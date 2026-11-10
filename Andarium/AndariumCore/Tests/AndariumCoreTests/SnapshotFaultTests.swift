@@ -93,6 +93,35 @@ struct SnapshotFaultTests {
         #expect(GuestDirectory.describeIgnoringIdentities(scenario.fixture.directory) == initial)
     }
 
+    @Test func aRestoreOnAVolumeThatCannotCloneRefusesAsSuch() async throws {
+        let faults = SnapshotFaults(guestDirectory: URL(fileURLWithPath: "/"))
+        let scenario = try await SnapshotCrashTests.Scenario.make(io: faults.operations)
+        defer { scenario.fixture.cleanUp() }
+        let initial = GuestDirectory.describeIgnoringIdentities(scenario.fixture.directory)
+        faults.restart()
+        faults.fail(when: { $0.name == "clone" }, with: CloneFile.Failure(code: ENOTSUP))
+        #expect(throws: SnapshotRefusal.volumeCannotClone) { try scenario.app.restoreSnapshot(scenario.snapshot, guest: scenario.guest) }
+        #expect(GuestDirectory.describeIgnoringIdentities(scenario.fixture.directory) == initial)
+    }
+
+    /// The update's own clone keeps the error and the words it always had; the
+    /// store's refusals are not routed through it.
+    @Test func theUpdatesOwnCloneKeepsItsErrorAndItsWords() throws {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("andarium-no-such-\(UUID().uuidString)")
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("andarium-clone-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let reason = String(cString: strerror(ENOENT))
+        #expect(throws: InstanceError.cannotClone(reason)) { try InstanceFiles.clone(missing, to: destination) }
+        do {
+            try InstanceFiles.clone(missing, to: destination)
+        } catch let error as InstanceError {
+            #expect(
+                error.errorDescription == "The guest's data cannot be snapshotted (it needs an APFS volume): \(reason)")
+        }
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+        #expect(!FileManager.default.fileExists(atPath: destination.appendingPathExtension("tmp").path))
+    }
+
     // MARK: Create
 
     @Test func aCreateThatFailsAtAnyCallLeavesNothingOrTheWholeSnapshot() async throws {
