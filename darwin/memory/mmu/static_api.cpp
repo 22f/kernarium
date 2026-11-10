@@ -5,6 +5,7 @@
 #include "uml/tlb_sync_ranges.h"
 #include "address_layout.hpp"
 #include "memory/guest_ram_commitment.hpp"
+#include "platform/host_wait.hpp"
 #if UML_MEMORY_HAS_NATIVE_VM
 #include "bridge_call.hpp"
 #include "native_address_space.hpp"
@@ -414,11 +415,13 @@ extern "C" int darwin_uml_vm_retry_fault(unsigned long address, int execute, int
 extern "C" int darwin_uml_physmem_release(unsigned long long offset,
 	unsigned long long length)
 {
+	const uml::platform::ScopedHostWait wait{uml::platform::HostWait::memory};
 	return uml::memory::release_guest_ram(offset, length);
 }
 
 extern "C" int darwin_uml_physmem_commit(unsigned long long offset,
 	unsigned long long length)
 {
+	const uml::platform::ScopedHostWait wait{uml::platform::HostWait::memory};
 	return uml::memory::commit_guest_ram(offset, length);
 }

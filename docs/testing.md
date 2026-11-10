@@ -284,11 +284,13 @@ automation host.
 free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the haptics session on fake guests and
-players, and the haptics wire against the golden frames in
+players, the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
-test against too; and the game controllers' wire against that directory's
+test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
-descriptor parser, and the stream and session on a fake relay);
+descriptor parser, and the stream and session on a fake relay; and the session
+record's stall slot against the golden slot there, which `runtime-stall-record`
+checks the runtime's writer against);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol` and
 `andarium-thermal-levels` (unit), `andarium-stage-system-image` and
@@ -533,13 +535,16 @@ anywhere is a blocker. The candidate must show:
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
 
-`android-oobe`, `android-adb-debugging` (integration) each register only when
-`UML_ANDROID_OOBE_RELEASE` or `UML_ANDROID_ADB_DEBUGGING_RELEASE` names the
+`android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
+each register only when `UML_ANDROID_OOBE_RELEASE`,
+`UML_ANDROID_ADB_DEBUGGING_RELEASE` or `UML_ANDROID_GUEST_PROC_RELEASE` names the
 release and the Android macOS executable is built (`UML_BUILD_ANDROID17_CLI`
 with `UML_KERNEL_PRODUCT=android-17`: the executable embeds its product's
 kernel, and the Linux default cannot start Android's init). They boot blank
-instances and check the setup wizard's flow and end state, and the product's adb
-defaults; `tests/integration/android/run_guest_android_adb_vsock.py` is the
+instances and check the setup wizard's flow and end state, the product's adb
+defaults, and that the command Andarium's bug report sends for the guest's
+`/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
+not; `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of

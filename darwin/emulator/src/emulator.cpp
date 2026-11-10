@@ -11,6 +11,7 @@
 #include "kernel_signal_scope.hpp"
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
+#include "stall_watch.hpp"
 #include "thread_fence.hpp"
 #include "virtual_jetsam.hpp"
 #include "testing.hpp"
@@ -529,6 +530,9 @@ public:
 		/* An informational run prints and returns: it ran no guest, so it
 		 * has no end to record. */
 		std::optional<RunEndRecorder> run_end_recorder;
+		/* Declared after the recorder, so that it ends first and records an
+		 * event in progress before the session ends. */
+		std::unique_ptr<::uml::runtime::StallWatch> stall_watch;
 #if UML_EMULATOR_TESTING
 		if (const auto entry = test_kernel_entry(kernel_view_);
 		    entry != nullptr) {
@@ -538,6 +542,7 @@ public:
 				(void)::uml::runtime::begin_session_record(
 					prepared.session_record_path, arguments);
 				run_end_recorder.emplace(*this);
+				stall_watch = ::uml::runtime::start_stall_watch();
 			}
 			/* The kernel's own process state is the run's to restore, as
 			 * the loader restores it around a real kernel. */
@@ -553,6 +558,7 @@ public:
 			(void)::uml::runtime::begin_session_record(
 				prepared.session_record_path, arguments);
 			run_end_recorder.emplace(*this);
+			stall_watch = ::uml::runtime::start_stall_watch();
 		}
 		const auto result = uml_elf_run(kernel_view_.data(),
 			kernel_view_.size(), native_layout.load_bias,
