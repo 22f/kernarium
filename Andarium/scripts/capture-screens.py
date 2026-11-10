@@ -28,15 +28,16 @@ launched process, on the shot's screen, and active, both before and after the
 screenshot, and the frame is neither blank nor black; a shot that fails is
 reported and not recorded.
 
-A shot with `-systemMicrophone YES` runs the Microphone switch against the
-Simulator's own permission: the script sets it first with `simctl privacy`
-(grant, revoke or reset), and the revoked-while-backgrounded shot takes the
-permission away while the app is in the background. The Simulator keeps the
-system's permission alert up, over whatever launches next, until SpringBoard is
-restarted, and a restart turns an iPad upright. A launch under such an alert
-leaves the app inactive, which the check above refuses, so the one shot that
-raises the alert runs last, and SpringBoard is restarted once after it: rotate
-the iPad again before the next run.
+A shot with `-systemMicrophone YES` (or `-systemLocation YES`) runs the
+Microphone (or Location) switch against the Simulator's own permission: the
+script sets it first with `simctl privacy` (grant, revoke or reset), and the
+revoked-while-backgrounded shot takes the permission away while the app is in
+the background. The Simulator keeps the system's permission alert up, over
+whatever launches next, until SpringBoard is restarted, and a restart turns an
+iPad upright. A launch under such an alert leaves the app inactive, which the
+check above refuses, so the shots that raise the alert run last, and
+SpringBoard is restarted after each: rotate the iPad again before the next
+run.
 
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard
@@ -80,8 +81,10 @@ class Shot:
     args: tuple[str, ...] = ()
     dark: bool = False
     wait: float = 3.0
-    # The Simulator's microphone permission before the launch: "grant", "revoke" or "reset" (not asked).
+    # The Simulator's permission before the launch: "grant", "revoke" or "reset" (not asked).
     privacy: str | None = None
+    # Which permission `privacy` and `flow` set: the `simctl privacy` service.
+    service: str = "microphone"
     # Steps after the launch, for a state that needs the app in the background: "background", "grant", "revoke",
     # "foreground".
     flow: tuple[str, ...] = ()
@@ -98,11 +101,21 @@ def s(id: str, group: str, screen: str, description: str, *args: str, dark: bool
 
 
 SYSTEM = ("-systemMicrophone", "YES")
+SYSTEM_LOCATION = ("-systemLocation", "YES")
 
 
 def system_mic(id: str, group: str, screen: str, description: str, privacy: str, *flow: str) -> Shot:
     """A shot with the Microphone switch on the Simulator's own permission, set to `privacy` first."""
     return Shot(id, group, screen, description, SYSTEM, privacy=privacy, flow=tuple(flow), alert=privacy == "reset")
+
+
+def system_location(id: str, group: str, screen: str, description: str, privacy: str, *flow: str, alert: bool | None = None) -> Shot:
+    """A shot with the Location switch on the Simulator's own permission, set to `privacy` first. `alert` says the
+    shot raises the system's question; a reset permission does when the screen turns the switch on."""
+    return Shot(
+        id, group, screen, description, SYSTEM_LOCATION, privacy=privacy, service="location", flow=tuple(flow),
+        alert=privacy == "reset" and screen == "home-location-ask" if alert is None else alert,
+    )
 
 
 def boot_stages(prefix: str, screen: str, names: list[str], what: str, dark_step: int | None = None) -> list[Shot]:
@@ -134,6 +147,15 @@ SHOTS: list[Shot] = [
     s("home-capabilities-mic-denied", "Home", "home-mic-denied", "Capabilities after iOS refused the microphone or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),
     s("home-capabilities-mic-alert", "Home", "home-mic-alert", "Turning Microphone on while iOS refuses it: the alert that offers Settings."),
     s("home-capabilities-gyroscope-unavailable", "Home", "home-gyroscope-unavailable", "Capabilities on a device without a gyroscope or accelerometer: Gyroscope is disabled and the footnote says why."),
+    s("home-capabilities-location-on", "Home", "home-location-on", "Capabilities with Location on, iOS having allowed it with the exact position."),
+    s("home-capabilities-location-approximate", "Home", "home-location-approximate", "Location on while iOS gives only an approximate location: the line under it says Approximate, with an info mark that explains.", dark=True),
+    s("home-capabilities-location-approximate-alert", "Home", "home-location-approximate-alert", "The explanation behind Approximate: Precise Location is off for Andarium, with Open Settings."),
+    s("home-capabilities-location-denied", "Home", "home-location-denied", "Capabilities after iOS refused the location or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),
+    s("home-capabilities-location-alert", "Home", "home-location-alert", "Turning Location on while iOS refuses it: the alert that offers Settings."),
+    s("home-capabilities-location-restricted", "Home", "home-location-restricted", "Capabilities on a device that restricts the location (Screen Time or a profile): the row is dimmed and says it is restricted."),
+    s("home-capabilities-location-restricted-alert", "Home", "home-location-restricted-alert", "Turning Location on while the device restricts it: the alert explains and has only OK."),
+    s("home-capabilities-location-services-off", "Home", "home-location-services-off", "Capabilities while Location Services are off for the whole device: the row is dimmed and says so."),
+    s("home-capabilities-location-services-off-alert", "Home", "home-location-services-off-alert", "Turning Location on while Location Services are off: the alert explains where to turn them on."),
     s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the guest-data backup toggle and a one-line note."),
     s("home-first-start-recovery", "Home", "home-new-recovery", "Home scrolled to Recovery and erase on a guest not yet started: Start in recovery is disabled until the first start.", dark=True),
     s("home-recovery-erase", "Home", "home-recovery-erase", "Home scrolled to Recovery and erase: Start in recovery and Erase guest."),
@@ -206,6 +228,11 @@ SHOTS: list[Shot] = [
     system_mic("home-mic-system-refused", "Capabilities", "home-capabilities", "Microphone after iOS refused it: the row is dimmed and says it is not allowed in Settings.", "revoke"),
     system_mic("home-mic-system-settings-prompt", "Capabilities", "home-mic-alert", "Turning Microphone on after a refusal: Andarium explains and offers Settings.", "revoke"),
     system_mic("home-mic-system-revoked", "Capabilities", "home-mic-on", "Microphone on, access taken away in Settings while Andarium was in the background, Andarium active again: the switch is off and dimmed.", "grant", "background", "revoke", "foreground"),
+    system_location("home-location-system-prompt", "Capabilities", "home-location-ask", "The system's own question when Location is turned on for the first time (the Simulator's alert).", "reset"),
+    system_location("home-location-system-allowed", "Capabilities", "home-location-on", "Location on after iOS allowed it.", "grant"),
+    system_location("home-location-system-refused", "Capabilities", "home-capabilities", "Location after iOS refused it: the row is dimmed and says it is not allowed in Settings.", "revoke"),
+    system_location("home-location-system-settings-prompt", "Capabilities", "home-location-alert", "Turning Location on after a refusal: Andarium explains and offers Settings.", "revoke"),
+    system_location("home-location-system-revoked", "Capabilities", "home-location-on", "Location on, access taken away in Settings while Andarium was in the background, Andarium active again: the switch is off and dimmed.", "grant", "background", "revoke", "foreground"),
     s("settings-adb", "Settings", "settings-adb", "Developer: ADB over network on, the address a computer connects to."),
     s("settings-adb-no-address", "Settings", "settings-adb-no-address", "Developer: ADB over network on with no network address."),
     s("settings-adb-off", "Settings", "settings-adb-off", "Developer: ADB over network unavailable because USB debugging is off."),
@@ -362,7 +389,7 @@ def play_flow(udid: str, shot: Shot, pid: int) -> int | None:
         if step == "background":
             result = simctl("launch", udid, "com.apple.Preferences")
         elif step in ("grant", "revoke"):
-            result = simctl("privacy", udid, step, "microphone", BUNDLE)
+            result = simctl("privacy", udid, step, shot.service, BUNDLE)
         elif step == "foreground":
             result = simctl("launch", udid, BUNDLE, *shot.launch_arguments())
             if result.returncode == 0:
@@ -399,7 +426,7 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
     (`orientation`)."""
     simctl("terminate", udid, BUNDLE)
     if shot.privacy is not None:
-        privacy = simctl("privacy", udid, shot.privacy, "microphone", BUNDLE)
+        privacy = simctl("privacy", udid, shot.privacy, shot.service, BUNDLE)
         if privacy.returncode != 0:
             print(f"  {shot.id}: privacy {shot.privacy} failed: {privacy.stderr.strip()}", file=sys.stderr)
             return None
@@ -564,6 +591,11 @@ def capture_all(args: argparse.Namespace) -> int:
         for appearance, shots in passes:
             simctl("ui", udid, "appearance", appearance)
             for shot in shots:
+                if shot.alert and asked:
+                    # The alert an earlier shot raised is still up over whatever launches. Clearing it turns an iPad
+                    # upright, so the orientation of the start no longer holds.
+                    clear_system_alert(udid)
+                    orientation = None
                 entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation)
                 if entry is None:
                     entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation)
