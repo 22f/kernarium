@@ -333,6 +333,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
     private let discover: @Sendable () -> [GCController]
     private let lock = NSLock()
     private var running = false
+    private var foreground = false
     private var observers: [NSObjectProtocol] = []
     private var batteryTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "andarium-game-controllers", qos: .userInteractive)
@@ -366,16 +367,30 @@ nonisolated final class GameControllers: @unchecked Sendable {
     // MARK: What is wanted
 
     /// What is wanted now, as `GamepadSession.update` takes it. Controllers
-    /// are looked for from the moment a run begins until it ends.
+    /// are looked for from the moment a run begins until it ends, and what
+    /// each holds is read again when the application returns to the front.
     func update(running: Bool, booted: Bool, foreground: Bool) {
-        let change: Bool? = lock.withLock {
-            guard running != self.running else { return nil }
+        let (change, entered) = lock.withLock { () -> (Bool?, Bool) in
+            let change: Bool? = running != self.running ? running : nil
             self.running = running
-            return running
+            let entered = foreground && !self.foreground
+            self.foreground = foreground
+            return (change, entered)
         }
         if change == false { stopLooking() }
         session.update(running: running, booted: booted, foreground: foreground)
         if change == true { startLooking() }
+        if entered && running && change == nil { refresh() }
+    }
+
+    /// Gives the session what each controller holds now. iOS delivers no
+    /// input to an application that is not in front, so a button held down
+    /// across the return is not seen again until it changes.
+    func refresh() {
+        for entry in table.all {
+            let state = entry.controller.input.capture()
+            session.submit(GamepadInputMapper.state(GamepadReading(state: state)), for: entry.id)
+        }
     }
 
     /// The guest restarted itself: the controllers stay, and the relay is
@@ -495,7 +510,6 @@ struct GameControllerEventInteraction: UIViewRepresentable {
     /// A view that carries the interaction.
     static func makeView() -> UIView {
         let view = UIView()
-        view.isUserInteractionEnabled = false
         let interaction = GCEventInteraction()
         interaction.handledEventTypes = .gamepad
         view.addInteraction(interaction)

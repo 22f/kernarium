@@ -377,6 +377,17 @@ struct GameControllersTests {
         #expect(gotState)
         // The buffered input of a controller nobody touches is the neutral state.
         #expect(GamepadInputMapper.state(GamepadReading(state: controller.input.capture())) == .neutral)
+        // Leaving the front lets the controller go, and returning to it reads
+        // what the controller holds again.
+        controllers.update(running: true, booted: false, foreground: false)
+        var released = false
+        while !released, let frame = await relay.next() {
+            if case .input(own, _) = frame { released = true }
+        }
+        #expect(released)
+        controllers.update(running: true, booted: false, foreground: true)
+        controllers.session.settle()
+        #expect(controllers.session.isConnected)
         // The virtual controller goes away, and its device with it.
         virtual.disconnect()
         var destroyed = false
