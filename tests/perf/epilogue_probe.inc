@@ -17,12 +17,22 @@
  * instructions; only the split one has an instruction between its restores
  * and its return.
  *
+ * EPILOGUE_HINT, with the two-pair frame, signs the return address on entry
+ * with PACIASP and authenticates it with AUTIASP after the restores, as code
+ * built for pointer authentication does; both are hints, and the virtual CPU,
+ * which implements no pointer authentication, runs them as NOPs.
+ *
  * The caller keeps its iteration count in X19 and a call count in X22 and
  * holds constants in X20, X21 and X23 to X28, which the leaf overwrites, so a
  * restore that went wrong fails the probe, as does a wrong result.
  *
- * The including file defines EPILOGUE_FRAME and EPILOGUE_SPLIT first.
+ * The including file defines EPILOGUE_FRAME and EPILOGUE_SPLIT first, and
+ * EPILOGUE_HINT when it wants it.
  */
+
+#ifndef EPILOGUE_HINT
+#define EPILOGUE_HINT 0
+#endif
 
 #ifndef BENCH_ITERATIONS
 #if EPILOGUE_FRAME
@@ -116,6 +126,9 @@
 #endif
 	ret
 #else
+#if EPILOGUE_HINT
+	hint	#25		/* PACIASP */
+#endif
 	stp	x29, x30, [sp, #-32]!
 	stp	x20, x19, [sp, #16]
 	mov	x29, sp
@@ -129,6 +142,9 @@
 	ldp	x29, x30, [sp], #32
 #if EPILOGUE_SPLIT
 	add	x0, x0, #7
+#endif
+#if EPILOGUE_HINT
+	hint	#29		/* AUTIASP */
 #endif
 	ret
 #endif
