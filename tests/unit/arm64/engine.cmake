@@ -535,6 +535,8 @@
     uml_add_arm64_unit_test(gadget_link NAME arm64-gadget-links WITHOUT_HARNESS)
     uml_add_arm64_unit_test(gadget_indirect_link NAME arm64-gadget-indirect-links
         WITHOUT_HARNESS)
+    uml_add_arm64_unit_test(gadget_run_head NAME arm64-gadget-run-heads
+        WITHOUT_HARNESS)
 
     add_executable(uml_gadget_record_table_tests
 		${PROJECT_SOURCE_DIR}/tests/unit/arm64/gadget_record_table_tests.cpp)

@@ -2033,6 +2033,23 @@ void uml_arm64_gadget_branch_link_register_cached();
 void uml_arm64_gadget_return_cached();
 void uml_arm64_gadget_return_x30_cached();
 void uml_arm64_gadget_return();
+/* The epilogue run heads (engine/run_heads.inc), by loads and ADD SP count. */
+void uml_arm64_gadget_run_epilogue_1_0();
+void uml_arm64_gadget_run_epilogue_1_1();
+void uml_arm64_gadget_run_epilogue_2_0();
+void uml_arm64_gadget_run_epilogue_2_1();
+void uml_arm64_gadget_run_epilogue_3_0();
+void uml_arm64_gadget_run_epilogue_3_1();
+void uml_arm64_gadget_run_epilogue_4_0();
+void uml_arm64_gadget_run_epilogue_4_1();
+void uml_arm64_gadget_run_epilogue_5_0();
+void uml_arm64_gadget_run_epilogue_5_1();
+void uml_arm64_gadget_run_epilogue_6_0();
+void uml_arm64_gadget_run_epilogue_6_1();
+void uml_arm64_gadget_run_epilogue_7_0();
+void uml_arm64_gadget_run_epilogue_7_1();
+void uml_arm64_gadget_run_epilogue_8_0();
+void uml_arm64_gadget_run_epilogue_8_1();
 /* Everything a condition has: the branch, its linked and inline forms, and
  * the fused CMP and B.cond in both widths with the same three forms. */
 #define UML_DECLARE_FUSED_COMPARE_BRANCH(kind, width, name) \

@@ -139,6 +139,18 @@ public:
 	}
 	[[nodiscard]] std::size_t size() const noexcept { return size_; }
 	[[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+	/* Open `count` words at `at`, moving the words from there on behind
+	 * them, for a head the builder puts in front of a run it has already
+	 * emitted. The opened words are the caller's to fill. */
+	void insert(std::size_t at, std::size_t count)
+	{
+		assert(at <= size_);
+		if (size_ + count > capacity_)
+			reserve(std::max(size_ + count, capacity_ * 2));
+		std::copy_backward(data() + at, data() + size_,
+			data() + size_ + count);
+		size_ += count;
+	}
 	/* Drop the words from `size` on, which a decode emitted and the builder
 	 * then rejected. */
 	void truncate(std::size_t size) noexcept

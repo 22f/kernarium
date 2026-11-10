@@ -71,6 +71,277 @@ void resolve_inline_suffixes(ProgramWords &words,
 	}
 }
 
+/* The epilogue run a head in front of it can do whole: SP-based 64-bit loads
+ * and at most one ADD SP, SP, #imm, then the RET through X30 that ends the
+ * block (engine/run_heads.inc has what the head does and its operand words). */
+namespace epilogue {
+
+inline constexpr std::size_t maximum_loads = 8;
+inline constexpr std::size_t maximum_adds = 1;
+/* The elements a run may have, ADD SP included: every one of them and the
+ * RET must still be in the builder's ring of group starts. */
+inline constexpr std::size_t maximum_elements = 16;
+inline constexpr std::size_t ring = 32;
+/* Every element and the RET is one decode group of two words, behind its
+ * execution_count group in a counting build. */
+#if UML_GADGET_EXECUTION_HISTOGRAM
+inline constexpr std::size_t count_words = 3;
+#else
+inline constexpr std::size_t count_words = 0;
+#endif
+inline constexpr std::size_t group_words = count_words + 2;
+
+/* By loads, then ADD SP count. */
+constexpr std::array<std::array<void (*)(), maximum_adds + 1>, maximum_loads>
+	heads{{
+		{uml_arm64_gadget_run_epilogue_1_0,
+		 uml_arm64_gadget_run_epilogue_1_1},
+		{uml_arm64_gadget_run_epilogue_2_0,
+		 uml_arm64_gadget_run_epilogue_2_1},
+		{uml_arm64_gadget_run_epilogue_3_0,
+		 uml_arm64_gadget_run_epilogue_3_1},
+		{uml_arm64_gadget_run_epilogue_4_0,
+		 uml_arm64_gadget_run_epilogue_4_1},
+		{uml_arm64_gadget_run_epilogue_5_0,
+		 uml_arm64_gadget_run_epilogue_5_1},
+		{uml_arm64_gadget_run_epilogue_6_0,
+		 uml_arm64_gadget_run_epilogue_6_1},
+		{uml_arm64_gadget_run_epilogue_7_0,
+		 uml_arm64_gadget_run_epilogue_7_1},
+		{uml_arm64_gadget_run_epilogue_8_0,
+		 uml_arm64_gadget_run_epilogue_8_1},
+	}};
+
+/* One load, at its address from SP at entry. A single load names its
+ * register as both halves and owns the first 8 of the 16 bytes the head
+ * reads. */
+struct Load final {
+	std::int64_t address{};
+	unsigned first{};
+	unsigned second{};
+	std::int64_t bytes{};
+};
+
+struct Plan final {
+	std::size_t loads{};
+	std::size_t adds{};
+	std::array<Load, maximum_loads> load{};
+};
+
+/* A head and its load count, which fixes its operand words. */
+struct Head final {
+	void (*gadget)(){};
+	std::size_t loads{};
+};
+
+[[nodiscard]] constexpr bool is_element(std::uint32_t word) noexcept
+{
+	return (word & 0xfe40'03e0U) == 0xa840'03e0U ||  // LDP Xt, Xt2, [SP..]
+		(word & 0xffc0'03e0U) == 0xf940'03e0U ||  // LDR Xt, [SP, #imm]
+		((word & 0xffe0'03e0U) == 0xf840'03e0U && // LDUR, LDR Xt with
+		 ((word >> 10) & 3U) != 2U) ||            // writeback
+		(word & 0xff80'03ffU) == 0x9100'03ffU;    // ADD SP, SP, #imm
+}
+
+/* Adds one element, at SP offset `sp`, to `plan` and advances `sp` past
+ * its writeback. False for a form the head does not perform: an access
+ * through an SP the ordinary gadget would fault on as misaligned, a load
+ * into XZR or of one register twice, a ninth load or a second ADD SP. */
+[[nodiscard]] bool add(std::uint32_t word, std::int64_t &sp, Plan &plan) noexcept
+{
+	if ((word & 0xff80'03ffU) == 0x9100'03ffU) {
+		if (plan.adds == maximum_adds)
+			return false;
+		++plan.adds;
+		sp += static_cast<std::int64_t>(((word >> 10) & 0xfffU) <<
+			((word & 0x0040'0000U) != 0 ? 12U : 0U));
+		return true;
+	}
+	if ((sp & 15) != 0 || plan.loads == maximum_loads)
+		return false;
+	Load load{};
+	if ((word & 0xfe40'03e0U) == 0xa840'03e0U) {
+		load.first = word & 31U;
+		load.second = (word >> 10) & 31U;
+		load.bytes = 16;
+		const auto mode = (word >> 23) & 3U;
+		const auto displacement =
+			sign_extend((word >> 15) & 0x7fU, 7) * 8;
+		load.address = mode == 1U ? sp : sp + displacement;
+		if (mode == 1U || mode == 3U)
+			sp += displacement;
+	} else if ((word & 0xffc0'03e0U) == 0xf940'03e0U) {
+		load.first = load.second = word & 31U;
+		load.bytes = 8;
+		load.address = sp + static_cast<std::int64_t>(
+			((word >> 10) & 0xfffU) << 3);
+	} else {
+		load.first = load.second = word & 31U;
+		load.bytes = 8;
+		const auto mode = (word >> 10) & 3U;
+		const auto displacement = sign_extend((word >> 12) & 0x1ffU, 9);
+		load.address = mode == 1U ? sp : sp + displacement;
+		if (mode != 0U)
+			sp += displacement;
+	}
+	if (load.first == 31U || load.second == 31U ||
+	    (load.bytes == 16 && load.first == load.second))
+		return false;
+	plan.load[plan.loads++] = load;
+	return true;
+}
+
+/* The head's operand words for the elements [start, ret) of `window`, the
+ * RET at `ret`, into `operands`. The result is the head, without a gadget
+ * when it cannot do the elements. */
+[[nodiscard]] Head encode(std::span<const std::uint32_t> window,
+	std::size_t start, std::size_t ret,
+	std::array<std::uintptr_t, 4> &operands) noexcept
+{
+	Plan plan{};
+	std::int64_t sp = 0;
+	for (std::size_t index = start; index < ret; ++index)
+		if (!add(window[index], sp, plan))
+			return {};
+	/* X30 comes from the second register of exactly one pair, which goes
+	 * last so that it is the value the head returns through. */
+	std::uint32_t written = 0;
+	std::size_t link = maximum_loads;
+	for (std::size_t index = 0; index < plan.loads; ++index) {
+		const auto &load = plan.load[index];
+		const auto registers = (1U << load.first) | (1U << load.second);
+		if ((written & registers) != 0)
+			return {};
+		written |= registers;
+		if (load.first == 30U && load.bytes == 8)
+			return {};
+		if (load.second == 30U && load.bytes == 16)
+			link = index;
+		else if (load.first == 30U)
+			return {};
+	}
+	if (link == maximum_loads)
+		return {};
+	std::rotate(plan.load.begin() + static_cast<std::ptrdiff_t>(link),
+		plan.load.begin() + static_cast<std::ptrdiff_t>(link) + 1,
+		plan.load.begin() + static_cast<std::ptrdiff_t>(plan.loads));
+	/* The bytes each load reads are its own; the head's 16-byte reads may
+	 * reach past a single load's 8, so they stay in the span but may
+	 * overlap another load's. */
+	std::int64_t low = plan.load[0].address;
+	std::int64_t end = low + 16;
+	for (std::size_t index = 0; index < plan.loads; ++index) {
+		const auto &load = plan.load[index];
+		if ((load.address & 7) != 0)
+			return {};
+		for (std::size_t other = 0; other < index; ++other) {
+			const auto &earlier = plan.load[other];
+			if (load.address < earlier.address + earlier.bytes &&
+			    earlier.address < load.address + load.bytes)
+				return {};
+		}
+		low = std::min(low, load.address);
+		end = std::max(end, load.address + 16);
+	}
+	const auto last = end - 1 - low;
+	const auto low_units = low / 8;
+	if (last > 0xfff || low_units < -4096 || low_units > 4095 ||
+	    (sp & 15) != 0 || sp / 16 < -2048 || sp / 16 > 2047)
+		return {};
+	const auto packed = [&](std::size_t index) {
+		const auto &load = plan.load[index];
+		return static_cast<std::uintptr_t>((load.address - low) / 8) |
+			(static_cast<std::uintptr_t>(load.first) << 9) |
+			(static_cast<std::uintptr_t>(load.second) << 14);
+	};
+	operands = {};
+	operands[0] = (static_cast<std::uintptr_t>(low_units) & 0x1fffU) |
+		(static_cast<std::uintptr_t>(last) << 13) |
+		((static_cast<std::uintptr_t>(sp / 16) & 0xfffU) << 25) |
+		(packed(0) << 37);
+	for (std::size_t index = 1; index < plan.loads; ++index)
+		operands[1 + (index - 1) / 3] |=
+			packed(index) << (19 * ((index - 1) % 3));
+	return {heads[plan.loads - 1][plan.adds], plan.loads};
+}
+
+[[nodiscard]] constexpr std::size_t operand_words(std::size_t loads) noexcept
+{
+	return 1 + (loads + 1) / 3;
+}
+
+using Starts = std::array<std::uint32_t, ring>;
+#if UML_GADGET_EXECUTION_HISTOGRAM
+using Predecessors = std::array<const void *, ring>;
+#endif
+
+/* Put a head in front of the longest epilogue run the RET at `ret` ends, now
+ * that the RET's group is the last one emitted. `starts` holds where each
+ * recent instruction's group begins. The run's words stay where they are,
+ * behind the head, and are its fallback. */
+void place(ProgramWords &words, InlineSuffixes &suffixes,
+	std::span<const std::uint32_t> window, std::size_t ret,
+	const Starts &starts
+#if UML_GADGET_EXECUTION_HISTOGRAM
+	, const Predecessors &predecessors
+#endif
+	)
+{
+	const auto ret_start = starts[ret % ring];
+	if (words.size() != ret_start + group_words ||
+	    words[ret_start + count_words] != reinterpret_cast<std::uintptr_t>(
+		    uml_arm64_gadget_return_x30_cached))
+		return;
+	std::size_t length = 0;
+	while (length < std::min(ret, maximum_elements) &&
+	       is_element(window[ret - 1 - length]))
+		++length;
+	for (; length != 0; --length) {
+		const auto start = ret - length;
+		bool grouped = true;
+		for (std::size_t index = start; index < ret; ++index)
+			grouped = grouped && starts[(index + 1) % ring] ==
+				starts[index % ring] + group_words;
+		if (!grouped)
+			continue;
+		std::array<std::uintptr_t, 4> operands{};
+		const auto [gadget, loads] = encode(window, start, ret, operands);
+		if (gadget == nullptr)
+			continue;
+		const auto head = reinterpret_cast<std::uintptr_t>(gadget);
+		const std::size_t at = starts[start % ring];
+		const auto inserted = count_words + 1 + operand_words(loads);
+		words.insert(at, inserted);
+		auto cursor = at;
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		/* The head is counted as a group of no guest words, and the
+		 * run's first word names it as its predecessor, so a counting
+		 * build tells the head's fallbacks from its runs. */
+		words[cursor++] = reinterpret_cast<std::uintptr_t>(
+			diagnostics::uml_arm64_gadget_execution_count);
+		words[cursor++] = diagnostics::execution_histogram_slot(
+			predecessors[start % ring],
+			reinterpret_cast<const void *>(head));
+		words[cursor++] = 0;
+#endif
+		words[cursor++] = head;
+		for (std::size_t index = 0; index < operand_words(loads); ++index)
+			words[cursor++] = operands[index];
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		words[cursor + 1] = diagnostics::execution_histogram_slot(
+			reinterpret_cast<const void *>(head),
+			reinterpret_cast<const void *>(words[cursor + count_words]));
+#endif
+		for (std::uint32_t index = 0; index < suffixes.count; ++index)
+			if (suffixes.word[index] >= at)
+				suffixes.word[index] +=
+					static_cast<std::uint32_t>(inserted);
+		return;
+	}
+}
+
+} // namespace epilogue
+
 } // namespace
 
 BuildResult Builder::build(
@@ -113,6 +384,10 @@ BuildResult Builder::build(
 	 * FEAT_AFP; there every entry that would ignore them runs as its twin,
 	 * which carries no forwarding contract. */
 	const bool afp = implements_afp(options.host_capabilities);
+	epilogue::Starts group_starts{};
+#if UML_GADGET_EXECUTION_HISTOGRAM
+	epilogue::Predecessors group_predecessors{};
+#endif
 	/* Indexed rather than ranged, because a decoder that fuses a pair needs to
 	 * see what follows the instruction it was handed. `compiled` is the loop
 	 * position as well as the retired count, and a fusing decoder advances it
@@ -123,7 +398,10 @@ BuildResult Builder::build(
 			uml::cpu::arm64::detail::
 				instruction_accesses_fp_state(instruction);
 		const auto address = guest_address + compiled * sizeof(instruction);
+		group_starts[compiled % epilogue::ring] =
+			static_cast<std::uint32_t>(words.size());
 #if UML_GADGET_EXECUTION_HISTOGRAM
+		group_predecessors[compiled % epilogue::ring] = previous_gadget;
 		const auto counter_word = words.size();
 		emit(words, diagnostics::uml_arm64_gadget_execution_count);
 		emit(words, std::uintptr_t{sizeof(std::uint64_t)});
@@ -223,6 +501,14 @@ BuildResult Builder::build(
 			previous_gadget = reinterpret_cast<const void *>(
 				words[emitted_start]);
 #endif
+		if (decoded == DecodeResult::terminal && !streaming &&
+		    instruction == 0xd65f'03c0U && compiled == compiled_before + 1)
+			epilogue::place(words, suffixes, window, compiled_before,
+				group_starts
+#if UML_GADGET_EXECUTION_HISTOGRAM
+				, group_predecessors
+#endif
+				);
 		if (decoded != DecodeResult::decoded)
 			return {finish(compiled), decoded == DecodeResult::terminal,
 				address, instruction};
