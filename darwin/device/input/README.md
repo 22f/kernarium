@@ -69,9 +69,24 @@ wheel taking a whole step, and false for motion and every release. The
 runtime sends a wake to a guest that suspended itself for the former only, so a
 bumped mouse never resumes it.
 
+## macOS launcher
+
+`--hardware-input` of the macOS launchers adds the keyboard, mouse and pointer
+after every other device, unplugged, and sends the display's keys and pointer
+to them instead of the touchscreen and the side keys. It requires `--gpu` with
+a VNC or native display. The first key of a client plugs the keyboard and the
+first pointer event plugs the mouse and the pointer; when the last client of a
+VNC display has gone both are unplugged, and a native window keeps what it
+plugged. No key is reserved: every key goes to the guest. The launcher prints
+each plug and unplug, each registration the guest announces, and Android's
+lock LEDs and pointer capture, on stderr as `Hardware keyboard: ...`,
+`Hardware mouse: ...` and `Hardware pointer: ...`.
+
 ## Testing
 
 `tests/unit/input/virtio` drives each device through its queues and its event
 descriptor with no guest (`ctest -R '^virtio-input-'`): the protocol and the
-connected state, the HID table against the kernel's rows, and the reports, the
-pointer mapping and the three devices together.
+connected state, the HID table against the kernel's rows, the reports, the
+pointer mapping and the three devices together, and the launcher's bridge
+from a display's events to them. `run_launcher_refusals.py`
+(`tests/integration/boot`) covers the option's refusals.

@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "hardware_input.hpp"
-#include "hardware_reports.hpp"
+#include "hardware_test_support.hpp"
 #include "hid_keyboard.hpp"
-#include "require.hpp"
-#include "wire_bytes.hpp"
 
 #include <array>
 #include <cstdlib>
@@ -14,68 +11,22 @@
 
 namespace {
 
-using uml::input::virtio::EventQueue;
-using uml::input::virtio::HardwareInput;
-using uml::input::virtio::HardwareKeyboard;
-using uml::input::virtio::HardwareReport;
-using uml::input::virtio::HardwareStatus;
-using uml::input::virtio::Mouse;
-using uml::input::virtio::Pointer;
-using uml::input::virtio::VirtioInputDevice;
-namespace protocol = uml::input::virtio::protocol;
-using uml::input::virtio::DeviceKind;
-using uml::testing::require;
-
-using Event = protocol::InputEvent;
-using Events = std::vector<Event>;
-
-constexpr Event event(
-    std::uint16_t type,
-    std::uint16_t code,
-    std::int32_t value) noexcept
-{
-    return {type, code, value};
-}
-
-constexpr Event sync() noexcept
-{
-    return event(protocol::eventSynchronize, protocol::synchronizeReport, 0);
-}
-
-bool sameEvents(const Events& actual, std::initializer_list<Event> expected)
-{
-    if (actual.size() != expected.size())
-        return false;
-    std::size_t index = 0;
-    for (const auto& one : expected) {
-        const auto& got = actual[index++];
-        if (got.type != one.type || got.code != one.code ||
-            got.value != one.value)
-            return false;
-    }
-    return true;
-}
-
-bool sameEvents(const HardwareReport& report, std::initializer_list<Event> expected)
-{
-    return sameEvents(report.events, expected);
-}
+using namespace uml::input::virtio;
+using namespace uml::input::virtio::testing;
 
 // ---- The report builders.
-
-constexpr auto key = protocol::eventKey;
 
 void aKeyGoesDownOnceAndUpOnce()
 {
     HardwareKeyboard keyboard;
     const auto down = keyboard.key(30, true);
-    require(sameEvents(down, {event(key, 30, 1), sync()}));
+    require(sameEvents(down, {event(key, 30, 1), syncEvent()}));
     require(down.wakes);
     require(keyboard.holds());
     // A second press of a key that is down is not a repeat.
     require(keyboard.key(30, true).empty());
     const auto up = keyboard.key(30, false);
-    require(sameEvents(up, {event(key, 30, 0), sync()}));
+    require(sameEvents(up, {event(key, 30, 0), syncEvent()}));
     require(!up.wakes);
     require(!keyboard.holds());
     // A release of a key that is not down is nothing.
@@ -102,7 +53,7 @@ void releaseAllLetsGoOfEveryKeyInOneReport()
     (void)keyboard.key(30, true);
     const auto release = keyboard.releaseAll();
     require(sameEvents(release, {
-        event(key, 30, 0), event(key, 125, 0), event(key, 194, 0), sync()}));
+        event(key, 30, 0), event(key, 125, 0), event(key, 194, 0), syncEvent()}));
     require(!release.wakes && !keyboard.holds());
     require(keyboard.releaseAll().empty());
     // What was released can go down again.
@@ -119,30 +70,30 @@ void aMouseMovesAndScrollsAndPressesButtons()
     const auto moved = mouse.update(5, -3, 0, 0, 0);
     require(sameEvents(moved, {
         event(protocol::eventRelative, protocol::relativeX, 5),
-        event(protocol::eventRelative, protocol::relativeY, -3), sync()}));
+        event(protocol::eventRelative, protocol::relativeY, -3), syncEvent()}));
     require(!moved.wakes);
     // One axis moves alone.
     require(sameEvents(mouse.update(0, 7, 0, 0, 0), {
-        event(protocol::eventRelative, protocol::relativeY, 7), sync()}));
+        event(protocol::eventRelative, protocol::relativeY, 7), syncEvent()}));
 
     const auto press = mouse.update(0, 0, 1U, 0, 0);
-    require(sameEvents(press, {event(key, protocol::buttonLeft, 1), sync()}));
+    require(sameEvents(press, {event(key, protocol::buttonLeft, 1), syncEvent()}));
     require(press.wakes && mouse.holds());
     // The held button is not sent again, and a second one is an event.
     require(mouse.update(0, 0, 1U, 0, 0).empty());
     require(sameEvents(mouse.update(1, 0, 0b10011, 0, 0), {
         event(protocol::eventRelative, protocol::relativeX, 1),
         event(key, protocol::buttonRight, 1),
-        event(key, protocol::buttonExtra, 1), sync()}));
+        event(key, protocol::buttonExtra, 1), syncEvent()}));
     // A bit past the fifth button is no button.
     require(mouse.update(0, 0, 0b10011 | 0b100000, 0, 0).empty());
     const auto release = mouse.update(0, 0, 0b10, 0, 0);
     require(sameEvents(release, {
         event(key, protocol::buttonLeft, 0),
-        event(key, protocol::buttonExtra, 0), sync()}));
+        event(key, protocol::buttonExtra, 0), syncEvent()}));
     require(!release.wakes);
     require(sameEvents(mouse.releaseAll(), {
-        event(key, protocol::buttonRight, 0), sync()}));
+        event(key, protocol::buttonRight, 0), syncEvent()}));
     require(!mouse.holds() && mouse.releaseAll().empty());
 }
 
@@ -155,34 +106,34 @@ void theWheelsReportHighResolutionUnitsAndDeriveTheSteps()
     // A whole detent: the high-resolution event, then the step.
     const auto detent = mouse.update(0, 0, 0, 120, 0);
     require(sameEvents(detent, {
-        event(rel, high, 120), event(rel, low, 1), sync()}));
+        event(rel, high, 120), event(rel, low, 1), syncEvent()}));
     require(detent.wakes);
     // Half a detent is no step, and the other half completes it.
     const auto half = mouse.update(0, 0, 0, 60, 0);
-    require(sameEvents(half, {event(rel, high, 60), sync()}) && !half.wakes);
+    require(sameEvents(half, {event(rel, high, 60), syncEvent()}) && !half.wakes);
     const auto rest = mouse.update(0, 0, 0, 60, 0);
     require(sameEvents(rest, {
-        event(rel, high, 60), event(rel, low, 1), sync()}) && rest.wakes);
+        event(rel, high, 60), event(rel, low, 1), syncEvent()}) && rest.wakes);
     // Down is negative, and several detents at once are one step event.
     require(sameEvents(mouse.update(0, 0, 0, -360, 0), {
-        event(rel, high, -360), event(rel, low, -3), sync()}));
+        event(rel, high, -360), event(rel, low, -3), syncEvent()}));
     // A turn the other way cancels the remainder before it steps.
     require(sameEvents(mouse.update(0, 0, 0, 100, 0), {
-        event(rel, high, 100), sync()}));
+        event(rel, high, 100), syncEvent()}));
     require(sameEvents(mouse.update(0, 0, 0, -150, 0), {
-        event(rel, high, -150), sync()}));
+        event(rel, high, -150), syncEvent()}));
     require(sameEvents(mouse.update(0, 0, 0, -70, 0), {
-        event(rel, high, -70), event(rel, low, -1), sync()}));
+        event(rel, high, -70), event(rel, low, -1), syncEvent()}));
 
     // The horizontal wheel has its own codes and its own remainder.
     Mouse sideways;
     require(sameEvents(sideways.update(0, 0, 0, 60, 90), {
         event(rel, high, 60),
         event(rel, protocol::relativeHorizontalWheelHighResolution, 90),
-        sync()}));
+        syncEvent()}));
     require(sameEvents(sideways.update(0, 0, 0, 0, 30), {
         event(rel, protocol::relativeHorizontalWheelHighResolution, 30),
-        event(rel, protocol::relativeHorizontalWheel, 1), sync()}));
+        event(rel, protocol::relativeHorizontalWheel, 1), syncEvent()}));
     // A report with motion, wheels and a button keeps that order.
     Mouse all;
     require(sameEvents(all.update(2, 3, 1U, 120, 120), {
@@ -190,30 +141,14 @@ void theWheelsReportHighResolutionUnitsAndDeriveTheSteps()
         event(rel, high, 120), event(rel, low, 1),
         event(rel, protocol::relativeHorizontalWheelHighResolution, 120),
         event(rel, protocol::relativeHorizontalWheel, 1),
-        event(key, protocol::buttonLeft, 1), sync()}));
+        event(key, protocol::buttonLeft, 1), syncEvent()}));
     // A reset forgets the remainder.
     all.reset();
-    require(sameEvents(all.update(0, 0, 0, 60, 0), {event(rel, high, 60), sync()}));
+    require(sameEvents(all.update(0, 0, 0, 60, 0), {event(rel, high, 60), syncEvent()}));
     all.reset();
     require(all.update(0, 0, 0, 60, 0).events.size() == 2);
 }
 
-constexpr Event slot0() noexcept
-{
-    return event(protocol::eventAbsolute, protocol::absoluteMtSlot, 0);
-}
-constexpr Event positionX(std::int32_t x) noexcept
-{
-    return event(protocol::eventAbsolute, protocol::absoluteMtPositionX, x);
-}
-constexpr Event positionY(std::int32_t y) noexcept
-{
-    return event(protocol::eventAbsolute, protocol::absoluteMtPositionY, y);
-}
-constexpr Event trackingId(std::int32_t id) noexcept
-{
-    return event(protocol::eventAbsolute, protocol::absoluteMtTrackingId, id);
-}
 
 void thePointerEntersMovesAndLeaves()
 {
@@ -228,24 +163,24 @@ void thePointerEntersMovesAndLeaves()
     require(sameEvents(enter, {
         event(key, protocol::buttonToolMouse, 1),
         event(key, protocol::buttonTouch, 1), slot0(), trackingId(0),
-        positionX(100), positionY(200), sync()}));
+        positionX(100), positionY(200), syncEvent()}));
     require(!enter.wakes && pointer.inRange());
 
     // A move states the slot and the position, and no tracking id.
     require(sameEvents(pointer.update(101, 200, 0, true), {
-        slot0(), positionX(101), positionY(200), sync()}));
+        slot0(), positionX(101), positionY(200), syncEvent()}));
     require(pointer.update(101, 200, 0, true).empty());
 
     // A press with the pointer still wakes and states no position.
     const auto press = pointer.update(101, 200, 0b1, true);
-    require(sameEvents(press, {event(key, protocol::buttonLeft, 1), sync()}));
+    require(sameEvents(press, {event(key, protocol::buttonLeft, 1), syncEvent()}));
     require(press.wakes);
     // Moving with the button down, then pressing a second.
     require(sameEvents(pointer.update(150, 250, 0b11, true), {
         slot0(), positionX(150), positionY(250),
-        event(key, protocol::buttonRight, 1), sync()}));
+        event(key, protocol::buttonRight, 1), syncEvent()}));
     require(sameEvents(pointer.update(150, 250, 0b10, true), {
-        event(key, protocol::buttonLeft, 0), sync()}));
+        event(key, protocol::buttonLeft, 0), syncEvent()}));
 
     // Leaving releases what is held, ends the contact and the tool, and
     // keeps the position out of it.
@@ -253,7 +188,7 @@ void thePointerEntersMovesAndLeaves()
     require(sameEvents(leave, {
         event(key, protocol::buttonRight, 0), slot0(), trackingId(-1),
         event(key, protocol::buttonTouch, 0),
-        event(key, protocol::buttonToolMouse, 0), sync()}));
+        event(key, protocol::buttonToolMouse, 0), syncEvent()}));
     require(!leave.wakes && !pointer.inRange());
     require(pointer.leave().empty());
 
@@ -263,11 +198,11 @@ void thePointerEntersMovesAndLeaves()
         event(key, protocol::buttonToolMouse, 1),
         event(key, protocol::buttonTouch, 1), slot0(), trackingId(1),
         positionX(5), positionY(6),
-        event(key, protocol::buttonMiddle, 1), sync()}));
+        event(key, protocol::buttonMiddle, 1), syncEvent()}));
     require(again.wakes);
     // A coordinate past the range is held at its edge.
     require(sameEvents(pointer.update(40000, 70000, 0b100, true), {
-        slot0(), positionX(32767), positionY(32767), sync()}));
+        slot0(), positionX(32767), positionY(32767), syncEvent()}));
     // A button without a contact is nothing.
     pointer.reset();
     require(!pointer.inRange() && pointer.update(0, 0, 0b1, false).empty());
@@ -354,64 +289,6 @@ void theRawPositionLandsOnTheSamePixelATouchWould()
     }
 }
 
-// ---- HardwareInput over the three devices.
-
-struct Rig final {
-    std::shared_ptr<EventQueue> keyboardQueue {
-        std::make_shared<EventQueue>(EventQueue::Attachment::pluggable)};
-    std::shared_ptr<EventQueue> mouseQueue {
-        std::make_shared<EventQueue>(EventQueue::Attachment::pluggable)};
-    std::shared_ptr<EventQueue> pointerQueue {
-        std::make_shared<EventQueue>(EventQueue::Attachment::pluggable)};
-    VirtioInputDevice keyboardDevice {
-        DeviceKind::hardwareKeyboard, keyboardQueue};
-    VirtioInputDevice mouseDevice {DeviceKind::mouse, mouseQueue};
-    VirtioInputDevice pointerDevice {DeviceKind::pointer, pointerQueue};
-    HardwareInput input {keyboardQueue, mouseQueue, pointerQueue};
-    std::vector<std::pair<HardwareStatus, bool>> statuses;
-
-    Rig()
-    {
-        input.setStatusCallback([this](HardwareStatus kind, bool on) {
-            statuses.emplace_back(kind, on);
-        });
-    }
-
-    static void status(VirtioInputDevice& device, Event sent)
-    {
-        const auto result = device.processQueue(
-            protocol::statusQueue, 1, uml::virtio::toBytes(sent), 0);
-        require(result.action == uml::virtio::VhostUserQueueAction::complete);
-    }
-
-    static void registers(VirtioInputDevice& device)
-    {
-        status(device, event(
-            protocol::statusNotice, protocol::noticeRegistration, 1));
-    }
-
-    static Events received(VirtioInputDevice& device)
-    {
-        Events all;
-        for (;;) {
-            const auto result =
-                device.processQueue(protocol::eventQueue, 2, {}, 8);
-            if (result.action != uml::virtio::VhostUserQueueAction::complete)
-                return all;
-            all.push_back(uml::testing::loadExact<protocol::InputEvent>(
-                result.response));
-        }
-    }
-
-    void plugEverything()
-    {
-        input.setKeyboardConnected(true);
-        input.setMouseConnected(true);
-        registers(keyboardDevice);
-        registers(mouseDevice);
-        registers(pointerDevice);
-    }
-};
 
 void theKeyboardAndTheMouseArePluggedSeparately()
 {
@@ -485,8 +362,8 @@ void keysArriveAsLinuxCodesAndTheirReturnWakes()
     require(!rig.input.key(0, true));
     const auto keys = Rig::received(rig.keyboardDevice);
     require(sameEvents(keys, {
-        event(key, 30, 1), sync(), event(key, 30, 0), sync(),
-        event(key, 125, 1), sync()}));
+        event(key, 30, 1), syncEvent(), event(key, 30, 0), syncEvent(),
+        event(key, 125, 1), syncEvent()}));
     // The same key held down, then the table's own code through key().
     require(rig.input.key(48, true));
     require(!rig.input.key(48, true));
@@ -505,16 +382,16 @@ void thePointerIsMappedOntoTheGuestDisplay()
     require(sameEvents(enter, {
         event(key, protocol::buttonToolMouse, 1),
         event(key, protocol::buttonTouch, 1), slot0(), trackingId(0),
-        positionX(32767), positionY(18431), sync()}));
+        positionX(32767), positionY(18431), syncEvent()}));
     // A press wakes; out of range ends the contact even with no display.
     require(rig.input.pointer(0, 0, 1, true, 1920, 1080));
     require(!rig.input.pointer(0, 0, 0, false, 0, 0));
     require(sameEvents(Rig::received(rig.pointerDevice), {
         slot0(), positionX(0), positionY(0),
-        event(key, protocol::buttonLeft, 1), sync(),
+        event(key, protocol::buttonLeft, 1), syncEvent(),
         event(key, protocol::buttonLeft, 0), slot0(), trackingId(-1),
         event(key, protocol::buttonTouch, 0),
-        event(key, protocol::buttonToolMouse, 0), sync()}));
+        event(key, protocol::buttonToolMouse, 0), syncEvent()}));
 }
 
 void theMouseCarriesMotionButtonsAndWheels()
@@ -528,12 +405,12 @@ void theMouseCarriesMotionButtonsAndWheels()
     const auto all = Rig::received(rig.mouseDevice);
     require(sameEvents(all, {
         event(protocol::eventRelative, protocol::relativeX, 3),
-        event(protocol::eventRelative, protocol::relativeY, 4), sync(),
-        event(key, protocol::buttonLeft, 1), sync(),
+        event(protocol::eventRelative, protocol::relativeY, 4), syncEvent(),
+        event(key, protocol::buttonLeft, 1), syncEvent(),
         event(protocol::eventRelative, protocol::relativeWheelHighResolution, 120),
-        event(protocol::eventRelative, protocol::relativeWheel, 1), sync(),
+        event(protocol::eventRelative, protocol::relativeWheel, 1), syncEvent(),
         event(protocol::eventRelative, protocol::relativeWheelHighResolution, 30),
-        sync()}));
+        syncEvent()}));
 }
 
 void anUnplugReleasesEverythingTheHostHolds()
@@ -558,17 +435,17 @@ void anUnplugReleasesEverythingTheHostHolds()
     // The keyboard is not the mouse: it stays down.
     require(rig.input.mouseConnected());
     require(sameEvents(Rig::received(rig.keyboardDevice), {
-        event(key, 30, 0), event(key, 48, 0), sync()}));
+        event(key, 30, 0), event(key, 48, 0), syncEvent()}));
 
     rig.input.setMouseConnected(false);
     require(sameEvents(Rig::received(rig.mouseDevice), {
         event(key, protocol::buttonLeft, 0),
-        event(key, protocol::buttonMiddle, 0), sync()}));
+        event(key, protocol::buttonMiddle, 0), syncEvent()}));
     require(sameEvents(Rig::received(rig.pointerDevice), {
         event(key, protocol::buttonLeft, 0),
         event(key, protocol::buttonRight, 0), slot0(), trackingId(-1),
         event(key, protocol::buttonTouch, 0),
-        event(key, protocol::buttonToolMouse, 0), sync()}));
+        event(key, protocol::buttonToolMouse, 0), syncEvent()}));
     require(rig.mouseDevice.configChangePending());
     require(rig.pointerDevice.configChangePending());
 

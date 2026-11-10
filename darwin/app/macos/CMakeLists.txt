@@ -81,6 +81,7 @@ function(uml_add_macos_embedded_kernel_app
     endif()
 
     add_executable("${TARGET_NAME}"
+        hardware_input_bridge.hpp
         launcher.hpp
         main.cpp
         "${MAIN_SOURCE}")
