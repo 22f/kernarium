@@ -141,6 +141,49 @@ struct SnapshotStoreTests {
         #expect(!exists(fixture.snapshots))
     }
 
+    @Test func theListingNamesTheReleaseTheDataIsOnWhateverThePlanIs() async throws {
+        let fixture = try await SnapshotFixture.make(release: snapshotNewer)
+        defer { fixture.cleanUp() }
+        #expect(fixture.storage.snapshotListing().dataRelease == SnapshotRelease(releaseID: snapshotNewer.releaseID, buildNumber: 200))
+        // An older app than the data: a start is blocked, and the release is still said.
+        let older = fixture.app(on: snapshotRelease())
+        #expect(older.startPlan() == .blocked(.olderAndroid))
+        #expect(older.snapshotListing().dataRelease == SnapshotRelease(releaseID: snapshotNewer.releaseID, buildNumber: 200))
+        // A record that cannot be read, or none, says nothing.
+        try Data("not json".utf8).write(to: fixture.files.state)
+        #expect(fixture.storage.snapshotListing().dataRelease == nil)
+        try FileManager.default.removeItem(at: fixture.files.state)
+        #expect(fixture.storage.snapshotListing().dataRelease == nil)
+    }
+
+    @Test func anUnmeasuredListingHasEverythingButTheFiguresAndReadsNoDisk() async throws {
+        let fixture = try await SnapshotFixture.make(marker: 1)
+        defer { fixture.cleanUp() }
+        _ = try fixture.storage.createSnapshot(named: "first")
+        let second = try fixture.storage.createSnapshot(named: "second")
+        try rewriteTwoMiB(fixture)
+        try fixture.storage.deleteSnapshot(second.id)
+        _ = try fixture.storage.createSnapshot(named: "third")
+
+        // No measuring call is made at all.
+        var io = SnapshotFileOperations.live
+        io.measure = SnapshotMeasure.Primitives(
+            privateSize: { _ in Issue.record("a private size was asked for"); return nil },
+            extents: { _ in Issue.record("an extent map was asked for"); return nil })
+        let quick = fixture.app(using: io).snapshotListing(measured: false)
+        let full = fixture.storage.snapshotListing()
+
+        #expect(full.isMeasured && !quick.isMeasured)
+        #expect(quick.items.count == 2 && quick.items.map(\.id) == full.items.map(\.id))
+        #expect(quick.items.map(\.name) == full.items.map(\.name) && quick.items.map(\.restore) == full.items.map(\.restore))
+        #expect(quick.items.map(\.created) == full.items.map(\.created))
+        #expect(quick.createRefusal == full.createRefusal && quick.dataRelease == full.dataRelease)
+        // Every figure says it knows nothing.
+        let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)
+        #expect(quick.items.allSatisfy { $0.freesWhenDeleted == unknown && $0.kept == unknown })
+        #expect(quick.space.snapshotsUse == unknown)
+    }
+
     @Test func createIsAllowedWhileANewerAndroidWaitsToUpdateTheData() async throws {
         let fixture = try await SnapshotFixture.make()
         defer { fixture.cleanUp() }

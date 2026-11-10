@@ -199,8 +199,8 @@ public enum SnapshotRules {
     /// and ended with Android's own power off: `lastCompleted` names the
     /// record's release and is later than the last start (a start in the same
     /// second as the completion is not shut down: the clock has no finer
-    /// word). Everything else, from iOS closing a paused guest to a Recovery session, leaves
-    /// the disk as a phone is left by a power cut.
+    /// word). Everything else, from iOS closing a paused guest to a Recovery
+    /// session, leaves the disk as a phone is left by a power cut.
     public static func wasShutDown(_ state: InstanceState) -> Bool {
         guard state.pendingUpdate == nil, let completed = state.lastCompleted,
             completed.releaseID == state.releaseID,
@@ -366,6 +366,17 @@ public struct SnapshotUnfinishedRestore: Equatable, Sendable {
     }
 }
 
+/// The Android a guest's data, or a snapshot, is on.
+public struct SnapshotRelease: Equatable, Sendable {
+    public var releaseID: String
+    public var buildNumber: Int
+
+    public init(releaseID: String, buildNumber: Int) {
+        self.releaseID = releaseID
+        self.buildNumber = buildNumber
+    }
+}
+
 /// The snapshots, their space and what may be done now.
 public struct SnapshotListing: Equatable, Sendable {
     /// Newest first.
@@ -380,17 +391,33 @@ public struct SnapshotListing: Equatable, Sendable {
     public var whileNotStopped: SnapshotRefusal?
     /// A restore that did not finish, or nil.
     public var unfinishedRestore: SnapshotUnfinishedRestore?
+    /// The release the guest's data is on now, from its record, also when a
+    /// start would be blocked or a snapshot cannot be made; nil when there is
+    /// no readable record.
+    public var dataRelease: SnapshotRelease?
+    /// Whether the figures were measured. In a listing that was not, every
+    /// figure is zero as a lower bound: names, dates, releases and restore
+    /// plans are all there, and the measured listing follows.
+    public var isMeasured: Bool
+    /// How many snapshot operations the driver had finished when this listing
+    /// was read; a screen that holds an older one than the driver's current
+    /// count reads again.
+    public var revision: Int
 
     public init(
         items: [SnapshotSummary] = [], space: SnapshotSpace = SnapshotSpace(),
         createRefusal: SnapshotRefusal? = nil, whileNotStopped: SnapshotRefusal? = nil,
-        unfinishedRestore: SnapshotUnfinishedRestore? = nil
+        unfinishedRestore: SnapshotUnfinishedRestore? = nil, dataRelease: SnapshotRelease? = nil,
+        isMeasured: Bool = true, revision: Int = 0
     ) {
         self.items = items
         self.space = space
         self.createRefusal = createRefusal
         self.whileNotStopped = whileNotStopped
         self.unfinishedRestore = unfinishedRestore
+        self.dataRelease = dataRelease
+        self.isMeasured = isMeasured
+        self.revision = revision
     }
 }
 

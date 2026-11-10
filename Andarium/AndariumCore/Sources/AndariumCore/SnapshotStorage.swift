@@ -14,8 +14,10 @@ extension TwoDiskStorage {
     /// The snapshots, newest first, with their figures and what may be done.
     /// It measures every snapshot and the space they use all together, which
     /// takes a fraction of a second for a large guest: call it off the main
-    /// actor.
-    public func snapshotListing() -> SnapshotListing {
+    /// actor. `measured: false` reads only the small files, so it returns at
+    /// once: every figure is then zero as a lower bound and `isMeasured` is
+    /// false.
+    public func snapshotListing(measured: Bool = true) -> SnapshotListing {
         let store = snapshotStore
         let entries = store.entries()
         let calls = snapshotIO.measure
@@ -24,10 +26,20 @@ extension TwoDiskStorage {
         let copies = updateCopies()
         let wholeSnapshots = entries.filter(\.hasData).map { store.dataURL($0.id) }
 
-        let items = entries.map { entry in
-            summary(
+        var listing = SnapshotListing(
+            createRefusal: store.createRefusal(), unfinishedRestore: store.unfinishedRestore(), dataRelease: dataRelease(),
+            isMeasured: measured)
+        guard measured else {
+            let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)
+            listing.items = entries.map { summary(of: $0, frees: unknown, kept: unknown) }
+            listing.space = SnapshotSpace(snapshotsUse: unknown, updateCopy: copies.isEmpty ? nil : unknown)
+            return listing
+        }
+        listing.items = entries.map { entry in
+            let (frees, kept) = figures(
                 of: entry, store: store, calls: calls,
                 keeping: live + copies + wholeSnapshots.filter { $0 != store.dataURL(entry.id) })
+            return summary(of: entry, frees: frees, kept: kept)
         }
         // What deleting them all frees: what they hold together that neither
         // the live disk nor an update's copy holds.
@@ -36,19 +48,25 @@ extension TwoDiskStorage {
             total + store.smallFiles(entry.id).reduce(0) { $0 + SnapshotMeasure.allocatedBytes(of: $1) }
         }
         let copyFigure = copies.isEmpty ? nil : SnapshotMeasure.freed(by: copies, keeping: live + wholeSnapshots, using: calls)
-        return SnapshotListing(
-            items: items, space: SnapshotSpace(snapshotsUse: use, updateCopy: copyFigure),
-            createRefusal: store.createRefusal(), unfinishedRestore: store.unfinishedRestore()
-        )
+        listing.space = SnapshotSpace(snapshotsUse: use, updateCopy: copyFigure)
+        return listing
     }
 
-    /// `others` are the files that stay when this snapshot goes: the live
-    /// disk, an update's copies and the other snapshots. With the file system's
-    /// private size this is not needed; with only the extent map it says what
-    /// the others still hold, and with neither the figure is a lower bound.
-    private func summary(
+    /// The release the guest's data is on now, from its record, whatever a
+    /// start or a restore would be: nil when there is no record to read.
+    private func dataRelease() -> SnapshotRelease? {
+        guard let state = try? files.readState() else { return nil }
+        return SnapshotRelease(releaseID: state.releaseID, buildNumber: Int(state.buildIncremental) ?? 0)
+    }
+
+    /// What deleting a snapshot frees and what it would take alone. `others`
+    /// are the files that stay when it goes: the live disk, an update's copies
+    /// and the other snapshots. With the file system's private size they are
+    /// not needed; with only the extent map they say what the others still
+    /// hold, and with neither the figure is a lower bound.
+    private func figures(
         of entry: SnapshotEntry, store: SnapshotStore, calls: SnapshotMeasure.Primitives, keeping others: [URL]
-    ) -> SnapshotSummary {
+    ) -> (frees: SnapshotFigure, kept: SnapshotFigure) {
         // A damaged snapshot that still has its disk holds space, which
         // deleting it frees.
         let data = store.dataURL(entry.id)
@@ -60,6 +78,10 @@ extension TwoDiskStorage {
             frees.bytes += small
             kept = SnapshotFigure(bytes: SnapshotMeasure.allocatedBytes(of: data))
         }
+        return (frees, kept)
+    }
+
+    private func summary(of entry: SnapshotEntry, frees: SnapshotFigure, kept: SnapshotFigure) -> SnapshotSummary {
         guard let record = entry.record, let state = entry.state, entry.hasData else {
             return SnapshotSummary(
                 id: entry.id, name: entry.record?.name ?? "", created: entry.record?.created ?? .distantPast,
@@ -97,7 +119,9 @@ extension TwoDiskStorage {
         let store = snapshotStore
         let id = try store.create(name: name, now: now)
         guard let entry = store.entry(id) else { throw SnapshotRefusal.missing }
-        return summary(of: entry, store: store, calls: snapshotIO.measure, keeping: holders(besides: id, store: store))
+        let (frees, kept) = figures(
+            of: entry, store: store, calls: snapshotIO.measure, keeping: holders(besides: id, store: store))
+        return summary(of: entry, frees: frees, kept: kept)
     }
 
     public func deleteSnapshot(_ id: SnapshotID) throws {
