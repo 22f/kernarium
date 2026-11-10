@@ -44,7 +44,8 @@ nonisolated struct DeviceHapticEngines: HapticEngineSource {
 }
 
 /// Plays the guest's scores on Core Haptics engines. One engine serves a
-/// target, made when it first plays and kept for the process; the engine is
+/// target, made when it first plays and kept until the target's actuator is
+/// gone (`forget`, a game controller that disconnected); the engine is
 /// started for a score and stopped when the application leaves the front, and
 /// starts again by itself when the system stopped it, a second after a failure
 /// at the soonest. A score makes a player for each element that has a shape: a
@@ -196,6 +197,12 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
 
     func stop(_ target: HapticTarget) {
         lock.withLock { channels[target] }?.cancelPlayers()
+    }
+
+    func forget(_ target: HapticTarget) {
+        guard let channel = lock.withLock({ channels.removeValue(forKey: target) }) else { return }
+        channel.cancelPlayers()
+        channel.stopEngine()
     }
 
     func stopAll() {
