@@ -15,3 +15,21 @@ target_include_directories(uml_andarium_motion_protocol_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/sensors)
 uml_add_unit_test(NAME andarium-motion-protocol
     COMMAND uml_andarium_motion_protocol_tests LABELS andarium)
+
+# The guest's vibrator HAL (android/lineage-24/overlay/vibrator): the wire format
+# against the golden frames that AndariumCore checks too (the fixture's path is
+# the test's argument, so the file has one copy), the timelines the framework's
+# calls become, and the HAL's state and timing against a fake link.
+add_executable(uml_andarium_haptics_protocol_tests haptics_protocol_tests.cpp)
+target_include_directories(uml_andarium_haptics_protocol_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/vibrator)
+uml_add_unit_test(NAME andarium-haptics-protocol
+    COMMAND uml_andarium_haptics_protocol_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/haptics-golden-frames.txt
+    LABELS andarium)
+
+add_executable(uml_andarium_haptics_player_tests haptics_player_tests.cpp)
+target_include_directories(uml_andarium_haptics_player_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/vibrator)
+uml_add_unit_test(NAME andarium-haptics-player
+    COMMAND uml_andarium_haptics_player_tests LABELS andarium)
