@@ -529,6 +529,12 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
+  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
+  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
+  default devices and again with the option and a connected client; a result
+  that differs from the accepted release's is explained
+  ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 
 `android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
 each register only when `UML_ANDROID_OOBE_RELEASE`,
@@ -545,6 +551,14 @@ opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of
 [`microg/build-apks.sh`](../tests/integration/android/microg/README.md), and
 checks that only microG's own packages present Google's certificate.
+`android-keymouse` (integration) registers when `UML_ANDROID_KEYMOUSE_RELEASE`
+names the release and `UML_ANDROID_KEYMOUSE_PROBE_APK` the
+[probe application](../tests/integration/android/keymouse/README.md)'s APK: the
+runner is a VNC client of the launcher's `--hardware-input` display and checks,
+through Android's input dump and the probe's log, that the host's devices
+plug, are configured as the image says, deliver keys, the cursor, buttons and
+wheel, pass pointer capture both ways and unplug; `--instance` names the
+previous release's data disk to check the one-time on-screen keyboard change.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

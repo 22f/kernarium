@@ -152,6 +152,15 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The keyboard and mouse runner's reading of the guest's input dump and of the
+# probe's log, its VNC client's wire, and its key table against the launcher's.
+uml_add_tooling_test(
+    NAME android17-keymouse-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_keymouse_runner.py
+    LABELS android
+    TIMEOUT 30)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(

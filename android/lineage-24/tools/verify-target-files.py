@@ -259,6 +259,12 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_reclaim_boot_apps.rc",
     "SYSTEM_EXT/bin/kernarium_time_zone.sh",
     "SYSTEM_EXT/etc/init/kernarium_time_zone.rc",
+    "SYSTEM_EXT/bin/kernarium_keyboard_default.sh",
+    "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
+    "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc",
     "SYSTEM_EXT/etc/selinux/system_ext_file_contexts",
     "SYSTEM_EXT/etc/selinux/system_ext_property_contexts",
     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
@@ -481,10 +487,11 @@ FORBIDDEN_APP_DIRECTORIES = {
     "F-DroidPrivilegedExtension",
     "Gallery2",
     "Jelly",
-    # In-tree test applications (tests/integration/android/{gamepad,location,motion,webgl,storage}):
+    # In-tree test applications (tests/integration/android/{gamepad,keymouse,location,motion,webgl,storage}):
     # `m <module>` leaves them in the shared product output, and none belongs
     # in an image, whichever partition or DATA/app path it would reach.
     "AndariumGamepadProbe",
+    "AndariumKeyMouseProbe",
     "AndariumLocationProbe",
     "AndariumMotionProbe",
     "AndariumStorageTests",
@@ -814,6 +821,39 @@ TIME_ZONE_TRANSITION = re.compile(
     rb"kernarium_time_zone\)$",
     re.MULTILINE,
 )
+# Android hides its on-screen keyboard while a hardware keyboard is attached unless the user's
+# "Show on-screen keyboard" (Settings.Secure.show_ime_with_hard_keyboard) is on. The product's
+# default is off, which SettingsProvider writes only when it first creates a guest's settings, so
+# once boot completes a script changes a stored 1 to 0 in a guest that started with an older release,
+# once (overlay/tools/kernarium_keyboard_default.sh, in a core domain of its own on system_ext in
+# overlay/sepolicy/system_ext/private). A marker property records that it has looked, so a person who
+# turns the setting on afterwards keeps it on.
+KEYBOARD_DEFAULT_SERVICE = (
+    "kernarium_keyboard_default", "/system_ext/bin/kernarium_keyboard_default.sh"
+)
+KEYBOARD_DEFAULT_TRIGGER = "property:sys.boot_completed=1"
+KEYBOARD_DEFAULT_MARKER = "persist.sys.kernarium.keyboard_default"
+KEYBOARD_DEFAULT_MARKER_TYPE = "kernarium_keyboard_default_prop"
+KEYBOARD_DEFAULT_SCRIPT_REQUIRED = (
+    "cmd settings get secure show_ime_with_hard_keyboard",
+    "cmd settings put secure show_ime_with_hard_keyboard 0",
+    KEYBOARD_DEFAULT_MARKER,
+    'setprop "$marker" 1',
+)
+KEYBOARD_DEFAULT_SCRIPT_FORBIDDEN = (
+    "settings put secure show_ime_with_hard_keyboard 1",
+    "settings put global",
+    "settings put system",
+    "settings delete",
+    "settings reset",
+    "--user",
+    "svc ",
+)
+KEYBOARD_DEFAULT_TRANSITION = re.compile(
+    rb"^\(typetransition init(?:_[0-9]+)? kernarium_keyboard_default_exec process "
+    rb"kernarium_keyboard_default\)$",
+    re.MULTILINE,
+)
 # The partition the host grew is filled on every boot, once /data is mounted
 # (init.vendor.rc says why): the kernel's online resize needs neither a fsck nor
 # a recorded check. resize2fs runs as root with the group of /data's owner, so
@@ -994,6 +1034,19 @@ def init_services(payload: str) -> dict[str, tuple[str, list[str]]]:
         elif options is not None and raw[:1].isspace():
             options.append(" ".join(fields))
     return services
+
+
+def check_init_keychords(init_payload: str) -> None:
+    """No service starts on a keychord: init counts keys across every input device, so with a
+    hardware keyboard attached ordinary typing would start it (Cuttlefish's bugreport chord was A+B)."""
+    for name, (_, options) in init_services(init_payload).items():
+        for option in options:
+            if option.split()[0] == "keycodes":
+                fail(
+                    f"UML init policy starts {name} on a keychord ('{option}'): init fires it whenever "
+                    "those keys are down together on any input device, so typing on a hardware keyboard "
+                    "would start it"
+                )
 
 
 def check_suspend_blocker(init_payload: str, actions: dict[str, list[str]]) -> None:
@@ -1389,6 +1442,7 @@ def check_boot_policy(
         )
     check_zram_swap(actions)
     check_userdata_grow(actions)
+    check_init_keychords(init_payload)
     check_suspend_blocker(init_payload, actions)
     check_network_setup(init_payload, actions)
     check_wifi_network(
@@ -1408,6 +1462,12 @@ def check_boot_policy(
             "utf-8", errors="strict"
         ),
         read_small(archive, infos["SYSTEM_EXT/bin/kernarium_time_zone.sh"]),
+    )
+    check_keyboard_default(
+        read_small(archive, infos["SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc"]).decode(
+            "utf-8", errors="strict"
+        ),
+        read_small(archive, infos["SYSTEM_EXT/bin/kernarium_keyboard_default.sh"]),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -2545,6 +2605,27 @@ def check_adb_root_service(
         )
 
 
+# The input topic of route p0022 lights LED_MISC on a cursor device that advertises it while pointer
+# capture is on, which is how the host's mouse learns that an application captured the pointer. The
+# mapper's dump line for it is in libinputflinger.so's bytes. A build without the topic never tells the
+# host, and a game that captures the mouse would hold a pointer that the host does not release.
+INPUT_FLINGER = "SYSTEM/lib64/libinputflinger.so"
+INPUT_FLINGER_MARKER = b"PointerCaptureLed: "
+INPUT_FLINGER_LIMIT = 64 << 20
+
+
+def check_input_flinger(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(INPUT_FLINGER)
+    if info is None or info.is_dir():
+        fail(f"{INPUT_FLINGER} is missing")
+    if INPUT_FLINGER_MARKER not in read_small(archive, info, INPUT_FLINGER_LIMIT):
+        fail(
+            f"{INPUT_FLINGER} lacks the pointer capture LED topic of route p0022 "
+            f"({INPUT_FLINGER_MARKER.decode()!r} is not in it): the mouse would not tell the host "
+            "that an application captured the pointer"
+        )
+
+
 def check_example_hal(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], hal: dict
 ) -> None:
@@ -3121,6 +3202,13 @@ def check_kernel_policy(
             "utf-8", errors="strict"
         ),
     )
+    check_keyboard_default_policy(
+        system_ext_policy,
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_property_contexts"]).decode(
+            "utf-8", errors="strict"
+        ),
+    )
     check_property_writers(
         platform_policy,
         vendor_policy,
@@ -3561,6 +3649,168 @@ def check_time_zone_policy(
         if line.strip() and not line.lstrip().startswith("#")
     ):
         fail(f"system_ext property contexts do not label {TIME_ZONE_MARKER}")
+
+
+def check_keyboard_default(rc_payload: str, script: bytes) -> None:
+    """The script that moves an older guest to the on-screen keyboard default runs once after boot."""
+    name, executable = KEYBOARD_DEFAULT_SERVICE
+    service = init_services(rc_payload).get(name)
+    if service is None or service[0] != executable:
+        fail(f"system_ext init policy does not declare the {name} service at {executable}")
+    for option in ("oneshot", "disabled"):
+        if option not in service[1]:
+            fail(f"system_ext init policy does not declare {name} as {option}")
+    actions = init_actions(rc_payload)
+    for trigger, commands in actions.items():
+        if f"start {name}" in commands and trigger != KEYBOARD_DEFAULT_TRIGGER:
+            fail(f"system_ext init policy starts {name} under '{trigger}'")
+    if f"start {name}" not in actions.get(KEYBOARD_DEFAULT_TRIGGER, []):
+        fail(f"system_ext init policy does not start {name} when boot completes")
+    code = "\n".join(
+        line
+        for line in script.decode("utf-8", errors="strict").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for token in KEYBOARD_DEFAULT_SCRIPT_REQUIRED:
+        if token not in code:
+            fail(f"{executable} does not contain '{token}'")
+    for token in KEYBOARD_DEFAULT_SCRIPT_FORBIDDEN:
+        if token in code:
+            fail(
+                f"{executable} contains '{token}': it may only read the on-screen keyboard setting "
+                "and turn it off, once"
+            )
+
+
+def check_keyboard_default_policy(
+    system_ext_policy: bytes, system_ext_file_contexts: bytes, system_ext_property_contexts: str
+) -> None:
+    """The script runs in its own core domain, uses only the settings service, sets only its marker."""
+    domain = KEYBOARD_DEFAULT_SERVICE[0]
+    if file_context_label(system_ext_file_contexts, KEYBOARD_DEFAULT_SERVICE[1]) != (
+        f"u:object_r:{domain}_exec:s0"
+    ):
+        fail(f"system_ext file contexts do not label {KEYBOARD_DEFAULT_SERVICE[1]}")
+    if not KEYBOARD_DEFAULT_TRANSITION.search(system_ext_policy):
+        fail("system_ext policy does not move init into the keyboard default domain")
+
+    def has(source: str, target: str, object_class: bytes, permission: bytes) -> bool:
+        return any(
+            CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) == source
+            and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) == target
+            and match.group(3) == object_class
+            and permission in match.group(4).split()
+            for match in CIL_ALLOW_RULE.finditer(system_ext_policy)
+        )
+
+    for source, target, object_class, permission, why in (
+        (domain, "settings_service", b"service_manager", b"find",
+         "cmd finds the settings service to read and write the on-screen keyboard setting"),
+        (domain, "system_server", b"binder", b"transfer",
+         "cmd hands the service the receiver of its result"),
+        ("system_server", domain, b"binder", b"call",
+         "cmd waits for the receiver of its result"),
+        ("system_server", domain, b"fd", b"use",
+         "the service writes to the descriptors cmd passes"),
+        ("system_server", domain, b"fifo_file", b"write",
+         "the settings service writes the setting it reads to a pipe"),
+    ):
+        if not has(source, target, object_class, permission):
+            fail(
+                f"system_ext policy does not allow {source} {target} {object_class.decode()} "
+                f"{permission.decode()}: {why}"
+            )
+    if KEYBOARD_DEFAULT_MARKER_TYPE not in cil_attribute_members(
+        system_ext_policy, "system_property_type"
+    ):
+        fail(f"system_ext policy does not define the system-owned {KEYBOARD_DEFAULT_MARKER_TYPE}")
+    settable = {
+        CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode())
+        for match in CIL_PROPERTY_SET_RULE.finditer(system_ext_policy)
+        if CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) == domain
+        and b"set" in match.group(3).split()
+    }
+    if KEYBOARD_DEFAULT_MARKER_TYPE not in settable:
+        fail(f"system_ext policy does not let the keyboard default domain set {KEYBOARD_DEFAULT_MARKER}")
+    if settable != {KEYBOARD_DEFAULT_MARKER_TYPE}:
+        fail(
+            f"system_ext policy lets the keyboard default domain set {sorted(settable)}, not only "
+            f"its own marker {KEYBOARD_DEFAULT_MARKER_TYPE}"
+        )
+    if not any(
+        line.split()[:2] == [KEYBOARD_DEFAULT_MARKER, f"u:object_r:{KEYBOARD_DEFAULT_MARKER_TYPE}:s0"]
+        for line in system_ext_property_contexts.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ):
+        fail(f"system_ext property contexts do not label {KEYBOARD_DEFAULT_MARKER}")
+
+
+# The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
+# (overlay/input, the product makefile). The side-key keyboard (1af4:0002) carries Power, Volume Up
+# and Down, Back and Home, and its key layout holds those five keys alone: Android would otherwise
+# give it Generic.kl, count it as a full keyboard that is always attached, and never hide its
+# on-screen keyboard for a real one. The keyboard (0003) and the mouse (0004) are external, as a USB
+# keyboard and mouse are, so that a key or a click wakes the screen; the absolute pointer (0005)
+# follows the display's orientation and wakes it too. The three have no key layout or character map
+# of their own: Android's keyboard layout choice belongs to the user.
+INPUT_SIDE_KEY_LAYOUT = "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl"
+INPUT_SIDE_KEYS = {116: "POWER", 115: "VOLUME_UP", 114: "VOLUME_DOWN", 158: "BACK", 172: "HOME"}
+INPUT_DEVICE_CONFIGURATIONS = {
+    "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc": {"device.internal": "0"},
+    "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc": {"device.internal": "0"},
+    "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc": {"touch.orientationAware": "1", "touch.wake": "1"},
+}
+INPUT_HOST_DEVICE_LAYOUT = re.compile(
+    r"^VENDOR/usr/(?:keylayout|keychars)/Vendor_1af4_Product_000[345](?:_Version_[0-9a-f]{4})?\.(?:kl|kcm)$"
+)
+
+
+def input_file_lines(payload: bytes, path: str) -> list[tuple[int, str]]:
+    """The lines of an Android input configuration file that are not blank or comments."""
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        fail(f"{path} is not UTF-8: {error}")
+    return [
+        (number, line.strip())
+        for number, line in enumerate(text.splitlines(), 1)
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def check_input_device_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    keys: dict[int, str] = {}
+    for number, line in input_file_lines(
+        read_small(archive, infos[INPUT_SIDE_KEY_LAYOUT]), INPUT_SIDE_KEY_LAYOUT
+    ):
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != "key" or not fields[1].isdecimal():
+            fail(f"{INPUT_SIDE_KEY_LAYOUT}:{number} must be a 'key <scan code> <label>' line: {line}")
+        if int(fields[1]) in keys:
+            fail(f"{INPUT_SIDE_KEY_LAYOUT}:{number} maps scan code {fields[1]} twice")
+        keys[int(fields[1])] = fields[2]
+    if keys != INPUT_SIDE_KEYS:
+        fail(
+            f"{INPUT_SIDE_KEY_LAYOUT} must map the five side keys alone ({INPUT_SIDE_KEYS}), so that "
+            f"Android does not count the side-key keyboard as a full keyboard: {keys}"
+        )
+    for path, expected in INPUT_DEVICE_CONFIGURATIONS.items():
+        found: dict[str, str] = {}
+        for number, line in input_file_lines(read_small(archive, infos[path]), path):
+            name, separator, value = line.partition("=")
+            if not separator or not name.strip() or not value.strip():
+                fail(f"{path}:{number} must be a 'name = value' line: {line}")
+            if name.strip() in found:
+                fail(f"{path}:{number} sets {name.strip()} twice")
+            found[name.strip()] = value.strip()
+        if found != expected:
+            fail(f"{path} must set {expected} and nothing else: {found}")
+    for name in sorted(infos):
+        if INPUT_HOST_DEVICE_LAYOUT.match(name):
+            fail(
+                f"{name} gives a host input device a key layout or character map of its own: "
+                "Android's keyboard layout choice is the user's"
+            )
 
 
 def check_policy_relaxations(policies: tuple[bytes, ...], build_variant: str) -> None:
@@ -4635,6 +4885,7 @@ def main() -> None:
         check_launcher_workspace(archive, infos)
         check_network_time(archive, infos)
         check_flip_to_screen_off(archive, infos)
+        check_input_device_configuration(archive, infos)
         check_pinner_overlay(archive, infos)
         check_application_manifests(archive, infos, build_variant)
         check_thermal_hal(archive, infos)
@@ -4645,6 +4896,7 @@ def main() -> None:
         check_adb_root_service(archive, infos)
         check_lmkd_gpu_reclaim(archive, infos)
         check_services_jar(archive, infos)
+        check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)
