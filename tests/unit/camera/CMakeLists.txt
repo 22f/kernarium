@@ -25,3 +25,11 @@ add_executable(uml_camera_apple_discovery_tests camera_apple_discovery_tests.cpp
 target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
+
+# The synthetic camera is the platform camera that the other camera tests use.
+if(TARGET UML::SyntheticCamera)
+    add_executable(uml_camera_synthetic_tests camera_synthetic_tests.cpp)
+    target_link_libraries(uml_camera_synthetic_tests PRIVATE UML::SyntheticCamera)
+    uml_add_unit_test(NAME camera-synthetic COMMAND uml_camera_synthetic_tests
+        LABELS "device;camera")
+endif()

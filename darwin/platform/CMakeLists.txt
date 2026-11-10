@@ -118,6 +118,12 @@ target_link_libraries(uml_apple_camera PRIVATE
     "-framework Foundation"
     "-framework ImageIO")
 
+# The camera without hardware, for tests and for the launchers that run a guest
+# against a chart. An App Store runtime carries none.
+if(NOT UML_APP_STORE_RUNTIME)
+    add_subdirectory(synthetic_camera)
+endif()
+
 add_library(uml_host_gpu_memory STATIC apple/host_gpu_memory.mm)
 add_library(UML::HostGpuMemory ALIAS uml_host_gpu_memory)
 uml_declare_architecture_target(uml_host_gpu_memory platform)

@@ -103,7 +103,16 @@ interface to the wire.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself.
 - `nv12_transform.hpp` crops, rotates and scales NV12 pictures in portable C++.
+- The synthetic camera is `synthetic_camera/` (`UML::SyntheticCamera`), a
+  platform camera with no hardware: profiles of a phone (a back zoom camera over
+  three lenses, and a front camera), a tablet and a laptop; a deterministic chart
+  whose top row encodes the camera and the frame counter (`decodeChartMarker`);
+  brightness, blur, tint and zoom that follow the settings; JPEG and Bayer
+  stills; simulated interruptions; and, with a manual clock, frames that a test
+  pumps. App Store runtimes do not build it. It is never a real camera.
 
-Tests: `camera-frame-transform` and `camera-dng-color` need nothing. The Apple
-backend's discovery runs in `camera-apple-discovery` on any host; its sessions
-are not run by a test, because a test must never capture from a real camera.
+Tests: `camera-frame-transform` and `camera-dng-color` need nothing;
+`camera-synthetic` exercises the synthetic camera through the interface; and
+`camera-apple-discovery` reads the host's own cameras on any host. The Apple
+backend's sessions are not run by a test, because a test must never capture from
+a real camera.
