@@ -63,7 +63,10 @@ application's statements (the sensor orientation, the rotation that
   to the platform session it happened in: when the session closes, or a new one
   opens, it is over, and the guest is told it ended. The guest is told each way
   once (`CAMERA_INTERRUPTED` or `CAMERA_UNAVAILABLE`, then `CAMERA_RESUMED` or
-  `CAMERA_AVAILABLE`).
+  `CAMERA_AVAILABLE`): a second interruption says nothing new, a session that
+  fails marks the cameras that have a stream, and a capture that failed is told
+  to be back when it delivers a frame, so a start that fails round after round
+  tells the guest once.
 - **Events and reset.** The event queue never holds a buffer: with no event
   pending it returns retry, so the guest's buffer stays in its ring, and an
   event raised later signals the device's event descriptor so the server runs
@@ -95,10 +98,11 @@ budget, and a state line goes to stderr when the host starts or stops capturing.
 ## Tests
 
 `camera-controls`, `camera-description`, `camera-jpeg-gap` and
-`camera-calibration` check the pure parts. `camera-device` drives the device over
-both queues in front of the synthetic camera, including the invariant that a
-blocked session never opens a platform session, a hostile guest, a reset
-with streams and stills in flight, an event queue that retries and wakes the
-server, and a suspend with no stream open that resets nothing (its test models
-the server's rule for a disabled ring). The Apple backend's capture is not run by any
-test.
+`camera-calibration` check the pure parts. `camera-device` drives the device
+over both queues in front of the synthetic camera, including the invariant that
+a blocked session never opens a platform session, a hostile guest, a reset with
+streams and stills in flight, an event queue that retries and wakes the server,
+a suspend with no stream open that resets nothing (its test models the
+server's rule for a disabled ring), a still on one camera while another streams,
+a join over the hardware budget, and a capture that fails to start round after
+round. The Apple backend's capture is not run by any test.

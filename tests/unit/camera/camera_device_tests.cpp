@@ -1209,12 +1209,99 @@ void testCamerasJoin()
     rig.camera->advanceClock(1'500'000'000);
     require(rig.waitFor([&] { return rig.camera->videoRunning(1); }), "the camera that could not start is tried again, in the open session");
     require(rig.camera->sessionsOpened() == 1, "without a new session");
-    require(events.arrived() == EventList {{VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, 1}, {VIRTIO_VIDEO_EVENT_CAMERA_RESUMED, 1}},
-            "and the guest is told it is back");
+    require(events.arrived() == EventList {{VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, 1}},
+            "the guest is not told it is back before the capture delivers");
     const auto live = rig.queue(2, 2);
     rig.camera->pump(1, 1);
     rig.step();
     require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    require(events.arrived() == EventList {{VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, 1}, {VIRTIO_VIDEO_EVENT_CAMERA_RESUMED, 1}},
+            "and then the guest is told it is back");
+}
+
+/* A camera that only takes stills is an input of the platform's session too:
+ * with another camera streaming, it joins as a streaming camera does. The
+ * camera that streams moves to a format a multi-camera session takes while the
+ * still is on its way, and goes back after; a still that cannot be taken fails
+ * its buffer and leaves the stream alone. */
+void testStillOnAnotherCamera()
+{
+    RigOptions options;
+    options.profile = SyntheticCameraProfile::tabletDualFront;
+    options.tier = CameraTier::large;
+    Rig rig(options);
+    const auto stillStream = [&](std::uint32_t stream, std::uint32_t camera) {
+        rig.create(stream, camera, stillKind);
+        require(Rig::type(rig.setParams(stream, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        for (std::uint32_t resource = 1; resource <= 2; ++resource) rig.attach(stream, resource, rig.params(stream).plane_formats[0].plane_size);
+    };
+    using Size = std::pair<std::uint32_t, std::uint32_t>;
+
+    // The back camera streams at a size of its own, and the front camera takes a still.
+    videoStream(rig, 1, 0, 1600, 900, 2);
+    stillStream(2, 1);
+    const auto frame = rig.queue(1, 1);
+    require(rig.camera->videoSize(0) == Size(1600, 900), "alone, the back camera runs the format that covers 1600 x 900");
+    const auto still = rig.queue(2, 1, 777);
+    require(rig.camera->videoSize(0) == Size(1920, 1080), "the back camera moved to a format a multi-camera session takes");
+    require(rig.camera->sessionsOpened() == 1 && !rig.done(still), "in the same session, and the still is with the platform");
+    rig.camera->pump(1, 0);
+    rig.step();
+    require(rig.done(still) && rig.result(still).base.flags == 0 && rig.result(still).base.timestamp == 777, "the still is taken");
+    require(rig.camera->videoSize(0) == Size(1600, 900), "and the back camera goes back to its own format once it is delivered");
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(frame) && rig.result(frame).base.flags == 0, "the stream never stopped");
+
+    // A 4K stream has no format a multi-camera session takes: the still is refused.
+    clearStream(rig, 1);
+    rig.destroy(1);
+    videoStream(rig, 1, 0, 3840, 2160, 1);
+    const auto big = rig.queue(1, 1);
+    require(rig.camera->videoSize(0) == Size(3840, 2160), "4K on the back camera");
+    const auto refused = rig.queue(2, 2, 778);
+    require(rig.done(refused) && rig.result(refused).base.flags == errorFlag, "the still fails its buffer");
+    require(rig.camera->videoRunning(0) && rig.camera->videoSize(0) == Size(3840, 2160), "and the stream is left alone");
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(big) && rig.result(big).base.flags == 0, "frames still flow");
+
+    // With that stream ended the still is taken, and the camera's session ends with it.
+    clearStream(rig, 1);
+    const auto later = rig.queue(2, 1, 779);
+    rig.camera->pump(1, 0);
+    rig.step();
+    require(rig.done(later) && rig.result(later).base.flags == 0, "the still is taken");
+    require(rig.camera->sessionsOpen() == 0, "and the session is released");
+}
+
+/* Cameras that ask for more than the hardware gives together are not all run:
+ * the camera that joins is refused, and the one that runs is left alone. */
+void testHardwareBudget()
+{
+    RigOptions options;
+    options.profile = SyntheticCameraProfile::tabletDualFront;
+    Rig rig(options);
+    EventQueue events(rig, 4);
+    videoStream(rig, 1, 0, 1920, 1080, 3);
+    videoStream(rig, 2, 1, 1920, 1080, 3);
+    require(Rig::type(rig.setInterval(1, 1, 60)) == VIRTIO_VIDEO_RESP_OK_NODATA, "60 frames a second on the back camera");
+    require(Rig::type(rig.setInterval(2, 1, 60)) == VIRTIO_VIDEO_RESP_OK_NODATA, "and on the front camera");
+    const auto back = rig.queue(1, 1);
+    const auto front = rig.queue(2, 1);
+    require(rig.camera->videoRunning(0) && !rig.camera->videoRunning(1), "the second camera is refused");
+    require(events.arrived() == EventList {{VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, 1}}, "and told that camera cannot run");
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(back) && rig.result(back).base.flags == 0, "the first camera delivers");
+    require(rig.waitFor([&] { return rig.done(front); }) && rig.result(front).base.flags == (blackFlag | interruptedFlag),
+            "the second gets black frames");
+
+    // At half the rate both fit.
+    clearStream(rig, 2);
+    require(Rig::type(rig.setInterval(2, 1, 30)) == VIRTIO_VIDEO_RESP_OK_NODATA, "30 frames a second");
+    rig.queue(2, 2);
+    require(rig.camera->videoRunning(1) && rig.camera->videoRunning(0), "both run");
 }
 
 /* The colour data a still may teach is a courtesy: a Bayer part that the
@@ -1310,20 +1397,55 @@ void testInterruptionEndsWithTheSession()
     rig.camera->post({allCameras, CameraEventKind::failed});
     rig.step();
     require(rig.camera->sessionsOpen() == 0, "a failed session is closed");
-    require(events.arrived().size() == 6 && events.arrived()[4].first == VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED &&
-                events.arrived()[5].first == VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED,
-            "the guest is told");
+    require(events.arrived().size() == 5 && events.arrived()[4] == std::make_pair(VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, 0u),
+            "the camera that has a stream is told, and the other, which has none, is not");
     const auto c = rig.queue(1, 3);
     require(rig.waitFor([&] { return rig.done(c); }), "black frames bridge it");
     require(rig.result(c).base.flags == (blackFlag | interruptedFlag), "black and interrupted");
     rig.camera->advanceClock(1'200'000'000);
     require(rig.waitFor([&] { return rig.camera->videoRunning(0); }), "the session is opened again");
     require(rig.camera->sessionsOpened() == 3, "a new one");
-    require(events.arrived().size() == 8 && events.arrived()[6].first == VIRTIO_VIDEO_EVENT_CAMERA_RESUMED, "and the guest is told it is back");
+    require(events.arrived().size() == 5, "and the guest is not told it is back before the capture delivers");
     const auto d = rig.queue(1, 4);
     rig.camera->pump(0, 1);
     rig.step();
     require(rig.done(d) && rig.result(d).base.flags == 0, "frames are live again");
+    require(events.arrived().size() == 6 && events.arrived()[5] == std::make_pair(VIRTIO_VIDEO_EVENT_CAMERA_RESUMED, 0u),
+            "and then the guest is told it is back");
+}
+
+/* A capture that cannot start fails round after round: the platform's session
+ * reports an interruption and then its failure, and the device opens another a
+ * second later. The camera with the stream is told it is interrupted once, and
+ * told it is back when a frame comes. */
+void testFailingStartTellsOnce()
+{
+    Rig rig;
+    EventQueue events(rig, 24);
+    videoStream(rig, 1, 0, 640, 480, 4);
+    const auto first = rig.queue(1, 1);
+    require(rig.camera->sessionsOpened() == 1, "a session");
+    const auto told = [&](std::uint32_t type) {
+        const auto all = events.arrived();
+        return std::count(all.begin(), all.end(), std::make_pair(type, 0u));
+    };
+    for (unsigned round = 0; round < 3; ++round) {
+        rig.camera->post({allCameras, CameraEventKind::interrupted});
+        rig.camera->post({allCameras, CameraEventKind::failed});
+        rig.step();
+        require(rig.camera->sessionsOpen() == 0, "a failed session is closed");
+        require(told(VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED) == 1, "told it is interrupted once, however many rounds have failed");
+        rig.camera->advanceClock(1'200'000'000);
+        require(rig.waitFor([&] { return rig.camera->sessionsOpened() == round + 2; }), "the camera is tried again a second later");
+        require(told(VIRTIO_VIDEO_EVENT_CAMERA_RESUMED) == 0, "and not told it is back by a session that opened and failed");
+    }
+    // A session that stays up delivers: now it is back, and told so once.
+    const auto live = rig.queue(1, 2);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(first) && rig.done(live) && rig.result(live).base.flags == 0, "frames are live");
+    require(told(VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED) == 1 && told(VIRTIO_VIDEO_EVENT_CAMERA_RESUMED) == 1,
+            "told interrupted once and back once");
 }
 
 /* System pressure is an interruption with a state of its own. */
@@ -1731,6 +1853,9 @@ int main()
     testSuspendResetsAndTheDriverRecreates();
     testEventQueueRetries();
     testSuspendWithNoStreamResetsNothing();
+    testFailingStartTellsOnce();
+    testStillOnAnotherCamera();
+    testHardwareBudget();
     testStillDeadlines();
     testStillsInFlight();
     testHostileGuest();

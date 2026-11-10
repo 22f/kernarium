@@ -335,13 +335,17 @@ public:
     }
 
     /* The camera cannot run, for a reason that ends by itself. The guest is
-     * told when it was not already; the events of the platform tell it again. */
-    void markDown(Runtime& runtime, std::uint32_t eventType, bool always)
+     * told once each way: a second interruption, or a capture that fails to
+     * start again and again, says nothing new until the camera has been up.
+     * Interrupted and unavailable are two states to the guest, so a camera
+     * that goes from one to the other is told. */
+    void markDown(Runtime& runtime, std::uint32_t eventType)
     {
         runtime.resuming = false;
-        if (runtime.told && !always) return;
+        const bool unavailable = eventType == VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE;
+        if (runtime.told && runtime.toldUnavailable == unavailable) return;
         runtime.told = true;
-        runtime.toldUnavailable = eventType == VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE;
+        runtime.toldUnavailable = unavailable;
         event(runtime.description.index, eventType);
     }
 
@@ -477,10 +481,11 @@ public:
         if (blocked()) return;
         if (!ensureSession()) {
             runtime.failed = true;
-            markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, false);
+            markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
             return;
         }
         if (runtime.videoRunning && runtime.runWidth == width && runtime.runHeight == height && runtime.runRate == rate) return;
+        const bool wasFailed = runtime.failed;
         const bool ok = session->startVideo(runtime.description.platformIndex, width, height, rate);
         runtime.videoRunning = ok;
         runtime.failed = !ok;
@@ -492,9 +497,12 @@ public:
             // The capture has to deliver before the stream has a picture of its own.
             runtime.resuming = true;
             applySettings(runtime, true);
-            settle(runtime);
+            // A capture that failed is not told to be back until it delivers
+            // (pump): a start that fails again and again would otherwise tell
+            // the guest at every try.
+            if (!wasFailed) settle(runtime);
         } else {
-            markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, false);
+            markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
         }
     }
 
@@ -1046,8 +1054,7 @@ public:
                     : platformEvent.kind == CameraEventKind::interruptedBySystemPressure ? Interruption::pressure
                                                                                           : Interruption::interrupted;
                 markDown(runtime, platformEvent.kind == CameraEventKind::unavailable ? VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE
-                                                                                      : VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED,
-                         true);
+                                                                                      : VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
                 updateBlackTimers(runtime);
             });
             break;
@@ -1067,15 +1074,19 @@ public:
             break;
         case CameraEventKind::failed:
             // The session is gone; it is opened again when a stream needs it.
+            // The cameras that have a stream are down until it runs again, and
+            // are told so before the session's end could tell them they are
+            // back.
+            each([&](Runtime& runtime) {
+                runtime.videoRunning = false;
+                if (!wantsVideo(runtime)) return;
+                runtime.failed = true;
+                markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
+            });
             closeSession();
             sessionFailed = true;
             lastRetry = now();
-            each([&](Runtime& runtime) {
-                runtime.failed = true;
-                runtime.videoRunning = false;
-                markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, true);
-                updateBlackTimers(runtime);
-            });
+            each([&](Runtime& runtime) { updateBlackTimers(runtime); });
             break;
         }
         reportState();
@@ -1101,6 +1112,7 @@ public:
             auto& runtime = runtimes[wire->second];
             if (runtime.resuming && runtime.interruption == Interruption::none) {
                 runtime.resuming = false;
+                settle(runtime);
                 updateBlackTimers(runtime);
             }
             if (blackMode(runtime)) continue;

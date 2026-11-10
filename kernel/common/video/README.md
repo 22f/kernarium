@@ -152,7 +152,8 @@ streams, and a metadata node, for its meta streams.
   (`VIRTIO_VIDEO_EVENT_CAMERA_*`, stream ID the camera index) report each change
   once: a camera that was reported interrupted or unavailable is reported
   resumed or available when its interruption ends, including when its session
-  was closed and opened again meanwhile.
+  was closed and opened again meanwhile, and a capture that failed is reported
+  back when it delivers a frame.
 - **Suspend and reset.** The camera's event buffers stay in the guest's ring:
   the device answers one only when it has an event, and the buffer the guest
   posted waits in the ring, across a suspend as well. A guest suspend that finds
