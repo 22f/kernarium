@@ -356,6 +356,20 @@ struct GamepadSessionTests {
         #expect(noFrame(rig))
     }
 
+    @Test func aStateOfTheInputsKeepsTheBatteryTheApplicationReported() {
+        let rig = greeted()
+        let pad = dualSense(1)
+        ready(rig, pad)
+        rig.clock.advance(milliseconds: 20)
+        rig.session.updateBattery(GamepadBattery(level: 0.3, state: .discharging), for: 1)
+        _ = rig.guest.nextFrame()
+        rig.clock.advance(milliseconds: 20)
+        // A state built from the inputs alone carries the default battery.
+        rig.session.submit(GamepadState(buttons: .south), for: 1)
+        guard case .input(_, let report)? = rig.guest.nextFrame() else { Issue.record("no report"); return }
+        #expect(report[53] == 3)
+    }
+
     @Test func aStateForAControllerThatIsNotKnownIsIgnored() {
         let rig = greeted()
         rig.session.submit(GamepadState(buttons: .south), for: 99)

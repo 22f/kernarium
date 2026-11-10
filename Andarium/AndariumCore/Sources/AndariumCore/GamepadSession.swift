@@ -234,13 +234,17 @@ public final class GamepadSession: @unchecked Sendable {
         }
     }
 
-    /// A controller's state, newest first. While the application is not in
-    /// front none is taken: the controller is let go of.
+    /// A controller's inputs, newest first (its battery is the one
+    /// `updateBattery` set). While the application is not in front none is
+    /// taken: the controller is let go of.
     public func submit(_ state: GamepadState, for id: Int) {
         queue.async { [self] in
             guard foreground, let index = slot(of: id), var slot = slots[index] else { return }
             let previous = slot.state
+            // The battery is the application's own reading (`updateBattery`),
+            // which a state of the inputs does not carry.
             slot.state = state
+            slot.state.battery = previous.battery
             slots[index] = slot
             guard slot.phase == .ready else { return }
             if !state.newlyPressed(since: previous).isEmpty { wake() }
