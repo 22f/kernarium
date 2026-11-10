@@ -287,6 +287,53 @@ class BootAndroidTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     boot_android.parse_arguments(arguments)
 
+    def test_memory_without_a_unit_is_refused_with_the_units_named(self) -> None:
+        # The kernel reads mem=4096 as 4096 bytes.
+        for value in ("4096", "512", "8192", "0", "67108863", "bogus", "16M", "1KB"):
+            with self.subTest(memory=value):
+                with mock.patch("sys.stderr") as stderr, self.assertRaises(SystemExit):
+                    boot_android.parse_arguments(["--memory", value])
+                message = "".join(call.args[0] for call in stderr.write.call_args_list)
+                self.assertIn(f"--memory {value}", message)
+        with mock.patch("sys.stderr") as stderr, self.assertRaises(SystemExit):
+            boot_android.parse_arguments(["--memory", "4096"])
+        message = "".join(call.args[0] for call in stderr.write.call_args_list)
+        self.assertIn("4096 bytes", message)
+        self.assertIn("K, M or G", message)
+        self.assertIn("4096M", message)
+
+    def test_memory_every_caller_passes_is_accepted(self) -> None:
+        # The launchers' defaults, the tests' sizes, and the other spellings
+        # the kernel reads as 64 MiB or more.
+        for value in (
+            "8G", "4G", "6G", "2G", "1G", "1536M", "4096M", "512M", "64M",
+            "4g", "0x40000000", "010000000000", "67108864", "8589934592", "1Gignored",
+        ):
+            with self.subTest(memory=value):
+                options = boot_android.parse_arguments(["--memory", value])
+                self.assertEqual(options.memory, value)
+                command = boot_android.emulator_command(
+                    options, Path("/r"), Path("/i"), Path("/e")
+                )
+                self.assertIn(f"mem={value}", command)
+        self.assertEqual(boot_android.parse_arguments([]).memory, "8G")
+
+    def test_memory_is_read_as_the_kernel_reads_it(self) -> None:
+        for text, size, has_unit in (
+            ("4096", 4096, False),
+            ("4096M", 4096 << 20, True),
+            ("4g", 4 << 30, True),
+            ("0x10", 16, False),
+            ("010", 8, False),
+            ("1Gignored", 1 << 30, True),
+            ("09G", 0, False),
+            ("bogus", 0, False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    boot_android.kernel_memory_size(text), (size, has_unit)
+                )
+
     def test_default_instance_is_the_stable_directory(self) -> None:
         instance = boot_android.instance_path(None)
         self.assertEqual(instance.name, "android-17")

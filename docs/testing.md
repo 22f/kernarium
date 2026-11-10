@@ -283,9 +283,12 @@ free-space thresholds, suspension check and pause both applications share, and
 with `swift test` (it includes the haptics session on fake guests and
 players, and the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator HAL tests against
-too); `andarium-motion-protocol` (unit), `andarium-stage-system-image`
-and `andarium-capture-screens` (tooling) cover the motion wire format, system
-image staging and the screenshot script, and `kernarium-host-features` (unit)
+too); `andarium-motion-protocol`, `andarium-haptics-protocol` and
+`andarium-haptics-player` (unit), `andarium-stage-system-image` and
+`andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
+HAL's haptics wire (against those golden frames, whose path the test takes as
+its argument), timelines and state, system image staging and the screenshot
+script, and `kernarium-host-features` (unit)
 the table of host features the boot request carries to an Android guest. The
 application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,

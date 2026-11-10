@@ -207,6 +207,9 @@ REQUIRED_ENTRIES = {
     "VENDOR/etc/vintf/manifest/android.hardware.sensors-multihal.xml",
     "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so",
     "VENDOR/etc/init/android.hardware.sensors-service-multihal.rc",
+    "VENDOR/bin/hw/android.hardware.vibrator-service.andarium",
+    "VENDOR/etc/init/android.hardware.vibrator-service.andarium.rc",
+    "ODM/etc/vintf/manifest_haptics.xml",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -390,6 +393,7 @@ FORBIDDEN_STATIC_ENTRIES = {
     "VENDOR/apex/com.android.hardware.neuralnetworks.apex",
     "VENDOR/apex/com.android.hardware.threadnetwork.apex",
     "VENDOR/apex/com.android.hardware.uwb.apex",
+    "VENDOR/apex/com.android.hardware.vibrator.apex",
     "VENDOR/apex/com.google.cf.bt.apex",
     "VENDOR/apex/com.google.cf.health.apex",
     "VENDOR/apex/com.google.cf.light.apex",
@@ -2581,6 +2585,109 @@ def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipI
         fail("motion sensor HAL service does not start the multi-HAL binary")
 
 
+# The vibrator HAL exists only on a device with haptics. The host passes the "haptics" ODM SKU for
+# one; the SKU's manifest is the one place that declares a vibrator, and the service's init script
+# starts it for that SKU alone. Cuttlefish's vibrator (an APEX of the AOSP example HAL) is not
+# installed, and no other manifest, fragment or APEX declares the HAL.
+VIBRATOR_HAL_NAME = "android.hardware.vibrator"
+VIBRATOR_SKU = "haptics"
+VIBRATOR_SKU_MANIFEST = f"ODM/etc/vintf/manifest_{VIBRATOR_SKU}.xml"
+VIBRATOR_SERVICE = "android.hardware.vibrator-service.andarium"
+VIBRATOR_INTERFACE = "android.hardware.vibrator.IVibrator/default"
+# The file_contexts line itself is a regular expression, so the check looks for its text.
+VIBRATOR_FILE_CONTEXT = re.compile(
+    re.escape(rb"/(vendor|system/vendor)/bin/hw/android\.hardware\.vibrator-service\.andarium")
+    + rb"\s+u:object_r:hal_vibrator_default_exec:s0"
+)
+
+
+def declared_hals(root: ET.Element) -> list[tuple[str | None, str | None, list[str]]]:
+    """The (name, version, fully qualified names) of each HAL a VINTF manifest declares."""
+    hals = []
+    for hal in root.iter("hal"):
+        interfaces = [
+            f"{interface.findtext('name')}/{instance.text}"
+            for interface in hal.iter("interface")
+            for instance in interface.iter("instance")
+        ]
+        interfaces += [fqname.text or "" for fqname in hal.iter("fqname")]
+        hals.append((hal.findtext("name"), hal.findtext("version"), interfaces))
+    return hals
+
+
+def check_haptics_vibrator(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for name, info in infos.items():
+        path = PurePosixPath(name)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+            or name == VIBRATOR_SKU_MANIFEST
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {name}: {error}")
+        if any(hal_name == VIBRATOR_HAL_NAME for hal_name, _, _ in declared_hals(root)):
+            fail(
+                f"{name} declares a vibrator HAL: only {VIBRATOR_SKU_MANIFEST} may, so that a "
+                "device without haptics has none"
+            )
+    try:
+        manifest = ET.fromstring(read_small(archive, infos[VIBRATOR_SKU_MANIFEST]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {VIBRATOR_SKU_MANIFEST}: {error}")
+    hals = declared_hals(manifest)
+    if (
+        len(hals) != 1
+        or hals[0][0] != VIBRATOR_HAL_NAME
+        or hals[0][1] != "4"
+        or hals[0][2] != ["IVibrator/default"]
+        or any(hal.get("format") != "aidl" for hal in manifest.iter("hal"))
+    ):
+        fail(f"{VIBRATOR_SKU_MANIFEST} must declare exactly the AIDL IVibrator/default at version 4: {hals}")
+    skus = sorted(
+        PurePosixPath(name).name
+        for name in infos
+        if re.fullmatch(r"ODM/etc/vintf/manifest_[^/]+\.xml", name)
+    )
+    if skus != [PurePosixPath(VIBRATOR_SKU_MANIFEST).name]:
+        fail(f"the ODM SKU manifests must be exactly the {VIBRATOR_SKU} one: {skus}")
+    skus_line = [
+        line
+        for line in read_small(archive, infos["META/misc_info.txt"]).decode("utf-8").splitlines()
+        if line.startswith("vintf_odm_manifest_skus=")
+    ]
+    if skus_line != [f"vintf_odm_manifest_skus={VIBRATOR_SKU}"]:
+        fail(f"META/misc_info.txt must name only the {VIBRATOR_SKU} ODM manifest SKU: {skus_line}")
+    script = read_small(
+        archive, infos[f"VENDOR/etc/init/{VIBRATOR_SERVICE}.rc"]
+    ).decode("utf-8", errors="strict")
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(
+        rf"service \S+ /vendor/bin/hw/{re.escape(VIBRATOR_SERVICE)}", service[0]
+    ):
+        fail("the vibrator init script must define one service that runs the Andarium vibrator HAL")
+    for required in (f"interface aidl {VIBRATOR_INTERFACE}", "disabled"):
+        if required not in lines:
+            fail(f"the vibrator service must carry '{required}': it starts for the haptics SKU alone")
+    name = service[0].split()[1]
+    trigger = f"on boot && property:ro.boot.product.hardware.sku={VIBRATOR_SKU}"
+    if trigger not in lines:
+        fail(f"the vibrator service must start on '{trigger}'")
+    after = lines[lines.index(trigger) + 1 :]
+    if after[:2] != [f"enable {name}", f"start {name}"]:
+        fail(f"'{trigger}' must enable and start {name}")
+    if any(line.startswith("on ") for line in lines if line != trigger):
+        fail("the vibrator init script may have no trigger but the haptics SKU's boot trigger")
+    if not VIBRATOR_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the vibrator HAL its hal_vibrator_default_exec label")
+
+
 def check_hardware_features(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
 ) -> None:
@@ -4252,6 +4359,7 @@ def main() -> None:
         check_app_dexpreopt(seen)
         check_hardware_features(archive, infos)
         check_motion_sensors(archive, infos)
+        check_haptics_vibrator(archive, infos)
         check_discrete_ops(archive, infos)
         check_default_wallpaper(archive, infos)
         check_no_statistics_uploader(archive, infos)

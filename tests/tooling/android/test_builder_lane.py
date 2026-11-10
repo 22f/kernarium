@@ -656,12 +656,32 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         good_net_setup_label = (
             "/vendor/bin/kernarium_net_setup  u:object_r:kernarium_net_setup_exec:s0\n"
         )
+        good_vibrator_label = (
+            "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.vibrator-service\\.andarium"
+            "  u:object_r:hal_vibrator_default_exec:s0\n"
+        )
         good_video_contexts = (
             "/dev/hvc0  u:object_r:serial_device:s0\n"
             + good_net_setup_label
             + "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.media\\.c2-service-v4l2"
             "  u:object_r:mediacodec_exec:s0\n"
+            + good_vibrator_label
         )
+        # The vibrator HAL: declared by the ODM manifest of the haptics SKU alone, and started by init
+        # for that SKU alone.
+        good_vibrator_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.vibrator</name><version>4</version>"
+            "<fqname>IVibrator/default</fqname></hal></manifest>"
+        )
+        good_vibrator_rc = (
+            "service vendor.vibrator-andarium /vendor/bin/hw/android.hardware.vibrator-service.andarium\n"
+            "    interface aidl android.hardware.vibrator.IVibrator/default\n"
+            "    class hal\n    user nobody\n    group nobody\n    disabled\n\n"
+            "on boot && property:ro.boot.product.hardware.sku=haptics\n"
+            "    enable vendor.vibrator-andarium\n    start vendor.vibrator-andarium\n"
+        )
+        vibrator_rc_path = "VENDOR/etc/init/android.hardware.vibrator-service.andarium.rc"
 
         def software_update(name: str, hevc_rate: str, vp9_size: str, vp9_blocks: str) -> str:
             # The software decoders' 3840x2160 update (config/media_codecs_c2.xml).
@@ -891,6 +911,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "userdata_extfs_inode_count": (
                         "32768" if wrong_userdata_inodes else "8192"
                     ),
+                    "vintf_odm_manifest_skus": "haptics",
                 }
                 for key, value in (misc_info_edits or {}).items():
                     if value is None:
@@ -2151,6 +2172,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                  '<manifest version="1.0" type="device"><hal format="aidl">'
                                  '<name>android.hardware.sensors</name><version>3</version>'
                                  '<fqname>ISensors/default</fqname></hal></manifest>')
+                archive.writestr("VENDOR/bin/hw/android.hardware.vibrator-service.andarium", synthetic_aarch64_elf())
+                archive.writestr(vibrator_rc_path, good_vibrator_rc)
+                archive.writestr("ODM/etc/vintf/manifest_haptics.xml", good_vibrator_manifest)
                 advertised_features = ["android.hardware.touchscreen",
                                        "android.hardware.sensor.accelerometer",
                                        "android.hardware.sensor.gyroscope"]
@@ -4317,6 +4341,59 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                           good_video_contexts.replace("mediacodec_exec", "vendor_file").encode()}},
              "not labeled mediacodec_exec"),
+            ("missing-vibrator-service", {"entries": {
+                "VENDOR/bin/hw/android.hardware.vibrator-service.andarium": None}},
+             "required entries are missing"),
+            ("missing-haptics-manifest", {"entries": {"ODM/etc/vintf/manifest_haptics.xml": None}},
+             "required entries are missing"),
+            ("always-declared-vibrator", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_vibrator_manifest.encode()}},
+             "declares a vibrator HAL"),
+            ("vibrator-in-a-vendor-fragment", {"entries": {
+                "VENDOR/etc/vintf/manifest/android.hardware.vibrator.xml": good_vibrator_manifest.encode()}},
+             "declares a vibrator HAL"),
+            ("vibrator-in-the-plain-odm-manifest", {"entries": {
+                "ODM/etc/vintf/manifest.xml": good_vibrator_manifest.encode()}},
+             "declares a vibrator HAL"),
+            ("vibrator-manager-in-the-haptics-manifest", {"entries": {
+                "ODM/etc/vintf/manifest_haptics.xml": good_vibrator_manifest.replace(
+                    "IVibrator/default", "IVibratorManager/default").encode()}},
+             "must declare exactly the AIDL IVibrator/default at version 4"),
+            ("vibrator-version-3-in-the-haptics-manifest", {"entries": {
+                "ODM/etc/vintf/manifest_haptics.xml": good_vibrator_manifest.replace(
+                    "<version>4", "<version>3").encode()}},
+             "must declare exactly the AIDL IVibrator/default at version 4"),
+            ("second-odm-sku-manifest", {"entries": {
+                "ODM/etc/vintf/manifest_other.xml": b'<manifest version="1.0" type="device"/>'}},
+             "ODM SKU manifests must be exactly the haptics one"),
+            ("odm-skus-in-the-build", {"misc_info_edits": {"vintf_odm_manifest_skus": "haptics other"}},
+             "must name only the haptics ODM manifest SKU"),
+            ("no-odm-sku-in-the-build", {"misc_info_edits": {"vintf_odm_manifest_skus": None}},
+             "must name only the haptics ODM manifest SKU"),
+            ("cuttlefish-vibrator-apex", {"entries": {
+                "VENDOR/apex/com.android.hardware.vibrator.apex": b"apex"}},
+             "nonstatic image or metadata is forbidden"),
+            ("vibrator-service-not-disabled", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace("    disabled\n", "").encode()}},
+             "must carry 'disabled'"),
+            ("vibrator-service-without-interface", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace(
+                    "    interface aidl android.hardware.vibrator.IVibrator/default\n", "").encode()}},
+             "must carry 'interface aidl"),
+            ("vibrator-service-for-any-sku", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace(
+                    "on boot && property:ro.boot.product.hardware.sku=haptics", "on boot").encode()}},
+             "must start on 'on boot && property:ro.boot.product.hardware.sku=haptics'"),
+            ("vibrator-service-at-early-hal", {"entries": {
+                vibrator_rc_path: (good_vibrator_rc + "\non early-hal\n    start vendor.vibrator-andarium\n").encode()}},
+             "may have no trigger but the haptics SKU's boot trigger"),
+            ("vibrator-service-wrong-binary", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace(
+                    "android.hardware.vibrator-service.andarium", "android.hardware.vibrator-service.example").encode()}},
+             "must define one service that runs the Andarium vibrator HAL"),
+            ("vibrator-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_vibrator_default_exec", "vendor_file").encode()}},
+             "hal_vibrator_default_exec label"),
         ):
             reject(label, options, reason)
 

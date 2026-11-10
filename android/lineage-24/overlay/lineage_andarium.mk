@@ -116,6 +116,13 @@ PRODUCT_COPY_FILES_EXCLUDE += \
 PRODUCT_EXTRA_RECOVERY_KEYS :=
 
 PRODUCT_PACKAGES_EXCLUDE += cuttlefish_sensor_injection
+
+# The vibrator is advertised only on a device with haptics. The host selects the
+# "haptics" SKU at boot (androidboot.product.hardware.sku=haptics); the ODM
+# manifest of that SKU (BoardConfig.mk) alone declares the HAL, and its init
+# script starts the service for that SKU alone. Cuttlefish's own vibrator (an
+# APEX of the AOSP example HAL that only sleeps) stays excluded below.
+PRODUCT_PACKAGES += android.hardware.vibrator-service.andarium
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/sensors/hals.conf:$(TARGET_COPY_OUT_VENDOR)/etc/sensors/hals.conf \
     frameworks/native/data/etc/android.hardware.sensor.accelerometer.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.sensor.accelerometer.xml \

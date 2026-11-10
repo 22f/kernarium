@@ -90,9 +90,10 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
 - **Hardware not advertised.** Telephony, GNSS, NFC, UWB, Thread, camera,
-  biometric, vibrator, secure element, USB, Bluetooth and Trusty. SecureElement
-  is kept but not persistent (route `p0024`): nothing starts it at boot, and the
-  first `SEService` client that binds it starts it.
+  biometric, secure element, USB, Bluetooth and Trusty; the vibrator only on a
+  device with haptics ([Haptics](#haptics)). SecureElement is kept but not
+  persistent (route `p0024`): nothing starts it at boot, and the first
+  `SEService` client that binds it starts it.
 - **Diagnostics.** A `user` image needs no guest root for diagnostics: the
   host-captured console, UML's mconsole and tracefs at `/sys/kernel/tracing`
   cover them. Only what these cannot reach needs a `userdebug` build with `su`.
@@ -158,6 +159,32 @@ multiplied by -9.80665, and events carry the guest's `CLOCK_BOOTTIME` at receipt
 a live input path, not a synchronized recording. Andarium's
 [scene policy](../../Andarium/README.md#devices) describes windowed operation.
 
+### Haptics
+
+The vibrator exists only on a device with haptics. The host passes
+`androidboot.product.hardware.sku=haptics` for one (Android's ODM SKU, which
+`Build.ODM_SKU` reports). The ODM manifest of that SKU
+(`overlay/vibrator/manifest_haptics.xml`, named by `ODM_MANIFEST_HAPTICS_FILES`
+in `overlay/BoardConfig.mk`) is the only place that declares
+`android.hardware.vibrator` `IVibrator/default`, and the service's init script
+starts it for that SKU alone. Without the SKU nothing is declared or started,
+and Android sees no vibrator.
+
+`overlay/vibrator/` is the vendor AIDL HAL (version 4). It offers amplitude
+control, the predefined effects CLICK, DOUBLE_CLICK, TICK, THUD, POP,
+HEAVY_CLICK and TEXTURE_TICK, the nine composition primitives (up to 128 per
+composition, delays up to 1 s) and completion callbacks; the framework's
+intensity settings are applied before the HAL. Envelope (PWLE) effects,
+frequency control, audio-coupled haptics, always-on effects and vendor effects
+are unsupported and not advertised. The HAL fixes the durations it reports
+(`haptics_effects.hpp`) and completes each callback at the declared time whether
+or not a host is connected; the host's Core Haptics player decides what fills
+them. The HAL listens on vsock port 5557 and accepts only host CID 2; a later
+connection replaces an earlier one. It sends each frame without waiting and shuts
+a connection down when a frame does not go whole. `overlay/vibrator/haptics_protocol.hpp`
+and `Andarium/AndariumCore/Sources/AndariumCore/HapticsProtocol.swift` own the
+wire format, which the golden frames in `tests/unit/andarium/fixtures` pin.
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -194,7 +221,8 @@ than making silence up (route `p0005`). A low-latency AAudio
 stream with a data callback that leaves its capacity unspecified starts with a
 two-burst buffer and grows it by one burst per underrun until the app sets a
 size (route `p0028`). A Virtio battery device reports the Apple host's
-percentage and charging state.
+percentage and charging state; on iOS the percentage is `UIDevice.batteryLevel`,
+which moves in 5% steps, so the guest's does too, and the Mac's is exact.
 The swipe lock screen can be turned on: `ro.lockscreen.disable.default` turns it
 off for user 0 of a fresh `/data` only.
 
