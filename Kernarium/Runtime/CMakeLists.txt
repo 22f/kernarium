@@ -122,6 +122,7 @@ target_link_libraries(KernariumRuntime PRIVATE
     UML::GpuDevice
     UML::ConsoleDevice
     UML::VsockDevice
+    UML::GnssDevice
     UML::VirtioInput
     UML::NetworkProvider
     "-framework Foundation"

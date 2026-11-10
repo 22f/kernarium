@@ -476,6 +476,13 @@ CONFIG_SSL_CHAN="fd:0,fd:1"
 # logind grants session access to DRM and input devices through tmpfs ACLs.
 CONFIG_TMPFS_POSIX_ACL=y
 
+# --- Location ---------------------------------------------------------------
+# The host's location as a GNSS receiver (/dev/gnssN, type NMEA) behind a local
+# experimental Virtio device. The node exists only where the host provides the
+# device, so a Linux guest without one is unchanged.
+CONFIG_GNSS=y
+CONFIG_GNSS_KERNARIUM_VIRTIO=y
+
 # --- Tracing and diagnostics ------------------------------------------------
 CONFIG_MAGIC_SYSRQ=y
 CONFIG_FTRACE=y
