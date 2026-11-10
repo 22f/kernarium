@@ -377,6 +377,38 @@ struct SnapshotStoreTests {
         near(after.space.snapshotsUse, 2 << 20)
     }
 
+    @Test func withNoLiveDiskTheSnapshotsHoldWhatTheyHoldTogether() async throws {
+        let fixture = try await SnapshotFixture.make(marker: 1)
+        defer { fixture.cleanUp() }
+        let first = try fixture.storage.createSnapshot(named: "first")
+        _ = try fixture.storage.createSnapshot(named: "second")
+        try FileManager.default.removeItem(at: fixture.data)
+
+        let listing = fixture.storage.snapshotListing()
+        // Both clones share every block and the live disk is gone: deleting
+        // both frees them once, deleting one frees none of them.
+        #expect(!listing.space.snapshotsUse.isLowerBound)
+        #expect(listing.space.snapshotsUse.bytes >= 3 << 20 && listing.space.snapshotsUse.bytes < 4 << 20)
+        #expect(listing.items.allSatisfy { $0.freesWhenDeleted.bytes < 1 << 20 })
+        #expect(listing.items.allSatisfy { $0.kept.bytes >= 3 << 20 })
+        #expect(listing.createRefusal == .noData)
+        // Either can still be restored: the data comes back.
+        _ = try fixture.storage.restoreSnapshot(first.id, guest: fixture.guest)
+        #expect(try TestDisk.read(fixture.data, at: 0) == [1])
+    }
+
+    @Test func aDamagedSnapshotThatKeepsItsDiskStillSaysWhatDeletingItFrees() async throws {
+        let fixture = try await SnapshotFixture.make(marker: 1)
+        defer { fixture.cleanUp() }
+        let made = try fixture.storage.createSnapshot(named: "")
+        try rewriteTwoMiB(fixture)
+        try FileManager.default.removeItem(at: fixture.snapshots.appendingPathComponent(made.id.rawValue).appendingPathComponent("snapshot.json"))
+        let damaged = try #require(fixture.storage.snapshotListing().items.first)
+        #expect(damaged.isDamaged)
+        #expect(abs(Int64(damaged.freesWhenDeleted.bytes) - (2 << 20)) <= 256 << 10)
+        #expect(damaged.kept.bytes >= 3 << 20)
+    }
+
     @Test func whereTheExtentMapIsRefusedTheUseIsALowerBoundAndSaysSo() async throws {
         var fixture = try await SnapshotFixture.make(marker: 1)
         defer { fixture.cleanUp() }

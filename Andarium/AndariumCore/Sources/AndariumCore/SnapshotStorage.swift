@@ -19,18 +19,19 @@ extension TwoDiskStorage {
         let store = snapshotStore
         let entries = store.entries()
         let calls = snapshotSeam.measure
-        let live = files.data
+        // What else holds blocks the snapshots hold: the live disk, once there is one, and an update's copy.
+        let live = FileManager.default.fileExists(atPath: files.data.path) ? [files.data] : []
         let copies = updateCopies()
         let wholeSnapshots = entries.filter(\.hasData).map { store.dataURL($0.id) }
 
         let items = entries.map { summary(of: $0, store: store, calls: calls) }
         // What deleting them all frees: what they hold together that neither
         // the live disk nor an update's copy holds.
-        var use = SnapshotMeasure.freed(by: wholeSnapshots, keeping: [live] + copies, using: calls)
+        var use = SnapshotMeasure.freed(by: wholeSnapshots, keeping: live + copies, using: calls)
         use.bytes += entries.reduce(0) { total, entry in
             total + store.smallFiles(entry.id).reduce(0) { $0 + SnapshotMeasure.allocatedBytes(of: $1) }
         }
-        let copyFigure = copies.isEmpty ? nil : SnapshotMeasure.freed(by: copies, keeping: [live] + wholeSnapshots, using: calls)
+        let copyFigure = copies.isEmpty ? nil : SnapshotMeasure.freed(by: copies, keeping: live + wholeSnapshots, using: calls)
         return SnapshotListing(
             items: items, space: SnapshotSpace(snapshotsUse: use, updateCopy: copyFigure),
             createRefusal: store.createRefusal()
@@ -38,22 +39,29 @@ extension TwoDiskStorage {
     }
 
     private func summary(of entry: SnapshotEntry, store: SnapshotStore, calls: SnapshotMeasure.Primitives) -> SnapshotSummary {
+        // A damaged snapshot that still has its disk holds space, which
+        // deleting it frees.
+        let data = store.dataURL(entry.id)
+        let small = store.smallFiles(entry.id).reduce(0) { $0 + SnapshotMeasure.allocatedBytes(of: $1) }
+        var frees = SnapshotFigure(bytes: small)
+        var kept = SnapshotFigure(bytes: small)
+        if entry.hasData {
+            frees = SnapshotMeasure.freed(by: [data], keeping: [], using: calls)
+            frees.bytes += small
+            kept = SnapshotFigure(bytes: SnapshotMeasure.allocatedBytes(of: data))
+        }
         guard let record = entry.record, let state = entry.state, entry.hasData else {
             return SnapshotSummary(
                 id: entry.id, name: entry.record?.name ?? "", created: entry.record?.created ?? .distantPast,
                 releaseID: entry.record?.releaseID ?? "", buildNumber: entry.record?.buildNumber ?? 0,
-                diskGiB: entry.record?.diskGiB ?? 0, restore: .refused(.incomplete)
+                diskGiB: entry.record?.diskGiB ?? 0, restore: .refused(.incomplete), kept: kept, freesWhenDeleted: frees
             )
         }
-        let data = store.dataURL(entry.id)
-        let small = store.smallFiles(entry.id).reduce(0) { $0 + SnapshotMeasure.allocatedBytes(of: $1) }
-        var frees = SnapshotMeasure.freed(by: [data], keeping: [], using: calls)
-        frees.bytes += small
         return SnapshotSummary(
             id: entry.id, name: record.name, created: record.created, releaseID: record.releaseID,
             buildNumber: record.buildNumber, diskGiB: record.diskGiB,
             restore: SnapshotRules.restorePlan(of: state, diskGiB: record.diskGiB, release: release),
-            kept: SnapshotFigure(bytes: SnapshotMeasure.allocatedBytes(of: data)), freesWhenDeleted: frees
+            kept: kept, freesWhenDeleted: frees
         )
     }
 
