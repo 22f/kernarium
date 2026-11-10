@@ -255,6 +255,11 @@ void kernarium_runtime_loader_set_location_receiver_handler(
  * runs, -EINVAL for a fix the runtime refuses. */
 int kernarium_runtime_loader_report_location(
     const kernarium_runtime_location_fix* _Nullable fix);
+/* A button of a game controller went down: wakes a guest that suspended
+ * itself, as a key down does; see kernarium_runtime_wake_for_input_function.
+ * It does nothing when no runtime is loaded or the runtime has no such entry.
+ * It may be called from any thread. */
+void kernarium_runtime_loader_wake_for_input(void);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

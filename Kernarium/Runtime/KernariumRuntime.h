@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 32U
+#define KERNARIUM_RUNTIME_API_VERSION 33U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -616,6 +616,13 @@ typedef void (*kernarium_runtime_set_location_receiver_callback_function)(
 typedef int (*kernarium_runtime_report_location_function)(
     const kernarium_runtime_location_fix* fix);
 
+/* A button of a game controller went down: wakes a guest that suspended
+ * itself, as a key down does through send_key, and does nothing to one that is
+ * running. It shares the keyboard's limit of one wake a second, never wakes
+ * for an axis or a release, and may be called from any thread. A runtime with
+ * no guest ignores it. */
+typedef void (*kernarium_runtime_wake_for_input_function)(void);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -654,6 +661,7 @@ typedef struct kernarium_runtime_api {
     kernarium_runtime_set_location_receiver_callback_function
         set_location_receiver_callback;
     kernarium_runtime_report_location_function report_location;
+    kernarium_runtime_wake_for_input_function wake_for_input;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

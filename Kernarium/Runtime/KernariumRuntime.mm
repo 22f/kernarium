@@ -2226,6 +2226,17 @@ void runtimeCancelTouch(uint32_t slot)
     }
 }
 
+/* Wakes a guest that suspended itself. The wake can wait on the guest's
+ * console, so it leaves the caller's thread. */
+void wakeGuestAsync()
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        std::lock_guard lifecycle(emulatorLifecycleMutex);
+        if (activeEmulator != nullptr)
+            uml_emulator_wake(activeEmulator);
+    });
+}
+
 void runtimeSendKey(uint16_t code, int pressed)
 {
     namespace input = uml::input::virtio::protocol;
@@ -2255,11 +2266,17 @@ void runtimeSendKey(uint16_t code, int pressed)
             code == input::keyPower, pressed != 0,
             std::chrono::steady_clock::now()))
         return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        std::lock_guard lifecycle(emulatorLifecycleMutex);
-        if (activeEmulator != nullptr)
-            uml_emulator_wake(activeEmulator);
-    });
+    wakeGuestAsync();
+}
+
+/* A game controller's button went down: the same wake as a key's, under the
+ * keyboard's own limit (see KeyWakePolicy). */
+void runtimeWakeForInput(void)
+{
+    if (!keyWakePolicy.shouldWakeForButtonDown(
+            std::chrono::steady_clock::now()))
+        return;
+    wakeGuestAsync();
 }
 
 int runtimeSetGpuHold(int held)
@@ -2637,6 +2654,7 @@ const kernarium_runtime_api runtimeApi {
     .prepare_jit = runtimePrepareJit,
     .set_location_receiver_callback = runtimeSetLocationReceiverCallback,
     .report_location = runtimeReportLocation,
+    .wake_for_input = runtimeWakeForInput,
 };
 
 } // namespace
