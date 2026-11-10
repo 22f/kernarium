@@ -40,10 +40,12 @@ nonisolated struct VsockConnector: AdbConnector, GuestStreamOpener {
 nonisolated enum AdbOperationRunner {
     static func run<Output: Sendable>(
         identity: AdbKeyStore.Identity?, clock: GuestRunClock, cancellable: Bool = true,
-        connector: any AdbConnector = VsockConnector(), onCancel: @escaping @Sendable () -> Void = {},
+        connector: any AdbConnector = VsockConnector(), connectLimit: Duration = AdbSession.defaultConnectLimit,
+        onCancel: @escaping @Sendable () -> Void = {},
         _ body: @escaping @Sendable (AdbSession) throws -> Output
     ) async throws -> Output {
-        let session = AdbSession(connector: connector, signer: identity?.signer, clock: clock)
+        let session = AdbSession(
+            connector: connector, signer: identity?.signer, clock: clock, connectLimit: connectLimit)
         let operation: () async throws -> Output = {
             try await withCheckedThrowingContinuation { continuation in
                 let thread = Thread {
@@ -217,6 +219,26 @@ nonisolated struct AdbGuestOperations: Sendable {
                 await stopBugReport(identity: identity, trail: trail)
             }
             throw shown
+        }
+    }
+
+    /// The guest kernel's counters that bear on a stall (`GuestProcFiles`),
+    /// read within `GuestProcFiles.timeBound`, connecting included. The entry
+    /// says why when they could not be read.
+    func guestProcFiles() async -> [BugReportArchive.Entry] {
+        guard let identity else { return [GuestProcFiles.entry(failedBecause: "no adb key is held")] }
+        do {
+            let result = try await AdbOperationRunner.run(
+                identity: identity, clock: clock, connector: connector, connectLimit: GuestProcFiles.connectLimit
+            ) { session in
+                try session.run { connection in
+                    session.watchdog.arm(idle: GuestProcFiles.commandLimit, overall: GuestProcFiles.commandLimit)
+                    return try connection.runShell(GuestProcFiles.command)
+                }
+            }
+            return [GuestProcFiles.entry(output: result.text)]
+        } catch {
+            return [GuestProcFiles.entry(failedBecause: "adb said \(error)")]
         }
     }
 

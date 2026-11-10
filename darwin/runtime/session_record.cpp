@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "session_record.hpp"
 
+#include "fixed_text.hpp"
+#include "platform/host_wait.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -24,7 +27,7 @@ namespace {
 
 /* The kernel output a record keeps: enough for a panic's message, its stack
  * and the lines before it. */
-constexpr std::size_t output_size = 4096;
+constexpr std::size_t output_size = session_kernel_output_bytes;
 constexpr std::size_t console_slots = 4;
 /* Darwin's limit on a thread name, its terminator included. */
 constexpr std::size_t thread_name_size = 64;
@@ -49,13 +52,15 @@ std::atomic<bool> crash_recorded{false};
 
 /* The record and the output it quotes: static, so an end formats nothing on
  * a stack it does not know the size of. One end writes them, the first. */
-char record_text[output_size + 1024];
+char record_text[session_state_max_bytes];
 char tail_text[output_size];
 
-/* The record's first bytes are a fixed slot that only the checkpoints write
- * and the rest is the session's state that only its begin and its end write,
- * so neither ever overwrites the other's bytes, whichever finishes last. */
+/* The record's first bytes are a fixed slot that only the checkpoints write,
+ * the next are the stall slot that only the stall watch writes, and the rest
+ * is the session's state that only its begin and its end write, so none ever
+ * overwrites another's bytes, whichever finishes last. */
 constexpr std::size_t memory_slot_size = session_memory_slot_bytes;
+constexpr std::size_t stall_slot_offset = session_memory_slot_bytes;
 std::atomic<bool> checkpoint_thread_started{false};
 
 std::atomic<MemoryTermsReader> terms_reader{nullptr};
@@ -119,53 +124,7 @@ void keep_output(const void *data, std::size_t length) noexcept
 			std::memory_order_relaxed);
 }
 
-/* Formats into a fixed buffer; what does not fit is dropped. */
-class Text final {
-public:
-	Text(char *data, std::size_t size) noexcept : data_{data}, size_{size} {}
-
-	Text &text(std::string_view value) noexcept
-	{
-		const std::size_t count = std::min(value.size(), size_ - used_);
-		std::memcpy(data_ + used_, value.data(), count);
-		used_ += count;
-		return *this;
-	}
-
-	Text &number(std::int64_t value) noexcept
-	{
-		char digits[24];
-		const auto result =
-			std::to_chars(digits, digits + sizeof(digits), value);
-		return text({digits, static_cast<std::size_t>(result.ptr - digits)});
-	}
-
-	/* `value` with every byte that is not printable ASCII, or a line feed
-	 * where `lines` allows one, replaced; carriage returns are dropped. */
-	Text &printable(std::string_view value, bool lines) noexcept
-	{
-		for (const char character : value) {
-			if (used_ == size_)
-				break;
-			if (character == '\r')
-				continue;
-			const bool keep = (character >= ' ' && character < 0x7f) ||
-				(lines && (character == '\n' || character == '\t'));
-			data_[used_++] = keep ? character : '?';
-		}
-		return *this;
-	}
-
-	[[nodiscard]] std::size_t size() const noexcept
-	{
-		return used_;
-	}
-
-private:
-	char *data_;
-	std::size_t size_;
-	std::size_t used_{};
-};
+using Text = FixedText;
 
 std::int64_t now() noexcept
 {
@@ -269,7 +228,7 @@ void write_memory_slot(int descriptor) noexcept
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 3\nmemory at ").number(at);
+	text.text("uml-session 4\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -362,6 +321,24 @@ void write_memory_slot(int descriptor) noexcept
 	os_unfair_lock_unlock(&history_lock);
 }
 
+/* The stall slot of a session that has seen no stall, so that nothing of the
+ * file's earlier session stays in it. */
+void write_blank_stall_slot(int descriptor) noexcept
+{
+	static char slot[session_stall_slot_bytes];
+	Text text{slot, sizeof(slot) - 1};
+	const std::int64_t at = now();
+	text.text("stalls 1 base ").number(at).text(" at ").number(at)
+		.text(" total 0 shown 0\n");
+	const std::size_t used = text.size();
+	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
+	slot[sizeof(slot) - 1] = '\n';
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot, sizeof(slot), stall_slot_offset);
+	} while (written < 0 && errno == EINTR);
+}
+
 /* Waits one checkpoint interval inside libsystem_kernel alone: the thread
  * fence defers a thread inside libsystem_c (nanosleep, usleep) on every pass,
  * and so never holds this uml-* thread. */
@@ -437,11 +414,11 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	ssize_t written;
 	do {
 		written = pwrite(descriptor, record_text, record.size(),
-			memory_slot_size);
+			session_state_offset);
 	} while (written < 0 && errno == EINTR);
 	if (written == static_cast<ssize_t>(record.size()))
 		(void)ftruncate(descriptor,
-			static_cast<off_t>(memory_slot_size + record.size()));
+			static_cast<off_t>(session_state_offset + record.size()));
 }
 
 std::string_view output_tail() noexcept
@@ -611,10 +588,32 @@ bool begin_session_record(std::string_view path,
 	session_started.store(now(), std::memory_order_relaxed);
 	forget_history();
 	write_memory_slot(descriptor);
+	write_blank_stall_slot(descriptor);
 	session_open.store(true, std::memory_order_release);
 	write_record(SessionEnd::running, 0, {}, {});
 	start_checkpoints();
 	return true;
+}
+
+bool session_record_open() noexcept
+{
+	return session_open.load(std::memory_order_acquire) &&
+		record_descriptor.load(std::memory_order_acquire) >= 0;
+}
+
+void write_session_stall_slot(std::string_view slot) noexcept
+{
+	if (slot.size() != session_stall_slot_bytes ||
+	    !session_open.load(std::memory_order_acquire))
+		return;
+	const int descriptor = record_descriptor.load(std::memory_order_acquire);
+	if (descriptor < 0)
+		return;
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot.data(), slot.size(),
+			stall_slot_offset);
+	} while (written < 0 && errno == EINTR);
 }
 
 void set_memory_terms_reader(MemoryTermsReader reader) noexcept
@@ -663,6 +662,8 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
 			    .starts_with(host_fault_line))
 			record_host_fault();
 	}
+	const ::uml::platform::ScopedHostWait wait{
+		::uml::platform::HostWait::send};
 	return write(descriptor, buffer, length);
 }
 
