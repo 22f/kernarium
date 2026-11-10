@@ -58,6 +58,10 @@ LOCAL_ENABLE_FRP := false
 # example HAL's APEX, which stays excluded below. The HAL reads the host's
 # receiver (/dev/gnss0) and is declared on every device.
 LOCAL_GNSS_PRODUCT_PACKAGE := android.hardware.gnss-service.andarium
+# Cuttlefish's thermal fragment installs this package where it would install the
+# example HAL's APEX, which stays excluded below. The HAL reports the host's
+# thermal state (overlay/thermal) and is declared on every device.
+LOCAL_THERMAL_HAL_PRODUCT_PACKAGE := android.hardware.thermal-service.andarium
 # Select the inherited HIDL primary HAL explicitly so Cuttlefish does not also
 # append its MMAP-capable product-property defaults.
 LOCAL_AUDIO_PRODUCT_PACKAGE := \
@@ -311,6 +315,7 @@ KERNARIUM_REMOVED_PACKAGES := \
     com.android.hardware.security.authgraph \
     com.android.hardware.security.secretkeeper \
     com.android.hardware.tetheroffload \
+    com.android.hardware.thermal \
     com.android.hardware.usb \
     com.android.hardware.vibrator \
     com.android.vndk.v31 \
@@ -400,6 +405,12 @@ PRODUCT_COPY_FILES_EXCLUDE += \
     frameworks/native/data/etc/android.software.verified_boot.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.verified_boot.xml
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/config/kernarium_core_hardware.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/handheld_core_hardware.xml
+
+# The default display configuration: when the thermal HAL reports SEVERE (the
+# host is hot) the display's render rate is held to 30 Hz. The framework reads
+# the map from this file for a display that has none of its own (route p0007).
+PRODUCT_COPY_FILES += \
+    device/kernarium/andarium/config/displayconfig_default.xml:$(TARGET_COPY_OUT_VENDOR)/etc/displayconfig/default.xml
 
 # Every device declares the location and GPS features, whether or not the host
 # has a position to give: the GNSS HAL (overlay/gnss) is the guest's GPS. The
