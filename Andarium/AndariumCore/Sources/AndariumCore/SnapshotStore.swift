@@ -245,16 +245,30 @@ struct SnapshotStore: Sendable {
 
     // MARK: Delete and rename
 
+    /// Deletes a snapshot: set aside by one rename, which is the commit, and
+    /// then removed. A failure to remove it leaves `.gone-<id>` for the next
+    /// launch and is not the person's failure. The snapshot a restore under
+    /// way names stays, as the restore needs it; every other can go, which is
+    /// how room is made for a restore that ran out of it.
     func delete(_ id: SnapshotID) throws {
-        if restoreUnderWay { throw SnapshotRefusal.restoreUnfinished }
+        switch intent() {
+        case .none:
+            break
+        case .unreadable:
+            throw SnapshotRefusal.restoreUnfinished
+        case .readable(let restoring):
+            if restoring == id { throw SnapshotRefusal.restoreUnfinished }
+        }
         guard FileManager.default.fileExists(atPath: directory(id).path) else { throw SnapshotRefusal.missing }
         let gone = root.appendingPathComponent(Self.removalPrefix + id.rawValue, isDirectory: true)
         try? io.remove(gone)
         try io.rename(directory(id), gone)
         try? io.flush(root)
-        try io.remove(gone)
+        try? io.remove(gone)
     }
 
+    /// Renames a snapshot: the write of its record is the commit, and the
+    /// flushes after it are best effort.
     func rename(_ id: SnapshotID, to rawName: String) throws {
         guard let name = SnapshotRules.normalizedName(rawName) else { throw SnapshotRefusal.invalidName }
         guard let found = entry(id) else { throw SnapshotRefusal.missing }
@@ -262,19 +276,28 @@ struct SnapshotStore: Sendable {
         record.name = name
         let metadata = directory(id).appendingPathComponent(Self.metadataFile)
         do {
-            try durablyWrite(Self.encoded(record), to: metadata)
+            try io.write(Self.encoded(record), metadata)
         } catch {
             throw translated(error)
         }
         Self.excludeFromBackup(metadata)
+        try? io.flush(metadata)
+        try? io.flush(directory(id))
     }
 
     // MARK: Restore
+
+    private var dataTemporary: URL { files.data.appendingPathExtension("tmp") }
 
     /// Puts the snapshot's data and record in place of the guest's. `settle`
     /// is the step that touches the guest's choices (the capacity, the
     /// backup policy); it runs once the files are in place and may run again
     /// after a crash. The snapshot stays, and the state it replaces is gone.
+    ///
+    /// The rename of the clone over `data.img` is the commit point. An error
+    /// before it, in writing the intent too, forgets the restore and changes
+    /// nothing; an error after it leaves the intent for roll-forward and is
+    /// thrown as `SnapshotRestoreUnfinished`.
     func restore(_ id: SnapshotID, settle: (SnapshotRecord) throws -> Void) throws {
         if restoreUnderWay { throw SnapshotRefusal.restoreUnfinished }
         guard let found = entry(id) else { throw SnapshotRefusal.missing }
@@ -282,36 +305,50 @@ struct SnapshotStore: Sendable {
         if case .refused(let reason) = SnapshotRules.restorePlan(of: state, diskGiB: record.diskGiB, release: release) {
             throw reason
         }
-        try durablyWrite(JSONEncoder().encode(RestoreIntent(snapshot: id)), to: restoreURL)
-        Self.excludeFromBackup(restoreURL)
         do {
-            try replaceData(of: id)
+            try io.write(JSONEncoder().encode(RestoreIntent(snapshot: id)), restoreURL)
+            try io.flush(restoreURL)
+            try io.flush(root)
+            Self.excludeFromBackup(restoreURL)
+            try stageData(of: id)
+            try io.rename(dataTemporary, files.data)
         } catch {
-            // Nothing has changed until the clone is in place: forget the
-            // restore rather than leave one to finish at the next launch.
+            try? io.remove(dataTemporary)
             try? io.remove(restoreURL)
             throw translated(error)
         }
-        try finishRestore(found, settle: settle)
+        do {
+            try io.flush(files.data)
+            try? io.flush(locations.directory)
+            try finishRestore(found, settle: settle)
+        } catch {
+            throw SnapshotRestoreUnfinished(cause: error)
+        }
     }
 
-    /// Step 2: the clone of the snapshot's data, renamed over `data.img`.
+    /// The clone of the snapshot's data beside `data.img`, flushed.
+    private func stageData(of id: SnapshotID) throws {
+        try? io.remove(dataTemporary)
+        try io.clone(dataURL(id), dataTemporary)
+        try io.flush(dataTemporary)
+    }
+
+    /// The clone renamed over `data.img`, for a roll-forward.
     private func replaceData(of id: SnapshotID) throws {
-        let temporary = files.data.appendingPathExtension("tmp")
-        try? io.remove(temporary)
         do {
-            try io.clone(dataURL(id), temporary)
-            try io.rename(temporary, files.data)
+            try stageData(of: id)
+            try io.rename(dataTemporary, files.data)
         } catch {
-            try? io.remove(temporary)
+            try? io.remove(dataTemporary)
             throw error
         }
         try io.flush(files.data)
         try? io.flush(locations.directory)
     }
 
-    /// Steps 3 to 6, each of which can run again with the same result while
-    /// the snapshot is whole, because it is only read.
+    /// What follows the data: the record, the update copies, the guest's
+    /// choices and the end of the intent. Each can run again with the same
+    /// result while the snapshot is whole, because it is only read.
     private func finishRestore(_ found: SnapshotEntry, settle: (SnapshotRecord) throws -> Void) throws {
         guard let bytes = found.instanceBytes, let record = found.record else { throw SnapshotRefusal.incomplete }
         try durablyWrite(bytes, to: files.state)
@@ -326,29 +363,44 @@ struct SnapshotStore: Sendable {
 
     // MARK: Launch
 
-    /// Completes what a crash left, before the guest is read: a restore that
-    /// began is carried through (the snapshot is intact, so every step can run
-    /// again), a clone's temporary file is dropped, and a create or delete
-    /// that did not finish is removed. A restore whose snapshot is gone or
-    /// damaged cannot be carried on and is forgotten.
+    /// Completes what a crash left, before the guest is read: the leftovers of
+    /// a create or a delete (and a clone's temporary file) are removed first,
+    /// whatever follows, as they hold space; a restore that began is then
+    /// carried through (the snapshot is intact, so every step can run again).
+    /// A restore whose snapshot is gone or damaged cannot be carried on and is
+    /// forgotten. A roll-forward that fails throws `SnapshotRestoreUnfinished`
+    /// and leaves the intent.
     func recover(settle: (SnapshotRecord) throws -> Void) throws {
-        try? io.remove(files.data.appendingPathExtension("tmp"))
+        try? io.remove(dataTemporary)
+        for name in (try? io.list(root)) ?? []
+        where name.hasPrefix(Self.stagingPrefix) || name.hasPrefix(Self.removalPrefix) {
+            try? io.remove(root.appendingPathComponent(name))
+        }
         switch intent() {
         case .none:
             break
         case .unreadable:
             try? io.remove(restoreURL)
         case .readable(let id):
-            if let found = entry(id), found.isComplete {
+            guard let found = entry(id), found.isComplete else {
+                try? io.remove(restoreURL)
+                return
+            }
+            do {
                 try replaceData(of: id)
                 try finishRestore(found, settle: settle)
-            } else {
-                try? io.remove(restoreURL)
+            } catch {
+                throw SnapshotRestoreUnfinished(cause: error)
             }
         }
-        for name in (try? io.list(root)) ?? []
-        where name.hasPrefix(Self.stagingPrefix) || name.hasPrefix(Self.removalPrefix) {
-            try? io.remove(root.appendingPathComponent(name))
-        }
     }
+}
+
+/// A restore that has put the snapshot's data in place and has not finished:
+/// its intent stays, and the next launch or start carries it through. `cause`
+/// is the error that stopped it.
+public struct SnapshotRestoreUnfinished: Error, LocalizedError {
+    public var cause: any Error
+
+    public var errorDescription: String? { cause.localizedDescription }
 }

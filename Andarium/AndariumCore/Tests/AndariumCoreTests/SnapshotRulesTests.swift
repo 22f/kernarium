@@ -187,6 +187,9 @@ struct SnapshotRulesTests {
         struct Broken: Error {}
         #expect(SnapshotResult<Int>(catching: { 7 }).value == 7)
         #expect(SnapshotResult<Int>(catching: { throw SnapshotRefusal.notShutDown }).refusal == .notShutDown)
+        // A restore that took effect and did not finish says so as a value.
+        let unfinished = SnapshotRestoreUnfinished(cause: Broken())
+        #expect(SnapshotResult<Int>(catching: { throw unfinished }).refusal == .restoreUnfinished)
         if case .failed(let error) = SnapshotResult<Int>(catching: { throw Broken() }) {
             #expect(error is Broken)
         } else {

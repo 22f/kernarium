@@ -371,6 +371,10 @@ public enum SnapshotResult<Value: Sendable>: Sendable {
             self = .done(try body())
         } catch let refusal as SnapshotRefusal {
             self = .refused(refusal)
+        } catch is SnapshotRestoreUnfinished {
+            // The files are in place and the restore completes at the next
+            // launch or start.
+            self = .refused(.restoreUnfinished)
         } catch {
             self = .failed(error)
         }
