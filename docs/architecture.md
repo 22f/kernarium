@@ -477,7 +477,10 @@ from the host application to a service in the guest (adbd) with no listening
 socket on the host; the guest cannot open a connection to the host. The
 [Virtio GNSS device](../darwin/device/gnss/README.md) is the guest's
 `/dev/gnssN`: it carries the host's fixes as an NMEA stream while the guest has
-the receiver open, and nothing else of the host's location.
+the receiver open, and nothing else of the host's location. The
+[Virtio camera device](../darwin/device/camera/README.md) serves the host's cameras
+through the video wire, on a platform camera the caller supplies; a blocked
+session never opens a capture session.
 
 **Lost backend.** A virtqueue call or kick descriptor, or the backend request
 stream, that reports end of file or an error other than would-block means the
