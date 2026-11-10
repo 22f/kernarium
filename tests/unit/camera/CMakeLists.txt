@@ -57,4 +57,9 @@ if(TARGET UML::SyntheticCamera)
     target_link_libraries(uml_camera_description_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
     uml_add_unit_test(NAME camera-description COMMAND uml_camera_description_tests
         LABELS "device;camera")
+
+    add_executable(uml_camera_device_tests camera_device_tests.cpp)
+    target_link_libraries(uml_camera_device_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    uml_add_unit_test(NAME camera-device COMMAND uml_camera_device_tests
+        LABELS "device;camera" TIMEOUT 120)
 endif()
