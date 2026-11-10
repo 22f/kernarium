@@ -126,7 +126,6 @@ void fillWire(CameraDescription& camera)
     if (info.manualFocus) flags |= VIRTIO_VIDEO_CAMERA_F_MANUAL_FOCUS;
     if (info.manualWhiteBalance) flags |= VIRTIO_VIDEO_CAMERA_F_MANUAL_WHITE_BALANCE;
     if (camera.raw()) flags |= VIRTIO_VIDEO_CAMERA_F_RAW;
-    if (info.variableAperture) flags |= VIRTIO_VIDEO_CAMERA_F_VARIABLE_APERTURE;
     wire.flags = flags;
     wire.sensor_orientation = camera.sensorOrientation;
     wire.pixel_array_width = info.pixelArrayWidth;

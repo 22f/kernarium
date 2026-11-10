@@ -7,12 +7,15 @@
 #include <cstdlib>
 
 /* The camera records are laid out for a kernel that compiles the same header:
- * each keeps its size and every 64-bit member its natural alignment, with no
- * compiler padding to disagree about. */
+ * each keeps its size and every 64-bit member its natural alignment, and every
+ * gap is a named member, so no compiler padding is left to disagree about. */
 static_assert(sizeof(virtio_video_camera_query) == 16);
 static_assert(sizeof(virtio_video_camera_desc) == 328);
 static_assert(sizeof(virtio_video_camera_desc) % 8 == 0);
+static_assert(offsetof(virtio_video_camera_desc, reserved0) == 68);
 static_assert(offsetof(virtio_video_camera_desc, exposure_min_ns) == 72);
+static_assert(offsetof(virtio_video_camera_desc, reserved) + sizeof(virtio_video_camera_desc::reserved) ==
+              sizeof(virtio_video_camera_desc));
 static_assert(offsetof(virtio_video_camera_desc, switch_over_q16) == 100);
 static_assert(offsetof(virtio_video_camera_desc, color_matrix1_q16) == 164);
 static_assert(sizeof(virtio_video_camera_query_resp) == 32);
@@ -23,6 +26,8 @@ static_assert(sizeof(virtio_video_camera_queue_resp) == 64);
 static_assert(offsetof(virtio_video_camera_queue_resp, sequence) == 56);
 static_assert(sizeof(virtio_video_camera_meta) == 168);
 static_assert(sizeof(virtio_video_camera_meta) % 8 == 0);
+static_assert(offsetof(virtio_video_camera_meta, reserved) + sizeof(virtio_video_camera_meta::reserved) ==
+              sizeof(virtio_video_camera_meta));
 static_assert(offsetof(virtio_video_camera_meta, wb_gain_q16) == 48);
 static_assert(VIRTIO_VIDEO_DEVICE_CAMERA == 0x0102);
 static_assert(UML_VIRTIO_VIDEO_CAMERA_DEVICE_ID != 65535);

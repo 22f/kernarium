@@ -69,8 +69,9 @@ enum {
 	VIRTIO_VIDEO_F_RESOURCE_SHM_REGION = 3,
 	/* The device speaks the V4L2 control and stream-information commands
 	   (VIRTIO_VIDEO_CMD_*_V4L2_CONTROLS, VIRTIO_VIDEO_CMD_*_STREAM_INFO).
-	   An encoder (device ID 30) always offers it, and a driver binds an
-	   encoder only when it is negotiated. A decoder never offers it. */
+	   An encoder (device ID 30) and a camera (device ID 65533) always offer
+	   it, and a driver binds either only when it is negotiated. A decoder
+	   never offers it. */
 	VIRTIO_VIDEO_F_V4L2_CONTROLS = 4
 };
 
@@ -235,7 +236,7 @@ enum virtio_video_cmd_type {
 	VIRTIO_VIDEO_CMD_QUERY_CONTROL,
 	VIRTIO_VIDEO_CMD_GET_CONTROL,
 	VIRTIO_VIDEO_CMD_SET_CONTROL,
-	/* Encoder only; requires VIRTIO_VIDEO_F_V4L2_CONTROLS */
+	/* Encoder and camera; requires VIRTIO_VIDEO_F_V4L2_CONTROLS */
 	VIRTIO_VIDEO_CMD_QUERY_V4L2_CONTROLS,
 	VIRTIO_VIDEO_CMD_SET_V4L2_CONTROLS,
 	VIRTIO_VIDEO_CMD_GET_V4L2_CONTROLS,
@@ -582,7 +583,7 @@ struct virtio_video_set_control_resp {
 };
 
 /*
- * V4L2 controls (encoder only, VIRTIO_VIDEO_F_V4L2_CONTROLS)
+ * V4L2 controls (encoder and camera, VIRTIO_VIDEO_F_V4L2_CONTROLS)
  *
  * Controls cross the wire as V4L2 control IDs and V4L2 menu indices, which
  * are stable UAPI. The host lists every control it supports with its range,
@@ -748,7 +749,6 @@ enum virtio_video_camera_flag {
 	VIRTIO_VIDEO_CAMERA_F_MANUAL_WHITE_BALANCE = 1 << 6,
 	/* Bayer stills can be taken and the colour data below is calibrated. */
 	VIRTIO_VIDEO_CAMERA_F_RAW = 1 << 7,
-	VIRTIO_VIDEO_CAMERA_F_VARIABLE_APERTURE = 1 << 8,
 };
 
 enum virtio_video_camera_bayer {
@@ -802,6 +802,7 @@ struct virtio_video_camera_desc {
 	__le32 min_focus_distance_mm; /* 0: fixed focus */
 	__le32 iso_min;
 	__le32 iso_max;
+	__u8 reserved0[4];
 	__le64 exposure_min_ns;
 	__le64 exposure_max_ns;
 	/* The ratio Android sees: 0.5 is the ultra wide lens of a zoom camera. */
@@ -825,7 +826,7 @@ struct virtio_video_camera_desc {
 	__le32 color_matrix2_q16[9];
 	__le32 forward_matrix1_q16[9];
 	__le32 forward_matrix2_q16[9];
-	__u8 reserved[16];
+	__u8 reserved[20];
 };
 
 struct virtio_video_camera_query_resp {
@@ -925,8 +926,14 @@ struct virtio_video_camera_stream_create {
  * VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE and the same non-zero timestamp (a
  * cookie of the guest's) on the still streams of one camera are filled from one
  * capture, which starts when a buffer of that cookie arrives without the flag
- * (a JPEG with its Bayer still). A group that is not completed in two seconds
- * completes with VIRTIO_VIDEO_DEQUEUE_FLAG_ERR.
+ * (a JPEG with its Bayer still). A group whose last buffer has not arrived two
+ * seconds after its first completes with VIRTIO_VIDEO_DEQUEUE_FLAG_ERR; once
+ * the capture has started it has ten seconds to deliver, and its buffers
+ * complete with the same flag when it does not. A buffer also completes with
+ * VIRTIO_VIDEO_DEQUEUE_FLAG_ERR when the capture is refused, with
+ * VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLOCKED | _BLACK in a blocked session and
+ * _INTERRUPTED while the capture is interrupted or its session cannot open;
+ * a Bayer still that fails alone leaves the group's JPEG intact.
  */
 #define VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE (1u << 0)
 
@@ -938,7 +945,9 @@ enum virtio_video_camera_dequeue_flag {
 	VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED = 1 << 9,
 	/* The session is blocked (VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED). */
 	VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLOCKED = 1 << 10,
-	/* The capture is restarting after the guest paused. */
+	/* The capture is starting: the frame is a stand-in from the creation of
+	   the stream, from the stream's restart and from the end of an
+	   interruption until the host's capture delivers its first frame. */
 	VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_RESUMING = 1 << 11,
 };
 
@@ -994,7 +1003,7 @@ struct virtio_video_camera_meta {
 	   buffer, for the guest to fill in place. Zero when there is none. */
 	__le32 jpeg_gap_offset;
 	__le32 jpeg_gap_length;
-	__u8 reserved[24];
+	__u8 reserved[28];
 };
 
 /*

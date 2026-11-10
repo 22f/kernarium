@@ -128,7 +128,13 @@ streams, and a metadata node, for its meta streams.
   the guest to fill in place. A Bayer still is 16-bit little-endian samples up to
   the camera's white level. Buffers queued with
   `VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE` and one non-zero timestamp are filled
-  from a single capture (a JPEG with its Bayer still).
+  from a single capture (a JPEG with its Bayer still). The group's assembly has
+  two seconds from its first buffer; a started capture has ten more before its
+  buffers complete with `VIRTIO_VIDEO_DEQUEUE_FLAG_ERR`. A still that cannot be
+  taken completes with the same flag: a blocked session adds
+  `_CAMERA_BLOCKED | _CAMERA_BLACK`, an interrupted capture or a session that
+  cannot open adds `_CAMERA_INTERRUPTED`. A Bayer still that fails alone fails
+  its own buffer only, and the JPEG of the group completes.
 - **Controls.** `VIRTIO_VIDEO_CMD_CAMERA_QUERY_CONTROLS` lists a camera's
   controls in the encoder's descriptor format. The standard ones are V4L2
   camera, flash and white-balance controls (`virtio_video_v4l2_ids.h`, which
@@ -139,6 +145,20 @@ streams, and a metadata node, for its meta streams.
   `VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED` and delivers black frames flagged
   `VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLACK | _BLOCKED` at the stream's rate, and
   never opens a capture session. A live session sends black frames flagged
-  `_INTERRUPTED` or `_RESUMING` while the capture cannot run. The camera events
-  (`VIRTIO_VIDEO_EVENT_CAMERA_*`, stream ID the camera index) report the
-  change.
+  `_INTERRUPTED` while the capture cannot run, and flagged `_RESUMING` from the
+  creation of a stream, from a restart of its capture and from the end of an
+  interruption until the host's capture delivers its first frame, so an
+  application sees a short dark gap and no stall. The camera events
+  (`VIRTIO_VIDEO_EVENT_CAMERA_*`, stream ID the camera index) report each change
+  once: a camera that was reported interrupted or unavailable is reported
+  resumed or available when its interruption ends, including when its session
+  was closed and opened again meanwhile.
+- **Suspend and reset.** A guest suspend that finds buffers held resets the
+  device, as it resets any device of the transport; the driver does not use
+  `virtio_uml_set_no_vq_suspend`. The driver therefore owns continuity: before
+  it suspends it stops the device's streams and keeps its own V4L2 state, and
+  after the resume it creates the streams again, applies the controls again,
+  posts the event buffers and queues the buffers. The device keeps nothing
+  across a reset and has stopped every capture (its camera indicator is off
+  and no host buffer remains), and the first frames after a re-created stream
+  are black and flagged `_RESUMING`.

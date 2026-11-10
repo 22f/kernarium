@@ -82,7 +82,6 @@ struct CameraInfo {
     bool autofocus {};
     bool flash {};
     bool torch {};
-    bool variableAperture {};
     // The host lets a client set these by hand on this camera. A zoom camera
     // sets none of them.
     bool manualExposure {};
