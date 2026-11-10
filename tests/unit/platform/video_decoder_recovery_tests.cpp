@@ -16,7 +16,8 @@
  * The pictures that need the lost session are dropped without an error, the
  * session is made anew from the parameter sets the stream stated, and decoding
  * goes on at the next random access point. A second loss with no picture
- * decoded between is an error, and a seek starts over. */
+ * decoded between is an error, and a seek starts over. An error of the stream
+ * is not a loss and stays until the seek. */
 
 namespace {
 using uml::testing::require;
@@ -123,6 +124,36 @@ void secondLossIsFinal(const Stream& stream)
     requireAscending(frames, "pictures after a seek leave in display order");
 }
 
+/* An error of the stream, which the hardware reports for data it cannot decode,
+ * is not a lost session: it is reported for the picture and for every picture
+ * after it until the client's seek, as it always was. */
+void streamErrorStays(const Stream& stream)
+{
+    std::printf("== %s: error of the stream\n", stream.name);
+    constexpr std::int32_t badData = -12909;   // kVTVideoDecoderBadDataErr
+    const auto fails = [&](VideoDecoder& decoder, std::size_t picture) {
+        try {
+            decoder.submit(stream.units[picture], (picture + 1) * 1000ull);
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    auto decoder = makeVideoDecoder(stream.codec);
+    auto frames = submit(*decoder, stream, 0, lossAt);
+    hook::failOutput(*decoder, badData);
+    require(fails(*decoder, lossAt), "an error of the stream was not reported");
+    require(fails(*decoder, lossAt + 1), "an error of the stream was reported once and the stream went on");
+    require(fails(*decoder, syncAt), "an error of the stream ended at a sync picture without a seek");
+
+    decoder->discard();
+    require(decoder->takeFrames().empty(), "a seek shows nothing decoded before it");
+    frames = submit(*decoder, stream, syncAt, stream.units.size());
+    decoder->drain();
+    append(frames, decoder->takeFrames());
+    require(frames.size() == 20 - syncAt, "the stream did not start over after a seek");
+}
+
 /* A loss followed by a drain, as a client that ends its stream asks for. */
 void lossThenDrain(const Stream& stream)
 {
@@ -187,6 +218,7 @@ int main(int argc, char** argv)
             lossMidStream(stream);
             secondLossIsFinal(stream);
             lossThenDrain(stream);
+            streamErrorStays(stream);
         }
         if (has(VideoCodec::jpeg)) standAlone("jpeg.bin", VideoCodec::jpeg);
         if (has(VideoCodec::vp9)) standAlone("vp9-profile0.bin", VideoCodec::vp9);

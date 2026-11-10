@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -999,28 +1000,41 @@ private:
         auto& self = *static_cast<AppleVideoDecoder*>(context);
         auto& picture = *static_cast<Picture*>(source);
         std::lock_guard lock(self.mutex_);
+#if UML_VIDEO_DECODER_TESTING
+        if (const auto injected = self.injectedOutputStatus_.exchange(noErr); injected != noErr) status = injected;
+#endif
         try {
             if (sessionLoss(status)) {
-                self.callbackLost_ = true;
-                self.callbackError_ = "hardware video output: " + std::to_string(status);
+                // Not over an error of the stream, which stays until discard().
+                if (self.callbackError_.empty() || self.callbackLost_) {
+                    self.callbackLost_ = true;
+                    self.callbackError_ = "hardware video output: " + std::to_string(status);
+                }
                 return;
             }
             checked(status, "hardware video output");
             if (!image) return;
             picture.frames.push_back(copyPicture(image, picture, picture.timestamp));
         } catch (const std::exception& error) {
+            self.callbackLost_ = false;
             self.callbackError_ = error.what();
         } catch (...) {
+            self.callbackLost_ = false;
             self.callbackError_ = "hardware video output failed";
         }
     }
+    /* A session the system took away is reported once and the decoder makes a
+     * new one. Any other error of the callback is the stream's and stays until
+     * discard(), so every picture after it fails too. */
     void checkCallback()
     {
         std::lock_guard lock(mutex_);
         if (callbackError_.empty()) return;
-        const auto message = std::exchange(callbackError_, {});
-        if (std::exchange(callbackLost_, false)) throw SessionLost(message);
-        throw std::runtime_error(message);
+        if (callbackLost_) {
+            callbackLost_ = false;
+            throw SessionLost(std::exchange(callbackError_, {}));
+        }
+        throw std::runtime_error(callbackError_);
     }
 
     VideoCodec codec_;
@@ -1059,8 +1073,10 @@ private:
 #if UML_VIDEO_DECODER_TESTING
 public:
     void loseSessionForTest(unsigned count) { injectedLosses_ = count; }
+    void failOutputForTest(OSStatus status) { injectedOutputStatus_ = status; }
 private:
     unsigned injectedLosses_ {};
+    std::atomic<OSStatus> injectedOutputStatus_ {noErr};
 #endif
 };
 
@@ -1111,6 +1127,11 @@ std::unique_ptr<VideoDecoder> makeVideoDecoder(VideoCodec codec)
 void testing::loseSession(VideoDecoder& decoder, unsigned count)
 {
     static_cast<AppleVideoDecoder&>(decoder).loseSessionForTest(count);
+}
+
+void testing::failOutput(VideoDecoder& decoder, std::int32_t status)
+{
+    static_cast<AppleVideoDecoder&>(decoder).failOutputForTest(status);
 }
 #endif
 

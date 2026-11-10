@@ -13,5 +13,9 @@ namespace uml::platform::testing {
 // on demand. `decoder` must come from `makeVideoDecoder()` of that variant.
 void loseSession(VideoDecoder& decoder, unsigned count);
 
+// The next picture's output reports `status`, an error of the stream and not
+// of the session, as the hardware does for data it cannot decode.
+void failOutput(VideoDecoder& decoder, std::int32_t status);
+
 } // namespace uml::platform::testing
 #endif
