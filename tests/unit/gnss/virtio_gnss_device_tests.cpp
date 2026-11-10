@@ -5,7 +5,6 @@
 #include "nmea_writer.hpp"
 #include "protocol.hpp"
 #include "require.hpp"
-#include "synthetic_source.hpp"
 #include "virtio_gnss_device.hpp"
 #include "watchdog.hpp"
 #include "wire_bytes.hpp"

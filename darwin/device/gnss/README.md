@@ -20,8 +20,12 @@ The guest driver is `drivers/gnss/kernarium.c` in the shared kernel series
 | `nmea_writer.{hpp,cpp}` | fix to sentences: the epoch |
 | `virtio_gnss_device.{hpp,cpp}` | the `VhostUserDevice`: power, the epoch timer, delivery |
 | `endpoint.{hpp,cpp}` | the thread-safe host side: `report`, `clear`, the power observer, the wake hook, and the kqueue the transport polls |
-| `synthetic_source.{hpp,cpp}` | the `--location` test sources: fixed, approximate, a timed route |
 | `in_process_service.{hpp,cpp}` | the service on a thread named `uml-gnss`, and its endpoint |
+
+`UML::GnssSyntheticSource` (`synthetic_source.{hpp,cpp}`) is a separate target
+with the launcher's `--location` test sources: fixed, approximate, and a timed
+route. Only the launcher and its unit test link it, so the App Store runtime
+cannot. `Endpoint` and `makeInProcessService` take any `FixSource`.
 
 ## Wire contract
 

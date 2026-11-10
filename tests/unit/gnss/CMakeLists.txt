@@ -9,7 +9,8 @@ uml_add_unit_test(NAME gnss-nmea-writer
     LABELS "device;gnss")
 
 add_executable(uml_gnss_synthetic_source_tests synthetic_source_tests.cpp)
-target_link_libraries(uml_gnss_synthetic_source_tests PRIVATE UML::GnssDevice)
+target_link_libraries(uml_gnss_synthetic_source_tests
+    PRIVATE UML::GnssSyntheticSource)
 uml_add_unit_test(NAME gnss-synthetic-source
     COMMAND uml_gnss_synthetic_source_tests
     LABELS "device;gnss")
