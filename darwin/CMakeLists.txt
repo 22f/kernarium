@@ -19,6 +19,7 @@ add_subdirectory(device/console)
 add_subdirectory(device/input/virtio)
 add_subdirectory(device/battery)
 add_subdirectory(device/vsock)
+add_subdirectory(device/gnss)
 add_subdirectory(device/video)
 add_subdirectory(device/camera)
 

@@ -27,8 +27,8 @@ TIMEOUT_SECONDS = 30
 # Skips the rootfs lookup; no case boots far enough to open it.
 NO_ROOTFS = "ubd0=/dev/null"
 # The Virtio device identifiers of the explicit transport arguments.
-BATTERY, CONSOLE, AUDIO, VIDEO, VIDEO_ENCODER, GPU, VSOCK = (
-    65535, 3, 25, 31, 30, 16, 19)
+BATTERY, CONSOLE, AUDIO, VIDEO, VIDEO_ENCODER, GPU, VSOCK, GNSS = (
+    65535, 3, 25, 31, 30, 16, 19, 65534)
 CAMERA = 65533
 
 
@@ -45,6 +45,21 @@ CONFIGURE = "Unable to configure host devices: "
 # (arguments, the stderr line the launcher must print)
 REFUSALS: list[tuple[list[str], str]] = [
     (["--battery", explicit(BATTERY)], COLLISION.format("--battery", "Virtio battery")),
+    (["--gnss", explicit(GNSS)], COLLISION.format("--gnss", "Virtio GNSS")),
+    (["--location=fixed:35.0,139.0", explicit(GNSS)],
+     COLLISION.format("--location", "Virtio GNSS")),
+    (["--location="],
+     CONFIGURE + "invalid --location '': expected fixed:, approximate: or "
+     "route:"),
+    (["--location=fixed:91,0"],
+     CONFIGURE + "invalid --location 'fixed:91,0': expected "
+     "fixed:LAT,LON[,ALT[,ACC]]"),
+    (["--location=approximate:1,2,3"],
+     CONFIGURE + "invalid --location 'approximate:1,2,3': expected "
+     "approximate:LAT,LON"),
+    (["--location=route:{tmp}/nonexistent/route.csv"],
+     CONFIGURE + "invalid --location 'route:{tmp}/nonexistent/route.csv': "
+     "cannot read the route file"),
     (["--video", explicit(VIDEO)], COLLISION.format("--video", "Virtio video")),
     (["--video-encoder", explicit(VIDEO_ENCODER)],
      COLLISION.format("--video-encoder", "Virtio video encoder")),
@@ -183,6 +198,9 @@ ACCEPTED: list[list[str]] = [
     ["--audio", "--audio-output=host"],
     ["--audio-input=silent"],
     ["--vsock-forward=127.0.0.1:0-5555", "--vsock-forward=6000-7"],
+    ["--gnss"],
+    ["--location=fixed:35.6895,139.6917,40,8", "--vsock-forward=0-5555"],
+    ["--location=approximate:48.85,2.35"],
 ]
 
 
@@ -217,6 +235,7 @@ def check(emulator: pathlib.Path) -> None:
         for arguments, message in REFUSALS:
             arguments = [argument.format(tmp=root) for argument in arguments]
             result = run(emulator, scratch, arguments)
+            message = message.format(tmp=root)
             lines = result.stderr.splitlines()
             if result.returncode != 1 or message not in lines:
                 raise CaseFailure(

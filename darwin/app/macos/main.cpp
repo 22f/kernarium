@@ -13,6 +13,9 @@
 #include "vsock/protocol.hpp"
 #include "console/in_process_service.hpp"
 #include "console/protocol.hpp"
+#include "gnss/in_process_service.hpp"
+#include "gnss/protocol.hpp"
+#include "gnss/synthetic_source.hpp"
 #include "gpu/in_process_service.hpp"
 #include "gpu/mesa_shader_cache.hpp"
 #include "gpu/metal_shader_cache.hpp"
@@ -356,6 +359,11 @@ struct PreparedArguments {
 	uml::audio::OutputMode audio_output {uml::audio::OutputMode::host};
 	bool audio_input_host {};
 	bool battery {};
+	/* --gnss adds the Virtio GNSS receiver, with no position; --location=
+	 * adds it with a synthetic one (gnss/synthetic_source.hpp). It is the
+	 * last device, after vsock. */
+	bool gnss {};
+	std::string location;
 	bool video {};
 	bool video_encoder {};
 	CameraSource camera {CameraSource::none};
@@ -409,14 +417,15 @@ struct PreparedArguments {
 		const PreparedArguments &other) const
 	{
 		return std::tie(gpu, gpu_budget, audio, audio_output,
-				audio_input_host, battery, video, video_encoder,
-				camera, camera_profile, camera_calibration_directory,
-				console_socket, serial_socket, net_forwards,
-				vsock_forwards) ==
+				audio_input_host, battery, gnss, location, video,
+				video_encoder, camera, camera_profile,
+				camera_calibration_directory, console_socket,
+				serial_socket, net_forwards, vsock_forwards) ==
 			std::tie(other.gpu, other.gpu_budget, other.audio,
 				 other.audio_output, other.audio_input_host,
-				 other.battery, other.video, other.video_encoder,
-				 other.camera, other.camera_profile,
+				 other.battery, other.gnss, other.location,
+				 other.video, other.video_encoder, other.camera,
+				 other.camera_profile,
 				 other.camera_calibration_directory,
 				 other.console_socket, other.serial_socket,
 				 other.net_forwards, other.vsock_forwards);
@@ -549,6 +558,16 @@ PreparedArguments prepare_host_arguments(
 			prepared.audio = true;
 		} else if (argument == "--battery") {
 			prepared.battery = true;
+		} else if (argument == "--gnss") {
+			prepared.gnss = true;
+		} else if (valued("--location=")) {
+			std::string error;
+			if (uml::gnss::makeSyntheticSource(value, error) == nullptr)
+				throw std::invalid_argument(
+					"invalid --location '" + std::string(value) +
+					"': " + error);
+			prepared.location = std::string(value);
+			prepared.gnss = true;
 		} else if (argument == "--video") {
 			prepared.video = true;
 		} else if (argument == "--video-encoder") {
@@ -790,6 +809,65 @@ bool informational_option(std::string_view argument)
 
 using VirtioService = std::unique_ptr<uml::gpu::InProcessVhostUserService>;
 
+/* Wakes a guest that suspended itself when its GNSS receiver has output that
+ * nobody takes, as a phone's receiver wakes its processor. The wake can wait
+ * on the guest's console, so it runs on a thread of its own, and requests that
+ * come meanwhile are one. */
+class GuestWaker final {
+public:
+	explicit GuestWaker(uml_emulator *emulator)
+		: emulator_(emulator), thread_([this] { run(); })
+	{
+	}
+
+	GuestWaker(const GuestWaker &) = delete;
+	GuestWaker &operator=(const GuestWaker &) = delete;
+
+	~GuestWaker()
+	{
+		{
+			std::lock_guard lock(mutex_);
+			stopping_ = true;
+		}
+		changed_.notify_all();
+		thread_.join();
+	}
+
+	/* May be called from any thread. */
+	void request() noexcept
+	{
+		{
+			std::lock_guard lock(mutex_);
+			requested_ = true;
+		}
+		changed_.notify_all();
+	}
+
+private:
+	void run()
+	{
+		(void)::pthread_setname_np("uml-wake");
+		std::unique_lock lock(mutex_);
+		for (;;) {
+			changed_.wait(lock, [this] { return requested_ || stopping_; });
+			if (stopping_)
+				return;
+			requested_ = false;
+			lock.unlock();
+			uml_emulator_wake(emulator_);
+			lock.lock();
+		}
+	}
+
+	uml_emulator *const emulator_;
+	std::mutex mutex_;
+	std::condition_variable changed_;
+	bool requested_ {};
+	bool stopping_ {};
+	/* Last, so everything above exists when the thread starts. */
+	std::thread thread_;
+};
+
 /* The thread behind --stats: once an interval it reads the running guest's
  * figures through the public calls, as the iOS applications do, and prints
  * the line statistics_report.hpp builds. It exists only when the option does,
@@ -923,7 +1001,6 @@ struct BootServices final {
 	VirtioService battery;
 	VirtioService video;
 	VirtioService video_encoder;
-	VirtioService camera;
 	VirtioService audio;
 	/* The guest records silence unless the user asked for the host's
 	 * microphone; the switch ends with the boot's audio service. */
@@ -933,10 +1010,18 @@ struct BootServices final {
 	 * through it; the listeners stop first. */
 	VirtioService vsock;
 	std::unique_ptr<uml::vsock::Forwarder> vsock_forwarder;
+	/* The GNSS receiver, after vsock. */
+	VirtioService gnss;
+	/* The camera, after the GNSS receiver. */
+	VirtioService camera;
 
 	void stop() noexcept
 	{
 		vsock_forwarder.reset();
+		if (camera)
+			camera->stop();
+		if (gnss)
+			gnss->stop();
 		if (vsock)
 			vsock->stop();
 		if (audio)
@@ -947,8 +1032,6 @@ struct BootServices final {
 			video->stop();
 		if (video_encoder)
 			video_encoder->stop();
-		if (camera)
-			camera->stop();
 		if (console)
 			console->stop();
 	}
@@ -1086,6 +1169,8 @@ public:
 			stats_ = std::make_unique<StatsSampler>(
 				std::chrono::milliseconds(prepared_.stats_interval_ms),
 				emulator_.get(), gpu_service_.get());
+		if (prepared_.gnss && !information_only_)
+			waker_ = std::make_unique<GuestWaker>(emulator_.get());
 		return true;
 	}
 
@@ -1340,13 +1425,53 @@ private:
 			    named_serial ? "Virtio serial" : "Virtio console",
 			    "Virtio console"))
 			return false;
-		/* Last, so that no other device's index moves. */
+		/* After the devices that existed before it, so that no other
+		 * device's index moves. */
 		if (!prepared_.vsock_forwards.empty() && !information_only_ &&
 		    !start_vsock(kernel))
 			return false;
+		/* After the vsock device, so that no other device's index moves. */
+		if (prepared_.gnss && !information_only_ && !start_gnss(kernel))
+			return false;
+		/* The last device. */
 		if (prepared_.camera != CameraSource::none && !information_only_ &&
 		    !start_camera(kernel))
 			return false;
+		return true;
+	}
+
+	/* Starts the Virtio GNSS receiver, with the synthetic position the launch
+	 * asked for, and reports its power on stderr, which the guest's tests read
+	 * to see what the host was asked. */
+	[[nodiscard]] bool start_gnss(std::vector<std::string> &kernel)
+	{
+		std::shared_ptr<uml::gnss::Endpoint> endpoint;
+		if (!start_virtio_device(
+			    kernel, services_.gnss, uml::gnss::protocol::deviceId,
+			    [&] {
+				    std::unique_ptr<uml::gnss::FixSource> source;
+				    if (!prepared_.location.empty()) {
+					    std::string error;
+					    source = uml::gnss::makeSyntheticSource(
+						    prepared_.location, error);
+					    if (source == nullptr)
+						    throw std::runtime_error(
+							    "invalid --location: " + error);
+				    }
+				    auto started =
+					    uml::gnss::makeInProcessService(std::move(source));
+				    endpoint = std::move(started.endpoint);
+				    return std::move(started.service);
+			    },
+			    prepared_.location.empty() ? "--gnss" : "--location",
+			    "Virtio GNSS"))
+			return false;
+		endpoint->setPowerObserver([](bool powered) {
+			std::fprintf(stderr, "GNSS receiver: %s\n",
+				     powered ? "on" : "off");
+		});
+		if (waker_)
+			endpoint->setWakeHook([waker = waker_.get()] { waker->request(); });
 		return true;
 	}
 
@@ -1480,6 +1605,9 @@ private:
 	std::unique_ptr<uml::gpu::InProcessGpuService> gpu_service_;
 	/* After the handle and the GPU service it reads, so it ends before them. */
 	std::unique_ptr<StatsSampler> stats_;
+	/* After the handle it wakes and before the services that ask it to, so it
+	 * ends between them. */
+	std::unique_ptr<GuestWaker> waker_;
 	BootServices services_;
 	/* What the camera has learned about the host's lenses; it outlives the
 	 * boots, so a restarted guest keeps it. */

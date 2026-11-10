@@ -409,6 +409,18 @@ uml_add_guest_integration_test(
     TIMEOUT 600
     CPUS 2)
 
+# The Virtio GNSS receiver: /dev/gnss0 reads whole NMEA epochs of the launcher's
+# synthetic position about once a second, the host sees the power go on at the
+# first open and off at the last close, a reopen starts fresh, and a suspend the
+# guest enters by itself holds with the receiver closed and is ended by the host
+# with it open.
+uml_add_guest_integration_test(
+    NAME guest-gnss-receiver
+    SCRIPT gnss/run_guest_gnss_receiver.py
+    LABELS guest;gnss;kernel
+    TIMEOUT 600
+    CPUS 2)
+
 add_subdirectory(aarch32)
 add_subdirectory(android)
 add_subdirectory(exclusive)
