@@ -25,6 +25,11 @@ LAUNCH_KNOB = (
     "#include <stdlib.h>\n"
     'const char *fixture(void) { return getenv("ANDARIUM_START"); }\n'
 )
+# The thermal state a harness launch states in place of iOS's.
+THERMAL_KNOB = (
+    "#include <stdlib.h>\n"
+    'const char *fixture(void) { return getenv("ANDARIUM_THERMAL_STATE"); }\n'
+)
 # The harness's console lines (ConsoleReport), which the configuration
 # compiles out: what the check reports for each, and a full line.
 REPORT_LINES = (
@@ -59,6 +64,7 @@ DEBUG_SUPPORT = (
     ("automation", 'const char *fixture(void) { return "removed the boot payload"; }\n'),
     ("test tooling", "int _rfbGetScreen(void) { return 1; }\n"),
     ("launch harness", "int _s8Andarium8AppEntryV13applyDeferred2toyyF(void) { return 1; }\n"),
+    ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
     # The arm64 JIT: its owner of executable memory, its engine and its
     # entries, the runtime's and the loader's, the options that select it, and
     # the instruction that asks a debugger for JIT memory.
@@ -259,6 +265,7 @@ def main() -> int:
         clean = build(root, "clean", CLEAN)
         knob = build(root, "knob", KNOB)
         launch = build(root, "launch", LAUNCH_KNOB)
+        thermal = build(root, "thermal", THERMAL_KNOB)
         reports = {
             index: build(root, f"report{index}", f'const char *fixture(void) {{ return "{line}"; }}\n')
             for index, (_name, line) in enumerate(REPORT_LINES)
@@ -296,6 +303,8 @@ def main() -> int:
               passes=False, expect="KERNARIUM_HOST_FORWARD")
         check(make_app(root, "launch-knob", launch, app_info()),
               passes=False, expect="ANDARIUM_START")
+        check(make_app(root, "thermal-knob", thermal, app_info()),
+              passes=False, expect="ANDARIUM_THERMAL_STATE")
         knob_app = make_app(root, "framework-knob", clean, app_info(), framework=knob)
         check(knob_app, passes=False, expect="Runtime.framework/Runtime")
 

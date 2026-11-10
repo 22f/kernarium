@@ -47,6 +47,26 @@ struct LaunchEnvironmentTests {
         #expect(isolated != ordinary)
     }
 
+    @Test func theThermalStateIsStatedByNameAndAnythingElseIsNoSetting() {
+        #expect(ThermalOverride.environmentName == "ANDARIUM_THERMAL_STATE")
+        for (word, state) in [
+            ("nominal", HostThermalState.nominal), ("fair", .fair), ("serious", .serious), ("critical", .critical),
+            ("Serious", .serious),
+        ] {
+            #expect(ThermalOverride.stated(in: ["ANDARIUM_THERMAL_STATE": word]) == state, "\(word)")
+        }
+        for word in ["", "hot", "3", "emergency", "serious "] {
+            #expect(ThermalOverride.stated(in: ["ANDARIUM_THERMAL_STATE": word]) == nil, "\(word)")
+        }
+        #expect(ThermalOverride.stated(in: [:]) == nil)
+    }
+
+    @Test func aLaunchThatStatesTheThermalStateIsAHarnesss() {
+        let none = LaunchOverrides(environment: [:], processorCount: 4)
+        #expect(AppEntry.isPersonsLaunch(overrides: none, environment: [:]))
+        #expect(!AppEntry.isPersonsLaunch(overrides: none, environment: ["ANDARIUM_THERMAL_STATE": "serious"]))
+    }
+
     @Test func kernariumsBootModeAsksForARecoveryStartOnly() {
         #expect(LaunchOverrides(environment: ["KERNARIUM_ANDROID_BOOT_MODE": "recovery"], processorCount: 4).start == .recovery)
         #expect(LaunchOverrides(environment: ["KERNARIUM_ANDROID_BOOT_MODE": "normal"], processorCount: 4).start == nil)

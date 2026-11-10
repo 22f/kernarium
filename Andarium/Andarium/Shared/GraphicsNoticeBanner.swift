@@ -39,19 +39,26 @@ struct GraphicsNoticeBanner: View {
     }
 }
 
-/// The banner when the model has a notice to show, below the statistics
-/// capsule when that is up.
-struct GraphicsNoticeOverlay: View {
+/// The banners over the top of the session when the model has a notice to
+/// show: Android's graphics memory and the lowered frame rate, one below the
+/// other, below the statistics capsule when that is up.
+struct SessionNoticesOverlay: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        ZStack {
+        let showing = model.graphicsNotice.isShowing || model.thermalNotice.isShowing
+        VStack(spacing: StatsPlacement.noticeGap) {
             if model.graphicsNotice.isShowing {
                 GraphicsNoticeBanner { model.dismissGraphicsNotice() }
-                    .padding(.top, StatsPlacement.noticeTop(statsShowing: model.session.showStats))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            if model.thermalNotice.isShowing {
+                ThermalNoticeBanner { model.dismissThermalNotice() }
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .padding(.top, showing ? StatsPlacement.noticeTop(statsShowing: model.session.showStats) : 0)
         .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)
+        .animation(.easeInOut(duration: 0.2), value: model.thermalNotice.isShowing)
     }
 }
