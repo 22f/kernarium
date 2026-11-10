@@ -276,28 +276,18 @@ requires reopening Andarium.
   hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
 - **Location.** Location is a per-guest switch under Capabilities on Home,
-  off for a new guest and for one stored before. Turning it on asks iOS for
-  when-in-use access (`requestWhenInUseAuthorization`) the first time and
-  never at launch, at boot or when Android asks; Andarium has no Always
-  access, background mode or background activity session. `HostLocation`
-  reads Core Location (best accuracy, no distance filter) only while the
-  switch is on, iOS allows it, Andarium is in front and not holding the guest
-  still, a normal run goes on and the guest has powered its GNSS receiver,
-  which the runtime reports as a level (`LocationSession` decides; a late or
-  repeated event changes nothing, and a run's end or a restart forgets the
-  power). Each fix goes to the runtime's receiver
-  (`kernarium_runtime_loader_report_location`; the stream is the
-  [GNSS device](../darwin/device/gnss/README.md)), tagged approximate when iOS
-  had reduced the accuracy as it delivered it and with every invalid field
-  left out. A change of the authorization or of Precise Location drops the held
-  fix before the next one, and so does the switch going off, which applies at
-  once. The guest's HAL and Android's own permissions decide what an app sees
-  of an approximate fix. The row is off and dimmed when iOS refuses, the
-  device restricts it or Location Services are off, and says Approximate, with
-  an explanation and Settings, when Precise Location is off; a switch whose
-  once-only access has ended goes off at the next look. The Mac (Designed for
-  iPad) and the Simulator run the same code; the Simulator's location comes
-  from `simctl location`. No test reads a real location.
+  off for a new guest and for one stored before. iOS is asked, for
+  when-in-use access, only when the person turns it on; Andarium has no
+  background or Always access. The position is read only while the switch is
+  on, iOS allows it, Andarium is in front, a normal run goes on and the
+  guest's GNSS receiver is powered, and goes to the
+  [GNSS device](../darwin/device/gnss/README.md) through the runtime. A change
+  of access or of Precise Location drops the held position first. An
+  approximate position is passed as approximate; the guest owns what apps see
+  of it. The row is dimmed and off when iOS refuses, the device restricts
+  location or Location Services are off, and says Approximate, with an
+  explanation and Settings, when Precise Location is off. No test reads a real
+  location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display. A touch the system takes over reaches
   Android as a cancelled touch, not a lift, so no tap follows. Only the side
