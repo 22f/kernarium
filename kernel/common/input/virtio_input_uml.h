@@ -26,7 +26,8 @@
 /*
  * The notice codes. A notice is sent in answer to every configuration change
  * that leaves the driver with a registered input device, including the change
- * that finds it registered already, so that every plug is answered.
+ * that finds it registered already, so that every plug is answered, and once
+ * at probe when the probe registers an input device.
  */
 /* value 1: the input device is registered; value 0: it is not. */
 #define VIRTIO_INPUT_UML_NOTICE_REGISTRATION 0x00

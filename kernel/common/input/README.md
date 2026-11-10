@@ -1,10 +1,10 @@
 # Private Virtio-input registration notice
 
 `virtio_input_uml.h` owns the one private extension of the Virtio-input device
-that the host's hardware keyboard, mouse and
-pointer devices (`darwin/device/input`) use. It is independent of
-the public API and the host/kernel bridge ABI, and the wire is the same for
-every maintained kernel slice.
+that the host's hardware keyboard, mouse and pointer devices
+([`darwin/device/input`](../../../darwin/device/input/README.md)) use. It is
+independent of the public API and the host/kernel bridge ABI, and the wire is
+the same for every maintained kernel slice.
 
 These devices are plugged and unplugged by the host while the guest runs. The
 host raises a Virtio configuration change and the driver reads the device's
@@ -15,7 +15,8 @@ the input device it sends one event on the status queue,
 and value 1 (registered) or 0, so that the host can hold the first events after
 a plug until the input device exists. Every configuration change that leaves
 the driver with a registered input device is answered, including the one that
-finds it registered already.
+finds it registered already, and a probe that registers one sends the notice
+too.
 
 A kernel without the driver change reads an unplugged device as an input device
 with no events, which Android drops, and never answers a plug; the host drops

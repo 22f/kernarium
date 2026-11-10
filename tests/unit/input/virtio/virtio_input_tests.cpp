@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "hid_keyboard.hpp"
 #include "require.hpp"
 #include "touchscreen.hpp"
 #include "virtio_input_device.hpp"
@@ -8,8 +9,10 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <poll.h>
+#include <string>
 #include <vector>
 
 namespace {
@@ -734,6 +737,552 @@ void eventQueueDefersAndThenReturnsOneWireEvent()
     require(returned.value == 123);
 }
 
+
+// ---- The hardware keyboard, mouse and pointer: what each advertises, and
+// ---- the plugging of the device.
+
+using Attachment = EventQueue::Attachment;
+using StatusEvent = uml::input::virtio::StatusEvent;
+
+std::shared_ptr<EventQueue> pluggableQueue()
+{
+    return std::make_shared<EventQueue>(Attachment::pluggable);
+}
+
+// Whether the bitmap holds exactly the bits listed, out of every bit the
+// configuration space can state.
+bool holdsExactly(
+    const protocol::InputConfig& config,
+    std::initializer_list<std::uint16_t> bits)
+{
+    for (std::uint16_t index = 0; index < 128U * 8U; ++index) {
+        bool expected = false;
+        for (const auto wanted : bits)
+            expected |= wanted == index;
+        if (bit(config, index) != expected)
+            return false;
+    }
+    return true;
+}
+
+std::string text(const protocol::InputConfig& config)
+{
+    return {config.value.string.data(), config.size};
+}
+
+void expectIdentity(
+    DeviceKind kind,
+    const char* name,
+    const char* serial,
+    std::uint16_t product)
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(kind, events);
+    // The identity does not depend on the plug.
+    for (const bool plugged : {false, true, false}) {
+        (void)events->setConnected(plugged);
+        select(device, protocol::configIdName, 0);
+        require(text(configuration(device)) == name);
+        select(device, protocol::configIdSerial, 0);
+        require(text(configuration(device)) == serial);
+        select(device, protocol::configIdDeviceIds, 0);
+        const auto ids = configuration(device);
+        require(ids.size == sizeof(protocol::InputDeviceIds));
+        require(ids.value.ids.bus == protocol::busVirtual);
+        require(ids.value.ids.vendor == 0x1af4);
+        require(ids.value.ids.product == product);
+        require(ids.value.ids.version == 1);
+    }
+    require(device.queueCount() == 2);
+    require(device.features() == 0);
+}
+
+void everyKindKeepsItsPermanentIdentity()
+{
+    expectIdentity(
+        DeviceKind::hardwareKeyboard, "Kernarium Hardware Keyboard",
+        "kernarium-hardware-keyboard-0", 3);
+    expectIdentity(
+        DeviceKind::mouse, "Kernarium Mouse", "kernarium-mouse-0", 4);
+    expectIdentity(
+        DeviceKind::pointer, "Kernarium Pointer", "kernarium-pointer-0", 5);
+    // The two devices that were there first keep theirs.
+    expectIdentity(
+        DeviceKind::touchscreen, "Kernarium Touchscreen",
+        "kernarium-touch-0", 1);
+    expectIdentity(
+        DeviceKind::keyboard, "Kernarium Keyboard", "kernarium-keyboard-0", 2);
+}
+
+void hardwareKeyboardAdvertisesExactlyTheTablesKeys()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    (void)events->setConnected(true);
+    select(device, protocol::configEventBits, protocol::eventKey);
+    const auto keys = configuration(device);
+    const auto& image = uml::input::virtio::hid::keyImage();
+    for (std::uint16_t code = 0; code < 128U * 8U; ++code) {
+        const bool expected = code < 256U &&
+            (image[code / 8U] & (1U << (code % 8U))) != 0;
+        require(bit(keys, code) == expected);
+        require(uml::input::virtio::hid::producesKey(code) == expected);
+    }
+    // The ends of the image: Escape, and F24 (193 and 194 are F23 and F24).
+    require(bit(keys, 1) && bit(keys, 194) && !bit(keys, 195));
+    require(keys.size == 194 / 8U + 1U);
+    // KEY_UNKNOWN and KEY_RESERVED are not keys of the keyboard.
+    require(!bit(keys, 0) && !bit(keys, 240));
+
+    select(device, protocol::configEventBits, protocol::eventLed);
+    require(holdsExactly(configuration(device), {0, 1, 2}));
+    // No auto-repeat, no relative or absolute axes, no properties.
+    for (const std::uint8_t type : {0x02, 0x03, 0x14, 0x04, 0x05}) {
+        select(device, protocol::configEventBits, type);
+        require(configuration(device).size == 0);
+    }
+    select(device, protocol::configPropertyBits, 0);
+    require(configuration(device).size == 0);
+}
+
+void mouseAdvertisesRelativeAxesWheelsButtonsAndTheCaptureLed()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::mouse, events);
+    (void)events->setConnected(true);
+    select(device, protocol::configEventBits, 0x02); // EV_REL
+    // X, Y, HWHEEL, WHEEL, WHEEL_HI_RES, HWHEEL_HI_RES.
+    require(holdsExactly(configuration(device), {0, 1, 6, 8, 0x0b, 0x0c}));
+    select(device, protocol::configEventBits, protocol::eventKey);
+    // BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA.
+    require(holdsExactly(
+        configuration(device), {0x110, 0x111, 0x112, 0x113, 0x114}));
+    select(device, protocol::configEventBits, protocol::eventLed);
+    require(holdsExactly(configuration(device), {8})); // LED_MISC
+    for (const std::uint8_t type : {0x03, 0x14, 0x04}) {
+        select(device, protocol::configEventBits, type);
+        require(configuration(device).size == 0);
+    }
+    select(device, protocol::configPropertyBits, 0);
+    require(configuration(device).size == 0);
+    select(device, protocol::configAbsoluteInfo, protocol::absoluteX);
+    require(configuration(device).size == 0);
+}
+
+void pointerAdvertisesAnAbsoluteMouseAndNoInputProperty()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::pointer, events);
+    (void)events->setConnected(true);
+    select(device, protocol::configEventBits, protocol::eventKey);
+    // BTN_TOOL_MOUSE, the five buttons, BTN_TOUCH.
+    require(holdsExactly(
+        configuration(device),
+        {0x146, 0x14a, 0x110, 0x111, 0x112, 0x113, 0x114}));
+    select(device, protocol::configEventBits, protocol::eventAbsolute);
+    // MT_SLOT, MT_POSITION_X, MT_POSITION_Y, MT_TRACKING_ID: no tool type,
+    // which an absolute mouse in the slot protocol does not take.
+    require(holdsExactly(configuration(device), {0x2f, 0x35, 0x36, 0x39}));
+    for (const std::uint8_t type : {0x02, 0x11, 0x14, 0x04}) {
+        select(device, protocol::configEventBits, type);
+        require(configuration(device).size == 0);
+    }
+    select(device, protocol::configPropertyBits, 0);
+    require(configuration(device).size == 0); // not direct: it is a mouse
+
+    for (const auto axis : {protocol::absoluteMtPositionX,
+                            protocol::absoluteMtPositionY}) {
+        select(device, protocol::configAbsoluteInfo,
+               static_cast<std::uint8_t>(axis));
+        const auto info = configuration(device);
+        require(info.size == sizeof(protocol::InputAbsoluteInfo));
+        require(info.value.absolute.minimum == 0);
+        require(info.value.absolute.maximum == 32767);
+    }
+    // Android reads the slot protocol only when the slot axis has a maximum
+    // above zero.
+    select(device, protocol::configAbsoluteInfo, protocol::absoluteMtSlot);
+    require(configuration(device).value.absolute.maximum == 9);
+    select(device, protocol::configAbsoluteInfo, protocol::absoluteMtTrackingId);
+    require(configuration(device).value.absolute.maximum == 65535);
+    select(device, protocol::configAbsoluteInfo, protocol::absoluteMtToolType);
+    require(configuration(device).size == 0);
+    select(device, protocol::configAbsoluteInfo, protocol::absoluteX);
+    require(configuration(device).size == 0);
+}
+
+void anUnpluggedDeviceReportsNoEventAtAll()
+{
+    for (const auto kind : {DeviceKind::hardwareKeyboard, DeviceKind::mouse,
+                            DeviceKind::pointer}) {
+        auto events = pluggableQueue();
+        VirtioInputDevice device(kind, events);
+        require(!events->connected());
+        for (std::uint16_t type = 0; type < 0x20; ++type) {
+            select(device, protocol::configEventBits,
+                   static_cast<std::uint8_t>(type));
+            require(configuration(device).size == 0);
+        }
+        select(device, protocol::configPropertyBits, 0);
+        require(configuration(device).size == 0);
+        for (const std::uint16_t axis :
+             {protocol::absoluteX, protocol::absoluteY,
+              protocol::absoluteMtSlot, protocol::absoluteMtPositionX,
+              protocol::absoluteMtPositionY, protocol::absoluteMtTrackingId}) {
+            select(device, protocol::configAbsoluteInfo,
+                   static_cast<std::uint8_t>(axis));
+            require(configuration(device).size == 0);
+        }
+        // Plugged, it has events; unplugged again, it has none.
+        (void)events->setConnected(true);
+        select(device, protocol::configEventBits, protocol::eventKey);
+        require(configuration(device).size != 0);
+        (void)events->setConnected(false);
+        require(configuration(device).size == 0);
+    }
+}
+
+void theSideKeysAndTheTouchscreenAreAlwaysPluggedIn()
+{
+    for (const auto kind : {DeviceKind::touchscreen, DeviceKind::keyboard}) {
+        auto events = std::make_shared<EventQueue>();
+        VirtioInputDevice device(kind, events);
+        require(events->connected() && events->registered());
+        select(device, protocol::configEventBits, protocol::eventKey);
+        const auto before = configuration(device);
+        require(before.size != 0);
+        require(!events->setConnected(false));
+        require(!device.configChangePending());
+        require(events->connected());
+        select(device, protocol::configEventBits, protocol::eventKey);
+        const auto after = configuration(device);
+        require(after.size == before.size);
+        require(std::memcmp(
+            &after.value, &before.value, before.size) == 0);
+        // And it needs no registration for its events to go.
+        const protocol::InputEvent sent {protocol::eventKey, 116, 1};
+        events->enqueue(std::span {&sent, 1U});
+        protocol::InputEvent taken {};
+        require(events->take(taken) && taken.code == 116);
+    }
+}
+
+bool readable(const VirtioInputDevice& device)
+{
+    pollfd readiness {
+        .fd = device.eventDescriptor(),
+        .events = POLLIN,
+        .revents = 0,
+    };
+    return ::poll(&readiness, 1, 0) == 1;
+}
+
+void aPlugAndAnUnplugEachRaiseOneConfigurationChange()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    require(!device.configChangePending());
+    require(!device.claimConfigChange());
+
+    require(events->setConnected(true));
+    require(device.configChangePending());
+    // The transport wakes on the device's descriptor and signals the change.
+    require(readable(device));
+    device.drainEventSource();
+    require(!readable(device));
+    require(device.claimConfigChange());
+    device.clearConfigChange();
+    require(!device.configChangePending());
+
+    // Plugging a plugged device changes nothing.
+    require(!events->setConnected(true));
+    require(!device.configChangePending() && !readable(device));
+
+    require(events->setConnected(false));
+    require(device.configChangePending() && readable(device));
+    device.drainEventSource();
+    require(device.claimConfigChange());
+    device.clearConfigChange();
+    require(!device.configChangePending());
+    require(!events->setConnected(false));
+    require(!device.configChangePending());
+}
+
+void aChangeThatComesWhileOneIsBeingSentIsNotLost()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::mouse, events);
+    require(events->setConnected(true));
+    require(device.claimConfigChange());
+    // The guest is told, and before it answers the device is unplugged.
+    require(events->setConnected(false));
+    device.clearConfigChange();
+    require(device.configChangePending());
+    require(device.claimConfigChange());
+    device.clearConfigChange();
+    require(!device.configChangePending());
+
+    // A claim that is not acknowledged leaves the change pending, for the
+    // transport to send again.
+    require(events->setConnected(true));
+    require(device.claimConfigChange());
+    require(device.configChangePending());
+}
+
+std::vector<Event> everythingTheGuestReceives(VirtioInputDevice& device)
+{
+    std::vector<Event> received;
+    for (;;) {
+        const auto result =
+            device.processQueue(protocol::eventQueue, 5, {}, 8);
+        if (result.action != uml::virtio::VhostUserQueueAction::complete)
+            return received;
+        received.push_back(
+            uml::testing::loadExact<protocol::InputEvent>(result.response));
+    }
+}
+
+void status(VirtioInputDevice& device, Event sent)
+{
+    const auto result = device.processQueue(
+        protocol::statusQueue, 7, uml::virtio::toBytes(sent), 0);
+    require(result.action == uml::virtio::VhostUserQueueAction::complete);
+    require(result.response.empty());
+}
+
+void guestRegisters(VirtioInputDevice& device, bool registered = true)
+{
+    status(device, event(
+        protocol::statusNotice, protocol::noticeRegistration,
+        registered ? 1 : 0));
+}
+
+void theStatusQueueHandsLedWritesAndRegistrationsToTheSink()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    std::vector<StatusEvent> seen;
+    events->setStatusSink([&](const StatusEvent& one) { seen.push_back(one); });
+
+    status(device, event(protocol::eventLed, protocol::ledCapsLock, 1));
+    status(device, event(protocol::eventLed, protocol::ledNumLock, 0));
+    status(device, event(protocol::eventLed, protocol::ledMisc, 1));
+    require(seen.size() == 3);
+    require(seen[0].kind == StatusEvent::Kind::led && seen[0].led == 1 &&
+        seen[0].on);
+    require(seen[1].kind == StatusEvent::Kind::led && seen[1].led == 0 &&
+        !seen[1].on);
+    require(seen[2].led == protocol::ledMisc && seen[2].on);
+
+    // A sound is neither an LED nor a notice, and so is a notice of another
+    // code; neither reaches the sink.
+    status(device, event(0x12, 2, 1));
+    status(device, event(protocol::statusNotice, 1, 1));
+    require(seen.size() == 3);
+
+    // A registration the host did not ask for, while unplugged, is ignored.
+    guestRegisters(device);
+    require(seen.size() == 3 && !events->registered());
+    (void)events->setConnected(true);
+    guestRegisters(device);
+    require(seen.size() == 4);
+    require(seen[3].kind == StatusEvent::Kind::registration && seen[3].on &&
+        !seen[3].lostEvents);
+    require(events->registered());
+    guestRegisters(device, false);
+    require(seen.size() == 5 && !seen[4].on && !events->registered());
+
+    // A buffer that is not one event is refused, as before.
+    bool refused = false;
+    try {
+        (void)device.processQueue(protocol::statusQueue, 8, {}, 0);
+    } catch (const std::exception&) {
+        refused = true;
+    }
+    require(refused);
+
+    // Cleared, the sink hears nothing.
+    events->setStatusSink({});
+    status(device, event(protocol::eventLed, protocol::ledCapsLock, 1));
+    require(seen.size() == 5);
+}
+
+Event key(std::uint16_t code, int value)
+{
+    return event(protocol::eventKey, code, value);
+}
+
+void aPluggedDeviceHoldsItsFirstEventsUntilTheGuestRegisters()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    const std::array first {key(30, 1), endOfReport()};
+    const std::array second {key(30, 0), endOfReport()};
+
+    // Unplugged, input is dropped, and plugging does not bring it back.
+    events->enqueue(first);
+    require(everythingTheGuestReceives(device).empty());
+    require(events->setConnected(true));
+    require(everythingTheGuestReceives(device).empty());
+
+    // Plugged and not yet registered, it waits.
+    events->enqueue(first);
+    events->enqueue(second);
+    require(everythingTheGuestReceives(device).empty());
+
+    guestRegisters(device);
+    const auto received = everythingTheGuestReceives(device);
+    require(received.size() == 4);
+    require(equal(received[0], first[0]) && equal(received[1], first[1]));
+    require(equal(received[2], second[0]) && equal(received[3], second[1]));
+
+    // From then on events go straight through.
+    events->enqueue(first);
+    const auto direct = everythingTheGuestReceives(device);
+    require(direct.size() == 2 && equal(direct[0], first[0]));
+}
+
+void aRegistrationWakesTheTransportToDeliverWhatWasHeld()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    require(events->setConnected(true));
+    device.drainEventSource();
+    const std::array down {key(30, 1), endOfReport()};
+    events->enqueue(down);
+    require(!readable(device));
+    guestRegisters(device);
+    require(readable(device));
+    device.drainEventSource();
+    require(everythingTheGuestReceives(device).size() == 2);
+}
+
+void aGuestThatNeverRegistersGetsNothingAndCostsABoundedBuffer()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::pointer, events);
+    std::vector<StatusEvent> seen;
+    events->setStatusSink([&](const StatusEvent& one) { seen.push_back(one); });
+    require(events->setConnected(true));
+
+    // A report of eight events, many times over the bound.
+    const std::array report {
+        event(protocol::eventAbsolute, protocol::absoluteMtSlot, 0),
+        event(protocol::eventAbsolute, protocol::absoluteMtPositionX, 5),
+        event(protocol::eventAbsolute, protocol::absoluteMtPositionY, 6),
+        endOfReport(),
+    };
+    const unsigned reports = EventQueue::heldEventLimit / report.size() * 4U;
+    for (unsigned index = 0; index < reports; ++index)
+        events->enqueue(report);
+    require(everythingTheGuestReceives(device).empty());
+    require(events->connected() && !events->registered());
+
+    // Registration finally comes: nothing that was held is delivered, the
+    // sink is told so, and what follows passes.
+    guestRegisters(device);
+    require(everythingTheGuestReceives(device).empty());
+    require(seen.size() == 1 && seen[0].on && seen[0].lostEvents);
+    events->enqueue(report);
+    require(everythingTheGuestReceives(device).size() == report.size());
+    // The next plug starts over.
+    require(events->setConnected(false) && events->setConnected(true));
+    events->enqueue(report);
+    guestRegisters(device);
+    require(seen.size() == 2 && !seen[1].lostEvents);
+    require(everythingTheGuestReceives(device).size() == report.size());
+}
+
+void theHeldBufferTakesExactlyTheBoundAndNoMore()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    std::vector<StatusEvent> seen;
+    events->setStatusSink([&](const StatusEvent& one) { seen.push_back(one); });
+    require(events->setConnected(true));
+    const std::array one {key(30, 1)};
+    for (std::size_t index = 0; index < EventQueue::heldEventLimit; ++index)
+        events->enqueue(one);
+    guestRegisters(device);
+    require(everythingTheGuestReceives(device).size() ==
+        EventQueue::heldEventLimit);
+    require(!seen.back().lostEvents);
+
+    require(events->setConnected(false) && events->setConnected(true));
+    for (std::size_t index = 0; index <= EventQueue::heldEventLimit; ++index)
+        events->enqueue(one);
+    guestRegisters(device);
+    require(everythingTheGuestReceives(device).empty());
+    require(seen.back().lostEvents);
+}
+
+void anUnplugDropsWhatWaitedAndAnOldRegistrationDoesNotPlugAgain()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    require(events->setConnected(true));
+    const std::array down {key(30, 1), endOfReport()};
+    events->enqueue(down);
+    require(events->setConnected(false));
+    // The guest's answer to the plug arrives after the unplug.
+    guestRegisters(device);
+    require(!events->registered());
+    require(everythingTheGuestReceives(device).empty());
+    // The next plug waits for its own answer, with nothing left from before.
+    require(events->setConnected(true));
+    require(everythingTheGuestReceives(device).empty());
+    guestRegisters(device);
+    require(everythingTheGuestReceives(device).empty());
+}
+
+void aGuestResetForgetsTheRegistrationAndWhatWasQueued()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    require(events->setConnected(true));
+    guestRegisters(device);
+    const std::array down {key(30, 1), endOfReport()};
+    events->enqueue(down);
+    device.reset();
+    require(everythingTheGuestReceives(device).empty());
+    require(events->connected() && !events->registered());
+    // The device is still plugged in: the guest registers again, and the
+    // events sent meanwhile wait for it.
+    events->enqueue(down);
+    guestRegisters(device);
+    require(everythingTheGuestReceives(device).size() == 2);
+}
+
+void anUnplugDeliversTheGuestItsFinalEventsFirst()
+{
+    auto events = pluggableQueue();
+    VirtioInputDevice device(DeviceKind::hardwareKeyboard, events);
+    require(events->setConnected(true));
+    guestRegisters(device);
+    const std::array down {key(30, 1), endOfReport()};
+    events->enqueue(down);
+    const std::array release {key(30, 0), endOfReport()};
+    events->disconnect(release);
+    require(!events->connected() && device.configChangePending());
+    const auto received = everythingTheGuestReceives(device);
+    require(received.size() == 4);
+    require(equal(received[2], release[0]) && equal(received[3], release[1]));
+    // Nothing more is taken once it is gone.
+    events->enqueue(down);
+    require(everythingTheGuestReceives(device).empty());
+    // Disconnecting an unplugged device is nothing.
+    require(device.claimConfigChange());
+    device.clearConfigChange();
+    events->disconnect(release);
+    require(!device.configChangePending());
+    // A device the guest never registered has nothing to release, and is
+    // unplugged all the same.
+    require(events->setConnected(true));
+    events->disconnect(release);
+    require(!events->connected() && device.configChangePending());
+    require(everythingTheGuestReceives(device).empty());
+}
+
 } // namespace
 
 int main()
@@ -756,5 +1305,21 @@ int main()
     keyboardAdvertisesBackAndHomeAndNothingElseAbove127();
     keyboardDeliversBackAndHomeAsKeyEvents();
     eventQueueDefersAndThenReturnsOneWireEvent();
+    everyKindKeepsItsPermanentIdentity();
+    hardwareKeyboardAdvertisesExactlyTheTablesKeys();
+    mouseAdvertisesRelativeAxesWheelsButtonsAndTheCaptureLed();
+    pointerAdvertisesAnAbsoluteMouseAndNoInputProperty();
+    anUnpluggedDeviceReportsNoEventAtAll();
+    theSideKeysAndTheTouchscreenAreAlwaysPluggedIn();
+    aPlugAndAnUnplugEachRaiseOneConfigurationChange();
+    aChangeThatComesWhileOneIsBeingSentIsNotLost();
+    theStatusQueueHandsLedWritesAndRegistrationsToTheSink();
+    aPluggedDeviceHoldsItsFirstEventsUntilTheGuestRegisters();
+    aRegistrationWakesTheTransportToDeliverWhatWasHeld();
+    aGuestThatNeverRegistersGetsNothingAndCostsABoundedBuffer();
+    theHeldBufferTakesExactlyTheBoundAndNoMore();
+    anUnplugDropsWhatWaitedAndAnOldRegistrationDoesNotPlugAgain();
+    aGuestResetForgetsTheRegistrationAndWhatWasQueued();
+    anUnplugDeliversTheGuestItsFinalEventsFirst();
     return EXIT_SUCCESS;
 }
