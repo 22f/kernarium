@@ -21,6 +21,12 @@ let package = Package(
             name: "AndariumCore",
             dependencies: [.product(name: "GuestHostCore", package: "Core")]
         ),
+        // A test-only tool that plays a gamepad script to the guest's relay; the
+        // application does not link it.
+        .executableTarget(
+            name: "andarium-gamepad-probe",
+            dependencies: ["AndariumCore"]
+        ),
         .testTarget(
             name: "AndariumCoreTests",
             dependencies: ["AndariumCore"]
