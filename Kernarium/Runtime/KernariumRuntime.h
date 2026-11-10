@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 31U
+#define KERNARIUM_RUNTIME_API_VERSION 32U
 
 #if defined(__OBJC__)
 @class MTKView;

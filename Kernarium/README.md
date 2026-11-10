@@ -202,7 +202,7 @@ Kernarium attaches:
 - an Android-only Virtio GNSS receiver ([the device](../darwin/device/gnss/README.md)),
   the last Virtio device, which gives the guest the position the application
   reports (`report_location`) and tells it when the guest powers the receiver
-  (`set_location_receiver_callback`; runtime API 31). The Linux runtime keeps
+  (`set_location_receiver_callback`; runtime API 32). The Linux runtime keeps
   both entries and answers `-ENODEV`;
 - a Virtio-GPU Metal framebuffer; and
 - the guest's `ttyS0` stream mirrored to a terminal view.
