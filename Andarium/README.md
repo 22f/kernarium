@@ -249,6 +249,18 @@ requires reopening Andarium.
   (`GuestTimeZone`, the boot request's `android_time_zone`); the system image
   applies it unless the guest's user chose a zone
   ([Android README](../android/lineage-24/README.md#time-zone)).
+- **Haptics.** On a device with a Taptic Engine the boot request states the
+  haptics bit (`android_host_features`), which gives the guest a vibrator, and
+  the application plays the vibrator's scores on Core Haptics. It connects to
+  the guest's HAL over vsock 5557 (`HapticsSession`), plays only while it is in
+  front and holds the guest running, and lets everything go the moment it is
+  not. The HAL sends the effect or primitive and its duration, and
+  `HapticShapes` decides what fills it, so the feel is tuned in an app update.
+  There is no switch: Android's own vibration settings decide what the guest
+  asks for, and an iPad, a Mac or the Simulator, which have no Taptic Engine,
+  give the guest no vibrator. The wire is `HapticsProtocol`, whose golden frames
+  the HAL's test shares (`tests/unit/andarium/fixtures`); the
+  [Android README](../android/lineage-24/README.md) owns the HAL.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display. A touch the system takes over reaches
   Android as a cancelled touch, not a lift, so no tap follows. Only the side

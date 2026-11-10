@@ -52,6 +52,16 @@ enum {
     KERNARIUM_RUNTIME_ANDROID_BOOT_RECOVERY = 2,
 };
 
+/* The bits of kernarium_runtime_boot.android_host_features (runtime API 31).
+ * Each is one feature of the host, and the runtime's table of them
+ * (KernariumHostFeatures.hpp) names the kernel argument it becomes. */
+enum {
+    /* The device has haptics (a Taptic Engine) and the application plays the
+     * guest's vibrator on it. The guest then finds a vibrator; without the bit
+     * it finds none. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS = 1u << 0,
+};
+
 /* A boot request. Linux guests supply rootfs_path and overlay_path. Android
  * guests supply the release directory (guest/system.img, the read-only system
  * disk; guest/partition-layout.json; boot/kernel-command-line.txt), the path of
@@ -102,7 +112,15 @@ enum {
  * prepare_jit for this request's guest memory and vCPU count with a result of
  * KERNARIUM_RUNTIME_JIT_READY. A boot that asks for it when that is not so
  * runs on gadgets, with a line on stderr: an engine never fails a boot. The
- * runtime reads it only from a request whose struct_size covers it. */
+ * runtime reads it only from a request whose struct_size covers it.
+ *
+ * android_host_features says what the host has that an Android guest is to
+ * find (runtime API 31): a mask of the KERNARIUM_RUNTIME_ANDROID_HOST_ bits
+ * below, zero for none. The runtime turns each bit it knows into the one kernel
+ * argument the guest's image reads for it, which the release's command-line
+ * file cannot set, and ignores a bit it does not know with a line on stderr: a
+ * feature never fails a boot. The runtime reads it only from a request whose
+ * struct_size covers it; a Linux guest ignores it. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -124,7 +142,7 @@ typedef struct kernarium_runtime_boot {
     const char* android_time_zone;
     const char* session_record_path;
     uint32_t use_jit;
-    uint32_t reserved;
+    uint32_t android_host_features;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for

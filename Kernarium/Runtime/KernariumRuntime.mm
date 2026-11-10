@@ -5,6 +5,7 @@
 #include "KernariumConsoleInput.hpp"
 #include "KernariumConsoleOutput.hpp"
 #include "KernariumGuestTimeZone.hpp"
+#include "KernariumHostFeatures.hpp"
 #include "KernariumKeyWake.hpp"
 #include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
@@ -954,18 +955,21 @@ void appendKernelCommandLine(
     uint32_t dotsPerInch,
     uint32_t guestProcessorCount,
     std::string_view adbPublicKey,
-    std::string_view timeZone)
+    std::string_view timeZone,
+    std::uint32_t hostFeatures)
 {
     const auto path = storage.release() / uml::android::releaseCommandLine;
     constexpr std::string_view adbAuthorizationPrefix {
         "androidboot.kernarium.adb_auth="};
-    constexpr std::array launcherPrefixes {
+    std::vector<std::string_view> launcherPrefixes {
         uml::android::lcdDensityPrefix,
         uml::android::hwTimeoutMultiplierPrefix,
         adbAuthorizationPrefix,
         kernarium::adb::keyPrefix,
         kernarium::adb::tcpPrefix,
         kernarium::timezone::prefix};
+    for (const auto prefix : kernarium::hostfeatures::launcherPrefixes())
+        launcherPrefixes.push_back(prefix);
     for (auto& argument :
          uml::android::readKernelCommandLine(path, launcherPrefixes))
         arguments.push_back(std::move(argument));
@@ -1024,6 +1028,11 @@ void appendKernelCommandLine(
         arguments.emplace_back(
             std::string {kernarium::timezone::prefix} + std::string {timeZone});
     }
+    /* What the host has that the guest is to find, as the boot request states
+     * it: one argument per feature the runtime knows. */
+    for (auto& argument :
+         kernarium::hostfeatures::kernelArguments(hostFeatures))
+        arguments.push_back(std::move(argument));
 }
 
 #endif
@@ -1144,6 +1153,9 @@ struct GuestRequest final {
     /* The host's time zone an Android guest is given for the launch, empty for
      * none; a Linux guest ignores it. */
     std::string timeZone;
+    /* The host features an Android guest is told, the known bits of the boot
+     * request's android_host_features; a Linux guest ignores them. */
+    std::uint32_t hostFeatures {};
     /* Where the run records how the session ended, empty for nowhere. */
     std::string sessionRecordPath;
     /* The JIT cache budget of a run on the JIT engine, in bytes, or zero for
@@ -1506,7 +1518,8 @@ private:
             request_.dotsPerInch,
             request_.guestProcessorCount,
             request_.adbPublicKey,
-            request_.timeZone);
+            request_.timeZone,
+            request_.hostFeatures);
 #else
         /* A sealed ext4 derivative is attached read-only; the per-run /init
          * mounts either kind of image beneath the overlay. */
@@ -1669,6 +1682,11 @@ constexpr std::size_t bootSizeBeforeSessionRecord =
 constexpr std::size_t bootSizeBeforeJit =
     offsetof(kernarium_runtime_boot, use_jit);
 
+/* What a request states before the host features were added to it (runtime API
+ * 31; the word was reserved, and zero, before). */
+constexpr std::size_t bootSizeBeforeHostFeatures =
+    offsetof(kernarium_runtime_boot, android_host_features);
+
 #ifndef UML_APP_STORE_RUNTIME
 /* The JIT cache budget a boot that asks for the JIT runs with, or zero when it
  * runs on gadgets. Preparing again is cheap when an earlier prepare_jit
@@ -1808,6 +1826,19 @@ int runtimeRun(
                 readyJitCacheBudget(guestMemoryMiB, guestProcessorCount);
 #endif
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* A bit the runtime has no row for is dropped, because a feature
+         * never fails a boot: the guest finds the others and not that one. */
+        if (boot->struct_size >= bootSizeBeforeHostFeatures +
+                sizeof(boot->android_host_features)) {
+            const std::uint32_t unknown = kernarium::hostfeatures::unknownBits(
+                boot->android_host_features);
+            if (unknown != 0)
+                std::fprintf(
+                    stderr,
+                    "Kernarium: ignoring unknown host features 0x%x\n",
+                    unknown);
+            request.hostFeatures = boot->android_host_features & ~unknown;
+        }
         if (boot->android_data_disk_path == nullptr ||
             boot->android_release_path == nullptr) {
             std::fputs("Kernarium: incomplete Android bundle\n", stderr);

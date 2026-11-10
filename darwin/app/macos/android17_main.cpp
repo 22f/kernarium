@@ -33,6 +33,13 @@ constexpr std::string_view boot_mode_option{"--android-boot-mode="};
 constexpr std::string_view dpi_option{"--gpu-dpi="};
 constexpr std::string_view adb_authorization_prefix{
 	"androidboot.kernarium.adb_auth="};
+/* The hardware SKU that tells the guest what the host has (the iOS runtime's
+ * KernariumHostFeatures.hpp states it from the boot request). A Mac has no
+ * Taptic Engine, so this launcher states none itself; a run that wants the
+ * guest's vibrator for a CTS, VTS or protocol check passes the argument, which
+ * is forwarded as given. A release's own command line may not carry it. */
+constexpr std::string_view hardware_sku_prefix{
+	"androidboot.product.hardware.sku="};
 
 struct AndroidOptions {
 	std::filesystem::path release;
@@ -247,6 +254,7 @@ std::vector<std::string> boot_command_line(
 		forwarded.push_back(std::move(argument));
 	constexpr std::array launcher_prefixes{
 		adb_authorization_prefix,
+		hardware_sku_prefix,
 		uml::android::lcdDensityPrefix,
 		uml::android::hwTimeoutMultiplierPrefix};
 	for (auto &argument : uml::android::readKernelCommandLine(

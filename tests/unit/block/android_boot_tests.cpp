@@ -983,6 +983,32 @@ void testHwTimeoutMultiplier(const fs::path &directory)
 	});
 }
 
+/* Both launchers reserve the hardware SKU that tells the guest what the host
+ * has (the iOS runtime's KernariumHostFeatures.hpp, and the standalone
+ * launcher, which passes a host's own argument through), so a release cannot
+ * state it. The other SKU properties stay the release's. */
+void testHostFeatureArguments(const fs::path &directory)
+{
+	constexpr std::array<std::string_view, 2> launcherPrefixes{
+		"androidboot.kernarium.adb_auth=",
+		"androidboot.product.hardware.sku="};
+	const std::string devices{android::bootDevicesArgument};
+	const auto path = directory / "feature-command-line.txt";
+	for (const char *bad : {"androidboot.product.hardware.sku=haptics",
+				"androidboot.product.hardware.sku=",
+				"androidboot.product.hardware.sku=other"}) {
+		writeText(path, std::string{"quiet "} + bad + " " + devices + "\n");
+		requireThrows([&] {
+			(void)android::readKernelCommandLine(path, launcherPrefixes);
+		});
+	}
+	writeText(path, "quiet androidboot.product.vendor.sku=camera "
+			"androidboot.product.hardware.skus=1 " + devices + "\n");
+	require(android::readKernelCommandLine(path, launcherPrefixes) ==
+		std::vector<std::string>{"quiet", "androidboot.product.vendor.sku=camera",
+					 "androidboot.product.hardware.skus=1", devices});
+}
+
 /* Both launchers read the release's kernel command line through one
  * tokenizer and refuse an argument that they set themselves. */
 void testKernelCommandLine(const fs::path &directory)
@@ -1059,6 +1085,7 @@ int main(int argc, char *argv[])
 	testStorageIsExact(fixture, fresh("exact"));
 	testLcdDensity(fresh("density"));
 	testHwTimeoutMultiplier(fresh("multiplier"));
+	testHostFeatureArguments(fresh("feature-arguments"));
 	testKernelCommandLine(fresh("command-line"));
 	testUbdPath();
 	return 0;
