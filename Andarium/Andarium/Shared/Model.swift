@@ -90,6 +90,7 @@ final class AppModel {
             if lifecycle.phase != oldValue.phase {
                 refreshStatistics()
                 refreshGraphicsNotice()
+                showThermalNoticeIfWaiting()
             }
         }
     }
@@ -403,6 +404,19 @@ final class AppModel {
     /// When to end the cached app that holds the most graphics memory, from
     /// the same readings; nothing of it shows.
     @ObservationIgnored private(set) var graphicsReclaim = GraphicsReclaim()
+
+    // MARK: Thermal notice state
+
+    /// Whether the session says the frame rate is lowered while the device is
+    /// hot, once in a run, from the runtime's thermal policy.
+    private(set) var thermalNotice = ThermalNotice()
+    /// The policy has announced the cap and the session screen is not up yet.
+    @ObservationIgnored private var thermalCapWaiting = false
+    /// Waits out the notice's time; a test paces it by hand.
+    @ObservationIgnored var thermalNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
 
     init(
         guest: Guest?, host: HostDevice, system: SystemInfo, capabilities: Capabilities,
@@ -1081,6 +1095,8 @@ final class AppModel {
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
+        thermalCapWaiting = false
+        dismissThermalNotice()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1107,6 +1123,9 @@ final class AppModel {
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
+        // The notice was for the screen that restarts, and it was announced
+        // for the run, which goes on.
+        dismissThermalNotice()
         frozenBootStage = nil
         sessionPreset = SessionPreset()
         let showStats = session.showStats
@@ -1342,6 +1361,40 @@ final class AppModel {
         let now = graphicsNoticeClock()
         graphicsNotice.record(refusals: 0, at: now)
         graphicsNotice.record(refusals: 1, at: now)
+    }
+
+    // MARK: Thermal notice
+
+    /// The runtime's policy says Android starts to lower the frame rate. The
+    /// notice shows once the session screen is up, and the policy says this
+    /// once in a run, so nothing here counts.
+    func thermalCapStarted() {
+        thermalCapWaiting = true
+        showThermalNoticeIfWaiting()
+    }
+
+    fileprivate func showThermalNoticeIfWaiting() {
+        guard thermalCapWaiting, case .running(.normal) = phase else { return }
+        thermalCapWaiting = false
+        thermalNotice.show()
+        thermalNoticeTask?.cancel()
+        thermalNoticeTask = Task { [weak self] in
+            await self?.thermalNoticeSleep(ThermalNotice.visibleFor)
+            guard !Task.isCancelled else { return }
+            self?.thermalNotice.dismiss()
+        }
+    }
+
+    /// The person dismisses the notice, or it has run its time.
+    func dismissThermalNotice() {
+        thermalNoticeTask?.cancel()
+        thermalNoticeTask = nil
+        thermalNotice.dismiss()
+    }
+
+    /// The Simulator preview plays the notice: it has no runtime to start a cap.
+    func previewThermalNotice() {
+        thermalNotice.show()
     }
 
     /// The debugger is preparing the JIT, which keeps the boot at its first step.

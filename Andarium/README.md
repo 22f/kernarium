@@ -124,7 +124,8 @@ everything that exists for automation or only pretends:
 
 - `APP_STORE` is a Swift compilation condition that compiles out the launch
   environment (`Live/LaunchEnvironment.swift`, so no `ANDARIUM_` or
-  `KERNARIUM_` name is in the application or in `AndariumCore`), the harness's
+  `KERNARIUM_` name is in the application or in `AndariumCore`, nor the thermal
+  state a launch can state in place of iOS's), the harness's
   console lines (`Shared/ConsoleReport.swift`), the launch's deferred work
   (create, erase, start) and the isolated guest instance.
 - It defines `UML_APP_STORE_APPLICATION` for the loader it compiles, which
@@ -262,6 +263,17 @@ requires reopening Andarium.
   asks for, and an iPad, a Mac or the Simulator, which have no Taptic Engine,
   give the guest no vibrator. The wire is `HapticsProtocol`, whose golden frames
   the HAL's test shares (`tests/unit/andarium/fixtures`); the
+  [Android README](../android/lineage-24/README.md) owns the HAL.
+- **Heat.** The application tells the guest's thermal HAL how hot the device is
+  over vsock 5559 (`ThermalSession`; the wire is `ThermalProtocol`, whose
+  golden frames the HAL's test shares in `tests/unit/andarium/fixtures`). The
+  severity is the hottest iOS thermal state of the last 120 s: it rises at once
+  and falls 120 s after the hotter state ended. Fair is Android's light,
+  serious its severe and critical its critical, and the host never sends a
+  level that shuts the guest down. At severe and above Android lowers the
+  guest's frame rate to 30, and the first time in a run that this starts the
+  session screen says so once. There is no switch. A system without the HAL
+  hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display. A touch the system takes over reaches
@@ -443,6 +455,8 @@ they mean in Kernarium; the automation Android runtime
 (`package-ios-frameworks.sh --runtimes android --android-automation`)
 additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 ([`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+`ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
+for iOS's thermal state in the Simulator and in automation.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`
