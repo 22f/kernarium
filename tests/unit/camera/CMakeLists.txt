@@ -33,3 +33,28 @@ if(TARGET UML::SyntheticCamera)
     uml_add_unit_test(NAME camera-synthetic COMMAND uml_camera_synthetic_tests
         LABELS "device;camera")
 endif()
+
+# The camera device's pure parts: each is a function of its inputs, checked
+# without a device.
+add_executable(uml_camera_jpeg_gap_tests camera_jpeg_gap_tests.cpp)
+target_link_libraries(uml_camera_jpeg_gap_tests PRIVATE UML::CameraDevice)
+uml_add_unit_test(NAME camera-jpeg-gap COMMAND uml_camera_jpeg_gap_tests
+    LABELS "device;camera")
+
+add_executable(uml_camera_calibration_tests camera_calibration_tests.cpp)
+target_link_libraries(uml_camera_calibration_tests PRIVATE UML::CameraDevice)
+uml_add_unit_test(NAME camera-calibration COMMAND uml_camera_calibration_tests
+    LABELS "device;camera")
+
+# The device's tests use the synthetic camera as the platform camera.
+if(TARGET UML::SyntheticCamera)
+    add_executable(uml_camera_controls_tests camera_controls_tests.cpp)
+    target_link_libraries(uml_camera_controls_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    uml_add_unit_test(NAME camera-controls COMMAND uml_camera_controls_tests
+        LABELS "device;camera")
+
+    add_executable(uml_camera_description_tests camera_description_tests.cpp)
+    target_link_libraries(uml_camera_description_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    uml_add_unit_test(NAME camera-description COMMAND uml_camera_description_tests
+        LABELS "device;camera")
+endif()
