@@ -8,8 +8,10 @@ application that must:
   - declare no non-exempt encryption, require arm64 and Metal, target iPhone
     and iPad, and have no background mode;
   - carry no automation knob: no ANDARIUM_, KERNARIUM_, UML_ or DARWIN_UML_
-    environment name in the host code of the application or of any embedded
-    framework (the guest kernel image inside a runtime is not host code);
+    environment name (ANDARIUM_THERMAL_STATE, which states the thermal state
+    in place of iOS's, among them) in the host code of the application or of
+    any embedded framework (the guest kernel image inside a runtime is not
+    host code);
   - carry none of the harness's console lines (ConsoleReport in the
     application: the statistics, thermal state, runtime and focus lines),
     which the configuration compiles out;
@@ -307,7 +309,8 @@ DEBUG_SYMBOLS = (
     ("test tooling", (b"5vsock9Forwarder", b"17UnixSocketChannel", b"_rfbGetScreen",
                       b"_rfbInitServer")),
     ("launch harness", (b"13ConsoleReport", b"15environmentName", b"13applyDeferred",
-                        b"16printsStatistics", b"13launchApplied")),
+                        b"16printsStatistics", b"13launchApplied",
+                        b"15ThermalOverride")),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.
