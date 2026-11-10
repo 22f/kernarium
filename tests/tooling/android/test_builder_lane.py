@@ -660,13 +660,32 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.vibrator-service\\.andarium"
             "  u:object_r:hal_vibrator_default_exec:s0\n"
         )
+        good_gnss_label = (
+            "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.gnss-service\\.andarium"
+            "  u:object_r:hal_gnss_default_exec:s0\n"
+        )
         good_video_contexts = (
             "/dev/hvc0  u:object_r:serial_device:s0\n"
             + good_net_setup_label
             + "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.media\\.c2-service-v4l2"
             "  u:object_r:mediacodec_exec:s0\n"
             + good_vibrator_label
+            + good_gnss_label
         )
+        # The GNSS HAL: declared on every device by one vendor fragment, and started at boot with its
+        # class.
+        good_gnss_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.gnss</name><version>7</version>"
+            "<fqname>IGnss/default</fqname></hal></manifest>"
+        )
+        good_gnss_rc = (
+            "service vendor.gnss-andarium /vendor/bin/hw/android.hardware.gnss-service.andarium\n"
+            "    interface aidl android.hardware.gnss.IGnss/default\n"
+            "    class hal\n    user gps\n    group gps\n"
+        )
+        gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
+        gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
         # The vibrator HAL: declared by the ODM manifest of the haptics SKU alone, and started by init
         # for that SKU alone.
         good_vibrator_manifest = (
@@ -773,6 +792,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           unsupported_hal: bool = False,
                           unsupported_feature: bool = False,
                           missing_multitouch_feature: str | None = None,
+                          missing_location_feature: str | None = None,
                           missing_microphone_feature: bool = False,
                           missing_companion_feature: bool = False,
                           missing_midi_feature: bool = False,
@@ -2175,6 +2195,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr("VENDOR/bin/hw/android.hardware.vibrator-service.andarium", synthetic_aarch64_elf())
                 archive.writestr(vibrator_rc_path, good_vibrator_rc)
                 archive.writestr("ODM/etc/vintf/manifest_haptics.xml", good_vibrator_manifest)
+                archive.writestr("VENDOR/bin/hw/android.hardware.gnss-service.andarium", synthetic_aarch64_elf())
+                archive.writestr(gnss_rc_path, good_gnss_rc)
+                archive.writestr(gnss_fragment_path, good_gnss_manifest)
+                # The sample file of the platform: comments only, no assistance server.
+                archive.writestr("SYSTEM/etc/gps_debug.conf", "# SUPL_HOST=supl.example\n# NTP_SERVER=ntp.example\n\n")
                 advertised_features = ["android.hardware.touchscreen",
                                        "android.hardware.sensor.accelerometer",
                                        "android.hardware.sensor.gyroscope"]
@@ -2184,6 +2209,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "android.hardware.touchscreen.multitouch.distinct",
                         "android.hardware.touchscreen.multitouch.jazzhand",
                     ) if feature != missing_multitouch_feature
+                )
+                advertised_features.extend(
+                    feature for feature in ("android.hardware.location", "android.hardware.location.gps")
+                    if feature != missing_location_feature
                 )
                 if not missing_microphone_feature:
                     advertised_features.append("android.hardware.microphone")
@@ -4394,6 +4423,74 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("vibrator-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                 good_video_contexts.replace("hal_vibrator_default_exec", "vendor_file").encode()}},
              "hal_vibrator_default_exec label"),
+            ("missing-gnss-service", {"entries": {
+                "VENDOR/bin/hw/android.hardware.gnss-service.andarium": None}},
+             "required entries are missing"),
+            ("missing-gnss-rc", {"entries": {gnss_rc_path: None}}, "required entries are missing"),
+            ("missing-gnss-fragment", {"entries": {gnss_fragment_path: None}},
+             "required entries are missing"),
+            ("gnss-in-the-vendor-manifest", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_gnss_manifest.encode()}},
+             "declares a GNSS HAL"),
+            ("gnss-in-a-second-fragment", {"entries": {
+                "VENDOR/etc/vintf/manifest/android.hardware.gnss.xml": good_gnss_manifest.encode()}},
+             "declares a GNSS HAL"),
+            ("gnss-in-the-plain-odm-manifest", {"entries": {
+                "ODM/etc/vintf/manifest.xml": good_gnss_manifest.encode()}},
+             "declares a GNSS HAL"),
+            ("gnss-fragment-version-6", {"entries": {
+                gnss_fragment_path: good_gnss_manifest.replace("<version>7", "<version>6").encode()}},
+             "must declare exactly the AIDL IGnss/default at version 7"),
+            ("gnss-fragment-with-a-second-hal", {"entries": {
+                gnss_fragment_path: good_gnss_manifest.replace(
+                    "</manifest>", '<hal format="aidl"><name>android.hardware.light</name>'
+                    "<version>2</version><fqname>ILights/default</fqname></hal></manifest>").encode()}},
+             "must declare exactly the AIDL IGnss/default at version 7"),
+            ("gnss-fragment-other-instance", {"entries": {
+                gnss_fragment_path: good_gnss_manifest.replace("IGnss/default", "IGnss/other").encode()}},
+             "must declare exactly the AIDL IGnss/default at version 7"),
+            ("cuttlefish-gnss-apex", {"entries": {
+                "VENDOR/apex/com.android.hardware.gnss.apex": b"apex"}},
+             "nonstatic image or metadata is forbidden"),
+            ("gnss-service-disabled", {"entries": {
+                gnss_rc_path: (good_gnss_rc + "    disabled\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gnss-service-oneshot", {"entries": {
+                gnss_rc_path: (good_gnss_rc + "    oneshot\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gnss-service-triggered", {"entries": {
+                gnss_rc_path: (good_gnss_rc + "\non boot\n    start vendor.gnss-andarium\n").encode()}},
+             "may have no trigger"),
+            ("gnss-service-without-interface", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace(
+                    "    interface aidl android.hardware.gnss.IGnss/default\n", "").encode()}},
+             "must carry 'interface aidl"),
+            ("gnss-service-wrong-user", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace("user gps", "user root").encode()}},
+             "must carry 'user gps'"),
+            ("gnss-service-wrong-group", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace("group gps", "group system").encode()}},
+             "must carry 'group gps'"),
+            ("gnss-service-wrong-binary", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace(
+                    "android.hardware.gnss-service.andarium", "android.hardware.gnss-service.example").encode()}},
+             "must define one service that runs the Andarium GNSS HAL"),
+            ("gnss-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_gnss_default_exec", "vendor_file").encode()}},
+             "hal_gnss_default_exec label"),
+            ("gnss-supl-server", {"entries": {
+                "SYSTEM/etc/gps_debug.conf": b"SUPL_HOST=supl.example\nSUPL_PORT=7275\n"}},
+             "configures an assistance server"),
+            ("gnss-ntp-server", {"entries": {
+                "SYSTEM/etc/gps_debug.conf": b"# comment\nNTP_SERVER=time.example\n"}},
+             "configures an assistance server"),
+            ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
+             "feature is not declared: android.hardware.location(?!\\.gps)"),
+            ("missing-gps-feature", {"missing_location_feature": "android.hardware.location.gps"},
+             "feature is not declared: android.hardware.location.gps"),
+            ("location-probe-left-in-the-image", {"entries": {
+                "SYSTEM/app/AndariumLocationProbe/AndariumLocationProbe.apk": synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumLocationProbe"),
         ):
             reject(label, options, reason)
 

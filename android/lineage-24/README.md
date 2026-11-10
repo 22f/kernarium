@@ -89,9 +89,10 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   entry, the Bluetooth developer option, the media output switcher, and the
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
-- **Hardware not advertised.** Telephony, GNSS, NFC, UWB, Thread, camera,
+- **Hardware not advertised.** Telephony, NFC, UWB, Thread, camera,
   biometric, secure element, USB, Bluetooth and Trusty; the vibrator only on a
-  device with haptics ([Haptics](#haptics)). SecureElement is kept but not
+  device with haptics ([Haptics](#haptics)). The host's position is declared on
+  every device ([Location](#location)). SecureElement is kept but not
   persistent (route `p0024`): nothing starts it at boot, and the first
   `SEService` client that binds it starts it.
 - **Diagnostics.** A `user` image needs no guest root for diagnostics: the
@@ -185,6 +186,48 @@ a connection down when a frame does not go whole. `overlay/vibrator/haptics_prot
 and `Andarium/AndariumCore/Sources/AndariumCore/HapticsProtocol.swift` own the
 wire format, which the golden frames in `tests/unit/andarium/fixtures` pin.
 
+### Location
+
+The host's position is the guest's GNSS receiver: `/dev/gnss0`, a Kernarium
+Virtio device that the guest kernel registers in Linux's GNSS class
+([stream contract](../../darwin/device/gnss/README.md)). Every device declares
+`android.hardware.location` and `android.hardware.location.gps` and the vendor
+manifest declares `android.hardware.gnss` `IGnss/default` (version 7), with no
+SKU: the node exists on every device, and the host reports no fix while it has
+no position to give. ueventd gives the node to `gps`.
+
+`overlay/gnss/` is the vendor AIDL HAL. It opens the node at the framework's
+`start()`, which powers the receiver on the host, and closes it at `stop()`; it
+reads the NMEA epochs and reports a location once for each newer fix, at the
+interval `setPositionMode` gave. A location carries the fix's own UTC time and
+its age, the ellipsoidal altitude (sea level altitude plus the geoid separation,
+or none when either is missing), and the accuracies, speed and bearing only
+when the host knew them. The HAL declares no capability, so the framework
+schedules fixes slower than every 10 s itself, and it answers every extension a
+real receiver offers that this one cannot (satellites, measurements, navigation
+messages, batching, geofencing, assistance data, antenna information,
+corrections) with `EX_UNSUPPORTED_OPERATION`. The satellite list is always
+empty, and nothing the framework injects (time, locations, assistance data) is
+used. A fix never sets the clock or the time zone.
+
+A fix the host marked approximate (iOS's reduced accuracy) is reported as a GNSS
+fix at least 2000 m uncertain with no altitude, speed or bearing, whatever the
+stream carries, and the NMEA sentences an application can listen to are
+rewritten to the same. An application that holds only the coarse permission
+gets Android's own coarse location of the fix.
+
+A session holds a system-suspend wakelock from `start()` to `stop()`. A guest
+that suspends itself with its display off is woken once an epoch while the
+receiver is open, and without the lock it would suspend and wake every second
+for as long as a client listens. The lock belongs to the HAL's process, so it
+goes with the HAL, and it holds back only Android's own autosuspend.
+
+`overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
+rules and `gnss_engine.hpp` the session, with no Android dependency; the
+`gnss-hal-*` unit tests read the host writer's own epochs through them.
+`tests/integration/android/location/` is a probe application for the candidate
+image, never installed in a release.
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -274,6 +317,10 @@ outcomes are known and not defects of the image:
 - HEVC 4K decoding at 60 frames per second and 32-bit encoding at the largest
   sizes miss the published point
   ([hardware video](#hardware-video-encoding-and-decoding)).
+- The measurement, satellite and navigation message cases of
+  `CtsLocationGnssTestCases` and `VtsHalGnssTargetTest` fail: the host's
+  position has no satellites, raw measurements or ephemeris, and the product
+  declares `android.hardware.location.gps` regardless.
 - DocumentsUI (Files) on a smallest width of 720 dp or more can throw an
   `IllegalStateException` from AppCompat's `CascadingMenuPopup` while its
   overflow menu changes during the popup's exit transition; real tablets share

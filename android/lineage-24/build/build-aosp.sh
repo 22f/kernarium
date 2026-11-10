@@ -385,6 +385,8 @@ PRODUCT_PACKAGES=" $(get_build_var PRODUCT_PACKAGES) "
 	fail "the Andarium motion sensor backend is absent"
 [[ "$PRODUCT_PACKAGES" == *" android.hardware.vibrator-service.andarium "* ]] ||
 	fail "the Andarium vibrator service is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.gnss-service.andarium "* ]] ||
+	fail "the Andarium GNSS service is absent"
 [[ "$(get_build_var ODM_MANIFEST_SKUS)" == haptics ]] ||
 	fail "ODM_MANIFEST_SKUS must be exactly haptics: the vibrator HAL exists only in that SKU's manifest"
 for package in \
@@ -501,6 +503,7 @@ for package in \
 	com.android.hardware.graphics.composer.ranchu \
 	android.hardware.health-service.cuttlefish_recovery \
 	com.android.hardware.contexthub \
+	com.android.hardware.gnss \
 	com.android.hardware.input.processor \
 	com.android.hardware.net.nlinterceptor \
 	com.android.hardware.rebootescrow \
