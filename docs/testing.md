@@ -285,16 +285,18 @@ free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the haptics session on fake guests and
 players, the haptics wire against the golden frames in
-`tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
-test against too, and the session record's stall slot against the golden slot
-there, which `runtime-stall-record` checks the runtime's writer against);
+`tests/unit/andarium/fixtures`, which the guest's vibrator, thermal and gamepad
+relay test against too, and the session record's stall slot against the golden
+slot there, which `runtime-stall-record` checks the runtime's writer against);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
-`andarium-haptics-player`, `andarium-thermal-protocol` and
-`andarium-thermal-levels` (unit), `andarium-stage-system-image` and
+`andarium-haptics-player`, `andarium-thermal-protocol`,
+`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
+`andarium-stage-system-image` and
 `andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
-temperature and thresholds of each severity, system image staging and the
+temperature and thresholds of each severity, the gamepad relay's wire (the
+ranges of every field and the frame reader), system image staging and the
 screenshot script, and `kernarium-host-features` (unit)
 the table of host features the boot request carries to an Android guest. The
 application builds with Xcode (`AndariumPreview` is the Simulator build with
@@ -548,6 +550,15 @@ names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
 render rate and the frame rates at each severity, on a fresh data disk or, with
 `--instance`, over an older release's.
+`android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
+names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
+[`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the
+runner plays the host application over a vsock forward, creates a controller of
+each driver family (generic, Xbox, DualSense), sends reports and checks what
+Android sees (devices, keys, axes), what comes back (rumble, lights, the
+drivers' feature requests), hot plug, the relay's recovery, and reports the
+guest's cost per report and the relay's memory. `android17-gamepad-runner`
+(tooling) runs its wire, controllers and parsers without a guest.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only
