@@ -1,0 +1,40 @@
+# Golden frames of the thermal wire (vsock 5559), the contract between the
+# guest's thermal HAL (android/lineage-24/overlay/thermal) and the host
+# (Andarium/AndariumCore ThermalProtocol.swift).
+#
+# One frame per line: `name: <hex bytes>`. A line that starts with `#` is a
+# comment, and the comment above a frame says what it means.
+#
+# A record is 8 bytes, host to guest only: the magic `ATH1`, one byte with
+# Android's severity (0 NONE, 1 LIGHT, 2 MODERATE, 3 SEVERE, 4 CRITICAL) and
+# three reserved bytes, all 0.
+#
+# The host's encoder produces every frame that is not a `reject-` frame from
+# the severity named. The HAL's decoder accepts those frames and refuses every
+# `reject-` frame: it closes the connection and keeps the severity it had.
+
+# NONE: the device is not hot.
+none: 41 54 48 31 00 00 00 00
+
+# LIGHT: iOS fair.
+light: 41 54 48 31 01 00 00 00
+
+# SEVERE: iOS serious; Android lowers the frame rate to 30.
+severe: 41 54 48 31 03 00 00 00
+
+# CRITICAL: iOS critical.
+critical: 41 54 48 31 04 00 00 00
+
+# --- Frames the HAL refuses
+
+# EMERGENCY (5) is never reported.
+reject-emergency: 41 54 48 31 05 00 00 00
+
+# SHUTDOWN (6) is never reported.
+reject-shutdown: 41 54 48 31 06 00 00 00
+
+# The magic is ATH2.
+reject-magic: 41 54 48 32 00 00 00 00
+
+# A reserved byte is 1.
+reject-reserved: 41 54 48 31 01 00 01 00
