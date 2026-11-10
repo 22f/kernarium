@@ -45,11 +45,11 @@ struct alignas(128) ExecutorAnnouncement final {
 };
 
 /* Publish a pair of words that translated code reads with one `ldp`: a
- * BlockLink's pair (the arm64 engine's first entry and stream, the x86-64
- * engine's stream and instruction count), or an indirect cell's guest PC and
- * link. With FEAT_LSE2 an aligned sixteen-byte `stp` is a single access, so a
- * vCPU following the pair while another retargets it sees one value or the
- * other, never half of each. */
+ * BlockLink's pair (in both engines the first entry and the stream past
+ * it), or an indirect cell's guest PC and link. With FEAT_LSE2 an aligned
+ * sixteen-byte `stp` is a single access, so a vCPU following the pair
+ * while another retargets it sees one value or the other, never half of
+ * each. */
 inline void store_pair(void *at, std::uint64_t first,
 	std::uint64_t second) noexcept
 {
