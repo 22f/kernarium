@@ -4,7 +4,11 @@
 // holds a wakelock, opens the receiver (which powers it on the host) and runs a
 // thread that parses what it writes and reports to the framework through a
 // Sink; stop() joins the thread, powers the receiver off and lets the wakelock
-// go. After stop() returns, nothing more is reported.
+// go. After stop() returns, nothing more is reported. A session whose receiver
+// goes away by itself (it closed or failed) ends there: the thread lets the
+// wakelock go and reports session_end and engine_off once, and the stop() that
+// follows reports nothing more. The receiver is not opened again; the next
+// start() opens it.
 //
 // The wakelock is the one decision of this file that is not obvious. The
 // framework holds a partial wakelock only while it handles each report
@@ -62,9 +66,10 @@ struct Env {
     std::function<void(const std::string&)> log;
 };
 
-// What the engine reports. Every call is made on the session's thread, or on the
-// caller's thread of start() and stop() for the statuses; none while a lock of
-// the engine is held that its other entry points take.
+// What the engine reports. Every call is made on the session's thread, except
+// the statuses of start() and stop(), which are made on the caller's thread
+// while the engine's control lock is held: a sink must not call start() or
+// stop(). No other call is made with a lock of the engine held.
 struct Sink {
     std::function<void(Status)> status;
     std::function<void(const Location&)> location;
@@ -117,6 +122,7 @@ public:
         }
         parser_.reset();
         pacer_.reset();
+        end_reported_ = false;
         {
             std::lock_guard guard(shared_);
             wakelock_ = std::move(wakelock);
@@ -143,9 +149,11 @@ public:
     void set_nmea(bool on) { nmea_on_ = on; }
     void set_sv_status(bool on) { sv_status_on_ = on; }
 
+    // True from start() until stop(), or until the receiver went away and the
+    // session reported its end.
     bool running() const {
         std::lock_guard control(control_);
-        return running_;
+        return running_ && !end_reported_;
     }
 
     std::optional<DebugFix> last_fix() const {
@@ -163,7 +171,8 @@ private:
     }
 
     // Joins the thread, closes the receiver and releases the wakelock. With
-    // `notify_framework` the framework is told the session and the engine ended.
+    // `notify_framework` the framework is told the session and the engine ended,
+    // unless the thread already told it.
     // The caller holds `control_`, or is the destructor.
     void stop_locked(bool notify_framework) {
         if (!running_) return;
@@ -180,14 +189,20 @@ private:
             std::lock_guard guard(shared_);
             wakelock_.reset();
         }
-        if (notify_framework) {
-            notify(Status::session_end);
-            notify(Status::engine_off);
-        }
+        if (notify_framework) report_end();
+    }
+
+    // Tells the framework the session and the engine ended, once per session.
+    void report_end() {
+        if (end_reported_.exchange(true)) return;
+        notify(Status::session_end);
+        notify(Status::engine_off);
     }
 
     void run() {
         char buffer[512];
+        // True when stop() ended the loop; stop() then reports the end itself.
+        bool asked_to_stop = false;
         for (;;) {
             pollfd fds[2] = {{device_, POLLIN, 0}, {wake_read_, POLLIN, 0}};
             if (poll(fds, 2, -1) < 0) {
@@ -195,7 +210,10 @@ private:
                 log("poll failed: errno " + std::to_string(errno));
                 break;
             }
-            if (fds[1].revents != 0) break;
+            if (fds[1].revents != 0) {
+                asked_to_stop = true;
+                break;
+            }
             if ((fds[0].revents & POLLIN) != 0) {
                 const ssize_t count = read(device_, buffer, sizeof(buffer));
                 if (count < 0) {
@@ -216,8 +234,13 @@ private:
             }
         }
         // A session with no receiver behind it has nothing to keep awake for.
-        std::lock_guard guard(shared_);
-        wakelock_.reset();
+        {
+            std::lock_guard guard(shared_);
+            wakelock_.reset();
+        }
+        // The receiver went away by itself: the framework is told, with no lock
+        // of the engine held, and the stop() that follows finds it told.
+        if (!asked_to_stop) report_end();
     }
 
     void report(const nmea::Epoch& epoch) {
@@ -244,6 +267,9 @@ private:
     // Serializes start() and stop(); the session's thread never takes it.
     mutable std::mutex control_;
     bool running_ = false;
+    // Set once the framework has been told this session ended, by the thread or
+    // by stop(); whichever comes first does the telling.
+    std::atomic<bool> end_reported_{false};
     int device_ = -1;
     int wake_read_ = -1;
     int wake_write_ = -1;

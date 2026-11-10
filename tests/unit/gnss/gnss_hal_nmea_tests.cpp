@@ -410,6 +410,61 @@ void checksumsMatchTheWriter()
     require(!sentence_body(""));
 }
 
+/* A stream that never ends an epoch (no second GGA, no $PKRNF) cannot grow the
+ * epoch in progress without bound; one more sentence than an epoch may hold
+ * drops it, and the parser carries on with the next epoch. */
+void boundsAnEpochThatNeverEnds()
+{
+    using andarium::gnss::nmea::kMaxEpochSentences;
+    const std::string gga = "GNGGA,134530.25,3541.3700000,N,13941.5020000,E,1,,,40.0,M,40.5,M,,";
+    const std::string rmc = "GNRMC,134530.25,A,3541.3700000,N,13941.5020000,E,2.92,90.0,101126,,,A";
+    const std::string filler = withChecksum("GNGSA,A,3,,,,,,,,,,,,,,,");
+    const auto epochOf = [&](std::size_t sentences) {
+        // GGA, RMC and filler, then $PKRNF as the last of `sentences`.
+        std::string stream = withChecksum(gga) + withChecksum(rmc);
+        for (std::size_t count = 2; count + 1 < sentences; ++count)
+            stream += filler;
+        return stream + withChecksum("PKRNF,P,8.0,,,");
+    };
+
+    {
+        // The most an epoch may hold is still an epoch.
+        Parser parser;
+        const auto epochs = parser.feed(epochOf(kMaxEpochSentences));
+        require(epochs.size() == 1 && epochs[0].sentences.size() == kMaxEpochSentences);
+        require(epochs[0].position.fix_class == FixClass::precise);
+        require(parser.overflowed() == 0);
+    }
+    {
+        // One sentence more drops the epoch in progress, and $PKRNF starts a new, empty one.
+        Parser parser;
+        require(parser.feed(epochOf(kMaxEpochSentences + 1)).empty());
+        require(parser.overflowed() == 1);
+    }
+    {
+        // A stream of sentences that never end an epoch holds a bounded number.
+        Parser parser;
+        std::string stream;
+        for (int count = 0; count < 5000; ++count)
+            stream += filler;
+        require(parser.feed(stream).empty());
+        require(parser.overflowed() == (5000 - 1) / kMaxEpochSentences, "dropped each time the epoch filled");
+    }
+    {
+        // After the junk, a whole epoch comes through whatever the bound dropped.
+        Parser parser;
+        std::string stream;
+        for (int count = 0; count < 100; ++count)
+            stream += filler;
+        stream += uml::gnss::nmeaEpoch(preciseFix(), preciseTime);
+        const auto epochs = parser.feed(stream);
+        require(epochs.size() == 1, "the stream recovers");
+        require(epochs[0].position.fix_class == FixClass::precise);
+        require(near(epochs[0].position.latitude, 35.6895, 1e-5));
+        require(epochs[0].sentences.size() <= kMaxEpochSentences);
+    }
+}
+
 } // namespace
 
 int main()
@@ -431,6 +486,7 @@ int main()
         {"refuses-what-does-not-parse", refusesWhatDoesNotParse},
         {"reads-numbers-and-times", readsNumbersAndTimes},
         {"checksums-match-the-writer", checksumsMatchTheWriter},
+        {"bounds-an-epoch-that-never-ends", boundsAnEpochThatNeverEnds},
     };
     return uml::testing::runNamedTests(tests);
 }

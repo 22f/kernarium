@@ -22,6 +22,11 @@
 
 namespace andarium::gnss::nmea {
 
+// The most sentences an epoch in progress may hold. The host writes six; a
+// stream that never ends an epoch (no GGA after the first, no $PKRNF) is not
+// allowed to grow the epoch without bound: past this the epoch is dropped.
+inline constexpr std::size_t kMaxEpochSentences = 16;
+
 enum class FixClass { none, precise, approximate };
 
 // What one epoch says about where the receiver is. Every optional field is
@@ -265,6 +270,9 @@ public:
     // The sentences dropped for a bad checksum, shape or length.
     uint64_t rejected() const { return rejected_; }
 
+    // The epochs dropped for holding more than kMaxEpochSentences.
+    uint64_t overflowed() const { return overflowed_; }
+
 private:
     struct Pending {
         std::vector<std::string> sentences;
@@ -296,6 +304,10 @@ private:
         const bool proprietary = id == "PKRNF";
         const std::string_view type = id.size() == 5 && id[0] != 'P' ? id.substr(2) : std::string_view();
         if (type == "GGA" && pending_.has_gga) finish(epochs);
+        if (pending_.sentences.size() >= kMaxEpochSentences) {
+            pending_ = Pending();
+            ++overflowed_;
+        }
         pending_.sentences.push_back(std::move(text));
         if (type == "GGA") {
             pending_.gga = own(fields);
@@ -383,6 +395,7 @@ private:
     bool in_sentence_ = false;
     Pending pending_;
     uint64_t rejected_ = 0;
+    uint64_t overflowed_ = 0;
 };
 
 }  // namespace andarium::gnss::nmea

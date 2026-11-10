@@ -310,9 +310,97 @@ void releasesTheWakelockWhenTheReceiverDies()
     // A session with no receiver behind it keeps nothing awake.
     require(world.wait([&] { return world.wakelocksHeld == 0; }));
     require(world.wait([&] { return !world.logs.empty(); }));
-    // The framework's stop() still works.
+    // The framework's stop() still works, and has nothing left to say.
     engine.stop();
+    heldWakelocks(world, 0);
+    std::lock_guard lock(world.mutex);
     require(world.statuses.back() == Status::engine_off);
+}
+
+const std::vector<Status> endedSession{Status::engine_on, Status::session_begin, Status::session_end,
+                                       Status::engine_off};
+
+std::vector<Status> reportedStatuses(World& world)
+{
+    std::lock_guard lock(world.mutex);
+    return world.statuses;
+}
+
+/* A receiver that goes away ends the session by itself: the framework is told
+ * once, from the session's thread, and the stop() that follows adds nothing. */
+void reportsTheEndWhenTheReceiverDiesOnItsOwn()
+{
+    World world;
+    Engine engine(world.env(), world.sink());
+    require(engine.start());
+    world.write(epoch(preciseFix(baseNs)));
+    require(world.wait([&] { return !world.locations.empty(); }));
+    world.hangUp();
+    require(world.wait([&] { return world.statuses.size() == 4; }));
+    require(reportedStatuses(world) == endedSession);
+    require(!engine.running(), "a session that reported its end is not running");
+    heldWakelocks(world, 0);
+    {
+        std::lock_guard lock(world.mutex);
+        require(world.opens == 1, "the receiver is not opened again");
+    }
+    engine.stop();
+    require(reportedStatuses(world) == endedSession, "stop() after the end sends nothing more");
+    require(world.receiverClosed());
+    engine.stop();
+    require(reportedStatuses(world) == endedSession);
+}
+
+/* The same for a session that never received an epoch. */
+void reportsTheEndOfASessionThatReadNothing()
+{
+    World world;
+    Engine engine(world.env(), world.sink());
+    require(engine.start());
+    world.hangUp();
+    require(world.wait([&] { return world.statuses.size() == 4; }));
+    require(reportedStatuses(world) == endedSession);
+    // Destroying the engine after the end is silent too.
+}
+
+/* A restart after the end is a new session: it reports its own beginning, and
+ * its end is reported again. */
+void restartsAfterTheEnd()
+{
+    World world;
+    Engine engine(world.env(), world.sink());
+    require(engine.start());
+    world.hangUp();
+    require(world.wait([&] { return world.statuses.size() == 4; }));
+    require(engine.start());
+    require(engine.running());
+    require(reportedStatuses(world) ==
+            (std::vector<Status>{Status::engine_on, Status::session_begin, Status::session_end,
+                                 Status::engine_off, Status::engine_on, Status::session_begin}));
+    heldWakelocks(world, 1);
+    world.write(epoch(preciseFix(baseNs)));
+    require(world.wait([&] { return !world.locations.empty(); }));
+    engine.stop();
+    require(reportedStatuses(world).size() == 8);
+    require(reportedStatuses(world).back() == Status::engine_off);
+    std::lock_guard lock(world.mutex);
+    require(world.opens == 2);
+}
+
+/* stop() and the receiver dying at the same moment report the end once, from
+ * whichever gets there first. */
+void reportsTheEndOnceWhenStopRacesTheReceiverDying()
+{
+    for (int round = 0; round < 300; ++round) {
+        World world;
+        Engine engine(world.env(), world.sink());
+        require(engine.start());
+        std::thread hang([&] { world.hangUp(); });
+        engine.stop();
+        hang.join();
+        require(reportedStatuses(world) == endedSession, "one end per session");
+        heldWakelocks(world, 0);
+    }
 }
 
 void runsWithoutAWakelockWhenThereIsNone()
@@ -581,6 +669,10 @@ int main()
         {"holds-the-wakelock-for-the-whole-session", holdsTheWakelockForTheWholeSession},
         {"takes-no-wakelock-outside-a-session", takesNoWakelockBeforeStartOrAfterStop},
         {"releases-the-wakelock-when-the-receiver-dies", releasesTheWakelockWhenTheReceiverDies},
+        {"reports-the-end-when-the-receiver-dies", reportsTheEndWhenTheReceiverDiesOnItsOwn},
+        {"reports-the-end-of-a-session-that-read-nothing", reportsTheEndOfASessionThatReadNothing},
+        {"restarts-after-the-end", restartsAfterTheEnd},
+        {"reports-the-end-once-when-stop-races", reportsTheEndOnceWhenStopRacesTheReceiverDying},
         {"runs-without-a-wakelock-when-there-is-none", runsWithoutAWakelockWhenThereIsNone},
         {"fails-when-the-receiver-cannot-be-opened", failsWhenTheReceiverCannotBeOpened},
         {"reports-nothing-after-stop", reportsNothingAfterStop},
