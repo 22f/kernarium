@@ -9,11 +9,11 @@
 #include <map>
 #include <memory_resource>
 #include <utility>
+#include <vector>
 
 namespace arm64 = uml::cpu::arm64;
 namespace gadgets = arm64::gadgets;
 
-extern "C" void uml_arm64_gadget_link_exit();
 extern "C" void uml_arm64_gadget_branch_register_cached();
 extern "C" void uml_arm64_gadget_branch_link_register_cached();
 extern "C" void uml_arm64_gadget_return_cached();
@@ -24,35 +24,29 @@ namespace {
 using uml::testing::require;
 using uml::emulator::tests::address;
 
-/* Laid out as the executor's link record: the unlinked stream is one
- * link_exit word, which takes the PC from the BlockLink behind it. */
+/* Laid out as the executor's link record: unlinked, it names link_exit,
+ * which takes the PC from the link itself, and linked, a copy of a program
+ * behind a block header, as the executor stores a block. */
 struct LinkTarget final {
-	explicit LinkTarget(std::uint64_t pc) noexcept
-		: fallback_stream{address(uml_arm64_gadget_link_exit)},
-		  link{
-			.stream = &fallback_stream,
-			.instruction_count = 0,
-			.guest_pc = pc,
-		  }
+	explicit LinkTarget(std::uint64_t pc) noexcept : link{.guest_pc = pc}
 	{
+		uml::emulator::tests::unlink(link);
 	}
 
-	void resolve(const gadgets::BuildResult &target) noexcept
+	LinkTarget(const LinkTarget &) = delete;
+	LinkTarget &operator=(const LinkTarget &) = delete;
+
+	void resolve(const gadgets::BuildResult &target)
 	{
-		link.stream = target.program.words().data();
-		link.instruction_count = target.program.instruction_count();
+		blocks.emplace_back(target.program);
+		blocks.back().link(link);
 	}
 
-	void reset() noexcept
-	{
-		link.stream = &fallback_stream;
-		link.instruction_count = 0;
-	}
+	void reset() noexcept { uml::emulator::tests::unlink(link); }
 
-	std::uintptr_t fallback_stream;
 	gadgets::BlockLink link;
+	std::vector<uml::emulator::tests::LinkedBlock> blocks;
 };
-static_assert(offsetof(LinkTarget, link) == sizeof(std::uintptr_t));
 
 gadgets::BuildResult build_target(std::uint64_t pc, std::uint16_t value)
 {
