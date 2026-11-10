@@ -101,4 +101,5 @@ suspended until the host resumes it.
 
 `tests/unit/gnss` drives the device through its queues and its event descriptor
 with synthetic fixes (`ctest -R '^(gnss|virtio-gnss)'`). `guest-gnss-receiver`
-([testing](../../../docs/testing.md)) checks the whole path on a Linux guest.
+(`tests/integration/gnss`) checks the whole path on a Linux guest, including a
+suspend the guest enters by itself with the receiver closed and open.
