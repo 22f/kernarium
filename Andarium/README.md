@@ -225,10 +225,25 @@ control out.
 - **Updates.** `InstanceRules.decide` applies the rules of the
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
-  `data.img` first, and Erase guest deletes everything the guest has stored,
-  the snapshot and the adb key included.
+  `data.img` first (the update's copy, until the updated Android has booted),
+  and Erase guest deletes everything the guest has stored, its snapshots and
+  the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
-  user turns on Back up guest data.
+  user turns on Back up guest data. Its snapshots are never backed up.
+- **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
+  `instance.json`, in `Library/Guest/Snapshots/` (`SnapshotStore`): it costs
+  nothing when made and then the blocks the guest rewrites. It keeps the data
+  and the record of its Android, not the guest's choices, the system disk or
+  the adb key. Create, Restore and Delete run only while the guest is stopped
+  (Home, with no run active, pending or launching, since iOS takes no file lock
+  on the disk), and Create only after Android's own shut down and with no
+  update unfinished. Restore replaces the data and keeps nothing of the state
+  it replaces; a snapshot of an older Android then updates at the next start,
+  and one of a newer Android or layout is refused. Rename runs at any time.
+  Each operation ends in a state the next launch completes or discards
+  (`TwoDiskStorage.recoverSnapshots` runs before the guest is read). The
+  update's copy is not a snapshot. `SnapshotDriver` is what the screens call,
+  and a refusal is a `SnapshotRefusal`.
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
   from build 8 (build 5, the first public release, and builds 6 and 7 have
   none).

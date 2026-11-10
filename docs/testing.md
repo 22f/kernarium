@@ -283,7 +283,9 @@ automation host.
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
 free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
-with `swift test` (it includes the haptics session on fake guests and
+with `swift test` (it includes the snapshot store on APFS clones of sparse
+files in a temporary directory, with a stop after every step of each
+operation, the haptics session on fake guests and
 players, the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
 test against too, and the session record's stall slot against the golden slot
@@ -301,7 +303,11 @@ application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium`). The hosted tests
+an Apple silicon Mac (`xcodebuild test -scheme Andarium`). `SnapshotFileApiTests`
+checks the file calls the guest's snapshots use (clone, private size, extent
+map, backup attribute) on a small sparse file and prints their answers on a
+`SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
+fail on it. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
