@@ -60,9 +60,9 @@ satellite fix, and the stream says so. GGA carries the altitude above sea level
 and the geoid separation (ellipsoidal altitude minus altitude). GST carries the
 horizontal accuracy as a radial error divided by the square root of two on each
 axis, and the vertical accuracy. The satellite count and the dilutions are
-empty. `$PKRNF,<class>,<horizontal m>,<vertical m>,<speed m/s>,<course deg>`
-carries what NMEA cannot: the class, and the accuracies as the host reported
-them.
+empty. `$PKRNF,<class>,<hacc>,<vacc>,<sacc>,<cacc>` carries what NMEA cannot:
+the class, and the horizontal, vertical, speed and course accuracies (meters,
+meters, meters per second, degrees) as the host reported them.
 
 A precise fix is repeated for 10 seconds and an approximate one for 20 minutes
 (the host delivers it up to that old); after that the epoch reports no fix.
