@@ -527,6 +527,12 @@ PRODUCT_PACKAGES += kernarium_reclaim_boot_apps_script
 # with it off alone. It runs from system_ext in a core domain of its own.
 PRODUCT_PACKAGES += kernarium_time_zone_script
 
+# Android hides its on-screen keyboard while a hardware keyboard is attached unless
+# "Show on-screen keyboard" is on. The SettingsProvider overlay turns it off for a new
+# guest; once boot completes this script turns it off, once, for a guest whose settings
+# an older release created with it on. It runs from system_ext in a core domain of its own.
+PRODUCT_PACKAGES += kernarium_keyboard_default_script
+
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it
 # back, so a row pitch the driver cannot import or the renderer misreads fails

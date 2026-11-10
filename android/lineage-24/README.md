@@ -311,6 +311,17 @@ Back and Home) has a layout of those five keys alone, so Android no longer count
 it as a full keyboard that is always attached. The verifier requires each file's
 content.
 
+Android hides its on-screen keyboard while a hardware keyboard is attached
+unless "Show on-screen keyboard" is on, and the product's default is off (the
+SettingsProvider overlay): the keyboard shows until the host's keyboard is
+attached. SettingsProvider writes a default only when it first creates a guest's
+settings, so a guest that an older release created holds 1. Once boot completes,
+`kernarium_keyboard_default` (`overlay/tools`, a script in a core domain of its
+own) turns a stored 1 off, once; its marker property records that it has looked,
+so a person who turns the setting on afterwards keeps it on. The setting has no
+history that tells the old default from a person's choice of 1, so a 1 chosen
+earlier is turned off once as well.
+
 init starts a service on a keychord whenever its keys are down together on any
 input device, so typing would fire one: the product's `bugreport` service has
 none (Cuttlefish's was A and B), and the verifier refuses a keychord in the

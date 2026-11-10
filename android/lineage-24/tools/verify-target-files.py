@@ -257,6 +257,8 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_reclaim_boot_apps.rc",
     "SYSTEM_EXT/bin/kernarium_time_zone.sh",
     "SYSTEM_EXT/etc/init/kernarium_time_zone.rc",
+    "SYSTEM_EXT/bin/kernarium_keyboard_default.sh",
+    "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
     "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
     "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
     "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
@@ -813,6 +815,39 @@ TIME_ZONE_SCRIPT_FORBIDDEN = (
 TIME_ZONE_TRANSITION = re.compile(
     rb"^\(typetransition init(?:_[0-9]+)? kernarium_time_zone_exec process "
     rb"kernarium_time_zone\)$",
+    re.MULTILINE,
+)
+# Android hides its on-screen keyboard while a hardware keyboard is attached unless the user's
+# "Show on-screen keyboard" (Settings.Secure.show_ime_with_hard_keyboard) is on. The product's
+# default is off, which SettingsProvider writes only when it first creates a guest's settings, so
+# once boot completes a script changes a stored 1 to 0 in a guest that started with an older release,
+# once (overlay/tools/kernarium_keyboard_default.sh, in a core domain of its own on system_ext in
+# overlay/sepolicy/system_ext/private). A marker property records that it has looked, so a person who
+# turns the setting on afterwards keeps it on.
+KEYBOARD_DEFAULT_SERVICE = (
+    "kernarium_keyboard_default", "/system_ext/bin/kernarium_keyboard_default.sh"
+)
+KEYBOARD_DEFAULT_TRIGGER = "property:sys.boot_completed=1"
+KEYBOARD_DEFAULT_MARKER = "persist.sys.kernarium.keyboard_default"
+KEYBOARD_DEFAULT_MARKER_TYPE = "kernarium_keyboard_default_prop"
+KEYBOARD_DEFAULT_SCRIPT_REQUIRED = (
+    "cmd settings get secure show_ime_with_hard_keyboard",
+    "cmd settings put secure show_ime_with_hard_keyboard 0",
+    KEYBOARD_DEFAULT_MARKER,
+    'setprop "$marker" 1',
+)
+KEYBOARD_DEFAULT_SCRIPT_FORBIDDEN = (
+    "settings put secure show_ime_with_hard_keyboard 1",
+    "settings put global",
+    "settings put system",
+    "settings delete",
+    "settings reset",
+    "--user",
+    "svc ",
+)
+KEYBOARD_DEFAULT_TRANSITION = re.compile(
+    rb"^\(typetransition init(?:_[0-9]+)? kernarium_keyboard_default_exec process "
+    rb"kernarium_keyboard_default\)$",
     re.MULTILINE,
 )
 # The partition the host grew is filled on every boot, once /data is mounted
@@ -1423,6 +1458,12 @@ def check_boot_policy(
             "utf-8", errors="strict"
         ),
         read_small(archive, infos["SYSTEM_EXT/bin/kernarium_time_zone.sh"]),
+    )
+    check_keyboard_default(
+        read_small(archive, infos["SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc"]).decode(
+            "utf-8", errors="strict"
+        ),
+        read_small(archive, infos["SYSTEM_EXT/bin/kernarium_keyboard_default.sh"]),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -3075,6 +3116,13 @@ def check_kernel_policy(
             "utf-8", errors="strict"
         ),
     )
+    check_keyboard_default_policy(
+        system_ext_policy,
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_property_contexts"]).decode(
+            "utf-8", errors="strict"
+        ),
+    )
     check_property_writers(
         platform_policy,
         vendor_policy,
@@ -3515,6 +3563,100 @@ def check_time_zone_policy(
         if line.strip() and not line.lstrip().startswith("#")
     ):
         fail(f"system_ext property contexts do not label {TIME_ZONE_MARKER}")
+
+
+def check_keyboard_default(rc_payload: str, script: bytes) -> None:
+    """The script that moves an older guest to the on-screen keyboard default runs once after boot."""
+    name, executable = KEYBOARD_DEFAULT_SERVICE
+    service = init_services(rc_payload).get(name)
+    if service is None or service[0] != executable:
+        fail(f"system_ext init policy does not declare the {name} service at {executable}")
+    for option in ("oneshot", "disabled"):
+        if option not in service[1]:
+            fail(f"system_ext init policy does not declare {name} as {option}")
+    actions = init_actions(rc_payload)
+    for trigger, commands in actions.items():
+        if f"start {name}" in commands and trigger != KEYBOARD_DEFAULT_TRIGGER:
+            fail(f"system_ext init policy starts {name} under '{trigger}'")
+    if f"start {name}" not in actions.get(KEYBOARD_DEFAULT_TRIGGER, []):
+        fail(f"system_ext init policy does not start {name} when boot completes")
+    code = "\n".join(
+        line
+        for line in script.decode("utf-8", errors="strict").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for token in KEYBOARD_DEFAULT_SCRIPT_REQUIRED:
+        if token not in code:
+            fail(f"{executable} does not contain '{token}'")
+    for token in KEYBOARD_DEFAULT_SCRIPT_FORBIDDEN:
+        if token in code:
+            fail(
+                f"{executable} contains '{token}': it may only read the on-screen keyboard setting "
+                "and turn it off, once"
+            )
+
+
+def check_keyboard_default_policy(
+    system_ext_policy: bytes, system_ext_file_contexts: bytes, system_ext_property_contexts: str
+) -> None:
+    """The script runs in its own core domain, uses only the settings service, sets only its marker."""
+    domain = KEYBOARD_DEFAULT_SERVICE[0]
+    if file_context_label(system_ext_file_contexts, KEYBOARD_DEFAULT_SERVICE[1]) != (
+        f"u:object_r:{domain}_exec:s0"
+    ):
+        fail(f"system_ext file contexts do not label {KEYBOARD_DEFAULT_SERVICE[1]}")
+    if not KEYBOARD_DEFAULT_TRANSITION.search(system_ext_policy):
+        fail("system_ext policy does not move init into the keyboard default domain")
+
+    def has(source: str, target: str, object_class: bytes, permission: bytes) -> bool:
+        return any(
+            CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) == source
+            and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) == target
+            and match.group(3) == object_class
+            and permission in match.group(4).split()
+            for match in CIL_ALLOW_RULE.finditer(system_ext_policy)
+        )
+
+    for source, target, object_class, permission, why in (
+        (domain, "settings_service", b"service_manager", b"find",
+         "cmd finds the settings service to read and write the on-screen keyboard setting"),
+        (domain, "system_server", b"binder", b"transfer",
+         "cmd hands the service the receiver of its result"),
+        ("system_server", domain, b"binder", b"call",
+         "cmd waits for the receiver of its result"),
+        ("system_server", domain, b"fd", b"use",
+         "the service writes to the descriptors cmd passes"),
+        ("system_server", domain, b"fifo_file", b"write",
+         "the settings service writes the setting it reads to a pipe"),
+    ):
+        if not has(source, target, object_class, permission):
+            fail(
+                f"system_ext policy does not allow {source} {target} {object_class.decode()} "
+                f"{permission.decode()}: {why}"
+            )
+    if KEYBOARD_DEFAULT_MARKER_TYPE not in cil_attribute_members(
+        system_ext_policy, "system_property_type"
+    ):
+        fail(f"system_ext policy does not define the system-owned {KEYBOARD_DEFAULT_MARKER_TYPE}")
+    settable = {
+        CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode())
+        for match in CIL_PROPERTY_SET_RULE.finditer(system_ext_policy)
+        if CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) == domain
+        and b"set" in match.group(3).split()
+    }
+    if KEYBOARD_DEFAULT_MARKER_TYPE not in settable:
+        fail(f"system_ext policy does not let the keyboard default domain set {KEYBOARD_DEFAULT_MARKER}")
+    if settable != {KEYBOARD_DEFAULT_MARKER_TYPE}:
+        fail(
+            f"system_ext policy lets the keyboard default domain set {sorted(settable)}, not only "
+            f"its own marker {KEYBOARD_DEFAULT_MARKER_TYPE}"
+        )
+    if not any(
+        line.split()[:2] == [KEYBOARD_DEFAULT_MARKER, f"u:object_r:{KEYBOARD_DEFAULT_MARKER_TYPE}:s0"]
+        for line in system_ext_property_contexts.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ):
+        fail(f"system_ext property contexts do not label {KEYBOARD_DEFAULT_MARKER}")
 
 
 # The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
