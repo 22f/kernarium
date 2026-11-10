@@ -124,14 +124,19 @@ struct SnapshotCrashTests {
         var app: TwoDiskStorage
         var snapshot: SnapshotID
         var record: Data
+        /// A second snapshot of the same data, made before the divergence, when asked for.
+        var other: SnapshotID? = nil
 
         /// A disk of 8 GiB, snapshotted, then moved on: other data, an
         /// update that began and did not finish, and settings that say 4 GiB.
         /// `io` is what the snapshot store of `app` calls.
-        static func make(io: SnapshotFileOperations = .live, includeInBackups: Bool = false) async throws -> Scenario {
+        static func make(
+            io: SnapshotFileOperations = .live, includeInBackups: Bool = false, withOther: Bool = false
+        ) async throws -> Scenario {
             let fixture = try await SnapshotFixture.make(gib: 8, includeInBackups: includeInBackups, marker: 1)
             let record = try Data(contentsOf: fixture.files.state)
             let made = try fixture.storage.createSnapshot(named: "good")
+            let other = withOther ? try fixture.storage.createSnapshot(named: "other").id : nil
             try TestDisk.write(fixture.data, at: 0, count: 1 << 20, value: 2)
             let app = fixture.app(using: io, on: snapshotNewer)
             try await app.prepareStart(fixture.guest)
@@ -140,7 +145,7 @@ struct SnapshotCrashTests {
             choices.capacityGiB = 4
             choices.pendingCapacityGiB = 6
             try app.save(choices)
-            return Scenario(fixture: fixture, app: app, snapshot: made.id, record: record)
+            return Scenario(fixture: fixture, app: app, snapshot: made.id, record: record, other: other)
         }
 
         /// The guest as the application holds it before the restore.

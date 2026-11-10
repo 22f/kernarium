@@ -34,7 +34,7 @@ extension TwoDiskStorage {
         let copyFigure = copies.isEmpty ? nil : SnapshotMeasure.freed(by: copies, keeping: live + wholeSnapshots, using: calls)
         return SnapshotListing(
             items: items, space: SnapshotSpace(snapshotsUse: use, updateCopy: copyFigure),
-            createRefusal: store.createRefusal()
+            createRefusal: store.createRefusal(), unfinishedRestore: store.unfinishedRestore()
         )
     }
 

@@ -191,3 +191,53 @@ struct SnapshotFaultTests {
         }
     }
 }
+
+/// A restore that cannot finish leaves the person able to make room and says
+/// which restore it is.
+@Suite(.enabled(if: temporaryVolumeClones, "needs a volume that clones files"))
+struct SnapshotUnfinishedRestoreTests {
+    @Test func afterAFailedRollForwardTheLeftoversAreGoneOtherSnapshotsCanBeDeletedAndTheListingSaysWhich() async throws {
+        let faults = SnapshotFaults(guestDirectory: URL(fileURLWithPath: "/"))
+        let scenario = try await SnapshotCrashTests.Scenario.make(io: faults.operations, withOther: true)
+        defer { scenario.fixture.cleanUp() }
+        let other = try #require(scenario.other)
+        // A half-deleted snapshot and a half-made one hold space.
+        for prefix in [".gone-", ".new-"] {
+            let leftover = scenario.fixture.snapshots.appendingPathComponent(prefix + SnapshotID().rawValue)
+            try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+            try Data(count: 1 << 20).write(to: leftover.appendingPathComponent("data.img"))
+        }
+        // A restore that took effect and stopped after the commit.
+        faults.restart()
+        faults.fail(when: { $0.name == "write" && $0.path.hasSuffix("/instance.json") })
+        let result = SnapshotResult<Guest>(catching: { try scenario.app.restoreSnapshot(scenario.snapshot, guest: scenario.guest) })
+        #expect(result.refusal == .restoreUnfinished)
+        #expect(FileManager.default.fileExists(atPath: scenario.intent.path))
+
+        // The next launch cannot finish it (no room, here), and still clears the leftovers first.
+        faults.restart()
+        faults.fail(when: { $0.name == "clone" }, with: CloneFile.Failure(code: ENOSPC))
+        #expect(throws: SnapshotRestoreUnfinished.self) { try scenario.app.recoverSnapshots() }
+        #expect(GuestDirectory.leftovers(scenario.fixture.directory).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: scenario.intent.path))
+
+        // The listing says which restore, and why it is not finished is for the caller to add.
+        let listing = scenario.app.snapshotListing()
+        #expect(listing.unfinishedRestore == SnapshotUnfinishedRestore(snapshot: scenario.snapshot))
+        #expect(listing.createRefusal == .restoreUnfinished)
+
+        // Room is made by deleting another snapshot; the one being restored stays.
+        #expect(throws: SnapshotRefusal.restoreUnfinished) { try scenario.app.deleteSnapshot(scenario.snapshot) }
+        try scenario.app.deleteSnapshot(other)
+        #expect(scenario.app.snapshotListing().items.map(\.id) == [scenario.snapshot])
+        // And the restore finishes once there is room again.
+        try scenario.app.recoverSnapshots()
+        try SnapshotCrashTests.expectRestored(scenario)
+        #expect(scenario.app.snapshotListing().unfinishedRestore == nil)
+    }
+
+    @Test func aFailureIsAValueWithTheSystemsOwnDescription() {
+        let failure = SnapshotFailure(POSIXError(.ENOSPC))
+        #expect(failure.domain == NSPOSIXErrorDomain && failure.code == Int(ENOSPC) && !failure.description.isEmpty)
+    }
+}

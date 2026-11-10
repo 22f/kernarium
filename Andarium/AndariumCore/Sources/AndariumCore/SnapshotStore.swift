@@ -152,6 +152,15 @@ struct SnapshotStore: Sendable {
         if case .none = intent() { false } else { true }
     }
 
+    /// The restore that began and did not finish, or nil.
+    func unfinishedRestore() -> SnapshotUnfinishedRestore? {
+        switch intent() {
+        case .none: nil
+        case .unreadable: SnapshotUnfinishedRestore()
+        case .readable(let id): SnapshotUnfinishedRestore(snapshot: id)
+        }
+    }
+
     // MARK: Create
 
     private struct CreateInputs {

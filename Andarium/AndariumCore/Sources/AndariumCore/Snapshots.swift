@@ -333,6 +333,38 @@ public struct SnapshotSummary: Equatable, Sendable, Identifiable {
     public var isDamaged: Bool { restore == .refused(.incomplete) }
 }
 
+/// An I/O error as a value, for a screen to say in its own words or to show
+/// the system's description of.
+public struct SnapshotFailure: Equatable, Sendable {
+    public var domain: String
+    public var code: Int
+    /// The system's own description.
+    public var description: String
+
+    public init(_ error: any Error) {
+        let bridged = error as NSError
+        domain = bridged.domain
+        code = bridged.code
+        description = error.localizedDescription
+    }
+}
+
+/// A restore that put the snapshot's data in place and did not finish. It
+/// completes when the guest starts or Andarium is opened again; until it does,
+/// Create and Restore are refused, and every snapshot but this one can be
+/// deleted.
+public struct SnapshotUnfinishedRestore: Equatable, Sendable {
+    /// The snapshot being restored; nil when the record of the restore cannot be read.
+    public var snapshot: SnapshotID?
+    /// What stopped the last attempt to finish it in this process, if one did.
+    public var lastFailure: SnapshotFailure?
+
+    public init(snapshot: SnapshotID? = nil, lastFailure: SnapshotFailure? = nil) {
+        self.snapshot = snapshot
+        self.lastFailure = lastFailure
+    }
+}
+
 /// The snapshots, their space and what may be done now.
 public struct SnapshotListing: Equatable, Sendable {
     /// Newest first.
@@ -345,15 +377,19 @@ public struct SnapshotListing: Equatable, Sendable {
     /// state, or nil when the guest is stopped and idle. Rename and the list
     /// do not depend on it.
     public var whileNotStopped: SnapshotRefusal?
+    /// A restore that did not finish, or nil.
+    public var unfinishedRestore: SnapshotUnfinishedRestore?
 
     public init(
         items: [SnapshotSummary] = [], space: SnapshotSpace = SnapshotSpace(),
-        createRefusal: SnapshotRefusal? = nil, whileNotStopped: SnapshotRefusal? = nil
+        createRefusal: SnapshotRefusal? = nil, whileNotStopped: SnapshotRefusal? = nil,
+        unfinishedRestore: SnapshotUnfinishedRestore? = nil
     ) {
         self.items = items
         self.space = space
         self.createRefusal = createRefusal
         self.whileNotStopped = whileNotStopped
+        self.unfinishedRestore = unfinishedRestore
     }
 }
 
