@@ -3279,6 +3279,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"SYSTEM_EXT/priv-app/LineageSetupWizard/LineageSetupWizard.apk": None}}),
             ("auto-provisioner-bypasses-setup",
              {"extra_entry": "SYSTEM/priv-app/Provision/Provision.apk"}),
+            ("gamepad-probe-left-in-the-image",
+             {"entries": {"SYSTEM/app/AndariumGamepadProbe/AndariumGamepadProbe.apk":
+                          synthetic_apk(debuggable=False)}}),
             ("motion-probe-left-in-the-image",
              {"entries": {"SYSTEM/app/AndariumMotionProbe/AndariumMotionProbe.apk":
                           synthetic_apk(debuggable=False)}}),
@@ -3874,6 +3877,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-pinner-overlay-cause",
              {"entries": {"VENDOR/overlay/KernariumPinnerOverlay.apk": None}},
              "VENDOR/overlay/KernariumPinnerOverlay.apk"),
+            ("gamepad-probe-left-in-the-image-cause",
+             {"entries": {"SYSTEM/app/AndariumGamepadProbe/AndariumGamepadProbe.apk":
+                          synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: "
+             "SYSTEM/app/AndariumGamepadProbe"),
             ("motion-probe-left-in-the-image-cause",
              {"entries": {"SYSTEM/app/AndariumMotionProbe/AndariumMotionProbe.apk":
                           synthetic_apk(debuggable=False)}},

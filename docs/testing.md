@@ -545,6 +545,15 @@ names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
 render rate and the frame rates at each severity, on a fresh data disk or, with
 `--instance`, over an older release's.
+`android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
+names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
+[`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the
+runner plays the host application over a vsock forward, creates a controller of
+each driver family (generic, Xbox, DualSense), sends reports and checks what
+Android sees (devices, keys, axes), what comes back (rumble, lights, the
+drivers' feature requests), hot plug, the relay's recovery, and reports the
+guest's cost per report and the relay's memory. `android17-gamepad-runner`
+(tooling) runs its wire, controllers and parsers without a guest.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

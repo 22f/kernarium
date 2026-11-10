@@ -272,6 +272,9 @@ Recovery does not run it.
 `overlay/gamepad/gamepad_protocol.hpp` and
 `Andarium/AndariumCore/Sources/AndariumCore/GamepadProtocol.swift` own the wire
 format, which the golden frames in `tests/unit/andarium/fixtures` pin.
+`tests/integration/android/run_android_gamepad.py` (`android-gamepad`) plays the
+host against a booted release; its probe app is
+[`tests/integration/android/gamepad`](../../tests/integration/android/gamepad/README.md).
 
 ### Networking
 
