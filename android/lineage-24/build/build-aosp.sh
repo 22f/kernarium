@@ -383,6 +383,10 @@ PRODUCT_PACKAGES=" $(get_build_var PRODUCT_PACKAGES) "
 	fail "the Android motion sensor service is absent"
 [[ "$PRODUCT_PACKAGES" == *" android.hardware.sensors@2.1-impl.andarium "* ]] ||
 	fail "the Andarium motion sensor backend is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.vibrator-service.andarium "* ]] ||
+	fail "the Andarium vibrator service is absent"
+[[ "$(get_build_var ODM_MANIFEST_SKUS)" == haptics ]] ||
+	fail "ODM_MANIFEST_SKUS must be exactly haptics: the vibrator HAL exists only in that SKU's manifest"
 for package in \
 	android.hardware.health-service.example \
 	android.hardware.health-service.example_recovery \
@@ -504,6 +508,7 @@ for package in \
 	com.android.hardware.security.secretkeeper \
 	com.android.hardware.tetheroffload \
 	com.android.hardware.usb \
+	com.android.hardware.vibrator \
 	com.android.vndk.v31 \
 	com.android.vndk.v32 \
 	com.android.vndk.v33 \
