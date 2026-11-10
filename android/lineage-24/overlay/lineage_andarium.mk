@@ -17,8 +17,9 @@
 
 # Select the UML-safe branches in the inherited Cuttlefish product before it
 # is evaluated. The Darwin machine has no nested Trusty VM, modem, NFC,
-# Bluetooth, GNSS, biometric, secure-element, or camera transport, and its
-# Wi-Fi is the kernel's virtual one (kernarium_net_setup).
+# Bluetooth, biometric, secure-element, or camera transport, and its Wi-Fi is
+# the kernel's virtual one (kernarium_net_setup). Its GNSS is the host's
+# position, behind the kernel's /dev/gnss0 (overlay/gnss).
 TRUSTY_SYSTEM_VM := disabled
 UML_ANDROID_SECURITY_HALS := nonsecure
 UML_ANDROID_BUILTIN_KERNEL := true
@@ -53,7 +54,10 @@ LOCAL_SENSOR_PRODUCT_PACKAGE := \
     android.hardware.sensors@2.1-impl.andarium
 LOCAL_ENABLE_NFC := false
 LOCAL_ENABLE_FRP := false
-LOCAL_GNSS_PRODUCT_PACKAGE :=
+# Cuttlefish's gnss fragment installs this package where it would install the
+# example HAL's APEX, which stays excluded below. The HAL reads the host's
+# receiver (/dev/gnss0) and is declared on every device.
+LOCAL_GNSS_PRODUCT_PACKAGE := android.hardware.gnss-service.andarium
 # Select the inherited HIDL primary HAL explicitly so Cuttlefish does not also
 # append its MMAP-capable product-property defaults.
 LOCAL_AUDIO_PRODUCT_PACKAGE := \
@@ -388,7 +392,6 @@ PRODUCT_COPY_FILES_EXCLUDE += \
     frameworks/native/data/etc/android.hardware.camera.raw.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.camera.raw.xml \
     frameworks/native/data/etc/android.hardware.consumerir.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.consumerir.xml \
     frameworks/native/data/etc/android.hardware.ethernet.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.ethernet.xml \
-    frameworks/native/data/etc/android.hardware.location.gps.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.location.gps.xml \
     frameworks/native/data/etc/android.hardware.usb.accessory.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.accessory.xml \
     frameworks/native/data/etc/android.hardware.usb.host.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.host.xml \
     frameworks/native/data/etc/android.hardware.uwb.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.uwb.xml \
@@ -397,6 +400,13 @@ PRODUCT_COPY_FILES_EXCLUDE += \
     frameworks/native/data/etc/android.software.verified_boot.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.verified_boot.xml
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/config/kernarium_core_hardware.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/handheld_core_hardware.xml
+
+# Every device declares the location and GPS features, whether or not the host
+# has a position to give: the GNSS HAL (overlay/gnss) is the guest's GPS. The
+# platform's file declares both features; LocationManagerService creates the gps
+# provider only with android.hardware.location.
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.location.gps.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.location.gps.xml
 
 # The Vulkan HAL is Mesa's Venus driver built from this project's pinned guest
 # Mesa source. Its generated Soong module names are scoped with a venus_
