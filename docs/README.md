@@ -11,6 +11,7 @@ investigation date.
 | Virtio sound: playback pacing, the null output, capture and the microphone | [`../darwin/device/audio/README.md`](../darwin/device/audio/README.md) |
 | Virtio video decoding, encoding and the private wire contract | [`../darwin/device/video/README.md`](../darwin/device/video/README.md) and [`../kernel/common/video/README.md`](../kernel/common/video/README.md) |
 | Platform hardware video encoder: discovery, cache, sessions, recovery | [`../darwin/platform/README.md`](../darwin/platform/README.md) |
+| Platform camera interface: discovery, sessions, controls, stills, the synthetic camera | [`../darwin/platform/README.md`](../darwin/platform/README.md) |
 | Virtio vsock: the host end of the guest's vsock device, for a service such as adbd | [`../darwin/device/vsock/README.md`](../darwin/device/vsock/README.md) |
 | Guest VA-API backend over the video decoder and encoder | [`../tools/video/va-v4l2/README.md`](../tools/video/va-v4l2/README.md) |
 | Attempted performance work | [`optimization-history.md`](optimization-history.md) |

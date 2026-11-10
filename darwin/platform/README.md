@@ -73,3 +73,37 @@ variant of the backend that fails sessions on demand, and
 three hardware tests share the `video-encoder-hardware` resource lock.
 `Kernarium/KernariumTests/HostVideoEncoderTests.mm` checks the same on an
 iPad.
+
+# Platform camera
+
+`camera.hpp` is the platform's camera interface; nothing in it names
+AVFoundation, V4L2 or the Virtio wire. `UML::AppleCamera`
+(`apple/camera_capture.mm`) implements it for macOS, iOS device and iOS
+Simulator, and `camera_authorization.hpp` is the system's camera permission, in
+the style of `microphone_authorization.hpp`. A Virtio camera device maps the
+interface to the wire.
+
+- **Discovery** (`cameras()`, `concurrentSets()`) reads devices, formats, ranges
+  and the multi-camera sets and needs no authorization; it never prompts. An
+  iOS 27.1 device type is read only behind an availability check. The order is
+  stable, and every index in the interface is an index into it.
+- **Sessions.** `openSession()` is the one call that can light the system's
+  capture indicator, and it returns null unless the system has granted access.
+  One session is a single `AVCaptureMultiCamSession` on iOS (an
+  `AVCaptureSession` on macOS) with an input and a video data output per running
+  camera and a photo output once a still is asked for. Frames are NV12, full
+  range, delivered through `CameraSessionDelegate` with the exposure that made
+  them; holding a frame's `owner` holds the capture's buffer.
+- **Controls** arrive as one `CameraSettings` per camera, and the session applies
+  what differs. A zoom camera (a virtual device) takes automatic exposure, focus
+  and white balance only.
+- **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
+  carries its DNG's colour data (`dng_color.hpp`), the only place the host
+  reveals it.
+- **Interruptions** (another application, a call, system pressure, iPad
+  multitasking) arrive as events; the session does not stop itself.
+- `nv12_transform.hpp` crops, rotates and scales NV12 pictures in portable C++.
+
+Tests: `camera-frame-transform` and `camera-dng-color` need nothing. The Apple
+backend's discovery runs in `camera-apple-discovery` on any host; its sessions
+are not run by a test, because a test must never capture from a real camera.
