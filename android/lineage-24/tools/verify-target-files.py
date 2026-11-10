@@ -210,6 +210,9 @@ REQUIRED_ENTRIES = {
     "VENDOR/bin/hw/android.hardware.vibrator-service.andarium",
     "VENDOR/etc/init/android.hardware.vibrator-service.andarium.rc",
     "ODM/etc/vintf/manifest_haptics.xml",
+    "VENDOR/bin/hw/android.hardware.gnss-service.andarium",
+    "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc",
+    "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -390,6 +393,7 @@ FORBIDDEN_STATIC_ENTRIES = {
     "SYSTEM/bin/wificond",
     "VENDOR/apex/com.android.hardware.boot.apex",
     "VENDOR/apex/com.android.hardware.contexthub.apex",
+    "VENDOR/apex/com.android.hardware.gnss.apex",
     "VENDOR/apex/com.android.hardware.neuralnetworks.apex",
     "VENDOR/apex/com.android.hardware.threadnetwork.apex",
     "VENDOR/apex/com.android.hardware.uwb.apex",
@@ -470,9 +474,10 @@ FORBIDDEN_APP_DIRECTORIES = {
     "F-DroidPrivilegedExtension",
     "Gallery2",
     "Jelly",
-    # In-tree test applications (tests/integration/android/{motion,webgl,storage}):
+    # In-tree test applications (tests/integration/android/{location,motion,webgl,storage}):
     # `m <module>` leaves them in the shared product output, and none belongs
     # in an image, whichever partition or DATA/app path it would reach.
+    "AndariumLocationProbe",
     "AndariumMotionProbe",
     "AndariumStorageTests",
     "AndariumWebGLProbe",
@@ -498,7 +503,6 @@ FORBIDDEN_FEATURE_DECLARATIONS = {
     "android.hardware.camera.raw.xml",
     "android.hardware.ethernet.xml",
     "android.hardware.fingerprint.xml",
-    "android.hardware.location.gps.xml",
     "android.hardware.telephony.xml",
     "android.hardware.usb.accessory.xml",
     "android.hardware.usb.host.xml",
@@ -509,6 +513,9 @@ FORBIDDEN_FEATURE_DECLARATIONS = {
     "android.hardware.wifi.rtt.xml",
     "android.software.verified_boot.xml",
 }
+# The host's position is the guest's GPS on every device (overlay/gnss), so the product
+# declares android.hardware.location and .gps permanently. The GNSS measurement tests of CTS
+# fail by design: the host gives positions and no raw measurements.
 # The Virtio sound capture stream is the product's microphone. A build
 # fingerprint cannot report it only on some boots, so the declaration is
 # permanent (CDD 7.8.1 C-0-7) and the audio policy carries its input.
@@ -524,6 +531,8 @@ FORBIDDEN_FEATURE_DECLARATIONS = {
 # MidiManager without a null check. Virtual MIDI devices (MidiDeviceService)
 # need no hardware transport, so the declaration adds no USB or Bluetooth MIDI.
 REQUIRED_FEATURE_NAMES = {
+    "android.hardware.location",
+    "android.hardware.location.gps",
     "android.hardware.touchscreen",
     "android.hardware.touchscreen.multitouch",
     "android.hardware.touchscreen.multitouch.distinct",
@@ -547,7 +556,6 @@ FORBIDDEN_FEATURE_NAMES = {
     "android.hardware.context_hub",
     "android.hardware.ethernet",
     "android.hardware.fingerprint",
-    "android.hardware.location.gps",
     "android.hardware.telephony",
     "android.hardware.usb.accessory",
     "android.hardware.usb.host",
@@ -2688,6 +2696,85 @@ def check_haptics_vibrator(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zi
         fail("vendor_file_contexts does not give the vibrator HAL its hal_vibrator_default_exec label")
 
 
+# The GNSS HAL (overlay/gnss) reads the host's receiver, /dev/gnss0, which every device has, so
+# every device declares it: one vendor fragment, an init script that starts the service at boot
+# with no condition, and no other declaration of android.hardware.gnss anywhere (the example
+# HAL's APEX is not installed). The image carries no assistance server: the sample
+# gps_debug.conf has comments only.
+GNSS_HAL_NAME = "android.hardware.gnss"
+GNSS_SERVICE = "android.hardware.gnss-service.andarium"
+GNSS_FRAGMENT = f"VENDOR/etc/vintf/manifest/{GNSS_SERVICE}.xml"
+GNSS_INTERFACE = "android.hardware.gnss.IGnss/default"
+GNSS_VERSION = "7"
+GNSS_FILE_CONTEXT = re.compile(
+    re.escape(rb"/(vendor|system/vendor)/bin/hw/android\.hardware\.gnss-service\.andarium")
+    + rb"\s+u:object_r:hal_gnss_default_exec:s0"
+)
+GNSS_DEBUG_CONF = "SYSTEM/etc/gps_debug.conf"
+
+
+def check_gnss_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for name, info in infos.items():
+        path = PurePosixPath(name)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+            or name == GNSS_FRAGMENT
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {name}: {error}")
+        if any(hal_name == GNSS_HAL_NAME for hal_name, _, _ in declared_hals(root)):
+            fail(f"{name} declares a GNSS HAL: only {GNSS_FRAGMENT} may")
+    try:
+        fragment = ET.fromstring(read_small(archive, infos[GNSS_FRAGMENT]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {GNSS_FRAGMENT}: {error}")
+    hals = declared_hals(fragment)
+    if (
+        len(hals) != 1
+        or hals[0][0] != GNSS_HAL_NAME
+        or hals[0][1] != GNSS_VERSION
+        or hals[0][2] != ["IGnss/default"]
+        or any(hal.get("format") != "aidl" for hal in fragment.iter("hal"))
+    ):
+        fail(
+            f"{GNSS_FRAGMENT} must declare exactly the AIDL IGnss/default at version "
+            f"{GNSS_VERSION}: {hals}"
+        )
+    script = read_small(archive, infos[f"VENDOR/etc/init/{GNSS_SERVICE}.rc"]).decode(
+        "utf-8", errors="strict"
+    )
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(
+        rf"service \S+ /vendor/bin/hw/{re.escape(GNSS_SERVICE)}", service[0]
+    ):
+        fail("the GNSS init script must define one service that runs the Andarium GNSS HAL")
+    for required in (f"interface aidl {GNSS_INTERFACE}", "class hal", "user gps", "group gps"):
+        if required not in lines:
+            fail(f"the GNSS service must carry '{required}'")
+    if "disabled" in lines or "oneshot" in lines:
+        fail("the GNSS service starts at boot on every device: it is neither disabled nor oneshot")
+    if any(line.startswith("on ") for line in lines):
+        fail("the GNSS init script may have no trigger: the service starts with its class")
+    if not GNSS_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the GNSS HAL its hal_gnss_default_exec label")
+    if GNSS_DEBUG_CONF in infos:
+        active = [
+            line.strip()
+            for line in read_small(archive, infos[GNSS_DEBUG_CONF]).decode("utf-8", errors="replace").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if active:
+            fail(f"{GNSS_DEBUG_CONF} configures an assistance server or a position: {active}")
+
+
 def check_hardware_features(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
 ) -> None:
@@ -4360,6 +4447,7 @@ def main() -> None:
         check_hardware_features(archive, infos)
         check_motion_sensors(archive, infos)
         check_haptics_vibrator(archive, infos)
+        check_gnss_hal(archive, infos)
         check_discrete_ops(archive, infos)
         check_default_wallpaper(archive, infos)
         check_no_statistics_uploader(archive, infos)

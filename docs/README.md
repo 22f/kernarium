@@ -19,7 +19,7 @@ investigation date.
 | Attempted performance work | [`optimization-history.md`](optimization-history.md) |
 | Performance tools, probes, and profilers | [`../tests/perf/README.md`](../tests/perf/README.md) |
 | Test fixtures: the video decoder frames and the vhost-user test devices | [`../tests/support/video/README.md`](../tests/support/video/README.md) and [`../tests/support/vhost_user/README.md`](../tests/support/vhost_user/README.md) |
-| Android test probes: motion input, storage accounting and the WebGL workload | [`../tests/integration/android/motion/README.md`](../tests/integration/android/motion/README.md), [`../tests/integration/android/storage/README.md`](../tests/integration/android/storage/README.md) and [`../tests/integration/android/webgl/README.md`](../tests/integration/android/webgl/README.md) |
+| Android test probes: motion input, location, storage accounting and the WebGL workload | [`../tests/integration/android/motion/README.md`](../tests/integration/android/motion/README.md), [`../tests/integration/android/location/README.md`](../tests/integration/android/location/README.md), [`../tests/integration/android/storage/README.md`](../tests/integration/android/storage/README.md) and [`../tests/integration/android/webgl/README.md`](../tests/integration/android/webgl/README.md) |
 | A64 instruction coverage | [`a64-instruction-coverage.md`](a64-instruction-coverage.md) and `tests/unit/arm64/*.tsv` |
 | A64 instruction corpus | [`../tests/unit/arm64/corpus/README.md`](../tests/unit/arm64/corpus/README.md) |
 | A32 instruction coverage | [`a32-instruction-coverage.md`](a32-instruction-coverage.md) and `tests/unit/arm64/a32_instruction_inventory.tsv` |
