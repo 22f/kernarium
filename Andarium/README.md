@@ -229,9 +229,11 @@ control out.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Back up guest data.
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
-  from build 6 (the first public release, build 5, has none). The first
-  launch of an update that carries notes shows a ribbon above Start, on at most
-  three launches, that opens them; Info keeps every release's notes
+  from build 8 (build 5, the first public release, and builds 6 and 7 have
+  none).
+  The first launch of an update that carries notes shows a ribbon above Start,
+  on at most three launches, that opens them; a build shows the notes up to its
+  own number and no later ones. Info keeps every release's notes
   (`WhatsNewRules`, `WhatsNewStore`). A launch with a launch setting, or one a
   test runs, shows no ribbon and keeps no record.
 
@@ -266,18 +268,26 @@ requires reopening Andarium.
   device gives the JIT its executable memory only through a debugger attached to
   the process ([`docs/architecture.md`](../docs/architecture.md#executable-code)):
   the person assigns StikDebug's universal script to Andarium once in StikDebug
-  and opens Andarium from it. With the row on, a start prepares the memory while
-  the boot screen says "Preparing JIT" and boots on the JIT engine; without a
-  debugger, or if the preparation fails, it boots on gadgets and says why on
-  the boot screen and under the row. With the row off, a start lets an attached
-  debugger go, so the guest never runs under it. The memory is prepared once per
-  process for the guest's memory and vCPUs at that start; a guest changed after
-  it needs Andarium opened from StikDebug again. Starting a Debug build from
-  Xcode attaches lldb, which would stop at the request, so Debug serves the
-  request only when the launch says a servicing debugger is attached
-  (`ANDARIUM_JIT_DEBUGGER=1`). `ANDARIUM_JIT` (`1` or `0`) states the row for a
-  harness launch, which keeps nothing; a launch with another setting starts it
-  off. The JIT compiles every process's code again for itself
+  and opens Andarium from it. StikDebug spins until its request is served and
+  the system ends it within a minute, so Andarium asks as it opens
+  (`AppModel.prepareJitAtLaunch`), on a worker, and Home does not wait for it.
+  With the row on it prepares the memory for the guest, or for the guest Create
+  offers when there is none yet, and the debugger leaves within seconds; with
+  the row off it tells the debugger to leave at once, and turning the row on
+  later in that process says to open Andarium from StikDebug. A start uses the
+  memory prepared at launch (or waits for the attempt, with "Preparing JIT" on
+  the boot screen) and boots on the JIT engine; without a debugger, or if the
+  preparation fails, it boots on gadgets and says why on the boot screen and
+  under the row. A guest changed after the memory was prepared needs Andarium
+  opened from StikDebug again, and the memory stays wired for the process
+  whether the start uses it or not (the runtime's GPU plan counts it). No
+  debugger request is made while none is attached, and one that goes unanswered
+  because the debugger vanished is a start on gadgets, never a crash. Starting a
+  Debug build from Xcode attaches lldb, which would stop at the request, so
+  Debug serves the request only when the launch says a servicing debugger is
+  attached (`ANDARIUM_JIT_DEBUGGER=1`). `ANDARIUM_JIT` (`1` or `0`) states the
+  row for a harness launch, which keeps nothing; a launch with another setting
+  starts it off. The JIT compiles every process's code again for itself
   ([cold code](../darwin/cpu/arm64/jit/README.md#cold-code)), so an Android
   guest's boot, application launches and background work run several times
   slower than on gadgets, and a long single-process computation runs faster. An
@@ -363,17 +373,20 @@ is on. `AndariumCore/Adb` speaks the protocol.
   shared as Android made it.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
-  files over the same channel, in a normal session and while USB debugging is
-  on (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). One transfer runs
+  files over the same channel, in a normal session and whatever the guest's USB
+  debugging setting is, since adbd serves the application's key either way
+  (`Live/LiveGuestFiles.swift`, `AdbSync`, `GuestFiles`). One transfer runs
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
   original until the new file is whole; the guest's media index is then told.
   A transfer stops when the application leaves the foreground, and its files
-  say so. Android reports its boot done before internal storage is mounted, so
-  the browser is unavailable, as it is with USB debugging off, until a check in
-  the guest finds the storage mounted, writable and holding a standard folder
-  (`InternalStorage`); nothing is imported or exported before then.
+  say so. Turning USB debugging off restarts adbd, which ends a transfer in
+  flight: it fails, and Try Again runs it whole. Android reports its boot done
+  before internal storage is mounted, so the browser is unavailable until a
+  check in the guest finds the storage mounted, writable and holding a
+  standard folder (`InternalStorage`); nothing is imported or exported before
+  then.
 - **ADB over network** is off at every run and never persisted, and is
   available only while the guest's USB debugging is on. `AdbNetworkBridge`
   listens on TCP 5555 and relays each computer to a fresh vsock stream, serving

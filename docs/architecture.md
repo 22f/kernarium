@@ -96,11 +96,12 @@ host GPU's budget, B, is computed once at launch and fixed for the run
 (`platform/gpu_budget.hpp`, planned by `emulator/src/gpu_budget_plan.*`):
 
 ```text
-B = clamp(L - A - G - E - S, 384 MiB, G / 2)
+B = max(L - A - G - E - S, 384 MiB)
 ```
 
 G is the guest's RAM, E the guest side's host memory, A the application's
-expected ceiling and S the unused headroom; with no limit B is G / 2. A, the rest
+expected ceiling and S the unused headroom; the guest's size does not bound B.
+With no limit there is nothing to derive B from and B is G. A, the rest
 of E and S are launch parameters defaulting to the conservative launch set in
 `runtime/guest_memory_budget.hpp`. L is the limit the system advertises to the
 process; shortage elsewhere in the system is not counted. A launch under the
@@ -137,11 +138,11 @@ size held to 4 GiB (`default_guest_memory_mib`), however much the host offers,
 and on a device whose maximum at one vCPU reaches 4 GiB at every vCPU count
 also no more than the largest 0.5 GiB step that leaves B at 1 GiB or more,
 since a 4 GiB guest otherwise runs the host GPU short long before it runs the
-process short; that step is never under 2 GiB, because B is at most half of G
-and every limit that offers 4 GiB at one vCPU leaves a 2 GiB guest more than 1
-GiB at every count. A guest with more than the default but no more than the
-conservative size is likely to run out of graphics memory, and Andarium's
-System sheet says so beside its estimate of B for the chosen RAM and vCPUs
+process short; that step is never under 2 GiB, because every limit that offers
+4 GiB at one vCPU leaves a 2 GiB guest more than 1 GiB at every count. A guest
+with more than the default but no more than the conservative size is likely to
+run out of graphics memory, and Andarium's System sheet says so beside its
+estimate of B for the chosen RAM and vCPUs
 (`gpu_budget`), from the default where the graphics rule lowered it
 (`default_guest_memory`, `holds_gpu_budget`) and otherwise, where the cap of
 4 GiB or the limit holds the default, only from the size at which B falls
@@ -208,8 +209,22 @@ no entry, Andarium's JIT row and the loader's preparation entries are compiled
 out of its application, and `check-app-store-bundle.py` refuses the symbols,
 text and the `brk` instruction. A start that cannot have the JIT runs on
 gadgets and says why; it never fails. Andarium asks for the preparation through
-runtime API 30 (`prepare_jit`, `use_jit`), with StikDebug as the debugger and
-`tests/integration/support/ios_jit_debugger.py` as the harness's.
+runtime API 30 (`prepare_jit`, `use_jit`) as it opens, because StikDebug spins
+until it is served and is ended by the system within a minute; the region then
+sits wired until the process ends, and a run that does not use it (the JIT is
+off, or the guest changed after it was prepared) carries it beside its own
+cache, which the run's GPU budget plan counts as engine memory.
+
+The owner reads `P_TRACED` right before every request and sends the `brk` from a
+thread that has `SIGTRAP` unblocked, under a process-wide `SIGTRAP` handler that
+steps over a `brk #0xf00d`, counts it and passes any other trap to the
+disposition it found. A debugger that vanishes while a request waits (its
+debugserver holds the process traced for a while, then lets go) leaves the
+request unanswered instead of ending the process; the answer is "no debugger"
+when none is attached afterwards, and a region it never prepared is given back.
+The debugger is StikDebug, and
+`tests/integration/support/ios_jit_debugger.py` is the harness's: it attaches to
+the process of its own stopped launch and serves the request at launch.
 
 Every product that embeds a kernel carries its ELF as a host-page-aligned
 Mach-O `__TEXT,__uml_elf` section, which the emulator runs in place: the loader
