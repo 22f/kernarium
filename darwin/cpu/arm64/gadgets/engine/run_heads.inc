@@ -24,12 +24,13 @@
  * The first operand word:
  *   bits 12:0   the first byte the head reads, in 8-byte units from SP at
  *               entry, signed
- *   bits 24:13  the last byte it reads, in bytes from the first
- *   bits 36:25  SP at exit, in 16-byte units from SP at entry, signed
- *   bits 55:37  the first load
- * then three loads a word, at bits 0, 19 and 38. A load is its address in
- * 8-byte units from the first byte (bits 8:0), then the CpuState indices of
- * Rt (13:9) and Rt2 (18:14). Every load reads 16 bytes and stores Rt2 before
+ *   bits 21:13  the last byte it reads, in bytes from the first
+ *   bits 33:22  SP at exit, in 16-byte units from SP at entry, signed
+ *   bits 48:34  the first load
+ *   bits 63:49  the second load
+ * then four loads a word, at bits 0, 15, 30 and 45. A load is its address in
+ * 8-byte units from the first byte (bits 4:0), then the CpuState indices of
+ * Rt (9:5) and Rt2 (14:10). Every load reads 16 bytes and stores Rt2 before
  * Rt, so a single load names its register twice and keeps its own 8 bytes;
  * the builder counts the other 8 in the span. The pair that loads X30 as
  * Rt2 is the last load, so X30 is in x10 when the loads are done.
@@ -45,9 +46,9 @@
 #endif
 
 .macro run_epilogue_load word, shift
-	ubfx x11, \word, #\shift, #9
-	ubfx x12, \word, #(\shift + 9), #5
-	ubfx x13, \word, #(\shift + 14), #5
+	ubfx x11, \word, #\shift, #5
+	ubfx x12, \word, #(\shift + 5), #5
+	ubfx x13, \word, #(\shift + 10), #5
 	add x11, x16, x11, lsl #3
 	ldp x9, x10, [x11]
 	str x10, [_vcpu, x13, lsl #3]
@@ -55,7 +56,7 @@
 .endm
 
 .macro run_epilogue loads, adds
-	.set Lrun_operand_words\@, 1 + (\loads + 1) / 3
+	.set Lrun_operand_words\@, 1 + (\loads + 1) / 4
 	/* The cell, in words from the first operand word: past the operands,
 	 * the elements' groups and the RET's counting group and gadget word. */
 	.set Lrun_elements\@, (\loads + \adds) * (Lrun_count_words + 2)
@@ -64,7 +65,7 @@ gadget run_epilogue_\loads\()_\adds
 	ldr x8, [_stream]
 	ldr x17, [_vcpu, #UML_GADGET_CPU_SP]
 	sbfx x9, x8, #0, #13
-	ubfx x10, x8, #13, #12
+	ubfx x10, x8, #13, #9
 	tst x17, #0xf
 	b.ne Lrun_epilogue_fallback\@
 	add x16, x17, x9, lsl #3
@@ -76,32 +77,31 @@ gadget run_epilogue_\loads\()_\adds
 	cmp x12, x11
 	b.ne Lrun_epilogue_fallback\@
 	add x16, x13, x16
-	sbfx x15, x8, #25, #12
+	sbfx x15, x8, #22, #12
 	add x17, x17, x15, lsl #4
-	run_epilogue_load x8, 37
+	run_epilogue_load x8, 34
 	.if \loads > 1
+	run_epilogue_load x8, 49
+	.endif
+	.if \loads > 2
 	ldr x14, [_stream, #8]
 	run_epilogue_load x14, 0
 	.endif
-	.if \loads > 2
-	run_epilogue_load x14, 19
-	.endif
 	.if \loads > 3
-	run_epilogue_load x14, 38
+	run_epilogue_load x14, 15
 	.endif
 	.if \loads > 4
+	run_epilogue_load x14, 30
+	.endif
+	.if \loads > 5
+	run_epilogue_load x14, 45
+	.endif
+	.if \loads > 6
 	ldr x14, [_stream, #16]
 	run_epilogue_load x14, 0
 	.endif
-	.if \loads > 5
-	run_epilogue_load x14, 19
-	.endif
-	.if \loads > 6
-	run_epilogue_load x14, 38
-	.endif
 	.if \loads > 7
-	ldr x14, [_stream, #24]
-	run_epilogue_load x14, 0
+	run_epilogue_load x14, 15
 	.endif
 	str x17, [_vcpu, #UML_GADGET_CPU_SP]
 	ldr x9, [_stream, #(8 * Lrun_cell\@)]

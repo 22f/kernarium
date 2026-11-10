@@ -246,29 +246,34 @@ struct Head final {
 	}
 	const auto last = end - 1 - low;
 	const auto low_units = low / 8;
-	if (last > 0xfff || low_units < -4096 || low_units > 4095 ||
+	if (low_units < -4096 || low_units > 4095 ||
 	    (sp & 15) != 0 || sp / 16 < -2048 || sp / 16 > 2047)
 		return {};
+	/* A load's place in the span has 5 bits, which keeps the span's last
+	 * byte inside its 9. */
+	for (std::size_t index = 0; index < plan.loads; ++index)
+		if (plan.load[index].address - low > 8 * 31)
+			return {};
 	const auto packed = [&](std::size_t index) {
 		const auto &load = plan.load[index];
 		return static_cast<std::uintptr_t>((load.address - low) / 8) |
-			(static_cast<std::uintptr_t>(load.first) << 9) |
-			(static_cast<std::uintptr_t>(load.second) << 14);
+			(static_cast<std::uintptr_t>(load.first) << 5) |
+			(static_cast<std::uintptr_t>(load.second) << 10);
 	};
 	operands = {};
 	operands[0] = (static_cast<std::uintptr_t>(low_units) & 0x1fffU) |
 		(static_cast<std::uintptr_t>(last) << 13) |
-		((static_cast<std::uintptr_t>(sp / 16) & 0xfffU) << 25) |
-		(packed(0) << 37);
+		((static_cast<std::uintptr_t>(sp / 16) & 0xfffU) << 22) |
+		(packed(0) << 34);
 	for (std::size_t index = 1; index < plan.loads; ++index)
-		operands[1 + (index - 1) / 3] |=
-			packed(index) << (19 * ((index - 1) % 3));
+		operands[(index + 2) / 4] |= packed(index) <<
+			(index < 2 ? 49 : 15 * ((index - 2) % 4));
 	return {heads[plan.loads - 1][plan.adds], plan.loads};
 }
 
 [[nodiscard]] constexpr std::size_t operand_words(std::size_t loads) noexcept
 {
-	return 1 + (loads + 1) / 3;
+	return 1 + (loads + 1) / 4;
 }
 
 using Starts = std::array<std::uint32_t, ring>;

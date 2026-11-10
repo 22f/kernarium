@@ -411,7 +411,7 @@ struct Placed final {
 	gadgets::ProgramWords copy{std::pmr::get_default_resource()};
 	for (const auto word : words)
 		copy.push_back(word);
-	const auto first = placed->at + 1 + 1 + (placed->loads + 1) / 3;
+	const auto first = placed->at + 1 + 1 + (placed->loads + 1) / 4;
 	for (std::size_t group = 0; group <= groups; ++group) {
 		copy[first + 2 * group] = address(uml_arm64_gadget_illegal);
 		if (group < groups)
@@ -431,17 +431,17 @@ void structure()
 			ldp(29, 30, 32, Mode::post), ret};
 		const auto built = build(code_pc, code, &site);
 		const auto words = built.program.words();
-		require(words.size() == 3 + 4 + 2);
+		require(words.size() == 2 + 4 + 2);
 		require(words[0] == address(uml_arm64_gadget_run_epilogue_2_0));
 		/* Span 0..31, SP + 32 at exit, then the loads: x20/x19 at slot 2,
 		 * then x29/x30 at slot 0. */
-		const auto first_load = std::uintptr_t{2} | (20U << 9) | (19U << 14);
-		const auto link_load = std::uintptr_t{0} | (29U << 9) | (30U << 14);
+		const auto first_load = std::uintptr_t{2} | (20U << 5) | (19U << 10);
+		const auto link_load = std::uintptr_t{0} | (29U << 5) | (30U << 10);
 		require(words[1] == ((std::uintptr_t{31} << 13) |
-			(std::uintptr_t{2} << 25) | (first_load << 37)));
-		require(words[2] == link_load);
-		require(words[7] == address(uml_arm64_gadget_return_x30_cached));
-		require(words[8] == reinterpret_cast<std::uintptr_t>(&site.site));
+			(std::uintptr_t{2} << 22) | (first_load << 34) |
+			(link_load << 49)));
+		require(words[6] == address(uml_arm64_gadget_return_x30_cached));
+		require(words[7] == reinterpret_cast<std::uintptr_t>(&site.site));
 	}
 	/* The pair that loads X30 goes last, whatever its place in the run;
 	 * the span starts at the lowest byte, which may be below SP. */
@@ -452,13 +452,12 @@ void structure()
 		const auto words = built.program.words();
 		require(words[0] == address(uml_arm64_gadget_run_epilogue_2_1));
 		const auto units = static_cast<std::uintptr_t>(-2) & 0x1fffU;
-		const auto x19 = std::uintptr_t{2} | (19U << 9) | (19U << 14);
-		const auto x30 = std::uintptr_t{0} | (29U << 9) | (30U << 14);
+		const auto x19 = std::uintptr_t{2} | (19U << 5) | (19U << 10);
+		const auto x30 = std::uintptr_t{0} | (29U << 5) | (30U << 10);
 		require(words[1] == (units | (std::uintptr_t{31} << 13) |
-			(std::uintptr_t{1} << 25) | (x19 << 37)));
-		require(words[2] == x30);
+			(std::uintptr_t{1} << 22) | (x19 << 34) | (x30 << 49)));
 	}
-	/* Eight loads in four operand words. */
+	/* Eight loads in three operand words. */
 	{
 		const std::array code{ldp(19, 20, 16), ldp(21, 22, 32),
 			ldp(23, 24, 48), ldp(25, 26, 64), ldp(27, 28, 80),
@@ -467,9 +466,23 @@ void structure()
 		const auto built = build(code_pc, code, &site);
 		const auto words = built.program.words();
 		require(words[0] == address(uml_arm64_gadget_run_epilogue_8_1));
-		require(words.size() == 1 + 4 + 2 * 10);
-		require((words[4] & 0x7ffffU) ==
-			(std::uintptr_t{0} | (29U << 9) | (30U << 14)));
+		require(words.size() == 1 + 3 + 2 * 10);
+		require(((words[3] >> 15) & 0x7fffU) ==
+			(std::uintptr_t{0} | (29U << 5) | (30U << 10)));
+	}
+	/* A load 31 units into the span is the furthest a head takes; one
+	 * further ends the run a head may take there. */
+	{
+		const std::array code{ldp(19, 20, 248), ldp(29, 30, 0),
+			add_sp(272), ret};
+		const auto placed = head_of(build(code_pc, code, &site).program);
+		require(placed && placed->at == 0 && placed->loads == 2);
+	}
+	{
+		const std::array code{ldp(19, 20, 256), ldp(21, 22, 16),
+			ldp(29, 30, 0), add_sp(272), ret};
+		const auto placed = head_of(build(code_pc, code, &site).program);
+		require(placed && placed->at == 2 && placed->loads == 2);
 	}
 	/* More loads than a head holds: the head takes the last eight, behind
 	 * the run's first two loads. */
