@@ -179,6 +179,7 @@ struct AppEntry {
             // Access the person took away while Andarium was closed takes the
             // Microphone choice with it.
             model.microphone?.refresh()
+            model.location?.refresh()
             #if !APP_STORE
             // A debugger attached at launch (StikDebug) is asked for what the
             // JIT row says at once: it spins until it is served, and the

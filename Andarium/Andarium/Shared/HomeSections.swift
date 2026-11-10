@@ -50,6 +50,9 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
+    /// What the line under the title does when it is touched; the line then
+    /// reads as a button. None leaves it plain text.
+    var detailAction: (() -> Void)?
     /// The capability is off and unreachable: the tile and the words dim.
     var dimmed = false
     @ViewBuilder var control: Control
@@ -64,11 +67,25 @@ struct OptionRow<Control: View>: View {
                     .minimumScaleFactor(0.85)
                     .opacity(dimmed ? 0.55 : 1)
                 if let detail {
-                    Text(detail)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let detailAction {
+                        Button(action: detailAction) {
+                            HStack(spacing: 4) {
+                                Text(detail)
+                                Image(systemName: "info.circle")
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(Color.accentColor)
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("option-detail-button")
+                    } else {
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             Spacer(minLength: 8)
@@ -259,8 +276,8 @@ struct DisplaySection: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the microphone, which iOS asks
-/// about when it is turned on, and the gyroscope.
+/// What the guest may use of this device: the microphone and the location,
+/// which iOS asks about when they are turned on, and the gyroscope.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
@@ -270,6 +287,8 @@ struct CapabilitiesSection: View {
                 MicrophoneRow()
                 RowDivider()
                 GyroscopeRow()
+                RowDivider()
+                LocationRow()
             } footer: {
                 if let reason = model.motionSensorsProblem ?? Self.gyroscopeUnavailable(available: model.motionSensorsAvailable) {
                     SectionNote(reason)
@@ -324,6 +343,30 @@ struct GyroscopeRow: View {
     }
 }
 
+struct LocationRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let access = model.locationAuthorization
+        let shownOn = model.locationShownOn
+        let approximate = access.isApproximate && shownOn
+        OptionRow(
+            title: LocationWords.title, symbol: "location.fill",
+            detail: LocationWords.detail(for: access, shownOn: shownOn),
+            detailAction: approximate ? { model.permissionPrompt = .location } : nil,
+            dimmed: access.refuses
+        ) {
+            Toggle(LocationWords.title, isOn: Binding(
+                get: { model.locationShownOn },
+                set: { model.setLocation($0) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("home-location-switch")
+        }
+        .accessibilityHint(LocationWords.hint(for: access, shownOn: shownOn))
+    }
+}
+
 /// When iOS has refused the microphone there is nothing to ask again: say so,
 /// and offer Andarium's page in Settings.
 struct MicrophoneAccessAlert: ViewModifier {
@@ -347,6 +390,37 @@ struct MicrophoneAccessAlert: ViewModifier {
 
 extension View {
     func microphoneAccessAlert() -> some View { modifier(MicrophoneAccessAlert()) }
+}
+
+/// When iOS refuses the location, or gives only an approximate one, there is
+/// nothing to ask: say why, and offer Andarium's page in Settings where it has
+/// the way out.
+struct LocationAccessAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    func body(content: Content) -> some View {
+        @Bindable var model = model
+        let words = LocationWords.alert(for: model.locationAuthorization)
+        content.alert(
+            words?.title ?? "", isPresented: Binding(
+                get: { model.permissionPrompt == .location && words != nil },
+                set: { if !$0, model.permissionPrompt == .location { model.permissionPrompt = nil } }
+            )
+        ) {
+            if words?.offersSettings == true {
+                Button("Open Settings") { model.openLocationSettings() }
+                Button("Not now", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: {
+            Text(words?.message ?? "")
+        }
+    }
+}
+
+extension View {
+    func locationAccessAlert() -> some View { modifier(LocationAccessAlert()) }
 }
 
 #if !APP_STORE

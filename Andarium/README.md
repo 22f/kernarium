@@ -275,6 +275,19 @@ requires reopening Andarium.
   session screen says so once. There is no switch. A system without the HAL
   hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
+- **Location.** Location is a per-guest switch under Capabilities on Home,
+  off for a new guest and for one stored before. iOS is asked, for
+  when-in-use access, only when the person turns it on; Andarium has no
+  background or Always access. The position is read only while the switch is
+  on, iOS allows it, Andarium is in front, a normal run goes on and the
+  guest's GNSS receiver is powered, and goes to the
+  [GNSS device](../darwin/device/gnss/README.md) through the runtime. A change
+  of access or of Precise Location drops the held position first. An
+  approximate position is passed as approximate; the guest owns what apps see
+  of it. The row is dimmed and off when iOS refuses, the device restricts
+  location or Location Services are off, and says Approximate, with an
+  explanation and Settings, when Precise Location is off. No test reads a real
+  location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display. A touch the system takes over reaches
   Android as a cancelled touch, not a lift, so no tap follows. Only the side
