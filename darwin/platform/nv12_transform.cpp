@@ -149,7 +149,7 @@ Nv12Rect centredCrop(std::uint32_t width, std::uint32_t height, std::uint32_t ta
     return rect;
 }
 
-bool transformNv12(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation, const Nv12Target& target)
+bool validNv12Transform(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation, const Nv12Target& target) noexcept
 {
     if (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) return false;
     if (!source.luma || !source.chroma || !target.luma || !target.chroma) return false;
@@ -160,6 +160,12 @@ bool transformNv12(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotati
         return false;
     if (source.lumaStride < source.width || source.chromaStride < source.width) return false;
     if (target.lumaStride < target.width || target.chromaStride < target.width) return false;
+    return true;
+}
+
+bool transformNv12(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation, const Nv12Target& target)
+{
+    if (!validNv12Transform(source, crop, rotation, target)) return false;
 
     const Plane luma {source.luma, source.lumaStride, source.width, source.height, 1};
     const Plane chroma {source.chroma, source.chromaStride, source.width / 2, source.height / 2, 2};
@@ -183,6 +189,20 @@ bool transformNv12(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotati
                {target.chroma, target.chromaStride, target.width / 2, target.height / 2, 2});
     return true;
 }
+
+namespace {
+
+class PortableTransformer final : public Nv12Transformer {
+public:
+    bool transform(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation, const Nv12Target& target) override
+    {
+        return transformNv12(source, crop, rotation, target);
+    }
+};
+
+} // namespace
+
+std::unique_ptr<Nv12Transformer> makePortableNv12Transformer() { return std::make_unique<PortableTransformer>(); }
 
 void fillNv12Black(const Nv12Target& target) noexcept
 {

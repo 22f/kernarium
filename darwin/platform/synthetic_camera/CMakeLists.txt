@@ -10,6 +10,7 @@ uml_declare_architecture_target(uml_synthetic_camera platform)
 target_include_directories(uml_synthetic_camera PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(uml_synthetic_camera PUBLIC UML::Nv12Transform)
 target_link_libraries(uml_synthetic_camera PRIVATE
     UML::PlatformContract
     "-framework CoreFoundation"

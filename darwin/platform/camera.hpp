@@ -10,6 +10,8 @@
 // openSession() fails when the system has not granted access, and nothing in
 // this interface asks for it (camera_authorization.hpp does, at a user's act).
 
+#include "nv12_transform.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -155,6 +157,9 @@ struct CameraFrame {
     std::span<const std::uint8_t> chroma;  // interleaved Cb, Cr at half the width and height
     std::size_t chromaStride {};
     std::shared_ptr<const void> owner;
+    // The platform's own handle to the picture, valid while `owner` is held;
+    // see Nv12Source::native. Null when the frame has none.
+    const void* native {};
     // When the exposure began, in nanoseconds of the host's monotonic clock
     // (CameraSession::now()).
     std::uint64_t timestampNanoseconds {};
@@ -289,6 +294,10 @@ public:
     [[nodiscard]] virtual std::string hostModel() const = 0;
     // Nanoseconds of the monotonic clock that frame timestamps use.
     [[nodiscard]] virtual std::uint64_t now() const noexcept = 0;
+    // The fastest crop, rotate and scale of this host's frames (the Apple
+    // camera's runs on the system's scaler). The caller keeps the object and
+    // uses it from one thread.
+    [[nodiscard]] virtual std::unique_ptr<Nv12Transformer> makeFrameTransformer() const = 0;
     // Opens a capture session, or returns null when the system has not granted
     // access or the host has no camera. This is the only call that can light a
     // capture indicator, and a blocked guest session never makes it.

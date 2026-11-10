@@ -103,20 +103,24 @@ target_include_directories(uml_dng_color PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(uml_apple_camera STATIC
+    apple/accelerated_nv12.cpp
     apple/camera_authorization.mm
     apple/camera_capture.mm)
 add_library(UML::AppleCamera ALIAS uml_apple_camera)
 uml_declare_architecture_target(uml_apple_camera platform)
 target_include_directories(uml_apple_camera PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(uml_apple_camera PUBLIC UML::DngColor)
+target_link_libraries(uml_apple_camera PUBLIC UML::DngColor UML::Nv12Transform)
 target_link_libraries(uml_apple_camera PRIVATE
     UML::PlatformContract
+    "-framework Accelerate"
     "-framework AVFoundation"
     "-framework CoreMedia"
     "-framework CoreVideo"
     "-framework Foundation"
-    "-framework ImageIO")
+    "-framework ImageIO"
+    "-framework IOSurface"
+    "-framework VideoToolbox")
 
 # The camera without hardware, for tests and for the launchers that run a guest
 # against a chart. An App Store runtime carries none.

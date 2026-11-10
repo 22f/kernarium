@@ -6,6 +6,7 @@
 // input, one video data output and, once a still is asked for, one photo
 // output per running camera.
 
+#include "accelerated_nv12.hpp"
 #include "camera.hpp"
 #include "dng_color.hpp"
 
@@ -578,6 +579,7 @@ public:
         frame.chromaStride = CVPixelBufferGetBytesPerRowOfPlane(pixels, 1);
         frame.luma = {luma, frame.lumaStride * CVPixelBufferGetHeightOfPlane(pixels, 0)};
         frame.chroma = {chroma, frame.chromaStride * CVPixelBufferGetHeightOfPlane(pixels, 1)};
+        frame.native = pixels;
         frame.owner = std::shared_ptr<const void>(sample, [pixels](const void* held) {
             CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
             CFRelease(held);
@@ -879,6 +881,8 @@ public:
     }
 
     std::uint64_t now() const noexcept override { return hostNow(); }
+
+    std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return makeAcceleratedNv12Transformer(); }
 
     std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
     {

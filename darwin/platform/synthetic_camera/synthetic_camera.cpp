@@ -758,6 +758,7 @@ public:
     std::vector<std::vector<std::size_t>> concurrentSets() const override { return core_.profile_.sets; }
     std::string hostModel() const override { return core_.profile_.model; }
     std::uint64_t now() const noexcept override { return core_.options_.manualClock ? core_.clock.load() : realNow(); }
+    std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return makePortableNv12Transformer(); }
 
     std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
     {

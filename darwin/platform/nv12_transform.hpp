@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace uml::platform {
@@ -18,6 +19,11 @@ struct Nv12Source {
     std::size_t chromaStride {};
     std::uint32_t width {};
     std::uint32_t height {};
+    // The platform's own handle to the same picture (the Apple camera's
+    // CVPixelBufferRef), which the transformer of that platform may use to let
+    // the system's scaler do the work. Null for a picture that exists only in
+    // memory, and never read by another platform's transformer.
+    const void* native {};
 };
 
 struct Nv12Target {
@@ -54,8 +60,27 @@ struct Nv12Rect {
 [[nodiscard]] bool transformNv12(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation,
                                  const Nv12Target& target);
 
+// Whether transformNv12() accepts the arguments: the checks every transformer
+// makes before it touches a sample.
+[[nodiscard]] bool validNv12Transform(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation,
+                                      const Nv12Target& target) noexcept;
+
 // A picture of black: luma 0 and neutral chroma, which full-range YCbCr takes
 // for black.
 void fillNv12Black(const Nv12Target& target) noexcept;
+
+// Something that does transformNv12()'s work. A platform's camera supplies the
+// fastest one it has (the Apple backend uses the system's accelerated scaling
+// and rotation); the portable one is the reference the others are held to. An
+// object keeps its scratch memory between calls and is used by one thread at a
+// time.
+class Nv12Transformer {
+public:
+    virtual ~Nv12Transformer() = default;
+    [[nodiscard]] virtual bool transform(const Nv12Source& source, Nv12Rect crop, std::uint32_t rotation,
+                                         const Nv12Target& target) = 0;
+};
+
+[[nodiscard]] std::unique_ptr<Nv12Transformer> makePortableNv12Transformer();
 
 } // namespace uml::platform
