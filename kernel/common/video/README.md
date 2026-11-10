@@ -153,12 +153,16 @@ streams, and a metadata node, for its meta streams.
   once: a camera that was reported interrupted or unavailable is reported
   resumed or available when its interruption ends, including when its session
   was closed and opened again meanwhile.
-- **Suspend and reset.** A guest suspend that finds buffers held resets the
-  device, as it resets any device of the transport; the driver does not use
-  `virtio_uml_set_no_vq_suspend`. The driver therefore owns continuity: before
-  it suspends it stops the device's streams and keeps its own V4L2 state, and
-  after the resume it creates the streams again, applies the controls again,
-  posts the event buffers and queues the buffers. The device keeps nothing
-  across a reset and has stopped every capture (its camera indicator is off
-  and no host buffer remains), and the first frames after a re-created stream
-  are black and flagged `_RESUMING`.
+- **Suspend and reset.** The camera's event buffers stay in the guest's ring:
+  the device answers one only when it has an event, and the buffer the guest
+  posted waits in the ring, across a suspend as well. A guest suspend that finds
+  a request held (a queued stream buffer) resets the device, as it resets any
+  device of the transport, and the driver does not use
+  `virtio_uml_set_no_vq_suspend`. The driver therefore stops the device's
+  streams before it suspends, which completes every held buffer, and keeps its
+  own V4L2 state; a camera with no stream holds nothing, so its suspend resets
+  nothing and its next event reaches the buffer already posted. After a reset
+  the driver creates its streams again, applies the controls again and queues
+  the buffers; the device keeps nothing across a reset and has stopped every
+  capture (its camera indicator is off and no host buffer remains), and the
+  first frames after a re-created stream are black and flagged `_RESUMING`.

@@ -18,11 +18,14 @@
 #include "wire_bytes.hpp"
 
 #include <poll.h>
+#include <sys/event.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -100,6 +103,13 @@ struct Rig final {
     std::size_t bump {16 * page};
     std::uint64_t next {1};
     std::map<std::uint64_t, std::vector<std::uint8_t>> completed;
+    // The server's side of the queues (vhost_user_server.cpp): the event buffers
+    // the guest has posted wait in its ring in order and are offered again
+    // whenever the device may have an event; a request the device defers is
+    // held until a completion answers it.
+    std::deque<std::uint64_t> eventRing;
+    std::set<std::uint64_t> held;
+    unsigned resets {};
     std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<std::pair<std::uint64_t, std::uint32_t>>> segments;
 
     // --- Commands ----------------------------------------------------------
@@ -220,14 +230,54 @@ struct Rig final {
         const auto id = next++;
         const auto result = device->processQueue(0, id, request, sizeof(virtio_video_camera_queue_resp));
         require(result.action == VhostUserQueueAction::defer, "RESOURCE_QUEUE did not defer", where);
+        held.insert(id);
         collect();
         return id;
+    }
+    /* The guest posts event buffers. The device never keeps one: an event that is
+     * not there yet leaves the buffer in the ring (retry). */
+    std::vector<std::uint64_t> postEventBuffers(int count)
+    {
+        std::vector<std::uint64_t> ids;
+        for (int index = 0; index < count; ++index) {
+            ids.push_back(next++);
+            eventRing.push_back(ids.back());
+        }
+        serveEvents();
+        return ids;
+    }
+    /* What the server does with the event queue each time the device wakes it. */
+    void serveEvents()
+    {
+        while (!eventRing.empty()) {
+            const auto result = device->processQueue(1, eventRing.front(), {}, sizeof(virtio_video_event));
+            require(result.action != VhostUserQueueAction::defer, "the event queue held a buffer");
+            if (result.action == VhostUserQueueAction::retry) break;
+            completed[eventRing.front()] = result.response;
+            eventRing.pop_front();
+        }
     }
     void collect()
     {
         VhostUserQueueCompletion completion;
-        while (device->takeQueueCompletion(completion)) completed[completion.requestId] = completion.response;
+        while (device->takeQueueCompletion(completion)) {
+            completed[completion.requestId] = completion.response;
+            held.erase(completion.requestId);
+        }
+        serveEvents();
     }
+    /* A guest suspend, as the server sees it: the rings are disabled, and a
+     * device that holds a request is reset first (the held requests are dropped,
+     * the buffers waiting in the ring are not). */
+    void disableRings()
+    {
+        collect();
+        if (held.empty()) return;
+        device->reset();
+        held.clear();
+        ++resets;
+    }
+    void enableRings() { collect(); }
     void step()
     {
         device->drainEventSource();
@@ -702,14 +752,8 @@ void testInterruption()
     rig.create(1, 0, videoKind);
     rig.setVideo(1, 640, 480);
     for (std::uint32_t resource = 1; resource <= 6; ++resource) rig.attach(1, resource, nv12Size(640, 480));
-    // The guest keeps event buffers queued.
-    std::vector<std::uint64_t> eventBuffers;
-    for (int index = 0; index < 8; ++index) {
-        const auto id = rig.next++;
-        const auto result = rig.device->processQueue(1, id, {}, sizeof(virtio_video_event));
-        require(result.action == VhostUserQueueAction::defer, "an event buffer waits");
-        eventBuffers.push_back(id);
-    }
+    // The guest keeps event buffers posted.
+    const auto eventBuffers = rig.postEventBuffers(8);
     const auto eventOf = [&](std::size_t index) {
         require(rig.done(eventBuffers[index]), "an event did not arrive");
         return load<virtio_video_event>(rig.completed.at(eventBuffers[index]));
@@ -1049,19 +1093,11 @@ void testResetAndDestroy()
     rig.device->reset();
 }
 
-/* The event buffers a guest keeps queued, and the events that have reached it. */
+/* The event buffers a guest keeps posted, and the events that have reached it. */
 struct EventQueue {
     Rig& rig;
     std::vector<std::uint64_t> ids;
-    EventQueue(Rig& owner, int count) : rig(owner)
-    {
-        for (int index = 0; index < count; ++index) {
-            const auto id = rig.next++;
-            const auto result = rig.device->processQueue(1, id, {}, sizeof(virtio_video_event));
-            require(result.action == VhostUserQueueAction::defer, "an event buffer waits");
-            ids.push_back(id);
-        }
-    }
+    EventQueue(Rig& owner, int count) : rig(owner), ids(owner.postEventBuffers(count)) {}
     /* (event type, camera) in the order they arrived. */
     [[nodiscard]] std::vector<std::pair<std::uint32_t, std::uint32_t>> arrived() const
     {
@@ -1315,7 +1351,9 @@ void testSystemPressure()
 
 /* A guest suspend that finds buffers held resets the device. The device keeps
  * nothing, the driver creates its streams again, and the new streams' first
- * frames are black and flagged as resuming until the capture delivers. */
+ * frames are black and flagged as resuming until the capture delivers. The
+ * event buffers the guest posted are not held by the device: they are still in
+ * the ring, and the first event after the resume reaches them. */
 void testSuspendResetsAndTheDriverRecreates()
 {
     Rig rig;
@@ -1334,16 +1372,20 @@ void testSuspendResetsAndTheDriverRecreates()
     const auto still = rig.queue(2, 1, 777);  // with the platform, not yet taken
     const auto meta = rig.queue(3, 1);
     require(rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 1 && !rig.done(still), "streams and a still are in flight");
-    rig.device->reset();
+    require(rig.held.size() == 4, "the device holds the four buffers, and no event buffer");
+    rig.disableRings();
+    require(rig.resets == 1, "the suspend found requests held and reset the device");
     require(rig.camera->sessionsOpen() == 0 && !rig.camera->videoRunning(0) && rig.states.back() == CameraState::idle,
             "the capture is stopped");
     rig.camera->pump(0, 1);  // nothing of the old capture is left to deliver
     rig.step();
-    for (const auto id : {video, spare, still, meta, before.ids[0], before.ids[1]})
+    for (const auto id : {video, spare, still, meta})
         require(!rig.done(id), "no buffer of the old guest completes to the new one");
+    require(rig.eventRing.size() == 2 && !rig.done(before.ids[0]) && !rig.done(before.ids[1]),
+            "the event buffers are still in the ring");
+    rig.enableRings();
 
     // The driver creates everything again.
-    EventQueue after(rig, 2);
     build(1);
     require(rig.camera->sessionsOpen() == 0 && rig.get(1, {UML_V4L2_CID_ZOOM_ABSOLUTE})[0] == 200,
             "the driver's controls are kept, and open no session");
@@ -1357,10 +1399,93 @@ void testSuspendResetsAndTheDriverRecreates()
     rig.step();
     require(rig.done(live) && rig.result(live).base.flags == 0, "then the first captured frame ends it");
     require(rig.result(live).sequence > rig.result(b).sequence, "and the numbers keep counting");
-    // The new guest's event buffers are the ones that are used.
+    // The first event after the resume reaches a buffer posted before the suspend.
     rig.camera->interrupt();
     rig.step();
-    require(after.arrived().size() == 2 && !rig.done(before.ids[0]), "events reach the new guest's buffers");
+    require(before.arrived().size() == 2 && before.arrived()[0].first == VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED,
+            "events reach the buffers the guest posted before it suspended");
+}
+
+/* The event queue never holds a buffer: an empty one is retried, so the buffer
+ * stays in the ring, and an event raised later wakes the device and reaches it. */
+void testEventQueueRetries()
+{
+    Rig rig;
+    const auto id = rig.next++;
+    for (int offer = 0; offer < 3; ++offer) {
+        const auto result = rig.device->processQueue(1, id, {}, sizeof(virtio_video_event));
+        require(result.action == VhostUserQueueAction::retry && result.response.empty(), "with no event the buffer stays in the ring");
+    }
+    // A buffer too small for an event is no buffer for one.
+    require(rig.device->processQueue(1, rig.next++, {}, sizeof(virtio_video_event) - 1).action == VhostUserQueueAction::complete,
+            "a short buffer is completed");
+
+    videoStream(rig, 1, 0, 640, 480, 2);
+    rig.queue(1, 1);
+    // Whether the device has signalled its event descriptor with its wake-up since the last look.
+    const auto signalled = [&] {
+        std::array<struct kevent, 16> ready {};
+        const timespec none {};
+        const int count = ::kevent(rig.device->eventDescriptor(), nullptr, 0, ready.data(), int(ready.size()), &none);
+        return std::any_of(ready.begin(), ready.begin() + std::max(count, 0),
+                           [](const struct kevent& entry) { return entry.filter == EVFILT_USER; });
+    };
+    rig.device->drainEventSource();
+    (void)signalled();
+    rig.camera->interrupt();
+    require(signalled(), "the platform's interruption wakes the device");
+    // The interruption becomes an event inside the device's drain; the server must run the queue again.
+    rig.device->drainEventSource();
+    require(signalled(), "and the event it raises signals the event descriptor");
+    const auto offered = rig.device->processQueue(1, id, {}, sizeof(virtio_video_event));
+    require(offered.action == VhostUserQueueAction::complete, "the buffer offered again receives it");
+    const auto event = load<virtio_video_event>(offered.response);
+    require(event.event_type == VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED && event.stream_id == 0, "the interruption of the first camera");
+    // The second camera's event waits for the next buffer.
+    const auto following = rig.device->processQueue(1, rig.next++, {}, sizeof(virtio_video_event));
+    require(following.action == VhostUserQueueAction::complete && load<virtio_video_event>(following.response).stream_id == 1,
+            "the second camera's event is kept for the next buffer");
+    require(rig.device->processQueue(1, rig.next++, {}, sizeof(virtio_video_event)).action == VhostUserQueueAction::retry,
+            "and then the queue is empty again");
+}
+
+/* A guest whose driver stopped its streams holds nothing at a suspend: the
+ * rings are disabled and enabled again with no reset, the device keeps what the
+ * driver set, and an event after the resume reaches the buffer posted before. */
+void testSuspendWithNoStreamResetsNothing()
+{
+    Rig rig;
+    EventQueue events(rig, 2);
+    videoStream(rig, 1, 0, 640, 480, 2);
+    rig.setOk(1, {{VIRTIO_VIDEO_CAMERA_CID_ZOOM_Q16, 2 * 65536, {}}});
+    const auto frame = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(frame) && rig.camera->sessionsOpen() == 1, "a stream runs");
+    rig.queue(1, 2);
+    require(rig.held.size() == 1, "with a buffer held");
+    // The driver stops it before the suspend.
+    clearStream(rig, 1);
+    rig.destroy(1);
+    require(rig.held.empty() && rig.camera->sessionsOpen() == 0, "stopped, the camera holds nothing and the session is released");
+
+    rig.disableRings();
+    rig.enableRings();
+    require(rig.resets == 0, "the suspend reset nothing");
+    require(rig.eventRing.size() == 2 && events.arrived().empty(), "the event buffers wait in the ring");
+
+    // The device is not reset: the driver's controls are what it set.
+    videoStream(rig, 1, 0, 640, 480, 2);
+    require(rig.get(1, {UML_V4L2_CID_ZOOM_ABSOLUTE})[0] == 200, "the camera kept its controls");
+    // A later event still arrives: the interruption is the cause that lasts when the stream starts again.
+    rig.camera->interrupt();
+    rig.queue(1, 1);
+    rig.step();
+    require(events.arrived().size() >= 1 && events.arrived()[0].first == VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED,
+            "a later event reaches the buffer posted before the suspend");
+    require(rig.held.size() == 1, "and the stream's buffer is the one request the device holds now");
+    rig.disableRings();
+    require(rig.resets == 1, "a suspend that finds it held still resets the device, as the fallback");
 }
 
 /* A group has two seconds to assemble; a capture that has started has ten. */
@@ -1604,6 +1729,8 @@ int main()
     testInterruptionEndsWithTheSession();
     testSystemPressure();
     testSuspendResetsAndTheDriverRecreates();
+    testEventQueueRetries();
+    testSuspendWithNoStreamResetsNothing();
     testStillDeadlines();
     testStillsInFlight();
     testHostileGuest();

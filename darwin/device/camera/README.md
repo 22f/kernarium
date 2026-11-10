@@ -64,9 +64,13 @@ application's statements (the sensor orientation, the rotation that
   opens, it is over, and the guest is told it ended. The guest is told each way
   once (`CAMERA_INTERRUPTED` or `CAMERA_UNAVAILABLE`, then `CAMERA_RESUMED` or
   `CAMERA_AVAILABLE`).
-- **Reset.** A guest reset (and a suspend that finds buffers held, which resets
-  every device) drops every stream, group, event buffer and control value; the
-  driver creates them again (see the wire's README).
+- **Events and reset.** The event queue never holds a buffer: with no event
+  pending it returns retry, so the guest's buffer stays in its ring, and an
+  event raised later signals the device's event descriptor so the server runs
+  the queue again. A guest reset (and a suspend that finds a request held, which
+  resets every device) drops every stream, group, pending event and control
+  value; the driver creates them again (see the wire's README). A suspend with
+  no stream open holds nothing and resets nothing.
 - **Calibration.** RAW is offered only for a lens whose colour data is known.
   The first still of an uncalibrated lens at unit zoom also takes a Bayer still
   and keeps what its DNG reveals in the `CalibrationStore` (per host model and
@@ -93,6 +97,8 @@ budget, and a state line goes to stderr when the host starts or stops capturing.
 `camera-controls`, `camera-description`, `camera-jpeg-gap` and
 `camera-calibration` check the pure parts. `camera-device` drives the device over
 both queues in front of the synthetic camera, including the invariant that a
-blocked session never opens a platform session, a hostile guest, and a reset
-with streams and stills in flight. The Apple backend's capture is not run by any
+blocked session never opens a platform session, a hostile guest, a reset
+with streams and stills in flight, an event queue that retries and wakes the
+server, and a suspend with no stream open that resets nothing (its test models
+the server's rule for a disabled ring). The Apple backend's capture is not run by any
 test.

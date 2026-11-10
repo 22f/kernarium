@@ -7,7 +7,6 @@
 #include "nv12_transform.hpp"
 #include "raw_pitch.hpp"
 #include "unique_descriptor.hpp"
-#include "vhost_user_protocol.hpp"
 
 #include <sys/event.h>
 
@@ -207,7 +206,6 @@ public:
     GuestMapper mapper;
     std::shared_ptr<const uml::virtio::SharedMemoryRegions> regions;
     std::unordered_map<std::uint32_t, Stream> streams;
-    std::deque<std::uint64_t> eventBuffers;
     std::deque<virtio_video_event> events;
     std::deque<VhostUserQueueCompletion> completions;
     std::vector<Group> groups;
@@ -293,11 +291,9 @@ public:
          * adds nothing the guest has not been told. */
         if (events.size() >= 64) return;
         events.push_back({type, camera});
-        while (!events.empty() && !eventBuffers.empty()) {
-            completions.push_back({eventBuffers.front(), toBytes(events.front())});
-            eventBuffers.pop_front();
-            events.pop_front();
-        }
+        /* The server runs the event queue when the device's event descriptor
+         * fires, and the guest's buffer, if it has posted one, is filled. */
+        wake();
     }
 
     [[nodiscard]] Runtime* runtimeOf(std::uint32_t camera) noexcept
@@ -1564,7 +1560,6 @@ public:
         streams.clear();
         groups.clear();
         events.clear();
-        eventBuffers.clear();
         completions.clear();
         {
             std::lock_guard lock(inboxMutex);
@@ -1633,9 +1628,12 @@ VhostUserQueueResult VirtioCameraDevice::processQueue(std::uint32_t index, std::
             impl.events.pop_front();
             return {VhostUserQueueAction::complete, std::move(result)};
         }
-        if (impl.eventBuffers.size() >= uml::gpu::protocol::maximumVirtqueueSize) return {VhostUserQueueAction::retry, {}};
-        impl.eventBuffers.push_back(id);
-        return {VhostUserQueueAction::defer, {}};
+        /* No event is waiting: the buffer stays in the guest's ring, as an
+         * input device's does, and the server offers it again when an event
+         * wakes the device. A buffer the device kept instead would be dropped
+         * unanswered when the guest suspends and the server resets the device,
+         * and the guest would not be told of a camera again. */
+        return {VhostUserQueueAction::retry, {}};
     }
     if (index != 0 || request.size() < sizeof(virtio_video_cmd_hdr) || capacity < sizeof(virtio_video_cmd_hdr))
         return {VhostUserQueueAction::complete, {}};
