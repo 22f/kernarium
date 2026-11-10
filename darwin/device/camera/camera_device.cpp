@@ -827,7 +827,7 @@ public:
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
                 if (auto plan = reserveExifGap(result.jpeg); plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
                     // The scan is the end of the platform's own bytes, written from where they lie.
-                    const std::span<std::uint8_t> tail(result.jpeg.data() + (result.jpeg.size() - plan->tail.size()), plan->tail.size());
+                    const std::span<std::uint8_t> tail(result.jpeg.data() + (plan->tail.data() - result.jpeg.data()), plan->tail.size());
                     ok = transferSegments(mapper, regions.get(), resource.planes[0], plan->head, true) &&
                         transferSegments(mapper, regions.get(), resource.planes[0], tail, true, plan->head.size());
                     size = std::uint32_t(plan->size());

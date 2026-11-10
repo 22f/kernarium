@@ -85,6 +85,55 @@ void testSegmentsAroundTheGap()
     require(plan->tail[plan->tail.size() - 2] == 0xff && plan->tail.back() == 0xd9, "the end of image is last");
 }
 
+/* A phone's JPEG can carry a multi-picture index and a second picture (a gain
+ * map or a depth image) after the first one's end of image: the file the guest
+ * gets is the first picture. */
+void testOtherPicturesAreNotPassedOn()
+{
+    std::vector<std::uint8_t> jpeg = {0xff, 0xd8};
+    marker(jpeg, 0xe0, {'J', 'F', 'I', 'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0});
+    marker(jpeg, 0xe2, {'M', 'P', 'F', 0, 'I', 'I', 42, 0, 8, 0, 0, 0});
+    marker(jpeg, 0xe2, {'I', 'C', 'C', '_', 'P', 'R', 'O', 'F', 'I', 'L', 'E', 0, 1, 1});
+    marker(jpeg, 0xdb, std::vector<std::uint8_t>(65, 3));
+    marker(jpeg, 0xc0, {8, 0, 16, 0, 16, 1, 1, 0x11, 0});
+    marker(jpeg, 0xc4, std::vector<std::uint8_t>(20, 1));
+    marker(jpeg, 0xda, {1, 1, 0, 0, 63, 0});
+    // Stuffing and a restart marker in the data, and a fill byte before the end of image.
+    for (const std::uint8_t byte : {0x12, 0xff, 0x00, 0x34, 0xff, 0xd0, 0x56, 0x78, 0xff, 0xff, 0xd9}) jpeg.push_back(byte);
+    const std::size_t firstEnd = jpeg.size();
+    // The second picture: a whole JPEG of its own.
+    for (const std::uint8_t byte : {0xff, 0xd8}) jpeg.push_back(byte);
+    marker(jpeg, 0xdb, std::vector<std::uint8_t>(65, 5));
+    marker(jpeg, 0xda, {1, 1, 0, 0, 63, 0});
+    for (const std::uint8_t byte : {0x99, 0xff, 0xd9}) jpeg.push_back(byte);
+
+    const auto plan = reserveExifGap(jpeg);
+    require(plan.has_value(), "a file with a second picture is accepted");
+    require(plan->tail.data() + plan->tail.size() == jpeg.data() + firstEnd, "and ends at the first picture's end of image");
+    std::vector<std::uint8_t> rest(plan->head.begin() + plan->gapOffset + plan->gapLength, plan->head.end());
+    require(find(rest, 0xe2, 0) != size_t(-1), "the profile (APP2 ICC) is kept");
+    std::size_t index = 0;
+    for (; index + 8 < rest.size(); ++index)
+        if (rest[index] == 0xff && rest[index + 1] == 0xe2 && rest[index + 4] == 'M' && rest[index + 5] == 'P' && rest[index + 6] == 'F') break;
+    require(index + 8 >= rest.size(), "the multi-picture index is dropped");
+
+    // A progressive image: more scans and a table between the first scan and the end of image.
+    std::vector<std::uint8_t> progressive = {0xff, 0xd8};
+    marker(progressive, 0xdb, std::vector<std::uint8_t>(65, 3));
+    marker(progressive, 0xc2, {8, 0, 16, 0, 16, 1, 1, 0x11, 0});
+    marker(progressive, 0xc4, std::vector<std::uint8_t>(20, 1));
+    marker(progressive, 0xda, {1, 1, 0, 0, 0, 0});
+    for (const std::uint8_t byte : {0x11, 0xff, 0x00, 0x22}) progressive.push_back(byte);
+    marker(progressive, 0xc4, std::vector<std::uint8_t>(20, 2));
+    marker(progressive, 0xda, {1, 1, 0, 1, 63, 0});
+    for (const std::uint8_t byte : {0x33, 0x44, 0xff, 0xd9}) progressive.push_back(byte);
+    const std::size_t progressiveEnd = progressive.size();
+    for (const std::uint8_t byte : {0xff, 0xd8, 0xff, 0xd9}) progressive.push_back(byte);
+    const auto many = reserveExifGap(progressive);
+    require(many && many->tail.data() + many->tail.size() == progressive.data() + progressiveEnd,
+            "every scan of a progressive picture is kept, and nothing after its end of image");
+}
+
 void testFillBytesAndOtherLengths()
 {
     auto jpeg = sample();
@@ -100,6 +149,9 @@ void testRefusals()
     require(!reserveExifGap({}).has_value(), "empty data");
     require(!reserveExifGap(std::vector<std::uint8_t> {0x89, 'P', 'N', 'G', 0, 0}).has_value(), "not a JPEG");
     require(!reserveExifGap(sample(false)).has_value(), "no scan");
+    auto unfinished = sample();
+    unfinished.resize(unfinished.size() - 2);
+    require(!reserveExifGap(unfinished).has_value(), "a scan with no end of image");
     auto truncated = sample();
     truncated.resize(30);
     require(!reserveExifGap(truncated).has_value(), "a segment cut short");
@@ -115,6 +167,7 @@ int main()
 {
     testGap();
     testSegmentsAroundTheGap();
+    testOtherPicturesAreNotPassedOn();
     testFillBytesAndOtherLengths();
     testRefusals();
     return 0;

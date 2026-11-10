@@ -17,8 +17,8 @@ inline constexpr std::uint32_t exifGapLength = 65000;
 
 /* A JPEG as the device writes it into a guest buffer: `head` (the start of
  * image, the reserved Exif segment and every other segment before the scan)
- * and `tail` (the scan and the end of image, exactly as the platform made it),
- * so the entropy-coded data is copied once. */
+ * and `tail` (the scan or scans and the end of image, exactly as the platform
+ * made them), so the entropy-coded data is copied once. */
 struct JpegWithGap {
     std::vector<std::uint8_t> head;
     std::span<const std::uint8_t> tail;
@@ -29,9 +29,12 @@ struct JpegWithGap {
 };
 
 /* Reserves the Exif gap in `jpeg` and drops its own Exif and XMP (APP1)
- * segments; the other segments (JFIF, quantization and Huffman tables, the
- * frame header) keep their order. Returns nothing for data that is not a
- * JPEG with a scan. The result's `tail` refers to `jpeg`. */
+ * segments and its multi-picture index (APP2 MPF); the other segments (JFIF,
+ * quantization and Huffman tables, the frame header) keep their order. The
+ * file ends at the end of image of the first picture: a gain map, a depth
+ * image or any other picture after it is not passed on. Returns nothing for
+ * data that is not a JPEG with a scan and an end of image. The result's
+ * `tail` refers to `jpeg` and lies inside it. */
 [[nodiscard]] std::optional<JpegWithGap> reserveExifGap(std::span<const std::uint8_t> jpeg,
                                                         std::uint32_t gapLength = exifGapLength);
 
