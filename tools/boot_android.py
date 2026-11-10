@@ -61,6 +61,10 @@ DEFAULT_INSTANCE = INSTANCES_ROOT / "android-17"
 # The signals that ask the emulator to stop, each with its grace period,
 # before it is killed.
 GUEST_STOP_STAGES = ((signal.SIGINT, 10), (signal.SIGTERM, 5))
+# Below this a value cannot be a guest's memory, whatever its unit: it is
+# a number of megabytes or gigabytes given as bytes.
+MINIMUM_GUEST_MEMORY = 64 * 1024 * 1024
+_SIZE_UNIT_SHIFTS = {"k": 10, "m": 20, "g": 30, "t": 40, "p": 50, "e": 60}
 
 
 class LauncherError(RuntimeError):
@@ -71,6 +75,45 @@ class RequestedShutdown(Exception):
     def __init__(self, signum: int) -> None:
         super().__init__(signum)
         self.signum = signum
+
+
+def kernel_memory_size(text: str) -> tuple[int, bool]:
+    """The size the kernel reads from `mem=<text>`, and whether it had a unit.
+
+    The kernel's memparse() reads digits in the base their prefix names (0x
+    hexadecimal, 0 octal, else decimal), then one K, M, G, T, P or E suffix in
+    either case, and ignores the rest. A number without a suffix is bytes.
+    """
+    mask = (1 << 64) - 1
+    hexadecimal = "0123456789abcdef"
+    base, index = 10, 0
+    if text.startswith("0"):
+        base = 8
+        if len(text) >= 3 and text[1] in "xX" and text[2].lower() in hexadecimal:
+            base, index = 16, 2
+    value = 0
+    while index < len(text) and text[index].lower() in hexadecimal[:base]:
+        value = (value * base + int(text[index], 16)) & mask
+        index += 1
+    shift = _SIZE_UNIT_SHIFTS.get(text[index : index + 1].lower())
+    if shift is None:
+        return value, False
+    return (value << shift) & mask, True
+
+
+def guest_memory_problem(text: str) -> str | None:
+    """Why `text` cannot be a guest's memory, or None if it can."""
+    size, has_unit = kernel_memory_size(text)
+    if size >= MINIMUM_GUEST_MEMORY:
+        return None
+    if not (text[:1].isascii() and text[:1].isdigit()):
+        return "is not a size; give a number with a unit, K, M or G (for example 4G)"
+    if has_unit:
+        return f"is {size} bytes; a guest needs at least 64M"
+    return (
+        f"is {size} bytes, because the kernel reads a number without a unit as "
+        "bytes; give a unit, K, M or G (for example 4096M or 4G)"
+    )
 
 
 def positive_integer(value: str) -> int:
@@ -197,7 +240,14 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
         ),
     )
     parser.add_argument("--cpus", type=positive_integer, default=10)
-    parser.add_argument("--memory", default="8G")
+    parser.add_argument(
+        "--memory",
+        default="8G",
+        help=(
+            "guest memory, the kernel's mem= argument: a number with the unit "
+            "K, M or G; a number without a unit is bytes (default: 8G)"
+        ),
+    )
     parser.add_argument(
         "--width",
         type=positive_integer,
@@ -309,6 +359,8 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
     options = parser.parse_args(arguments)
     if not options.memory or any(character.isspace() for character in options.memory):
         parser.error("--memory must be one kernel argument without whitespace")
+    if (problem := guest_memory_problem(options.memory)) is not None:
+        parser.error(f"--memory {options.memory} {problem}")
     if options.display != "offscreen" and (
         options.offscreen_size or options.offscreen_mirror
     ):
