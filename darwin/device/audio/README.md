@@ -89,6 +89,14 @@ reads or opens the microphone, and no permission prompt can appear.
 - On iOS the microphone never takes the audio session from an app that plays or
   records, such as a call. The session is shared with the output
   (`audio_session.hpp`); macOS has no audio session.
+- While the guest records, a connected Bluetooth headset is the input, over the
+  hands-free profile (full bandwidth where the headset supports high-quality
+  recording), and the headset's output moves to that profile too, at telephone
+  quality where it has no better, until the recording stops. Playback alone
+  keeps the playback category and A2DP (`audio_session_category.hpp`). A route
+  change under a recording, a headset connecting or leaving, builds the
+  microphone's engine again on the same session, and the output restarts on the
+  new route and measures its latency again.
 
 macOS enables it with `--audio-input=host` (`silent` is the default): the
 launcher turns the switch on at start, which is when macOS asks, on behalf of the
@@ -105,6 +113,7 @@ tests make no sound. `host` is the default.
 
 `virtio-sound-protocol`, `virtio-sound-microphone` (over fakes, never opening
 the microphone or showing a prompt), `audio-mute-clock`, `audio-output-cycle`,
+`audio-session-category` (the session's category and options),
 `guest-virtio-sound-suspend` (a guest suspended under a playing and a paused
 stream, see [`../../../kernel/common/README.md`](../../../kernel/common/README.md))
 and `guest-virtio-sound-delay` (a guest's `snd_pcm_delay()` against when its
@@ -119,4 +128,6 @@ The real microphone is checked by hand, because granting access is the user's
 act: start a guest with `--audio-input=host`, answer the prompt, and record in
 the guest (`tinycap` on Android, `arecord` on Linux). The recording indicator
 lights while the guest records and goes out when it stops; with the setting off,
-or access denied, the capture is silence at the same rate.
+or access denied, the capture is silence at the same rate. A Bluetooth headset
+is checked the same way on an iPhone or iPad, connected before and during the
+recording.
