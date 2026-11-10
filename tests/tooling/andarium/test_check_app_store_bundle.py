@@ -65,6 +65,12 @@ DEBUG_SUPPORT = (
     ("test tooling", "int _rfbGetScreen(void) { return 1; }\n"),
     ("launch harness", "int _s8Andarium8AppEntryV13applyDeferred2toyyF(void) { return 1; }\n"),
     ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    # The synthetic camera: its class, its entries and its profiles' names.
+    ("synthetic camera", "int _ZN3uml8platform15SyntheticCamera13sessionsOpenedEv(void) { return 1; }\n"),
+    ("synthetic camera", "int _ZN3uml8platform19makeSyntheticCameraERKNS0_22SyntheticCameraOptionsE(void) { return 1; }\n"),
+    ("synthetic camera", "int _ZN3uml8platform17decodeChartMarkerEPKhmjj(void) { return 1; }\n"),
+    ("synthetic camera", 'const char *fixture(void) { return "SyntheticPhone1,1"; }\n'),
+    ("synthetic camera", 'const char *fixture(void) { return "synthetic-back-wide"; }\n'),
     # The arm64 JIT: its owner of executable memory, its engine and its
     # entries, the runtime's and the loader's, the options that select it, and
     # the instruction that asks a debugger for JIT memory.
