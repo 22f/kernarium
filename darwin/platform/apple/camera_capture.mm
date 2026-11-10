@@ -313,6 +313,9 @@ struct RunningCamera {
     std::uint32_t height {};
     std::uint32_t frameRate {};
     std::uint32_t focusSerial {};
+    // Settings have been applied to the device at least once, so that a format
+    // change (which reverts some of them) can put them back.
+    bool applied {};
 };
 
 // The rate a device runs at while the pressure caps it: the one asked for,
@@ -346,6 +349,39 @@ bool setFormat(AVCaptureDevice* device, AVCaptureDeviceFormat* format, std::uint
     return ok;
 }
 
+// Sets a device's format alone (a camera that only takes stills has no rate).
+bool setActiveFormat(AVCaptureDevice* device, AVCaptureDeviceFormat* format)
+{
+    NSError* error = nil;
+    if (![device lockForConfiguration:&error]) return false;
+    bool ok = true;
+    @try {
+        device.activeFormat = format;
+    } @catch (NSException*) {
+        ok = false;
+    }
+    [device unlockForConfiguration];
+    return ok;
+}
+
+// Sets the frame rate of a device's current format and nothing else: setting
+// the format again would revert the device's focus and exposure points.
+[[maybe_unused]] bool setFrameRate(AVCaptureDevice* device, std::uint32_t frameRate)
+{
+    NSError* error = nil;
+    if (![device lockForConfiguration:&error]) return false;
+    bool ok = true;
+    @try {
+        const CMTime duration = CMTimeMake(1, std::int32_t(frameRate));
+        device.activeVideoMinFrameDuration = duration;
+        device.activeVideoMaxFrameDuration = duration;
+    } @catch (NSException*) {
+        ok = false;
+    }
+    [device unlockForConfiguration];
+    return ok;
+}
+
 class AppleCamera;
 
 class AppleSession final : public CameraSession {
@@ -366,6 +402,9 @@ public:
 #endif
         queue_ = dispatch_queue_create("uml.camera.capture", DISPATCH_QUEUE_SERIAL);
         outputQueue_ = dispatch_queue_create("uml.camera.frames", DISPATCH_QUEUE_SERIAL);
+        // The map never changes shape afterwards: the session's queue and the
+        // thread that calls it reach a camera's state without searching.
+        for (std::size_t index = 0; index < entries_.size(); ++index) cameras_[index];
         NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
         auto state = state_;
         const auto post = [state](CameraEvent event) {
@@ -407,11 +446,22 @@ public:
                                       object:session_
                                        queue:nil
                                   usingBlock:^(NSNotification*) {
-                                      // A media-services reset is the recoverable case; try once.
-                                      restarting->store(true);
+                                      // A media-services reset is the recoverable case: one
+                                      // restart for an episode of errors, which ends when the
+                                      // session runs again. A start that fails once more (a
+                                      // hardware cost over budget, say) loses the capture; the
+                                      // client closes the session and tries later.
+                                      if (restarting->exchange(true)) {
+                                          post({allCameras, CameraEventKind::failed});
+                                          return;
+                                      }
                                       post({allCameras, CameraEventKind::interrupted});
                                       dispatch_async(queue, ^{
-                                          if (!observed.running) [observed startRunning];
+                                          @try {
+                                              if (!observed.running) [observed startRunning];
+                                          } @catch (NSException*) {
+                                              post({allCameras, CameraEventKind::failed});
+                                          }
                                       });
                                   }];
         started_ = [center addObserverForName:AVCaptureSessionDidStartRunningNotification
@@ -431,94 +481,38 @@ public:
     bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate) override
     {
         if (stopped_ || camera >= entries_.size() || width == 0 || height == 0 || frameRate == 0) return false;
-        const Entry& entry = entries_[camera];
-        auto& running = cameras_[camera];
-        if (running.video && running.width == width && running.height == height && running.frameRate == frameRate)
-            return true;
-        // Cameras that run together in a multi-camera session need formats it
-        // takes. A camera alone may use any format (applications linked on or
-        // after iOS 26 are not held to the rule for a single input), so the
-        // cameras already running move to such a format when another joins, or
-        // the new one is refused and nothing changes.
-        std::vector<std::size_t> others;
-        for (const auto& [index, other] : cameras_)
-            if (index != camera && other.video) others.push_back(index);
-        const bool several = multiCamera_ && !others.empty();
-        AVCaptureDeviceFormat* format = chooseFormat(entry, width, height, frameRate, several);
-        if (format == nil) return false;
-        std::vector<std::pair<std::size_t, AVCaptureDeviceFormat*>> moves;
-        if (several) {
-            for (const auto index : others) {
-                const auto& other = cameras_[index];
-                if (formatTakenByMultiCamera(other.format)) continue;
-                AVCaptureDeviceFormat* moved = chooseFormat(entries_[index], other.width, other.height, other.frameRate, true);
-                if (moved == nil) return false;
-                moves.emplace_back(index, moved);
-            }
-        }
-        bool ok = true;
-        onQueue([&] {
-            for (const auto& [index, moved] : moves) {
-                auto& other = cameras_[index];
-                other.throttle->requestedRate = other.frameRate;
-                if (!setFormat(entries_[index].device, moved, throttledRate(*other.throttle, moved))) {
-                    ok = false;
-                    break;
-                }
-                other.format = moved;
-            }
-            if (ok) ok = configureVideo(camera, entry, running, format, width, height, frameRate);
-            if (ok && !session_.running) [session_ startRunning];
-        });
+        bool ok = false;
+        onQueue([&] { ok = startVideoOnQueue(camera, width, height, frameRate); });
         return ok;
     }
 
     void stopVideo(std::size_t camera) override
     {
-        const auto found = cameras_.find(camera);
-        if (stopped_ || found == cameras_.end() || !found->second.video) return;
-        auto& running = found->second;
+        if (stopped_ || camera >= entries_.size()) return;
         onQueue([&] {
-            [session_ beginConfiguration];
-            if (running.videoOutput) [session_ removeOutput:running.videoOutput];
-            running.videoOutput = nil;
-            running.delegate = nil;
-            running.connection = nil;
-            running.video = false;
+            auto& running = cameras_[camera];
+            if (!running.video) return;
             // A camera that no longer streams leaves the session, and so does the
             // photo output made for it unless a still is still on its way; the
             // camera's indicator and its share of a multi-camera budget go with it.
-            if (!stillsInFlight(camera)) {
-                if (running.photoOutput) [session_ removeOutput:running.photoOutput];
-                running.photoOutput = nil;
-                if (running.input) {
-                    [session_ removeInput:running.input];
-                    running.input = nil;
-                }
-            }
-            [session_ commitConfiguration];
+            removeFromSession(running, true, !stillsInFlight(camera));
             endPressureWatch(running);
-            // A camera left alone may use the format it would have had alone.
-            if (multiCamera_) {
-                std::vector<std::size_t> remaining;
-                for (const auto& [index, other] : cameras_)
-                    if (other.video) remaining.push_back(index);
-                if (remaining.size() == 1) {
-                    auto& last = cameras_[remaining.front()];
-                    AVCaptureDeviceFormat* best = chooseFormat(entries_[remaining.front()], last.width, last.height, last.frameRate, false);
-                    if (best != nil && best != last.format &&
-                        setFormat(entries_[remaining.front()].device, best, throttledRate(*last.throttle, best)))
-                        last.format = best;
-                }
-            }
+            returnAlone();
         });
     }
 
     void apply(std::size_t camera, const CameraSettings& settings) override
     {
         if (stopped_ || camera >= entries_.size()) return;
+        onQueue([&] { applyOnQueue(camera, settings, false); });
+    }
+
+    // Puts a camera's settings on its device: all of them again when `force`
+    // (a format change reverts some), or what changed since the last time.
+    void applyOnQueue(std::size_t camera, const CameraSettings& settings, bool force)
+    {
         auto& running = cameras_[camera];
-        if (running.settings == settings && running.focusSerial == settings.focusTriggerSerial) return;
+        if (!force && running.settings == settings && running.focusSerial == settings.focusTriggerSerial) return;
         const Entry& entry = entries_[camera];
         AVCaptureDevice* device = entry.device;
         NSError* error = nil;
@@ -602,16 +596,25 @@ public:
         [device unlockForConfiguration];
         running.settings = settings;
         running.focusSerial = settings.focusTriggerSerial;
+        running.applied = true;
     }
 
     bool takeStill(std::size_t camera, const CameraStillRequest& request) override
     {
         if (stopped_ || camera >= entries_.size() || (request.jpegWidth == 0 && !request.raw)) return false;
+        // On the session's queue as a whole: a camera that only takes stills
+        // leaves the session when its last still is delivered, and a capture
+        // started here must be seen by that before the output could go.
+        bool started = false;
+        onQueue([&] { started = startStill(camera, request); });
+        return started;
+    }
+
+    bool startStill(std::size_t camera, const CameraStillRequest& request)
+    {
         const Entry& entry = entries_[camera];
         auto& running = cameras_[camera];
-        bool ok = true;
-        onQueue([&] { ok = prepareStill(camera, entry, running); });
-        if (!ok) return false;
+        if (!prepareStill(camera, entry, running)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
         NSDictionary* jpeg = @{AVVideoCodecKey: AVVideoCodecTypeJPEG, AVVideoQualityKey: @(request.jpegQuality / 100.0)};
@@ -745,6 +748,11 @@ public:
             photos_.erase(result.token);
         }
         delegate_.cameraStill(camera, std::move(result));
+        // A camera that only takes stills leaves the session with its last
+        // one. This is called under the state's mutex while the session lives,
+        // and stop() waits for the queue after clearing that state, so the
+        // block runs before the session can end.
+        if (camera < entries_.size()) dispatch_async(queue_, ^{ releaseStill(camera); });
     }
 
     CameraExposure exposureOf(std::size_t camera, CMSampleBufferRef sample) const
@@ -837,76 +845,298 @@ private:
         return best;
     }
 
+    using Move = std::pair<std::size_t, AVCaptureDeviceFormat*>;
+
+    // The cameras with an input in the session: those that stream and those
+    // that only take stills, a still in flight included.
+    std::vector<std::size_t> camerasInSession() const
+    {
+        std::vector<std::size_t> result;
+        for (const auto& [index, running] : cameras_)
+            if (running.input != nil) result.push_back(index);
+        return result;
+    }
+    std::vector<std::size_t> peersOf(std::size_t camera) const
+    {
+        auto result = camerasInSession();
+        result.erase(std::remove(result.begin(), result.end(), camera), result.end());
+        return result;
+    }
+
+    // A multi-camera session takes the formats of all its inputs, whatever
+    // each input is for. For the cameras that are in it already: the formats
+    // those that a multi-camera session does not take move to, or false when
+    // one has no format it takes.
+    bool planMoves(const std::vector<std::size_t>& peers, std::vector<Move>& moves) const
+    {
+        for (const auto index : peers) {
+            const auto& other = cameras_.at(index);
+            AVCaptureDeviceFormat* current = other.format != nil ? other.format : entries_[index].device.activeFormat;
+            if (formatTakenByMultiCamera(current)) continue;
+            AVCaptureDeviceFormat* moved = other.video
+                ? chooseFormat(entries_[index], other.width, other.height, other.frameRate, true)
+                : chooseStillFormat(entries_[index], true);
+            if (moved == nil) return false;
+            moves.emplace_back(index, moved);
+        }
+        return true;
+    }
+
+    // Moves the cameras to their formats; the cameras it moved are put back
+    // their settings, which a format change reverts in part.
+    bool applyMoves(const std::vector<Move>& moves, std::vector<std::size_t>& moved)
+    {
+        for (const auto& [index, format] : moves) {
+            auto& other = cameras_[index];
+            bool ok;
+            if (other.video) {
+                other.throttle->requestedRate = other.frameRate;
+                ok = setFormat(entries_[index].device, format, throttledRate(*other.throttle, format));
+            } else {
+                ok = setActiveFormat(entries_[index].device, format);
+            }
+            if (!ok) return false;
+            other.format = format;
+            moved.push_back(index);
+        }
+        return true;
+    }
+
+    void reapply(const std::vector<std::size_t>& cameras)
+    {
+        for (const auto index : cameras)
+            if (cameras_[index].applied) applyOnQueue(index, cameras_[index].settings, true);
+    }
+
+    bool startVideoOnQueue(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate)
+    {
+        const Entry& entry = entries_[camera];
+        auto& running = cameras_[camera];
+        if (running.video && running.width == width && running.height == height && running.frameRate == frameRate)
+            return true;
+        // Cameras that run together in a multi-camera session need formats it
+        // takes. A camera alone may use any format (applications linked on or
+        // after iOS 26 are not held to the rule for a single input), so the
+        // cameras already in the session move to such a format when another
+        // joins, or the new one is refused and nothing changes. Every camera
+        // with an input counts, one that only takes stills as well.
+        const auto peers = peersOf(camera);
+        const bool several = multiCamera_ && !peers.empty();
+        AVCaptureDeviceFormat* format = chooseFormat(entry, width, height, frameRate, several);
+        if (format == nil) return false;
+        std::vector<Move> moves;
+        if (several && !planMoves(peers, moves)) return false;
+        std::vector<std::size_t> moved;
+        bool ok = applyMoves(moves, moved);
+        if (ok) ok = configureVideo(camera, entry, running, format, width, height, frameRate);
+        if (ok) startSession();
+        reapply(moved);
+        return ok;
+    }
+
+    void startSession()
+    {
+        @try {
+            if (!session_.running) [session_ startRunning];
+        } @catch (NSException*) {
+            // The session's runtime error says how it went.
+        }
+    }
+
+    // Whether the multi-camera session's hardware is over its budget (it would
+    // not start): a join that does that is undone.
+    bool overBudget() const
+    {
+#if TARGET_OS_IOS
+        return multiCamera_ && ((AVCaptureMultiCamSession*)session_).hardwareCost > 1.0f;
+#else
+        return false;
+#endif
+    }
+
+    // Adds a camera's input to the session; nothing is left behind on failure.
+    bool addInput(const Entry& entry, RunningCamera& running)
+    {
+        NSError* error = nil;
+        AVCaptureDeviceInput* input = [AVCaptureDeviceInput deviceInputWithDevice:entry.device error:&error];
+        if (input == nil || ![session_ canAddInput:input]) return false;
+#if TARGET_OS_IOS
+        if (multiCamera_) {
+            [(AVCaptureMultiCamSession*)session_ addInputWithNoConnections:input];
+            running.input = input;
+            return true;
+        }
+#endif
+        [session_ addInput:input];
+        running.input = input;
+        return true;
+    }
+
+    // Takes a camera's outputs, and its input once it has none left, out of
+    // the session.
+    void removeFromSession(RunningCamera& running, bool video, bool photo)
+    {
+        [session_ beginConfiguration];
+        @try {
+            if (video && running.videoOutput) [session_ removeOutput:running.videoOutput];
+            if (photo && running.photoOutput) [session_ removeOutput:running.photoOutput];
+        } @catch (NSException*) {
+        }
+        if (video) {
+            running.videoOutput = nil;
+            running.delegate = nil;
+            running.connection = nil;
+            running.video = false;
+        }
+        if (photo) running.photoOutput = nil;
+        if (running.input != nil && running.videoOutput == nil && running.photoOutput == nil) {
+            @try {
+                [session_ removeInput:running.input];
+            } @catch (NSException*) {
+            }
+            running.input = nil;
+            running.format = nil;
+        }
+        [session_ commitConfiguration];
+    }
+
+    // A camera left alone in a multi-camera session may use the format it
+    // would have had alone.
+    void returnAlone()
+    {
+        if (!multiCamera_) return;
+        const auto inSession = camerasInSession();
+        if (inSession.size() != 1) return;
+        const auto index = inSession.front();
+        auto& last = cameras_[index];
+        if (!last.video) return;
+        AVCaptureDeviceFormat* best = chooseFormat(entries_[index], last.width, last.height, last.frameRate, false);
+        if (best == nil || best == last.format) return;
+        if (!setFormat(entries_[index].device, best, throttledRate(*last.throttle, best))) return;
+        last.format = best;
+        reapply({index});
+    }
+
+    // Called on the session's queue after a still is delivered: a camera that
+    // streams keeps its photo output, one that only takes stills leaves.
+    void releaseStill(std::size_t camera)
+    {
+        if (stopped_ || camera >= entries_.size()) return;
+        auto& running = cameras_[camera];
+        if (running.video || running.photoOutput == nil || stillsInFlight(camera)) return;
+        removeFromSession(running, false, true);
+        returnAlone();
+    }
+
+    // The format with the largest still a camera offers (among those a
+    // multi-camera session takes, when asked): what a camera that only takes
+    // stills runs in a session with other cameras.
+    AVCaptureDeviceFormat* chooseStillFormat(const Entry& entry, bool multiCameraOnly) const
+    {
+        AVCaptureDeviceFormat* best = nil;
+        std::int64_t bestArea = -1;
+        for (AVCaptureDeviceFormat* format in entry.device.formats) {
+            if (multiCameraOnly && !formatTakenByMultiCamera(format)) continue;
+            std::int64_t area = 0;
+            for (NSValue* value in format.supportedMaxPhotoDimensions) {
+                CMVideoDimensions photo;
+                [value getValue:&photo];
+                area = std::max<std::int64_t>(area, std::int64_t(photo.width) * photo.height);
+            }
+            if (area > bestArea) {
+                best = format;
+                bestArea = area;
+            }
+        }
+        return best;
+    }
+
     bool configureVideo(std::size_t camera, const Entry& entry, RunningCamera& running, AVCaptureDeviceFormat* format,
                         std::uint32_t width, std::uint32_t height, std::uint32_t frameRate)
     {
-        [session_ beginConfiguration];
+        const bool newInput = running.input == nil;
+        AVCaptureDeviceFormat* const previousFormat = running.format;
+        AVCaptureVideoDataOutput* newOutput = nil;
+        UMLCameraOutputDelegate* newDelegate = nil;
+        AVCaptureConnection* newConnection = nil;
         bool ok = true;
-        NSError* error = nil;
-        if (running.input == nil) {
-            running.input = [AVCaptureDeviceInput deviceInputWithDevice:entry.device error:&error];
-            if (running.input == nil) ok = false;
-            else if (multiCamera_) {
-#if TARGET_OS_IOS
-                if ([session_ canAddInput:running.input]) [(AVCaptureMultiCamSession*)session_ addInputWithNoConnections:running.input];
-                else ok = false;
-#endif
-            } else if ([session_ canAddInput:running.input]) {
-                [session_ addInput:running.input];
-            } else {
-                ok = false;
+        [session_ beginConfiguration];
+        // Every change here can raise; the configuration is committed either way.
+        @try {
+            if (running.input == nil) ok = addInput(entry, running);
+            if (ok) {
+                running.throttle->requestedRate = frameRate;
+                ok = setFormat(entry.device, format, throttledRate(*running.throttle, format));
             }
-        }
-        if (ok) {
-            running.throttle->requestedRate = frameRate;
-            ok = setFormat(entry.device, format, throttledRate(*running.throttle, format));
-        }
-        if (ok && running.videoOutput == nil) {
-            AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
-            output.videoSettings = @{(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey:
-                                         @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
-            output.alwaysDiscardsLateVideoFrames = YES;
-            UMLCameraOutputDelegate* delegate = [[UMLCameraOutputDelegate alloc] initWithCamera:camera state:state_];
-            [output setSampleBufferDelegate:delegate queue:outputQueue_];
-            if (multiCamera_) {
+            if (ok && running.videoOutput == nil) {
+                AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
+                output.videoSettings = @{(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey:
+                                             @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
+                output.alwaysDiscardsLateVideoFrames = YES;
+                UMLCameraOutputDelegate* delegate = [[UMLCameraOutputDelegate alloc] initWithCamera:camera state:state_];
+                [output setSampleBufferDelegate:delegate queue:outputQueue_];
+                if (multiCamera_) {
 #if TARGET_OS_IOS
-                AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
-                                                             sourceDeviceType:entry.device.deviceType
-                                                         sourceDevicePosition:entry.device.position].firstObject;
-                if (port != nil && [session_ canAddOutput:output]) {
-                    [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
-                    AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
-                    if ([session_ canAddConnection:connection]) {
-                        [session_ addConnection:connection];
-                        running.connection = connection;
+                    AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
+                                                                 sourceDeviceType:entry.device.deviceType
+                                                             sourceDevicePosition:entry.device.position].firstObject;
+                    if (port != nil && [session_ canAddOutput:output]) {
+                        [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
+                        newOutput = output;
+                        AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
+                        if ([session_ canAddConnection:connection]) {
+                            [session_ addConnection:connection];
+                            newConnection = connection;
+                        } else {
+                            ok = false;
+                        }
                     } else {
                         ok = false;
                     }
+#endif
+                } else if ([session_ canAddOutput:output]) {
+                    [session_ addOutput:output];
+                    newOutput = output;
+                    newConnection = [output connectionWithMediaType:AVMediaTypeVideo];
                 } else {
                     ok = false;
                 }
-#endif
-            } else if ([session_ canAddOutput:output]) {
-                [session_ addOutput:output];
-                running.connection = [output connectionWithMediaType:AVMediaTypeVideo];
-            } else {
-                ok = false;
+                newDelegate = delegate;
             }
-            if (ok) {
-                running.videoOutput = output;
-                running.delegate = delegate;
-            }
+        } @catch (NSException*) {
+            ok = false;
         }
         [session_ commitConfiguration];
+        if (ok && overBudget()) ok = false;
         if (ok) {
+            if (newOutput != nil) {
+                running.videoOutput = newOutput;
+                running.delegate = newDelegate;
+                running.connection = newConnection;
+            }
             running.video = true;
             running.format = format;
             running.width = width;
             running.height = height;
             running.frameRate = frameRate;
             beginPressureWatch(entry, running);
+            return true;
         }
-        return ok;
+        // The join is undone: what it added leaves again, and a stream that
+        // was resized has its old format back.
+        [session_ beginConfiguration];
+        @try {
+            if (newOutput != nil) [session_ removeOutput:newOutput];
+        } @catch (NSException*) {
+        }
+        [session_ commitConfiguration];
+        if (newInput && running.input != nil && running.videoOutput == nil && running.photoOutput == nil)
+            removeFromSession(running, false, false);
+        if (!newInput && newOutput == nil && running.video && previousFormat != nil) {
+            running.throttle->requestedRate = running.frameRate;
+            (void)setFormat(entry.device, previousFormat, throttledRate(*running.throttle, previousFormat));
+        }
+        return false;
     }
 
     // The system's pressure on a camera lowers the rate it runs at, as Apple
@@ -928,9 +1158,10 @@ private:
                      [level isEqualToString:AVCaptureSystemPressureLevelShutdown])
                 cap = 15;
             if (throttle->cap.exchange(cap) == cap) return;
+            // The frame durations alone: setting the format again would revert
+            // the device's focus and exposure points.
             dispatch_async(queue, ^{
-                AVCaptureDeviceFormat* active = device.activeFormat;
-                (void)setFormat(device, active, throttledRate(*throttle, active));
+                (void)setFrameRate(device, throttledRate(*throttle, device.activeFormat));
             });
         }];
 #else
@@ -953,60 +1184,87 @@ private:
     bool prepareStill(std::size_t camera, const Entry& entry, RunningCamera& running)
     {
         if (running.photoOutput != nil) return true;
-        [session_ beginConfiguration];
-        bool ok = true;
-        NSError* error = nil;
-        if (running.input == nil) {
-            running.input = [AVCaptureDeviceInput deviceInputWithDevice:entry.device error:&error];
-            if (running.input == nil) ok = false;
-            else if (multiCamera_) {
+        // A camera that takes only a still joins the session as a video camera
+        // does: the cameras in it move to formats a multi-camera session takes,
+        // as does this one, or the still is refused.
+        const auto peers = peersOf(camera);
+        const bool several = multiCamera_ && !peers.empty();
+        AVCaptureDeviceFormat* own = nil;
+        if (several && running.input == nil && !formatTakenByMultiCamera(entry.device.activeFormat)) {
+            own = chooseStillFormat(entry, true);
+            if (own == nil) return false;
+        }
+        std::vector<Move> moves;
+        if (several && !planMoves(peers, moves)) return false;
+        std::vector<std::size_t> moved;
+        bool ok = applyMoves(moves, moved);
+        if (ok && own != nil) ok = setActiveFormat(entry.device, own);
+        const bool newInput = running.input == nil;
+        AVCapturePhotoOutput* newOutput = nil;
+        if (ok) {
+            [session_ beginConfiguration];
+            // Every change here can raise; the configuration is committed either way.
+            @try {
+                if (running.input == nil) ok = addInput(entry, running);
+                if (ok) {
+                    AVCapturePhotoOutput* output = [[AVCapturePhotoOutput alloc] init];
 #if TARGET_OS_IOS
-                if ([session_ canAddInput:running.input]) [(AVCaptureMultiCamSession*)session_ addInputWithNoConnections:running.input];
-                else ok = false;
+                    CMVideoDimensions largest {0, 0};
+                    for (NSValue* value in entry.device.activeFormat.supportedMaxPhotoDimensions) {
+                        CMVideoDimensions candidate;
+                        [value getValue:&candidate];
+                        if (std::int64_t(candidate.width) * candidate.height > std::int64_t(largest.width) * largest.height)
+                            largest = candidate;
+                    }
+                    if (largest.width != 0) output.maxPhotoDimensions = largest;
+                    output.maxPhotoQualityPrioritization = AVCapturePhotoQualityPrioritizationQuality;
 #endif
-            } else if ([session_ canAddInput:running.input]) {
-                [session_ addInput:running.input];
-            } else {
+                    if (multiCamera_) {
+#if TARGET_OS_IOS
+                        AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
+                                                                     sourceDeviceType:entry.device.deviceType
+                                                                 sourceDevicePosition:entry.device.position].firstObject;
+                        if (port != nil && [session_ canAddOutput:output]) {
+                            [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
+                            newOutput = output;
+                            AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
+                            ok = [session_ canAddConnection:connection];
+                            if (ok) [session_ addConnection:connection];
+                        } else {
+                            ok = false;
+                        }
+#endif
+                    } else if ([session_ canAddOutput:output]) {
+                        [session_ addOutput:output];
+                        newOutput = output;
+                    } else {
+                        ok = false;
+                    }
+                }
+            } @catch (NSException*) {
                 ok = false;
             }
+            [session_ commitConfiguration];
+            if (ok && overBudget()) ok = false;
         }
         if (ok) {
-            AVCapturePhotoOutput* output = [[AVCapturePhotoOutput alloc] init];
-#if TARGET_OS_IOS
-            CMVideoDimensions largest {0, 0};
-            for (NSValue* value in entry.device.activeFormat.supportedMaxPhotoDimensions) {
-                CMVideoDimensions candidate;
-                [value getValue:&candidate];
-                if (std::int64_t(candidate.width) * candidate.height > std::int64_t(largest.width) * largest.height)
-                    largest = candidate;
-            }
-            if (largest.width != 0) output.maxPhotoDimensions = largest;
-            output.maxPhotoQualityPrioritization = AVCapturePhotoQualityPrioritizationQuality;
-#endif
-            if (multiCamera_) {
-#if TARGET_OS_IOS
-                AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
-                                                             sourceDeviceType:entry.device.deviceType
-                                                         sourceDevicePosition:entry.device.position].firstObject;
-                if (port != nil && [session_ canAddOutput:output]) {
-                    [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
-                    AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
-                    ok = [session_ canAddConnection:connection];
-                    if (ok) [session_ addConnection:connection];
-                } else {
-                    ok = false;
+            running.photoOutput = newOutput;
+            if (running.format == nil) running.format = entry.device.activeFormat;
+            startSession();
+        } else {
+            // The join is undone: what it added leaves again.
+            if (newOutput != nil) {
+                [session_ beginConfiguration];
+                @try {
+                    [session_ removeOutput:newOutput];
+                } @catch (NSException*) {
                 }
-#endif
-            } else if ([session_ canAddOutput:output]) {
-                [session_ addOutput:output];
-            } else {
-                ok = false;
+                [session_ commitConfiguration];
             }
-            if (ok) running.photoOutput = output;
+            if (newInput && running.input != nil && running.videoOutput == nil && running.photoOutput == nil)
+                removeFromSession(running, false, false);
         }
-        [session_ commitConfiguration];
-        if (ok && !session_.running) [session_ startRunning];
-        (void)camera;
+        reapply(moved);
         return ok;
     }
 

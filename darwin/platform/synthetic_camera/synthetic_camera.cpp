@@ -406,6 +406,9 @@ struct CameraState {
     CameraSettings settings;
     std::optional<RunningVideo> video;
     std::deque<PendingStill> stills;
+    // Stills taken and not yet delivered: a camera that only takes stills has
+    // an input in the session until the last one is.
+    std::uint32_t stillsOut {};
     std::uint32_t stillCounter {};
     std::uint32_t seenFocusSerial {};
     bool scanning {};
@@ -448,38 +451,9 @@ public:
     {
         std::lock_guard lock(mutex_);
         if (stopped_ || camera >= cameras_.size() || width == 0 || height == 0 || frameRate == 0) return false;
-        std::set<std::size_t> running {camera};
-        for (std::size_t index = 0; index < cameras_.size(); ++index)
-            if (cameras_[index].video) running.insert(index);
-        // Cameras that run together lie in one concurrent set and use formats
-        // a multi-camera session takes; the ones already running move to such a
-        // format, or the new one is refused and nothing changes.
-        const bool several = running.size() > 1;
-        if (several && !joinable(running)) return false;
         std::map<std::size_t, const CameraVideoFormat*> picks;
-        for (const auto index : running) {
-            const bool self = index == camera;
-            const auto askedWidth = self ? width : cameras_[index].video->requestedWidth;
-            const auto askedHeight = self ? height : cameras_[index].video->requestedHeight;
-            const auto askedRate = self ? frameRate : cameras_[index].video->frameRate;
-            const auto* pick = chooseFormat(core_.profile_.cameras[index], askedWidth, askedHeight, askedRate, several);
-            if (pick == nullptr) return false;
-            picks[index] = pick;
-        }
-        for (const auto& [index, pick] : picks) {
-            auto& state = cameras_[index];
-            const bool self = index == camera;
-            if (!self && state.video->width == pick->width && state.video->height == pick->height) continue;
-            RunningVideo video;
-            video.width = pick->width;
-            video.height = pick->height;
-            video.requestedWidth = self ? width : state.video->requestedWidth;
-            video.requestedHeight = self ? height : state.video->requestedHeight;
-            video.frameRate = self ? frameRate : state.video->frameRate;
-            video.next = std::chrono::steady_clock::now();
-            if (state.video) video.counter = state.video->counter;
-            state.video = video;
-        }
+        if (!plan(camera, true, width, height, frameRate, picks)) return false;
+        applyPicks(camera, true, width, height, frameRate, picks);
         wake_.notify_all();
         return true;
     }
@@ -489,17 +463,7 @@ public:
         std::lock_guard lock(mutex_);
         if (camera >= cameras_.size() || !cameras_[camera].video) return;
         cameras_[camera].video.reset();
-        // A camera left alone goes back to the smallest format of any kind.
-        std::vector<std::size_t> running;
-        for (std::size_t index = 0; index < cameras_.size(); ++index)
-            if (cameras_[index].video) running.push_back(index);
-        if (running.size() != 1) return;
-        auto& state = cameras_[running.front()];
-        const auto* pick = chooseFormat(core_.profile_.cameras[running.front()], state.video->requestedWidth,
-                                        state.video->requestedHeight, state.video->frameRate, false);
-        if (pick == nullptr || (pick->width == state.video->width && pick->height == state.video->height)) return;
-        state.video->width = pick->width;
-        state.video->height = pick->height;
+        returnAlone();
     }
 
     void apply(std::size_t camera, const CameraSettings& settings) override
@@ -516,6 +480,12 @@ public:
         if (request.raw && (!info.rawStills || info.rawStillSize.width == 0 || core_.rawRefused)) return false;
         if (request.jpegWidth != 0 && !stillSize(info, request.jpegWidth, request.jpegHeight)) return false;
         if (request.jpegWidth == 0 && !request.raw) return false;
+        // A camera that only takes stills is an input of the session too: it
+        // joins as a streaming camera does, or the still is refused.
+        std::map<std::size_t, const CameraVideoFormat*> picks;
+        if (!plan(camera, false, 0, 0, 0, picks)) return false;
+        applyPicks(camera, false, 0, 0, 0, picks);
+        ++cameras_[camera].stillsOut;
         cameras_[camera].stills.push_back({request});
         wake_.notify_all();
         return true;
@@ -587,6 +557,87 @@ public:
     void deliver(CameraEvent event) { delegate_.cameraEvent(event); }
 
 private:
+    // A camera has an input in the session while it streams and while a still
+    // it took is on its way.
+    static bool hasInput(const CameraState& state) { return state.video.has_value() || state.stillsOut > 0; }
+
+    // The pixels a second the session's cameras ask for, over which a
+    // multi-camera session is over its hardware budget (AVFoundation's
+    // hardwareCost above 1.0): two 1080p cameras at 60 frames a second are.
+    static constexpr double hardwareBudgetPixelsPerSecond = 200e6;
+
+    // What admitting `camera` asks of a multi-camera session, as AVFoundation
+    // asks it: every camera with an input lies in one concurrent set, and all
+    // of them use a format a multi-camera session takes (a camera that only
+    // takes stills needs one to exist; the ones that stream move to the
+    // smallest that covers their stream), and together they stay in the
+    // hardware budget. `streams` is whether the camera streams video at the
+    // asked size. False when the session cannot take it; nothing changes.
+    bool plan(std::size_t camera, bool streams, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate,
+              std::map<std::size_t, const CameraVideoFormat*>& picks) const
+    {
+        std::set<std::size_t> inputs {camera};
+        for (std::size_t index = 0; index < cameras_.size(); ++index)
+            if (hasInput(cameras_[index])) inputs.insert(index);
+        const bool several = inputs.size() > 1;
+        if (several && !joinable(inputs)) return false;
+        double cost = 0;
+        for (const auto index : inputs) {
+            const bool self = index == camera;
+            const auto& state = cameras_[index];
+            const auto& info = core_.profile_.cameras[index];
+            if (!(self && streams) && !state.video) {
+                const bool takesMulti = std::any_of(info.videoFormats.begin(), info.videoFormats.end(),
+                                                    [](const auto& candidate) { return candidate.multiCamera; });
+                if (several && !takesMulti) return false;
+                continue;
+            }
+            const auto askedWidth = self && streams ? width : state.video->requestedWidth;
+            const auto askedHeight = self && streams ? height : state.video->requestedHeight;
+            const auto askedRate = self && streams ? frameRate : state.video->frameRate;
+            const auto* pick = chooseFormat(info, askedWidth, askedHeight, askedRate, several);
+            if (pick == nullptr) return false;
+            picks[index] = pick;
+            cost += double(pick->width) * pick->height * askedRate;
+        }
+        return !several || cost <= hardwareBudgetPixelsPerSecond;
+    }
+
+    // Brings the cameras that stream to the formats the plan picked.
+    void applyPicks(std::size_t camera, bool streams, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate,
+                    const std::map<std::size_t, const CameraVideoFormat*>& picks)
+    {
+        for (const auto& [index, pick] : picks) {
+            auto& state = cameras_[index];
+            const bool self = index == camera && streams;
+            if (!self && state.video->width == pick->width && state.video->height == pick->height) continue;
+            RunningVideo video;
+            video.width = pick->width;
+            video.height = pick->height;
+            video.requestedWidth = self ? width : state.video->requestedWidth;
+            video.requestedHeight = self ? height : state.video->requestedHeight;
+            video.frameRate = self ? frameRate : state.video->frameRate;
+            video.next = std::chrono::steady_clock::now();
+            if (state.video) video.counter = state.video->counter;
+            state.video = video;
+        }
+    }
+
+    // A camera left alone goes back to the smallest format of any kind.
+    void returnAlone()
+    {
+        std::vector<std::size_t> inputs;
+        for (std::size_t index = 0; index < cameras_.size(); ++index)
+            if (hasInput(cameras_[index])) inputs.push_back(index);
+        if (inputs.size() != 1 || !cameras_[inputs.front()].video) return;
+        auto& state = cameras_[inputs.front()];
+        const auto* pick = chooseFormat(core_.profile_.cameras[inputs.front()], state.video->requestedWidth,
+                                        state.video->requestedHeight, state.video->frameRate, false);
+        if (pick == nullptr || (pick->width == state.video->width && pick->height == state.video->height)) return;
+        state.video->width = pick->width;
+        state.video->height = pick->height;
+    }
+
     // Whether the cameras that would run all lie in one concurrent set.
     bool joinable(const std::set<std::size_t>& running) const
     {
@@ -765,6 +816,10 @@ private:
             result.ok = (request.jpegWidth != 0 && !result.jpeg.empty()) || (request.raw && !result.raw.empty());
         }
         delegate_.cameraStill(camera, std::move(result));
+        // The still is delivered: a camera that only took stills leaves the session.
+        std::lock_guard lock(mutex_);
+        if (cameras_[camera].stillsOut > 0) --cameras_[camera].stillsOut;
+        returnAlone();
     }
 
     void run()

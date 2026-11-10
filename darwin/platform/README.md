@@ -98,14 +98,18 @@ interface to the wire.
   range, delivered through `CameraSessionDelegate` with the exposure that made
   them; holding a frame's `owner` holds the capture's buffer, and its `native`
   is the platform's own handle to the picture. A camera alone may run any
-  format; cameras that run together run formats a multi-camera session takes
-  (`multiCamera`): `startVideo()` moves the cameras already running to such a
-  format, or fails and changes nothing, and a camera left alone goes back to the
-  smallest format of any kind. A photo output's delegate is held by the session
-  until its capture ends.
-- **Controls** arrive as one `CameraSettings` per camera, and the session applies
-  what differs. A zoom camera (a virtual device) takes automatic exposure, focus
-  and white balance only.
+  format; every camera with an input in the session, one that only takes stills
+  as well, runs a format a multi-camera session takes (`multiCamera`) while
+  another is in it: `startVideo()` and `takeStill()` move the cameras already in
+  the session to such a format, or fail and change nothing, and fail and undo
+  the join when the session's hardware cost goes over its budget. A camera that
+  only takes stills leaves the session, with its photo output, when its last
+  still is delivered, and a camera left alone goes back to the smallest format
+  of any kind; a camera whose format changed has its settings applied again. A
+  photo output's delegate is held by the session until its capture ends.
+- **Controls** arrive as one `CameraSettings` per camera, and the session
+  applies what differs. A zoom camera (a virtual device) takes automatic
+  exposure, focus and white balance only.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when
@@ -113,8 +117,10 @@ interface to the wire.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at
-  critical), as Apple advises, before the session is interrupted. A restart
-  after a runtime error ends with a `resumed` event.
+  critical), as Apple advises, before the session is interrupted. A runtime
+  error is restarted once: the restart ends with a `resumed` event, and an
+  error before that ends the episode with `failed`, so that the client closes
+  the session and tries again later.
 - `nv12_transform.hpp` crops, rotates and scales NV12 pictures: the portable
   `transformNv12()` is the reference, and `Camera::makeFrameTransformer()` gives
   the host's fastest. The Apple camera's (`apple/accelerated_nv12.hpp`) scales a
@@ -125,7 +131,9 @@ interface to the wire.
 - The synthetic camera is `synthetic_camera/` (`UML::SyntheticCamera`), a
   platform camera with no hardware: profiles of a phone (a back zoom camera over
   three lenses, and a front camera), a tablet (and one with both of an iPad's
-  front cameras) and a laptop; the multi-camera format rule; a deterministic chart
+  front cameras) and a laptop; the multi-camera rule, which counts cameras that
+  only take stills and refuses a join over a hardware budget (200 million
+  pixels a second); a deterministic chart
   whose top row encodes the camera and the frame counter (`decodeChartMarker`);
   brightness, blur, tint and zoom that follow the settings; JPEG and Bayer
   stills; simulated interruptions; and, with a manual clock, frames that a test

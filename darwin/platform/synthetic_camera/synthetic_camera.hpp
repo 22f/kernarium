@@ -48,6 +48,12 @@ struct SyntheticCameraOptions {
     bool authorized {true};
 };
 
+// The multi-camera rule it models, as an AVCaptureMultiCamSession asks it:
+// every camera with an input (one that streams, or has a still on its way)
+// lies in one concurrent set and runs a format a multi-camera session takes,
+// the cameras that stream moving to such a format when another joins; a join
+// that cannot is refused with nothing changed, and so is one whose cameras ask
+// for more than 200 million pixels a second together (the hardware budget).
 class SyntheticCamera : public Camera {
 public:
     // Sessions opened since the object was made, and sessions open now. A

@@ -327,6 +327,70 @@ void multiCameraFormats()
     require(camera->videoSize(1) == Size(1920, 1080) && !camera->videoRunning(0));
 }
 
+// Every camera with an input counts in a multi-camera session, one that only
+// takes stills as well: it joins as a streaming camera does, the cameras that
+// stream move to formats the session takes (or the still is refused, nothing
+// changed), and it leaves with its last still, the others going back.
+void stillOnlyCamerasCount()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tabletDualFront));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    using Size = std::pair<std::uint32_t, std::uint32_t>;
+    CameraStillRequest request;
+    request.jpegWidth = 1000;
+    request.jpegHeight = 700;
+    request.token = 7;
+
+    // The back camera streams at a size of its own; a still on a front camera joins it.
+    require(session->startVideo(0, 1600, 900, 30));
+    require(camera->videoSize(0) == Size(1600, 900));
+    require(session->takeStill(1, request));
+    require(camera->videoSize(0) == Size(1920, 1080));  // moved to a format the session takes
+    require(recorder.stills.empty());
+    camera->pump(1, 0);
+    require(recorder.stills.size() == 1 && recorder.stills.back().second.ok);
+    require(camera->videoSize(0) == Size(1600, 900));  // alone again once the still is delivered
+
+    // A still on a camera in no concurrent set with the streaming one is refused.
+    require(session->startVideo(1, 640, 480, 30));
+    require(!session->takeStill(2, request));
+    require(camera->videoSize(0) == Size(1920, 1080) && camera->videoSize(1) == Size(640, 480));
+    session->stopVideo(1);
+
+    // A camera at a size no multi-camera format covers cannot be joined by a still either.
+    session->stopVideo(0);
+    require(session->startVideo(0, 3840, 2160, 30));
+    request.token = 8;
+    require(!session->takeStill(1, request));
+    require(camera->videoSize(0) == Size(3840, 2160) && camera->videoRunning(0));
+    // Without that stream the still is taken, and a stream cannot join it either while it is on its way.
+    session->stopVideo(0);
+    request.token = 9;
+    require(session->takeStill(1, request));
+    require(!session->startVideo(0, 3840, 2160, 30));
+    camera->pump(1, 0);
+    require(recorder.stills.size() == 2);
+    require(session->startVideo(0, 3840, 2160, 30));  // the still has left the session
+}
+
+// A join whose cameras ask for more than the hardware gives (AVFoundation's
+// hardwareCost over 1.0) is refused, and nothing changes.
+void hardwareBudget()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tabletDualFront));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    using Size = std::pair<std::uint32_t, std::uint32_t>;
+    require(session->startVideo(0, 1920, 1080, 60));
+    require(!session->startVideo(1, 1920, 1080, 60));
+    require(!camera->videoRunning(1) && camera->videoSize(0) == Size(1920, 1080));
+    require(session->startVideo(1, 1920, 1080, 30));  // half the rate fits
+    // Raising a camera's rate is a join of its own and is refused the same way.
+    require(!session->startVideo(1, 1920, 1080, 60));
+    require(camera->videoFrameRate(1) == 30 && camera->videoFrameRate(0) == 60);
+}
+
 // A Bayer still the platform refuses, or that fails alone, leaves what else the
 // capture asked for.
 void rawFailures()
@@ -515,6 +579,8 @@ int main()
     zoomCamera();
     multiCamera();
     multiCameraFormats();
+    stillOnlyCamerasCount();
+    hardwareBudget();
     rawFailures();
     interruptionOutlivesSession();
     stills();
