@@ -390,7 +390,15 @@ requires reopening Andarium.
   that record as the previous session's (`PreviousSession`) and, after an end
   that was neither Android's own nor a stop, Home shows a notice with its cause
   (`SessionRecord.notice`). `ExitReports` keeps the exit and diagnostic reports
-  MetricKit delivers beside the records.
+  MetricKit delivers beside the records. The record's stall slot (`StallRecord`)
+  says when the guest's vCPUs stopped running on the host and what the host was
+  doing; the bug report carries it in words, with the guest's `/proc` counters
+  (`GuestProcFiles`), which adds at most 10 s in all to a report and says per
+  file why one is missing. Everything Andarium keeps or copies of a session is
+  bounded: a record longer than the runtime writes (16 KiB at most) is not read
+  or copied, and a line says so; a report of the stalls is under 80 KiB per
+  session whatever a record claims; and MetricKit reports are 30 at most, of
+  1 MiB at most each.
 
 ## Android operations
 

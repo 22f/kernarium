@@ -4,6 +4,7 @@
 #include "audio/protocol.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
+#include "camera/camera_source.hpp"
 #include "camera/in_process_service.hpp"
 #include "video/in_process_service.hpp"
 #include "video/virtio_video_device.hpp"
@@ -28,12 +29,7 @@
 #include "gpu_budget_plan.hpp"
 #include "guest_memory_argument.hpp"
 #include "options.hpp"
-#include "platform/camera.hpp"
-#include "platform/camera_authorization.hpp"
 #include "platform/microphone_authorization.hpp"
-#if UML_APP_HAS_SYNTHETIC_CAMERA
-#include "platform/synthetic_camera/synthetic_camera.hpp"
-#endif
 #include "restart_loop_guard.hpp"
 #include "sockets/socket_paths.hpp"
 #include "statistics_report.hpp"
@@ -1595,7 +1591,6 @@ private:
 	 * way to grant it, when it is not. */
 	[[nodiscard]] bool start_camera(std::vector<std::string> &kernel)
 	{
-		std::shared_ptr<uml::platform::Camera> source;
 		uml::camera::CameraDeviceOptions options;
 		options.mode = prepared_.camera == CameraSource::blocked ?
 			uml::camera::CameraMode::blocked :
@@ -1610,38 +1605,32 @@ private:
 		options.onState = [](uml::camera::CameraState state) {
 			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
 		};
+		uml::camera::CameraSourceHandle source;
 		try {
 			if (prepared_.camera == CameraSource::synthetic ||
 			    (prepared_.camera == CameraSource::blocked &&
 			     prepared_.camera_profile)) {
-#if UML_APP_HAS_SYNTHETIC_CAMERA
-				uml::platform::SyntheticCameraOptions synthetic;
+				if (!uml::camera::syntheticCameraAvailable()) {
+					std::fputs("--camera=synthetic needs the synthetic "
+						   "camera, which this build lacks\n", stderr);
+					return false;
+				}
+				uml::camera::SyntheticProfile profile {};
 				switch (prepared_.camera_profile.value_or(
 					CameraProfile::phone)) {
 				case CameraProfile::phone:
-					synthetic.profile =
-						uml::platform::SyntheticCameraProfile::phone;
+					profile = uml::camera::SyntheticProfile::phone;
 					break;
 				case CameraProfile::tablet:
-					synthetic.profile =
-						uml::platform::SyntheticCameraProfile::tablet;
+					profile = uml::camera::SyntheticProfile::tablet;
 					break;
 				case CameraProfile::laptop:
-					synthetic.profile =
-						uml::platform::SyntheticCameraProfile::laptop;
+					profile = uml::camera::SyntheticProfile::laptop;
 					break;
 				}
-				source = uml::platform::makeSyntheticCamera(synthetic);
-#else
-				std::fputs("--camera=synthetic needs the synthetic "
-					   "camera, which this build lacks\n", stderr);
-				return false;
-#endif
+				source = uml::camera::makeSyntheticCameraSource(profile);
 			} else {
-				const auto permission =
-					uml::platform::makeAppleCameraAuthorization()
-						->permission();
-				if (permission != uml::platform::CameraPermission::granted) {
+				if (!uml::camera::hostCameraPermissionGranted()) {
 					std::fputs(
 						"--camera=host needs the system's camera "
 						"permission, granted beforehand: allow the "
@@ -1651,7 +1640,7 @@ private:
 						stderr);
 					return false;
 				}
-				source = uml::platform::makeAppleCamera();
+				source = uml::camera::makeHostCameraSource();
 			}
 		} catch (const std::exception &error) {
 			std::fprintf(stderr, "Unable to start the camera: %s\n",

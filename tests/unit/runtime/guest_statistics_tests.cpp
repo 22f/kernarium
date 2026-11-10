@@ -7,6 +7,7 @@
 #include "named_spinner.hpp"
 #include "named_tests.hpp"
 #include "require.hpp"
+#include "vcpu_carrier_name.hpp"
 #include "wait_until.hpp"
 
 #include <atomic>
@@ -36,6 +37,12 @@ constexpr std::chrono::seconds bound {30};
 void a_carrier_is_named_uml_vcpu_n_carrier()
 {
 	using uml::runtime::is_vcpu_carrier_name;
+	using uml::runtime::vcpu_carrier_index;
+	require(vcpu_carrier_index("uml-vcpu-0-carrier") == 0);
+	require(vcpu_carrier_index("uml-vcpu-13-carrier") == 13);
+	require(vcpu_carrier_index("uml-vcpu-99999999999999999999-carrier") == 1001);
+	require(vcpu_carrier_index("uml-vcpu-x-carrier") == -1);
+	require(vcpu_carrier_index("uml-irq-notify") == -1);
 	require(is_vcpu_carrier_name("uml-vcpu-0-carrier"));
 	require(is_vcpu_carrier_name("uml-vcpu-7-carrier"));
 	require(is_vcpu_carrier_name("uml-vcpu-63-carrier"));
