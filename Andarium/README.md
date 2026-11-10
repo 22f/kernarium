@@ -368,10 +368,12 @@ requires reopening Andarium.
   MetricKit delivers beside the records. The record's stall slot (`StallRecord`)
   says when the guest's vCPUs stopped running on the host and what the host was
   doing; the bug report carries it in words, with the guest's `/proc` counters
-  (`GuestProcFiles`). Everything Andarium keeps or copies of a session is
-  bounded: a record is read and copied up to 16 KiB, a report of the stalls is
-  under 80 KiB per session, and MetricKit reports are 30 at most, of 1 MiB at
-  most each.
+  (`GuestProcFiles`), which adds at most 10 s in all to a report and says per
+  file why one is missing. Everything Andarium keeps or copies of a session is
+  bounded: a record longer than the runtime writes (16 KiB at most) is not read
+  or copied, and a line says so; a report of the stalls is under 80 KiB per
+  session whatever a record claims; and MetricKit reports are 30 at most, of
+  1 MiB at most each.
 
 ## Android operations
 

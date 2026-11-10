@@ -106,9 +106,15 @@ public struct StallRecord: Equatable, Sendable {
         public var level: Int
     }
 
-    /// The most `report()` takes: the slot holds at most 32 events and 24
-    /// changes, and an event, with every vCPU stalled and the widest numbers,
-    /// is under 2 KiB in words.
+    /// What the runtime's slot holds: the newest 32 events and the newest 8
+    /// changes of each kind, and an event names at most 16 vCPUs. A record
+    /// that says more is not the runtime's, and only this much of it is read.
+    public static let eventCapacity = 32
+    public static let transitionCapacity = 8
+    public static let vcpuCapacity = 16
+
+    /// The most `report()` takes. A full slot, with every vCPU stalled and the
+    /// widest numbers, is about 62 KiB in words; a longer text is cut.
     public static let maximumReportBytes = 80 << 10
 
     /// The wall clock at the base of every time in the record.
@@ -122,6 +128,10 @@ public struct StallRecord: Equatable, Sendable {
     public var thermal: [ThermalChange]
     public var power: [PowerChange]
     public var pressure: [PressureChange]
+    /// How often the watch saw a vCPU thread in the idle wait the runtime
+    /// marks, and in a wait nothing marks; nil in a slot that does not count.
+    public var idleSamples: Int?
+    public var unmarkedSamples: Int?
 
     /// Reads the stall slot out of a session record's text (or the slot
     /// alone); nil when the text has none, as the records of the earlier
@@ -162,16 +172,25 @@ public struct StallRecord: Equatable, Sendable {
         guard let header, header.count >= 10, header[1] == "1", header[2] == "base", header[4] == "at",
             header[6] == "total", header[8] == "shown",
             let base = TimeInterval(header[3]), let written = TimeInterval(header[5]),
+            abs(base) < 1e11, abs(written) < 1e11,
             let total = Int(header[7]), let shown = Int(header[9])
         else { return nil }
         self.base = Date(timeIntervalSince1970: base)
         self.written = Date(timeIntervalSince1970: written)
         self.total = total
         self.shown = shown
-        self.events = events
-        self.thermal = thermal
-        self.power = power
-        self.pressure = pressure
+        // Only what the slot can hold: the newest of each.
+        self.events = Array(events.suffix(Self.eventCapacity))
+        self.thermal = Array(thermal.suffix(Self.transitionCapacity))
+        self.power = Array(power.suffix(Self.transitionCapacity))
+        self.pressure = Array(pressure.suffix(Self.transitionCapacity))
+        // idle I unmarked U, after the fields every reader knows.
+        func counter(_ name: Substring) -> Int? {
+            guard let at = header.firstIndex(of: name), at + 1 < header.count else { return nil }
+            return Int(header[at + 1])
+        }
+        idleSamples = counter("idle")
+        unmarkedSamples = counter("unmarked")
     }
 
     /// `stall SEQ START DUR[+] CAUSES SHARES UI WATCH THERMAL LPM CPUS BEFORE
@@ -187,16 +206,17 @@ public struct StallRecord: Equatable, Sendable {
         guard let duration = Int(durationText) else { return nil }
         // Each cause letter but '.' has a two-digit share, in order.
         var shares: [Int] = []
-        var digits = Array(words[5])
+        let digits = Array(words[5].prefix(2 * vcpuCapacity))
         if digits != ["-"] {
-            while digits.count >= 2 {
-                shares.append(Int(String(digits.prefix(2))) ?? 0)
-                digits.removeFirst(2)
+            var at = 0
+            while at + 1 < digits.count {
+                shares.append(Int(String(digits[at...at + 1])) ?? 0)
+                at += 2
             }
         }
         var stalled: [Stalled] = []
         var next = 0
-        for (vcpu, letter) in words[4].enumerated() {
+        for (vcpu, letter) in words[4].prefix(vcpuCapacity).enumerated() {
             guard let cause = Cause(rawValue: letter) else { continue }
             stalled.append(Stalled(vcpu: vcpu, cause: cause, sharePercent: next < shares.count ? shares[next] : 0))
             next += 1
@@ -233,9 +253,11 @@ public struct StallRecord: Equatable, Sendable {
 
 extension StallRecord {
     /// The record in words for a person reading a bug report: each event with
-    /// the vCPUs it stopped, what they waited for, how long, and the thermal,
-    /// power and memory state around it, newest last, then the changes of the
-    /// host's state. Times are UTC.
+    /// the vCPUs it stopped, what they waited for, how long, how much of the
+    /// time they ran meanwhile, and the thermal, power and memory state around
+    /// it, newest last, then the changes of the host's state. Times are UTC.
+    /// The text is never longer than `maximumReportBytes`; what does not fit is
+    /// cut at a line, with a line that says so.
     public func report() -> String {
         var lines: [String] = []
         lines.append("The session began \(Self.stamp(base)); this slot was last written \(Self.stamp(written)).")
@@ -244,6 +266,14 @@ extension StallRecord {
                 ? "No stall was recorded."
                 : "\(total) stall\(total == 1 ? "" : "s") recorded; "
                     + (shown == total ? "all are listed." : "the newest \(shown) are listed."))
+        if let idle = idleSamples, let unmarked = unmarkedSamples {
+            var seen = "The watch saw vCPU threads in the idle wait the runtime marks \(idle) times and in a wait it "
+                + "does not mark \(unmarked) times"
+            if idle == 0 && unmarked > 0 {
+                seen += "; with no marked idle wait seen, the runtime's wait markers may not be reaching its wrappers"
+            }
+            lines.append(seen + ".")
+        }
         if !events.isEmpty { lines.append("") }
         for event in events {
             lines.append(contentsOf: words(for: event))
@@ -267,7 +297,23 @@ extension StallRecord {
             }
         }
         while lines.last == "" { lines.removeLast() }
-        return lines.joined(separator: "\n") + "\n"
+        return Self.cut(lines, to: Self.maximumReportBytes)
+    }
+
+    /// The lines joined, whole lines only, in at most `limit` bytes.
+    static func cut(_ lines: [String], to limit: Int) -> String {
+        let note = "(the rest of the record is not shown)\n"
+        var text = ""
+        var bytes = 0
+        for line in lines {
+            let size = line.utf8.count + 1
+            if bytes + size > limit - note.utf8.count {
+                return text + note
+            }
+            text += line + "\n"
+            bytes += size
+        }
+        return text
     }
 
     /// One event in words.
@@ -278,35 +324,32 @@ extension StallRecord {
         headline += event.open ? ", still going when this was written." : "."
         lines.append(headline)
 
-        // What stopped.
+        // What stopped, and how much of the time each thread ran meanwhile.
         if event.stalled.isEmpty {
             lines.append(
-                "  No vCPU thread showed a stall of its own, and the watch's own tick ran "
+                "  No vCPU thread showed a stall of its own, and the watch's own wake-up was "
                     + "\(event.watchLate) ms late: the whole process was not running, or not "
                     + "scheduled, for that time.")
         } else {
             for group in Dictionary(grouping: event.stalled, by: \.cause).sorted(by: { $0.value[0].vcpu < $1.value[0].vcpu })
             {
                 let cpus = Self.list(group.value.map { "vCPU \($0.vcpu)" })
-                switch group.key {
-                case .starved:
-                    let shares = Set(group.value.map(\.sharePercent))
-                    let got = shares.count == 1 ? "\(shares.first ?? 0)% of a core" : "\(shares.min() ?? 0)% to \(shares.max() ?? 0)% of a core"
-                    lines.append("  \(cpus): runnable but starved. The system gave \(group.value.count == 1 ? "the thread" : "each thread") \(got).")
-                default:
-                    lines.append("  \(cpus): \(Self.waitWords(group.key)).")
-                }
+                let shares = Set(group.value.map(\.sharePercent))
+                let ran = shares.count == 1 ? "\(shares.first ?? 0)%" : "\(shares.min() ?? 0)% to \(shares.max() ?? 0)%"
+                lines.append(
+                    "  \(cpus): \(Self.waitWords(group.key)); "
+                        + "\(group.value.count == 1 ? "the thread" : "each thread") ran \(ran) of a core meanwhile.")
             }
             if event.watchLate >= 150 {
                 lines.append(
-                    "  The watch's own tick ran \(event.watchLate) ms late, so the whole process was held up, "
+                    "  The watch's own wake-up was \(event.watchLate) ms late, so the whole process was held up, "
                         + "not only the vCPU threads.")
             }
         }
-        if let late = event.mainQueueLate, late >= 100 {
-            lines.append("  The app's main queue answered \(late) ms late.")
-        } else if event.mainQueueLate == nil {
-            lines.append("  The main queue was not measured (no run loop).")
+        if let late = event.mainQueueLate {
+            if late >= 100 { lines.append("  The app's main queue answered \(late) ms late.") }
+        } else {
+            lines.append("  The main queue's lateness was not measured during this event.")
         }
 
         // The host around it.
@@ -336,36 +379,42 @@ extension StallRecord {
         return lines
     }
 
+    /// Memory counts as tight at the system's warning or critical pressure
+    /// level, when the process's compressed memory grew by 64 MiB or more
+    /// during the event, or when it paged in 1000 pages (16 MiB) or more.
+    static func memoryIsTight(_ event: Event) -> Bool {
+        event.pressure >= 1 || event.compressedChangeMiB >= 64 || event.pageins >= 1000
+    }
+
     private static func reading(_ event: Event) -> String {
         let hot = max(event.thermalStart, event.thermalEnd) >= 2
         let held = event.lowPowerMode || event.processorsEnd < event.processorsStart
-        let squeezed = event.pressure >= 1 || event.pageins > 0 || event.compressedChangeMiB > 0
+        var context = ""
+        if hot { context += ", while the device was hot" }
+        if held { context += ", with the cores held back" }
+        if memoryIsTight(event) { context += ", with memory tight" }
         if event.stalled.isEmpty {
-            return hot
-                ? "the whole process stopped while the device was hot; the system took the CPU away."
-                : "the whole process stopped; the system did not run it."
+            return "the whole process stopped" + context + "; the system did not run it."
         }
-        let system = event.stalled.filter(\.cause.isSystem)
-        let blocked = event.stalled.filter { !$0.cause.isSystem }
         var parts: [String] = []
-        if !system.isEmpty {
-            var text = "the system did not run the vCPU threads"
-            if hot { text += " while the device was hot" }
-            if held { text += ", with the cores held back" }
-            if squeezed { text += ", with memory tight" }
-            parts.append(text)
+        if event.stalled.contains(where: { $0.cause == .starved }) {
+            parts.append("the system did not run the vCPU threads" + context)
         }
-        if !blocked.isEmpty {
-            let kinds = Set(blocked.map(\.cause))
+        if event.stalled.contains(where: { $0.cause == .fault }) {
             parts.append(
-                "the vCPU threads waited on the host (" + kinds.map { waitWords($0) }.sorted().joined(separator: "; ") + ")")
+                "vCPU threads sat in an uninterruptible wait in the system, usually a page fault or storage" + context)
+        }
+        let blocked = Set(event.stalled.map(\.cause).filter { !$0.isSystem })
+        if !blocked.isEmpty {
+            parts.append(
+                "vCPU threads waited on the host (" + blocked.map { waitWords($0) }.sorted().joined(separator: "; ") + ")")
         }
         return parts.joined(separator: ", and ") + "."
     }
 
     private static func waitWords(_ cause: Cause) -> String {
         switch cause {
-        case .starved: "starved of CPU"
+        case .starved: "runnable but starved of CPU"
         case .fault: "in an uninterruptible wait in the system (usually a page fault or storage)"
         case .other: "blocked in a host call the runtime does not label"
         case .answer: "waiting for a device service's answer"

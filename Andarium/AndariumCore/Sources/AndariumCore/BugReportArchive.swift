@@ -190,17 +190,13 @@ public enum BugReportAttachments {
             (previousSessionRecord, "andarium/session-previous.txt"),
             (sessionRecord, "andarium/session-current.txt"),
         ]
-        var texts: [String?] = []
+        var records: [SessionRecord?] = []
         for (file, name) in files {
-            let text = BoundedFile.text(diagnostics.appendingPathComponent(file), limit: SessionRecord.maximumBytes)
-            texts.append(text)
-            if let text {
-                entries.append(.init(name: name, data: Data(DiagnosticRedaction.redact(text, containers: containers).utf8)))
-            }
+            let (entry, record) = sessionEntry(diagnostics.appendingPathComponent(file), named: name, containers: containers)
+            records.append(record)
+            if let entry { entries.append(entry) }
         }
-        if let report = stalls(previous: texts[0].flatMap(SessionRecord.init(text:)),
-            current: texts[1].flatMap(SessionRecord.init(text:)))
-        {
+        if let report = stalls(previous: records[0], current: records[1]) {
             entries.append(.init(name: stallReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }
         entries.append(contentsOf: guest)
@@ -212,10 +208,31 @@ public enum BugReportAttachments {
             if let text = BoundedFile.text(metrics.appendingPathComponent(report), limit: maximumMetricKitBytes) {
                 entries.append(.init(
                     name: "andarium/metrickit/\(report)",
-                    data: Data(DiagnosticRedaction.redact(text, containers: containers).utf8)))
+                    data: BoundedFile.capped(
+                        DiagnosticRedaction.redact(text, containers: containers), to: maximumMetricKitBytes)))
             }
         }
         return entries
+    }
+
+    /// A session record as the bug report copies it, and the record it holds.
+    /// A file longer than the runtime ever writes (`SessionRecord.maximumBytes`)
+    /// is not copied, exactly as `SessionRecord.read` refuses it, and a line
+    /// says so; bytes that are not text become U+FFFD, and the copy is cut to
+    /// the same bound after that and after the redaction.
+    private static func sessionEntry(
+        _ url: URL, named name: String, containers: [String]
+    ) -> (BugReportArchive.Entry?, SessionRecord?) {
+        guard let data = BoundedFile.read(url, limit: SessionRecord.maximumBytes) else { return (nil, nil) }
+        guard data.count <= SessionRecord.maximumBytes else {
+            let note = "\(name) was not copied: \(url.lastPathComponent) is longer than \(SessionRecord.maximumBytes) "
+                + "bytes, and the runtime writes a record of at most 13312.\n"
+            return (.init(name: name, data: Data(note.utf8)), nil)
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        let copy = BoundedFile.capped(
+            DiagnosticRedaction.redact(text, containers: containers), to: SessionRecord.maximumBytes)
+        return (.init(name: name, data: copy), SessionRecord(text: text))
     }
 
     /// The stalls of the two sessions the records describe, in words; nil
@@ -225,9 +242,10 @@ public enum BugReportAttachments {
         var lines = [
             "Stalls of the guest's vCPUs, as the runtime's stall watch recorded them.",
             "",
-            "A stall is a vCPU that, for at least 100 ms, was runnable but got under a fifth of a core (starved),",
-            "sat in an uninterruptible wait in the system, or sat in one host call (a device service's answer, a",
-            "disk, guest RAM, or a call the runtime does not label). The watch looks every 50 ms. Times are UTC.",
+            "A stall is a vCPU that, for at least 100 ms, was runnable but got under a fifth of a core (starved), or",
+            "sat in an uninterruptible wait in the system or in one host call (a device service's answer, a disk,",
+            "guest RAM, or a call the runtime does not label) and ran under a fifth of the time meanwhile. The",
+            "watch looks every 50 ms. Times are UTC.",
             "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
         ]
         for (title, record) in [("The previous session", previous), ("The current session", current)] {

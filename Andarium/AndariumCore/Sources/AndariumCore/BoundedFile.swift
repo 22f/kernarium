@@ -18,4 +18,16 @@ enum BoundedFile {
     static func text(_ url: URL, limit: Int) -> String? {
         read(url, limit: limit).map { String(decoding: $0.prefix(limit), as: UTF8.self) }
     }
+
+    /// The first `limit` bytes of `text` as UTF-8, cut at a character, so that
+    /// replacing bytes that were not text, or redacting a path, cannot take a
+    /// copy past the bound it was read under.
+    static func capped(_ text: String, to limit: Int) -> Data {
+        var bytes = Data(text.utf8)
+        guard bytes.count > limit else { return bytes }
+        bytes = bytes.prefix(limit)
+        // Drop a character cut in two.
+        while !bytes.isEmpty, String(data: bytes, encoding: .utf8) == nil { bytes.removeLast() }
+        return bytes
+    }
 }

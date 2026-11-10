@@ -31,6 +31,7 @@ struct StallRecordTests {
         #expect(record.base == Date(timeIntervalSince1970: 1_794_114_300))
         #expect(record.written == Date(timeIntervalSince1970: 1_794_118_430))
         #expect(record.total == 37 && record.shown == 32 && record.events.count == 32)
+        #expect(record.idleSamples == 123_456 && record.unmarkedSamples == 789)
         #expect(record.thermal == [
             .init(at: 1200, from: 0, to: 1), .init(at: 3_990_000, from: 1, to: 2),
         ])
@@ -120,8 +121,9 @@ struct StallRecordTests {
         let record = try #require(StallRecord(text: try Self.golden()))
         let blocked = record.words(for: record.events[31]).joined(separator: "\n")
         #expect(blocked.contains("Stall 37, 2026-11-08T06:13:40Z (1 h 8 min into the session): 5.2 s, still going"))
-        #expect(blocked.contains("vCPU 2: waiting for a disk write."))
-        #expect(blocked.contains("vCPU 4: waiting for a device service's answer."))
+        // The share of a core each thread got is printed whatever the cause.
+        #expect(blocked.contains("vCPU 2: waiting for a disk write; the thread ran 0% of a core meanwhile."))
+        #expect(blocked.contains("vCPU 4: waiting for a device service's answer; the thread ran 0% of a core meanwhile."))
         #expect(blocked.contains("thermal state serious"))
         #expect(blocked.contains("Low Power Mode on, 6 active cores to 4"))
         #expect(blocked.contains("the process held 5801 MiB, memory pressure normal, compressed memory -20 MiB"))
@@ -129,15 +131,27 @@ struct StallRecordTests {
 
         let starved = record.words(for: record.events[30]).joined(separator: "\n")
         #expect(starved.contains("vCPU 0, vCPU 1, vCPU 2, vCPU 3, vCPU 4 and vCPU 5: runnable but starved"))
-        #expect(starved.contains("The watch's own tick ran 955 ms late, so the whole process was held up"))
+        #expect(starved.contains("each thread ran 0% to 5% of a core meanwhile"))
+        #expect(starved.contains("The watch's own wake-up was 955 ms late, so the whole process was held up"))
         #expect(starved.contains("The app's main queue answered 940 ms late."))
-        #expect(starved.contains("the system did not run the vCPU threads while the device was hot"))
+        #expect(starved.contains("the system did not run the vCPU threads, while the device was hot, with memory tight."))
         #expect(starved.contains("5.87 cores (1.98 on performance cores, 3.44 W)"))
 
         let all = record.report()
         #expect(all.contains("37 stalls recorded; the newest 32 are listed."))
         #expect(all.contains("thermal state nominal to fair") && all.contains("memory pressure warning"))
         #expect(all.contains("Low Power Mode on, 4 active cores"))
+        // The counters of the markers the watch saw are in the report.
+        #expect(all.contains("idle wait the runtime marks 123456 times and in a wait it does not mark 789 times."))
+    }
+
+    @Test func theTimesAreTheBaseAndTheMillisecondsAfterIt() throws {
+        let record = try #require(StallRecord(text: try Self.golden()))
+        // base 1794114300 is 2026-11-08T05:05:00Z; the event at 3988180 ms is
+        // 66 min 28 s later, on the continuous clock that counts a sleep.
+        let words = record.words(for: record.events[30]).first ?? ""
+        #expect(words.contains("2026-11-08T06:11:28Z (1 h 6 min into the session)"), "\(words)")
+        #expect(record.report().contains("The session began 2026-11-08T05:05:00Z"))
     }
 
     @Test func aStallOfTheWholeProcessNamesNoVcpu() throws {
@@ -148,6 +162,105 @@ struct StallRecordTests {
         let words = record.words(for: record.events[0]).joined(separator: "\n")
         #expect(words.contains("the whole process was not running"))
         #expect(words.contains("the whole process stopped"))
+    }
+
+    /// A 16 KiB record of valid lines, the most the application reads, that
+    /// claims far more than the runtime's slot holds.
+    private func hostile(lines: [String], header: String = "stalls 1 base 1794114300 at 1794114320 total 99999 shown 99999\n") -> String {
+        var text = header
+        var index = 0
+        while text.utf8.count < SessionRecord.maximumBytes - 200 {
+            text += lines[index % lines.count] + "\n"
+            index += 1
+        }
+        return text
+    }
+
+    @Test func aHostileRecordOfValidLinesIsKeptWithinTheSlotsCapacities() throws {
+        // The shortest valid lines, as many as 16 KiB holds: hundreds of events
+        // and of every kind of change.
+        let lines = (0..<4000).flatMap { index in
+            [
+                "stall \(index) 1 1 . - - 0 00 0 0>0 0,0,0 0,0,0 0 0 - 0 0 0 0 0 0",
+                "thermal \(index) 0 1", "power \(index) 1 6", "pressure \(index) 1",
+            ]
+        }
+        let text = hostile(lines: lines)
+        #expect(text.utf8.count <= SessionRecord.maximumBytes)
+        let record = try #require(StallRecord(text: text))
+        #expect(record.events.count == StallRecord.eventCapacity)
+        #expect(record.thermal.count == StallRecord.transitionCapacity)
+        #expect(record.power.count == StallRecord.transitionCapacity)
+        #expect(record.pressure.count == StallRecord.transitionCapacity)
+        // The newest are the ones kept, in order.
+        let sequences = record.events.map(\.sequence)
+        #expect(sequences == sequences.sorted() && sequences.last == (sequences.first ?? 0) + sequences.count - 1)
+        #expect(record.report().utf8.count <= StallRecord.maximumReportBytes)
+    }
+
+    @Test func aHostileRecordOfTheWidestLinesStaysWithinTheReportBound() throws {
+        // Events on 255 vCPUs with the widest figures.
+        let causes = String(repeating: "wsfoarnmdy", count: 25)
+        let shares = String(repeating: "99", count: 250)
+        let lines = (0..<400).map { sequence in
+            "stall \(sequence) 999999999 999999+ \(causes) \(shares) 99999 99999 33 1 99>99 9999,9999,9999 "
+                + "9999,9999,9999 9999999 99999 99999 -99999 9999999 99999999 99999999 99999999 2"
+        } + ["thermal 999999999 3 2", "power 999999999 1 99", "pressure 999999999 2"]
+        let text = hostile(lines: lines)
+        let record = try #require(StallRecord(text: text))
+        #expect(record.events.allSatisfy { $0.stalled.count <= StallRecord.vcpuCapacity })
+        let report = record.report()
+        #expect(report.utf8.count <= StallRecord.maximumReportBytes, "\(report.utf8.count)")
+        // And through the bug report, which holds the two sessions' words.
+        let session = try #require(
+            SessionRecord(
+                text: "uml-session 4\nmemory at 1 footprint 2 peak 3\n" + text + "state running\nend running\nstatus 0\npid 7\n"))
+        let words = try #require(BugReportAttachments.stalls(previous: session, current: session))
+        #expect(words.utf8.count <= 2 * StallRecord.maximumReportBytes + 4096)
+    }
+
+    @Test func aBaseThatIsNotAFiniteTimeIsNoStallRecord() {
+        for base in ["nan", "inf", "-inf", "1e300", "1e12"] {
+            #expect(StallRecord(text: "stalls 1 base \(base) at 1794114320 total 0 shown 0\n") == nil, "\(base)")
+            #expect(StallRecord(text: "stalls 1 base 1794114300 at \(base) total 0 shown 0\n") == nil, "\(base)")
+        }
+        #expect(StallRecord(text: "stalls 1 base 1794114300 at 1794114320 total 0 shown 0\n") != nil)
+    }
+
+    @Test func aCauseStringLongerThanTheSlotWritesNamesOnlyItsFirstVcpus() throws {
+        let event = "stall 1 1000 500 \(String(repeating: "w", count: 300)) \(String(repeating: "07", count: 300)) "
+            + "- 0 00 0 6>6 0,0,0 0,0,0 0 400 - 0 0 0 0 0 0"
+        let record = try #require(StallRecord(text: "stalls 1 base 5 at 6 total 1 shown 1\n\(event)\n"))
+        #expect(record.events[0].stalled.count == StallRecord.vcpuCapacity)
+        #expect(record.events[0].stalled.map(\.vcpu) == Array(0..<StallRecord.vcpuCapacity))
+        #expect(record.events[0].stalled.allSatisfy { $0.sharePercent == 7 })
+    }
+
+    @Test func memoryIsTightOnPressureOnGrowthOrOnManyPageins() {
+        func event(pressure: Int = 0, compressed: Int = 0, pageins: Int = 0) -> StallRecord.Event {
+            var event = worstEvent(1)
+            event.pressure = pressure
+            event.compressedChangeMiB = compressed
+            event.pageins = pageins
+            return event
+        }
+        #expect(!StallRecord.memoryIsTight(event()))
+        // One page-in, or a few, is every process's ordinary life.
+        #expect(!StallRecord.memoryIsTight(event(pageins: 1)))
+        #expect(!StallRecord.memoryIsTight(event(pageins: 999)))
+        #expect(StallRecord.memoryIsTight(event(pageins: 1000)))
+        #expect(!StallRecord.memoryIsTight(event(compressed: 63)))
+        #expect(StallRecord.memoryIsTight(event(compressed: 64)))
+        #expect(StallRecord.memoryIsTight(event(pressure: 1)))
+    }
+
+    @Test func anUninterruptibleWaitIsWordedAsWhatItIs() throws {
+        let line = "stall 1 1000 500 f 07 - 0 00 0 6>6 0,0,0 0,0,0 0 400 - 0 0 0 0 0 0"
+        let record = try #require(StallRecord(text: "stalls 1 base 5 at 6 total 1 shown 1\n\(line)\n"))
+        let words = record.words(for: record.events[0]).joined(separator: "\n")
+        #expect(words.contains("vCPU 0: in an uninterruptible wait in the system (usually a page fault or storage); the thread ran 7% of a core meanwhile."))
+        #expect(words.contains("sat in an uninterruptible wait in the system"))
+        #expect(!words.contains("starved"))
     }
 
     /// The most an event can say: every vCPU stalled for a different cause, the
