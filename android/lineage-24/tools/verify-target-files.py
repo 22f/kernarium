@@ -485,9 +485,10 @@ FORBIDDEN_APP_DIRECTORIES = {
     "F-DroidPrivilegedExtension",
     "Gallery2",
     "Jelly",
-    # In-tree test applications (tests/integration/android/{location,motion,webgl,storage}):
+    # In-tree test applications (tests/integration/android/{keymouse,location,motion,webgl,storage}):
     # `m <module>` leaves them in the shared product output, and none belongs
     # in an image, whichever partition or DATA/app path it would reach.
+    "AndariumKeyMouseProbe",
     "AndariumLocationProbe",
     "AndariumMotionProbe",
     "AndariumStorageTests",

@@ -4688,6 +4688,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("location-probe-left-in-the-image", {"entries": {
                 "SYSTEM/app/AndariumLocationProbe/AndariumLocationProbe.apk": synthetic_apk(debuggable=False)}},
              "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumLocationProbe"),
+            ("keymouse-probe-left-in-the-image", {"entries": {
+                "SYSTEM/app/AndariumKeyMouseProbe/AndariumKeyMouseProbe.apk": synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumKeyMouseProbe"),
             ("bugreport-keychord", {"init_variant": "bugreport-keychord"},
              "starts bugreport on a keychord \\('keycodes 30 48'\\)"),
             ("keyboard-default-missing-script", {"keyboard_default_variant": "missing-script"},

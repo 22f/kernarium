@@ -83,6 +83,10 @@ LOCATIONS = (
         "SHA-256 is recorded in accepted-release.env and in each release "
         "manifest, so a changed byte re-opens the accepted release"),
     location(
+        r"^tests/integration/android/keymouse/", {"Apache-2.0"},
+        "the keyboard and mouse probe app is built in the Android tree and is "
+        "Apache-2.0", every_file=True),
+    location(
         r"^android/lineage-24/patches/", {"Apache-2.0"},
         "the series manifests of the patches to AOSP and LineageOS projects; "
         "regenerate-aosp-patches.py exports them as Apache-2.0"),
