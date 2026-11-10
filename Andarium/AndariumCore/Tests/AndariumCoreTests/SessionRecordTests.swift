@@ -117,7 +117,7 @@ struct SessionRecordTests {
 
     @Test func otherTextIsNoRecord() {
         #expect(SessionRecord(text: "") == nil)
-        #expect(SessionRecord(text: "uml-session 4\nstate ended\nend powered-off\n") == nil)
+        #expect(SessionRecord(text: "uml-session 5\nstate ended\nend powered-off\n") == nil)
         #expect(SessionRecord(text: "uml-session 2\nstatus 0\n") == nil)
         #expect(SessionRecord.read(at: URL(fileURLWithPath: "/nonexistent/session.txt")) == nil)
     }
