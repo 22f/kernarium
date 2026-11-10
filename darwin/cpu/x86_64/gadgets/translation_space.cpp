@@ -50,10 +50,12 @@ private:
 const TargetLinkTable &vacant_target_links() noexcept
 {
 	static const UnlinkedBlockLink vacant{
-		0, ~std::uint64_t{}, ~std::uint64_t{},
+		0, 0, ~std::uint64_t{}, ~std::uint64_t{},
 		reinterpret_cast<std::uintptr_t>(
 			native::uml_x86_64_gadget_link_exit),
-		{&vacant.fallback_stream, 0, ~std::uint64_t{}},
+		{reinterpret_cast<std::uintptr_t>(
+			 native::uml_x86_64_gadget_link_exit),
+			&vacant.fallback_stream + 1, ~std::uint64_t{}},
 	};
 	static const TargetLinkTable table = [] {
 		TargetLinkTable initial{};

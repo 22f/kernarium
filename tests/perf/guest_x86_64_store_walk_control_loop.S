@@ -6,6 +6,7 @@
  */
 
 #include "x86_64_probe_harness.inc"
+#include "x86_64_walk_order.inc"
 
 #define WALK_RANDOM 0
 #define WALK_STORE 1

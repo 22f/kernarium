@@ -1388,46 +1388,52 @@ Lx86_store_done\@:
 	retire_and_next
 .endm
 
-/* A BlockLink contains {stream, instruction_count, guest RIP}, and the two
- * words in front of the stream it names are the target's guest {begin, end}.
- * Refuse a target whose complete translated block would cross this native
- * run's exact budget. Every executable store resets cached targets whose
- * saved instruction bytes overlap the write. At the next branch, retain the
- * native chain only when the global code sequence contains exactly this run's
- * own publication, then accept that sequence without cooling the unrelated
- * links. An overwritten target already points at its link_exit fallback.
- * A reset record therefore needs no active-state branch and translated code
- * remains immutable.
+/* A BlockLink contains {first entry, stream past it, guest RIP}, and in front
+ * of the stream it names are the target's instruction count at -32 and its
+ * guest {begin, end} at -24 (link_header in program.hpp). The branch waits for
+ * the pair alone; the count, the bounds and the write-code test hang off it
+ * beside the branch. Refuse a target whose complete translated block would
+ * cross this native run's exact budget. Every executable store resets cached
+ * targets whose saved instruction bytes overlap the write. At the next branch,
+ * retain the native chain only when the global code sequence contains exactly
+ * this run's own publication, then accept that sequence without cooling the
+ * unrelated links. An overwritten target already names its record's
+ * link_exit. A reset record therefore needs no active-state branch and
+ * translated code remains immutable.
  *
  * Keep this common to the load/store and control families: a direct CALL has
  * to finish its architectural stack write before it can enter its callee.
+ * The three unreachable branches behind the last one keep the macro the size
+ * it had when the pair named the stream, so no gadget moves; they are
+ * branches because a region slot holds no zero word and ends in one.
  */
 .macro follow_block_link link
 	mov x19, \link
+	ldp x8, _stream, [x19]
 	ldrb w9, [_context, #UML_X86_64_CONTEXT_WRITE_CODE]
-	cbz w9, Lx86_link_code_ready\@
+	cbnz w9, Lx86_link_code\@
+Lx86_link_code_ready\@:
+	ldur w11, [_stream, #-32]
+	adds x11, _executed, x11
+	b.gt Lx86_link_exit\@
+	ldp x12, x13, [_stream, #-24]
+	stp x12, x13, [_context, #UML_X86_64_CONTEXT_PROGRAM_BEGIN]
+	br x8
+Lx86_link_code\@:
 	mov x0, _context
 	helper_call uml_x86_64_gadget_code_link_safe
-	cbz w0, Lx86_link_code_exit\@
+	cbz w0, Lx86_link_exit\@
 	strb wzr, [_context, #UML_X86_64_CONTEXT_WRITE_CODE]
-Lx86_link_code_exit\@:
-	cbnz w0, Lx86_link_code_ready\@
+	ldp x8, _stream, [x19]
+	b Lx86_link_code_ready\@
+Lx86_link_exit\@:
 	ldr x9, [x19, #16]
 	str x9, [_vcpu, #UML_X86_64_CPU_RIP]
 	mov w0, #UML_X86_64_EVENT_CONTINUED
 	b uml_x86_64_gadget_leave
-Lx86_link_code_ready\@:
-	ldp _stream, x11, [x19]
-	adds x12, _executed, x11
-	b.le Lx86_link_follow\@
-	ldr x9, [x19, #16]
-	str x9, [_vcpu, #UML_X86_64_CPU_RIP]
-	mov w0, #UML_X86_64_EVENT_CONTINUED
-	b uml_x86_64_gadget_leave
-Lx86_link_follow\@:
-	ldp x12, x13, [_stream, #-16]
-	stp x12, x13, [_context, #UML_X86_64_CONTEXT_PROGRAM_BEGIN]
-	next_gadget
+	.rept 3
+	b Lx86_link_exit\@
+	.endr
 .endm
 
 /* Probe the address space's shared guest-RIP tier. The entry names the block
