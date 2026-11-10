@@ -99,8 +99,15 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
         }
 
         func stopEngine() {
-            lock.withLock { running = false }
+            markStopped()
             engine.stop { _ in }
+        }
+
+        /// The engine is taken as stopped until it is started again, which
+        /// costs nothing if it runs: the system says so only for the stops it
+        /// causes itself.
+        func markStopped() {
+            lock.withLock { running = false }
         }
 
         func hold(_ player: any CHHapticPatternPlayer, isTone: Bool) {
@@ -177,6 +184,7 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
         } catch {
             HapticsDiagnostics.note("a haptic score could not be played: \(error)")
             channel.cancelPlayers()
+            channel.markStopped()
             return .failed
         }
     }

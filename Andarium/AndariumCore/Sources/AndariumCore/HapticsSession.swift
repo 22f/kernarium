@@ -159,6 +159,7 @@ public final class HapticsSession: @unchecked Sendable {
 
     private func giveUp() {
         gaveUp = true
+        run &+= 1
         stream?.stop()
         stream = nil
         connected = false
