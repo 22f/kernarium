@@ -16,9 +16,9 @@ public protocol GuestStorage: Sendable {
     /// The guest on disk, with its measured data, or nil if there is none.
     func load() throws -> Guest?
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest
-    /// Deletes everything the guest has: its data, its record and its
-    /// choices. Afterwards `load` finds no guest, and the application is
-    /// where it was before the first one was set up.
+    /// Deletes everything the guest has: its data, its record, its snapshots
+    /// and its choices. Afterwards `load` finds no guest, and the application
+    /// is where it was before the first one was set up.
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws
     /// What a start would be, from the instance on disk; nil when its record
     /// cannot be read.
@@ -114,6 +114,8 @@ public struct TwoDiskStorage: GuestStorage {
     public let release: ReleaseIdentity
     /// The release directory inside the application.
     public let releaseDirectory: URL
+    /// What a test replaces in the snapshot store; never set in the application.
+    var snapshotSeam = SnapshotSeam()
 
     public init(locations: GuestLocations, release: ReleaseIdentity, releaseDirectory: URL) {
         self.locations = locations
@@ -121,7 +123,7 @@ public struct TwoDiskStorage: GuestStorage {
         self.releaseDirectory = releaseDirectory
     }
 
-    private var files: InstanceFiles { InstanceFiles(directory: locations.directory) }
+    var files: InstanceFiles { InstanceFiles(directory: locations.directory) }
 
     public var createRequirementBytes: UInt64 { Limits.firstStartReserveBytes }
 
@@ -183,6 +185,10 @@ public struct TwoDiskStorage: GuestStorage {
 
     public func prepareStart(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
         try requireUsablePaths()
+        // A restore that began and did not finish completes before anything
+        // reads the files; launch does it, and this catches the one a failure
+        // left in this process.
+        if snapshotStore.restoreUnderWay { try recoverSnapshots() }
         var decision = try files.decide(for: release)
         if decision.action == .refusePending {
             // Start is Try Again; a release other than the one updating
@@ -230,9 +236,10 @@ public struct TwoDiskStorage: GuestStorage {
 
     /// iCloud and computer backups include the guest's files only when the
     /// user chose that for the guest. The flag sits on the guest's directory,
-    /// which covers whatever is later put in it (the data disk, a snapshot),
-    /// and on its files.
-    private func applyBackupPolicy(_ guest: Guest) {
+    /// which covers whatever is later put in it (the data disk), and on its
+    /// files. The user's snapshots are never backed up, whatever the choice:
+    /// a backup would hold each at its full size.
+    func applyBackupPolicy(_ guest: Guest) {
         var excluded = URLResourceValues()
         excluded.isExcludedFromBackup = true
         var included = URLResourceValues()
@@ -246,6 +253,9 @@ public struct TwoDiskStorage: GuestStorage {
             // new file and leaves that record in place, so the flag is set
             // first and the clear then removes both.
             if guest.includeInBackups { try? target.setResourceValues(included) }
+        }
+        if FileManager.default.fileExists(atPath: files.snapshots.path) {
+            SnapshotStore.excludeFromBackup(files.snapshots)
         }
     }
 }
