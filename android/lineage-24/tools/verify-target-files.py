@@ -257,6 +257,10 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_reclaim_boot_apps.rc",
     "SYSTEM_EXT/bin/kernarium_time_zone.sh",
     "SYSTEM_EXT/etc/init/kernarium_time_zone.rc",
+    "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc",
     "SYSTEM_EXT/etc/selinux/system_ext_file_contexts",
     "SYSTEM_EXT/etc/selinux/system_ext_property_contexts",
     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
@@ -3499,6 +3503,74 @@ def check_time_zone_policy(
         fail(f"system_ext property contexts do not label {TIME_ZONE_MARKER}")
 
 
+# The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
+# (overlay/input, the product makefile). The side-key keyboard (1af4:0002) carries Power, Volume Up
+# and Down, Back and Home, and its key layout holds those five keys alone: Android would otherwise
+# give it Generic.kl, count it as a full keyboard that is always attached, and never hide its
+# on-screen keyboard for a real one. The keyboard (0003) and the mouse (0004) are external, as a USB
+# keyboard and mouse are, so that a key or a click wakes the screen; the absolute pointer (0005)
+# follows the display's orientation and wakes it too. The three have no key layout or character map
+# of their own: Android's keyboard layout choice belongs to the user.
+INPUT_SIDE_KEY_LAYOUT = "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl"
+INPUT_SIDE_KEYS = {116: "POWER", 115: "VOLUME_UP", 114: "VOLUME_DOWN", 158: "BACK", 172: "HOME"}
+INPUT_DEVICE_CONFIGURATIONS = {
+    "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc": {"device.internal": "0"},
+    "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc": {"device.internal": "0"},
+    "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc": {"touch.orientationAware": "1", "touch.wake": "1"},
+}
+INPUT_HOST_DEVICE_LAYOUT = re.compile(
+    r"^VENDOR/usr/(?:keylayout|keychars)/Vendor_1af4_Product_000[345](?:_Version_[0-9a-f]{4})?\.(?:kl|kcm)$"
+)
+
+
+def input_file_lines(payload: bytes, path: str) -> list[tuple[int, str]]:
+    """The lines of an Android input configuration file that are not blank or comments."""
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        fail(f"{path} is not UTF-8: {error}")
+    return [
+        (number, line.strip())
+        for number, line in enumerate(text.splitlines(), 1)
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def check_input_device_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    keys: dict[int, str] = {}
+    for number, line in input_file_lines(
+        read_small(archive, infos[INPUT_SIDE_KEY_LAYOUT]), INPUT_SIDE_KEY_LAYOUT
+    ):
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != "key" or not fields[1].isdecimal():
+            fail(f"{INPUT_SIDE_KEY_LAYOUT}:{number} must be a 'key <scan code> <label>' line: {line}")
+        if int(fields[1]) in keys:
+            fail(f"{INPUT_SIDE_KEY_LAYOUT}:{number} maps scan code {fields[1]} twice")
+        keys[int(fields[1])] = fields[2]
+    if keys != INPUT_SIDE_KEYS:
+        fail(
+            f"{INPUT_SIDE_KEY_LAYOUT} must map the five side keys alone ({INPUT_SIDE_KEYS}), so that "
+            f"Android does not count the side-key keyboard as a full keyboard: {keys}"
+        )
+    for path, expected in INPUT_DEVICE_CONFIGURATIONS.items():
+        found: dict[str, str] = {}
+        for number, line in input_file_lines(read_small(archive, infos[path]), path):
+            name, separator, value = line.partition("=")
+            if not separator or not name.strip() or not value.strip():
+                fail(f"{path}:{number} must be a 'name = value' line: {line}")
+            if name.strip() in found:
+                fail(f"{path}:{number} sets {name.strip()} twice")
+            found[name.strip()] = value.strip()
+        if found != expected:
+            fail(f"{path} must set {expected} and nothing else: {found}")
+    for name in sorted(infos):
+        if INPUT_HOST_DEVICE_LAYOUT.match(name):
+            fail(
+                f"{name} gives a host input device a key layout or character map of its own: "
+                "Android's keyboard layout choice is the user's"
+            )
+
+
 def check_policy_relaxations(policies: tuple[bytes, ...], build_variant: str) -> None:
     """The policy holds none of the LineageOS grants that Android's neverallow tests refuse.
 
@@ -4571,6 +4643,7 @@ def main() -> None:
         check_launcher_workspace(archive, infos)
         check_network_time(archive, infos)
         check_flip_to_screen_off(archive, infos)
+        check_input_device_configuration(archive, infos)
         check_pinner_overlay(archive, infos)
         check_application_manifests(archive, infos, build_variant)
         check_thermal_hal(archive, infos)

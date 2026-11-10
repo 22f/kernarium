@@ -289,6 +289,28 @@ which moves in 5% steps, so the guest's does too, and the Mac's is exact.
 The swipe lock screen can be turned on: `ro.lockscreen.disable.default` turns it
 off for user 0 of a fresh `/data` only.
 
+### Keyboard and mouse
+
+The host's keyboard and mouse are three virtio-input devices of the guest. They
+exist from boot and are plugged into Android only while the host reports the
+hardware: "Kernarium Hardware Keyboard" (1af4:0003), "Kernarium Mouse" (1af4:0004:
+the wheels, and relative motion while an app captures the pointer) and
+"Kernarium Pointer" (1af4:0005: the absolute position, which places Android's
+cursor). The ids and names are permanent, because Android keys a keyboard layout
+and its settings to a device's identity. The host sends key positions and never
+characters, so Android's own layout, key repeat and Caps Lock apply, and every
+key goes to Android.
+
+`overlay/input/` holds the configuration Android reads for them from
+`/vendor/usr`. The keyboard and the mouse are external, as USB devices are, so a
+key or a click wakes the screen; the pointer follows the display's orientation.
+None of the three has a key layout of its own: Android picks one for the
+keyboard from the language of the input method, asks when it cannot, and keeps
+the user's choice. The side-key keyboard (1af4:0002: Power, Volume Up and Down,
+Back and Home) has a layout of those five keys alone, so Android no longer counts
+it as a full keyboard that is always attached. The verifier requires each file's
+content.
+
 ### Debugging and adb
 
 Fresh settings databases keep Developer options and USB debugging off, and

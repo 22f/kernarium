@@ -412,6 +412,21 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/config/displayconfig_default.xml:$(TARGET_COPY_OUT_VENDOR)/etc/displayconfig/default.xml
 
+# The host's keyboard and mouse are virtio-input devices (1af4:0003 to 0005) that
+# exist from boot and are plugged into Android only while the host reports the
+# hardware. Android finds a device's key layout and configuration by its vendor and
+# product, and /vendor/usr is one of the places it looks (libs/input/InputDevice.cpp).
+# The side-key keyboard (1af4:0002) gets a layout of its five keys alone, so that
+# Android stops counting it as a full keyboard. The keyboard and the mouse are
+# external, as a USB keyboard and mouse are, and the absolute pointer follows the
+# display's orientation. The three new devices have no layout or character map of
+# their own: Android's keyboard layout choice is the user's.
+PRODUCT_COPY_FILES += \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0002.kl:$(TARGET_COPY_OUT_VENDOR)/usr/keylayout/Vendor_1af4_Product_0002.kl \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0003.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0003.idc \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0004.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0004.idc \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0005.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0005.idc
+
 # Every device declares the location and GPS features, whether or not the host
 # has a position to give: the GNSS HAL (overlay/gnss) is the guest's GPS. The
 # platform's file declares both features; LocationManagerService creates the gps

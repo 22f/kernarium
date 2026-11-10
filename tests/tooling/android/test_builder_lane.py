@@ -706,6 +706,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         )
         thermal_rc_path = "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc"
         thermal_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml"
+        # The device configuration of the host's keyboard and mouse (overlay/input), and where each lands.
+        input_device_files = {
+            "Vendor_1af4_Product_0002.kl": "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
+            "Vendor_1af4_Product_0003.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
+            "Vendor_1af4_Product_0004.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
+            "Vendor_1af4_Product_0005.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc",
+        }
+        side_key_layout = (verifier.parents[1] / "overlay/input/Vendor_1af4_Product_0002.kl").read_text()
         display_config_path = "VENDOR/etc/displayconfig/default.xml"
         good_display_config = (
             '<?xml version="1.0" encoding="utf-8"?>\n<!-- comment -->\n<displayConfiguration>\n'
@@ -1526,6 +1534,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         time_zone_rc = time_zone_rc.replace(old, new)
                 if time_zone_variant != "missing-rc":
                     archive.writestr("SYSTEM_EXT/etc/init/kernarium_time_zone.rc", time_zone_rc)
+                # The device configuration of the host's keyboard and mouse: the tracked files.
+                for name, destination in input_device_files.items():
+                    archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_file_contexts",
                     "/(system_ext|system/system_ext)/bin/other\\.sh  u:object_r:system_file:s0\n"
@@ -4582,6 +4593,65 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("location-probe-left-in-the-image", {"entries": {
                 "SYSTEM/app/AndariumLocationProbe/AndariumLocationProbe.apk": synthetic_apk(debuggable=False)}},
              "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumLocationProbe"),
+            ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
+             "required entries are missing"),
+            ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},
+             "required entries are missing"),
+            ("missing-mouse-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0004.idc"]: None}},
+             "required entries are missing"),
+            ("missing-pointer-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0005.idc"]: None}},
+             "required entries are missing"),
+            ("side-key-layout-with-a-sixth-key", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "key 30   A\n").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-without-home", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 172   HOME\n", "").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-with-another-label", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 172   HOME", "key 172   MOVE_HOME").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-with-a-flag", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 116   POWER", "key 116   POWER   WAKE").encode()}},
+             "must be a 'key <scan code> <label>' line"),
+            ("side-key-layout-with-an-axis", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "axis 0x00 X\n").encode()}},
+             "must be a 'key <scan code> <label>' line"),
+            ("side-key-layout-maps-a-key-twice", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "key 116   SLEEP\n").encode()}},
+             "maps scan code 116 twice"),
+            ("keyboard-configuration-internal", {"entries": {
+                input_device_files["Vendor_1af4_Product_0003.idc"]: b"device.internal = 1\n"}},
+             "must set \\{'device.internal': '0'\\} and nothing else"),
+            ("keyboard-configuration-with-a-layout", {"entries": {
+                input_device_files["Vendor_1af4_Product_0003.idc"]: b"device.internal = 0\nkeyboard.layout = Generic\n"}},
+             "must set .* and nothing else"),
+            ("mouse-configuration-empty", {"entries": {input_device_files["Vendor_1af4_Product_0004.idc"]: b"# none\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-without-wake", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware = 1\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-orientation-unaware", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware = 0\ntouch.wake = 1\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-malformed", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware 1\n"}},
+             "must be a 'name = value' line"),
+            ("pointer-configuration-sets-a-property-twice", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: (
+                    b"touch.orientationAware = 1\ntouch.wake = 1\ntouch.wake = 0\n")}},
+             "sets touch.wake twice"),
+            ("keyboard-with-a-key-layout-of-its-own", {"entries": {
+                "VENDOR/usr/keylayout/Vendor_1af4_Product_0003.kl": b"key 30   A\n"}},
+             "a key layout or character map of its own"),
+            ("mouse-with-a-versioned-key-layout", {"entries": {
+                "VENDOR/usr/keylayout/Vendor_1af4_Product_0004_Version_0001.kl": b"key 30   A\n"}},
+             "a key layout or character map of its own"),
+            ("pointer-with-a-character-map", {"entries": {
+                "VENDOR/usr/keychars/Vendor_1af4_Product_0005.kcm": b"type FULL\n"}},
+             "a key layout or character map of its own"),
         ):
             reject(label, options, reason)
 
