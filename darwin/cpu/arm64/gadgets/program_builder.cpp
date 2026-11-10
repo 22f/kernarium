@@ -73,7 +73,8 @@ void resolve_inline_suffixes(ProgramWords &words,
 
 /* The epilogue run a head in front of it can do whole: SP-based 64-bit loads
  * and at most one ADD SP, SP, #imm, then the RET through X30 that ends the
- * block (engine/run_heads.inc has what the head does and its operand words). */
+ * block, or a hint the virtual CPU runs as a NOP and then that RET
+ * (engine/run_heads.inc has what the head does and its operand words). */
 namespace epilogue {
 
 inline constexpr std::size_t maximum_loads = 8;
@@ -278,7 +279,11 @@ using Predecessors = std::array<const void *, ring>;
 /* Put a head in front of the longest epilogue run the RET at `ret` ends, now
  * that the RET's group is the last one emitted. `starts` holds where each
  * recent instruction's group begins. The run's words stay where they are,
- * behind the head, and are its fallback. */
+ * behind the head, and are its fallback. A group that is only the nop gadget
+ * right before the RET, which a hint without effect on the virtual CPU
+ * translates to (AUTIASP in code built for pointer authentication), may end
+ * the run instead; it goes with the head, since it does nothing on either
+ * path and the head finds the RET's cell at a fixed distance. */
 void place(ProgramWords &words, InlineSuffixes &suffixes,
 	std::span<const std::uint32_t> window, std::size_t ret,
 	const Starts &starts
@@ -292,22 +297,42 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 	    words[ret_start + count_words] != reinterpret_cast<std::uintptr_t>(
 		    uml_arm64_gadget_return_x30_cached))
 		return;
+	auto end = ret;
+	if (ret != 0 && starts[(ret - 1) % ring] + count_words + 1 == ret_start &&
+	    words[ret_start - 1] ==
+		    reinterpret_cast<std::uintptr_t>(uml_arm64_gadget_nop))
+		end = ret - 1;
 	std::size_t length = 0;
-	while (length < std::min(ret, maximum_elements) &&
-	       is_element(window[ret - 1 - length]))
+	while (length < std::min(end, maximum_elements) &&
+	       is_element(window[end - 1 - length]))
 		++length;
 	for (; length != 0; --length) {
-		const auto start = ret - length;
+		const auto start = end - length;
 		bool grouped = true;
-		for (std::size_t index = start; index < ret; ++index)
+		for (std::size_t index = start; index < end; ++index)
 			grouped = grouped && starts[(index + 1) % ring] ==
 				starts[index % ring] + group_words;
 		if (!grouped)
 			continue;
 		std::array<std::uintptr_t, 4> operands{};
-		const auto [gadget, loads] = encode(window, start, ret, operands);
+		const auto [gadget, loads] = encode(window, start, end, operands);
 		if (gadget == nullptr)
 			continue;
+		if (end != ret) {
+			const auto dropped = starts[end % ring];
+			words.erase(dropped, count_words + 1);
+#if UML_GADGET_EXECUTION_HISTOGRAM
+			/* The RET's group now follows the run's last word. */
+			words[dropped + 1] = diagnostics::execution_histogram_slot(
+				predecessors[end % ring],
+				reinterpret_cast<const void *>(
+					uml_arm64_gadget_return_x30_cached));
+#endif
+			for (std::uint32_t index = 0; index < suffixes.count; ++index)
+				if (suffixes.word[index] > dropped)
+					suffixes.word[index] -= static_cast<std::uint32_t>(
+						count_words + 1);
+		}
 		const auto head = reinterpret_cast<std::uintptr_t>(gadget);
 		const std::size_t at = starts[start % ring];
 		const auto inserted = count_words + 1 + operand_words(loads);

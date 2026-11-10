@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* Epilogue run heads (engine/run_heads.inc). A block that ends in SP-based
- * 64-bit loads and ADD SP, then a RET through X30, begins that run with a
- * head, which does the whole run and the return when SP is aligned and every
- * byte it reads lies in one page the TLB holds, and otherwise runs the
- * ordinary words behind it. This test checks where the builder puts a head
- * and what it encodes; that the head does the run and the return itself,
+ * 64-bit loads and ADD SP, then a RET through X30, with or without a hint
+ * that runs as a NOP between them, begins that run with a head, which does
+ * the whole run and the return when SP is aligned and every byte it reads
+ * lies in one page the TLB holds, and otherwise runs the ordinary words
+ * behind it. This test checks where the builder puts a head and what it
+ * encodes; that the head does the run and the return itself,
  * through the site's cells and through the return ring; that a span across
  * two pages, a misaligned SP and a page the TLB does not hold each fall back
  * and end as the architecture says; that a fault inside the fallback resumes
@@ -33,6 +34,7 @@ namespace gadgets = arm64::gadgets;
 extern "C" void uml_arm64_gadget_return_x30_cached();
 extern "C" void uml_arm64_gadget_return();
 extern "C" void uml_arm64_gadget_illegal();
+extern "C" void uml_arm64_gadget_nop();
 extern "C" void uml_arm64_gadget_run_epilogue_1_0();
 extern "C" void uml_arm64_gadget_run_epilogue_1_1();
 extern "C" void uml_arm64_gadget_run_epilogue_2_0();
@@ -79,6 +81,9 @@ constexpr std::uint64_t beyond = high + page_size;
 
 constexpr std::uint32_t ret = 0xd65f'03c0U;
 constexpr std::uint32_t svc = 0xd400'0001U;
+/* A hint the virtual CPU, which has no pointer authentication, runs as a
+ * NOP. */
+constexpr std::uint32_t autiasp = 0xd503'23bfU;
 
 enum class Mode : std::uint32_t {
 	offset = 0xa940'0000U,
@@ -202,6 +207,8 @@ struct Expected final {
 	};
 	for (std::size_t index = 0; index < run.size(); ++index) {
 		const auto word = run[index];
+		if (word == autiasp)
+			continue;
 		if ((word & 0xff80'03ffU) == 0x9100'03ffU) {
 			out.sp += ((word >> 10) & 0xfffU) <<
 				((word & 0x0040'0000U) != 0 ? 12U : 0U);
@@ -388,6 +395,13 @@ struct Placed final {
 /* `program` with every word behind the head that the head skips replaced:
  * each group by the illegal exit, which names the group's position, and the
  * RET's entry too, so a run that reaches any of them leaves illegally. */
+/* The groups of a run behind its head: one an instruction, but for the hint
+ * before the RET, which goes with the head. */
+[[nodiscard]] std::size_t groups_of(std::span<const std::uint32_t> run) noexcept
+{
+	return run.size() - (!run.empty() && run.back() == autiasp);
+}
+
 [[nodiscard]] gadgets::Program without_fallback(const gadgets::Program &program,
 	std::size_t groups)
 {
@@ -468,6 +482,36 @@ void structure()
 		const auto placed = head_of(built.program);
 		require(placed && placed->loads == 8 && placed->at == 4);
 	}
+	/* A hint before the RET that runs as a NOP goes with the head; with no
+	 * head it stays, and one that is not right before the RET ends the run
+	 * where it is. */
+	{
+		const std::array code{ldp(29, 30, 16, Mode::post), autiasp, ret};
+		const auto built = build(code_pc, code, &site);
+		const auto words = built.program.words();
+		require(words.size() == 2 + 2 + 2);
+		require(words[0] == address(uml_arm64_gadget_run_epilogue_1_0));
+		require(words[4] == address(uml_arm64_gadget_return_x30_cached));
+		require(std::ranges::find(words, address(uml_arm64_gadget_nop)) ==
+			words.end());
+		require(built.program.instruction_count() == 3);
+	}
+	{
+		const std::array code{ldp(30, 29, 16, Mode::post), autiasp, ret};
+		const auto built = build(code_pc, code, &site);
+		const auto words = built.program.words();
+		require(!head_of(built.program));
+		require(words.size() == 2 + 1 + 2 && words[2] ==
+			address(uml_arm64_gadget_nop));
+	}
+	{
+		const std::array code{ldp(20, 19, 16), autiasp,
+			ldp(29, 30, 32, Mode::post), ret};
+		const auto built = build(code_pc, code, &site);
+		const auto placed = head_of(built.program);
+		require(placed && placed->at == 3 && placed->loads == 1);
+		require(built.program.words()[2] == address(uml_arm64_gadget_nop));
+	}
 	/* What gets no head: X30 from a single load or as a pair's first
 	 * register, no X30 at all, a RET through another register, a block
 	 * built without indirect sites, and no load before the RET. */
@@ -523,6 +567,11 @@ const std::vector<Case> &cases()
 		{"eight", {ldp(19, 20, 16), ldp(21, 22, 32), ldp(23, 24, 48),
 			ldp(25, 26, 64), ldp(27, 28, 80), ldr(9, 96), ldr(10, 104),
 			ldp(29, 30, 0), add_sp(112), ret}},
+		{"pair, then a hint", {ldp(20, 19, 16),
+			ldp(29, 30, 32, Mode::post), autiasp, ret}},
+		{"frame, then a hint", {ldp(28, 27, 0), ldp(26, 25, 16),
+			ldp(24, 23, 32), ldp(22, 21, 48), ldp(20, 19, 64),
+			ldp(29, 30, 80), add_sp(96), autiasp, ret}},
 	};
 	return all;
 }
@@ -552,7 +601,7 @@ void head_does_the_run(const Memory &memory)
 			code_pc, item.code.size(), &site);
 #if !UML_GADGET_EXECUTION_HISTOGRAM
 		const auto bare =
-			without_fallback(built.program, run_of(item).size());
+			without_fallback(built.program, groups_of(run_of(item)));
 		check(item.what, run(bare, start, *tlb), expected, code_pc,
 			item.code.size(), &site);
 #endif
@@ -612,7 +661,7 @@ void head_falls_back(const Memory &memory)
 				require(tlb->fault_alignment != 0);
 #if !UML_GADGET_EXECUTION_HISTOGRAM
 			const auto bare = without_fallback(built.program,
-				run_of(item).size());
+				groups_of(run_of(item)));
 			auto fresh = std::make_unique<::uml::memory::Tlb>();
 			hold(*fresh, memory, low);
 			if (fallback.held[1])
@@ -710,7 +759,7 @@ void head_returns(const Memory &memory)
 				for (auto &entry : site.site.entries)
 					entry = {~std::uint64_t{}, &site.empty.link};
 			const auto program = bare ?
-				without_fallback(built.program, run_of(item).size()) :
+				without_fallback(built.program, groups_of(run_of(item))) :
 				gadgets::Program{built.program};
 			const auto outcome = run(program, start, *tlb);
 			require(outcome.event == ::uml::cpu::EngineEvent::system_call);
@@ -732,9 +781,9 @@ void head_returns(const Memory &memory)
 	memory.put(sp + 8, saved);
 }
 
-/* Generated runs of every element form, broken by 32-bit pairs, at SPs
- * across, below and above the held pages and misaligned ones, against the
- * model. */
+/* Generated runs of every element form, broken by 32-bit pairs, some with a
+ * hint before the RET, at SPs across, below and above the held pages and
+ * misaligned ones, against the model. */
 void generated_runs(const Memory &memory)
 {
 	std::uint64_t state = 0x9e37'79b9'7f4a'7c15ULL;
@@ -799,6 +848,8 @@ void generated_runs(const Memory &memory)
 					next(8))));
 			}
 		}
+		if (next(3) == 0)
+			code.push_back(autiasp);
 		code.push_back(ret);
 		std::uint64_t sp = low + 16 * next(3 * page_size / 16);
 		if (next(16) == 0)

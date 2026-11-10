@@ -151,6 +151,13 @@ public:
 			data() + size_ + count);
 		size_ += count;
 	}
+	/* Remove the `count` words at `at`, moving the words behind them up. */
+	void erase(std::size_t at, std::size_t count) noexcept
+	{
+		assert(at + count <= size_);
+		std::copy(data() + at + count, data() + size_, data() + at);
+		size_ -= count;
+	}
 	/* Drop the words from `size` on, which a decode emitted and the builder
 	 * then rejected. */
 	void truncate(std::size_t size) noexcept

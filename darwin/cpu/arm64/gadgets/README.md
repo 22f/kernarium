@@ -52,13 +52,14 @@ empty block that names `link_exit`. `arm64-gadget-links` follows both.
 A block that ends in an epilogue run, SP-based 64-bit loads and at most one
 ADD SP followed by a RET through X30, begins the run with a head
 (`engine/run_heads.inc`) and its operand words, and keeps the run's own words
-behind them. The head does the run and the return when SP is 16-byte aligned
-and every byte it reads lies in one page the TLB holds for reading; otherwise
-it dispatches the run's first word, so a fault, its resume and the retirement
-count see the ordinary words. Programs built without indirect sites, as
-single-step builds them, get no head. `arm64-gadget-run-heads` checks where
-heads go, each fallback, a fault inside one and its resume, and generated runs
-against a model of the instructions.
+behind them; a hint between the run and the RET that the virtual CPU runs as
+a NOP, such as AUTIASP, then emits no word. The head does the run and the
+return when SP is 16-byte aligned and every byte it reads lies in one page the
+TLB holds for reading; otherwise it dispatches the run's first word, so a
+fault, its resume and the retirement count see the ordinary words. Programs
+built without indirect sites, as single-step builds them, get no head.
+`arm64-gadget-run-heads` checks where heads go, each fallback, a fault inside
+one and its resume, and generated runs against a model of the instructions.
 
 ## Return ring and target table
 

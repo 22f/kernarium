@@ -6,7 +6,8 @@
  * An epilogue head stands in front of a run the builder recognized: SP-based
  * 64-bit pair loads, 64-bit single loads and at most one ADD SP, SP, #imm,
  * then the RET through X30 that ends the block. The run's own words and the
- * RET's follow the head unchanged. When SP is 16-byte aligned and the TLB
+ * RET's follow the head unchanged; a hint between them that the virtual CPU
+ * runs as a NOP, such as AUTIASP, leaves no word. When SP is 16-byte aligned and the TLB
  * maps every byte the head reads in one guest page for reading, the head does
  * the whole run: each load, the final SP and the return, which takes X30 from
  * the register the last pair load left it in rather than from CpuState.
