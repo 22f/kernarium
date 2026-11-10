@@ -90,3 +90,55 @@ hybrid log-gamma. The kernel line therefore carries one local UAPI extension,
 `V4L2_XFER_FUNC_HLG = 8` (the topic "media: v4l2: add the HLG transfer
 function"). If upstream adds an HLG value, adopt upstream's in that topic and in
 `virtio_video_v4l2_ids.h`.
+
+## Camera (device ID 65533)
+
+One camera device carries every camera of the host. Its ID is
+`UML_VIRTIO_VIDEO_CAMERA_DEVICE_ID`, an experimental ID of the specification's
+local range after the battery's and the GNSS receiver's. It offers
+`VIRTIO_VIDEO_F_V4L2_CONTROLS`, guest pages, non-contiguous buffers, and shared
+memory regions where the host has one, and the codecs' two queues (commands,
+events). The driver makes each camera a capture node, for its video and still
+streams, and a metadata node, for its meta streams.
+
+- **Cameras.** `VIRTIO_VIDEO_CMD_CAMERA_QUERY` pages through
+  `virtio_video_camera_desc` records: facing, lens, flags, conflicting and
+  concurrent cameras, the optics, ranges, and colour data once the host has
+  learned it. Camera 0 is the back zoom camera when the host has one, a lens
+  otherwise; the front camera follows, then each back lens. A lens a host lacks
+  has no record. `VIRTIO_VIDEO_CMD_CAMERA_QUERY_FORMATS` answers as
+  `QUERY_CAPABILITY` does: NV12 sizes with frame-rate ranges for a video
+  stream, JPEG sizes and the Bayer size for a still stream.
+- **Streams.** `VIRTIO_VIDEO_CMD_CAMERA_STREAM_CREATE` names a camera and a
+  kind (video, still, meta); every other command is the codecs'. A stream has
+  only the output queue, the guest queues empty buffers on it, and the device
+  decides each plane's size and stride and reports them in `GET_PARAMS`. The
+  completion is `virtio_video_camera_queue_resp`: the codecs' response and the
+  sequence of the exposure. A frame's `timestamp` is its age in nanoseconds
+  when the device completes it, so the driver stamps it with its own clock minus
+  that age.
+- **Exposures and metadata.** Each exposure has a sequence, in capture order
+  from 1 for each camera. Every video frame and still it produces carries the
+  sequence, and every meta stream of the camera completes a buffer holding the
+  `virtio_video_camera_meta` of that sequence: what the camera actually did, so
+  a control that the host applies as soon as it can stays honest.
+- **Stills.** Queueing a buffer on a still stream takes one capture with the
+  controls in force when the device receives it. A JPEG still carries a
+  reserved Exif segment whose payload offset and length are in the metadata, for
+  the guest to fill in place. A Bayer still is 16-bit little-endian samples up to
+  the camera's white level. Buffers queued with
+  `VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE` and one non-zero timestamp are filled
+  from a single capture (a JPEG with its Bayer still).
+- **Controls.** `VIRTIO_VIDEO_CMD_CAMERA_QUERY_CONTROLS` lists a camera's
+  controls in the encoder's descriptor format. The standard ones are V4L2
+  camera, flash and white-balance controls (`virtio_video_v4l2_ids.h`, which
+  `sync-protocol.py` checks); the rest are the `VIRTIO_VIDEO_CAMERA_CID_*` of
+  `virtio_video.h`. Controls belong to the camera: a set or get through any of
+  its streams reaches the same values.
+- **Blocked and interrupted.** A session the host starts blocked reports
+  `VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED` and delivers black frames flagged
+  `VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLACK | _BLOCKED` at the stream's rate, and
+  never opens a capture session. A live session sends black frames flagged
+  `_INTERRUPTED` or `_RESUMING` while the capture cannot run. The camera events
+  (`VIRTIO_VIDEO_EVENT_CAMERA_*`, stream ID the camera index) report the
+  change.
