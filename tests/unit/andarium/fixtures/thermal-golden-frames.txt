@@ -5,36 +5,36 @@
 # One frame per line: `name: <hex bytes>`. A line that starts with `#` is a
 # comment, and the comment above a frame says what it means.
 #
-# A record is 8 bytes, host to guest only: the magic `ATH1`, one byte with
-# Android's severity (0 NONE, 1 LIGHT, 2 MODERATE, 3 SEVERE, 4 CRITICAL) and
-# three reserved bytes, all 0.
+# A record is 8 bytes, host to guest only: "ATH1" (41 54 48 31), one byte with
+# the Android severity the host wants reported (0 NONE, 1 LIGHT, 2 MODERATE,
+# 3 SEVERE, 4 CRITICAL) and three reserved bytes that are zero. Android's
+# EMERGENCY (5) and SHUTDOWN (6) are not severities of the wire.
 #
-# The host's encoder produces every frame that is not a `reject-` frame from
-# the severity named. The HAL's decoder accepts those frames and refuses every
-# `reject-` frame: it closes the connection and keeps the severity it had.
+# The host encodes every frame that is not a `reject-` frame, and the guest
+# reads each of them as the severity described. The guest closes the connection
+# on every `reject-` frame and keeps the severity it had; the host never
+# encodes one.
 
-# NONE: the device is not hot.
+# NONE: the host is nominal.
 none: 41 54 48 31 00 00 00 00
 
-# LIGHT: iOS fair.
+# LIGHT: the host's thermal state is fair.
 light: 41 54 48 31 01 00 00 00
 
-# SEVERE: iOS serious; Android lowers the frame rate to 30.
+# SEVERE: the host's thermal state is serious.
 severe: 41 54 48 31 03 00 00 00
 
-# CRITICAL: iOS critical.
+# CRITICAL: the host's thermal state is critical.
 critical: 41 54 48 31 04 00 00 00
 
-# --- Frames the HAL refuses
-
-# EMERGENCY (5) is never reported.
+# Severity 5 is Android's EMERGENCY, which the guest never reports.
 reject-emergency: 41 54 48 31 05 00 00 00
 
-# SHUTDOWN (6) is never reported.
+# Severity 6 is Android's SHUTDOWN, which the guest never reports.
 reject-shutdown: 41 54 48 31 06 00 00 00
 
-# The magic is ATH2.
+# The magic's last byte is 2, not 1: not this protocol's record.
 reject-magic: 41 54 48 32 00 00 00 00
 
-# A reserved byte is 1.
+# A reserved byte is not zero.
 reject-reserved: 41 54 48 31 01 00 01 00
