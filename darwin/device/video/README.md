@@ -181,5 +181,7 @@ encoder (`tests/support/video`) and then the host's hardware encoder;
 device and that the wire lists exactly what discovery found.
 
 `virtio-video-suspend` runs the decoder behind the real transport through a ring
-disable and enable, and `platform-video-decoder-recovery` and
-`platform-video-encoder-recovery` lose the VideoToolbox session.
+disable and enable, `platform-video-decoder-recovery` and
+`platform-video-encoder-recovery` lose the VideoToolbox session, and
+`guest-video-suspend` suspends a Linux guest by the host's route and its own with
+both devices idle.
