@@ -606,7 +606,20 @@ public:
         // leaves the session when its last still is delivered, and a capture
         // started here must be seen by that before the output could go.
         bool started = false;
-        onQueue([&] { started = startStill(camera, request); });
+        onQueue([&] {
+            // The photo settings and the capture itself raise for a request the
+            // output does not take; the camera then leaves with nothing in flight.
+            @try {
+                started = startStill(camera, request);
+            } @catch (NSException*) {
+                started = false;
+                {
+                    std::lock_guard lock(photoMutex_);
+                    photos_.erase(request.token);
+                }
+                releaseStill(camera);
+            }
+        });
         return started;
     }
 
