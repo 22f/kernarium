@@ -109,7 +109,7 @@ def dump(hub: list[str], reader: list[str]) -> str:
         "    ExcludedDeviceNames: []\n")
 
 
-def plugged_keyboard(led: str = "on") -> str:
+def plugged_keyboard(led: str = "true") -> str:
     return dump(
         [SIDE_KEYS_HUB, KEYBOARD_HUB, MOUSE_HUB, POINTER_HUB],
         [SIDE_KEYS_READER,
@@ -131,7 +131,7 @@ class InputDumpTests(unittest.TestCase):
         reader = parsed.reader[runner.KEYBOARD]
         self.assertEqual((reader.external, reader.keyboard_type, reader.sources), (True, 2, "KEYBOARD"))
         self.assertIsNone(reader.pointer_capture_led)
-        self.assertEqual(parsed.reader[runner.MOUSE].pointer_capture_led, "on")
+        self.assertEqual(parsed.reader[runner.MOUSE].pointer_capture_led, "true")
         self.assertIs(parsed.reader[runner.POINTER].external, False)
 
     def test_the_side_keys_alone(self) -> None:
@@ -200,11 +200,13 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("sources", runner.mouse_problem(parsed))
 
     def test_the_capture_led(self) -> None:
-        self.assertIsNone(runner.capture_led_problem(runner.parse_input_dump(plugged_keyboard("on")), "on"))
-        self.assertIsNone(runner.capture_led_problem(runner.parse_input_dump(plugged_keyboard("off")), "off"))
-        self.assertIn("not 'off'", runner.capture_led_problem(runner.parse_input_dump(plugged_keyboard("on")), "off"))
-        without = runner.parse_input_dump(plugged_keyboard().replace("      PointerCaptureLed: on\n", ""))
-        self.assertIn("no PointerCaptureLed line", runner.capture_led_problem(without, "on"))
+        self.assertIsNone(runner.capture_led_problem(runner.parse_input_dump(plugged_keyboard("true")), "true"))
+        self.assertIsNone(runner.capture_led_problem(runner.parse_input_dump(plugged_keyboard("false")), "false"))
+        self.assertIn("not 'false'", runner.capture_led_problem(runner.parse_input_dump(plugged_keyboard("true")), "false"))
+        without = runner.parse_input_dump(plugged_keyboard().replace("      PointerCaptureLed: true\n", ""))
+        self.assertIn("no PointerCaptureLed line", runner.capture_led_problem(without, "true"))
+        none = runner.parse_input_dump(plugged_keyboard("<none>"))
+        self.assertIn("not 'true'", runner.capture_led_problem(none, "true"))
 
 
 PROBE_LOG = """\

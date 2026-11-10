@@ -589,6 +589,7 @@ def unplugged_problem(dump: InputDump) -> str | None:
 
 
 def capture_led_problem(dump: InputDump, state: str) -> str | None:
+    """The mouse's mapper dumps `PointerCaptureLed: true`, `false`, or `<none>` for a device without the LED."""
     reader = dump.reader.get(MOUSE)
     if reader is None:
         return f"{MOUSE!r} is not an input device"
@@ -761,7 +762,7 @@ def check_capture(guest: Guest, vnc: VncClient) -> None:
     wait_for_events(guest, "pointer capture granted to the probe", probe_before,
                     lambda found: None if pointer_events(found, "capture", state="on") else "no capture on line")
     wait_for_host(guest, HOST_CAPTURE_ON, host_before)
-    wait_for("the cursor mapper's LED on", PLUG_SECONDS, lambda: capture_led_problem(guest.input_dump(), "on"), guest)
+    wait_for("the cursor mapper's LED on", PLUG_SECONDS, lambda: capture_led_problem(guest.input_dump(), "true"), guest)
     print("capture on: the probe holds it, LED_MISC is lit and the host heard it")
 
     # The absolute pointer is disabled while Android holds the capture. A hover that was in progress ends
@@ -795,7 +796,7 @@ def check_capture(guest: Guest, vnc: VncClient) -> None:
     wait_for_events(guest, "pointer capture released", probe_before,
                     lambda found: None if pointer_events(found, "capture", state="off") else "no capture off line")
     wait_for_host(guest, HOST_CAPTURE_OFF, host_before)
-    wait_for("the cursor mapper's LED off", PLUG_SECONDS, lambda: capture_led_problem(guest.input_dump(), "off"), guest)
+    wait_for("the cursor mapper's LED off", PLUG_SECONDS, lambda: capture_led_problem(guest.input_dump(), "false"), guest)
     probe_before = len(guest.probe_events())
     target = (vnc.width // 4, vnc.height // 4)
     vnc.pointer(0, *target)
