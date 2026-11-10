@@ -116,6 +116,9 @@ protocol RuntimeDriver: AnyObject {
     /// Asks the guest for a bug report and copies it into `BugReportStaging`.
     /// Returns the staged file; cancelling the task stops the report.
     func createBugReport(update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> URL
+    /// The guest kernel's counters that bear on a stall (`GuestProcFiles`), as
+    /// entries for the bug report; empty when the guest cannot be read now.
+    func guestStallFiles() async -> [BugReportArchive.Entry]
     /// Installs the APK at `url`, which the caller can read, into the guest.
     /// Cancelling the task stops it while the file is still being sent.
     func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws
@@ -168,6 +171,11 @@ protocol RuntimeDriver: AnyObject {
     /// thread. Without a servicing debugger it asks the runtime nothing.
     func prepareJit(wanted: Bool, shape: JitShape) async -> JitAnswer
     #endif
+}
+
+extension RuntimeDriver {
+    /// A driver with no guest to read adds nothing.
+    func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

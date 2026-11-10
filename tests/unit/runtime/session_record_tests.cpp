@@ -27,6 +27,7 @@ using uml::runtime::SessionEnd;
 using uml::testing::require;
 
 constexpr std::size_t slot_bytes = uml::runtime::session_memory_slot_bytes;
+constexpr std::size_t state_offset = uml::runtime::session_state_offset;
 
 std::string read_file(const std::string &path)
 {
@@ -144,9 +145,9 @@ void test_record_lifecycle()
 	const std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, {}));
 	std::string record = read_file(path);
-	require(record.starts_with("uml-session 3\nmemory at ") &&
-		record.size() > slot_bytes && record[slot_bytes - 1] == '\n' &&
-		record.substr(slot_bytes).starts_with(
+	require(record.starts_with("uml-session 4\nmemory at ") &&
+		record.size() > state_offset && record[slot_bytes - 1] == '\n' &&
+		record.substr(state_offset).starts_with(
 			"state running\nend running\n"),
 		"a begun session is not running: " + record);
 	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
@@ -155,7 +156,7 @@ void test_record_lifecycle()
 		has(record, "\nended ") && !has(record, "kernel-output"),
 		"a power-off was recorded wrong: " + record);
 	uml::runtime::end_session_record(SessionEnd::kernel_exit, 143);
-	require(read_file(path).substr(slot_bytes) == record.substr(slot_bytes),
+	require(read_file(path).substr(state_offset) == record.substr(state_offset),
 		"a second end replaced the first");
 
 	/* A restart begins the next session in the same file. */
@@ -195,12 +196,12 @@ void test_memory_checkpoints()
 	require(each < 5000.0, "a memory checkpoint is far too slow");
 	const std::string checked = read_file(path);
 	require(checked.size() == begun.size() &&
-		checked.substr(slot_bytes) == begun.substr(slot_bytes),
+		checked.substr(state_offset) == begun.substr(state_offset),
 		"a checkpoint changed the session's state");
 	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
 	uml::runtime::checkpoint_session_memory();
 	const std::string ended = read_file(path);
-	require(ended.substr(slot_bytes).starts_with("state ended\nend powered-off\n"),
+	require(ended.substr(state_offset).starts_with("state ended\nend powered-off\n"),
 		"a checkpoint after the end replaced it: " + ended);
 	/* The next session reuses the record's descriptor number. */
 	const std::string next = temporary_record();
@@ -295,7 +296,7 @@ void test_memory_terms()
 		require(seconds >= previous, "the history is out of order: " + slot);
 		previous = seconds;
 	}
-	require(checked.substr(slot_bytes) == begun.substr(slot_bytes),
+	require(checked.substr(state_offset) == begun.substr(state_offset),
 		"a checkpoint changed the session's state");
 	/* Checkpoints at one footprint read malloc's term once, and repeat that
 	 * reading. */
@@ -396,7 +397,7 @@ void test_host_fault()
 		has(record, "owns no virtual CPU"),
 		"a host fault was recorded wrong: " + record);
 	uml::runtime::record_kernel_crash();
-	require(read_file(path).substr(slot_bytes) == record.substr(slot_bytes),
+	require(read_file(path).substr(state_offset) == record.substr(state_offset),
 		"a later crash replaced the fault");
 	uml::runtime::reset_session_record();
 	unlink(path.c_str());
@@ -420,6 +421,78 @@ void test_process_exit_in_a_child()
 	require(has(record, "end process-exit\n") &&
 		has(record, "message exit() was called while the guest ran\n"),
 		"an exit() while the guest ran was recorded wrong: " + record);
+	unlink(path.c_str());
+}
+
+/* The file is a fixed layout of a size it never exceeds, whatever the session
+ * writes into it, and its parts do not overwrite each other. */
+void test_size_bound_and_stall_slot()
+{
+	using uml::runtime::session_record_max_bytes;
+	using uml::runtime::session_stall_slot_bytes;
+	static_assert(session_record_max_bytes == 13312,
+		"the record's largest size is stated in the documentation");
+	uml::runtime::reset_session_record();
+	const std::string path = temporary_record();
+	const int sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
+	require(sink >= 0, "no sink");
+	const std::string console = "con0=fd:" + std::to_string(sink) + ",fd:" +
+		std::to_string(sink);
+	const std::vector<std::string> arguments{console};
+	require(uml::runtime::begin_session_record(path, arguments));
+	const std::string begun = read_file(path);
+	require(begun.substr(slot_bytes, 14) == "stalls 1 base " &&
+		begun[state_offset - 1] == '\n' &&
+		begun.substr(slot_bytes).find("total 0 shown 0") != std::string::npos,
+		"a session starts with an empty stall slot");
+	require(begun.size() < state_offset + 200);
+
+	/* A slot of the wrong size changes nothing; the right one lands in its
+	 * place alone. */
+	uml::runtime::write_session_stall_slot(std::string(100, 'x'));
+	uml::runtime::write_session_stall_slot(
+		std::string(session_stall_slot_bytes + 1, 'x'));
+	require(read_file(path) == begun, "a wrong-sized slot was written");
+	std::string slot(session_stall_slot_bytes, 'x');
+	slot.back() = '\n';
+	uml::runtime::write_session_stall_slot(slot);
+	std::string changed = read_file(path);
+	require(changed.size() == begun.size() &&
+		changed.substr(slot_bytes, session_stall_slot_bytes) == slot &&
+		changed.substr(0, slot_bytes) == begun.substr(0, slot_bytes) &&
+		changed.substr(state_offset) == begun.substr(state_offset),
+		"the stall slot touched another part");
+
+	/* A long run of checkpoints, stall slots and kernel output, and an end
+	 * with a long message: the file stays within its bound. */
+	const std::string noise(60000, 'k');
+	for (unsigned round = 0; round < 40; ++round) {
+		(void)uml::runtime::kernel_write(sink, noise.data(), noise.size());
+		uml::runtime::checkpoint_session_memory();
+		uml::runtime::write_session_stall_slot(slot);
+		require(read_file(path).size() == begun.size(),
+			"the running record grew");
+	}
+	uml::runtime::end_session_record(SessionEnd::failed, 1,
+		std::string(100000, 'm'));
+	const std::string ended = read_file(path);
+	require(ended.size() <= session_record_max_bytes &&
+		ended.size() > state_offset + 1000,
+		"an end of a long message left a record of " +
+		std::to_string(ended.size()) + " bytes");
+	/* Nothing writes the slot once the session has ended. */
+	uml::runtime::write_session_stall_slot(std::string(
+		session_stall_slot_bytes, 'y'));
+	require(read_file(path) == ended, "a slot was written after the end");
+
+	/* The next session in the file starts empty, and the file shrinks. */
+	require(uml::runtime::begin_session_record(path, arguments));
+	const std::string next = read_file(path);
+	require(next.size() < ended.size() && next.size() < state_offset + 200 &&
+		next.substr(slot_bytes, 14) == "stalls 1 base ",
+		"a session inherited the last one");
+	uml::runtime::reset_session_record();
+	(void)close(sink);
 	unlink(path.c_str());
 }
 
@@ -448,6 +521,7 @@ int main()
 		test_memory_terms();
 		test_kernel_crash();
 		test_host_fault();
+		test_size_bound_and_stall_slot();
 		test_unopenable_record();
 	} catch (const std::exception &error) {
 		std::fprintf(stderr, "session record test failed: %s\n",
