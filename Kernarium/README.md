@@ -178,8 +178,13 @@ boot request carries the adb host key to authorize for that boot
 (`android_adb_public_key`, runtime API 19) and the host's time zone
 (`android_time_zone`, API 23: Kernarium sends none,
 [Andarium](../Andarium/README.md#runtime) the system's zone), and a launch with
-no `KERNARIUM_HOST_FORWARD` has adbd listen on vsock alone. The runtime
-validates the values (`KernariumAdbChannel.hpp`, `KernariumGuestTimeZone.hpp`).
+no `KERNARIUM_HOST_FORWARD` has adbd listen on vsock alone. The request also
+states what the host has that the guest is to find (`android_host_features`,
+API 31): the runtime turns each bit it knows into one kernel argument, from the
+table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
+`haptics`, which declares the guest's vibrator), and ignores the others;
+Kernarium sends none. The runtime validates the values
+(`KernariumAdbChannel.hpp`, `KernariumGuestTimeZone.hpp`).
 
 ## Devices and display
 

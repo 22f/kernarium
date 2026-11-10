@@ -280,11 +280,16 @@ automation host.
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
 free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
-with `swift test`; `andarium-motion-protocol` (unit), `andarium-stage-system-image`
+with `swift test` (it includes the haptics session on fake guests and
+players, and the haptics wire against the golden frames in
+`tests/unit/andarium/fixtures`, which the guest's vibrator HAL tests against
+too); `andarium-motion-protocol` (unit), `andarium-stage-system-image`
 and `andarium-capture-screens` (tooling) cover the motion wire format, system
-image staging and the screenshot script. The application builds with Xcode
-(`AndariumPreview` is the Simulator build with mock data, `Andarium` the device
-application, [targets](../Andarium/README.md#targets)); `AndariumTests` is
+image staging and the screenshot script, and `kernarium-host-features` (unit)
+the table of host features the boot request carries to an Android guest. The
+application builds with Xcode (`AndariumPreview` is the Simulator build with
+mock data, `Andarium` the device application,
+[targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium`). The hosted tests
 share the application's one key window: a test that replaces its root view
