@@ -63,6 +63,12 @@ final class LiveRuntime: RuntimeDriver {
     /// Engine never runs it: the guest finds no vibrator.
     private let hapticsAvailable = DeviceHaptics.isAvailable
     private lazy var haptics = HapticsSession(opener: HapticsConnector(), player: CoreHapticsPlayer())
+    /// Tells the guest's thermal HAL how hot the device is; Android lowers
+    /// its frame rate for it, and the session says so once.
+    private lazy var thermal = ThermalSession(opener: ThermalConnector()) { [weak self] in
+        Task { @MainActor [weak self] in self?.thermalCapStarted() }
+    }
+    private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
     /// The interface orientation the sensors' axes are mounted to.
     private var motionMount = MotionMount()
     private lazy var rotation = GuestRotationController(
@@ -315,6 +321,8 @@ final class LiveRuntime: RuntimeDriver {
         let dataGiB = storage.dataGiB(for: run.guest)
         reachedBootCompleted = false
         normalRun = run.mode == .normal
+        updateThermal()
+        if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
         updateHaptics()
         let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
@@ -461,6 +469,7 @@ final class LiveRuntime: RuntimeDriver {
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
         if bootCompleted {
             reachedBootCompleted = true
+            updateThermal()
             updateGuestRotation()
             updateSpaceWatch()
             // An update counts as applied once its start has booted, whatever
@@ -481,6 +490,8 @@ final class LiveRuntime: RuntimeDriver {
         spaceAlertOpen = false
         motion.stop()
         haptics.restart()
+        thermal.restart()
+        updateThermal()
         updateGuestRotation()
         updateSpaceWatch()
         switch model.phase {
@@ -500,6 +511,8 @@ final class LiveRuntime: RuntimeDriver {
         motion.stop()
         updateGuestRotation()
         updateSpaceWatch()
+        updateThermal()
+        thermalMonitor.stop()
         stopThermalObservation()
         kernarium_runtime_loader_set_restart_handler(nil)
         kernarium_runtime_loader_set_console_output_handler(nil)
@@ -709,9 +722,24 @@ final class LiveRuntime: RuntimeDriver {
 
     // MARK: Thermal state
 
-    // The thermal state and uptime go to the console for the iPad harness
-    // (`Shared/ConsoleReport.swift`); an App Store build prints neither and
-    // reads neither the system uptime nor the thermal state.
+    // Two readers of the thermal state. The guest's thermal HAL is told how
+    // hot the device is in every build (`ThermalSession`). The state and the
+    // uptime also go to the console for the iPad harness
+    // (`Shared/ConsoleReport.swift`); an App Store build prints neither line
+    // and reads no system uptime.
+
+    /// The guest's thermal HAL is told while a normal run goes on; Recovery
+    /// has none.
+    private func updateThermal() {
+        thermal.update(running: normalRun, booted: reachedBootCompleted)
+    }
+
+    /// Android starts to lower its frame rate: the first time in the run that
+    /// the device is hot enough and the HAL has heard of it.
+    private func thermalCapStarted() {
+        guard runActive, normalRun else { return }
+        model?.thermalCapStarted()
+    }
 
     #if !APP_STORE
     private func reportThermalState(_ phase: ConsoleReport.ThermalPhase) {
@@ -937,6 +965,7 @@ final class LiveRuntime: RuntimeDriver {
         #endif
         active = true
         updateGuestRotation()
+        if normalRun { thermalMonitor.refresh() }
         guard let model else { return }
         model.applicationActive = true
         let free = freeSpace()

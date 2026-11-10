@@ -41,12 +41,31 @@ extension JitPreference {
     }
 }
 
+/// The thermal state a harness launch states instead of iOS's, for the
+/// Simulator (which reports nominal) and for automation: `nominal`, `fair`,
+/// `serious` or `critical` in `ANDARIUM_THERMAL_STATE`. Anything else is no
+/// setting.
+nonisolated enum ThermalOverride {
+    static let environmentName = "ANDARIUM_THERMAL_STATE"
+
+    static func stated(in environment: [String: String]) -> HostThermalState? {
+        switch environment[environmentName]?.lowercased() {
+        case "nominal"?: .nominal
+        case "fair"?: .fair
+        case "serious"?: .serious
+        case "critical"?: .critical
+        default: nil
+        }
+    }
+}
+
 extension AppEntry {
     /// Whether the launch is the person's own, which announces the release
     /// notes (`announceWhatsNew`). A launch that states any setting, the JIT
-    /// included, or runs under XCTest is a harness's.
+    /// or the thermal state included, or runs under XCTest is a harness's.
     static func isPersonsLaunch(overrides: LaunchOverrides, environment: [String: String]) -> Bool {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
+            && ThermalOverride.stated(in: environment) == nil
             && environment["XCTestConfigurationFilePath"] == nil
     }
 
