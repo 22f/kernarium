@@ -72,22 +72,35 @@ void HardwareInput::guestStatus(HardwareStatus kind, const StatusEvent& event)
 
 void HardwareInput::registered(DeviceKind kind, const StatusEvent& event)
 {
-    if (!event.on || !event.lostEvents)
-        return;
-    std::lock_guard lock(mutex_);
+    HardwareStatus status;
     switch (kind) {
     case DeviceKind::hardwareKeyboard:
-        keyboard_.reset();
+        status = HardwareStatus::keyboardRegistered;
         break;
     case DeviceKind::mouse:
-        mouse_.reset();
+        status = HardwareStatus::mouseRegistered;
         break;
     case DeviceKind::pointer:
-        pointer_.reset();
+        status = HardwareStatus::pointerRegistered;
         break;
     default:
-        break;
+        return;
     }
+    if (event.on && event.lostEvents) {
+        std::lock_guard lock(mutex_);
+        switch (kind) {
+        case DeviceKind::hardwareKeyboard:
+            keyboard_.reset();
+            break;
+        case DeviceKind::mouse:
+            mouse_.reset();
+            break;
+        default:
+            pointer_.reset();
+            break;
+        }
+    }
+    guestStatus(status, event);
 }
 
 void HardwareInput::setKeyboardConnected(bool connected)

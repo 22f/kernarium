@@ -581,10 +581,26 @@ void anUnplugReleasesEverythingTheHostHolds()
     require(Rig::received(rig.keyboardDevice).size() == 2);
 }
 
+void theGuestsRegistrationsReachTheCallback()
+{
+    Rig rig;
+    rig.plugEverything();
+    require((rig.statuses == std::vector<std::pair<HardwareStatus, bool>> {
+        {HardwareStatus::keyboardRegistered, true},
+        {HardwareStatus::mouseRegistered, true},
+        {HardwareStatus::pointerRegistered, true}}));
+    rig.statuses.clear();
+    Rig::status(rig.pointerDevice, event(
+        protocol::statusNotice, protocol::noticeRegistration, 0));
+    require((rig.statuses == std::vector<std::pair<HardwareStatus, bool>> {
+        {HardwareStatus::pointerRegistered, false}}));
+}
+
 void theGuestsLedWritesReachTheCallback()
 {
     Rig rig;
     rig.plugEverything();
+    rig.statuses.clear();
     Rig::status(rig.keyboardDevice, event(protocol::eventLed, protocol::ledCapsLock, 1));
     Rig::status(rig.keyboardDevice, event(protocol::eventLed, protocol::ledNumLock, 1));
     Rig::status(rig.keyboardDevice, event(protocol::eventLed, protocol::ledScrollLock, 0));
@@ -654,6 +670,7 @@ int main()
     thePointerIsMappedOntoTheGuestDisplay();
     theMouseCarriesMotionButtonsAndWheels();
     anUnplugReleasesEverythingTheHostHolds();
+    theGuestsRegistrationsReachTheCallback();
     theGuestsLedWritesReachTheCallback();
     aRegistrationThatFollowsDroppedInputMakesTheHostForgetWhatItHolds();
     return EXIT_SUCCESS;

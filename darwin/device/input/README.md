@@ -56,7 +56,7 @@ are one mouse to Android and are plugged together.
   events), so no key stays down in the host's view only.
 - The status queue also carries Android's LED writes, which reach
   `HardwareInput::setStatusCallback` as Num, Caps and Scroll Lock and as
-  pointer capture on or off.
+  pointer capture on or off, and each registration the guest announces.
 
 A kernel without the guest driver's change never plugs: it sees an unplugged
 device as an input device with no events, which Android drops, and the host

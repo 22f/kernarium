@@ -19,6 +19,13 @@ enum class HardwareStatus : std::uint8_t {
     scrollLock,
     /* An Android application captured the pointer, and released it. */
     pointerCapture,
+    /* The guest registered an input device for the keyboard, the mouse or the
+     * pointer (on), or unregistered it: a plug the guest has answered. A
+     * kernel without the driver topic never says it
+     * (kernel/common/input). */
+    keyboardRegistered,
+    mouseRegistered,
+    pointerRegistered,
 };
 
 /* The host's side of the guest's hardware keyboard, mouse and pointer: one
