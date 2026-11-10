@@ -1323,7 +1323,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "    start adbd\n"
                     + rcu_restore + blocker_rules + net_rules
                     + ("" if init_variant == "no-adbd-keep-alive"
-                       else "on property:init.svc.adbd=stopped\n    start adbd\n"),
+                       else "on property:init.svc.adbd=stopped\n    start adbd\n")
+                    # Cuttlefish's bugreport service, which the product keeps without its keychord.
+                    + "service bugreport /system/bin/dumpstate -d -p -z\n    class main\n    user root\n"
+                      "    disabled\n    oneshot\n"
+                    + ("    keycodes 30 48\n" if init_variant == "bugreport-keychord" else ""),
                 )
                 if extra_entry is not None:
                     archive.writestr(extra_entry, "on early-init\n")
@@ -4593,6 +4597,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("location-probe-left-in-the-image", {"entries": {
                 "SYSTEM/app/AndariumLocationProbe/AndariumLocationProbe.apk": synthetic_apk(debuggable=False)}},
              "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumLocationProbe"),
+            ("bugreport-keychord", {"init_variant": "bugreport-keychord"},
+             "starts bugreport on a keychord \\('keycodes 30 48'\\)"),
             ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
              "required entries are missing"),
             ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},

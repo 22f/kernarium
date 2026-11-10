@@ -997,6 +997,19 @@ def init_services(payload: str) -> dict[str, tuple[str, list[str]]]:
     return services
 
 
+def check_init_keychords(init_payload: str) -> None:
+    """No service starts on a keychord: init counts keys across every input device, so with a
+    hardware keyboard attached ordinary typing would start it (Cuttlefish's bugreport chord was A+B)."""
+    for name, (_, options) in init_services(init_payload).items():
+        for option in options:
+            if option.split()[0] == "keycodes":
+                fail(
+                    f"UML init policy starts {name} on a keychord ('{option}'): init fires it whenever "
+                    "those keys are down together on any input device, so typing on a hardware keyboard "
+                    "would start it"
+                )
+
+
 def check_suspend_blocker(init_payload: str, actions: dict[str, list[str]]) -> None:
     """The wakelock that keeps the guest awake runs exactly while an adb host is connected."""
     name, executable = SUSPEND_BLOCKER_SERVICE
@@ -1390,6 +1403,7 @@ def check_boot_policy(
         )
     check_zram_swap(actions)
     check_userdata_grow(actions)
+    check_init_keychords(init_payload)
     check_suspend_blocker(init_payload, actions)
     check_network_setup(init_payload, actions)
     check_wifi_network(

@@ -311,6 +311,11 @@ Back and Home) has a layout of those five keys alone, so Android no longer count
 it as a full keyboard that is always attached. The verifier requires each file's
 content.
 
+init starts a service on a keychord whenever its keys are down together on any
+input device, so typing would fire one: the product's `bugreport` service has
+none (Cuttlefish's was A and B), and the verifier refuses a keychord in the
+product's init script. Bug reports are taken over adb.
+
 ### Debugging and adb
 
 Fresh settings databases keep Developer options and USB debugging off, and
