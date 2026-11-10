@@ -126,6 +126,29 @@ std::size_t count(const std::string &text, const std::string &part)
 	return found;
 }
 
+/* The events that name a vCPU. A host so loaded that the watch's own tick runs
+ * 150 ms late records an event of the whole process as well, which names none
+ * and says nothing of the carriers. */
+std::size_t vcpu_events(const std::string &slot)
+{
+	std::size_t found = 0;
+	std::size_t at = 0;
+	while ((at = slot.find("\nstall ", at)) != std::string::npos) {
+		++at;
+		const std::size_t end = slot.find('\n', at);
+		const std::string line = slot.substr(at, end - at);
+		/* stall SEQ START DUR[+] CAUSES ... */
+		std::size_t field = 0;
+		std::size_t from = 0;
+		for (; field < 4; ++field)
+			from = line.find(' ', from) + 1;
+		const std::string causes = line.substr(from, line.find(' ', from) - from);
+		if (causes.find_first_not_of('.') != std::string::npos)
+			++found;
+	}
+	return found;
+}
+
 void sleep_ms(unsigned milliseconds)
 {
 	nap(milliseconds * 1000U);
@@ -152,7 +175,7 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 
 	/* Only idle carriers: no event. */
 	sleep_ms(400);
-	require(count(stall_slot(path), "\nstall ") == 0);
+	require(vcpu_events(stall_slot(path)) == 0, "idle carriers stalled:\n" + stall_slot(path));
 
 	/* A carrier starts a wait that lasts, and the thermal state and the core
 	 * count move. */
@@ -165,7 +188,7 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 	Thermal::processors = 4;
 	sleep_ms(1000);
 	const std::string during = stall_slot(path);
-	require(count(during, "\nstall ") == 1, "one event is open:\n" + during);
+	require(vcpu_events(during) == 1, "one event is open:\n" + during);
 	require(during.find("+ ..a ") != std::string::npos,
 		"the third carrier is stalled on a device service's answer:\n" + during);
 	require(during.find("\nthermal ") != std::string::npos &&
@@ -175,7 +198,7 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 	require(write(pipe_fds[1], "x", 1) == 1);
 	sleep_ms(500);
 	const std::string after = stall_slot(path);
-	require(count(after, "\nstall ") == 1 && after.find("+ ..a ") == std::string::npos &&
+	require(vcpu_events(after) == 1 && after.find("+ ..a ") == std::string::npos &&
 		after.find(" ..a ") != std::string::npos,
 		"the event is closed:\n" + after);
 

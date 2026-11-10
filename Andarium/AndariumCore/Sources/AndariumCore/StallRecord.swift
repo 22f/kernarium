@@ -238,7 +238,7 @@ extension StallRecord {
     /// host's state. Times are UTC.
     public func report() -> String {
         var lines: [String] = []
-        lines.append("Written \(Self.stamp(written)); the session began \(Self.stamp(base)).")
+        lines.append("The session began \(Self.stamp(base)); this slot was last written \(Self.stamp(written)).")
         lines.append(
             total == 0
                 ? "No stall was recorded."
@@ -292,7 +292,7 @@ extension StallRecord {
                 case .starved:
                     let shares = Set(group.value.map(\.sharePercent))
                     let got = shares.count == 1 ? "\(shares.first ?? 0)% of a core" : "\(shares.min() ?? 0)% to \(shares.max() ?? 0)% of a core"
-                    lines.append("  \(cpus): runnable but starved. The system gave the thread \(got).")
+                    lines.append("  \(cpus): runnable but starved. The system gave \(group.value.count == 1 ? "the thread" : "each thread") \(got).")
                 default:
                     lines.append("  \(cpus): \(Self.waitWords(group.key)).")
                 }
