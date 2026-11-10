@@ -28,4 +28,13 @@ public protocol HapticPlayer: AnyObject, Sendable {
     /// Has the engine ready for the first score, as the application returns
     /// to the front with a guest that may ask for one.
     func prepare()
+    /// Stops the target and drops what the player keeps for it, the engine of
+    /// an actuator that is gone (a game controller that disconnected): the
+    /// next score for the target asks the engine source again.
+    func forget(_ target: HapticTarget)
+}
+
+extension HapticPlayer {
+    /// A player that keeps nothing for a target has nothing to forget.
+    public func forget(_ target: HapticTarget) { stop(target) }
 }

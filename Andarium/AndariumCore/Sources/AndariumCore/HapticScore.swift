@@ -11,6 +11,35 @@ public struct HapticTarget: Hashable, Sendable {
     public init(rawValue: UInt8) { self.rawValue = rawValue }
     /// The device's own actuator.
     public static let device = HapticTarget(rawValue: 0)
+
+    /// Where a game controller's actuators of a locality begin: the guest's
+    /// vibrator never asks for these, only the gamepad session plays them.
+    static let firstControllerTarget: UInt8 = 16
+
+    /// Where on a game controller a target plays.
+    public enum ControllerLocality: UInt8, Sendable, CaseIterable {
+        /// iOS's default locality: both handles on most controllers, the one
+        /// engine of a controller that has no handles of its own.
+        case standard = 0
+        case leftHandle = 1
+        case rightHandle = 2
+    }
+
+    /// The actuator of a locality on the controller that holds `slot`.
+    public static func controller(slot: Int, locality: ControllerLocality) -> HapticTarget {
+        precondition((0..<GamepadProtocol.slotCount).contains(slot), "a controller has a slot")
+        return HapticTarget(rawValue: firstControllerTarget + UInt8(slot) * 4 + locality.rawValue)
+    }
+
+    /// The controller and locality of a target, or nil for another actuator.
+    public var controller: (slot: Int, locality: ControllerLocality)? {
+        guard rawValue >= Self.firstControllerTarget else { return nil }
+        let offset = Int(rawValue - Self.firstControllerTarget)
+        guard offset / 4 < GamepadProtocol.slotCount, let locality = ControllerLocality(rawValue: UInt8(offset % 4)) else {
+            return nil
+        }
+        return (offset / 4, locality)
+    }
 }
 
 /// The composition primitives of Android's vibrator HAL
