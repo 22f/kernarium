@@ -24,6 +24,9 @@ typedef void (^KernariumConsoleOutputHandler)(NSData* data);
 typedef void (^KernariumRestartHandler)(
     uint32_t event,
     uint32_t restartCount);
+/* The guest powered its GNSS receiver on (`powered` is true) or off, delivered
+ * on the main queue. */
+typedef void (^KernariumLocationReceiverHandler)(BOOL powered);
 
 #ifdef __cplusplus
 extern "C" {
@@ -241,6 +244,17 @@ void kernarium_runtime_loader_set_console_output_handler(
  * It may be set before a runtime is selected. */
 void kernarium_runtime_loader_set_restart_handler(
     KernariumRestartHandler _Nullable handler);
+/* Receives the guest's receiver-power events (see
+ * kernarium_runtime_set_location_receiver_callback_function), or none for a nil
+ * handler. It may be set before a runtime is selected. */
+void kernarium_runtime_loader_set_location_receiver_handler(
+    KernariumLocationReceiverHandler _Nullable handler);
+/* Gives the guest's GNSS receiver the host's newest fix, or with a null `fix`
+ * drops it; see kernarium_runtime_report_location_function. Returns 0, or a
+ * negated errno: -ENODEV when no runtime is loaded or no guest with a receiver
+ * runs, -EINVAL for a fix the runtime refuses. */
+int kernarium_runtime_loader_report_location(
+    const kernarium_runtime_location_fix* _Nullable fix);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

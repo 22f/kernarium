@@ -7,6 +7,7 @@
 #include "KernariumGuestTimeZone.hpp"
 #include "KernariumHostFeatures.hpp"
 #include "KernariumKeyWake.hpp"
+#include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
 #include "KernariumStatistics.hpp"
 #if KERNARIUM_AUTOMATION_HARNESS
@@ -32,6 +33,8 @@
 #include "battery/protocol.hpp"
 #include "console/in_process_service.hpp"
 #include "console/protocol.hpp"
+#include "gnss/in_process_service.hpp"
+#include "gnss/protocol.hpp"
 #ifndef UML_APP_STORE_RUNTIME
 #include "gpu/frame_tap.hpp"
 #endif
@@ -168,6 +171,14 @@ uml::input::virtio::InProcessInputService* activeKeyboard;
  * open their stream without the mutex, which an open can hold for seconds. */
 std::mutex activeVsockMutex;
 std::shared_ptr<uml::vsock::Endpoint> activeVsock;
+/* The way into the running guest's GNSS receiver, if its flavour has one, and
+ * the one receiver of its power events. The callback is called with its mutex
+ * held, which is what makes clearing it wait for a call in progress. */
+std::mutex activeGnssMutex;
+std::shared_ptr<uml::gnss::Endpoint> activeGnss;
+std::mutex locationCallbackMutex;
+kernarium_runtime_location_receiver_callback locationCallback;
+void* locationContext;
 /* The GPU hold the application last asked for, and the GPU service it applies
  * to while a guest runs. A hold asked for before the guest's GPU exists takes
  * effect when it does. */
@@ -206,6 +217,34 @@ void publishRestart(std::uint32_t event, std::uint32_t restartCount)
     std::lock_guard lock(restartCallbackMutex);
     if (restartCallback != nullptr)
         restartCallback(restartContext, event, restartCount);
+}
+
+void publishLocationReceiver(bool powered)
+{
+    std::lock_guard lock(locationCallbackMutex);
+    if (locationCallback != nullptr)
+        locationCallback(locationContext, powered ? 1 : 0);
+}
+
+/* A guest that suspended itself, as Android does once its display is off,
+ * takes none of the receiver's output until something wakes it, as a phone's
+ * GNSS chip wakes its processor. The wake does nothing to a guest the host
+ * quiesced. It can wait on the guest's console, so it leaves the device's
+ * thread, and one wake in flight covers the periods that pass meanwhile. */
+std::atomic_bool locationWakeInFlight;
+
+void wakeGuestForLocation()
+{
+    if (locationWakeInFlight.exchange(true))
+        return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        {
+            std::lock_guard lifecycle(emulatorLifecycleMutex);
+            if (activeEmulator != nullptr)
+                uml_emulator_wake(activeEmulator);
+        }
+        locationWakeInFlight.store(false);
+    });
 }
 
 /* A host socket written after its peer reset it would end the process with
@@ -621,6 +660,39 @@ public:
 
     ActiveVsockRegistration(const ActiveVsockRegistration&) = delete;
     ActiveVsockRegistration& operator=(const ActiveVsockRegistration&) = delete;
+};
+
+class ActiveGnssRegistration final {
+public:
+    explicit ActiveGnssRegistration(std::shared_ptr<uml::gnss::Endpoint> endpoint)
+    {
+        endpoint->setPowerObserver(publishLocationReceiver);
+        endpoint->setWakeHook(wakeGuestForLocation);
+        std::lock_guard lock(activeGnssMutex);
+        activeGnss = std::move(endpoint);
+    }
+
+    ~ActiveGnssRegistration()
+    {
+        std::shared_ptr<uml::gnss::Endpoint> endpoint;
+        {
+            std::lock_guard lock(activeGnssMutex);
+            endpoint = std::move(activeGnss);
+            activeGnss.reset();
+        }
+        if (endpoint == nullptr)
+            return;
+        const bool powered = endpoint->powered();
+        endpoint->setPowerObserver({});
+        endpoint->setWakeHook({});
+        /* The guest is ending with its receiver on: the device is only reset
+         * after this, when nobody is listening. */
+        if (powered)
+            publishLocationReceiver(false);
+    }
+
+    ActiveGnssRegistration(const ActiveGnssRegistration&) = delete;
+    ActiveGnssRegistration& operator=(const ActiveGnssRegistration&) = delete;
 };
 
 class ActiveGpuRegistration final {
@@ -1298,8 +1370,12 @@ private:
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         std::unique_ptr<uml::gpu::InProcessVhostUserService> battery;
 #endif
-        /* The vsock device, the last Virtio device of the boot. */
+        /* The vsock device, after every device that existed before it. */
         std::optional<uml::vsock::InProcessService> vsock;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* The GNSS receiver, the last Virtio device of the boot. */
+        std::optional<uml::gnss::InProcessService> gnss;
+#endif
         std::optional<ConsoleBridge> console;
         std::vector<std::string> arguments;
         std::vector<const char*> pointers;
@@ -1308,6 +1384,9 @@ private:
 #endif
         std::optional<ActiveInputRegistration> inputRegistration;
         std::optional<ActiveVsockRegistration> vsockRegistration;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        std::optional<ActiveGnssRegistration> gnssRegistration;
+#endif
     };
 
     [[nodiscard]] std::unique_ptr<Boot> buildBoot()
@@ -1411,11 +1490,21 @@ private:
                 arguments.emplace_back(std::move(relay));
         }
 #endif
-        /* The last Virtio device, so that no other device's index moves. */
+        /* Appended after the devices that existed before it, so that no other
+         * device's index moves. */
         boot->vsock.emplace(uml::vsock::makeInProcessService());
         arguments.emplace_back(uml::gpu::virtioDeviceArgument(
             boot->vsock->service->takeConnectionName(),
             uml::vsock::protocol::deviceId));
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* Present in every Android launch, with or without a position, so the
+         * guest's /dev/gnss0 always exists; it is found by class, never by the
+         * device's index. */
+        boot->gnss.emplace(uml::gnss::makeInProcessService());
+        arguments.emplace_back(uml::gpu::virtioDeviceArgument(
+            boot->gnss->service->takeConnectionName(),
+            uml::gnss::protocol::deviceId));
+#endif
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         /* The release's read-only system disk and the instance's data disk are
          * the guest's only block devices. The selected ramdisk is exposed from
@@ -1448,6 +1537,9 @@ private:
 #endif
         boot->inputRegistration.emplace(*boot->touchscreen, *boot->keyboard);
         boot->vsockRegistration.emplace(boot->vsock->endpoint);
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        boot->gnssRegistration.emplace(boot->gnss->endpoint);
+#endif
         return boot;
     }
 
@@ -1590,10 +1682,13 @@ constexpr std::size_t bootSizeBeforeSessionRecord =
 constexpr std::size_t bootSizeBeforeJit =
     offsetof(kernarium_runtime_boot, use_jit);
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
 /* What a request states before the host features were added to it (runtime API
- * 31; the word was reserved, and zero, before). */
+ * 31; the word was reserved, and zero, before). Only an Android guest reads
+ * them. */
 constexpr std::size_t bootSizeBeforeHostFeatures =
     offsetof(kernarium_runtime_boot, android_host_features);
+#endif
 
 #ifndef UML_APP_STORE_RUNTIME
 /* The JIT cache budget a boot that asks for the JIT runs with, or zero when it
@@ -2418,6 +2513,44 @@ void runtimeSetRestartCallback(
     restartContext = context;
 }
 
+void runtimeSetLocationReceiverCallback(
+    kernarium_runtime_location_receiver_callback callback,
+    void* context)
+{
+    std::lock_guard lock(locationCallbackMutex);
+    locationCallback = callback;
+    locationContext = context;
+    if (callback == nullptr)
+        return;
+    std::shared_ptr<uml::gnss::Endpoint> endpoint;
+    {
+        std::lock_guard active(activeGnssMutex);
+        endpoint = activeGnss;
+    }
+    if (endpoint != nullptr && endpoint->powered())
+        callback(context, 1);
+}
+
+int runtimeReportLocation(const kernarium_runtime_location_fix* fix)
+{
+    std::shared_ptr<uml::gnss::Endpoint> endpoint;
+    {
+        std::lock_guard lock(activeGnssMutex);
+        endpoint = activeGnss;
+    }
+    if (endpoint == nullptr)
+        return -ENODEV;
+    if (fix == nullptr) {
+        endpoint->clear();
+        return 0;
+    }
+    uml::gnss::Fix converted;
+    if (const int error = kernarium::location::toFix(*fix, converted))
+        return error;
+    endpoint->report(converted);
+    return 0;
+}
+
 int runtimePrepareJit(
     int enable,
     std::uint32_t guestMemoryMiB,
@@ -2483,6 +2616,8 @@ const kernarium_runtime_api runtimeApi {
     .quiesce_resident = runtimeQuiesceResident,
     .read_graphics_memory = runtimeReadGraphicsMemory,
     .prepare_jit = runtimePrepareJit,
+    .set_location_receiver_callback = runtimeSetLocationReceiverCallback,
+    .report_location = runtimeReportLocation,
 };
 
 } // namespace

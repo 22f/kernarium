@@ -452,8 +452,9 @@ the GPU provider depends on `UML_BUILD_GPU`; the others build on the transport
 alone. A disabled ring is given no new data: a buffer the backend only fills (a
 virtio-input event) stays in the ring until it is enabled again, and a buffer
 that carries a request is consumed and dropped, because its sender may be
-waiting with interrupts off; only the GPU, whose requests are asynchronous, asks
-to keep them.
+waiting with interrupts off; only the GPU, whose requests are asynchronous, and
+the vsock and GNSS devices, whose requests the guest never waits on, ask to keep
+them.
 
 **Request gate.** A service can be given a request gate, which another thread
 closes to hold the device's requests back: a closed gate lets no request reach
@@ -473,7 +474,10 @@ V4L2 drivers to the platform VideoToolbox decoder and encoder over their own
 vhost-user connections and need no GPU context. The
 [Virtio vsock device](../darwin/device/vsock/README.md) carries a byte stream
 from the host application to a service in the guest (adbd) with no listening
-socket on the host; the guest cannot open a connection to the host.
+socket on the host; the guest cannot open a connection to the host. The
+[Virtio GNSS device](../darwin/device/gnss/README.md) is the guest's
+`/dev/gnssN`: it carries the host's fixes as an NMEA stream while the guest has
+the receiver open, and nothing else of the host's location.
 
 **Lost backend.** A virtqueue call or kick descriptor, or the backend request
 stream, that reports end of file or an error other than would-block means the
