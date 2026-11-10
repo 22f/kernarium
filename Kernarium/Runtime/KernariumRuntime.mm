@@ -1682,10 +1682,13 @@ constexpr std::size_t bootSizeBeforeSessionRecord =
 constexpr std::size_t bootSizeBeforeJit =
     offsetof(kernarium_runtime_boot, use_jit);
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
 /* What a request states before the host features were added to it (runtime API
- * 31; the word was reserved, and zero, before). */
+ * 31; the word was reserved, and zero, before). Only an Android guest reads
+ * them. */
 constexpr std::size_t bootSizeBeforeHostFeatures =
     offsetof(kernarium_runtime_boot, android_host_features);
+#endif
 
 #ifndef UML_APP_STORE_RUNTIME
 /* The JIT cache budget a boot that asks for the JIT runs with, or zero when it
