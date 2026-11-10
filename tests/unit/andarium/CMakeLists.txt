@@ -51,3 +51,15 @@ target_include_directories(uml_andarium_thermal_levels_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/thermal)
 uml_add_unit_test(NAME andarium-thermal-levels
     COMMAND uml_andarium_thermal_levels_tests LABELS andarium)
+
+# The guest's gamepad relay (android/lineage-24/overlay/gamepad): the wire format
+# against the golden frames that AndariumCore checks too (the fixture's path is
+# the test's argument, so the file has one copy), the ranges of every field and
+# the reader that turns a byte stream into frames.
+add_executable(uml_andarium_gamepad_protocol_tests gamepad_protocol_tests.cpp)
+target_include_directories(uml_andarium_gamepad_protocol_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/gamepad)
+uml_add_unit_test(NAME andarium-gamepad-protocol
+    COMMAND uml_andarium_gamepad_protocol_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/gamepad-golden-frames.txt
+    LABELS andarium)
