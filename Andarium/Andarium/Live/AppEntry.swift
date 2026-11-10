@@ -97,9 +97,11 @@ struct AppEntry {
         )
         // What the last process left half done in the snapshots (a restore, a
         // create, a delete) is completed before the guest is read.
+        var snapshotRecoveryFailure: (any Error)?
         do {
             try storage.recoverSnapshots()
         } catch {
+            snapshotRecoveryFailure = error
             print("Andarium: the snapshots could not be recovered: \(error.localizedDescription)")
         }
         var guest: Guest?
@@ -182,6 +184,8 @@ struct AppEntry {
                 sessionRecord: sessionRecord, freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
+            // The listing says why a restore that began last time is still not finished.
+            if let snapshotRecoveryFailure { runtime.snapshotRecoveryFailed(snapshotRecoveryFailure) }
             model.fileBrowser = FileBrowserModel(backend: runtime.makeGuestFiles(hostFree: watched))
             model.refreshPlan()
             // Access the person took away while Andarium was closed takes the

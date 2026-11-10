@@ -237,13 +237,24 @@ control out.
   the adb key. Create, Restore and Delete run only while the guest is stopped
   (Home, with no run active, pending or launching, since iOS takes no file lock
   on the disk), and Create only after Android's own shut down and with no
-  update unfinished. Restore replaces the data and keeps nothing of the state
-  it replaces; a snapshot of an older Android then updates at the next start,
-  and one of a newer Android or layout is refused. Rename runs at any time.
-  Each operation ends in a state the next launch completes or discards
-  (`TwoDiskStorage.recoverSnapshots` runs before the guest is read). The
-  update's copy is not a snapshot. `SnapshotDriver` is what the screens call,
-  and a refusal is a `SnapshotRefusal`.
+  update unfinished and on a volume that clones. Restore replaces the data and
+  keeps nothing of the state it replaces; a snapshot of an older Android then
+  updates at the next start, and one of a newer Android or an older layout is
+  refused. Rename runs at any time.
+  Each operation has one commit point (the snapshot's rename into place, the
+  set-aside rename of a delete, the rename of a restore's clone over
+  `data.img`): an error before it changes nothing, and one after it does not
+  fail the operation. A restore that took effect and did not finish completes
+  at the next start or launch (`TwoDiskStorage.recoverSnapshots` runs before
+  the guest is read); until then Create and Restore are refused and every
+  snapshot but that one can be deleted. The update's copy is not a snapshot.
+  The store's file calls are injected (`SnapshotFileOperations`).
+  `SnapshotDriver` is what the screens call, and a refusal is a
+  `SnapshotRefusal`. The driver reports what it does as `SnapshotActivity`,
+  which the model keeps (`AppModel.snapshotGate`, observable); no start begins
+  and the update's Restore waits while an operation runs. A listing is never
+  older than the last finished operation (`revision`), can come without its
+  figures, and names the release the data is on.
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
   from build 8 (build 5, the first public release, and builds 6 and 7 have
   none).

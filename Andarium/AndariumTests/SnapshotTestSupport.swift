@@ -55,9 +55,14 @@ struct SnapshotTestGuest {
             locations: GuestLocations(directory: directory.appendingPathComponent("Guest")),
             release: release, releaseDirectory: directory.appendingPathComponent("system"))
         let guest = try await storage.create(Guest.fresh(on: AppEntry.hostDevice()))
-        // The runtime would have made the disk, and Android shut itself down.
+        // The guest was set up an hour ago, the runtime made the disk, and
+        // Android shut itself down a minute later: a later start is told
+        // from this run by the clock.
+        let files = InstanceFiles(directory: storage.locations.directory)
+        let setUp = Date().addingTimeInterval(-3600)
+        try files.apply(InstanceDecision(.create, "A new guest."), release: release, now: setUp)
         try SnapshotTestDisk.make(at: storage.locations.data, size: 1 << 30, firstMiB: 1)
-        try storage.completeRun()
+        try files.complete(release: release, now: setUp.addingTimeInterval(60))
         return SnapshotTestGuest(directory: directory, storage: storage, guest: guest)
     }
 

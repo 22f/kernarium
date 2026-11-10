@@ -451,7 +451,7 @@ struct UnfinishedUpdateCard: View {
                 }
             }
             if canRestore {
-                Button("Restore") { model.restoreUpdate() }
+                Button("Restore") { Task { await model.restoreUpdate() } }
                     .buttonStyle(.glass)
                     .controlSize(.regular)
                     .accessibilityIdentifier("home-update-restore")

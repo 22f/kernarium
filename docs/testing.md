@@ -284,9 +284,9 @@ automation host.
 free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the snapshot store on APFS clones of sparse
-files in a temporary directory, with a stop after every step of each
-operation, the haptics session on fake guests and
-players, the haptics wire against the golden frames in
+files in a temporary directory, with a crash between every two file calls of
+each operation and a real error at each call in turn, the haptics session on
+fake guests and players, the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
 test against too, and the session record's stall slot against the golden slot
 there, which `runtime-stall-record` checks the runtime's writer against);

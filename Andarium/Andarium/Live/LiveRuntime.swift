@@ -96,7 +96,7 @@ final class LiveRuntime: RuntimeDriver {
         })
     private var normalRun = false
     /// The runtime runs a guest, from its start until its run returns.
-    private var runActive = false
+    private var runActive = false { didSet { publishSnapshotActivity() } }
     private var active = UIApplication.shared.applicationState == .active
     /// The device's free space, which the run watches. The application's
     /// own reading unless a test supplies another.
@@ -115,14 +115,24 @@ final class LiveRuntime: RuntimeDriver {
     /// Writes what the person sets, for the next launch.
     private let preferences: PreferenceKeeper
 
-    private var pending: PendingRun?
-    private var launching = false
-    private var preparing = false
+    private var pending: PendingRun? { didSet { publishSnapshotActivity() } }
+    private var launching = false { didSet { publishSnapshotActivity() } }
+    private var preparing = false { didSet { publishSnapshotActivity() } }
     /// The snapshot operation under way (`SnapshotDriver`). It clears the
     /// field itself before it ends, so what waits for it never sees it set.
     private var snapshotOperation: Task<Void, Never>?
+    /// What that operation is.
+    private var snapshotWork: SnapshotWork? { didSet { publishSnapshotActivity() } }
     /// A guest is being created or erased.
-    private var storageBusy = false
+    private var storageBusy = false { didSet { publishSnapshotActivity() } }
+    /// The operations finished so far (`SnapshotActivity.revision`).
+    private var snapshotRevision = 0 { didSet { publishSnapshotActivity() } }
+    /// What the snapshot driver is doing, as the model has it.
+    private(set) var activity = SnapshotActivity()
+    var activityChanged: (@MainActor (SnapshotActivity) -> Void)?
+    /// What stopped the last attempt in this process to finish a restore that
+    /// did not finish; the listing carries it.
+    private var rollForwardFailure: SnapshotFailure?
     private var view: GuestMetalView?
     private var geometry: GuestDisplayGeometry?
     private var bootStartedAt = Date()
@@ -172,7 +182,10 @@ final class LiveRuntime: RuntimeDriver {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
         await settleSnapshotOperation()
         storageBusy = true
-        defer { storageBusy = false }
+        defer {
+            snapshotRevision += 1
+            storageBusy = false
+        }
         return try await storage.create(guest, progress: progress)
     }
 
@@ -181,7 +194,10 @@ final class LiveRuntime: RuntimeDriver {
         // The snapshots go with the guest: an operation on them finishes first.
         await settleSnapshotOperation()
         storageBusy = true
-        defer { storageBusy = false }
+        defer {
+            snapshotRevision += 1
+            storageBusy = false
+        }
         try await storage.erase(progress: progress)
         // The next guest is a new one: it boots with a key of its own.
         keyStore.delete()
@@ -202,10 +218,29 @@ final class LiveRuntime: RuntimeDriver {
         storage.measuredUsedBytes()
     }
 
-    func restoreUpdate() throws {
+    /// The update's Restore: after the snapshot operation under way, as a
+    /// start is. It changes the guest's files (it completes a snapshot
+    /// restore that did not finish first), so what a screen has listed is stale.
+    func restoreUpdate() async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        guard snapshotOperation == nil, !storageBusy else { throw SnapshotRefusal.busy }
-        try storage.restoreUpdate()
+        await settleSnapshotOperation()
+        // A guest being set up or erased has no update to restore.
+        guard !storageBusy else { return }
+        defer { snapshotRevision += 1 }
+        do {
+            try storage.restoreUpdate()
+            rollForwardFailure = nil
+        } catch let unfinished as SnapshotRestoreUnfinished {
+            rollForwardFailure = SnapshotFailure(unfinished.cause)
+            throw unfinished
+        }
+    }
+
+    /// A restore that began in an earlier process and could not be finished
+    /// at launch (`TwoDiskStorage.recoverSnapshots`): the listing says so.
+    func snapshotRecoveryFailed(_ error: any Error) {
+        let cause = (error as? SnapshotRestoreUnfinished)?.cause ?? error
+        rollForwardFailure = SnapshotFailure(cause)
     }
 
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
@@ -238,11 +273,8 @@ final class LiveRuntime: RuntimeDriver {
 
     private func prepareAndLaunch(_ run: PendingRun) async {
         preparing = true
-        // A snapshot operation that is still under way finishes before the
-        // files are read.
-        await settleSnapshotOperation()
         do {
-            try await storage.prepareStart(run.guest) { fraction in
+            try await prepareFiles(for: run.guest) { fraction in
                 Task { @MainActor in self.preparingDisk(fraction) }
             }
         } catch {
@@ -275,6 +307,20 @@ final class LiveRuntime: RuntimeDriver {
             return
         }
         launch(run, view: view, geometry: geometry, extras: extras)
+    }
+
+    /// The guest's files, ready for the run: a snapshot operation under way
+    /// finishes first, and the update rules then apply to what it left (a
+    /// restore that did not finish completes here).
+    func prepareFiles(for guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
+        await settleSnapshotOperation()
+        do {
+            try await storage.prepareStart(guest, progress: progress)
+            rollForwardFailure = nil
+        } catch let unfinished as SnapshotRestoreUnfinished {
+            rollForwardFailure = SnapshotFailure(unfinished.cause)
+            throw unfinished
+        }
     }
 
     #if !APP_STORE
@@ -1145,49 +1191,74 @@ final class PauseTaskAssertion {
 /// The guest's data snapshots. The application's own state is the lock on the
 /// disk: no file lock says on iOS that a guest holds it, so an operation runs
 /// only while the guest is stopped (`SnapshotRules.gate`), one at a time, off
-/// the main actor, and a start or an erase waits for the one under way.
+/// the main actor, and a start, an erase or the update's Restore waits for the
+/// one under way.
 extension LiveRuntime: SnapshotDriver {
     var snapshotGate: SnapshotRefusal? {
         guard let model else { return .guestNotStopped }
         return SnapshotRules.gate(
-            phase: model.phase, runtimeActive: runActive || pending != nil || launching || preparing,
-            operationUnderWay: snapshotOperation != nil || storageBusy)
+            phase: model.phase, runtimeActive: activity.runtimeActive, operationUnderWay: activity.operation != nil)
     }
 
-    func snapshotListing() async -> SnapshotListing {
-        await settleSnapshotOperation()
+    /// Tells the model what the driver is doing when it changed.
+    fileprivate func publishSnapshotActivity() {
+        let now = SnapshotActivity(
+            runtimeActive: SnapshotRules.runtimeActive(
+                running: runActive, pending: pending != nil, launching: launching, preparing: preparing),
+            operation: snapshotWork ?? (storageBusy ? .guestStorage : nil), revision: snapshotRevision)
+        guard now != activity else { return }
+        activity = now
+        activityChanged?(now)
+    }
+
+    func snapshotListing(measured: Bool) async -> SnapshotListing {
         let storage = self.storage
-        var listing = await Task.detached(priority: .utility) { storage.snapshotListing() }.value
-        listing.whileNotStopped = snapshotGate
-        return listing
+        while true {
+            await settleSnapshotOperation()
+            // A guest being set up or erased changes the files under a listing.
+            while storageBusy { try? await Task.sleep(for: .milliseconds(50)) }
+            let revision = snapshotRevision
+            var listing = await Task.detached(priority: .utility) { storage.snapshotListing(measured: measured) }.value
+            // An operation that started or finished while this one read makes
+            // it older than the files: read again.
+            guard snapshotOperation == nil, !storageBusy, snapshotRevision == revision else { continue }
+            listing.revision = revision
+            listing.whileNotStopped = snapshotGate
+            if var unfinished = listing.unfinishedRestore {
+                unfinished.lastFailure = rollForwardFailure
+                listing.unfinishedRestore = unfinished
+            }
+            return listing
+        }
     }
 
     func createSnapshot(named name: String) async -> SnapshotResult<SnapshotSummary> {
-        await performSnapshot(gated: true) { try $0.createSnapshot(named: name) }
+        await performSnapshot(.create, gated: true) { try $0.createSnapshot(named: name) }
     }
 
     func restoreSnapshot(_ id: SnapshotID, guest: Guest) async -> SnapshotResult<Guest> {
-        await performSnapshot(gated: true) { try $0.restoreSnapshot(id, guest: guest) }
+        await performSnapshot(.restore, gated: true) { try $0.restoreSnapshot(id, guest: guest) }
     }
 
     func deleteSnapshot(_ id: SnapshotID) async -> SnapshotResult<Void> {
-        await performSnapshot(gated: true) { try $0.deleteSnapshot(id) }
+        await performSnapshot(.delete, gated: true) { try $0.deleteSnapshot(id) }
     }
 
     func renameSnapshot(_ id: SnapshotID, to name: String) async -> SnapshotResult<Void> {
-        await performSnapshot(gated: false) { try $0.renameSnapshot(id, to: name) }
+        await performSnapshot(.rename, gated: false) { try $0.renameSnapshot(id, to: name) }
     }
 
     /// Waits for the snapshot operation under way, if any.
-    private func settleSnapshotOperation() async {
+    fileprivate func settleSnapshotOperation() async {
         while let operation = snapshotOperation { await operation.value }
     }
 
     /// Runs `body` on the storage off the main actor as the one operation
     /// under way. A gated one refuses unless the guest is stopped and idle;
-    /// one that is not (Rename) waits its turn.
+    /// one that is not (Rename) waits its turn, and refuses only while a guest
+    /// is being set up or erased.
     private func performSnapshot<Value: Sendable>(
-        gated: Bool, _ body: @escaping @Sendable (TwoDiskStorage) throws -> Value
+        _ work: SnapshotWork, gated: Bool, _ body: @escaping @Sendable (TwoDiskStorage) throws -> Value
     ) async -> SnapshotResult<Value> {
         if gated {
             if let refusal = snapshotGate { return .refused(refusal) }
@@ -1196,14 +1267,36 @@ extension LiveRuntime: SnapshotDriver {
             if storageBusy { return .refused(.busy) }
         }
         let storage = self.storage
-        let work = Task.detached(priority: .userInitiated) { SnapshotResult(catching: { try body(storage) }) }
+        let working = Task.detached(priority: .userInitiated) { () -> SnapshotResult<Value> in
+            do {
+                return .done(try body(storage))
+            } catch let unfinished as SnapshotRestoreUnfinished {
+                // The data is in place and the intent stands: the caller is told as a value, and the cause is kept.
+                return .failed(unfinished)
+            } catch let refusal as SnapshotRefusal {
+                return .refused(refusal)
+            } catch {
+                return .failed(error)
+            }
+        }
+        // The operation clears itself before it ends, so what waits for it
+        // never sees it set once it has finished.
         let operation = Task { [weak self] in
-            _ = await work.value
+            _ = await working.value
+            self?.snapshotWork = nil
+            self?.snapshotRevision += 1
             self?.snapshotOperation = nil
         }
+        snapshotWork = work
         snapshotOperation = operation
-        let result = await work.value
+        var result = await working.value
         await operation.value
+        if case .failed(let error) = result, let unfinished = error as? SnapshotRestoreUnfinished {
+            rollForwardFailure = SnapshotFailure(unfinished.cause)
+            result = .refused(.restoreUnfinished)
+        } else if work == .restore, result.value != nil {
+            rollForwardFailure = nil
+        }
         // A restore or a delete changes what the device has free.
         model?.host.freeStorageBytes = AppEntry.freeStorageBytes()
         return result

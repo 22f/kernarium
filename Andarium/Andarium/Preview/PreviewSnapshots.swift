@@ -8,18 +8,30 @@ import Foundation
 /// up from a launch argument or a test (`PreviewSnapshotDriver`).
 struct PreviewSnapshotSeed {
     var items: [SnapshotSummary] = []
+    /// The space the snapshots use all together. nil is the sum of what each
+    /// frees; a design sets one to show a total above the sum, as blocks that
+    /// two snapshots share make it, and a figure that grows when a neighbour
+    /// is deleted.
+    var total: SnapshotFigure?
     /// What an unfinished update's own copy holds; nil when none is.
     var updateCopy: SnapshotFigure?
     /// The space the snapshots use is shown as a lower bound, as where the
-    /// extent map is refused.
+    /// extent map is refused (with no `total`).
     var useIsLowerBound = false
     /// Why Create refuses on the guest's files (`SnapshotListing.createRefusal`).
     var createRefusal: SnapshotRefusal?
+    /// The release the guest's data is on now.
+    var dataRelease: SnapshotRelease?
+    /// A restore that did not finish (`SnapshotListing.unfinishedRestore`).
+    var unfinishedRestore: SnapshotUnfinishedRestore?
     /// Why Create, Restore and Delete cannot run now, as with a guest that
     /// runs (`SnapshotDriver.snapshotGate`).
     var gate: SnapshotRefusal?
     /// How long an operation takes, which a capture of its overlay needs.
     var latency: Duration = .milliseconds(400)
+    /// How long a measured listing takes, so a design can show the names
+    /// first and the figures arriving.
+    var measuringLatency: Duration = .zero
     /// The failure the next operation ends with, once.
     var failure: (any Error)?
 }
@@ -49,44 +61,75 @@ extension PreviewSnapshotSeed {
                     restore: .updatesAtNextStart(from: PreviewData.previousSystemRelease, to: PreviewData.systemRelease)),
                 item("From a newer app", daysAgo: 9, release: "20261201-los24-r30", build: 1_794_000_000, frees: 0.6,
                     kept: 4.8, restore: .refused(.newerAndroid)),
-            ])
+            ],
+            dataRelease: SnapshotRelease(releaseID: PreviewData.systemRelease, buildNumber: 1_793_463_800))
     }
 }
 
 /// The preview's snapshots: seeded ones that the operations change, with the
-/// refusals the real driver gives and an optional delay. Nothing touches a file.
+/// refusals the real driver gives, the activity it reports and an optional
+/// delay. Nothing touches a file.
 @MainActor
 final class PreviewSnapshotDriver: SnapshotDriver {
     private(set) var seed: PreviewSnapshotSeed
-    private var operationUnderWay = false
+    private(set) var activity = SnapshotActivity() {
+        didSet { if activity != oldValue { activityChanged?(activity) } }
+    }
+    var activityChanged: (@MainActor (SnapshotActivity) -> Void)?
 
     init(_ seed: PreviewSnapshotSeed = PreviewSnapshotSeed()) {
         self.seed = seed
+        apply(gate: seed.gate)
     }
 
     /// Changes the state that gates the operations, as the guest starting or
     /// stopping would.
     func setGate(_ refusal: SnapshotRefusal?) {
         seed.gate = refusal
+        apply(gate: refusal)
+    }
+
+    /// What the gate looks like in the activity the model follows: a guest
+    /// that runs holds the disk, anything else under way is one operation.
+    private func apply(gate: SnapshotRefusal?) {
+        activity.runtimeActive = gate == .guestNotStopped
+        if gate == .busy {
+            activity.operation = .guestStorage
+        } else if activity.operation == .guestStorage {
+            activity.operation = nil
+        }
     }
 
     var snapshotGate: SnapshotRefusal? {
-        seed.gate ?? (operationUnderWay ? .busy : nil)
+        seed.gate ?? (activity.operation != nil ? .busy : nil)
     }
 
-    func snapshotListing() async -> SnapshotListing {
-        let items = seed.items.sorted { $0.created > $1.created }
-        let total = items.reduce(0) { $0 + $1.freesWhenDeleted.bytes }
+    func snapshotListing(measured: Bool) async -> SnapshotListing {
+        let revision = activity.revision
+        var items = seed.items.sorted { $0.created > $1.created }
+        let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)
+        var space = SnapshotSpace(
+            snapshotsUse: seed.total ?? SnapshotFigure(
+                bytes: items.reduce(0) { $0 + $1.freesWhenDeleted.bytes }, isLowerBound: seed.useIsLowerBound),
+            updateCopy: seed.updateCopy)
+        if measured {
+            if seed.measuringLatency > .zero { try? await Task.sleep(for: seed.measuringLatency) }
+        } else {
+            for index in items.indices {
+                items[index].kept = unknown
+                items[index].freesWhenDeleted = unknown
+            }
+            space = SnapshotSpace(snapshotsUse: unknown, updateCopy: seed.updateCopy == nil ? nil : unknown)
+        }
         return SnapshotListing(
-            items: items,
-            space: SnapshotSpace(
-                snapshotsUse: SnapshotFigure(bytes: total, isLowerBound: seed.useIsLowerBound), updateCopy: seed.updateCopy),
-            createRefusal: seed.createRefusal, whileNotStopped: snapshotGate)
+            items: items, space: space, createRefusal: seed.createRefusal, whileNotStopped: snapshotGate,
+            unfinishedRestore: seed.unfinishedRestore, dataRelease: seed.dataRelease, isMeasured: measured, revision: revision)
     }
 
     func createSnapshot(named name: String) async -> SnapshotResult<SnapshotSummary> {
-        await perform(gated: true) {
+        await perform(.create, gated: true) {
             guard let name = SnapshotRules.normalizedName(name) else { return .refused(.invalidName) }
+            if self.seed.unfinishedRestore != nil { return .refused(.restoreUnfinished) }
             if let refusal = self.seed.createRefusal { return .refused(refusal) }
             let kept = self.seed.items.map(\.kept.bytes).max() ?? 0
             let made = SnapshotSummary(
@@ -99,7 +142,8 @@ final class PreviewSnapshotDriver: SnapshotDriver {
     }
 
     func restoreSnapshot(_ id: SnapshotID, guest: Guest) async -> SnapshotResult<Guest> {
-        await perform(gated: true) {
+        await perform(.restore, gated: true) {
+            if self.seed.unfinishedRestore != nil { return .refused(.restoreUnfinished) }
             guard let item = self.seed.items.first(where: { $0.id == id }) else { return .refused(.missing) }
             if case .refused(let reason) = item.restore { return .refused(reason) }
             var restored = guest
@@ -110,15 +154,19 @@ final class PreviewSnapshotDriver: SnapshotDriver {
     }
 
     func deleteSnapshot(_ id: SnapshotID) async -> SnapshotResult<Void> {
-        await perform(gated: true) {
+        await perform(.delete, gated: true) {
             guard self.seed.items.contains(where: { $0.id == id }) else { return .refused(.missing) }
+            // The snapshot a restore under way names stays; every other can go.
+            if self.seed.unfinishedRestore != nil, self.seed.unfinishedRestore?.snapshot == id || self.seed.unfinishedRestore?.snapshot == nil {
+                return .refused(.restoreUnfinished)
+            }
             self.seed.items.removeAll { $0.id == id }
             return .done(())
         }
     }
 
     func renameSnapshot(_ id: SnapshotID, to name: String) async -> SnapshotResult<Void> {
-        await perform(gated: false) {
+        await perform(.rename, gated: false) {
             guard let name = SnapshotRules.normalizedName(name) else { return .refused(.invalidName) }
             guard let index = self.seed.items.firstIndex(where: { $0.id == id }) else { return .refused(.missing) }
             self.seed.items[index].name = name
@@ -129,16 +177,20 @@ final class PreviewSnapshotDriver: SnapshotDriver {
     /// Runs one operation: refused while the gate says so, after the seeded
     /// latency, or failed with the seeded failure.
     private func perform<Value: Sendable>(
-        gated: Bool, _ body: @MainActor () -> SnapshotResult<Value>
+        _ work: SnapshotWork, gated: Bool, _ body: @MainActor () -> SnapshotResult<Value>
     ) async -> SnapshotResult<Value> {
         if gated, let refusal = snapshotGate { return .refused(refusal) }
-        operationUnderWay = true
-        defer { operationUnderWay = false }
+        activity.operation = work
         try? await Task.sleep(for: seed.latency)
+        let result: SnapshotResult<Value>
         if let failure = seed.failure {
             seed.failure = nil
-            return .failed(failure)
+            result = .failed(failure)
+        } else {
+            result = body()
         }
-        return body()
+        activity.operation = nil
+        activity.revision += 1
+        return result
     }
 }
