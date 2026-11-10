@@ -44,13 +44,19 @@ struct Capture final : std::enable_shared_from_this<Capture> {
         close();
     }
 
-    /* The route changed under a running engine: build it again. */
+    /* The route changed under a running engine (a headset connected or left,
+     * the input's format changed): build the engine again. The session stays
+     * taken, so its category does not change under the route. Releasing it
+     * would return the category to playback, which moves a Bluetooth headset
+     * from the hands-free profile to A2DP and back, and every such switch is
+     * a route change of its own. Taking it again is idempotent, and activates
+     * a session the system has deactivated meanwhile. */
     void rebuild() noexcept
     {
         const std::lock_guard guard(lock);
         if (!wanted)
             return;
-        close();
+        closeEngine();
         (void)open();
     }
 
@@ -95,11 +101,11 @@ private:
         if (engine != nil)
             return true;
         @try {
-            if (!sessionHeld) {
-                if (!session::acquire(session::Client::capture))
-                    return false;
-                sessionHeld = true;
+            if (!session::acquire(session::Client::capture)) {
+                closeSession();
+                return false;
             }
+            sessionHeld = true;
             AVAudioEngine* created = [[AVAudioEngine alloc] init];
             AVAudioInputNode* input = created.inputNode;
             AVAudioFormat* inputFormat = [input outputFormatForBus:0];
@@ -196,6 +202,12 @@ private:
 
     void close() noexcept
     {
+        closeEngine();
+        closeSession();
+    }
+
+    void closeEngine() noexcept
+    {
         if (routeObserver != nil) {
             [NSNotificationCenter.defaultCenter removeObserver:routeObserver];
             routeObserver = nil;
@@ -208,7 +220,6 @@ private:
         } @catch (NSException*) {
         }
         engine = nil;
-        closeSession();
     }
 
     void closeSession() noexcept

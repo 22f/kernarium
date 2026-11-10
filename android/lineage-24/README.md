@@ -194,7 +194,8 @@ than making silence up (route `p0005`). A low-latency AAudio
 stream with a data callback that leaves its capacity unspecified starts with a
 two-burst buffer and grows it by one burst per underrun until the app sets a
 size (route `p0028`). A Virtio battery device reports the Apple host's
-percentage and charging state.
+percentage and charging state; on iOS the percentage is `UIDevice.batteryLevel`,
+which moves in 5% steps, so the guest's does too, and the Mac's is exact.
 The swipe lock screen can be turned on: `ro.lockscreen.disable.default` turns it
 off for user 0 of a fresh `/data` only.
 
