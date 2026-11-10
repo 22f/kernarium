@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <stdexcept>
 
 namespace uml::camera {
 namespace {
@@ -301,6 +302,9 @@ std::vector<std::uint8_t> cameraQueryResponse(std::span<const CameraDescription>
     response.desc_size = sizeof(virtio_video_camera_desc);
     const std::size_t room = capacity > sizeof(response) ? (capacity - sizeof(response)) / sizeof(virtio_video_camera_desc) : 0;
     const std::size_t count = start >= cameras.size() ? 0 : std::min<std::size_t>(cameras.size() - start, room);
+    // A buffer with no room for a record would answer "complete" and tell the
+    // driver there is nothing more.
+    if (count == 0 && start < cameras.size()) throw std::invalid_argument("camera response is too small");
     response.num_descs = std::uint32_t(count);
     response.next_index = start + count < cameras.size() ? std::uint32_t(start + count) : 0;
     auto bytes = toBytes(response);

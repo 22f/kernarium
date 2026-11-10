@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 using namespace uml::camera;
@@ -264,6 +265,14 @@ void testQueryPages()
     require(first.num_descs == 1 && first.next_index == 0, "the last page ends the walk");
     page = cameraQueryResponse(cameras, 5, room, 0);
     require(load<virtio_video_camera_query_resp>(page).num_descs == 0, "past the end is empty");
+    // A buffer with no room for a record is refused: "complete" would end the walk.
+    bool refused = false;
+    try {
+        (void)cameraQueryResponse(cameras, 1, sizeof(header) + sizeof(virtio_video_camera_desc) - 1, 0);
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    require(refused, "no room for a record is refused");
 }
 
 void testFormatAnswers()

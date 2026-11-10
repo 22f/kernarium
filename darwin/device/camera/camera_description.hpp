@@ -63,7 +63,7 @@ struct ArrangementOptions {
     std::string_view hostModel, const CalibrationStore& calibration, const ArrangementOptions& options);
 
 /* The answer to VIRTIO_VIDEO_CMD_CAMERA_QUERY from `start`, as many records as
- * fit in `capacity` bytes. */
+ * fit in `capacity` bytes. Throws std::invalid_argument when not one fits. */
 [[nodiscard]] std::vector<std::uint8_t> cameraQueryResponse(std::span<const CameraDescription> cameras,
                                                             std::uint32_t start, std::size_t capacity,
                                                             std::uint32_t sessionFlags);
