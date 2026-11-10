@@ -38,7 +38,7 @@ application.
 - **The device is appended after the Virtio devices that existed before it**, in
   the runtime and in the launcher, so that no other device's index moves:
   Android's vendor policy names the battery's sysfs path by its position. A device
-  added later (GNSS) goes after it.
+  added later (GNSS, then the camera) goes after it.
 
 ## Connections
 

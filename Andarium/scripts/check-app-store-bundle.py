@@ -18,8 +18,8 @@ application that must:
   - carry no debugging or automation support in the host code of the
     application or of a framework: the frame mirror, console input, the
     guest sampler, the footprint log, the virtual Jetsam, the activity logs,
-    the census and histogram, the automation entries and the harness's
-    leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
+    the census and histogram, the automation entries, the synthetic camera and
+    the harness's leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
     keep the runtime API's layout, runtimeSetFrameSink,
     runtimeSendConsoleInput and runtimePrepareJit, are allowed), and contain
     no test bundle and no XCTest or Testing framework;
@@ -311,6 +311,12 @@ DEBUG_SYMBOLS = (
     ("launch harness", (b"13ConsoleReport", b"15environmentName", b"13applyDeferred",
                         b"16printsStatistics", b"13launchApplied",
                         b"15ThermalOverride")),
+    # The camera without hardware (darwin/platform/synthetic_camera): a source
+    # for tests and launchers, which an App Store runtime does not build.
+    # namespace uml::platform, its class and entries.
+    ("synthetic camera", (b"15SyntheticCamera", b"19SyntheticCameraImpl",
+                          b"19makeSyntheticCamera", b"19encodeSyntheticJpeg",
+                          b"17decodeChartMarker")),
     # The arm64 JIT engine, the owner of executable memory and the debugger
     # route of the runtime and of the loader. namespace uml::cpu::jit_memory
     # and uml::cpu::arm64::jit, the engine's classes and entry names.
@@ -332,6 +338,8 @@ DEBUG_STRINGS = (
     ("automation", (b"kernarium_runtime_automation_", b"automation boot with",
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
+    ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
+                          b"SyntheticLaptop1,1", b"synthetic-back-wide")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
              b"running on gadgets, not the JIT", b"open Andarium from StikDebug",
              b"Started without JIT")),
