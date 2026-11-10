@@ -217,6 +217,8 @@ REQUIRED_ENTRIES = {
     "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc",
     "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml",
     "VENDOR/etc/displayconfig/default.xml",
+    "VENDOR/bin/kernarium_gamepad",
+    "VENDOR/etc/init/kernarium_gamepad.rc",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -485,9 +487,10 @@ FORBIDDEN_APP_DIRECTORIES = {
     "F-DroidPrivilegedExtension",
     "Gallery2",
     "Jelly",
-    # In-tree test applications (tests/integration/android/{keymouse,location,motion,webgl,storage}):
+    # In-tree test applications (tests/integration/android/{gamepad,keymouse,location,motion,webgl,storage}):
     # `m <module>` leaves them in the shared product output, and none belongs
     # in an image, whichever partition or DATA/app path it would reach.
+    "AndariumGamepadProbe",
     "AndariumKeyMouseProbe",
     "AndariumLocationProbe",
     "AndariumMotionProbe",
@@ -2936,6 +2939,66 @@ def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo
     check_default_display_config(archive, infos)
 
 
+# The gamepad relay (overlay/gamepad) turns the host's game controllers into HID devices through
+# /dev/uhid, and every device has a host, so every device runs it: a daemon that init starts with
+# its class at boot, in a domain of its own (not a HAL, so no VINTF fragment) that may use the uhid
+# node and vsock and nothing else the product grants.
+GAMEPAD_SERVICE = ("kernarium_gamepad", "/vendor/bin/kernarium_gamepad")
+GAMEPAD_RC = "VENDOR/etc/init/kernarium_gamepad.rc"
+GAMEPAD_RC_OPTIONS = ("class main", "user nobody", "group uhid")
+GAMEPAD_TRANSITION = re.compile(
+    rb"^\(typetransition init(?:_[0-9]+)? kernarium_gamepad_exec process kernarium_gamepad\)$",
+    re.MULTILINE,
+)
+GAMEPAD_UHID_RULE = re.compile(
+    rb"^\(allow kernarium_gamepad uhid_device(?:_[0-9]+)? \(chr_file \(([^)]*)\)\)\)$", re.MULTILINE
+)
+GAMEPAD_UHID_PERMISSIONS = frozenset({"open", "read", "write"})
+GAMEPAD_VSOCK_RULE = re.compile(
+    rb"^\(allow kernarium_gamepad self \(vsock_socket \(([^)]*)\)\)\)$", re.MULTILINE
+)
+GAMEPAD_VSOCK_PERMISSIONS = frozenset({"create", "bind", "listen", "accept", "read", "write", "shutdown"})
+
+
+def check_gamepad_relay(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The init script runs the relay at boot as the user and group that may open /dev/uhid."""
+    name, executable = GAMEPAD_SERVICE
+    script = read_small(archive, infos[GAMEPAD_RC]).decode("utf-8", errors="strict")
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if service != [f"service {name} {executable}"]:
+        fail(f"the gamepad init script must define the one service {name} that runs {executable}: {service}")
+    for required in GAMEPAD_RC_OPTIONS:
+        if required not in lines:
+            fail(f"the gamepad service must carry '{required}'")
+    if "disabled" in lines or "oneshot" in lines:
+        fail("the gamepad service starts at boot on every device: it is neither disabled nor oneshot")
+    if any(line.startswith("on ") for line in lines):
+        fail("the gamepad init script may have no trigger: the service starts with its class")
+    if any(line.startswith(("seclabel ", "capabilities ")) for line in lines):
+        fail("the gamepad service takes its domain from its file label and holds no capability")
+
+
+def check_gamepad_policy(vendor_policy: bytes, vendor_file_contexts: bytes) -> None:
+    """The relay runs in its own domain, with the uhid node and vsock."""
+    if file_context_label(vendor_file_contexts, GAMEPAD_SERVICE[1]) != "u:object_r:kernarium_gamepad_exec:s0":
+        fail("vendor file contexts do not label /vendor/bin/kernarium_gamepad")
+    if not GAMEPAD_TRANSITION.search(vendor_policy):
+        fail("vendor policy does not move init into the gamepad relay domain")
+    if not any(
+        GAMEPAD_UHID_PERMISSIONS <= set(match.group(1).decode().split())
+        for match in GAMEPAD_UHID_RULE.finditer(vendor_policy)
+    ):
+        fail("vendor policy does not let the gamepad relay open, read and write the uhid device")
+    if not any(
+        GAMEPAD_VSOCK_PERMISSIONS <= set(match.group(1).decode().split())
+        for match in GAMEPAD_VSOCK_RULE.finditer(vendor_policy)
+    ):
+        fail("vendor policy does not give the gamepad relay vsock sockets to listen on")
+    if "kernarium_gamepad" not in cil_attribute_members(vendor_policy, "unconstrained_vsock_violators"):
+        fail("vendor policy does not classify the gamepad relay as an unconstrained vsock user")
+
+
 def check_default_display_config(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     if DISPLAY_CONFIG_SHADOW in infos:
         fail(
@@ -3116,6 +3179,7 @@ def check_kernel_policy(
     check_network_setup_policy(
         vendor_policy, read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])
     )
+    check_gamepad_policy(vendor_policy, read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"]))
     platform_policy = read_small(
         archive, infos["SYSTEM/etc/selinux/plat_sepolicy.cil"], PLATFORM_POLICY_LIMIT
     )
@@ -4825,6 +4889,7 @@ def main() -> None:
         check_pinner_overlay(archive, infos)
         check_application_manifests(archive, infos, build_variant)
         check_thermal_hal(archive, infos)
+        check_gamepad_relay(archive, infos)
         check_cas_hal(archive, infos)
         check_wifi_hals(archive, infos)
         check_adbd_launch_properties(archive, infos)

@@ -498,6 +498,11 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/bin/kernarium_vk_presen
 # (init.vendor.rc runs it at post-fs-data).
 PRODUCT_PACKAGES += kernarium_net_setup
 
+# The host's game controllers become HID devices of the guest through /dev/uhid,
+# which the kernel's own drivers bind (overlay/gamepad). Every device has a host,
+# so every device runs the relay; it creates nothing until a controller connects.
+PRODUCT_PACKAGES += kernarium_gamepad
+
 # The Wi-Fi module's resources are overlaid by KernariumWifiOverlay
 # (rro/KernariumWifiOverlay): virt_wifi cannot change its MAC address, so the
 # framework must not randomize it.

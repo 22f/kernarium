@@ -248,6 +248,34 @@ display topic of route `p0007` makes a display with no map of its own use.
 `tests/integration/android/run_android_thermal.py` drives the stream on a
 candidate image.
 
+### Game controllers
+
+The host application's game controllers are HID devices of the guest.
+`kernarium_gamepad` (`overlay/gamepad/`) is a vendor daemon that init starts at
+boot on every device, in a domain of its own. It listens on vsock port 5558,
+accepts only host CID 2, and creates a device through `/dev/uhid` for each
+controller the host describes: the node Android's Bluetooth stack uses for a
+paired controller, so the kernel's own driver for that device binds it and
+Android applies its stock key layout. The relay knows no controller family; the
+identity, the descriptor and the meaning of every report are the host's, so a
+fix to one ships in an application update. It moves the host's input reports
+into the device and the driver's output and feature requests (rumble, lights,
+calibration) back to the host.
+
+There is one device per controller, at most eight at a time. A connection that
+ends, or a host that connects again, removes every device, and the host creates
+its controllers again after the relay's `HELLO`. A driver request that the host
+cannot get is answered with `EIO` at once, so a driver never waits out uhid's
+five seconds. Writes to the host never block: a frame that does not go whole
+shuts the connection down. With no controller the relay only waits, and
+Recovery does not run it.
+`overlay/gamepad/gamepad_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/GamepadProtocol.swift` own the wire
+format, which the golden frames in `tests/unit/andarium/fixtures` pin.
+`tests/integration/android/run_android_gamepad.py` (`android-gamepad`) plays the
+host against a booted release; its probe app is
+[`tests/integration/android/gamepad`](../../tests/integration/android/gamepad/README.md).
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,

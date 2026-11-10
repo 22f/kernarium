@@ -459,6 +459,8 @@ fi
 	fail "the suspend blocker that holds the guest awake for an adb host is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_net_setup "* ]] ||
 	fail "the network setup tool that configures eth0 and the virtual Wi-Fi is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_gamepad "* ]] ||
+	fail "the gamepad relay that turns the host's game controllers into HID devices is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_wifi_network_script "* ]] ||
 	fail "the script that saves the virtual Wi-Fi network is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_reclaim_boot_apps_script "* ]] ||
