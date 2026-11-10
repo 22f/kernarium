@@ -42,6 +42,13 @@ each family at several positions, directly and through a link. The packed
 operand forms are pinned by `arm64-gadget-packed-immediate` and
 `arm64-gadget-test-bit-branch`.
 
+A direct link (`BlockLink` in `program.hpp`) holds its target's first entry
+word and the stream behind it, so following it branches without loading from
+the target's stream first. A block a link names lies behind a 16-byte header
+with its guest PC and instruction count, which a follow reads for the
+retirement limit and its exit; an unlinked link is itself the header of an
+empty block that names `link_exit`. `arm64-gadget-links` follows both.
+
 ## Return ring and target table
 
 A cached return consults a private per-carrier ring of return records that

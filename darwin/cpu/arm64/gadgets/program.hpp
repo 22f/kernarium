@@ -341,17 +341,46 @@ struct BuildOptions final {
 };
 
 /* Direct control-flow gadgets load these immutable-layout cells through the
- * data stream. The cache may retarget a cell from the shared exit stream to a
- * translated successor without modifying executable memory. */
-struct BlockLink final {
-	const std::uintptr_t *stream{};
-	std::size_t instruction_count{};
+ * data stream. The cache may retarget a cell from its exit to a translated
+ * successor without modifying executable memory.
+ *
+ * A block a cell links to is laid out behind a header of block_header_bytes,
+ * which holds the block's guest PC in its first word and its instruction
+ * count in byte block_header_count, and then its first entry word and the
+ * rest of its stream. A cell's pair is that entry word and the stream behind
+ * it, so translated code branches to the block's first gadget from the pair
+ * alone, and reads the count it precharges, and the PC a retirement exit
+ * stores, from the header in front of the stream. A cell is itself the
+ * header of an empty block at its guest PC: unlinked, its pair names
+ * link_exit and its own stream word (unlinked_stream). */
+inline constexpr std::size_t block_header_bytes = 16;
+inline constexpr std::size_t block_header_count = 14;
+
+struct alignas(16) BlockLink final {
 	std::uint64_t guest_pc{};
+	/* The rest of the empty block's header: its count is zero. */
+	std::uint64_t header_rest{};
+	std::uintptr_t entry{};
+	const std::uintptr_t *stream{};
 };
-static_assert(offsetof(BlockLink, stream) == 0);
-static_assert(offsetof(BlockLink, instruction_count) == 8);
-static_assert(offsetof(BlockLink, guest_pc) == 16);
-static_assert(sizeof(BlockLink) == 24);
+static_assert(offsetof(BlockLink, guest_pc) == 0);
+static_assert(offsetof(BlockLink, entry) == UML_GADGET_LINK_PAIR &&
+	UML_GADGET_LINK_PAIR == block_header_bytes);
+static_assert(offsetof(BlockLink, stream) == UML_GADGET_LINK_PAIR + 8);
+static_assert(sizeof(BlockLink) == 32);
+static_assert(UML_GADGET_LINK_HEADER_PC ==
+		-static_cast<int>(block_header_bytes + sizeof(std::uintptr_t)) &&
+	UML_GADGET_LINK_HEADER_COUNT == UML_GADGET_LINK_HEADER_PC +
+		static_cast<int>(block_header_count),
+	"the stream a pair names begins one entry word past its header");
+
+/* The stream an unlinked `link` names: its own stream word, which puts the
+ * cell's header in front of it. */
+[[nodiscard]] inline const std::uintptr_t *unlinked_stream(
+	const BlockLink &link) noexcept
+{
+	return reinterpret_cast<const std::uintptr_t *>(&link.stream);
+}
 
 struct IndirectLinkEntry final {
 	std::uint64_t guest_pc{};

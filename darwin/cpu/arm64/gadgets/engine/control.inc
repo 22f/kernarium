@@ -24,31 +24,35 @@ gadget breakpoint
 	mov w0, #UML_GADGET_EVENT_BREAKPOINT
 	b uml_arm64_gadget_leave
 
-/* A BlockLink contains {stream, instruction_count, guest_pc}. An unlinked
- * target points at the one-word {link_exit} stream in front of it, so the hot
- * path needs no linked/unlinked test. Resolved edges defer the architectural PC store
- * until an actual exit. Bound chains at 4,096 guest instructions; the
- * executor still observes pending shootdowns/IPIs sixteen times within its
- * 64K fairness limit. */
+/* A BlockLink is a block header {guest PC, instruction count} followed by the
+ * pair {first entry, stream past it} (gadgets/program.hpp), so the branch to
+ * the successor waits for the pair alone. The count the follow precharges and
+ * the PC a retirement exit stores come from the header in front of the
+ * stream, which for an unlinked BlockLink is its own: it names link_exit and
+ * its own stream word, so the hot path needs no linked/unlinked test.
+ * Resolved edges defer the architectural PC store until an actual exit. Bound
+ * chains at 4,096 guest instructions; the executor still observes pending
+ * shootdowns/IPIs sixteen times within its 64K fairness limit. */
 .macro follow_block_link link
-	ldp _stream, x11, [\link]
+	ldp x8, _stream, [\link, #UML_GADGET_LINK_PAIR]
+	ldurb w11, [_stream, #UML_GADGET_LINK_HEADER_COUNT]
 	add x29, x29, x11
 	/* x29 is biased by -4,096 at entry, so a negative total remains below
 	 * the retirement limit. Unlike testing bit 12 directly, this stays correct
 	 * when callers enter with counts above 8,191. */
 	tbnz x29, #63, 98f
-	ldr x9, [\link, #16]
+	ldur x9, [_stream, #UML_GADGET_LINK_HEADER_PC]
 	str x9, [_vcpu, #UML_GADGET_CPU_PC]
 	mov w0, wzr
 	b uml_arm64_gadget_leave
 98:
-	next_gadget
+	br x8
 .endm
 
-/* The stream an unlinked BlockLink names is the link_exit word right in front
- * of that BlockLink, so the guest PC is the BlockLink's own. */
+/* An unlinked BlockLink names its own stream word, so the guest PC in the
+ * header in front of the stream is the BlockLink's own. */
 gadget link_exit
-	ldr x9, [_stream, #16]
+	ldur x9, [_stream, #UML_GADGET_LINK_HEADER_PC]
 	str x9, [_vcpu, #UML_GADGET_CPU_PC]
 	mov w0, wzr
 	b uml_arm64_gadget_leave
@@ -111,7 +115,7 @@ gadget branch_link
 gadget branch_link_linked
 	ldr x8, [_stream], #8
 	ldr x11, [_stream]
-	ldr x9, [x11, #16]
+	ldr x9, [x11]
 	str x9, [_vcpu, #(UML_GADGET_CPU_X0 + 30 * 8)]
 	push_return_record x9, x11
 	follow_block_link x8
@@ -230,7 +234,7 @@ gadget branch_link_register_cached
 	ldp x8, x9, [_stream], #16
 	ldr x14, [_stream]
 	ldr x10, [_vcpu, x8]
-	ldr x11, [x14, #16]
+	ldr x11, [x14]
 	str x11, [_vcpu, #(UML_GADGET_CPU_X0 + 30 * 8)]
 	push_return_record x11, x14
 	follow_indirect_link

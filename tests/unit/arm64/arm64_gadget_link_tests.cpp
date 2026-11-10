@@ -10,6 +10,7 @@
 #include <cstring>
 #include <memory_resource>
 #include <utility>
+#include <vector>
 
 namespace arm64 = uml::cpu::arm64;
 namespace gadgets = arm64::gadgets;
@@ -21,6 +22,7 @@ namespace {
 
 using uml::testing::require;
 using uml::emulator::tests::address;
+using uml::emulator::tests::LinkedBlock;
 
 gadgets::BuildResult build_target(std::uint64_t pc, std::uint16_t value)
 {
@@ -31,52 +33,43 @@ gadgets::BuildResult build_target(std::uint64_t pc, std::uint16_t value)
 	return gadgets::Builder{}.build(pc, instructions);
 }
 
-/* Laid out as the executor's link record: the unlinked stream is one
- * link_exit word, which takes the PC from the BlockLink behind it. */
+/* Laid out as the executor's link record: unlinked, it names link_exit,
+ * which takes the PC from the link itself, and linked, a copy of a program
+ * behind a block header, as the executor stores a block. */
 struct LinkTarget final {
-	explicit LinkTarget(std::uint64_t pc) noexcept
-		: fallback_stream{address(uml_arm64_gadget_link_exit)},
-		  link{
-			.stream = &fallback_stream,
-			.instruction_count = 0,
-			.guest_pc = pc,
-		  }
+	explicit LinkTarget(std::uint64_t pc) noexcept : link{.guest_pc = pc}
 	{
+		uml::emulator::tests::unlink(link);
 	}
 
 	LinkTarget(const LinkTarget &) = delete;
 	LinkTarget &operator=(const LinkTarget &) = delete;
 
-	void resolve(const gadgets::BuildResult &target) noexcept
+	void resolve(const gadgets::BuildResult &target)
 	{
-		link.stream = target.program.words().data();
-		link.instruction_count = target.program.instruction_count();
+		blocks.emplace_back(target.program);
+		blocks.back().link(link);
 	}
 
 	/* As the executor stores an FP/SIMD block: its stream behind one
 	 * fp_link_entry word, which the link names. */
-	void resolve_fp(const gadgets::BuildResult &target) noexcept
+	void resolve_fp(const gadgets::BuildResult &target)
 	{
 		require(target.program.accesses_fp_state());
-		const auto words = target.program.words();
-		require(words.size() < fp_stream.size());
-		fp_stream[0] = address(uml_arm64_gadget_fp_link_entry);
-		std::copy(words.begin(), words.end(), fp_stream.begin() + 1);
-		link.stream = fp_stream.data();
-		link.instruction_count = target.program.instruction_count();
+		std::vector<std::uintptr_t> words{
+			address(uml_arm64_gadget_fp_link_entry)};
+		const auto stream = target.program.words();
+		words.insert(words.end(), stream.begin(), stream.end());
+		blocks.emplace_back(target.program.guest_address(),
+			target.program.instruction_count(), words);
+		blocks.back().link(link);
 	}
 
-	void reset() noexcept
-	{
-		link.stream = &fallback_stream;
-		link.instruction_count = 0;
-	}
+	void reset() noexcept { uml::emulator::tests::unlink(link); }
 
-	std::uintptr_t fallback_stream;
 	gadgets::BlockLink link;
-	std::array<std::uintptr_t, 64> fp_stream{};
+	std::vector<LinkedBlock> blocks;
 };
-static_assert(offsetof(LinkTarget, link) == sizeof(std::uintptr_t));
 
 std::uint32_t direct_branch(std::uint64_t pc, std::uint64_t target,
 			    bool link = false)
@@ -442,9 +435,7 @@ int main()
 				::uml::cpu::EngineEvent::system_call);
 			require(cpu.registers[0] == expected);
 			require(executed == 3);
-			target.link.stream = second_target.program.words().data();
-			target.link.instruction_count =
-				second_target.program.instruction_count();
+			target.resolve(second_target);
 		}
 
 		target.reset();
@@ -461,12 +452,11 @@ int main()
 	 * executor can observe interrupts and enforce its 64K budget. */
 	{
 		LinkTarget self{0x4000};
-		self.link.instruction_count = 1;
 		const std::array instructions{0x1400'0000U}; // b .
 		auto loop = gadgets::Builder{}.build(
 			0x4000, instructions,
 			[&](std::uint64_t) { return &self.link; });
-		self.link.stream = loop.program.words().data();
+		self.resolve(loop);
 		arm64::CpuState cpu{};
 		::uml::memory::Tlb tlb;
 		std::size_t executed = 0;
@@ -481,7 +471,6 @@ int main()
 	 * above 8,191, where testing bit 12 alone would wrap back to "below". */
 	{
 		LinkTarget self{0x4000};
-		self.link.instruction_count = 1;
 		const std::array instructions{0x1400'0000U}; // b .
 		auto built = gadgets::Builder{}.build(
 			0x4000, instructions,
@@ -491,7 +480,7 @@ int main()
 			words.push_back(word);
 		gadgets::Program precharged{
 			0x4000, 8192, std::move(words), false};
-		self.link.stream = precharged.words().data();
+		self.resolve(built);
 		arm64::CpuState cpu{};
 		::uml::memory::Tlb tlb;
 		std::size_t executed = 0;
