@@ -230,34 +230,21 @@ image, never installed in a release.
 
 ### Thermal
 
-The thermal HAL reports the host's thermal state. The vendor manifest declares
-`android.hardware.thermal` `IThermal/default` (version 3) on every device, and
-the service starts at boot. `overlay/thermal/` is the vendor AIDL HAL, which
-replaces the AOSP example HAL (its APEX is not installed). It has one SKIN
-sensor, `skin`, with the framework's seven hot thresholds, and no other sensor
-and no cooling device. The sensor's temperature and throttling status follow
-the severity the host application last sent (NONE, LIGHT, MODERATE, SEVERE or
-CRITICAL), starting at NONE; `forecastSkinTemperature` is unsupported, so the
-system service derives the headroom itself. The HAL never reports EMERGENCY or
-SHUTDOWN, whatever the host sends, and keeps its severity when the host link
-drops.
-
-The HAL listens on vsock port 5559, accepts only host CID 2 and reads 8-byte
-records; a later connection replaces an earlier one, and a record that breaks
-the rules closes the connection. The stream runs one way. A launcher with no
-host link leaves the state at NONE. `overlay/thermal/thermal_protocol.hpp` and
-`Andarium/AndariumCore/Sources/AndariumCore/ThermalProtocol.swift` own the wire
-format, which the golden frames in `tests/unit/andarium/fixtures` pin, and
-`thermal_levels.hpp` holds the temperatures and thresholds that the host's
-severities become.
+The thermal HAL tells Android how hot the host is. `overlay/thermal/` is the
+vendor AIDL HAL, which replaces the AOSP example HAL (its APEX is not
+installed); the vendor manifest declares `android.hardware.thermal`
+`IThermal/default` on every device. Its one SKIN sensor follows the severity
+the host application last sent (NONE to CRITICAL), and stays at NONE until a
+host connects. The HAL never reports EMERGENCY or SHUTDOWN, whatever the host
+sends, and keeps its severity when the host link drops.
+`overlay/thermal/thermal_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/ThermalProtocol.swift` own the wire,
+which the golden frames in `tests/unit/andarium/fixtures` pin.
 
 From SEVERE on, Android holds the display's render rate to 30 Hz; the display
-mode does not change, and SurfaceFlinger renders every second frame. The map
-is the vendor default display configuration
-(`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`), which holds
-one SEVERE point from 0 to 30 Hz; the display topic of route `p0007` makes a
-display with no refresh rate throttling map of its own use the default
-configuration's, and a status above SEVERE takes the SEVERE point.
+mode does not change. The map is the vendor default display configuration
+(`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`), which the
+display topic of route `p0007` makes a display with no map of its own use.
 `tests/integration/android/run_android_thermal.py` drives the stream on a
 candidate image.
 
