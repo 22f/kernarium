@@ -71,14 +71,14 @@ enum {
  * android_data_gib GiB when that is larger; it never shrinks one. The guest
  * has exactly these two disks. The kernel is carried by the runtime.
  *
- * The host GPU's budget is B = clamp(L - A - G - E - S, 384 MiB, G / 2),
- * evaluated once at launch (see the architecture document): L is the
- * application's memory limit, G the guest's memory, and E the gadget cache
- * plus the other memory the guest side of the process uses. The request states
- * the three launch parameters: A, the application's own expected ceiling;
- * E_rest, the guest side's memory beyond the gadget cache; and S, the headroom
- * left unused. Zero, which is what the application states until their values
- * are chosen, adds nothing to the sum.
+ * The host GPU's budget is B = max(L - A - G - E - S, 384 MiB), evaluated
+ * once at launch (see the architecture document): L is the application's
+ * memory limit, G the guest's memory, and E the gadget cache plus the other
+ * memory the guest side of the process uses. Without a limit B is G. The
+ * request states the three launch parameters: A, the application's own
+ * expected ceiling; E_rest, the guest side's memory beyond the gadget cache;
+ * and S, the headroom left unused. Zero, which is what the application states
+ * until their values are chosen, adds nothing to the sum.
  *
  * An Android guest authorizes one adb host key for this boot without asking
  * its user: android_adb_public_key is the key as adb writes it, base64 of the
@@ -211,8 +211,9 @@ enum {
     /* This runtime has no JIT: an App Store runtime, or a build for the
      * Simulator or a host that cannot make executable memory. */
     KERNARIUM_RUNTIME_JIT_UNSUPPORTED = 1,
-    /* No debugger is attached to the process, so none could prepare the
-     * memory. A boot runs on gadgets. */
+    /* No debugger is attached to the process, or the one that was left
+     * before it served the request, so none prepared the memory. A boot
+     * runs on gadgets. */
     KERNARIUM_RUNTIME_JIT_NO_DEBUGGER = 2,
     /* The memory could not be prepared: the debugger did not answer, or the
      * pages did not run code. A boot runs on gadgets, and the process does
@@ -234,7 +235,9 @@ enum {
  * attached debugger to detach, so a process that will not use the JIT does
  * not stay under it. Call it before run, with the memory and vCPUs the run
  * will state, and away from the main thread: it blocks for the seconds the
- * debugger takes. */
+ * debugger takes. It may be called long before the run, such as when the
+ * application opens: the prepared memory then stays wired until the process
+ * ends, and a run that does not use it carries it beside its own cache. */
 typedef int (*kernarium_runtime_prepare_jit_function)(
     int enable,
     uint32_t guest_memory_mib,
