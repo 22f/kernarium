@@ -282,13 +282,15 @@ free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
 with `swift test` (it includes the haptics session on fake guests and
 players, and the haptics wire against the golden frames in
-`tests/unit/andarium/fixtures`, which the guest's vibrator HAL tests against
-too); `andarium-motion-protocol`, `andarium-haptics-protocol` and
-`andarium-haptics-player` (unit), `andarium-stage-system-image` and
+`tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
+test against too); `andarium-motion-protocol`, `andarium-haptics-protocol`,
+`andarium-haptics-player`, `andarium-thermal-protocol` and
+`andarium-thermal-levels` (unit), `andarium-stage-system-image` and
 `andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
-its argument), timelines and state, system image staging and the screenshot
-script, and `kernarium-host-features` (unit)
+its argument), timelines and state, the thermal HAL's wire and the status,
+temperature and thresholds of each severity, system image staging and the
+screenshot script, and `kernarium-host-features` (unit)
 the table of host features the boot request carries to an Android guest. The
 application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
@@ -532,6 +534,11 @@ opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of
 [`microg/build-apks.sh`](../tests/integration/android/microg/README.md), and
 checks that only microG's own packages present Google's certificate.
+`android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
+names the release: the runner plays the host application over a vsock forward
+and checks the thermal manager, the display manager's vote, SurfaceFlinger's
+render rate and the frame rates at each severity, on a fresh data disk or, with
+`--instance`, over an older release's.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

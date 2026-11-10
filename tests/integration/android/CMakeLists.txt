@@ -79,3 +79,23 @@ if(UML_ANDROID_MICROG_RELEASE AND UML_ANDROID_MICROG_PROBE_DIR AND TARGET uml-da
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()
+
+# The thermal HAL and the 30 fps cap (route p0007's display topic): the runner
+# plays the host application over a vsock forward to the HAL's port and checks
+# the thermal manager, the display manager's vote, SurfaceFlinger's render rate
+# and the frame rates of the guest and the host at each severity. It boots
+# Android with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_THERMAL_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-thermal test boots")
+if(UML_ANDROID_THERMAL_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-thermal
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_thermal.py
+            --release ${UML_ANDROID_THERMAL_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()

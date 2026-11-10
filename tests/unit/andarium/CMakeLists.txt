@@ -33,3 +33,21 @@ target_include_directories(uml_andarium_haptics_player_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/vibrator)
 uml_add_unit_test(NAME andarium-haptics-player
     COMMAND uml_andarium_haptics_player_tests LABELS andarium)
+
+# The guest's thermal HAL (android/lineage-24/overlay/thermal): the wire format
+# against the golden frames that AndariumCore checks too (the fixture's path is
+# the test's argument, so the file has one copy), and the status, temperature
+# and thresholds that each severity becomes.
+add_executable(uml_andarium_thermal_protocol_tests thermal_protocol_tests.cpp)
+target_include_directories(uml_andarium_thermal_protocol_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/thermal)
+uml_add_unit_test(NAME andarium-thermal-protocol
+    COMMAND uml_andarium_thermal_protocol_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/thermal-golden-frames.txt
+    LABELS andarium)
+
+add_executable(uml_andarium_thermal_levels_tests thermal_levels_tests.cpp)
+target_include_directories(uml_andarium_thermal_levels_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/thermal)
+uml_add_unit_test(NAME andarium-thermal-levels
+    COMMAND uml_andarium_thermal_levels_tests LABELS andarium)
