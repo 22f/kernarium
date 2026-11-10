@@ -286,7 +286,10 @@ free-space thresholds, suspension check and pause both applications share, and
 with `swift test` (it includes the haptics session on fake guests and
 players, and the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
-test against too); `andarium-motion-protocol`, `andarium-haptics-protocol`,
+test against too; and the game controllers' wire against that directory's
+gamepad frames, each family's reports read back through a test-only HID
+descriptor parser, and the stream and session on a fake relay);
+`andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol` and
 `andarium-thermal-levels` (unit), `andarium-stage-system-image` and
 `andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
@@ -305,7 +308,11 @@ controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
 (`AndariumTestBundle`) shows the side keys' tip in every session of the run,
 whatever the device's tip store says, except in an `ANDARIUM_HOLD_SECONDS`
-harness launch, which hides it.
+harness launch, which hides it. No test attaches, scans for or pairs a real
+controller: the game controller tests use software controllers and the
+system's virtual controller (which needs the host's window) against a fake
+relay, and the package's test-only `andarium-gamepad-probe` plays a script to a
+TCP port, where the macOS launcher's `--vsock-forward` reaches a guest's relay.
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
