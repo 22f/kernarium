@@ -5,6 +5,9 @@ guest_compare_branch_pair_loop.S	control-flow	base	run_guest_link_bench.py	Guest
 guest_compare_register_branch_loop.S	control-flow	base	run_guest_link_bench.py	Guest CMP of two registers followed by B.cond. G116 ranks this pair fourth and ninth over a full Geekbench run while the immediate form does not reach the table, so the two shapes get separate probes.
 guest_compare_retry_loop.S	atomic	base	run_guest_link_bench.py	Private compare-and-retry control for exclusive sequence quality.
 guest_compare_retry_shared_status_loop.S	atomic	base	run_guest_link_bench.py	Exercises the shared load-result and store-status register fallback shape.
+guest_dispatch_arity_1_loop.S	control-flow	base	run_guest_link_bench.py	Eight words from eight gadget families, each with one successor: the predictable control for guest_dispatch_arity_2_loop.S and guest_dispatch_arity_3_loop.S, which run the same words the same number of times.
+guest_dispatch_arity_2_loop.S	control-flow	base	run_guest_link_bench.py	The arity probe words in an order that gives about half of them two successors.
+guest_dispatch_arity_3_loop.S	control-flow	base	run_guest_link_bench.py	The arity probe words in an order that gives nearly every one three successors, so the dispatch that ends each gadget mispredicts inside one block at a rate the order sets. The link and indirect probes mispredict only at block ends.
 guest_fp_environment_loop.S	floating-state	base	run_guest_link_bench.py	Measures floating-state activation and restoration overhead.
 guest_fp_environment_run_loop.S	floating-state	base	run_guest_link_bench.py	Measures a run of native floating-point operations sharing one program-level environment activation.
 guest_fp_link_loop.S	floating-state	base	run_guest_link_bench.py	Measures vector-state successor linking through a conditional self-edge.
