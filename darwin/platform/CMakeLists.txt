@@ -130,6 +130,16 @@ target_link_libraries(uml_host_environment PRIVATE
 target_include_directories(uml_host_environment PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 
+# The system's thermal state, Low Power Mode and active processor count, for
+# the stall record.
+add_library(uml_host_thermal OBJECT apple/host_thermal.mm)
+add_library(UML::HostThermal ALIAS uml_host_thermal)
+uml_declare_architecture_target(uml_host_thermal platform)
+target_link_libraries(uml_host_thermal PRIVATE
+    UML::PlatformContract)
+target_include_directories(uml_host_thermal PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(uml_guest_files OBJECT guest_files.cpp)
 add_library(UML::GuestFiles ALIAS uml_guest_files)
 uml_declare_architecture_target(uml_guest_files platform)
@@ -159,4 +169,5 @@ target_sources(uml_platform_component INTERFACE
     $<TARGET_OBJECTS:uml_run_routing>
     $<TARGET_OBJECTS:uml_host_topology>
     $<TARGET_OBJECTS:uml_host_environment>
+    $<TARGET_OBJECTS:uml_host_thermal>
     $<TARGET_OBJECTS:uml_guest_files>)
