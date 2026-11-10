@@ -50,14 +50,18 @@ public:
 		shares_[cpu] = share;
 	}
 
-	/* Advances `interval_ms` and observes. */
+	/* Advances `interval_ms` and observes. The watch woke late by what the
+	 * interval has over a tick unless the test says its wake-up was on time
+	 * (`late_ms`), as when a tick's own work took the time. */
 	StallDetector::Change tick(unsigned interval_ms = tick_ms,
-		bool disturbed = false)
+		bool disturbed = false, int late_ms = -1)
 	{
 		now_ += interval_ms * millisecond;
 		Tick current;
 		current.now_ns = now_;
 		current.disturbed = disturbed;
+		current.late_ms = late_ms >= 0 ? static_cast<std::uint32_t>(late_ms) :
+			interval_ms > tick_ms ? interval_ms - tick_ms : 0;
 		for (unsigned cpu = 0; cpu < vcpus_; ++cpu) {
 			samples_[cpu].cpu_ns += static_cast<std::uint64_t>(interval_ms) *
 				millisecond * shares_[cpu] / 100;
@@ -196,8 +200,9 @@ void a_late_tick_is_a_stall_of_the_process_and_a_long_gap_is_not()
 	require(late.tick() == StallDetector::Change::closed);
 	const StallEvent &process = late.record.events.back();
 	require(process.mask == 0 && process.watch_late_ms == 950);
-	require(process.start_ms == 5 * tick_ms);
-	require(process.duration_ms >= 1000 && process.duration_ms <= 1100);
+	/* From the wake-up the watch missed to the one it made. */
+	require(process.start_ms == 6 * tick_ms);
+	require(process.duration_ms >= 950 && process.duration_ms <= 1100);
 
 	/* The same gap with a runnable carrier is a starved carrier at once. */
 	Scenario starved{6};
@@ -279,6 +284,113 @@ void an_event_ends_at_its_age_limit_and_the_next_starts_from_there()
 	require(second.duration_ms < max_event_ms + tick_ms * 20);
 }
 
+void a_carrier_that_ran_is_not_held_in_the_waits_it_was_seen_in()
+{
+	/* A busy carrier that every sample finds in a wait: an unmarked one, an
+	 * uninterruptible one, or one marked wait that the sequence says is the
+	 * same. It used 85% of each interval, so it was not held. */
+	struct Case {
+		RunState state;
+		std::uint64_t wait_word;
+	};
+	const Case cases[] = {
+		{RunState::waiting, 0},
+		{RunState::uninterruptible, 0},
+		{RunState::waiting, word(HostWait::disk_read, 41)},
+	};
+	for (const Case &entry : cases) {
+		Scenario scenario{3};
+		scenario.sample(1, entry.state, 85, entry.wait_word);
+		for (unsigned index = 0; index < 400; ++index)
+			require(scenario.tick() == StallDetector::Change::none);
+		require(scenario.record.events.total() == 0);
+		/* Seen at 90% of one interval and at nothing in the next, it is a
+		 * wait that began in between: the stall counts from there. */
+		scenario.sample(1, entry.state, 0, entry.wait_word);
+		scenario.ticks(4);
+		require(scenario.record.events.total() == 1);
+		require(scenario.record.events.back().share[1] == 0);
+	}
+	/* A carrier in a wait that is mostly idle but runs a few percent is held. */
+	Scenario held{2};
+	held.sample(1, RunState::waiting, 15, word(HostWait::answer, 5));
+	held.ticks(4);
+	require(held.record.events.total() == 1 &&
+		held.record.events.back().share[1] == 15);
+}
+
+void a_slow_tick_is_not_a_late_one()
+{
+	/* The watch's own work took 150 ms between two waits, and its wake-ups
+	 * were on time: nobody stopped the process. */
+	Scenario scenario{4};
+	scenario.ticks(5);
+	for (unsigned index = 0; index < 10; ++index)
+		require(scenario.tick(200, false, 0) == StallDetector::Change::none);
+	require(scenario.record.events.total() == 0);
+	/* The same interval with a wake-up that was 150 ms late is. */
+	require(scenario.tick(200, false, 150) == StallDetector::Change::opened);
+	require(scenario.record.events.back().mask == 0 &&
+		scenario.record.events.back().watch_late_ms == 150);
+}
+
+void the_times_run_through_a_sleep_of_the_system()
+{
+	/* The clock the watch feeds counts the time the system sleeps. An hour
+	 * of sleep is a gap, not an event, and the next event's time is its time
+	 * since the base, the hour included, so base plus offset is the wall
+	 * clock. */
+	Scenario scenario{3};
+	scenario.ticks(5);
+	require(scenario.tick(3'600'000) == StallDetector::Change::none);
+	scenario.sample(1, RunState::waiting, 0, word(HostWait::answer, 3));
+	scenario.ticks(3);
+	require(scenario.record.events.total() == 1);
+	const StallEvent &event = scenario.record.events.back();
+	const std::uint32_t slept = 3'600'000;
+	require(event.start_ms >= slept && event.start_ms <= slept + 8 * tick_ms);
+	/* The slot says the same: the base, and a time that includes the hour. */
+	char slot[slot_bytes];
+	scenario.record.base_unix = 1'794'114'300;
+	(void)format_stall_slot(slot, sizeof(slot), scenario.record, 1'794'118'000);
+	require(std::string_view{slot, sizeof(slot)}.find("base 1794114300") !=
+		std::string_view::npos);
+}
+
+void the_markers_are_counted_and_a_hold_is_not()
+{
+	Scenario scenario{3};
+	scenario.sample(1, RunState::waiting, 0, 0);
+	scenario.ticks(2);
+	/* Three carriers in a marked idle wait, one of them unmarked, for two
+	 * ticks. */
+	require(scenario.record.idle_samples == 4 /* carriers 0 and 2 */);
+	require(scenario.record.unmarked_samples == 2 /* carrier 1 */);
+	/* A held tick says nothing about the waits. */
+	scenario.sample(2, RunState::running, 100, 0);
+	(void)scenario.tick(tick_ms, true);
+	require(scenario.record.idle_samples == 4 && scenario.record.unmarked_samples == 2);
+	(void)scenario.tick();
+	require(scenario.record.idle_samples == 5 && scenario.record.unmarked_samples == 3);
+}
+
+void the_main_queue_is_asked_only_while_something_is_suspicious()
+{
+	Scenario scenario{3};
+	scenario.ticks(20);
+	require(!scenario.detector().suspicious());
+	scenario.sample(1, RunState::waiting, 0, word(HostWait::send, 4));
+	require(scenario.tick() == StallDetector::Change::none);
+	/* The first sight of a stall being confirmed. */
+	require(scenario.detector().suspicious());
+	require(scenario.tick() == StallDetector::Change::none);
+	require(scenario.tick() == StallDetector::Change::opened);
+	require(scenario.detector().suspicious());
+	scenario.sample(1, RunState::waiting, 0, word(HostWait::idle, 5));
+	scenario.ticks(2);
+	require(!scenario.detector().open() && !scenario.detector().suspicious());
+}
+
 void the_rings_keep_their_size()
 {
 	Scenario scenario{2};
@@ -337,6 +449,8 @@ StallRecord largest_record()
 {
 	StallRecord record;
 	record.base_unix = 9'999'999'999;
+	record.idle_samples = 0xffffffffU;
+	record.unmarked_samples = 0xffffffffU;
 	for (std::uint32_t index = 0; index < event_capacity * 4; ++index)
 		record.events.push(largest_event(index));
 	for (std::uint32_t index = 0; index < transition_capacity * 4; ++index) {
@@ -385,7 +499,7 @@ void the_slot_never_exceeds_its_size_whatever_the_figures()
 		++shown;
 	require(shown >= 10 && shown < event_capacity);
 	char header[160];
-	std::snprintf(header, sizeof(header), "shown %zu\n", shown);
+	std::snprintf(header, sizeof(header), "shown %zu idle ", shown);
 	require(slot.find(header) != std::string::npos);
 	require(slot.find("total 128 shown") != std::string::npos);
 
@@ -396,7 +510,7 @@ void the_slot_never_exceeds_its_size_whatever_the_figures()
 	const std::size_t blank_used = format_stall_slot(blank.data(), slot_bytes,
 		empty, 6);
 	require(std::string_view{blank.data(), blank_used} ==
-		"stalls 1 base 5 at 6 total 0 shown 0\n");
+		"stalls 1 base 5 at 6 total 0 shown 0 idle 0 unmarked 0\n");
 }
 
 /* Fixed figures every platform makes the same: the golden slot. */
@@ -404,6 +518,8 @@ StallRecord golden_record()
 {
 	StallRecord record;
 	record.base_unix = 1'794'114'300;
+	record.idle_samples = 123'456;
+	record.unmarked_samples = 789;
 	/* More events than the ring holds, so that the total says so. */
 	for (std::uint32_t index = 1; index <= event_capacity + 3; ++index) {
 		StallEvent event;
@@ -504,7 +620,7 @@ void the_slot_matches_the_golden_file(const char *path)
 		require(false, "the slot differs from the golden file");
 	}
 	/* The ring keeps its newest 32 of the 37 and says how many there were. */
-	require(text.find("total 37 shown 32\n") != std::string::npos);
+	require(text.find("total 37 shown 32 idle ") != std::string::npos);
 }
 
 } // namespace
@@ -520,6 +636,11 @@ int main(int argc, char **argv)
 	a_blocked_carrier_must_stay_in_the_same_wait();
 	every_wait_kind_has_a_cause_and_an_unmarked_wait_is_other();
 	a_late_tick_is_a_stall_of_the_process_and_a_long_gap_is_not();
+	a_carrier_that_ran_is_not_held_in_the_waits_it_was_seen_in();
+	a_slow_tick_is_not_a_late_one();
+	the_times_run_through_a_sleep_of_the_system();
+	the_markers_are_counted_and_a_hold_is_not();
+	the_main_queue_is_asked_only_while_something_is_suspicious();
 	a_hold_ends_an_event_and_restarts_the_measurement();
 	one_event_holds_every_carrier_stalled_meanwhile_and_two_quiet_ticks_end_it();
 	an_event_ends_at_its_age_limit_and_the_next_starts_from_there();

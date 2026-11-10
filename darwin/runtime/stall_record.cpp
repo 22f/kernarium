@@ -170,7 +170,7 @@ std::size_t format_stall_slot(char *slot, std::size_t size,
 	transitions(changed, "power", record.power, true);
 	transitions(changed, "pressure", record.pressure, false);
 
-	constexpr std::size_t header_reserve = 96;
+	constexpr std::size_t header_reserve = 128;
 	std::size_t remaining = size - 1;
 	remaining -= std::min(remaining, header_reserve + changed.size());
 	std::size_t shown = 0;
@@ -189,6 +189,8 @@ std::size_t format_stall_slot(char *slot, std::size_t size,
 		.text(" at ").number(now_unix)
 		.text(" total ").number(record.events.total())
 		.text(" shown ").number(static_cast<std::int64_t>(shown))
+		.text(" idle ").number(record.idle_samples)
+		.text(" unmarked ").number(record.unmarked_samples)
 		.text("\n");
 	text.text({changes, changed.size()});
 	for (std::size_t index = record.events.size() - shown;
@@ -212,6 +214,16 @@ void StallDetector::reset(std::uint64_t now_ns) noexcept
 	started_ = true;
 	open_ = false;
 	quiet_ticks_ = 0;
+}
+
+bool StallDetector::suspicious() const noexcept
+{
+	if (open_)
+		return true;
+	for (const Track &track : tracks_)
+		if (track.cause != Cause::none)
+			return true;
+	return false;
 }
 
 std::uint32_t StallDetector::since_base_ms(std::uint64_t now_ns) const noexcept
@@ -302,8 +314,7 @@ StallDetector::Change StallDetector::observe(const Tick &tick) noexcept
 		return change;
 	}
 
-	const std::uint32_t late_ms = wall_ms > tick_ms ?
-		static_cast<std::uint32_t>(wall_ms - tick_ms) : 0;
+	const std::uint32_t late_ms = tick.late_ms;
 	bool any_stalled = false;
 	std::uint64_t first_stalled_ns = tick.now_ns;
 	for (std::size_t cpu = 0; cpu < max_vcpus; ++cpu) {
@@ -324,7 +335,20 @@ StallDetector::Change StallDetector::observe(const Tick &tick) noexcept
 		track.seen = true;
 		track.cpu_ns = sample.cpu_ns;
 
-		const Cause cause = sample_cause(sample, share);
+		if (sample.state == RunState::waiting) {
+			const HostWait kind = ::uml::platform::wait_kind(sample.wait_word);
+			if (kind == HostWait::idle)
+				++record_.idle_samples;
+			else if (kind == HostWait::none)
+				++record_.unmarked_samples;
+		}
+		Cause cause = sample_cause(sample, share);
+		/* A carrier that ran between two samples was not held in the wait
+		 * they both found it in: it counts toward a stall of a wait only
+		 * when it used little of the interval. */
+		if (cause != Cause::none && !measured_over_the_interval(cause) &&
+		    measured && share >= starved_below_percent)
+			cause = Cause::none;
 		const std::uint64_t sequence =
 			::uml::platform::wait_sequence(sample.wait_word);
 		if (cause == Cause::none) {
@@ -371,8 +395,12 @@ StallDetector::Change StallDetector::observe(const Tick &tick) noexcept
 			continued_ = false;
 			return Change::none;
 		}
-		begin_event(tick, any_stalled ? first_stalled_ns : previous_ns,
-			continued_);
+		/* A watch that woke late was away from its deadline on. */
+		const std::uint64_t late_ns = std::min<std::uint64_t>(
+			static_cast<std::uint64_t>(late_ms) * nanoseconds_per_millisecond,
+			tick.now_ns);
+		begin_event(tick, any_stalled ? first_stalled_ns :
+			tick.now_ns - late_ns, continued_);
 		continued_ = false;
 		change = Change::opened;
 	}

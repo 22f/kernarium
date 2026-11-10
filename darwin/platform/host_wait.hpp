@@ -62,9 +62,13 @@ public:
 			std::memory_order_release);
 	}
 
-	void end() noexcept
+	/* Ends the wait begun last. `enclosing` is the kind of the wait it was
+	 * begun inside, none for a mark that has no outer one; the sequence stays
+	 * advanced, so a reader takes the outer wait for a new one. */
+	void end(HostWait enclosing = HostWait::none) noexcept
 	{
-		word_.store(word_.load(std::memory_order_relaxed) & ~std::uint64_t{0xff},
+		word_.store((word_.load(std::memory_order_relaxed) & ~std::uint64_t{0xff}) |
+				static_cast<std::uint8_t>(enclosing),
 			std::memory_order_release);
 	}
 
@@ -88,20 +92,24 @@ private:
  * thread registry (runtime/kernel_threads.hpp) sets it as a thread starts. */
 inline thread_local WaitCell *current_wait_cell = nullptr;
 
-/* Marks the calling thread as waiting for the length of the scope. */
+/* Marks the calling thread as waiting for the length of the scope. A mark
+ * made inside another, as a signal handler's write inside a wait the handler
+ * interrupted, gives the thread back to the outer wait at its end. */
 class ScopedHostWait final {
 public:
 	explicit ScopedHostWait(HostWait kind) noexcept
 		: cell_{current_wait_cell}
 	{
-		if (cell_ != nullptr)
+		if (cell_ != nullptr) {
+			enclosing_ = wait_kind(cell_->word());
 			cell_->begin(kind);
+		}
 	}
 
 	~ScopedHostWait()
 	{
 		if (cell_ != nullptr)
-			cell_->end();
+			cell_->end(enclosing_);
 	}
 
 	ScopedHostWait(const ScopedHostWait &) = delete;
@@ -109,6 +117,7 @@ public:
 
 private:
 	WaitCell *cell_;
+	HostWait enclosing_{HostWait::none};
 };
 
 } // namespace uml::platform

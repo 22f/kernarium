@@ -9,6 +9,7 @@
 #include "kernel_waits.hpp"
 #include "platform/host_wait.hpp"
 #include "require.hpp"
+#include "scratch_directory.hpp"
 #include "thread_nap.hpp"
 
 #include <atomic>
@@ -22,6 +23,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/select.h>
+#include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -207,10 +209,11 @@ void other_calls_are_marked_and_immediate_ones_are_not()
 	using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
 		const sigset_t *);
 
-	char path[] = "/tmp/uml-kernel-waits-XXXXXX";
-	const int file = mkstemp(path);
+	const uml::testing::ScratchSubdirectory directory{"uml-kernel-waits.XXXXXX"};
+	const std::string path = (directory.path() / "file").string();
+	const int file = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
 	require(file >= 0);
-	(void)unlink(path);
+	(void)unlink(path.c_str());
 
 	std::atomic<std::uint64_t> sequence_after_marked{0};
 	std::atomic<std::uint64_t> sequence_after_immediate{0};
@@ -270,8 +273,41 @@ void a_thread_without_a_cell_marks_nothing()
 
 } // namespace
 
+/* A signal handler's marked write inside a wait it interrupted gives the
+ * thread back to that wait, as a new sighting of it. */
+void a_mark_inside_another_gives_the_thread_back_to_the_outer_wait()
+{
+	using uml::platform::ScopedHostWait;
+	using uml::platform::WaitCell;
+	using uml::platform::wait_kind;
+	using uml::platform::wait_sequence;
+	WaitCell cell;
+	uml::platform::current_wait_cell = &cell;
+	{
+		const ScopedHostWait outer{HostWait::idle};
+		require(wait_kind(cell.word()) == HostWait::idle);
+		const std::uint64_t outer_sequence = wait_sequence(cell.word());
+		{
+			const ScopedHostWait inner{HostWait::send};
+			require(wait_kind(cell.word()) == HostWait::send);
+			{
+				const ScopedHostWait innermost{HostWait::disk_write};
+				require(wait_kind(cell.word()) == HostWait::disk_write);
+			}
+			require(wait_kind(cell.word()) == HostWait::send);
+		}
+		require(wait_kind(cell.word()) == HostWait::idle);
+		/* The sequence only goes forward, or a reader would take a later wait
+		 * for the one it saw. */
+		require(wait_sequence(cell.word()) == outer_sequence + 2);
+	}
+	require(wait_kind(cell.word()) == HostWait::none);
+	uml::platform::current_wait_cell = nullptr;
+}
+
 int main()
 {
+	a_mark_inside_another_gives_the_thread_back_to_the_outer_wait();
 	a_thread_without_a_cell_marks_nothing();
 	calls_the_loader_does_not_hand_over_are_not_wrapped();
 	blocking_calls_are_marked_for_as_long_as_they_block();

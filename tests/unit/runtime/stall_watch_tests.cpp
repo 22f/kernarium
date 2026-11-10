@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -31,6 +32,7 @@
 #include <signal.h>
 #include <string>
 #include <sys/select.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace {
@@ -42,13 +44,22 @@ using uml::runtime::session_stall_slot_bytes;
 using uml::testing::nap;
 using uml::testing::require;
 
-/* A thermal source the test moves. */
+/* A thermal source the test moves. It counts the readings made from a thread
+ * of the process's own (uml-*), which the thread fence can hold: the watch
+ * thread must never read it. */
 struct Thermal final : uml::platform::HostThermalProvider {
 	static inline std::atomic<int> level{0};
 	static inline std::atomic<int> processors{6};
+	static inline std::atomic<int> from_held_threads{0};
+	static inline std::atomic<int> readings{0};
 
 	HostThermalState state() noexcept override
 	{
+		char name[64]{};
+		(void)pthread_getname_np(pthread_self(), name, sizeof(name));
+		if (std::strncmp(name, "uml-", 4) == 0)
+			++from_held_threads;
+		++readings;
 		HostThermalState result;
 		result.level = static_cast<HostThermalLevel>(level.load());
 		result.activeProcessors = static_cast<std::uint8_t>(processors.load());
@@ -117,15 +128,6 @@ std::string stall_slot(const std::string &path)
 	return content.substr(session_memory_slot_bytes, session_stall_slot_bytes);
 }
 
-std::size_t count(const std::string &text, const std::string &part)
-{
-	std::size_t found = 0;
-	for (auto at = text.find(part); at != std::string::npos;
-	     at = text.find(part, at + 1))
-		++found;
-	return found;
-}
-
 /* The events that name a vCPU. A host so loaded that the watch's own tick runs
  * 150 ms late records an event of the whole process as well, which names none
  * and says nothing of the carriers. */
@@ -147,6 +149,32 @@ std::size_t vcpu_events(const std::string &slot)
 			++found;
 	}
 	return found;
+}
+
+/* The events whose watch lateness, the eighth field, is at least `late_ms`. */
+std::size_t late_events(const std::string &slot, unsigned late_ms)
+{
+	std::size_t found = 0;
+	std::size_t at = 0;
+	while ((at = slot.find("\nstall ", at)) != std::string::npos) {
+		++at;
+		const std::size_t end = slot.find('\n', at);
+		const std::string line = slot.substr(at, end - at);
+		std::size_t from = 0;
+		for (unsigned field = 0; field < 7; ++field)
+			from = line.find(' ', from) + 1;
+		if (std::strtoul(line.c_str() + from, nullptr, 10) >= late_ms)
+			++found;
+	}
+	return found;
+}
+
+/* The count after `word` in the slot's header. */
+unsigned long header_count(const std::string &slot, const std::string &word)
+{
+	const std::size_t at = slot.find(" " + word + " ");
+	return at == std::string::npos ? 0 :
+		std::strtoul(slot.c_str() + at + word.size() + 2, nullptr, 10);
 }
 
 void sleep_ms(unsigned milliseconds)
@@ -173,9 +201,12 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr, "a watch without a record");
 
-	/* Only idle carriers: no event. */
+	/* Only idle carriers: no event, and the watch has seen them in the idle
+	 * wait the loader's wrapper marks, which no load on the host changes. */
 	sleep_ms(400);
 	require(vcpu_events(stall_slot(path)) == 0, "idle carriers stalled:\n" + stall_slot(path));
+	require(header_count(stall_slot(path), "idle") >= 1,
+		"no carrier was seen in a marked idle wait:\n" + stall_slot(path));
 
 	/* A carrier starts a wait that lasts, and the thermal state and the core
 	 * count move. */
@@ -206,6 +237,10 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 	watch.reset();
 	const std::string last = stall_slot(path);
 	require(last.size() == session_stall_slot_bytes && last.back() == '\n');
+	/* The thermal source was read, and never from a thread the fence holds. */
+	require(Thermal::readings.load() > 0, "the thermal source was never read");
+	require(Thermal::from_held_threads.load() == 0,
+		"the thermal source was read from a thread of the process's own");
 
 	for (Carrier *carrier : {&idle0, &idle1, &stalled})
 		carrier->stop.store(true, std::memory_order_release);
@@ -237,14 +272,30 @@ void a_hold_of_the_threads_is_no_stall()
 	fence.release();
 	sleep_ms(400);
 
+	/* No event names a vCPU, and none is as late as the hold was; a loaded
+	 * host may still make a short lateness of its own. */
 	const std::string slot = stall_slot(path);
-	require(count(slot, "\nstall ") == 0,
+	require(vcpu_events(slot) == 0 && late_events(slot, 400) == 0,
 		"a hold of the threads was recorded as a stall:\n" + slot);
 
 	watch.reset();
 	idle0.stop.store(true, std::memory_order_release);
 	require(pthread_join(idle0.thread, nullptr) == 0);
 	uml::runtime::reset_session_record();
+}
+
+/* The record's times are on the clock that counts the system's sleep. */
+void the_record_is_on_the_continuous_clock()
+{
+	const auto continuous = static_cast<long long>(
+		clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
+	const auto ours = static_cast<long long>(uml::runtime::stall_clock_ns());
+	const auto uptime = static_cast<long long>(
+		clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+	require(ours - continuous < 50'000'000 && continuous - ours < 50'000'000,
+		"the record's clock is not the continuous one");
+	/* The continuous clock is the uptime and the time spent asleep. */
+	require(ours + 50'000'000 >= uptime);
 }
 
 void no_session_means_no_watch()
@@ -258,6 +309,7 @@ void no_session_means_no_watch()
 int main()
 {
 	no_session_means_no_watch();
+	the_record_is_on_the_continuous_clock();
 	a_stalled_carrier_is_recorded_and_idle_ones_are_not();
 	a_hold_of_the_threads_is_no_stall();
 	std::puts("stall watch tests passed");

@@ -14,9 +14,11 @@ namespace uml::runtime::stall {
  *
  * A vCPU is stalled when, for at least stall_threshold_ms, its carrier thread
  * was runnable and got less than starved_below_percent of the time (starved),
- * sat in an uninterruptible wait (fault), or sat in one host wait
- * (blocked: for a device service's answer, a disk, guest RAM, or in no wait
- * the loader marks). A carrier in its idle wait is not stalled. The watch
+ * or sat in an uninterruptible wait (fault) or in one host wait (blocked: for
+ * a device service's answer, a disk, guest RAM, or in no wait the loader
+ * marks) and used less than starved_below_percent of the time: a carrier that
+ * ran between two samples was not held in the wait both found it in. A carrier
+ * in its idle wait is not stalled. The watch
  * (stall_watch.hpp) feeds this file one Tick every tick_ms; what comes out is
  * a StallRecord, a ring of events and three rings of transitions, which
  * format_stall_slot writes as text into the session record's fixed slot. The
@@ -73,6 +75,10 @@ struct Tick final {
 	/* The threads were held, or the process was, since the last tick, and
 	 * what they show says nothing of the host. */
 	bool disturbed{};
+	/* How late the watch woke against its own deadline, which leaves out the
+	 * watch's work between two waits: a slow write of the slot is not the
+	 * process being stopped. */
+	std::uint32_t late_ms{};
 	/* The main queue's lateness at this tick, -1 where it is not serviced. */
 	std::int32_t ui_late_ms{-1};
 };
@@ -200,8 +206,15 @@ struct StallRecord final {
 	Ring<Transition, transition_capacity> thermal;
 	Ring<Transition, transition_capacity> power;
 	Ring<Transition, transition_capacity> pressure;
-	/* The wall clock, in seconds, at the base of every time in the record. */
+	/* The wall clock, in seconds, at the base of every time in the record.
+	 * The times are on the continuous clock, which counts the time the
+	 * system sleeps, so a time is the base plus its offset. */
 	std::int64_t base_unix{};
+	/* Observations of a vCPU carrier in the idle wait the loader marks, and
+	 * in a wait nothing marks. A running guest shows the first, which proves
+	 * the markers reach the wrappers. */
+	std::uint32_t idle_samples{};
+	std::uint32_t unmarked_samples{};
 };
 
 /* How the slot spells a record, a text of at most slot_bytes: the header
@@ -247,6 +260,9 @@ public:
 	[[nodiscard]] Change observe(const Tick &tick) noexcept;
 
 	[[nodiscard]] bool open() const noexcept { return open_; }
+	/* Whether an event is open or a stall is being confirmed: the only time
+	 * the main queue is asked how late it is. */
+	[[nodiscard]] bool suspicious() const noexcept;
 	/* Milliseconds since the base for a clock reading. */
 	[[nodiscard]] std::uint32_t since_base_ms(std::uint64_t now_ns) const
 		noexcept;

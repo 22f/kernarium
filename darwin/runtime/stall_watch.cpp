@@ -4,6 +4,7 @@
 #include "kernel_threads.hpp"
 #include "session_record.hpp"
 #include "stall_record.hpp"
+#include "vcpu_carrier_name.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -45,26 +46,6 @@ constexpr std::uint64_t before_window_ns = 5 * nanoseconds_per_second;
 /* A thread that has no name yet is looked at again this often. */
 constexpr std::uint64_t unnamed_retry_ms = 200;
 
-constexpr std::string_view carrier_prefix = "uml-vcpu-";
-constexpr std::string_view carrier_suffix = "-carrier";
-
-/* The vCPU number of a carrier's name (uml-vcpu-N-carrier), else -1. */
-int carrier_index(std::string_view name) noexcept
-{
-	if (!name.starts_with(carrier_prefix) || !name.ends_with(carrier_suffix) ||
-	    name.size() <= carrier_prefix.size() + carrier_suffix.size())
-		return -1;
-	name.remove_prefix(carrier_prefix.size());
-	name.remove_suffix(carrier_suffix.size());
-	int index = 0;
-	for (const char digit : name) {
-		if (digit < '0' || digit > '9' || index > 1000)
-			return -1;
-		index = index * 10 + (digit - '0');
-	}
-	return index;
-}
-
 mach_timebase_info_data_t timebase() noexcept
 {
 	static const mach_timebase_info_data_t base = [] {
@@ -83,9 +64,12 @@ std::uint64_t ticks_to_ns(std::uint64_t ticks) noexcept
 	return ticks * base.numer / base.denom;
 }
 
-std::uint64_t uptime_ns() noexcept
+/* The continuous clock keeps counting while the system sleeps, as the wall
+ * clock and the guest's own do, so a time in the record is the base plus its
+ * offset whatever the session slept through. */
+std::uint64_t continuous_ns() noexcept
 {
-	return ticks_to_ns(mach_absolute_time());
+	return ticks_to_ns(mach_continuous_time());
 }
 
 std::int64_t wall_seconds() noexcept
@@ -105,6 +89,9 @@ struct MainQueuePing final {
 	/* Whether the main queue has ever answered: a process that runs no main
 	 * queue, as a command-line run, never does, and then it says nothing. */
 	std::atomic<bool> serviced{false};
+	/* The watch wants the main queue asked: an event is open or a stall is
+	 * being confirmed. */
+	std::atomic<bool> wanted{false};
 };
 
 MainQueuePing main_queue_ping;
@@ -114,7 +101,7 @@ void main_queue_answered(void *) noexcept
 	const std::uint64_t sent = main_queue_ping.sent_ns.load(
 		std::memory_order_acquire);
 	const auto late = static_cast<std::int64_t>(
-		(uptime_ns() - sent) / nanoseconds_per_millisecond);
+		(continuous_ns() - sent) / nanoseconds_per_millisecond);
 	std::int64_t worst = main_queue_ping.worst_ms.load(std::memory_order_relaxed);
 	while (late > worst && !main_queue_ping.worst_ms.compare_exchange_weak(
 		       worst, late, std::memory_order_relaxed)) {
@@ -123,9 +110,12 @@ void main_queue_answered(void *) noexcept
 	main_queue_ping.outstanding.store(false, std::memory_order_release);
 }
 
+/* Asks the main queue, if the watch wants it asked and no ask is out. Only
+ * the host observer's queue calls it, never the watch's own thread. */
 void send_main_queue_ping(std::uint64_t now_ns) noexcept
 {
-	if (main_queue_ping.outstanding.load(std::memory_order_acquire))
+	if (!main_queue_ping.wanted.load(std::memory_order_relaxed) ||
+	    main_queue_ping.outstanding.load(std::memory_order_acquire))
 		return;
 	main_queue_ping.sent_ns.store(now_ns, std::memory_order_release);
 	main_queue_ping.outstanding.store(true, std::memory_order_release);
@@ -237,8 +227,14 @@ struct StallWatch::State final {
 	 * defers a thread inside libsystem_c on every pass; a signal on it ends
 	 * the watch at once. */
 	semaphore_t wake{MACH_PORT_NULL};
-	dispatch_queue_t pressure_queue{};
+	/* The host observer: a serial queue of the system's worker threads,
+	 * which the fence never holds, takes the memory pressure and runs a timer
+	 * that reads the thermal source and asks the main queue. The watch thread
+	 * calls into no framework: it reads what the observer left in atomics. */
+	dispatch_queue_t observer_queue{};
 	dispatch_source_t pressure_source{};
+	dispatch_source_t observer_timer{};
+	std::atomic<std::uint32_t> observed_thermal{0};
 
 	/* Thread-confined state. */
 	std::uint32_t fence_epoch{};
@@ -247,6 +243,7 @@ struct StallWatch::State final {
 	std::uint64_t next_poll_ns{};
 	std::uint64_t next_context_ns{};
 	std::uint64_t next_write_ns{};
+	bool idle_seen{};
 	Context recent[context_ring]{};
 	std::size_t recent_count{};
 	Context opened_at{};
@@ -254,6 +251,34 @@ struct StallWatch::State final {
 	explicit State(std::unique_ptr<HostThermalProvider> source)
 		: thermal{std::move(source)}
 	{
+	}
+
+	/* ---- What the host observer saw. ---- */
+
+	static std::uint32_t pack(const HostThermalState &state) noexcept
+	{
+		return static_cast<std::uint32_t>(state.level) |
+			(state.lowPowerMode ? 0x100U : 0U) |
+			static_cast<std::uint32_t>(state.activeProcessors) << 16;
+	}
+
+	[[nodiscard]] HostThermalState observed() const noexcept
+	{
+		const std::uint32_t word = observed_thermal.load(std::memory_order_relaxed);
+		HostThermalState state;
+		state.level = static_cast<HostThermalLevel>(word & 0xffU);
+		state.lowPowerMode = (word & 0x100U) != 0;
+		state.activeProcessors = static_cast<std::uint8_t>(word >> 16 & 0xffU);
+		return state;
+	}
+
+	/* On the observer's queue. */
+	static void observe_host(void *argument) noexcept
+	{
+		auto *self = static_cast<State *>(argument);
+		self->observed_thermal.store(pack(self->thermal->state()),
+			std::memory_order_relaxed);
+		send_main_queue_ping(continuous_ns());
 	}
 
 	/* ---- Reading the system. ---- */
@@ -344,7 +369,7 @@ struct StallWatch::State final {
 				nanoseconds_per_millisecond;
 			return;
 		}
-		const int cpu = carrier_index(name);
+		const int cpu = vcpu_carrier_index(name);
 		identity.cpu = cpu < static_cast<int>(max_vcpus) ? cpu : -1;
 	}
 
@@ -385,7 +410,7 @@ struct StallWatch::State final {
 	void poll_host(std::uint64_t now_ns) noexcept
 	{
 		bool changed = false;
-		const HostThermalState state = thermal->state();
+		const HostThermalState state = observed();
 		const std::uint32_t at = detector.since_base_ms(now_ns);
 		if (state.level != host_state.level) {
 			record.thermal.push({at,
@@ -417,7 +442,7 @@ struct StallWatch::State final {
 	void begin_context(StallEvent &event, std::uint64_t now_ns) noexcept
 	{
 		opened_at = read_context(now_ns);
-		const HostThermalState state = thermal->state();
+		const HostThermalState state = observed();
 		event.thermal_start = static_cast<std::uint8_t>(state.level);
 		event.low_power = state.lowPowerMode;
 		event.processors_start = state.activeProcessors;
@@ -465,7 +490,7 @@ struct StallWatch::State final {
 		event.system_decompressions = static_cast<std::uint32_t>(
 			std::min<std::uint64_t>(closed.system_decompressions -
 				opened_at.system_decompressions, 0xffffffffU));
-		const HostThermalState state = thermal->state();
+		const HostThermalState state = observed();
 		event.thermal_end = static_cast<std::uint8_t>(state.level);
 		event.processors_end = state.activeProcessors;
 		event.low_power = event.low_power || state.lowPowerMode;
@@ -498,16 +523,26 @@ struct StallWatch::State final {
 		}
 	}
 
-	void tick(std::uint64_t now_ns) noexcept
+	void tick(std::uint64_t now_ns, std::uint32_t late_ms) noexcept
 	{
 		Tick tick;
 		tick.now_ns = now_ns;
+		tick.late_ms = late_ms;
 		const std::uint32_t epoch = kernel_thread_fence_epoch();
 		tick.disturbed = kernel_thread_reclaim_inhibited() || epoch != fence_epoch;
 		fence_epoch = epoch;
 		tick.ui_late_ms = main_queue_lateness_ms(now_ns);
 		read_carriers(tick);
 		handle(detector.observe(tick), now_ns);
+		main_queue_ping.wanted.store(detector.suspicious(),
+			std::memory_order_relaxed);
+		/* The first sight of a carrier in a marked idle wait says the
+		 * markers reach the wrappers; it is written once, then rides with
+		 * the next write. */
+		if (!idle_seen && record.idle_samples != 0) {
+			idle_seen = true;
+			write_slot();
+		}
 		if (now_ns >= next_context_ns) {
 			sample_context(now_ns);
 			next_context_ns = now_ns + context_period_ms *
@@ -524,26 +559,42 @@ struct StallWatch::State final {
 		(void)pthread_setname_np("uml-stall-watch");
 		/* This thread's local storage exists before anything marks a wait. */
 		::uml::platform::current_wait_cell = nullptr;
-		std::uint64_t now_ns = uptime_ns();
+		/* The set-up is done before the measurement starts, so its time is
+		 * nobody's lateness. */
+		host_state = observed();
+		sample_context(continuous_ns());
+		std::uint64_t now_ns = continuous_ns();
 		detector.reset(now_ns);
 		record.base_unix = wall_seconds();
-		host_state = thermal->state();
-		sample_context(now_ns);
 		next_context_ns = now_ns + context_period_ms * nanoseconds_per_millisecond;
 		next_poll_ns = now_ns;
 		write_slot();
+		constexpr std::uint64_t period_ns = tick_ms * nanoseconds_per_millisecond;
+		/* The watch wakes at a deadline of its own and measures how late it
+		 * woke; the work of a tick (a slow write of the slot, say) is not
+		 * part of that. */
+		std::uint64_t deadline_ns = continuous_ns() + period_ns;
 		while (!stopping.load(std::memory_order_acquire)) {
-			const mach_timespec_t period{0,
-				static_cast<clock_res_t>(tick_ms * nanoseconds_per_millisecond)};
-			(void)semaphore_timedwait(wake, period);
-			now_ns = uptime_ns();
+			now_ns = continuous_ns();
+			if (now_ns < deadline_ns) {
+				const std::uint64_t wait_ns = deadline_ns - now_ns;
+				const mach_timespec_t period{
+					static_cast<unsigned int>(wait_ns / nanoseconds_per_second),
+					static_cast<clock_res_t>(wait_ns % nanoseconds_per_second)};
+				(void)semaphore_timedwait(wake, period);
+				now_ns = continuous_ns();
+			}
 			if (stopping.load(std::memory_order_acquire))
 				break;
-			tick(now_ns);
+			const std::uint64_t late_ns =
+				now_ns > deadline_ns ? now_ns - deadline_ns : 0;
+			tick(now_ns, static_cast<std::uint32_t>(std::min<std::uint64_t>(
+				late_ns / nanoseconds_per_millisecond, 0xffffffffU)));
+			deadline_ns = continuous_ns() + period_ns;
 		}
 		/* An event in progress ends where it was last seen. */
 		Tick last;
-		last.now_ns = uptime_ns();
+		last.now_ns = continuous_ns();
 		last.disturbed = true;
 		handle(detector.observe(last), last.now_ns);
 		write_slot();
@@ -555,35 +606,53 @@ struct StallWatch::State final {
 		return nullptr;
 	}
 
-	void start_pressure_source() noexcept
+	void start_observer() noexcept
 	{
-		pressure_queue = dispatch_queue_create("uml.stall-watch.pressure",
+		observed_thermal.store(pack(thermal->state()), std::memory_order_relaxed);
+		observer_queue = dispatch_queue_create("uml.stall-watch.host",
 			DISPATCH_QUEUE_SERIAL);
-		if (pressure_queue == nullptr)
+		if (observer_queue == nullptr)
 			return;
 		pressure_source = dispatch_source_create(
 			DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
 			DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN |
 				DISPATCH_MEMORYPRESSURE_CRITICAL,
-			pressure_queue);
-		if (pressure_source == nullptr)
-			return;
-		dispatch_set_context(pressure_source, pressure_source);
-		dispatch_source_set_event_handler_f(pressure_source,
-			&memory_pressure_changed);
-		dispatch_resume(pressure_source);
+			observer_queue);
+		if (pressure_source != nullptr) {
+			dispatch_set_context(pressure_source, pressure_source);
+			dispatch_source_set_event_handler_f(pressure_source,
+				&memory_pressure_changed);
+			dispatch_resume(pressure_source);
+		}
+		observer_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+			observer_queue);
+		if (observer_timer != nullptr) {
+			dispatch_set_context(observer_timer, this);
+			dispatch_source_set_event_handler_f(observer_timer, &State::observe_host);
+			dispatch_source_set_timer(observer_timer, DISPATCH_TIME_NOW,
+				host_poll_ms * nanoseconds_per_millisecond,
+				host_poll_ms * nanoseconds_per_millisecond / 4);
+			dispatch_resume(observer_timer);
+		}
 	}
 
-	void stop_pressure_source() noexcept
+	void stop_observer() noexcept
 	{
+		if (observer_timer != nullptr) {
+			dispatch_source_cancel(observer_timer);
+			dispatch_release(observer_timer);
+			observer_timer = nullptr;
+		}
 		if (pressure_source != nullptr) {
 			dispatch_source_cancel(pressure_source);
 			dispatch_release(pressure_source);
 			pressure_source = nullptr;
 		}
-		if (pressure_queue != nullptr) {
-			dispatch_release(pressure_queue);
-			pressure_queue = nullptr;
+		if (observer_queue != nullptr) {
+			/* A handler that is running ends before the state goes. */
+			dispatch_sync_f(observer_queue, nullptr, [](void *) {});
+			dispatch_release(observer_queue);
+			observer_queue = nullptr;
 		}
 	}
 
@@ -594,7 +663,7 @@ struct StallWatch::State final {
 			return;
 		host = mach_host_self();
 		memory_pressure_level.store(0, std::memory_order_relaxed);
-		start_pressure_source();
+		start_observer();
 		/* The thread takes no signal: the kernel's process-directed signals
 		 * must never pick it. */
 		sigset_t all;
@@ -626,7 +695,7 @@ struct StallWatch::State final {
 			(void)semaphore_destroy(mach_task_self(), wake);
 			wake = MACH_PORT_NULL;
 		}
-		stop_pressure_source();
+		stop_observer();
 		if (host != MACH_PORT_NULL) {
 			(void)mach_port_deallocate(mach_task_self(), host);
 			host = MACH_PORT_NULL;
@@ -645,6 +714,11 @@ StallWatch::StallWatch(std::unique_ptr<HostThermalProvider> thermal)
 StallWatch::~StallWatch()
 {
 	state_->stop();
+}
+
+std::uint64_t stall_clock_ns() noexcept
+{
+	return continuous_ns();
 }
 
 std::unique_ptr<StallWatch> start_stall_watch(

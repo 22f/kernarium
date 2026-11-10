@@ -1,4 +1,4 @@
-stalls 1 base 1794114300 at 1794118430 total 37 shown 32
+stalls 1 base 1794114300 at 1794118430 total 37 shown 32 idle 123456 unmarked 789
 thermal 1200 0 1
 thermal 3990000 1 2
 power 50000 1 6

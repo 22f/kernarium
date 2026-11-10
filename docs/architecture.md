@@ -629,22 +629,25 @@ reads it at launch.
 
 The stall slot records why the vCPUs stopped running. In every build a thread
 of the process, `uml-stall-watch`, looks every 50 ms (`runtime/stall_watch`) at
-each vCPU carrier's run state and CPU time (`thread_info`) and at the host wait
-the carrier says it is in: the loader's wrappers mark the waits for a device
-service's answer, a receive or send, a disk read, write or flush, and guest RAM
-being committed (`platform/host_wait.hpp`). A carrier that was runnable and got
-under a fifth of the time (starved), sat in an uninterruptible wait, or sat in
-one host wait for 100 ms or more is stalled; a late tick of the watch itself is
-a stall of the whole process. Stalls form events, each with the thermal state,
-Low Power Mode and active core count (`platform/host_thermal.hpp`), the
-process's cores, performance cores and power around it, its memory and paging,
-the memory pressure level and the lateness of the main queue
-(`runtime/stall_record`). The slot holds the newest events that fit in 4 KiB,
-at most 32, and the last 8 changes of each of the thermal state, power state and
-memory pressure. The watch reads no guest memory, takes no lock a carrier takes
-and suspends nothing; a hold of the kernel's threads is not recorded as a stall.
-Andarium adds the previous and current records, the stalls in words and the
-guest's `/proc` counters to its bug report.
+each vCPU carrier's run state and CPU time, and the loader's wrappers mark the
+host waits a carrier sits in (`platform/host_wait.hpp`). A carrier that for
+100 ms or more is runnable but gets under a fifth of the time, sits in an
+uninterruptible wait, or sits in one host wait while it is not using the CPU is
+stalled; a carrier that is busy is never held to a wait it was merely sampled
+in. A late tick of the watch itself, measured against its own deadline and not
+against the work it did, is a stall of the whole process. Stalls form events
+that carry the host's thermal, power, memory and main-queue state
+(`runtime/stall_record`). The slot is bounded: the newest events that fit in
+4 KiB, at most 32, the last 8 changes of each host state, and counts of the idle
+and unmarked waits the watch saw, which show whether the markers reach the
+wrappers. Times are milliseconds after a base wall time on the system's
+continuous clock, which runs through a sleep. The watch reads no guest memory,
+takes no lock a carrier takes, suspends nothing and calls no framework from its
+own thread, which the kernel-thread fence can hold: the host's state is read on
+a serial queue of system threads, and the main queue is asked only while a stall
+is open or being confirmed. A hold of the kernel's threads is not recorded as a
+stall. Andarium adds the previous and current records, the stalls in words and
+the guest's `/proc` counters to its bug report.
 
 A guest that restarts itself boots again in the same process, because iOS can
 neither re-exec nor respawn an application. The macOS launchers

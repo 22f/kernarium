@@ -3,6 +3,7 @@
 
 #include "platform/host_thermal.hpp"
 
+#include <cstdint>
 #include <memory>
 
 namespace uml::runtime {
@@ -14,26 +15,38 @@ namespace uml::runtime {
  * interactive quality of service, reads each vCPU carrier's run state and CPU
  * time from the system (thread_info, on the carriers the kernel thread
  * registry lists) and the wait the carrier says it is in (platform/
- * host_wait.hpp). A carrier that is runnable and gets little of the time, is
- * in an uninterruptible wait, or sits in one host wait for 100 ms or more is
- * stalled, and the stalls form events (runtime/stall_record.hpp). Each event
- * carries what the host looked like around it: the thermal state, Low Power
- * Mode and the active core count; the process's cores, performance cores and
- * power in the 5 s before and during it; its memory, paging and involuntary
- * context switches; the lateness of the watch's own tick and of the main
- * queue, which tell a stall of the whole process from one of the carriers.
- * Changes of the thermal state, of Low Power Mode and the core count, and of
- * the memory pressure level are recorded with the time they were seen.
+ * host_wait.hpp). A carrier that is runnable and gets little of the time, or
+ * sits in an uninterruptible wait or one host wait and used little of the
+ * time, for 100 ms or more is stalled, and the stalls form events (runtime/
+ * stall_record.hpp). Each event carries what the host looked like around it:
+ * the thermal state, Low Power Mode and the active core count; the process's
+ * cores, performance cores and power in the 5 s before and during it; its
+ * memory, paging and involuntary context switches; the lateness of the
+ * watch's own wake-up and of the main queue, which tell a stall of the whole
+ * process from one of the carriers. Changes of the thermal state, of Low Power
+ * Mode and the core count, and of the memory pressure level are recorded with
+ * the time they were seen.
+ *
+ * The times are on the continuous clock (stall_clock_ns), which counts the
+ * time the system sleeps; the record's base is the wall clock at the start.
  *
  * The record is the stall slot of the session record (session_record.hpp),
- * rewritten when an event opens or ends, once a second while one is open, and
- * when a transition is seen. Nothing is written otherwise. The watch never
- * suspends a thread, takes no lock a carrier takes and reads no guest memory;
- * it uses only public system interfaces, in every build.
+ * rewritten when an event opens or ends, once a second while one is open, when
+ * a transition is seen and when the first carrier is seen in an idle wait.
+ * Nothing is written otherwise. The watch never suspends a thread, takes no
+ * lock a carrier takes and reads no guest memory; it uses only public system
+ * interfaces, in every build.
  *
- * A fence that holds the kernel's threads (thread_fence.hpp) holds this
- * thread too; the first tick after it starts the measurement over.
- */
+ * The watch thread calls no framework. A fence that holds the kernel's threads
+ * (thread_fence.hpp) holds this thread too, and a hold inside a system
+ * library's lock would last until the release. What needs Foundation or
+ * libdispatch (the thermal state, Low Power Mode and the core count, the
+ * memory pressure level, the main queue's answer) is observed on a serial
+ * queue that the system's worker threads run and the fence never holds, and
+ * the watch reads it from atomics. The main queue is asked only while an event
+ * is open or a stall is being confirmed. The first tick after a hold starts
+ * the measurement over.
+  */
 class StallWatch final {
 public:
 	/* Starts the thread. `thermal` is the host's thermal source, the
@@ -51,6 +64,10 @@ private:
 	struct State;
 	std::unique_ptr<State> state_;
 };
+
+/* The clock of every time in the record: the continuous clock, in
+ * nanoseconds. */
+[[nodiscard]] std::uint64_t stall_clock_ns() noexcept;
 
 /* Starts the watch of the session that is open on a record file
  * (session_record_open); null when none is. */
