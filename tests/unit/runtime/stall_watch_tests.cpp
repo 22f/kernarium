@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dispatch/dispatch.h>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -34,6 +35,28 @@
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
+
+/* The main queue's ping is a call of dispatch_async_f. This binary defines
+ * the function, so the watch's call binds here and not to libdispatch: it
+ * counts the callers by thread, answers the ping at once, and the test
+ * requires that no thread of the process's own (uml-*), which the thread fence
+ * can hold, ever sends one. */
+namespace {
+std::atomic<int> pings_from_held_threads{0};
+std::atomic<int> pings_from_other_threads{0};
+} // namespace
+
+extern "C" void dispatch_async_f(dispatch_queue_t, void *context,
+	dispatch_function_t work)
+{
+	char name[64]{};
+	(void)pthread_getname_np(pthread_self(), name, sizeof(name));
+	if (std::strncmp(name, "uml-", 4) == 0)
+		++pings_from_held_threads;
+	else
+		++pings_from_other_threads;
+	work(context);
+}
 
 namespace {
 
@@ -241,6 +264,12 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 	require(Thermal::readings.load() > 0, "the thermal source was never read");
 	require(Thermal::from_held_threads.load() == 0,
 		"the thermal source was read from a thread of the process's own");
+	/* The main queue was asked while the stall was open, and never from a
+	 * thread the fence holds. */
+	require(pings_from_other_threads.load() > 0,
+		"the main queue was never asked during the stall");
+	require(pings_from_held_threads.load() == 0,
+		"the main queue was asked from a thread of the process's own");
 
 	for (Carrier *carrier : {&idle0, &idle1, &stalled})
 		carrier->stop.store(true, std::memory_order_release);

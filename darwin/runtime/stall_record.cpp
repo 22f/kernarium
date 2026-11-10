@@ -345,7 +345,10 @@ StallDetector::Change StallDetector::observe(const Tick &tick) noexcept
 		Cause cause = sample_cause(sample, share);
 		/* A carrier that ran between two samples was not held in the wait
 		 * they both found it in: it counts toward a stall of a wait only
-		 * when it used little of the interval. */
+		 * when it used little of the interval. The interval a busy carrier
+		 * began to block in still shows its busy share, so the wait counts
+		 * from the next one: a wait shorter than about 200 ms is not
+		 * recorded, and a longer one is recorded 50 ms late and short. */
 		if (cause != Cause::none && !measured_over_the_interval(cause) &&
 		    measured && share >= starved_below_percent)
 			cause = Cause::none;

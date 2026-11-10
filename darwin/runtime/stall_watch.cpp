@@ -111,7 +111,8 @@ void main_queue_answered(void *) noexcept
 }
 
 /* Asks the main queue, if the watch wants it asked and no ask is out. Only
- * the host observer's queue calls it, never the watch's own thread. */
+ * the host observer's queue calls it: dispatch_async_f is libdispatch, which
+ * the watch's own thread, a thread the fence can hold, never calls. */
 void send_main_queue_ping(std::uint64_t now_ns) noexcept
 {
 	if (!main_queue_ping.wanted.load(std::memory_order_relaxed) ||
@@ -434,7 +435,6 @@ struct StallWatch::State final {
 		}
 		if (changed)
 			write_slot();
-		send_main_queue_ping(now_ns);
 	}
 
 	/* ---- Events. ---- */

@@ -304,8 +304,9 @@ void a_carrier_that_ran_is_not_held_in_the_waits_it_was_seen_in()
 		for (unsigned index = 0; index < 400; ++index)
 			require(scenario.tick() == StallDetector::Change::none);
 		require(scenario.record.events.total() == 0);
-		/* Seen at 90% of one interval and at nothing in the next, it is a
-		 * wait that began in between: the stall counts from there. */
+		/* Seen at 85% of one interval and at nothing in the next, the wait
+		 * began in between. The interval it began in is not counted, so the
+		 * stall counts from the next sample. */
 		scenario.sample(1, entry.state, 0, entry.wait_word);
 		scenario.ticks(4);
 		require(scenario.record.events.total() == 1);
