@@ -228,6 +228,39 @@ rules and `gnss_engine.hpp` the session, with no Android dependency; the
 `tests/integration/android/location/` is a probe application for the candidate
 image, never installed in a release.
 
+### Thermal
+
+The thermal HAL reports the host's thermal state. The vendor manifest declares
+`android.hardware.thermal` `IThermal/default` (version 3) on every device, and
+the service starts at boot. `overlay/thermal/` is the vendor AIDL HAL, which
+replaces the AOSP example HAL (its APEX is not installed). It has one SKIN
+sensor, `skin`, with the framework's seven hot thresholds, and no other sensor
+and no cooling device. The sensor's temperature and throttling status follow
+the severity the host application last sent (NONE, LIGHT, MODERATE, SEVERE or
+CRITICAL), starting at NONE; `forecastSkinTemperature` is unsupported, so the
+system service derives the headroom itself. The HAL never reports EMERGENCY or
+SHUTDOWN, whatever the host sends, and keeps its severity when the host link
+drops.
+
+The HAL listens on vsock port 5559, accepts only host CID 2 and reads 8-byte
+records; a later connection replaces an earlier one, and a record that breaks
+the rules closes the connection. The stream runs one way. A launcher with no
+host link leaves the state at NONE. `overlay/thermal/thermal_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/ThermalProtocol.swift` own the wire
+format, which the golden frames in `tests/unit/andarium/fixtures` pin, and
+`thermal_levels.hpp` holds the temperatures and thresholds that the host's
+severities become.
+
+From SEVERE on, Android holds the display's render rate to 30 Hz; the display
+mode does not change, and SurfaceFlinger renders every second frame. The map
+is the vendor default display configuration
+(`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`), which holds
+one SEVERE point from 0 to 30 Hz; the display topic of route `p0007` makes a
+display with no refresh rate throttling map of its own use the default
+configuration's, and a status above SEVERE takes the SEVERE point.
+`tests/integration/android/run_android_thermal.py` drives the stream on a
+candidate image.
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -461,8 +494,8 @@ patches, never by deleting files from a completed image.
 `KERNARIUM_REMOVED_PACKAGES` in `overlay/lineage_andarium.mk` lists what the
 product omits: HAL APEXes with no Darwin UML hardware, AVF guest payloads, OTA
 and DSU executables, and Cuttlefish host-monitoring services. The build and the
-verifier reject any excluded module that reappears. The thermal and CAS HAL
-APEXes (CTS needs both) stay, as do DeviceLock, Virtualization and the modular
+verifier reject any excluded module that reappears. The CAS HAL APEX (CTS needs
+it) stays, as do DeviceLock, Virtualization and the modular
 framework containers, which the platform SDK classes link. EasterEgg stays
 too: Settings' Android version row opens the platform logo screen, which starts
 the egg, and the verifier requires its package.

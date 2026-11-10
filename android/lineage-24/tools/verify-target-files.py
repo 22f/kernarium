@@ -213,6 +213,10 @@ REQUIRED_ENTRIES = {
     "VENDOR/bin/hw/android.hardware.gnss-service.andarium",
     "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc",
     "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml",
+    "VENDOR/bin/hw/android.hardware.thermal-service.andarium",
+    "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc",
+    "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml",
+    "VENDOR/etc/displayconfig/default.xml",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -395,6 +399,7 @@ FORBIDDEN_STATIC_ENTRIES = {
     "VENDOR/apex/com.android.hardware.contexthub.apex",
     "VENDOR/apex/com.android.hardware.gnss.apex",
     "VENDOR/apex/com.android.hardware.neuralnetworks.apex",
+    "VENDOR/apex/com.android.hardware.thermal.apex",
     "VENDOR/apex/com.android.hardware.threadnetwork.apex",
     "VENDOR/apex/com.android.hardware.uwb.apex",
     "VENDOR/apex/com.android.hardware.vibrator.apex",
@@ -2319,18 +2324,6 @@ def check_application_manifests(
 # (overlay/config/erofs_apex_payload_hints.txt) store every .rc and .xml file uncompressed, and
 # the binary is looked up in the payload's directories, since the init script names it too.
 APEX_PAYLOAD_READ_LIMIT = 64 << 20
-# system_server's thermal manager and CTS NativeThermalTest need a thermal HAL.
-THERMAL_HAL = {
-    "apex": "VENDOR/apex/com.android.hardware.thermal.apex",
-    "binary": b"android.hardware.thermal-service.example",
-    "fragment": (
-        b"<name>android.hardware.thermal</name>",
-        b"<fqname>IThermal/default</fqname>",
-    ),
-    "interface": "IThermal/default",
-    "service": "vendor.thermal-example",
-    "need": "a thermal HAL",
-}
 # MediaCas and CTS MediaCasTest need the default CAS HAL, which loads the ClearKey CAS plugin
 # (CAS system id 63192) from /vendor/lib*/mediacas.
 CAS_HAL = {
@@ -2409,8 +2402,16 @@ def check_payload_regular_file(payload: bytes, path: str, apex_name: str, what: 
 # persist.sys.usb.config and restart adbd, where stock stops it, when debugging is turned off.
 # The jar stores its dex files uncompressed, so the topic's log line is in the bytes. A build
 # without it would forget the user's choice at every boot and stop the host's channel.
+# The display topic of the same route lets a display without a refresh rate throttling map use the
+# default configuration's; without it the thermal HAL's SEVERE status holds no frame rate back.
 SERVICES_JAR = "SYSTEM/framework/services.jar"
-SERVICES_JAR_MARKERS = (b"kernarium: USB debugging is now ",)
+SERVICES_JAR_MARKERS = (
+    (b"kernarium: USB debugging is now ", "the AdbService topics"),
+    (
+        b"RefreshRateThrottling: using the map of the default configuration",
+        "the display topic that reads the default configuration's refresh rate throttling map",
+    ),
+)
 SERVICES_JAR_LIMIT = 48 << 20
 
 
@@ -2425,10 +2426,10 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
             ]
             if not dex:
                 fail(f"{SERVICES_JAR} holds no dex file")
-            for marker in SERVICES_JAR_MARKERS:
+            for marker, topic in SERVICES_JAR_MARKERS:
                 if not any(marker in jar.read(name) for name in dex):
                     fail(
-                        f"{SERVICES_JAR} lacks the AdbService topics of route p0007 "
+                        f"{SERVICES_JAR} lacks {topic} of route p0007 "
                         f"({marker.decode()!r} is not in its dex files)"
                     )
     except (OSError, zipfile.BadZipFile) as problem:
@@ -2555,12 +2556,6 @@ def check_example_hal(
     service = f"service {hal['service']} /apex/{apex_dir}/bin/hw/".encode() + binary
     if service not in payload:
         fail(f"{apex_name} does not start the {hal['service']} service")
-
-
-def check_thermal_hal(
-    archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
-) -> None:
-    check_example_hal(archive, infos, THERMAL_HAL)
 
 
 def check_wifi_hals(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2773,6 +2768,125 @@ def check_gnss_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) 
         ]
         if active:
             fail(f"{GNSS_DEBUG_CONF} configures an assistance server or a position: {active}")
+
+
+# The thermal HAL (overlay/thermal) reports the host's thermal state, and every device has a host,
+# so every device declares it: one vendor fragment, an init script that starts the service at boot
+# with no condition, and no other declaration of android.hardware.thermal anywhere (the example
+# HAL's APEX is not installed). system_server's thermal manager and CTS need a thermal HAL.
+THERMAL_HAL_NAME = "android.hardware.thermal"
+THERMAL_SERVICE = "android.hardware.thermal-service.andarium"
+THERMAL_FRAGMENT = f"VENDOR/etc/vintf/manifest/{THERMAL_SERVICE}.xml"
+THERMAL_INTERFACE = "android.hardware.thermal.IThermal/default"
+THERMAL_VERSION = "3"
+THERMAL_FILE_CONTEXT = re.compile(
+    re.escape(rb"/(vendor|system/vendor)/bin/hw/android\.hardware\.thermal-service\.andarium")
+    + rb"\s+u:object_r:hal_thermal_default_exec:s0"
+)
+# The default display configuration holds one point: the render rate is held to 30 Hz from the
+# SEVERE status on, which the thermal HAL reports while the host is hot. The framework gives a
+# display that has no refresh rate throttling map the default configuration's (the display topic of
+# route p0007), and reads the first default.xml it finds in the product, vendor and system
+# partitions, so a product copy would take the map away.
+DISPLAY_CONFIG_DEFAULT = "VENDOR/etc/displayconfig/default.xml"
+DISPLAY_CONFIG_SHADOW = "PRODUCT/etc/displayconfig/default.xml"
+DISPLAY_CONFIG_POINT = ("severe", "0", "30")
+
+
+def check_single_hal_declaration(
+    archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], hal_name: str, allowed: str
+) -> None:
+    """No VINTF manifest but `allowed` declares the HAL."""
+    for name, info in infos.items():
+        path = PurePosixPath(name)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+            or name == allowed
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {name}: {error}")
+        if any(declared == hal_name for declared, _, _ in declared_hals(root)):
+            fail(f"{name} declares {hal_name}: only {allowed} may")
+
+
+def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    check_single_hal_declaration(archive, infos, THERMAL_HAL_NAME, THERMAL_FRAGMENT)
+    try:
+        fragment = ET.fromstring(read_small(archive, infos[THERMAL_FRAGMENT]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {THERMAL_FRAGMENT}: {error}")
+    hals = declared_hals(fragment)
+    if (
+        len(hals) != 1
+        or hals[0][0] != THERMAL_HAL_NAME
+        or hals[0][1] != THERMAL_VERSION
+        or hals[0][2] != ["IThermal/default"]
+        or any(hal.get("format") != "aidl" for hal in fragment.iter("hal"))
+    ):
+        fail(
+            f"{THERMAL_FRAGMENT} must declare exactly the AIDL IThermal/default at version "
+            f"{THERMAL_VERSION}: {hals}"
+        )
+    script = read_small(archive, infos[f"VENDOR/etc/init/{THERMAL_SERVICE}.rc"]).decode(
+        "utf-8", errors="strict"
+    )
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(
+        rf"service \S+ /vendor/bin/hw/{re.escape(THERMAL_SERVICE)}", service[0]
+    ):
+        fail("the thermal init script must define one service that runs the Andarium thermal HAL")
+    for required in (f"interface aidl {THERMAL_INTERFACE}", "class hal", "user nobody", "group system"):
+        if required not in lines:
+            fail(f"the thermal service must carry '{required}'")
+    if "disabled" in lines or "oneshot" in lines:
+        fail("the thermal service starts at boot on every device: it is neither disabled nor oneshot")
+    if any(line.startswith("on ") for line in lines):
+        fail("the thermal init script may have no trigger: the service starts with its class")
+    if not THERMAL_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the thermal HAL its hal_thermal_default_exec label")
+    check_default_display_config(archive, infos)
+
+
+def check_default_display_config(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    if DISPLAY_CONFIG_SHADOW in infos:
+        fail(
+            f"{DISPLAY_CONFIG_SHADOW} exists: the framework reads the first default display "
+            f"configuration it finds, so it would hide {DISPLAY_CONFIG_DEFAULT}"
+        )
+    try:
+        root = ET.fromstring(read_small(archive, infos[DISPLAY_CONFIG_DEFAULT]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {DISPLAY_CONFIG_DEFAULT}: {error}")
+    shape = [child.tag for child in root]
+    throttling = root.find("thermalThrottling")
+    if root.tag != "displayConfiguration" or shape != ["thermalThrottling"] or throttling is None:
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold a displayConfiguration with thermalThrottling and nothing else")
+    maps = list(throttling)
+    if len(maps) != 1 or maps[0].tag != "refreshRateThrottlingMap" or maps[0].get("id") not in (None, "default"):
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold the one default refreshRateThrottlingMap")
+    points = list(maps[0])
+    if len(points) != 1 or points[0].tag != "refreshRateThrottlingPoint":
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold one refreshRateThrottlingPoint")
+    point = points[0]
+    refresh_rates = point.find("refreshRateRange")
+    found = (
+        (point.findtext("thermalStatus") or "").strip(),
+        (refresh_rates.findtext("minimum") or "").strip() if refresh_rates is not None else "",
+        (refresh_rates.findtext("maximum") or "").strip() if refresh_rates is not None else "",
+    )
+    if [child.tag for child in point] != ["thermalStatus", "refreshRateRange"] or found != DISPLAY_CONFIG_POINT:
+        fail(
+            f"{DISPLAY_CONFIG_DEFAULT} must hold the severe point with the refresh rate range "
+            f"0 to 30 Hz: {found}"
+        )
 
 
 def check_hardware_features(
