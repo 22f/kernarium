@@ -4,6 +4,7 @@
 #include "audio/protocol.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
+#include "camera/in_process_service.hpp"
 #include "video/in_process_service.hpp"
 #include "video/virtio_video_device.hpp"
 #include "video/virtio_video_encoder_device.hpp"
@@ -21,7 +22,11 @@
 #include "gpu_budget_plan.hpp"
 #include "guest_memory_argument.hpp"
 #include "options.hpp"
+#include "platform/camera.hpp"
 #include "platform/microphone_authorization.hpp"
+#if UML_APP_HAS_SYNTHETIC_CAMERA
+#include "platform/synthetic_camera/synthetic_camera.hpp"
+#endif
 #include "restart_loop_guard.hpp"
 #include "sockets/socket_paths.hpp"
 #include "statistics_report.hpp"
@@ -329,6 +334,22 @@ struct HostGpuOptions {
 	[[nodiscard]] bool operator==(const HostGpuOptions &) const = default;
 };
 
+/* --camera=: where the guest's cameras come from. */
+enum class CameraSource : std::uint8_t {
+	/* No camera device. */
+	none,
+	/* The synthetic camera's chart, live. */
+	synthetic,
+	/* The cameras the host has, discovered and never opened: every frame the
+	 * guest receives is black. */
+	blocked,
+	/* The host's cameras, live. */
+	host,
+};
+
+/* The cameras the synthetic camera presents (--camera-profile=). */
+enum class CameraProfile : std::uint8_t { phone, tablet, laptop };
+
 struct PreparedArguments {
 	HostGpuOptions gpu;
 	bool audio {};
@@ -337,6 +358,13 @@ struct PreparedArguments {
 	bool battery {};
 	bool video {};
 	bool video_encoder {};
+	CameraSource camera {CameraSource::none};
+	/* --camera-profile=: the synthetic camera is the source of `synthetic`
+	 * and, when this is given, of `blocked`. */
+	std::optional<CameraProfile> camera_profile;
+	/* --camera-calibration-dir=: where the colour data a Bayer still teaches
+	 * is kept; in memory when empty. */
+	std::string camera_calibration_directory;
 	/* --gpu-budget-app=, --gpu-budget-engine= and --gpu-budget-headroom=:
 	 * A, E_rest and S of the host GPU's fixed budget
 	 * (platform/gpu_budget.hpp). */
@@ -382,11 +410,14 @@ struct PreparedArguments {
 	{
 		return std::tie(gpu, gpu_budget, audio, audio_output,
 				audio_input_host, battery, video, video_encoder,
+				camera, camera_profile, camera_calibration_directory,
 				console_socket, serial_socket, net_forwards,
 				vsock_forwards) ==
 			std::tie(other.gpu, other.gpu_budget, other.audio,
 				 other.audio_output, other.audio_input_host,
 				 other.battery, other.video, other.video_encoder,
+				 other.camera, other.camera_profile,
+				 other.camera_calibration_directory,
 				 other.console_socket, other.serial_socket,
 				 other.net_forwards, other.vsock_forwards);
 	}
@@ -522,6 +553,33 @@ PreparedArguments prepare_host_arguments(
 			prepared.video = true;
 		} else if (argument == "--video-encoder") {
 			prepared.video_encoder = true;
+		} else if (valued("--camera=")) {
+			if (value == "none")
+				prepared.camera = CameraSource::none;
+			else if (value == "synthetic")
+				prepared.camera = CameraSource::synthetic;
+			else if (value == "blocked")
+				prepared.camera = CameraSource::blocked;
+			else if (value == "host")
+				prepared.camera = CameraSource::host;
+			else
+				throw std::invalid_argument(
+					"--camera must be none, synthetic, blocked or host");
+		} else if (valued("--camera-profile=")) {
+			if (value == "phone")
+				prepared.camera_profile = CameraProfile::phone;
+			else if (value == "tablet")
+				prepared.camera_profile = CameraProfile::tablet;
+			else if (value == "laptop")
+				prepared.camera_profile = CameraProfile::laptop;
+			else
+				throw std::invalid_argument(
+					"--camera-profile must be phone, tablet or laptop");
+		} else if (valued("--camera-calibration-dir=")) {
+			if (value.empty())
+				throw std::invalid_argument(
+					"--camera-calibration-dir requires a path");
+			prepared.camera_calibration_directory = value;
 		} else if (valued("--virtio-console-socket=")) {
 			set_socket_path(prepared.console_socket,
 					"--virtio-console-socket", value);
@@ -654,6 +712,16 @@ PreparedArguments prepare_host_arguments(
 	     prepared.gpu.height > uml::gpu::protocol::maximumEdidDimension))
 		throw std::invalid_argument(
 			"--gpu-dpi requires display dimensions no larger than 4095");
+	if (prepared.camera_profile &&
+	    prepared.camera != CameraSource::synthetic &&
+	    prepared.camera != CameraSource::blocked)
+		throw std::invalid_argument(
+			"--camera-profile requires --camera=synthetic or "
+			"--camera=blocked");
+	if (!prepared.camera_calibration_directory.empty() &&
+	    prepared.camera == CameraSource::none)
+		throw std::invalid_argument(
+			"--camera-calibration-dir requires --camera");
 	if (!prepared.console_socket.empty() && !prepared.serial_socket.empty())
 		throw std::invalid_argument(
 			"--virtio-console-socket and --virtio-serial-socket are "
@@ -855,6 +923,7 @@ struct BootServices final {
 	VirtioService battery;
 	VirtioService video;
 	VirtioService video_encoder;
+	VirtioService camera;
 	VirtioService audio;
 	/* The guest records silence unless the user asked for the host's
 	 * microphone; the switch ends with the boot's audio service. */
@@ -878,6 +947,8 @@ struct BootServices final {
 			video->stop();
 		if (video_encoder)
 			video_encoder->stop();
+		if (camera)
+			camera->stop();
 		if (console)
 			console->stop();
 	}
@@ -1273,7 +1344,92 @@ private:
 		if (!prepared_.vsock_forwards.empty() && !information_only_ &&
 		    !start_vsock(kernel))
 			return false;
+		if (prepared_.camera != CameraSource::none && !information_only_ &&
+		    !start_camera(kernel))
+			return false;
 		return true;
+	}
+
+	/* Starts the Virtio camera device on the source --camera= names. Live
+	 * sources open a platform capture session only when the guest streams;
+	 * the blocked source never opens one. Nothing here asks the system for
+	 * the camera: that happens, for `host`, when a guest first streams. */
+	[[nodiscard]] bool start_camera(std::vector<std::string> &kernel)
+	{
+		std::shared_ptr<uml::platform::Camera> source;
+		uml::camera::CameraDeviceOptions options;
+		options.mode = prepared_.camera == CameraSource::blocked ?
+			uml::camera::CameraMode::blocked :
+			uml::camera::CameraMode::live;
+		options.tier =
+			uml::camera::cameraTierForBudget(device_memory_limit_);
+		if (!camera_calibration_)
+			camera_calibration_ =
+				std::make_shared<uml::camera::CalibrationStore>(
+					prepared_.camera_calibration_directory);
+		options.calibration = camera_calibration_;
+		options.onState = [](uml::camera::CameraState state) {
+			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
+		};
+		try {
+			if (prepared_.camera == CameraSource::synthetic ||
+			    (prepared_.camera == CameraSource::blocked &&
+			     prepared_.camera_profile)) {
+#if UML_APP_HAS_SYNTHETIC_CAMERA
+				uml::platform::SyntheticCameraOptions synthetic;
+				switch (prepared_.camera_profile.value_or(
+					CameraProfile::phone)) {
+				case CameraProfile::phone:
+					synthetic.profile =
+						uml::platform::SyntheticCameraProfile::phone;
+					break;
+				case CameraProfile::tablet:
+					synthetic.profile =
+						uml::platform::SyntheticCameraProfile::tablet;
+					break;
+				case CameraProfile::laptop:
+					synthetic.profile =
+						uml::platform::SyntheticCameraProfile::laptop;
+					break;
+				}
+				source = uml::platform::makeSyntheticCamera(synthetic);
+#else
+				std::fputs("--camera=synthetic needs the synthetic "
+					   "camera, which this build lacks\n", stderr);
+				return false;
+#endif
+			} else {
+				source = uml::platform::makeAppleCamera();
+			}
+		} catch (const std::exception &error) {
+			std::fprintf(stderr, "Unable to start the camera: %s\n",
+				error.what());
+			return false;
+		}
+		return start_virtio_device(
+			kernel, services_.camera, uml::camera::cameraDeviceId,
+			[&] {
+				return uml::camera::makeInProcessCameraService(
+					std::move(source), std::move(options),
+					gpu_service_ ? shared_memory_regions_ : nullptr);
+			},
+			"--camera", "Virtio camera");
+	}
+
+	static const char *camera_state_name(
+		uml::camera::CameraState state) noexcept
+	{
+		switch (state) {
+		case uml::camera::CameraState::idle:
+			return "idle";
+		case uml::camera::CameraState::streaming:
+			return "streaming";
+		case uml::camera::CameraState::interrupted:
+			return "interrupted";
+		case uml::camera::CameraState::interruptedByMultitasking:
+			return "interrupted by multitasking";
+		}
+		return "unknown";
 	}
 
 	/* Starts the Virtio vsock device and the listeners that reach it, and
@@ -1325,6 +1481,9 @@ private:
 	/* After the handle and the GPU service it reads, so it ends before them. */
 	std::unique_ptr<StatsSampler> stats_;
 	BootServices services_;
+	/* What the camera has learned about the host's lenses; it outlives the
+	 * boots, so a restarted guest keeps it. */
+	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;
 	std::uint64_t device_memory_limit_{};
 	std::atomic<bool> stop_requested_{};
 };

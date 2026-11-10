@@ -53,6 +53,17 @@ application's statements (the sensor orientation, the rotation that
   set applies every value or none. The table is `camera_controls.cpp`; the
   platform sees one `CameraSettings` per camera.
 
+## Launcher
+
+The macOS launcher starts the device with `--camera=synthetic|blocked|host|none`
+(`none` by default), as the last of the Virtio devices it creates so that no
+other device's index moves. `synthetic` serves the synthetic camera's chart
+(`--camera-profile=phone|tablet|laptop`, phone by default); `blocked` serves the
+host's cameras, or the synthetic profile when one is given, without ever opening
+a capture session; `host` serves the host's cameras live. `--camera-calibration-dir=`
+keeps learned colour data across launches. The tier follows the launch's GPU
+budget, and a state line goes to stderr when the host starts or stops capturing.
+
 ## Tests
 
 `camera-controls`, `camera-description`, `camera-jpeg-gap` and

@@ -29,6 +29,7 @@ NO_ROOTFS = "ubd0=/dev/null"
 # The Virtio device identifiers of the explicit transport arguments.
 BATTERY, CONSOLE, AUDIO, VIDEO, VIDEO_ENCODER, GPU, VSOCK = (
     65535, 3, 25, 31, 30, 16, 19)
+CAMERA = 65533
 
 
 def explicit(device_id: int) -> str:
@@ -47,6 +48,24 @@ REFUSALS: list[tuple[list[str], str]] = [
     (["--video", explicit(VIDEO)], COLLISION.format("--video", "Virtio video")),
     (["--video-encoder", explicit(VIDEO_ENCODER)],
      COLLISION.format("--video-encoder", "Virtio video encoder")),
+    (["--camera=synthetic", explicit(CAMERA)],
+     COLLISION.format("--camera", "Virtio camera")),
+    (["--camera=blocked", "--camera-profile=laptop", explicit(CAMERA)],
+     COLLISION.format("--camera", "Virtio camera")),
+    (["--camera=webcam"],
+     CONFIGURE + "--camera must be none, synthetic, blocked or host"),
+    (["--camera-profile=phone"],
+     CONFIGURE + "--camera-profile requires --camera=synthetic or "
+     "--camera=blocked"),
+    (["--camera=host", "--camera-profile=phone"],
+     CONFIGURE + "--camera-profile requires --camera=synthetic or "
+     "--camera=blocked"),
+    (["--camera=synthetic", "--camera-profile=watch"],
+     CONFIGURE + "--camera-profile must be phone, tablet or laptop"),
+    (["--camera-calibration-dir={tmp}/cal"],
+     CONFIGURE + "--camera-calibration-dir requires --camera"),
+    (["--camera=synthetic", "--camera-calibration-dir="],
+     CONFIGURE + "--camera-calibration-dir requires a path"),
     (["--audio", explicit(AUDIO)], COLLISION.format("--audio", "Virtio Sound")),
     (["--gpu", explicit(GPU)], COLLISION.format("--gpu", "Virtio-GPU")),
     (["--vsock-forward=0-5555", explicit(VSOCK)],
@@ -154,6 +173,12 @@ ACCEPTED: list[list[str]] = [
     ["--gpu-display=offscreen", "--gpu-offscreen-mirror=off"],
     ["--gpu", "--battery", "--audio", "--video", "--video-encoder",
      explicit(BATTERY), explicit(GPU)],
+    ["--camera=synthetic", "--camera-profile=tablet",
+     "--camera-calibration-dir={tmp}/calibration"],
+    ["--camera=blocked", "--camera-profile=laptop"],
+    ["--camera=blocked"],
+    ["--camera=host"],
+    ["--camera=none"],
     ["--audio-output=null"],
     ["--audio", "--audio-output=host"],
     ["--audio-input=silent"],
