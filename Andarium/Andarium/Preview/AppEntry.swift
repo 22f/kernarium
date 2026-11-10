@@ -303,6 +303,8 @@ struct AppEntry {
         }
         if systemMicrophone { useSystemMicrophone(in: model) }
         if systemLocation { useSystemLocation(in: model) }
+        // Seeded snapshots no screen opens yet; a state sets its own seed.
+        model.snapshotDriver = PreviewSnapshotDriver(.sample())
         return model
     }
 

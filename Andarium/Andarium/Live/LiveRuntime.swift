@@ -118,6 +118,11 @@ final class LiveRuntime: RuntimeDriver {
     private var pending: PendingRun?
     private var launching = false
     private var preparing = false
+    /// The snapshot operation under way (`SnapshotDriver`). It clears the
+    /// field itself before it ends, so what waits for it never sees it set.
+    private var snapshotOperation: Task<Void, Never>?
+    /// A guest is being created or erased.
+    private var storageBusy = false
     private var view: GuestMetalView?
     private var geometry: GuestDisplayGeometry?
     private var bootStartedAt = Date()
@@ -165,11 +170,18 @@ final class LiveRuntime: RuntimeDriver {
 
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
+        await settleSnapshotOperation()
+        storageBusy = true
+        defer { storageBusy = false }
         return try await storage.create(guest, progress: progress)
     }
 
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
+        // The snapshots go with the guest: an operation on them finishes first.
+        await settleSnapshotOperation()
+        storageBusy = true
+        defer { storageBusy = false }
         try await storage.erase(progress: progress)
         // The next guest is a new one: it boots with a key of its own.
         keyStore.delete()
@@ -192,6 +204,7 @@ final class LiveRuntime: RuntimeDriver {
 
     func restoreUpdate() throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
+        guard snapshotOperation == nil, !storageBusy else { throw SnapshotRefusal.busy }
         try storage.restoreUpdate()
     }
 
@@ -225,6 +238,9 @@ final class LiveRuntime: RuntimeDriver {
 
     private func prepareAndLaunch(_ run: PendingRun) async {
         preparing = true
+        // A snapshot operation that is still under way finishes before the
+        // files are read.
+        await settleSnapshotOperation()
         do {
             try await storage.prepareStart(run.guest) { fraction in
                 Task { @MainActor in self.preparingDisk(fraction) }
@@ -1121,5 +1137,75 @@ final class PauseTaskAssertion {
         guard identifier != .invalid else { return }
         UIApplication.shared.endBackgroundTask(identifier)
         identifier = .invalid
+    }
+}
+
+// MARK: Snapshots
+
+/// The guest's data snapshots. The application's own state is the lock on the
+/// disk: no file lock says on iOS that a guest holds it, so an operation runs
+/// only while the guest is stopped (`SnapshotRules.gate`), one at a time, off
+/// the main actor, and a start or an erase waits for the one under way.
+extension LiveRuntime: SnapshotDriver {
+    var snapshotGate: SnapshotRefusal? {
+        guard let model else { return .guestNotStopped }
+        return SnapshotRules.gate(
+            phase: model.phase, runtimeActive: runActive || pending != nil || launching || preparing,
+            operationUnderWay: snapshotOperation != nil || storageBusy)
+    }
+
+    func snapshotListing() async -> SnapshotListing {
+        await settleSnapshotOperation()
+        let storage = self.storage
+        var listing = await Task.detached(priority: .utility) { storage.snapshotListing() }.value
+        listing.whileNotStopped = snapshotGate
+        return listing
+    }
+
+    func createSnapshot(named name: String) async -> SnapshotResult<SnapshotSummary> {
+        await performSnapshot(gated: true) { try $0.createSnapshot(named: name) }
+    }
+
+    func restoreSnapshot(_ id: SnapshotID, guest: Guest) async -> SnapshotResult<Guest> {
+        await performSnapshot(gated: true) { try $0.restoreSnapshot(id, guest: guest) }
+    }
+
+    func deleteSnapshot(_ id: SnapshotID) async -> SnapshotResult<Void> {
+        await performSnapshot(gated: true) { try $0.deleteSnapshot(id) }
+    }
+
+    func renameSnapshot(_ id: SnapshotID, to name: String) async -> SnapshotResult<Void> {
+        await performSnapshot(gated: false) { try $0.renameSnapshot(id, to: name) }
+    }
+
+    /// Waits for the snapshot operation under way, if any.
+    private func settleSnapshotOperation() async {
+        while let operation = snapshotOperation { await operation.value }
+    }
+
+    /// Runs `body` on the storage off the main actor as the one operation
+    /// under way. A gated one refuses unless the guest is stopped and idle;
+    /// one that is not (Rename) waits its turn.
+    private func performSnapshot<Value: Sendable>(
+        gated: Bool, _ body: @escaping @Sendable (TwoDiskStorage) throws -> Value
+    ) async -> SnapshotResult<Value> {
+        if gated {
+            if let refusal = snapshotGate { return .refused(refusal) }
+        } else {
+            await settleSnapshotOperation()
+            if storageBusy { return .refused(.busy) }
+        }
+        let storage = self.storage
+        let work = Task.detached(priority: .userInitiated) { SnapshotResult(catching: { try body(storage) }) }
+        let operation = Task { [weak self] in
+            _ = await work.value
+            self?.snapshotOperation = nil
+        }
+        snapshotOperation = operation
+        let result = await work.value
+        await operation.value
+        // A restore or a delete changes what the device has free.
+        model?.host.freeStorageBytes = AppEntry.freeStorageBytes()
+        return result
     }
 }

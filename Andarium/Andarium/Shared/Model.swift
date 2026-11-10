@@ -313,6 +313,9 @@ final class AppModel {
 
     /// The runtime and storage behind the screens; nil plays mock data.
     var driver: (any RuntimeDriver)?
+    /// The guest's data snapshots behind the screens: the runtime's, or the
+    /// preview's seeded ones (`SnapshotDriver`).
+    var snapshotDriver: (any SnapshotDriver)?
     /// A long task the screens wait for.
     var busy: BusyState?
     /// The guest is paused because the device is nearly out of space; the

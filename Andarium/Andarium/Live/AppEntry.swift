@@ -95,6 +95,13 @@ struct AppEntry {
             ),
             releaseDirectory: systemFolder ?? locations.directory
         )
+        // What the last process left half done in the snapshots (a restore, a
+        // create, a delete) is completed before the guest is read.
+        do {
+            try storage.recoverSnapshots()
+        } catch {
+            print("Andarium: the snapshots could not be recovered: \(error.localizedDescription)")
+        }
         var guest: Guest?
         do {
             guest = try storage.load()
@@ -174,6 +181,7 @@ struct AppEntry {
                 model: model, storage: storage, marker: marker, keyStore: adbKeyStore,
                 sessionRecord: sessionRecord, freeSpace: watched)
             model.driver = runtime
+            model.snapshotDriver = runtime
             model.fileBrowser = FileBrowserModel(backend: runtime.makeGuestFiles(hostFree: watched))
             model.refreshPlan()
             // Access the person took away while Andarium was closed takes the
