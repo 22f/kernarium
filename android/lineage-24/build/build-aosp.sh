@@ -387,6 +387,8 @@ PRODUCT_PACKAGES=" $(get_build_var PRODUCT_PACKAGES) "
 	fail "the Andarium vibrator service is absent"
 [[ "$PRODUCT_PACKAGES" == *" android.hardware.gnss-service.andarium "* ]] ||
 	fail "the Andarium GNSS service is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.thermal-service.andarium "* ]] ||
+	fail "the Andarium thermal service is absent"
 [[ "$(get_build_var ODM_MANIFEST_SKUS)" == haptics ]] ||
 	fail "ODM_MANIFEST_SKUS must be exactly haptics: the vibrator HAL exists only in that SKU's manifest"
 for package in \
@@ -475,8 +477,6 @@ fi
 	fail "the OMAPI service that SEService clients bind on demand is absent"
 [[ "$PRODUCT_PACKAGES" == *" EasterEgg "* ]] ||
 	fail "the easter egg that the platform logo screen opens is absent"
-[[ "$PRODUCT_PACKAGES" == *" com.android.hardware.thermal "* ]] ||
-	fail "the example thermal HAL that the thermal manager needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.cas "* ]] ||
 	fail "the default CAS HAL that MediaCas needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" libclearkeycasplugin "* ]] ||
@@ -510,6 +510,7 @@ for package in \
 	com.android.hardware.security.authgraph \
 	com.android.hardware.security.secretkeeper \
 	com.android.hardware.tetheroffload \
+	com.android.hardware.thermal \
 	com.android.hardware.usb \
 	com.android.hardware.vibrator \
 	com.android.vndk.v31 \

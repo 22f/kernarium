@@ -21,6 +21,7 @@ add_subdirectory(device/battery)
 add_subdirectory(device/vsock)
 add_subdirectory(device/gnss)
 add_subdirectory(device/video)
+add_subdirectory(device/camera)
 
 if(UML_BUILD_GPU)
     add_subdirectory(device/gpu)

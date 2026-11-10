@@ -133,6 +133,14 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The thermal runner's reading of the guest's dumps, and the records it sends.
+uml_add_tooling_test(
+    NAME android17-thermal-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_thermal_runner.py
+    LABELS android
+    TIMEOUT 30)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(

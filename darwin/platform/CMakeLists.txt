@@ -25,13 +25,32 @@ uml_declare_architecture_target(uml_descriptor platform)
 target_include_directories(uml_descriptor INTERFACE
     ${PROJECT_SOURCE_DIR}/darwin)
 
-add_library(uml_video_decoder STATIC apple/video_decoder.mm apple/hevc_stream.cpp apple/h264_stream.cpp)
+set(UML_VIDEO_DECODER_SOURCES
+    apple/video_decoder.mm
+    apple/hevc_stream.cpp
+    apple/h264_stream.cpp)
+add_library(uml_video_decoder STATIC ${UML_VIDEO_DECODER_SOURCES})
 add_library(UML::VideoDecoder ALIAS uml_video_decoder)
 uml_declare_architecture_target(uml_video_decoder platform)
 target_include_directories(uml_video_decoder PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(uml_video_decoder PRIVATE UML::PlatformContract
     "-framework Foundation" "-framework CoreMedia" "-framework CoreVideo"
     "-framework VideoToolbox")
+if(UML_BUILD_UNIT_TESTS)
+    # The same sources with the session-loss injection the recovery test
+    # drives; products compile them without it.
+    add_library(uml_video_decoder_test_variant STATIC
+        ${UML_VIDEO_DECODER_SOURCES})
+    uml_declare_architecture_target(uml_video_decoder_test_variant platform)
+    target_include_directories(uml_video_decoder_test_variant PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(uml_video_decoder_test_variant PUBLIC
+        UML_VIDEO_DECODER_TESTING=1)
+    target_link_libraries(uml_video_decoder_test_variant PRIVATE
+        UML::PlatformContract
+        "-framework Foundation" "-framework CoreMedia" "-framework CoreVideo"
+        "-framework VideoToolbox")
+endif()
 
 # The hardware video encoder: VideoToolbox discovery, sessions and Annex B
 # output behind darwin/platform/video_encoder.hpp.
@@ -86,6 +105,47 @@ target_link_libraries(uml_microphone_authorization PRIVATE
     UML::PlatformContract
     "-framework AVFAudio"
     "-framework Foundation")
+
+# The camera: the picture and DNG helpers, which are portable C++, and the
+# AVFoundation implementation of darwin/platform/camera.hpp with the system's
+# camera permission. The synthetic camera has its own directory.
+add_library(uml_nv12_transform STATIC nv12_transform.cpp)
+add_library(UML::Nv12Transform ALIAS uml_nv12_transform)
+uml_declare_architecture_target(uml_nv12_transform platform)
+target_include_directories(uml_nv12_transform PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(uml_dng_color STATIC dng_color.cpp)
+add_library(UML::DngColor ALIAS uml_dng_color)
+uml_declare_architecture_target(uml_dng_color platform)
+target_include_directories(uml_dng_color PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(uml_apple_camera STATIC
+    apple/accelerated_nv12.cpp
+    apple/camera_authorization.mm
+    apple/camera_capture.mm)
+add_library(UML::AppleCamera ALIAS uml_apple_camera)
+uml_declare_architecture_target(uml_apple_camera platform)
+target_include_directories(uml_apple_camera PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(uml_apple_camera PUBLIC UML::DngColor UML::Nv12Transform)
+target_link_libraries(uml_apple_camera PRIVATE
+    UML::PlatformContract
+    "-framework Accelerate"
+    "-framework AVFoundation"
+    "-framework CoreMedia"
+    "-framework CoreVideo"
+    "-framework Foundation"
+    "-framework ImageIO"
+    "-framework IOSurface"
+    "-framework VideoToolbox")
+
+# The camera without hardware, for tests and for the launchers that run a guest
+# against a chart. An App Store runtime carries none.
+if(NOT UML_APP_STORE_RUNTIME)
+    add_subdirectory(synthetic_camera)
+endif()
 
 add_library(uml_host_gpu_memory STATIC apple/host_gpu_memory.mm)
 add_library(UML::HostGpuMemory ALIAS uml_host_gpu_memory)

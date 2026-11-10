@@ -228,6 +228,26 @@ rules and `gnss_engine.hpp` the session, with no Android dependency; the
 `tests/integration/android/location/` is a probe application for the candidate
 image, never installed in a release.
 
+### Thermal
+
+The thermal HAL tells Android how hot the host is. `overlay/thermal/` is the
+vendor AIDL HAL, which replaces the AOSP example HAL (its APEX is not
+installed); the vendor manifest declares `android.hardware.thermal`
+`IThermal/default` on every device. Its one SKIN sensor follows the severity
+the host application last sent (NONE to CRITICAL), and stays at NONE until a
+host connects. The HAL never reports EMERGENCY or SHUTDOWN, whatever the host
+sends, and keeps its severity when the host link drops.
+`overlay/thermal/thermal_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/ThermalProtocol.swift` own the wire,
+which the golden frames in `tests/unit/andarium/fixtures` pin.
+
+From SEVERE on, Android holds the display's render rate to 30 Hz; the display
+mode does not change. The map is the vendor default display configuration
+(`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`), which the
+display topic of route `p0007` makes a display with no map of its own use.
+`tests/integration/android/run_android_thermal.py` drives the stream on a
+candidate image.
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -461,8 +481,8 @@ patches, never by deleting files from a completed image.
 `KERNARIUM_REMOVED_PACKAGES` in `overlay/lineage_andarium.mk` lists what the
 product omits: HAL APEXes with no Darwin UML hardware, AVF guest payloads, OTA
 and DSU executables, and Cuttlefish host-monitoring services. The build and the
-verifier reject any excluded module that reappears. The thermal and CAS HAL
-APEXes (CTS needs both) stay, as do DeviceLock, Virtualization and the modular
+verifier reject any excluded module that reappears. The CAS HAL APEX (CTS needs
+it) stays, as do DeviceLock, Virtualization and the modular
 framework containers, which the platform SDK classes link. EasterEgg stays
 too: Settings' Android version row opens the platform logo screen, which starts
 the egg, and the verifier requires its package.

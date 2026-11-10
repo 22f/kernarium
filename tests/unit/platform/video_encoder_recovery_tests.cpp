@@ -116,6 +116,27 @@ void aSecondLossIsFinal()
     require(again.pictures()[0]->type == VideoFrameType::key, "the new stream starts at a key frame");
 }
 
+/* The system revokes the session of an app in the background while nothing is
+ * in flight, so the first frame after it is refused when it is submitted. */
+void idleSessionInvalidated()
+{
+    std::puts("== idle session invalidated");
+    const auto base = fixturePicture(false);
+    auto encoder = open(settings());
+    const auto before = feed(*encoder, 6, 0, base);
+    requireWhole(before, 6, 0);
+    ::uml::platform::testing::invalidateSession(*encoder);
+    const auto after = feed(*encoder, 6, 100, base);
+    requireWhole(after, 6, 100);
+    const auto frames = after.pictures();
+    require(frames[0]->timestamp == 100 && frames[0]->type == VideoFrameType::key, "the frame after the loss is a key frame");
+    require(hasUnit(VideoCodec::h264, *frames[0], bits::h264NalSps), "carrying the parameter sets");
+    for (unsigned i = 1; i < 6; ++i) require(frames[i]->type == VideoFrameType::predicted, "and the rest follow it");
+    if (hardwareDecodes(VideoEncodeProfile::h264High)) {
+        require(decode(VideoCodec::h264, before).size() == 6 && decode(VideoCodec::h264, after).size() == 6, "both halves decode");
+    }
+}
+
 void lossesWithOutputBetweenAreEachRecovered()
 {
     std::puts("== separate losses");
@@ -173,6 +194,7 @@ int main(int argc, char** argv)
     try {
         oneLossIsRecovered();
         lossInTheMiddle();
+        idleSessionInvalidated();
         aSecondLossIsFinal();
         lossesWithOutputBetweenAreEachRecovered();
         lossWithReordering();

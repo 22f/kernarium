@@ -664,6 +664,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.gnss-service\\.andarium"
             "  u:object_r:hal_gnss_default_exec:s0\n"
         )
+        good_thermal_label = (
+            "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.thermal-service\\.andarium"
+            "  u:object_r:hal_thermal_default_exec:s0\n"
+        )
         good_video_contexts = (
             "/dev/hvc0  u:object_r:serial_device:s0\n"
             + good_net_setup_label
@@ -671,6 +675,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "  u:object_r:mediacodec_exec:s0\n"
             + good_vibrator_label
             + good_gnss_label
+            + good_thermal_label
         )
         # The GNSS HAL: declared on every device by one vendor fragment, and started at boot with its
         # class.
@@ -686,6 +691,30 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         )
         gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
         gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
+        # The thermal HAL: declared on every device by one vendor fragment, started at boot with its
+        # class. The default display configuration holds the one point that holds the render rate to
+        # 30 Hz from the SEVERE status on.
+        good_thermal_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.thermal</name><version>3</version>"
+            "<fqname>IThermal/default</fqname></hal></manifest>"
+        )
+        good_thermal_rc = (
+            "service vendor.thermal-andarium /vendor/bin/hw/android.hardware.thermal-service.andarium\n"
+            "    interface aidl android.hardware.thermal.IThermal/default\n"
+            "    class hal\n    user nobody\n    group system\n"
+        )
+        thermal_rc_path = "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc"
+        thermal_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml"
+        display_config_path = "VENDOR/etc/displayconfig/default.xml"
+        good_display_config = (
+            '<?xml version="1.0" encoding="utf-8"?>\n<!-- comment -->\n<displayConfiguration>\n'
+            "  <thermalThrottling>\n    <refreshRateThrottlingMap>\n"
+            "      <refreshRateThrottlingPoint>\n        <thermalStatus>severe</thermalStatus>\n"
+            "        <refreshRateRange>\n          <minimum>0</minimum>\n          <maximum>30</maximum>\n"
+            "        </refreshRateRange>\n      </refreshRateThrottlingPoint>\n"
+            "    </refreshRateThrottlingMap>\n  </thermalThrottling>\n</displayConfiguration>\n"
+        )
         # The vibrator HAL: declared by the ODM manifest of the haptics SKU alone, and started by init
         # for that SKU alone.
         good_vibrator_manifest = (
@@ -868,7 +897,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           reclaim_variant: str | None = None,
                           time_zone_variant: str | None = None,
                           wallpaper_variant: str | None = None,
-                          thermal_hal_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
                           services_jar_variant: str | None = None,
@@ -2198,6 +2226,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr("VENDOR/bin/hw/android.hardware.gnss-service.andarium", synthetic_aarch64_elf())
                 archive.writestr(gnss_rc_path, good_gnss_rc)
                 archive.writestr(gnss_fragment_path, good_gnss_manifest)
+                archive.writestr("VENDOR/bin/hw/android.hardware.thermal-service.andarium", synthetic_aarch64_elf())
+                archive.writestr(thermal_rc_path, good_thermal_rc)
+                archive.writestr(thermal_fragment_path, good_thermal_manifest)
+                archive.writestr(display_config_path, good_display_config)
                 # The sample file of the platform: comments only, no assistance server.
                 archive.writestr("SYSTEM/etc/gps_debug.conf", "# SUPL_HOST=supl.example\n# NTP_SERVER=ntp.example\n\n")
                 advertised_features = ["android.hardware.touchscreen",
@@ -2451,31 +2483,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                 if unsupported_hal:
                     archive.writestr("VENDOR/apex/com.google.cf.light.apex", b"apex")
-                # The AOSP example thermal service as the vendor APEX Cuttlefish installs: the service
-                # binary as a file under bin/hw, the VINTF fragment that declares it and the init
-                # script that starts it. The init script names the binary too, so the file is read
-                # from the payload's directories, not found by its name.
-                thermal_binary = b"android.hardware.thermal-service.example"
-                thermal_content = b"\x00" * 8
-                thermal_files = ("etc/init.rc",)
-                if thermal_hal_variant != "no-binary":
-                    thermal_files += (f"bin/hw/{thermal_binary.decode()}",)
-                if thermal_hal_variant != "no-fragment":
-                    thermal_content += (
-                        b'<manifest version="1.0" type="device"><hal format="aidl">'
-                        b"<name>android.hardware.thermal</name><version>3</version>"
-                        b"<fqname>IThermal/default</fqname></hal></manifest>"
-                    )
-                if thermal_hal_variant != "no-service":
-                    thermal_content += (
-                        b"service vendor.thermal-example "
-                        b"/apex/com.android.hardware.thermal/bin/hw/" + thermal_binary + b"\n"
-                    )
-                if thermal_hal_variant != "missing-apex":
-                    archive.writestr(
-                        "VENDOR/apex/com.android.hardware.thermal.apex",
-                        synthetic_apex("erofs", thermal_content, files=thermal_files),
-                    )
                 # The adb daemon in its APEX: bin/adbd is a file of the payload, stored uncompressed (the payload
                 # hints), and holds the names of the launch properties that the p0011 topics read.
                 adbd_content = b"\x00" * 8
@@ -2512,7 +2519,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             "classes.dex",
                             b"dex\n039\x00"
                             + (b"" if services_jar_variant == "no-marker"
-                               else b"kernarium: USB debugging is now \x00"),
+                               else b"kernarium: USB debugging is now \x00")
+                            + (b"" if services_jar_variant == "no-display-marker"
+                               else b"RefreshRateThrottling: using the map of the default configuration\x00"),
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
                 # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
@@ -3062,10 +3071,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("vendor-soc-model", {"soc_variant": "vendor-model"}),
             ("vendor-soc-other", {"soc_variant": "vendor-other"}),
             ("vendor-soc-same-as-odm", {"soc_variant": "vendor-same"}),
-            ("missing-thermal-apex", {"thermal_hal_variant": "missing-apex"}),
-            ("thermal-apex-without-binary", {"thermal_hal_variant": "no-binary"}),
-            ("thermal-apex-without-fragment", {"thermal_hal_variant": "no-fragment"}),
-            ("thermal-apex-without-service", {"thermal_hal_variant": "no-service"}),
             ("missing-cas-apex", {"cas_hal_variant": "missing-apex"}),
             ("cas-apex-without-binary", {"cas_hal_variant": "no-binary"}),
             ("cas-apex-without-fragment", {"cas_hal_variant": "no-fragment"}),
@@ -3079,6 +3084,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("adb-root-service-without-the-debuggable-rule", {"adbd_variant": "no-root-guard"}),
             ("missing-adb-root-service", {"adbd_variant": "no-root-service"}),
             ("services-jar-without-the-adb-topics", {"services_jar_variant": "no-marker"}),
+            ("services-jar-without-the-display-topic", {"services_jar_variant": "no-display-marker"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
@@ -3749,14 +3755,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "VENDOR/build.prop sets ro.soc.et=true: the SoC identity is the ODM"),
             ("vendor-soc-same-as-odm-cause", {"soc_variant": "vendor-same"},
              "VENDOR/build.prop sets ro.soc.manufacturer=Kernarium: the SoC identity is the ODM"),
-            ("missing-thermal-apex-cause", {"thermal_hal_variant": "missing-apex"},
-             "com.android.hardware.thermal.apex is missing: the product needs a thermal HAL"),
-            ("thermal-apex-without-binary-cause", {"thermal_hal_variant": "no-binary"},
-             "does not hold the service binary bin/hw/android.hardware.thermal-service.example"),
-            ("thermal-apex-without-fragment-cause", {"thermal_hal_variant": "no-fragment"},
-             "does not declare IThermal/default in a VINTF fragment"),
-            ("thermal-apex-without-service-cause", {"thermal_hal_variant": "no-service"},
-             "does not start the vendor.thermal-example service"),
             ("missing-adbd-apex-cause", {"adbd_variant": "missing-apex"},
              "SYSTEM/apex/com.android.adbd.apex is missing: the product needs the adb daemon"),
             ("adbd-apex-without-binary-cause", {"adbd_variant": "no-binary"},
@@ -3790,6 +3788,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "RECOVERY/RAMDISK/system/etc/security/otacerts.zip is missing from the unsigned"),
             ("services-jar-without-the-adb-topics-cause", {"services_jar_variant": "no-marker"},
              "lacks the AdbService topics of route p0007"),
+            ("services-jar-without-the-display-topic-cause", {"services_jar_variant": "no-display-marker"},
+             "lacks the display topic that reads the default configuration's refresh rate throttling map "
+             "of route p0007"),
             ("missing-services-jar-cause", {"services_jar_variant": "missing"},
              "SYSTEM/framework/services.jar is missing"),
             ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
@@ -4484,6 +4485,96 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("gnss-ntp-server", {"entries": {
                 "SYSTEM/etc/gps_debug.conf": b"# comment\nNTP_SERVER=time.example\n"}},
              "configures an assistance server"),
+            ("missing-thermal-service", {"entries": {
+                "VENDOR/bin/hw/android.hardware.thermal-service.andarium": None}},
+             "required entries are missing"),
+            ("missing-thermal-rc", {"entries": {thermal_rc_path: None}}, "required entries are missing"),
+            ("missing-thermal-fragment", {"entries": {thermal_fragment_path: None}},
+             "required entries are missing"),
+            ("missing-display-config", {"entries": {display_config_path: None}},
+             "required entries are missing"),
+            ("thermal-in-the-vendor-manifest", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_thermal_manifest.encode()}},
+             "declares android.hardware.thermal"),
+            ("thermal-in-a-second-fragment", {"entries": {
+                "VENDOR/etc/vintf/manifest/android.hardware.thermal.xml": good_thermal_manifest.encode()}},
+             "declares android.hardware.thermal"),
+            ("thermal-in-the-plain-odm-manifest", {"entries": {
+                "ODM/etc/vintf/manifest.xml": good_thermal_manifest.encode()}},
+             "declares android.hardware.thermal"),
+            ("cuttlefish-thermal-apex", {"entries": {
+                "VENDOR/apex/com.android.hardware.thermal.apex": b"apex"}},
+             "nonstatic image or metadata is forbidden"),
+            ("thermal-fragment-version-2", {"entries": {
+                thermal_fragment_path: good_thermal_manifest.replace("<version>3", "<version>2").encode()}},
+             "must declare exactly the AIDL IThermal/default at version 3"),
+            ("thermal-fragment-with-a-second-hal", {"entries": {
+                thermal_fragment_path: good_thermal_manifest.replace(
+                    "</manifest>", '<hal format="aidl"><name>android.hardware.light</name>'
+                    "<version>2</version><fqname>ILights/default</fqname></hal></manifest>").encode()}},
+             "must declare exactly the AIDL IThermal/default at version 3"),
+            ("thermal-fragment-other-instance", {"entries": {
+                thermal_fragment_path: good_thermal_manifest.replace("IThermal/default", "IThermal/other").encode()}},
+             "must declare exactly the AIDL IThermal/default at version 3"),
+            ("thermal-service-disabled", {"entries": {
+                thermal_rc_path: (good_thermal_rc + "    disabled\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("thermal-service-oneshot", {"entries": {
+                thermal_rc_path: (good_thermal_rc + "    oneshot\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("thermal-service-triggered", {"entries": {
+                thermal_rc_path: (good_thermal_rc + "\non boot\n    start vendor.thermal-andarium\n").encode()}},
+             "may have no trigger"),
+            ("thermal-service-without-interface", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace(
+                    "    interface aidl android.hardware.thermal.IThermal/default\n", "").encode()}},
+             "must carry 'interface aidl"),
+            ("thermal-service-wrong-user", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace("user nobody", "user root").encode()}},
+             "must carry 'user nobody'"),
+            ("thermal-service-wrong-group", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace("group system", "group root").encode()}},
+             "must carry 'group system'"),
+            ("thermal-service-wrong-binary", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace(
+                    "android.hardware.thermal-service.andarium", "android.hardware.thermal-service.example").encode()}},
+             "must define one service that runs the Andarium thermal HAL"),
+            ("thermal-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_thermal_default_exec", "vendor_file").encode()}},
+             "hal_thermal_default_exec label"),
+            ("display-config-in-the-product-partition", {"entries": {
+                "PRODUCT/etc/displayconfig/default.xml": good_display_config.encode()}},
+             "would hide VENDOR/etc/displayconfig/default.xml"),
+            ("display-config-malformed", {"entries": {display_config_path: b"<displayConfiguration>"}},
+             "cannot parse VENDOR/etc/displayconfig/default.xml"),
+            ("display-config-with-another-setting", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<thermalThrottling>", "<name>display</name><thermalThrottling>").encode()}},
+             "with thermalThrottling and nothing else"),
+            ("display-config-with-a-brightness-map", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "</thermalThrottling>", "<brightnessThrottlingMap/></thermalThrottling>").encode()}},
+             "must hold the one default refreshRateThrottlingMap"),
+            ("display-config-with-a-named-map", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<refreshRateThrottlingMap>", '<refreshRateThrottlingMap id="other">').encode()}},
+             "must hold the one default refreshRateThrottlingMap"),
+            ("display-config-with-a-second-point", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "</refreshRateThrottlingMap>",
+                    "<refreshRateThrottlingPoint><thermalStatus>critical</thermalStatus>"
+                    "<refreshRateRange><minimum>0</minimum><maximum>20</maximum></refreshRateRange>"
+                    "</refreshRateThrottlingPoint></refreshRateThrottlingMap>").encode()}},
+             "must hold one refreshRateThrottlingPoint"),
+            ("display-config-critical-point", {"entries": {
+                display_config_path: good_display_config.replace("severe", "critical").encode()}},
+             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+            ("display-config-60-hz", {"entries": {
+                display_config_path: good_display_config.replace("<maximum>30", "<maximum>60").encode()}},
+             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+            ("display-config-minimum-30", {"entries": {
+                display_config_path: good_display_config.replace("<minimum>0", "<minimum>30").encode()}},
+             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
             ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
              "feature is not declared: android.hardware.location(?!\\.gps)"),
             ("missing-gps-feature", {"missing_location_feature": "android.hardware.location.gps"},
@@ -6115,7 +6206,7 @@ def verify_package_assertions(android_root: Path) -> None:
     for package in (
         "android.hardware.sensors-service.multihal",
         "android.hardware.sensors@2.1-impl.andarium",
-        "com.android.hardware.thermal",
+        "android.hardware.thermal-service.andarium",
         "com.android.hardware.cas",
         "libclearkeycasplugin",
         "com.android.hardware.wifi",

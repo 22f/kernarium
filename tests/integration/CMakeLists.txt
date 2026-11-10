@@ -605,6 +605,17 @@ uml_add_guest_integration_test(
     TIMEOUT 600
     CPUS 4)
 
+# A host suspend and the guest's own suspend, with the Virtio video decoder and
+# encoder idle, leave both devices as they were: a descriptor opened before the
+# suspend decodes and encodes after it, a new decode session gets its source
+# change and a picture, and the host resets neither device.
+uml_add_guest_integration_test(
+    NAME guest-video-suspend
+    SCRIPT kernel/run_guest_video_suspend.py
+    LABELS guest;kernel;video
+    TIMEOUT 900
+    CPUS 2)
+
 # Files of an LZ4 EROFS image with 4 KiB clusters, which EROFS decompresses
 # through vm_map_ram() aliases of page-cache folios, read back exactly, again
 # after the page cache is dropped.
