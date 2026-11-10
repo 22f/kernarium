@@ -168,8 +168,12 @@ device `wlan0` on it, and the kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
-airplane mode off takes apps offline while adb keeps working. There is no
-SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped.
+airplane mode off takes apps offline while adb keeps working. The platform
+validates a Wi-Fi network without probes (route `p0029`): NetworkMonitor sends
+none and reports the network validated once private DNS passes, so a blocked
+validation server never leaves a no-internet state or a sign-in notification. A
+VPN, a test network, DNS and the private DNS settings keep the stock rules. There
+is no SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped.
 
 ### Audio, settings and lock screen defaults
 

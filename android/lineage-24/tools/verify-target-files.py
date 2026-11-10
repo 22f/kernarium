@@ -2423,6 +2423,37 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
         fail(f"cannot inspect {SERVICES_JAR}: {problem}")
 
 
+# The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi without probes, so a blocked
+# validation server cannot leave the guest's one network unvalidated. NetworkStack is a priv-app of
+# the system partition, and its APK stores the dex file uncompressed, so the topic's validation log
+# line is in the bytes. A build without it would probe through the virtual Wi-Fi.
+NETWORK_STACK_APK = "SYSTEM/priv-app/NetworkStack/NetworkStack.apk"
+NETWORK_STACK_MARKERS = (b"Wi-Fi is validated without probes",)
+NETWORK_STACK_LIMIT = 16 << 20
+
+
+def check_network_stack(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(NETWORK_STACK_APK)
+    if info is None:
+        fail(f"{NETWORK_STACK_APK} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, NETWORK_STACK_LIMIT))) as apk:
+            dex = [
+                name for name in apk.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)
+            ]
+            if not dex:
+                fail(f"{NETWORK_STACK_APK} holds no dex file")
+            for marker in NETWORK_STACK_MARKERS:
+                if not any(marker in apk.read(name) for name in dex):
+                    fail(
+                        f"{NETWORK_STACK_APK} lacks the NetworkMonitor topic of route p0029 "
+                        f"({marker.decode()!r} is not in its dex files): the guest's Wi-Fi would be "
+                        "probed and could stay unvalidated"
+                    )
+    except (OSError, zipfile.BadZipFile) as problem:
+        fail(f"cannot inspect {NETWORK_STACK_APK}: {problem}")
+
+
 def check_ota_certificates(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], build_variant: str, signed: bool
 ) -> None:
@@ -4239,6 +4270,7 @@ def main() -> None:
         check_adb_root_service(archive, infos)
         check_lmkd_gpu_reclaim(archive, infos)
         check_services_jar(archive, infos)
+        check_network_stack(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)
         check_video_encoders(archive, infos)
