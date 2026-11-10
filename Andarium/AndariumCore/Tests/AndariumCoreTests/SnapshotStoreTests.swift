@@ -103,6 +103,27 @@ struct SnapshotStoreTests {
         #expect(!exists(fixture.snapshots), "a refusal makes nothing")
     }
 
+    @Test func theVolumeAnswersWhetherItClonesAndCreateSaysSoInAdvance() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        // This volume is one that clones (the suite runs only where it does).
+        #expect(VolumeCapabilities.clones(at: fixture.directory) == true)
+        #expect(fixture.storage.snapshotListing().createRefusal == nil)
+
+        var io = SnapshotFileOperations.live
+        io.volumeClones = { _ in false }
+        let app = fixture.app(using: io)
+        // It comes before what the person could change: a guest not shut down is told the permanent thing first.
+        try fixture.startWithoutShutDown(at: fixture.origin.addingTimeInterval(120))
+        #expect(app.snapshotListing().createRefusal == .volumeCannotClone)
+        #expect(throws: SnapshotRefusal.volumeCannotClone) { try app.createSnapshot(named: "x") }
+        #expect(GuestDirectory.describe(fixture.directory).filter { $0.key.hasPrefix("Snapshots") }.isEmpty)
+
+        // A volume that does not say is not a refusal; the clone itself decides.
+        io.volumeClones = { _ in nil }
+        #expect(fixture.app(using: io).snapshotListing().createRefusal == .notShutDown)
+    }
+
     @Test func createRefusesAnUnreadableRecordAndAnUnfinishedUpdate() async throws {
         let fixture = try await SnapshotFixture.make()
         defer { fixture.cleanUp() }

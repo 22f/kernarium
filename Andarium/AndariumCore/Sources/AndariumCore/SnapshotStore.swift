@@ -173,6 +173,8 @@ struct SnapshotStore: Sendable {
         if restoreUnderWay { throw SnapshotRefusal.restoreUnfinished }
         var details = stat()
         let dataExists = lstat(files.data.path, &details) == 0 && (details.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG)
+        // The volume's own answer: no state of the guest makes a clone work on one that cannot.
+        if dataExists, io.volumeClones(locations.directory) == false { throw SnapshotRefusal.volumeCannotClone }
         var state: InstanceState?
         var bytes: Data?
         if FileManager.default.fileExists(atPath: files.state.path) {

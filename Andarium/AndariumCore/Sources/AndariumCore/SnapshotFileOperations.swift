@@ -20,6 +20,8 @@ struct SnapshotFileOperations: Sendable {
     var flush: @Sendable (_ url: URL) throws -> Void
     var remove: @Sendable (_ url: URL) throws -> Void
     var list: @Sendable (_ directory: URL) throws -> [String]
+    /// Whether the volume `url` is on can clone files; nil when it does not say.
+    var volumeClones: @Sendable (_ url: URL) -> Bool?
     var measure = SnapshotMeasure.Primitives.live
 
     static let live = SnapshotFileOperations(
@@ -41,6 +43,34 @@ struct SnapshotFileOperations: Sendable {
             }
         },
         remove: { try FileManager.default.removeItem(at: $0) },
-        list: { try FileManager.default.contentsOfDirectory(atPath: $0.path) }
+        list: { try FileManager.default.contentsOfDirectory(atPath: $0.path) },
+        volumeClones: { VolumeCapabilities.clones(at: $0) }
     )
+}
+
+/// What the volume under a path says it can do.
+enum VolumeCapabilities {
+    /// Whether the volume supports `clonefile(2)` (`VOL_CAP_INT_CLONE`); nil
+    /// when the question is refused or the volume does not know it.
+    static func clones(at url: URL) -> Bool? {
+        var request = attrlist()
+        request.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+        request.volattr = ATTR_VOL_INFO | attrgroup_t(ATTR_VOL_CAPABILITIES)
+        // The reply: its length, then the capabilities as four words of
+        // supported bits and four of the bits the volume has an answer for.
+        var reply = [UInt8](repeating: 0, count: 64)
+        let status = reply.withUnsafeMutableBytes { buffer in
+            getattrlist(url.path, &request, buffer.baseAddress, buffer.count, 0)
+        }
+        guard status == 0 else { return nil }
+        let length = reply.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 0, as: UInt32.self) }
+        guard length >= 4 + 8 * 4 else { return nil }
+        let word = 4 * Int(VOL_CAPABILITIES_INTERFACES)
+        let supported = reply.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4 + word, as: UInt32.self) }
+        let known = reply.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4 + 16 + word, as: UInt32.self) }
+        let bit = UInt32(VOL_CAP_INT_CLONE)
+        // A bit the volume has no answer for says nothing.
+        guard known & bit != 0 else { return nil }
+        return supported & bit != 0
+    }
 }

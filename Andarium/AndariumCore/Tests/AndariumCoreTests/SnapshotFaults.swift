@@ -111,7 +111,8 @@ final class SnapshotFaults: @unchecked Sendable {
             write: { [self] in try enter("write", $1); try live.write($0, $1) },
             flush: { [self] in try enter("flush", $0); try live.flush($0) },
             remove: { [self] in try enter("remove", $0); try live.remove($0) },
-            list: { [self] in try enter("list", $0); return try live.list($0) }
+            list: { [self] in try enter("list", $0); return try live.list($0) },
+            volumeClones: { live.volumeClones($0) }
         )
     }
 }
