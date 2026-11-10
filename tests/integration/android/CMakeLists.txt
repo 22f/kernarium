@@ -79,3 +79,23 @@ if(UML_ANDROID_MICROG_RELEASE AND UML_ANDROID_MICROG_PROBE_DIR AND TARGET uml-da
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()
+
+# The command that Andarium's bug report sends to the guest to read its /proc
+# counters (AndariumCore's GuestProcFiles.swift, the one source of the string),
+# run as the application's adb channel runs it, in an Android guest: every file
+# arrives with content or says why it did not. It boots Android with the macOS
+# launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_GUEST_PROC_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-guest-proc test boots")
+if(UML_ANDROID_GUEST_PROC_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-guest-proc
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_guest_proc.py
+            --release ${UML_ANDROID_GUEST_PROC_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 1800
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()

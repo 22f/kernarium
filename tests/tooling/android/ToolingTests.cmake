@@ -113,6 +113,13 @@ uml_add_tooling_test(
     TIMEOUT 30)
 
 uml_add_tooling_test(
+    NAME android17-guest-proc-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_guest_proc_runner.py
+    LABELS android
+    TIMEOUT 60)
+
+uml_add_tooling_test(
     NAME android17-provision-helper
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_android_provision.py
