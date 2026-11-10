@@ -26,9 +26,19 @@ struct HapticsSessionTests {
         }
         var attempts: Int { lock.withLock { attemptCount } }
         var connections: Int { lock.withLock { peerList.count } }
-        var latest: Int32? { lock.withLock { peerList.last } }
+        var latest: Int32? { lock.withLock { peerList.last.flatMap { $0 >= 0 ? $0 : nil } } }
 
-        deinit { for peer in peerList { close(peer) } }
+        deinit { for peer in peerList where peer >= 0 { close(peer) } }
+
+        /// The guest's end of the latest connection goes away: closed here and
+        /// forgotten, so that it is closed once and not again by the fake.
+        func dropLatest() {
+            lock.withLock {
+                guard let peer = peerList.last, peer >= 0 else { return }
+                peerList[peerList.count - 1] = -1
+                close(peer)
+            }
+        }
 
         func openStream() throws -> Int32 {
             try lock.withLock {
@@ -301,7 +311,7 @@ struct HapticsSessionTests {
 
     @Test func aLostConnectionStopsEverythingAndIsMadeAgain() throws {
         let rig = try connected()
-        if let peer = rig.guest.latest { close(peer) }
+        rig.guest.dropLatest()
         #expect(eventually { rig.guest.connections == 2 && rig.session.isConnected })
         #expect(rig.player.calls.contains(.stopAll))
         // The new connection is a working one, and the engine is made ready for it.
@@ -375,7 +385,7 @@ struct HapticsSessionTests {
         #expect(eventually { rig.session.isConnected })
         // The HAL goes away and comes back after four failures.
         rig.guest.accepting = false
-        if let peer = rig.guest.latest { close(peer) }
+        rig.guest.dropLatest()
         #expect(eventually { rig.guest.attempts >= 5 })
         rig.guest.accepting = true
         #expect(eventually { rig.session.isConnected && rig.guest.connections == 2 })
