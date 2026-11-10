@@ -69,6 +69,12 @@ final class LiveRuntime: RuntimeDriver {
         Task { @MainActor [weak self] in self?.thermalCapStarted() }
     }
     private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
+    /// The device's position for the guest's GNSS receiver, read from Core
+    /// Location only while the person's Location switch, iOS, the foreground,
+    /// a normal run and the guest's own receiver all say so
+    /// (`LocationSession`).
+    private let hostLocation = HostLocation()
+    private lazy var location = LocationSession(updates: hostLocation, sink: RuntimeLocationSink())
     /// The interface orientation the sensors' axes are mounted to.
     private var motionMount = MotionMount()
     private lazy var rotation = GuestRotationController(
@@ -137,6 +143,16 @@ final class LiveRuntime: RuntimeDriver {
             // The runtime is told the setting and never asks the system
             // itself; a guest records silence while access is out of reach.
             _ = kernarium_runtime_loader_set_microphone($0 ? 1 : 0)
+        }
+        hostLocation.deliver = { [weak self] fix in self?.location.deliver(fix) }
+        model.location = LocationController(model: model, source: hostLocation.access) { [weak self] in
+            self?.updateLocation()
+        }
+        // The guest's receiver powers up when an Android app wants a position
+        // and again when it stops; the loader delivers each event on the main
+        // queue.
+        kernarium_runtime_loader_set_location_receiver_handler { @Sendable [weak self] powered in
+            MainActor.assumeIsolated { self?.location.receiverPower(powered) }
         }
         model.motionSensorsAvailable = motion.available
         motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
@@ -325,6 +341,7 @@ final class LiveRuntime: RuntimeDriver {
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
         updateHaptics()
+        updateLocation()
         let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
@@ -491,6 +508,7 @@ final class LiveRuntime: RuntimeDriver {
         motion.stop()
         haptics.restart()
         thermal.restart()
+        location.guestRestarted()
         updateThermal()
         updateGuestRotation()
         updateSpaceWatch()
@@ -595,6 +613,7 @@ final class LiveRuntime: RuntimeDriver {
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
         updateHaptics()
+        updateLocation()
     }
 
     func setMotionSensors(_ on: Bool) {
@@ -621,6 +640,20 @@ final class LiveRuntime: RuntimeDriver {
         haptics.update(
             available: hapticsAvailable, running: normalRun, booted: reachedBootCompleted,
             foreground: active && !holdsGuestStill)
+    }
+
+    // MARK: Location
+
+    /// Sets the location session to what is wanted now: the switch as the
+    /// screens show it, what iOS allows, whether Andarium is in front and not
+    /// holding the guest still, and whether a normal run goes on. The guest's
+    /// own receiver decides the rest, and the session ends it all the moment
+    /// a run does.
+    private func updateLocation() {
+        guard let model else { return }
+        location.update(
+            enabled: model.locationShownOn, authorization: model.locationAuthorization,
+            foreground: active && !holdsGuestStill, running: normalRun)
     }
 
     // MARK: Microphone
@@ -974,6 +1007,7 @@ final class LiveRuntime: RuntimeDriver {
         // room while Andarium was away: the screen says what is free now.
         if model.spacePause != nil { model.spacePause?.freeBytes = free }
         model.microphone?.refresh()
+        model.location?.refresh()
     }
 
     private func observeRotationPolicy() {

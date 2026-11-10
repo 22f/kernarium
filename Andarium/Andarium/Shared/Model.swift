@@ -336,6 +336,19 @@ final class AppModel {
     /// application and the Simulator preview's system mode have one; a preview
     /// without it takes the access as given.
     @ObservationIgnored var microphone: MicrophoneController?
+    var locationAuthorization = LocationAuthorization.notDetermined
+    /// The person went to Settings to allow the location: when Andarium is
+    /// active again with access, the switch they tapped turns on.
+    var locationAwaitsSettings = false
+    /// The Location switch is on and iOS's question about it is on screen, or
+    /// about to be. A switch that is on while iOS has not been asked and no
+    /// question is under way is a choice made under access that has ended
+    /// (iOS's "Allow Once"), and it goes off.
+    private var locationAsking = false
+    /// Asks iOS about the location and sets the guest's session to match. The
+    /// device application and the Simulator preview's system mode have one; a
+    /// preview without it takes the access as given.
+    @ObservationIgnored var location: LocationController?
     /// Opens Andarium's page in the system's Settings. A test puts its own here.
     @ObservationIgnored var openSettings: @MainActor () -> Void = {
         if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -1215,6 +1228,83 @@ final class AppModel {
     /// The alert's Open Settings.
     func openMicrophoneSettings() {
         microphoneAwaitsSettings = true
+        openSettings()
+    }
+
+    /// The Location switch as the screens show it: the guest's choice is on
+    /// and iOS lets Andarium read the location, or has not been asked yet and
+    /// the question is under way. Access that was refused or taken away, or
+    /// Location Services off, shows it off, and the guest gets no position.
+    var locationShownOn: Bool {
+        guard guest?.location == true else { return false }
+        return locationAuthorization.allowsLocating || locationAuthorization == .notDetermined
+    }
+
+    /// The Location switch. Turning it on asks iOS for access at once, the
+    /// first time. Where there is nothing to ask (refused, restricted, Location
+    /// Services off) the person is told why and, where Settings has the way
+    /// out, offered Andarium's page there. It applies at once, in a run too.
+    func setLocation(_ on: Bool) {
+        guard guest != nil else { return }
+        guard on else {
+            locationAwaitsSettings = false
+            locationAsking = false
+            guest?.location = false
+            persistNow()
+            location?.setOn(false)
+            return
+        }
+        switch locationAuthorization {
+        case .servicesOff, .restricted, .denied:
+            permissionPrompt = .location
+        case .notDetermined:
+            guest?.location = true
+            locationAsking = true
+            persistNow()
+            // The controller asks iOS and reports the answer to
+            // `locationAccessChanged`. A preview without one has no system
+            // prompt to show and takes it as given.
+            if let location { location.setOn(true) } else { locationAccessChanged(.precise) }
+        case .precise, .approximate:
+            guest?.location = true
+            persistNow()
+            location?.setOn(true)
+        }
+    }
+
+    /// iOS answered the location question, or the person changed Andarium's
+    /// access, Location Services or Precise Location. A refusal takes the
+    /// choice back with it; access the person went to Settings to give turns
+    /// on the switch they tapped.
+    func locationAccessChanged(_ state: LocationAuthorization) {
+        locationAuthorization = state
+        switch state {
+        case .servicesOff, .restricted, .denied:
+            if guest?.location == true {
+                guest?.location = false
+                persistNow()
+            }
+        case .precise, .approximate:
+            if locationAwaitsSettings, guest != nil, guest?.location != true {
+                guest?.location = true
+                persistNow()
+            }
+        case .notDetermined:
+            if !locationAsking, guest?.location == true {
+                guest?.location = false
+                persistNow()
+            }
+        }
+        if state != .notDetermined {
+            locationAwaitsSettings = false
+            locationAsking = false
+        }
+    }
+
+    /// The alert's Open Settings: for a refusal, the switch the person tapped
+    /// turns on when Andarium is active again with access.
+    func openLocationSettings() {
+        locationAwaitsSettings = locationAuthorization.refuses
         openSettings()
     }
 

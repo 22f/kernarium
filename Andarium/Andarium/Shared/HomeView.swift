@@ -73,6 +73,7 @@ struct HomeView: View {
             .environment(model)
         }
         .microphoneAccessAlert()
+        .locationAccessAlert()
         .alert("Erase guest?", isPresented: $model.confirmingErase) {
             Button("Erase guest", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
