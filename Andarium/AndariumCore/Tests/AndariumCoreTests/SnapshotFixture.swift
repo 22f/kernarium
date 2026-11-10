@@ -20,8 +20,11 @@ let snapshotHost = HostDevice(
     name: "iPad", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
 )
 
-/// Whether the volume of the temporary directory clones files. The tests that
-/// need clones run only where it does (APFS, every Mac and iOS volume).
+/// Whether the volume of the temporary directory clones files (APFS, every Mac
+/// and iOS volume). The suites that need it run only where it does: on a
+/// volume that cannot clone, a run passes with the store, crash, fault, erase
+/// and listing tests skipped, so none of the file-level behaviour is covered.
+/// The gate forbids a custom TMPDIR, so its run is on APFS.
 let temporaryVolumeClones: Bool = {
     let manager = FileManager.default
     let directory = manager.temporaryDirectory.appendingPathComponent("andarium-core-clone-probe-\(UUID().uuidString)")

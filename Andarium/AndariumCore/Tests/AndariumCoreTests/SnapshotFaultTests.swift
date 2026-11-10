@@ -269,4 +269,96 @@ struct SnapshotUnfinishedRestoreTests {
         let failure = SnapshotFailure(POSIXError(.ENOSPC))
         #expect(failure.domain == NSPOSIXErrorDomain && failure.code == Int(ENOSPC) && !failure.description.isEmpty)
     }
+
+    /// A restore that stopped after its commit, recovered on a launch whose
+    /// backup choice is `includeInBackups`.
+    @Test(arguments: [true, false])
+    func aRecoveredRestoreAppliesTheGuestsBackupChoiceToWhatItPutBack(includeInBackups: Bool) async throws {
+        let faults = SnapshotFaults(guestDirectory: URL(fileURLWithPath: "/"))
+        let scenario = try await SnapshotCrashTests.Scenario.make(io: faults.operations, includeInBackups: includeInBackups)
+        defer { scenario.fixture.cleanUp() }
+        faults.restart()
+        faults.fail(when: { $0.name == "write" && $0.path.hasSuffix("/instance.json") })
+        #expect(throws: SnapshotRestoreUnfinished.self) { try scenario.app.restoreSnapshot(scenario.snapshot, guest: scenario.guest) }
+        try scenario.app.recoverSnapshots()
+        try SnapshotCrashTests.expectRestored(scenario)
+    }
+
+    @Test func aRecoveryOfAGuestWithNoSettingsStillRestoresTheFiles() async throws {
+        let faults = SnapshotFaults(guestDirectory: URL(fileURLWithPath: "/"))
+        let scenario = try await SnapshotCrashTests.Scenario.make(io: faults.operations)
+        defer { scenario.fixture.cleanUp() }
+        faults.restart()
+        faults.fail(when: { $0.name == "write" && $0.path.hasSuffix("/instance.json") })
+        #expect(throws: SnapshotRestoreUnfinished.self) { try scenario.app.restoreSnapshot(scenario.snapshot, guest: scenario.guest) }
+        // The settings are gone (a guest erased, or never saved): there is nothing to settle.
+        try FileManager.default.removeItem(at: scenario.fixture.storage.locations.settings)
+        try scenario.app.recoverSnapshots()
+        #expect(try TestDisk.read(scenario.fixture.data, at: 0) == [1])
+        #expect(try Data(contentsOf: scenario.fixture.files.state) == scenario.record)
+        #expect(!FileManager.default.fileExists(atPath: scenario.intent.path))
+        #expect(!scenario.fixture.names().contains { $0.hasPrefix("data.img.pre-") })
+        #expect(try scenario.app.load() == nil)
+    }
+
+    /// The update's own Restore waits behind a snapshot restore that did not
+    /// finish: that one completes first, and nothing is left for this one.
+    @Test func theUpdatesRestoreCompletesAnUnfinishedSnapshotRestoreFirst() async throws {
+        let faults = SnapshotFaults(guestDirectory: URL(fileURLWithPath: "/"))
+        let scenario = try await SnapshotCrashTests.Scenario.make(io: faults.operations)
+        defer { scenario.fixture.cleanUp() }
+        // The files as a restore that stopped after its commit leaves them: the
+        // snapshot's data under the record of the update that did not finish.
+        faults.restart()
+        faults.fail(when: { $0.name == "write" && $0.path.hasSuffix("/instance.json") })
+        #expect(throws: SnapshotRestoreUnfinished.self) { try scenario.app.restoreSnapshot(scenario.snapshot, guest: scenario.guest) }
+        #expect(try scenario.fixture.files.readState()?.pendingUpdate != nil)
+
+        #expect(throws: InstanceError.refused("No update is pending.")) { try scenario.app.restoreUpdate() }
+        try SnapshotCrashTests.expectRestored(scenario)
+    }
+}
+
+/// Erase takes the snapshots with the rest, and a failure part-way leaves the
+/// guest in view for another try.
+@Suite(.enabled(if: temporaryVolumeClones, "needs a volume that clones files"))
+struct SnapshotEraseTests {
+    @Test func anEraseThatCannotRemoveASnapshotFileFailsAndAnotherTryFinishes() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        _ = try fixture.storage.createSnapshot(named: "one")
+        let two = try fixture.storage.createSnapshot(named: "two")
+        // A file the volume will not remove: immutable.
+        let stuck = fixture.snapshots.appendingPathComponent(two.id.rawValue).appendingPathComponent("data.img")
+        #expect(chflags(stuck.path, UInt32(UF_IMMUTABLE)) == 0)
+        defer { _ = chflags(stuck.path, 0) }
+
+        await #expect(throws: (any Error).self) { try await fixture.storage.erase() }
+        // The data and the record are gone and the snapshots stay as far as the
+        // file system went; the guest is still in view, for another try.
+        #expect(!FileManager.default.fileExists(atPath: fixture.data.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.files.state.path))
+        #expect(FileManager.default.fileExists(atPath: stuck.path))
+        #expect(try fixture.storage.load() != nil)
+
+        #expect(chflags(stuck.path, 0) == 0)
+        try await fixture.storage.erase()
+        #expect(try fixture.storage.load() == nil)
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshots.path))
+    }
+
+    @Test func anEraseInterruptedAfterTheDataWentFinishesWithTheSnapshotsAndTheChoices() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        _ = try fixture.storage.createSnapshot(named: "kept")
+        // A crash after the data and the record were removed, the snapshots and the choices not yet.
+        try FileManager.default.removeItem(at: fixture.data)
+        try FileManager.default.removeItem(at: fixture.files.state)
+        #expect(try fixture.storage.load() != nil)
+
+        try await fixture.storage.erase()
+        #expect(try fixture.storage.load() == nil)
+        #expect(!FileManager.default.fileExists(atPath: fixture.snapshots.path))
+        #expect(fixture.names().allSatisfy { !$0.hasPrefix("Snapshots") && !$0.hasPrefix("data.img") })
+    }
 }

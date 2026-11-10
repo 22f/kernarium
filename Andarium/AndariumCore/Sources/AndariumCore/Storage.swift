@@ -205,6 +205,10 @@ public struct TwoDiskStorage: GuestStorage {
     }
 
     public func restoreUpdate() throws {
+        // A snapshot restore that began completes before anything else changes
+        // the guest's files; after it there is no update copy, and this then
+        // says that no update is pending.
+        if snapshotStore.restoreUnderWay { try recoverSnapshots() }
         try files.apply(files.decide(for: release, flags: InstanceFlags(restoreSnapshot: true)), release: release)
     }
 

@@ -179,6 +179,16 @@ struct SnapshotCrashTests {
         let items = scenario.app.snapshotListing().items
         #expect(items.map(\.id) == [scenario.snapshot] && items.first?.isDamaged == false, sourceLocation: sourceLocation)
         #expect(scenario.app.startPlan() == .update(from: "20261031-los24-r4", to: "20261102-los24-r5"), sourceLocation: sourceLocation)
+        // The guest's backup choice is applied to the files that were put back,
+        // and the snapshots are never backed up, whatever it is.
+        let included = fixture.guest.includeInBackups
+        for url in [fixture.directory, fixture.data, fixture.files.state, fixture.storage.locations.settings] {
+            #expect(fixture.settles(url, to: !included), "\(url.lastPathComponent) backup exclusion", sourceLocation: sourceLocation)
+        }
+        let snapshot = fixture.snapshots.appendingPathComponent(scenario.snapshot.rawValue)
+        for url in [fixture.snapshots, snapshot] + ["data.img", "instance.json", "snapshot.json"].map({ snapshot.appendingPathComponent($0) }) {
+            #expect(fixture.settles(url, to: true), "\(url.lastPathComponent) is backed up", sourceLocation: sourceLocation)
+        }
     }
 
     @Test func anUninterruptedRestoreReachesTheFinalState() async throws {
