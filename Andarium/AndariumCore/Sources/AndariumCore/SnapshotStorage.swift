@@ -24,7 +24,11 @@ extension TwoDiskStorage {
         let copies = updateCopies()
         let wholeSnapshots = entries.filter(\.hasData).map { store.dataURL($0.id) }
 
-        let items = entries.map { summary(of: $0, store: store, calls: calls) }
+        let items = entries.map { entry in
+            summary(
+                of: entry, store: store, calls: calls,
+                keeping: live + copies + wholeSnapshots.filter { $0 != store.dataURL(entry.id) })
+        }
         // What deleting them all frees: what they hold together that neither
         // the live disk nor an update's copy holds.
         var use = SnapshotMeasure.freed(by: wholeSnapshots, keeping: live + copies, using: calls)
@@ -38,7 +42,13 @@ extension TwoDiskStorage {
         )
     }
 
-    private func summary(of entry: SnapshotEntry, store: SnapshotStore, calls: SnapshotMeasure.Primitives) -> SnapshotSummary {
+    /// `others` are the files that stay when this snapshot goes: the live
+    /// disk, an update's copies and the other snapshots. With the file system's
+    /// private size this is not needed; with only the extent map it says what
+    /// the others still hold, and with neither the figure is a lower bound.
+    private func summary(
+        of entry: SnapshotEntry, store: SnapshotStore, calls: SnapshotMeasure.Primitives, keeping others: [URL]
+    ) -> SnapshotSummary {
         // A damaged snapshot that still has its disk holds space, which
         // deleting it frees.
         let data = store.dataURL(entry.id)
@@ -46,7 +56,7 @@ extension TwoDiskStorage {
         var frees = SnapshotFigure(bytes: small)
         var kept = SnapshotFigure(bytes: small)
         if entry.hasData {
-            frees = SnapshotMeasure.freed(by: [data], keeping: [], using: calls)
+            frees = SnapshotMeasure.freed(by: [data], keeping: others, using: calls)
             frees.bytes += small
             kept = SnapshotFigure(bytes: SnapshotMeasure.allocatedBytes(of: data))
         }
@@ -65,6 +75,13 @@ extension TwoDiskStorage {
         )
     }
 
+    /// The files that keep blocks of a snapshot's data when it goes.
+    private func holders(besides id: SnapshotID, store: SnapshotStore) -> [URL] {
+        let live = FileManager.default.fileExists(atPath: files.data.path) ? [files.data] : []
+        let others = store.entries().filter { $0.hasData && $0.id != id }.map { store.dataURL($0.id) }
+        return live + updateCopies() + others
+    }
+
     /// The copies an Android update keeps until its start has booted.
     private func updateCopies() -> [URL] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: locations.directory.path)) ?? []
@@ -80,7 +97,7 @@ extension TwoDiskStorage {
         let store = snapshotStore
         let id = try store.create(name: name, now: now)
         guard let entry = store.entry(id) else { throw SnapshotRefusal.missing }
-        return summary(of: entry, store: store, calls: snapshotIO.measure)
+        return summary(of: entry, store: store, calls: snapshotIO.measure, keeping: holders(besides: id, store: store))
     }
 
     public func deleteSnapshot(_ id: SnapshotID) throws {

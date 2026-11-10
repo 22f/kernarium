@@ -430,6 +430,32 @@ struct SnapshotStoreTests {
         #expect(listing.items.allSatisfy { !$0.freesWhenDeleted.isLowerBound })
     }
 
+    @Test func whereThePrivateSizeIsRefusedEachFigureStillCountsWhatTheOthersHold() async throws {
+        let fixture = try await SnapshotFixture.make(marker: 1)
+        defer { fixture.cleanUp() }
+        let first = try fixture.storage.createSnapshot(named: "first")
+        let second = try fixture.storage.createSnapshot(named: "second")
+        try rewriteTwoMiB(fixture)
+        func near(_ figure: SnapshotFigure, _ expected: Int64, sourceLocation: SourceLocation = #_sourceLocation) {
+            #expect(abs(Int64(figure.bytes) - expected) <= 256 << 10, "\(figure.bytes) against \(expected)", sourceLocation: sourceLocation)
+        }
+        var io = SnapshotFileOperations.live
+        io.measure = SnapshotMeasure.Primitives(privateSize: { _ in nil }, extents: { SnapshotMeasure.physicalExtents(of: $0) })
+        let app = fixture.app(using: io)
+        // What both snapshots share is private to neither: the extent map says so, exactly.
+        for item in app.snapshotListing().items {
+            near(item.freesWhenDeleted, 0)
+            #expect(!item.freesWhenDeleted.isLowerBound)
+        }
+        try app.deleteSnapshot(first.id)
+        near(try #require(app.snapshotListing().items.first { $0.id == second.id }).freesWhenDeleted, 2 << 20)
+
+        // With neither call, a figure is a lower bound and never the whole disk.
+        io.measure = SnapshotMeasure.Primitives(privateSize: { _ in nil }, extents: { _ in nil })
+        let blind = fixture.app(using: io).snapshotListing()
+        #expect(blind.items.allSatisfy { $0.freesWhenDeleted.isLowerBound && $0.freesWhenDeleted.bytes < 1 << 20 })
+    }
+
     @Test func theUpdatesOwnCopyIsAFigureApartFromTheSnapshots() async throws {
         let fixture = try await SnapshotFixture.make(marker: 1)
         defer { fixture.cleanUp() }
