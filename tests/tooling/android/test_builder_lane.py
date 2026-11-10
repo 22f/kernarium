@@ -909,6 +909,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
                           services_jar_variant: str | None = None,
+                          input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
                           ota_certificates: str | None = None,
                           signed: bool = False,
@@ -2630,6 +2631,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                else b"RefreshRateThrottling: using the map of the default configuration\x00"),
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
+                # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
+                if input_flinger_variant != "missing":
+                    archive.writestr(
+                        "SYSTEM/lib64/libinputflinger.so",
+                        b"\x00" * 8
+                        + (b"" if input_flinger_variant == "no-marker"
+                           else b"      PointerCaptureLed: %s\n\x00"),
+                    )
                 # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
                 # validation log line is in the bytes.
                 if network_stack_variant != "missing":
@@ -3191,6 +3200,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-adb-root-service", {"adbd_variant": "no-root-service"}),
             ("services-jar-without-the-adb-topics", {"services_jar_variant": "no-marker"}),
             ("services-jar-without-the-display-topic", {"services_jar_variant": "no-display-marker"}),
+            ("input-flinger-without-the-pointer-capture-led", {"input_flinger_variant": "no-marker"}),
+            ("missing-input-flinger", {"input_flinger_variant": "missing"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
@@ -3899,6 +3910,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "of route p0007"),
             ("missing-services-jar-cause", {"services_jar_variant": "missing"},
              "SYSTEM/framework/services.jar is missing"),
+            ("input-flinger-without-the-pointer-capture-led-cause", {"input_flinger_variant": "no-marker"},
+             "lacks the pointer capture LED topic of route p0022"),
+            ("missing-input-flinger-cause", {"input_flinger_variant": "missing"},
+             "SYSTEM/lib64/libinputflinger.so is missing"),
             ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
              "lacks the NetworkMonitor topic of route p0029"),
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},

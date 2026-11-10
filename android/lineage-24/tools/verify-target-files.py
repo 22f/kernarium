@@ -2602,6 +2602,27 @@ def check_adb_root_service(
         )
 
 
+# The input topic of route p0022 lights LED_MISC on a cursor device that advertises it while pointer
+# capture is on, which is how the host's mouse learns that an application captured the pointer. The
+# mapper's dump line for it is in libinputflinger.so's bytes. A build without the topic never tells the
+# host, and a game that captures the mouse would hold a pointer that the host does not release.
+INPUT_FLINGER = "SYSTEM/lib64/libinputflinger.so"
+INPUT_FLINGER_MARKER = b"PointerCaptureLed: "
+INPUT_FLINGER_LIMIT = 64 << 20
+
+
+def check_input_flinger(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(INPUT_FLINGER)
+    if info is None or info.is_dir():
+        fail(f"{INPUT_FLINGER} is missing")
+    if INPUT_FLINGER_MARKER not in read_small(archive, info, INPUT_FLINGER_LIMIT):
+        fail(
+            f"{INPUT_FLINGER} lacks the pointer capture LED topic of route p0022 "
+            f"({INPUT_FLINGER_MARKER.decode()!r} is not in it): the mouse would not tell the host "
+            "that an application captured the pointer"
+        )
+
+
 def check_example_hal(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], hal: dict
 ) -> None:
@@ -4810,6 +4831,7 @@ def main() -> None:
         check_adb_root_service(archive, infos)
         check_lmkd_gpu_reclaim(archive, infos)
         check_services_jar(archive, infos)
+        check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)

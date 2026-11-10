@@ -322,6 +322,13 @@ so a person who turns the setting on afterwards keeps it on. The setting has no
 history that tells the old default from a person's choice of 1, so a 1 chosen
 earlier is turned off once as well.
 
+While an app holds pointer capture, Android lights the LED_MISC of a cursor
+device that advertises it, and puts it out when the capture ends; the mouse is
+that device, and the host reads the LED to take hold of its own pointer for the
+guest. A device without the LED sees no change. It is a topic of route `p0022`
+(`frameworks/native`), and the verifier requires its dump line in
+`libinputflinger.so`.
+
 init starts a service on a keychord whenever its keys are down together on any
 input device, so typing would fire one: the product's `bugreport` service has
 none (Cuttlefish's was A and B), and the verifier refuses a keychord in the
