@@ -3,55 +3,6 @@
 import Darwin
 import Foundation
 
-/// A point in an operation after which a crash leaves a state the next launch
-/// completes or discards. `SnapshotSeam` can stop an operation after any of
-/// them, which is how the tests prove it.
-enum SnapshotStep: Equatable, Sendable, CaseIterable {
-    // Create
-    case createdStaging, clonedData, copiedRecord, wroteMetadata, published
-    // Delete
-    case setAside, removed
-    // Restore
-    case recordedIntent, replacedData, replacedRecord, removedUpdateCopies, settledSettings, finishedRestore
-}
-
-/// What a test replaces: a stop after a step, and the measuring calls.
-struct SnapshotSeam: Sendable {
-    /// Called after each step; a throw stops the operation there as a crash
-    /// would, leaving every file as it is.
-    var afterStep: (@Sendable (SnapshotStep) throws -> Void)?
-    var measure = SnapshotMeasure.Primitives.live
-}
-
-/// The error an operation throws when a seam stopped it.
-struct SnapshotSeamStop: Error {
-    var step: SnapshotStep
-}
-
-/// Files that survive a power loss, which Foundation's atomic write alone does
-/// not make them: each commit point flushes the file and its directory.
-enum DurableFile {
-    static func write(_ data: Data, to url: URL) throws {
-        try data.write(to: url, options: .atomic)
-        try flush(url)
-        flushDirectory(url.deletingLastPathComponent())
-    }
-
-    /// `F_FULLFSYNC` where the volume has it, else `fsync`.
-    static func flush(_ url: URL) throws {
-        let descriptor = open(url.path, O_RDONLY)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { close(descriptor) }
-        if fcntl(descriptor, F_FULLFSYNC) != 0, fsync(descriptor) != 0 {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-    }
-
-    static func flushDirectory(_ url: URL) {
-        try? flush(url)
-    }
-}
-
 /// A snapshot as the store finds it on disk, with what could be read.
 struct SnapshotEntry: Sendable {
     var id: SnapshotID
@@ -94,7 +45,8 @@ struct SnapshotStore: Sendable {
 
     var locations: GuestLocations
     var release: ReleaseIdentity
-    var seam = SnapshotSeam()
+    /// The file calls; a test replaces them (`SnapshotFileOperations`).
+    var io = SnapshotFileOperations.live
 
     private var files: InstanceFiles { InstanceFiles(directory: locations.directory) }
     var root: URL { files.snapshots }
@@ -104,8 +56,13 @@ struct SnapshotStore: Sendable {
         root.appendingPathComponent(id.rawValue, isDirectory: true)
     }
 
-    private func step(_ step: SnapshotStep) throws {
-        do { try seam.afterStep?(step) } catch { throw SnapshotSeamStop(step: step) }
+    /// A write that is on the volume when it returns: the atomic replacement,
+    /// then the file and its directory flushed. A failure to flush the
+    /// directory is not one, as the write itself is in place.
+    private func durablyWrite(_ data: Data, to url: URL) throws {
+        try io.write(data, url)
+        try io.flush(url)
+        try? io.flush(url.deletingLastPathComponent())
     }
 
     /// Keeps `url` out of iCloud and computer backups.
@@ -154,7 +111,7 @@ struct SnapshotStore: Sendable {
     /// Every snapshot, complete or not, newest first; a damaged one (no
     /// readable record) is last.
     func entries() -> [SnapshotEntry] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        let names = (try? io.list(root)) ?? []
         let found = names.compactMap { name in SnapshotID(name).flatMap { entry($0) } }
         return found.sorted {
             switch ($0.record?.created, $1.record?.created) {
@@ -245,46 +202,36 @@ struct SnapshotStore: Sendable {
         let state = try JSONDecoder().decode(InstanceState.self, from: inputs.instanceBytes)
         let id = SnapshotID()
         let staging = root.appendingPathComponent(Self.stagingPrefix + id.rawValue, isDirectory: true)
-        let manager = FileManager.default
         let gib = Int64(Limits.bytesPerGiB)
         let record = SnapshotRecord(
             name: name, created: now, releaseID: state.releaseID, buildIncremental: state.buildIncremental,
             diskGiB: Int((inputs.diskBytes + gib - 1) / gib)
         )
         do {
-            let rootIsNew = !manager.fileExists(atPath: root.path)
-            try manager.createDirectory(at: staging, withIntermediateDirectories: true)
+            let rootIsNew = !FileManager.default.fileExists(atPath: root.path)
+            try io.createDirectory(staging)
             Self.excludeFromBackup(root)
             Self.excludeFromBackup(staging)
-            if rootIsNew { DurableFile.flushDirectory(locations.directory) }
-            try step(.createdStaging)
+            if rootIsNew { try? io.flush(locations.directory) }
 
             let clone = staging.appendingPathComponent(InstanceFiles.dataDisk)
-            try CloneFile.clone(files.data, to: clone)
+            try io.clone(files.data, clone)
             Self.excludeFromBackup(clone)
-            try DurableFile.flush(clone)
-            try step(.clonedData)
+            try io.flush(clone)
 
             let copy = staging.appendingPathComponent(InstanceFiles.stateFile)
-            try DurableFile.write(inputs.instanceBytes, to: copy)
+            try durablyWrite(inputs.instanceBytes, to: copy)
             Self.excludeFromBackup(copy)
-            try step(.copiedRecord)
 
             let metadata = staging.appendingPathComponent(Self.metadataFile)
-            try DurableFile.write(Self.encoded(record), to: metadata)
+            try durablyWrite(Self.encoded(record), to: metadata)
             Self.excludeFromBackup(metadata)
-            DurableFile.flushDirectory(staging)
-            try step(.wroteMetadata)
+            try? io.flush(staging)
 
-            guard Darwin.rename(staging.path, directory(id).path) == 0 else {
-                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            }
-            DurableFile.flushDirectory(root)
-            try step(.published)
-        } catch let stop as SnapshotSeamStop {
-            throw stop
+            try io.rename(staging, directory(id))
+            try? io.flush(root)
         } catch {
-            try? manager.removeItem(at: staging)
+            try? io.remove(staging)
             throw translated(error)
         }
         return id
@@ -300,17 +247,12 @@ struct SnapshotStore: Sendable {
 
     func delete(_ id: SnapshotID) throws {
         if restoreUnderWay { throw SnapshotRefusal.restoreUnfinished }
-        let manager = FileManager.default
-        guard manager.fileExists(atPath: directory(id).path) else { throw SnapshotRefusal.missing }
+        guard FileManager.default.fileExists(atPath: directory(id).path) else { throw SnapshotRefusal.missing }
         let gone = root.appendingPathComponent(Self.removalPrefix + id.rawValue, isDirectory: true)
-        try? manager.removeItem(at: gone)
-        guard Darwin.rename(directory(id).path, gone.path) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        DurableFile.flushDirectory(root)
-        try step(.setAside)
-        try manager.removeItem(at: gone)
-        try step(.removed)
+        try? io.remove(gone)
+        try io.rename(directory(id), gone)
+        try? io.flush(root)
+        try io.remove(gone)
     }
 
     func rename(_ id: SnapshotID, to rawName: String) throws {
@@ -320,7 +262,7 @@ struct SnapshotStore: Sendable {
         record.name = name
         let metadata = directory(id).appendingPathComponent(Self.metadataFile)
         do {
-            try DurableFile.write(Self.encoded(record), to: metadata)
+            try durablyWrite(Self.encoded(record), to: metadata)
         } catch {
             throw translated(error)
         }
@@ -340,48 +282,46 @@ struct SnapshotStore: Sendable {
         if case .refused(let reason) = SnapshotRules.restorePlan(of: state, diskGiB: record.diskGiB, release: release) {
             throw reason
         }
-        try DurableFile.write(JSONEncoder().encode(RestoreIntent(snapshot: id)), to: restoreURL)
+        try durablyWrite(JSONEncoder().encode(RestoreIntent(snapshot: id)), to: restoreURL)
         Self.excludeFromBackup(restoreURL)
-        try step(.recordedIntent)
         do {
             try replaceData(of: id)
-        } catch let stop as SnapshotSeamStop {
-            throw stop
         } catch {
             // Nothing has changed until the clone is in place: forget the
             // restore rather than leave one to finish at the next launch.
-            try? FileManager.default.removeItem(at: restoreURL)
+            try? io.remove(restoreURL)
             throw translated(error)
         }
-        try step(.replacedData)
         try finishRestore(found, settle: settle)
     }
 
     /// Step 2: the clone of the snapshot's data, renamed over `data.img`.
     private func replaceData(of id: SnapshotID) throws {
-        try InstanceFiles.clone(dataURL(id), to: files.data)
-        try DurableFile.flush(files.data)
-        DurableFile.flushDirectory(locations.directory)
+        let temporary = files.data.appendingPathExtension("tmp")
+        try? io.remove(temporary)
+        do {
+            try io.clone(dataURL(id), temporary)
+            try io.rename(temporary, files.data)
+        } catch {
+            try? io.remove(temporary)
+            throw error
+        }
+        try io.flush(files.data)
+        try? io.flush(locations.directory)
     }
 
     /// Steps 3 to 6, each of which can run again with the same result while
     /// the snapshot is whole, because it is only read.
     private func finishRestore(_ found: SnapshotEntry, settle: (SnapshotRecord) throws -> Void) throws {
         guard let bytes = found.instanceBytes, let record = found.record else { throw SnapshotRefusal.incomplete }
-        try DurableFile.write(bytes, to: files.state)
-        try step(.replacedRecord)
+        try durablyWrite(bytes, to: files.state)
         // The replaced state's update copy has no record naming it now.
-        let manager = FileManager.default
-        for name in (try? manager.contentsOfDirectory(atPath: locations.directory.path)) ?? []
-        where name.hasPrefix(InstanceFiles.snapshotPrefix) {
-            try manager.removeItem(at: locations.directory.appendingPathComponent(name))
+        for name in try io.list(locations.directory) where name.hasPrefix(InstanceFiles.snapshotPrefix) {
+            try io.remove(locations.directory.appendingPathComponent(name))
         }
-        try step(.removedUpdateCopies)
         try settle(record)
-        try step(.settledSettings)
-        try manager.removeItem(at: restoreURL)
-        DurableFile.flushDirectory(root)
-        try step(.finishedRestore)
+        try io.remove(restoreURL)
+        try? io.flush(root)
     }
 
     // MARK: Launch
@@ -392,24 +332,23 @@ struct SnapshotStore: Sendable {
     /// that did not finish is removed. A restore whose snapshot is gone or
     /// damaged cannot be carried on and is forgotten.
     func recover(settle: (SnapshotRecord) throws -> Void) throws {
-        let manager = FileManager.default
-        try? manager.removeItem(at: files.data.appendingPathExtension("tmp"))
+        try? io.remove(files.data.appendingPathExtension("tmp"))
         switch intent() {
         case .none:
             break
         case .unreadable:
-            try? manager.removeItem(at: restoreURL)
+            try? io.remove(restoreURL)
         case .readable(let id):
             if let found = entry(id), found.isComplete {
                 try replaceData(of: id)
                 try finishRestore(found, settle: settle)
             } else {
-                try? manager.removeItem(at: restoreURL)
+                try? io.remove(restoreURL)
             }
         }
-        for name in (try? manager.contentsOfDirectory(atPath: root.path)) ?? []
+        for name in (try? io.list(root)) ?? []
         where name.hasPrefix(Self.stagingPrefix) || name.hasPrefix(Self.removalPrefix) {
-            try? manager.removeItem(at: root.appendingPathComponent(name))
+            try? io.remove(root.appendingPathComponent(name))
         }
     }
 }

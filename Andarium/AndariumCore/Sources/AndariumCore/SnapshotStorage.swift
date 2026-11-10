@@ -8,7 +8,7 @@ import Foundation
 /// (`SnapshotRules.gate`), before any of them is called.
 extension TwoDiskStorage {
     var snapshotStore: SnapshotStore {
-        SnapshotStore(locations: locations, release: release, seam: snapshotSeam)
+        SnapshotStore(locations: locations, release: release, io: snapshotIO)
     }
 
     /// The snapshots, newest first, with their figures and what may be done.
@@ -18,7 +18,7 @@ extension TwoDiskStorage {
     public func snapshotListing() -> SnapshotListing {
         let store = snapshotStore
         let entries = store.entries()
-        let calls = snapshotSeam.measure
+        let calls = snapshotIO.measure
         // What else holds blocks the snapshots hold: the live disk, once there is one, and an update's copy.
         let live = FileManager.default.fileExists(atPath: files.data.path) ? [files.data] : []
         let copies = updateCopies()
@@ -80,7 +80,7 @@ extension TwoDiskStorage {
         let store = snapshotStore
         let id = try store.create(name: name, now: now)
         guard let entry = store.entry(id) else { throw SnapshotRefusal.missing }
-        return summary(of: entry, store: store, calls: snapshotSeam.measure)
+        return summary(of: entry, store: store, calls: snapshotIO.measure)
     }
 
     public func deleteSnapshot(_ id: SnapshotID) throws {

@@ -142,6 +142,21 @@ struct SnapshotFixture {
         TwoDiskStorage(locations: storage.locations, release: release, releaseDirectory: storage.releaseDirectory)
     }
 
+    /// The same files with the snapshot store's file calls replaced
+    /// (`SnapshotFaults`).
+    func app(using io: SnapshotFileOperations, on release: ReleaseIdentity? = nil) -> TwoDiskStorage {
+        TwoDiskStorage(
+            locations: storage.locations, release: release ?? storage.release, releaseDirectory: storage.releaseDirectory,
+            snapshotIO: io)
+    }
+
+    /// A directory under the fixture's root for what a test keeps apart.
+    func scratch(_ name: String) -> URL {
+        let url = root.appendingPathComponent(name, isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
     /// Whether the backup exclusion of `url` reads `value`. macOS applies a
     /// cleared flag through the backup service, so it reads back a moment
     /// after the call returns; the wait is bounded.

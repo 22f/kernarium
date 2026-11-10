@@ -114,13 +114,18 @@ public struct TwoDiskStorage: GuestStorage {
     public let release: ReleaseIdentity
     /// The release directory inside the application.
     public let releaseDirectory: URL
-    /// What a test replaces in the snapshot store; never set in the application.
-    var snapshotSeam = SnapshotSeam()
+    /// The file calls of the snapshot store, which a test replaces.
+    let snapshotIO: SnapshotFileOperations
 
     public init(locations: GuestLocations, release: ReleaseIdentity, releaseDirectory: URL) {
+        self.init(locations: locations, release: release, releaseDirectory: releaseDirectory, snapshotIO: .live)
+    }
+
+    init(locations: GuestLocations, release: ReleaseIdentity, releaseDirectory: URL, snapshotIO: SnapshotFileOperations) {
         self.locations = locations
         self.release = release
         self.releaseDirectory = releaseDirectory
+        self.snapshotIO = snapshotIO
     }
 
     var files: InstanceFiles { InstanceFiles(directory: locations.directory) }

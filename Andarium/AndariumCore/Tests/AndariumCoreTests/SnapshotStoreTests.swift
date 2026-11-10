@@ -10,6 +10,13 @@ private func contents(_ url: URL) throws -> Data { try Data(contentsOf: url) }
 
 private func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 
+/// What a crash right after a restore's intent leaves: the intent, with the
+/// data as it was.
+private func writeIntent(for id: SnapshotID, in fixture: SnapshotFixture) throws {
+    try Data(#"{"schema": 1, "snapshot": "\#(id.rawValue)"}"#.utf8)
+        .write(to: fixture.snapshots.appendingPathComponent("restore.json"))
+}
+
 /// The guest rewrites 2 MiB of data the disk holds: the first mebibyte and the
 /// one at 1 GiB (a hole would cost a snapshot nothing).
 private func rewriteTwoMiB(_ fixture: SnapshotFixture) throws {
@@ -141,9 +148,8 @@ struct SnapshotStoreTests {
         let fixture = try await SnapshotFixture.make()
         defer { fixture.cleanUp() }
         let made = try fixture.storage.createSnapshot(named: "")
-        var storage = fixture.storage
-        storage.snapshotSeam.afterStep = { if $0 == .recordedIntent { throw CancellationError() } }
-        #expect(throws: SnapshotSeamStop.self) { try storage.restoreSnapshot(made.id, guest: fixture.guest) }
+        // A restore that crashed right after its intent was written.
+        try writeIntent(for: made.id, in: fixture)
 
         let operations: [() throws -> Void] = [
             { _ = try fixture.storage.createSnapshot(named: "") },
@@ -410,14 +416,14 @@ struct SnapshotStoreTests {
     }
 
     @Test func whereTheExtentMapIsRefusedTheUseIsALowerBoundAndSaysSo() async throws {
-        var fixture = try await SnapshotFixture.make(marker: 1)
+        let fixture = try await SnapshotFixture.make(marker: 1)
         defer { fixture.cleanUp() }
         _ = try fixture.storage.createSnapshot(named: "first")
         _ = try fixture.storage.createSnapshot(named: "second")
         try rewriteTwoMiB(fixture)
-        fixture.storage.snapshotSeam.measure = SnapshotMeasure.Primitives(
-            privateSize: { SnapshotMeasure.privateSize(of: $0) }, extents: { _ in nil })
-        let listing = fixture.storage.snapshotListing()
+        var io = SnapshotFileOperations.live
+        io.measure = SnapshotMeasure.Primitives(privateSize: { SnapshotMeasure.privateSize(of: $0) }, extents: { _ in nil })
+        let listing = fixture.app(using: io).snapshotListing()
         #expect(listing.space.snapshotsUse.isLowerBound)
         #expect(listing.space.snapshotsUse.bytes < 2 << 20)
         // One snapshot's own figure is exact without the map.
@@ -522,9 +528,7 @@ struct SnapshotStoreTests {
         defer { fixture.cleanUp() }
         let made = try fixture.storage.createSnapshot(named: "")
         try TestDisk.write(fixture.data, at: 0, count: 1 << 20, value: 2)
-        var storage = fixture.storage
-        storage.snapshotSeam.afterStep = { if $0 == .recordedIntent { throw CancellationError() } }
-        #expect(throws: SnapshotSeamStop.self) { try storage.restoreSnapshot(made.id, guest: fixture.guest) }
+        try writeIntent(for: made.id, in: fixture)
         #expect(try TestDisk.read(fixture.data, at: 0) == [2])
 
         // No relaunch: the start finishes the restore before it reads the files.
