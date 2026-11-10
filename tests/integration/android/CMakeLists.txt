@@ -120,13 +120,14 @@ if(UML_ANDROID_THERMAL_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
-# The gamepad relay (route p0007's input topic): the runner plays the host
-# application over a vsock forward to the relay's port, creates a controller of
-# each driver family and checks what Android sees (devices, keys, axes), what
-# comes back (rumble, lights, the drivers' feature requests), hot plug, the
-# relay's recovery, and the guest's cost per report. It boots Android with the
-# macOS launcher, so it is opt-in: name the release under test and the probe
-# app's APK (tests/integration/android/gamepad/build-apk.sh).
+# The gamepad relay, a vendor daemon of the image's overlay
+# (android/lineage-24/overlay/gamepad): the runner plays the host application
+# over a vsock forward to the relay's port, creates a controller of each driver
+# family and checks what Android sees (devices, keys, axes), what comes back
+# (rumble, lights, the drivers' feature requests), hot plug, the relay's
+# recovery, and the guest's cost per report. It boots Android with the macOS
+# launcher, so it is opt-in: name the release under test and the probe app's
+# APK (tests/integration/android/gamepad/build-apk.sh).
 set(UML_ANDROID_GAMEPAD_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-gamepad test boots")
 set(UML_ANDROID_GAMEPAD_PROBE_APK "" CACHE FILEPATH
