@@ -16,21 +16,20 @@ the node and on the last close, so the receiver is powered as a real one
 is. Bytes that arrive while the node is closed are dropped, as the GNSS
 core requires.
 
-While the node is open the device is a wake source and its queues stay
-enabled through a suspend, the way UML's virtio PCI device does it, so a
-receiver that reports a position wakes a suspended guest as a phone's
-does.
+A suspend disables the queues, so the buffers the driver posted wait in
+the ring and the host fills them after the resume. The driver is not a
+wake source: the host wakes a guest that suspended itself.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  drivers/gnss/Kconfig     |  14 ++
  drivers/gnss/Makefile    |   3 +
- drivers/gnss/kernarium.c | 325 +++++++++++++++++++++++++++++++++++++++
- 3 files changed, 342 insertions(+)
+ drivers/gnss/kernarium.c | 313 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 330 insertions(+)
  create mode 100644 drivers/gnss/kernarium.c
 
 diff --git a/drivers/gnss/Kconfig b/drivers/gnss/Kconfig
-index d7fe265c2869657e8ffc3f555c59e83eacce8259..e88920433e031f7df9f3fa6d56f69fdc1b1a7e18 100644
+index d7fe265c2869657e8ffc3f555c59e83eacce8259..5a2ef6a2d3a9b7b74965cdfee470ed788e7bd56d 100644
 --- a/drivers/gnss/Kconfig
 +++ b/drivers/gnss/Kconfig
 @@ -65,4 +65,18 @@ config GNSS_USB
@@ -39,7 +38,7 @@ index d7fe265c2869657e8ffc3f555c59e83eacce8259..e88920433e031f7df9f3fa6d56f69fdc
  
 +config GNSS_KERNARIUM_VIRTIO
 +	tristate "Kernarium host GNSS receiver over Virtio"
-+	depends on VIRTIO && UML
++	depends on VIRTIO
 +	help
 +	  Say Y here to expose the location of the Apple host, which the
 +	  Kernarium emulator provides as a local experimental Virtio device, as
@@ -65,10 +64,10 @@ index bb2cbada34359b73c2402a72b46820b3ef231922..4731a392542bc9838ab9be33a6237e22
 +gnss-kernarium-y := kernarium.o
 diff --git a/drivers/gnss/kernarium.c b/drivers/gnss/kernarium.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c4468c6a1b0b615fb58c80b9634d86dbcc25365
+index 0000000000000000000000000000000000000000..3c491b2fea50bc4d5caaf6a40fba138c2af8b607
 --- /dev/null
 +++ b/drivers/gnss/kernarium.c
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,313 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Kernarium host GNSS receiver over Virtio.
@@ -91,7 +90,9 @@ index 0000000000000000000000000000000000000000..1c4468c6a1b0b615fb58c80b9634d86d
 + *     the receiver is off.
 + *
 + * The receiver is powered from the first open of the node to the last close,
-+ * as a real receiver is.
++ * as a real receiver is. A suspend disables the queues: the posted buffers
++ * wait in the ring and the host fills them after the resume. The driver is
++ * not a wake source; the host wakes a guest that suspended itself.
 + *
 + * Virtio devices of UML are not frozen for hibernation, so the driver has no
 + * freeze and restore.
@@ -102,12 +103,10 @@ index 0000000000000000000000000000000000000000..1c4468c6a1b0b615fb58c80b9634d86d
 +#include <linux/gnss.h>
 +#include <linux/kernel.h>
 +#include <linux/module.h>
-+#include <linux/pm_wakeup.h>
 +#include <linux/scatterlist.h>
 +#include <linux/slab.h>
 +#include <linux/spinlock.h>
 +#include <linux/virtio.h>
-+#include <linux/virtio-uml.h>
 +#include <linux/virtio_config.h>
 +
 +#define VIRTIO_ID_KERNARIUM_GNSS	65534
@@ -237,13 +236,6 @@ index 0000000000000000000000000000000000000000..1c4468c6a1b0b615fb58c80b9634d86d
 +		spin_unlock_irqrestore(&gnss->lock, flags);
 +		return error;
 +	}
-+
-+	/*
-+	 * A receiver that is searching wakes a suspended system when it has
-+	 * something to report, as a phone's does. The device's queues stay
-+	 * enabled through a suspend for it to be able to.
-+	 */
-+	device_set_wakeup_enable(&gnss->vdev->dev, true);
 +	return 0;
 +}
 +
@@ -251,8 +243,6 @@ index 0000000000000000000000000000000000000000..1c4468c6a1b0b615fb58c80b9634d86d
 +{
 +	struct kernarium_gnss *gnss = gnss_get_drvdata(gdev);
 +	unsigned long flags;
-+
-+	device_set_wakeup_enable(&gnss->vdev->dev, false);
 +
 +	/* The core resets the read FIFO once this returns. */
 +	spin_lock_irqsave(&gnss->lock, flags);
@@ -330,9 +320,6 @@ index 0000000000000000000000000000000000000000..1c4468c6a1b0b615fb58c80b9634d86d
 +	gnss->gdev->ops = &kernarium_gnss_ops;
 +	gnss->gdev->type = GNSS_TYPE_NMEA;
 +	gnss_set_drvdata(gnss->gdev, gnss);
-+
-+	/* Wakeup and the queues across a suspend: see kernarium_gnss_open(). */
-+	virtio_uml_set_no_vq_suspend(vdev, true);
 +
 +	virtio_device_ready(vdev);
 +	spin_lock_irqsave(&gnss->lock, flags);
