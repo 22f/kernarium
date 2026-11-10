@@ -668,6 +668,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.thermal-service\\.andarium"
             "  u:object_r:hal_thermal_default_exec:s0\n"
         )
+        good_gamepad_label = (
+            "/vendor/bin/kernarium_gamepad  u:object_r:kernarium_gamepad_exec:s0\n"
+        )
         good_video_contexts = (
             "/dev/hvc0  u:object_r:serial_device:s0\n"
             + good_net_setup_label
@@ -676,6 +679,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             + good_vibrator_label
             + good_gnss_label
             + good_thermal_label
+            + good_gamepad_label
         )
         # The GNSS HAL: declared on every device by one vendor fragment, and started at boot with its
         # class.
@@ -704,6 +708,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "    interface aidl android.hardware.thermal.IThermal/default\n"
             "    class hal\n    user nobody\n    group system\n"
         )
+        # The gamepad relay: a daemon that init starts with its class, in a domain of its own.
+        good_gamepad_rc = (
+            "service kernarium_gamepad /vendor/bin/kernarium_gamepad\n"
+            "    class main\n    user nobody\n    group uhid\n"
+        )
+        gamepad_binary_path = "VENDOR/bin/kernarium_gamepad"
+        gamepad_rc_path = "VENDOR/etc/init/kernarium_gamepad.rc"
         thermal_rc_path = "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc"
         thermal_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml"
         display_config_path = "VENDOR/etc/displayconfig/default.xml"
@@ -838,6 +849,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           missing_net_setup_binary: bool = False,
                           missing_net_library: bool = False,
                           net_policy_variant: str | None = None,
+                          gamepad_policy_variant: str | None = None,
                           wifi_network_variant: str | None = None,
                           wifi_hal_variant: str | None = None,
                           wifi_dirs_variant: str | None = None,
@@ -1821,6 +1833,34 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         else "(typetransition init_202604 kernarium_net_setup_exec process "
                         "kernarium_net_setup)\n"
                     )
+                    # The gamepad relay: init enters its domain through its executable's label, and
+                    # the domain may use the uhid node and vsock, as an unconstrained vsock user.
+                    + (
+                        ""
+                        if gamepad_policy_variant == "missing-transition"
+                        else "(typetransition init_202604 kernarium_gamepad_exec process "
+                        "kernarium_gamepad)\n"
+                    )
+                    + (
+                        ""
+                        if gamepad_policy_variant == "no-uhid"
+                        else "(allow kernarium_gamepad uhid_device_202604 (chr_file ("
+                        + ("getattr open read ioctl lock map" if gamepad_policy_variant == "uhid-read-only"
+                           else "getattr open read ioctl lock map append write")
+                        + ")))\n"
+                    )
+                    + (
+                        ""
+                        if gamepad_policy_variant == "no-vsock"
+                        else "(allow kernarium_gamepad self (vsock_socket ("
+                        + ("read write create getattr bind accept getopt shutdown"
+                           if gamepad_policy_variant == "vsock-no-listen"
+                           else "read write create getattr bind listen accept getopt shutdown")
+                        + ")))\n"
+                    )
+                    + "(typeattributeset unconstrained_vsock_violators (hal_sensors_default"
+                    + ("" if gamepad_policy_variant == "no-attribute" else " kernarium_gamepad")
+                    + "))\n"
                     # The ClearKey HAL's rule for the memfd files of application domains: the
                     # generated attribute names the application domains less the isolated ones.
                     + (
@@ -2230,6 +2270,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr(thermal_rc_path, good_thermal_rc)
                 archive.writestr(thermal_fragment_path, good_thermal_manifest)
                 archive.writestr(display_config_path, good_display_config)
+                archive.writestr(gamepad_binary_path, synthetic_aarch64_elf())
+                archive.writestr(gamepad_rc_path, good_gamepad_rc)
                 # The sample file of the platform: comments only, no assistance server.
                 archive.writestr("SYSTEM/etc/gps_debug.conf", "# SUPL_HOST=supl.example\n# NTP_SERVER=ntp.example\n\n")
                 advertised_features = ["android.hardware.touchscreen",
@@ -4575,6 +4617,57 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("display-config-minimum-30", {"entries": {
                 display_config_path: good_display_config.replace("<minimum>0", "<minimum>30").encode()}},
              "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+            ("missing-gamepad-binary", {"entries": {gamepad_binary_path: None}}, "required entries are missing"),
+            ("missing-gamepad-rc", {"entries": {gamepad_rc_path: None}}, "required entries are missing"),
+            ("gamepad-service-disabled", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    disabled\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gamepad-service-oneshot", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    oneshot\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gamepad-service-triggered", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "\non boot\n    start kernarium_gamepad\n").encode()}},
+             "may have no trigger"),
+            ("gamepad-service-with-a-seclabel", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    seclabel u:r:init:s0\n").encode()}},
+             "takes its domain from its file label"),
+            ("gamepad-service-with-a-capability", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    capabilities SYS_ADMIN\n").encode()}},
+             "takes its domain from its file label"),
+            ("gamepad-service-wrong-user", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace("user nobody", "user root").encode()}},
+             "must carry 'user nobody'"),
+            ("gamepad-service-wrong-group", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace("group uhid", "group nobody").encode()}},
+             "must carry 'group uhid'"),
+            ("gamepad-service-wrong-class", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace("class main", "class hal").encode()}},
+             "must carry 'class main'"),
+            ("gamepad-service-wrong-binary", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace(
+                    "/vendor/bin/kernarium_gamepad", "/vendor/bin/other").encode()}},
+             "must define the one service kernarium_gamepad"),
+            ("gamepad-service-twice", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "service second /vendor/bin/kernarium_gamepad\n").encode()}},
+             "must define the one service kernarium_gamepad"),
+            ("gamepad-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace(good_gamepad_label, "").encode()}},
+             "do not label /vendor/bin/kernarium_gamepad"),
+            ("gamepad-label-of-another-domain", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("kernarium_gamepad_exec", "vendor_file").encode()}},
+             "do not label /vendor/bin/kernarium_gamepad"),
+            ("gamepad-policy-transition", {"gamepad_policy_variant": "missing-transition"},
+             "does not move init into the gamepad relay domain"),
+            ("gamepad-policy-without-uhid", {"gamepad_policy_variant": "no-uhid"},
+             "does not let the gamepad relay open, read and write the uhid device"),
+            ("gamepad-policy-read-only-uhid", {"gamepad_policy_variant": "uhid-read-only"},
+             "does not let the gamepad relay open, read and write the uhid device"),
+            ("gamepad-policy-without-vsock", {"gamepad_policy_variant": "no-vsock"},
+             "does not give the gamepad relay vsock sockets to listen on"),
+            ("gamepad-policy-vsock-without-listen", {"gamepad_policy_variant": "vsock-no-listen"},
+             "does not give the gamepad relay vsock sockets to listen on"),
+            ("gamepad-policy-without-the-vsock-attribute", {"gamepad_policy_variant": "no-attribute"},
+             "does not classify the gamepad relay as an unconstrained vsock user"),
             ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
              "feature is not declared: android.hardware.location(?!\\.gps)"),
             ("missing-gps-feature", {"missing_location_feature": "android.hardware.location.gps"},
@@ -6207,6 +6300,7 @@ def verify_package_assertions(android_root: Path) -> None:
         "android.hardware.sensors-service.multihal",
         "android.hardware.sensors@2.1-impl.andarium",
         "android.hardware.thermal-service.andarium",
+        "kernarium_gamepad",
         "com.android.hardware.cas",
         "libclearkeycasplugin",
         "com.android.hardware.wifi",
