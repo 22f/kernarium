@@ -36,3 +36,7 @@
 # thermal HAL domain, which the AOSP file contexts assign to its own example
 # binary only.
 /(vendor|system/vendor)/bin/hw/android\.hardware\.thermal-service\.andarium  u:object_r:hal_thermal_default_exec:s0
+
+# The gamepad relay turns the host's game controllers into HID devices and runs
+# in a domain of its own: it is a daemon, not a HAL.
+/vendor/bin/kernarium_gamepad  u:object_r:kernarium_gamepad_exec:s0
