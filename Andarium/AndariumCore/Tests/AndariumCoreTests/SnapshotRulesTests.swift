@@ -103,7 +103,7 @@ struct SnapshotRulesTests {
         #expect(SnapshotRules.restorePlan(of: state(release: newer), diskGiB: 8, release: older) == .refused(.newerAndroid))
         let layout2 = snapshotRelease("20261103-los24-r6", build: 300, sha: String(repeating: "d", count: 64), layout: 2)
         // The app's layout is newer than the snapshot's and there is no migration.
-        #expect(SnapshotRules.restorePlan(of: state(release: older), diskGiB: 8, release: layout2) == .refused(.newerDataLayout))
+        #expect(SnapshotRules.restorePlan(of: state(release: older), diskGiB: 8, release: layout2) == .refused(.olderDataLayout))
         // The snapshot's layout is newer than the app's: an older app.
         #expect(SnapshotRules.restorePlan(of: state(release: layout2), diskGiB: 8, release: older) == .refused(.newerAndroid))
         let other = snapshotRelease(older.releaseID, build: older.buildNumber, sha: String(repeating: "c", count: 64))

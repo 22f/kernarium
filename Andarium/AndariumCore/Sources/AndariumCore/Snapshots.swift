@@ -152,9 +152,9 @@ public enum SnapshotRefusal: Error, Equatable, Sendable {
     /// The snapshot's Android is newer than the one this app carries; a newer
     /// app can restore it.
     case newerAndroid
-    /// The snapshot's data is of an older layout than the one this app carries,
-    /// and no migration exists (`StartBlock.newerDataLayout`).
-    case newerDataLayout
+    /// The snapshot's data layout is older than this app's and no migration
+    /// takes it forward (`StartBlock.newerDataLayout`, the app's side).
+    case olderDataLayout
     /// The snapshot was taken on a system disk this app's release does not
     /// carry.
     case differentSystem
@@ -245,7 +245,7 @@ public enum SnapshotRules {
         case .blocked(.olderAndroid):
             return .refused(.newerAndroid)
         case .blocked(.newerDataLayout):
-            return .refused(.newerDataLayout)
+            return .refused(.olderDataLayout)
         case .blocked(.mismatch):
             return .refused(.differentSystem)
         case .firstStart, .unfinishedUpdate:
