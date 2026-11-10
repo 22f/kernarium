@@ -17,6 +17,7 @@ struct SessionSettingsSheet: View {
     @State private var copied = false
     @State private var confirmingStop = false
     @State private var filesBarInset: CGFloat = 0
+    @State private var filesBarHeight: CGFloat = 0
     @State private var detent: PresentationDetent
 
     init(large: Bool) {
@@ -41,6 +42,7 @@ struct SessionSettingsSheet: View {
                 }
             }
             .listSectionSpacing(.compact)
+            .endingAboveFilesBar(filesBarHeight)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -54,6 +56,7 @@ struct SessionSettingsSheet: View {
                 }
             }
         }
+        .environment(\.filesBarHeight, filesBarHeight)
         // The bar is outside the pages, so folders slide under it.
         .safeAreaBar(edge: .bottom) {
             if let browser = model.fileBrowser,
@@ -62,6 +65,7 @@ struct SessionSettingsSheet: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .readFilesBarHeight(into: $filesBarHeight)
         .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.bottom } action: { filesBarInset = $0 }
         .animation(.snappy, value: model.fileBrowser?.browsing)
         .interactiveDismissDisabled(model.fileBrowser?.running == true)
@@ -72,10 +76,9 @@ struct SessionSettingsSheet: View {
             }
             Button("Keep Going", role: .cancel) {}
         }
-        // A browser wants the room. It stays half height while USB debugging
-        // is off, so the guest's own Settings can be reached behind it.
+        // A browser wants the room.
         .onChange(of: model.fileBrowser?.browsing) { _, browsing in
-            if browsing == true, model.adbOverNetworkAvailable { detent = .large }
+            if browsing == true { detent = .large }
         }
         .task { await model.watchSettings() }
         .onDisappear { model.fileBrowser?.sheetClosed() }

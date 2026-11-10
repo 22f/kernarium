@@ -8,6 +8,7 @@ import SwiftUI
 /// can do here, so selecting needs no mode.
 struct FolderPage: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.filesBarHeight) private var barHeight
     let browser: FileBrowserModel
     let route: FolderRoute
     let close: () -> Void
@@ -29,18 +30,16 @@ struct FolderPage: View {
             }
     }
 
-    /// What a folder is read again for: another folder, or USB debugging
-    /// coming back on, or Android's storage coming up.
+    /// What a folder is read again for: another folder, or Android's storage
+    /// coming up.
     private struct LoadKey: Hashable {
         var path: String
         var available: Bool
     }
 
-    /// USB debugging, or Android's storage once USB debugging is on, is not
-    /// known yet: Settings reads them as it opens.
+    /// Android's storage is not known yet: Settings reads it as it opens.
     private var checking: Bool {
-        guard model.driver != nil else { return false }
-        return model.session.usbDebugging == nil || (model.adbOverNetworkAvailable && model.session.storageReady == nil)
+        model.driver != nil && model.session.storageReady == nil
     }
 
     /// The selection when there is one, otherwise the folder.
@@ -56,12 +55,6 @@ struct FolderPage: View {
     @ViewBuilder private var content: some View {
         if checking {
             loading
-        } else if !model.adbOverNetworkAvailable {
-            ContentUnavailableView {
-                Label("USB debugging is off", systemImage: "cable.connector")
-            } description: {
-                Text("Turn on USB debugging in the guest\u{2019}s Developer options to browse its files.")
-            }
         } else if !model.filesAvailable {
             ContentUnavailableView {
                 Label("Android is still starting", systemImage: "hourglass")
@@ -111,6 +104,7 @@ struct FolderPage: View {
         }
         .listSectionSpacing(.compact)
         .contentMargins(.top, wide ? 0 : 6, for: .scrollContent)
+        .endingAboveFilesBar(barHeight)
     }
 
     @ViewBuilder private func row(_ file: GuestFile) -> some View {
@@ -186,6 +180,7 @@ struct FolderPage: View {
         }
         .listSectionSpacing(.compact)
         .contentMargins(.top, wide ? 0 : 6, for: .scrollContent)
+        .endingAboveFilesBar(barHeight)
         .redacted(reason: .placeholder)
         .allowsHitTesting(false)
     }

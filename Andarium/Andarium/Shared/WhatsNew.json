@@ -1,27 +1,33 @@
 [
   {
-    "build": 6,
-    "version": "1.0 (6)",
+    "build": 8,
+    "version": "1.0 (8)",
     "entries": [
       {
         "id": "file-browser",
         "title": "File browser",
-        "text": "Browse Android’s internal storage, and import or export files and folders.",
+        "text": "Browse the guest’s internal storage, and import or export files and folders.",
         "symbol": "folder.fill",
         "place": "sessionSettings"
       },
       {
         "id": "more-memory",
         "title": "More memory",
-        "text": "On devices that allow it, Android’s RAM can now go above 4 GiB.",
+        "text": "On devices that allow it, the guest’s RAM can now go above 4 GiB.",
         "symbol": "memorychip.fill",
         "requirement": { "memoryAboveMiB": 4096 }
       },
       {
-        "id": "graphics-memory",
-        "title": "Graphics memory",
-        "text": "Games free and reuse graphics memory better, so heavy games are less likely to be stopped.",
-        "symbol": "gamecontroller.fill"
+        "id": "stability-fixes",
+        "title": "Stability fixes",
+        "points": [
+          "Fixed the guest crashing on many iPhones",
+          "Fixed a crash when returning to Andarium from the background",
+          "Fixed crashes in some 3D games and apps",
+          "Fixed a crash when using the gyroscope",
+          "Fixed high CPU use and heat after a network connection drops"
+        ],
+        "symbol": "wrench.and.screwdriver.fill"
       }
     ]
   }
