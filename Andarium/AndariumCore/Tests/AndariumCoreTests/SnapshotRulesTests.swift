@@ -188,6 +188,16 @@ struct SnapshotRulesTests {
         #expect(throws: DecodingError.self) { try JSONDecoder().decode(SnapshotID.self, from: Data(#""../x""#.utf8)) }
     }
 
+    @Test func eachStateOfTheRuntimeKeepsTheDiskFromAnOperation() {
+        #expect(!SnapshotRules.runtimeActive(running: false, pending: false, launching: false, preparing: false))
+        #expect(SnapshotRules.runtimeActive(running: true, pending: false, launching: false, preparing: false))
+        #expect(SnapshotRules.runtimeActive(running: false, pending: true, launching: false, preparing: false))
+        #expect(SnapshotRules.runtimeActive(running: false, pending: false, launching: true, preparing: false))
+        #expect(SnapshotRules.runtimeActive(running: false, pending: false, launching: false, preparing: true))
+        // And with it the gate says the guest is not stopped, on Home or not.
+        #expect(SnapshotRules.gate(phase: .home, runtimeActive: true, operationUnderWay: false) == .guestNotStopped)
+    }
+
     @Test func aResultCarriesARefusalAsAValueAndAnythingElseAsAFailure() {
         struct Broken: Error {}
         #expect(SnapshotResult<Int>(catching: { 7 }).value == 7)

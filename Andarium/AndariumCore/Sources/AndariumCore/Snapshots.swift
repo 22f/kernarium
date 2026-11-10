@@ -257,6 +257,13 @@ public enum SnapshotRules {
         return result
     }
 
+    /// Whether the runtime holds the guest's disk or is about to: a run is
+    /// pending for the display, launching, preparing its files or running.
+    /// Each of the four keeps the disk from a snapshot operation.
+    public static func runtimeActive(running: Bool, pending: Bool, launching: Bool, preparing: Bool) -> Bool {
+        running || pending || launching || preparing
+    }
+
     /// Whether a snapshot operation may start now, from the application's
     /// state: stopped means Home with no run active, pending or launching in
     /// the runtime (`runtimeActive`), and nothing else under way. No file
