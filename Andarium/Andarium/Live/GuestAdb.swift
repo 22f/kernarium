@@ -220,6 +220,15 @@ nonisolated struct AdbGuestOperations: Sendable {
         }
     }
 
+    /// The guest kernel's counters that bear on a stall (`GuestProcFiles`),
+    /// read within a bound; none when the guest cannot be asked now.
+    func guestProcFiles() async -> [BugReportArchive.Entry] {
+        guard let result = try? await shell(GuestProcFiles.command, limit: .seconds(30)),
+            let entry = GuestProcFiles.entry(from: result.text)
+        else { return [] }
+        return [entry]
+    }
+
     /// Stops a dump the guest may still run and removes what it left, on a
     /// connection of its own that a cancelled task cannot end.
     private func stopBugReport(identity: AdbKeyStore.Identity, trail: BugReportTrail) async {

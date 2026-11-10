@@ -823,11 +823,13 @@ final class AppModel {
                 } else {
                     try await Self.playBugReport(update)
                 }
-                // The host's records travel inside Android's own report.
+                // The host's records and the guest's counters travel inside
+                // Android's own report.
                 if let diagnosticsDirectory {
+                    let guest = await driver?.guestStallFiles() ?? []
                     _ = await Task.detached(priority: .userInitiated) {
                         BugReportAttachments.attach(
-                            to: file, from: diagnosticsDirectory, containers: diagnosticsContainers)
+                            to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
                     }.value
                 }
                 return file

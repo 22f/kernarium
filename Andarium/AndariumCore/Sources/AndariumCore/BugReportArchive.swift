@@ -165,29 +165,51 @@ public enum BugReportArchive {
     }
 }
 
-/// What Andarium adds to a bug report: the session records and the system's
-/// exit and diagnostic reports MetricKit delivered, from `diagnostics`, with
-/// the application's container paths taken out.
+/// What Andarium adds to a bug report: the session records, the stalls they
+/// hold in words and the system's exit and diagnostic reports MetricKit
+/// delivered, from `diagnostics`, with the application's container paths taken
+/// out; and what the guest's own counters say, when the caller read them.
+///
+/// Every part is bounded: a session record to `SessionRecord.maximumBytes`, a
+/// report of the stalls to a few dozen events per session, a MetricKit report
+/// to `maximumMetricKitBytes` and the reports to `MetricKitReports`' limit, a
+/// file of the guest's to `GuestProcFiles.maximumBytes`.
 public enum BugReportAttachments {
     public static let sessionRecord = "session.txt"
     public static let previousSessionRecord = "previous-session.txt"
     public static let metricKitDirectory = "metrickit"
+    public static let stallReport = "andarium/stalls.txt"
+    /// The most of one MetricKit report that is kept, copied or read.
+    public static let maximumMetricKitBytes = 1 << 20
 
-    public static func entries(from diagnostics: URL, containers: [String]) -> [BugReportArchive.Entry] {
+    public static func entries(
+        from diagnostics: URL, containers: [String], guest: [BugReportArchive.Entry] = []
+    ) -> [BugReportArchive.Entry] {
         var entries: [BugReportArchive.Entry] = []
         let files: [(String, String)] = [
             (previousSessionRecord, "andarium/session-previous.txt"),
             (sessionRecord, "andarium/session-current.txt"),
         ]
+        var texts: [String?] = []
         for (file, name) in files {
-            if let text = try? String(contentsOf: diagnostics.appendingPathComponent(file), encoding: .utf8) {
+            let text = BoundedFile.text(diagnostics.appendingPathComponent(file), limit: SessionRecord.maximumBytes)
+            texts.append(text)
+            if let text {
                 entries.append(.init(name: name, data: Data(DiagnosticRedaction.redact(text, containers: containers).utf8)))
             }
         }
+        if let report = stalls(previous: texts[0].flatMap(SessionRecord.init(text:)),
+            current: texts[1].flatMap(SessionRecord.init(text:)))
+        {
+            entries.append(.init(name: stallReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
+        }
+        entries.append(contentsOf: guest)
         let metrics = diagnostics.appendingPathComponent(metricKitDirectory)
         let reports = (try? FileManager.default.contentsOfDirectory(atPath: metrics.path)) ?? []
         for report in reports.sorted() where report.hasSuffix(".json") {
-            if let text = try? String(contentsOf: metrics.appendingPathComponent(report), encoding: .utf8) {
+            // A longer report is cut, and so no longer JSON: the head is what
+            // a person can still read.
+            if let text = BoundedFile.text(metrics.appendingPathComponent(report), limit: maximumMetricKitBytes) {
                 entries.append(.init(
                     name: "andarium/metrickit/\(report)",
                     data: Data(DiagnosticRedaction.redact(text, containers: containers).utf8)))
@@ -196,11 +218,37 @@ public enum BugReportAttachments {
         return entries
     }
 
+    /// The stalls of the two sessions the records describe, in words; nil
+    /// when neither record has a stall slot (a runtime before layout 4).
+    public static func stalls(previous: SessionRecord?, current: SessionRecord?) -> String? {
+        guard previous?.stalls != nil || current?.stalls != nil else { return nil }
+        var lines = [
+            "Stalls of the guest's vCPUs, as the runtime's stall watch recorded them.",
+            "",
+            "A stall is a vCPU that, for at least 100 ms, was runnable but got under a fifth of a core (starved),",
+            "sat in an uninterruptible wait in the system, or sat in one host call (a device service's answer, a",
+            "disk, guest RAM, or a call the runtime does not label). The watch looks every 50 ms. Times are UTC.",
+            "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
+        ]
+        for (title, record) in [("The previous session", previous), ("The current session", current)] {
+            lines.append("")
+            lines.append("== \(title)\(record.map { " (process \($0.processID))" } ?? "") ==")
+            if let stalls = record?.stalls {
+                lines.append(stalls.report().trimmingCharacters(in: .newlines))
+            } else {
+                lines.append(record == nil ? "There is no record." : "The record has no stall slot.")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     /// Adds the attachments to the report at `file`; a report that cannot take
     /// them is shared as Android made it.
     @discardableResult
-    public static func attach(to file: URL, from diagnostics: URL, containers: [String]) -> Bool {
-        let entries = entries(from: diagnostics, containers: containers)
+    public static func attach(
+        to file: URL, from diagnostics: URL, containers: [String], guest: [BugReportArchive.Entry] = []
+    ) -> Bool {
+        let entries = entries(from: diagnostics, containers: containers, guest: guest)
         do {
             try BugReportArchive.append(entries, to: file)
             return true
@@ -218,7 +266,10 @@ public enum MetricKitReports {
         let directory = diagnostics.appendingPathComponent(BugReportAttachments.metricKitDirectory)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try json.write(to: directory.appendingPathComponent(name), options: .atomic)
+            // A report longer than the cap keeps its head: no longer JSON, still
+            // what a person reads in a bug report.
+            try json.prefix(BugReportAttachments.maximumMetricKitBytes)
+                .write(to: directory.appendingPathComponent(name), options: .atomic)
             let kept = try FileManager.default.contentsOfDirectory(atPath: directory.path)
                 .filter { $0.hasSuffix(".json") }.sorted()
             for old in kept.dropLast(limit) {

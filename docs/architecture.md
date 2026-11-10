@@ -595,8 +595,13 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. Its first
-4 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
+was ended from outside without running, as a memory-limit end is. The file is
+text of a fixed layout (`uml-session 4`) that never passes 13312 bytes
+(`session_record_max_bytes`): a 4 KiB memory slot, a 4 KiB stall slot and the
+state with the kernel output it quotes, at most 5 KiB. Each part is rewritten in
+place by its own writer, so nothing grows with the session; layouts 1 to 3,
+which have the state where the stall slot is, still parse. The first 4 KiB are a
+memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest
 RAM, the host GPU's use against its budget, graphics, the gadget cache, the
@@ -606,6 +611,25 @@ the first checkpoint and when the footprint climbs 64 MiB past the highest
 reading's (`memory_malloc_reading_due`); every checkpoint also writes the
 footprint less the other terms. Andarium names the file in its boot request and
 reads it at launch.
+
+The stall slot records why the vCPUs stopped running. In every build a thread
+of the process, `uml-stall-watch`, looks every 50 ms (`runtime/stall_watch`) at
+each vCPU carrier's run state and CPU time (`thread_info`) and at the host wait
+the carrier says it is in: the loader's wrappers mark the waits for a device
+service's answer, a receive or send, a disk read, write or flush, and guest RAM
+being committed (`platform/host_wait.hpp`). A carrier that was runnable and got
+under a fifth of the time (starved), sat in an uninterruptible wait, or sat in
+one host wait for 100 ms or more is stalled; a late tick of the watch itself is
+a stall of the whole process. Stalls form events, each with the thermal state,
+Low Power Mode and active core count (`platform/host_thermal.hpp`), the
+process's cores, performance cores and power around it, its memory and paging,
+the memory pressure level and the lateness of the main queue
+(`runtime/stall_record`). The slot holds the newest events that fit in 4 KiB,
+at most 32, and the last 8 changes of each of the thermal state, power state and
+memory pressure. The watch reads no guest memory, takes no lock a carrier takes
+and suspends nothing; a hold of the kernel's threads is not recorded as a stall.
+Andarium adds the previous and current records, the stalls in words and the
+guest's `/proc` counters to its bug report.
 
 A guest that restarts itself boots again in the same process, because iOS can
 neither re-exec nor respawn an application. The macOS launchers
