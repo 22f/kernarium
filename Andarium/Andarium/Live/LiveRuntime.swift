@@ -59,6 +59,10 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
     private let motion = MotionSensors()
+    /// The device's haptics for the guest's vibrator. A device without a Taptic
+    /// Engine never runs it: the guest finds no vibrator.
+    private let hapticsAvailable = DeviceHaptics.isAvailable
+    private lazy var haptics = HapticsSession(opener: HapticsConnector(), player: CoreHapticsPlayer())
     /// The interface orientation the sensors' axes are mounted to.
     private var motionMount = MotionMount()
     private lazy var rotation = GuestRotationController(
@@ -331,6 +335,8 @@ final class LiveRuntime: RuntimeDriver {
         reachedBootCompleted = false
         normalRun = run.mode == .normal
         motionMount.begin(interface: interfaceMotionAxes)
+        updateHaptics()
+        let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -349,7 +355,7 @@ final class LiveRuntime: RuntimeDriver {
                 view: view, dataDiskPath: dataDiskPath, releasePath: releasePath, dataGiB: dataGiB, bootMode: bootMode,
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
                 processorCount: processorCount, adbKeyLine: adbKeyLine, timeZone: timeZone,
-                sessionRecordPath: sessionRecordPath, extras: extras
+                sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, extras: extras
             )
             Task { @MainActor in self.finished(result: result) }
         }
@@ -361,7 +367,7 @@ final class LiveRuntime: RuntimeDriver {
         view: GuestMetalView, dataDiskPath: String, releasePath: String, dataGiB: UInt32, bootMode: UInt32,
         width: UInt32, height: UInt32, dotsPerInch: UInt32, memoryMiB: UInt32,
         processorCount: UInt32, adbKeyLine: String?, timeZone: String?, sessionRecordPath: String?,
-        extras: StartExtras
+        hostFeatures: UInt32, extras: StartExtras
     ) -> Int32 {
         dataDiskPath.withCString { dataDisk in
             releasePath.withCString { release in
@@ -393,6 +399,8 @@ final class LiveRuntime: RuntimeDriver {
                             request.android_time_zone = zone
                             // Where the runtime records how the session ends.
                             request.session_record_path = record
+                            // What the host has that the guest is to find.
+                            request.android_host_features = hostFeatures
                             #if !APP_STORE
                             // The JIT engine, once its memory is prepared; gadgets otherwise.
                             request.use_jit = extras.jit ? 1 : 0
@@ -410,6 +418,12 @@ final class LiveRuntime: RuntimeDriver {
     ) -> Output {
         guard let text else { return body(nil) }
         return text.withCString(body)
+    }
+
+    /// What the boot request tells the guest the host has
+    /// (`android_host_features`): a vibrator, on a device with haptics.
+    nonisolated static func hostFeatures(hapticsAvailable: Bool) -> UInt32 {
+        hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0
     }
 
     // MARK: Android operations
@@ -485,6 +499,7 @@ final class LiveRuntime: RuntimeDriver {
         reachedBootCompleted = false
         spaceAlertOpen = false
         motion.stop()
+        haptics.restart()
         updateGuestRotation()
         updateSpaceWatch()
         switch model.phase {
@@ -585,6 +600,7 @@ final class LiveRuntime: RuntimeDriver {
         if motionMount.update(policy: policy, interface: interfaceMotionAxes) { motion.restart() }
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
+        updateHaptics()
     }
 
     func setMotionSensors(_ on: Bool) {
@@ -599,6 +615,18 @@ final class LiveRuntime: RuntimeDriver {
                 && rotation.applied == rotationPolicy,
             axes: motionMount.axes
         )
+    }
+
+    // MARK: Haptics
+
+    /// The guest's vibrator plays while a normal run is in front and holds
+    /// the guest running; the connection is made from the run's start, because
+    /// the guest's HAL starts early. The screens have no part in it: Android's
+    /// own settings decide what it asks for.
+    private func updateHaptics() {
+        haptics.update(
+            available: hapticsAvailable, running: normalRun, booted: reachedBootCompleted,
+            foreground: active && !holdsGuestStill)
     }
 
     // MARK: Microphone
