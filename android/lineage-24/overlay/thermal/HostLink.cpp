@@ -73,6 +73,13 @@ void HostLink::serve() {
         const auto ready = poll(descriptors, 3, -1);
         if (ready < 0 && errno == EINTR) continue;
         if (ready < 0 || descriptors[0].revents != 0) return;
+        // A listener that reports an error or a hang-up and has nothing to accept would make poll return at once from
+        // now on, and nothing consumes the event: stop serving. The severity stays what it was.
+        if ((descriptors[1].revents & (POLLERR | POLLHUP | POLLNVAL)) && !(descriptors[1].revents & POLLIN)) {
+            ALOGE("the listener on vsock port %u failed (poll events 0x%x); no longer serving", port,
+                  static_cast<unsigned>(descriptors[1].revents));
+            return;
+        }
         if (descriptors[1].revents & POLLIN) {
             sockaddr_vm peer{};
             socklen_t length = sizeof(peer);
