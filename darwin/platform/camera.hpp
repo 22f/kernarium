@@ -166,6 +166,9 @@ struct CameraFrame {
     CameraExposure exposure;
 };
 
+// What a capture produced. A part the request asked for that failed is empty
+// and the others stay: `ok` is false only when nothing the request asked for
+// arrived, so a Bayer still that fails alone leaves the JPEG that came with it.
 struct CameraStillResult {
     std::uint64_t token {};
     bool ok {};
@@ -235,6 +238,9 @@ enum class CameraEventKind : std::uint8_t {
     // The same, because other applications share the screen (iPad
     // multitasking). A host that cannot tell reports interrupted.
     interruptedByMultitasking,
+    // The same, because the system is under pressure (heat): the capture is
+    // stopped until the pressure eases.
+    interruptedBySystemPressure,
     // The capture runs again.
     resumed,
     // The camera went away or came back (an external camera).
@@ -269,7 +275,12 @@ public:
 
     // Starts a camera, or restarts it at another size or rate, with the
     // smallest format of the camera that covers the size at the rate. Fails
-    // when the camera cannot join the cameras already running.
+    // when the camera cannot join the cameras already running. Cameras that
+    // run together need formats a multi-camera session takes
+    // (CameraVideoFormat::multiCamera): the cameras already running move to
+    // the smallest such format that covers what they were asked for, and the
+    // call fails, changing nothing, when a camera has none. A camera that is
+    // alone again goes back to the smallest format of any kind.
     [[nodiscard]] virtual bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height,
                                           std::uint32_t frameRate) = 0;
     virtual void stopVideo(std::size_t camera) = 0;

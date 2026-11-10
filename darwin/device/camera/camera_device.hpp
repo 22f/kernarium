@@ -16,7 +16,7 @@ namespace uml::camera {
 
 /* The Virtio camera: the video device type VIRTIO_VIDEO_DEVICE_CAMERA, under
  * UML_VIRTIO_VIDEO_CAMERA_DEVICE_ID. */
-inline constexpr std::uint32_t cameraDeviceId = 65533;
+inline constexpr std::uint32_t cameraDeviceId = UML_VIRTIO_VIDEO_CAMERA_DEVICE_ID;
 
 /* How a session treats the host's cameras, fixed when the guest starts.
  *
@@ -36,6 +36,8 @@ enum class CameraState : std::uint8_t {
     interrupted,
     /* The same, because other applications share the screen. */
     interruptedByMultitasking,
+    /* The same, because the system is under pressure (heat). */
+    interruptedBySystemPressure,
 };
 
 struct CameraDeviceOptions {

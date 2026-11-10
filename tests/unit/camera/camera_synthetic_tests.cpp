@@ -97,7 +97,8 @@ SyntheticCameraOptions manual(SyntheticCameraProfile profile)
 void profiles()
 {
     std::set<std::string> models;
-    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::laptop}) {
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::tabletDualFront,
+                               SyntheticCameraProfile::laptop}) {
         const auto camera = makeSyntheticCamera(manual(profile));
         const auto cameras = camera->cameras();
         require(!cameras.empty());
@@ -120,7 +121,10 @@ void profiles()
                 require(found);
             }
     }
-    require(models.size() == 3);
+    require(models.size() == 4);
+    const auto dual = makeSyntheticCamera(manual(SyntheticCameraProfile::tabletDualFront))->cameras();
+    require(dual.size() == 3 && dual[1].position == CameraPosition::front && dual[1].lens == CameraLensKind::wide &&
+            dual[2].position == CameraPosition::front && dual[2].lens == CameraLensKind::ultraWide);
     const auto phone = makeSyntheticCamera(manual(SyntheticCameraProfile::phone))->cameras();
     require(phone.size() == 5 && phone[0].lens == CameraLensKind::zoom && !phone[0].manualExposure);
     require(phone[1].manualExposure && phone[1].rawStills && phone[1].stillSizes.front().width == 8064);
@@ -282,6 +286,110 @@ void multiCamera()
     require(session->startVideo(2, 3840, 2160, 30));   // alone, it may use it
 }
 
+// A camera alone runs any format; cameras that run together run formats a
+// multi-camera session takes. The ones running move to such a format when
+// another joins, the newcomer is refused with nothing changed when one has none,
+// and a camera left alone goes back to the smallest format of any kind.
+void multiCameraFormats()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tabletDualFront));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    using Size = std::pair<std::uint32_t, std::uint32_t>;
+    require(session->startVideo(0, 1600, 900, 30));
+    require(camera->videoSize(0) == Size(1600, 900));  // its own format, which no multi-camera session takes
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.width == 1600);
+
+    require(session->startVideo(1, 640, 480, 30));     // the front wide camera joins
+    require(camera->videoSize(0) == Size(1920, 1080) && camera->videoSize(1) == Size(640, 480));
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.width == 1920 && recorder.frames.back().first == 0);
+    require(!session->startVideo(2, 640, 480, 30));    // the ultra wide front is in no set with both
+    require(camera->videoSize(2) == Size(0, 0));
+
+    session->stopVideo(1);
+    require(camera->videoSize(0) == Size(1600, 900));  // alone again: its smallest format
+    // The other front camera is a set with the back one, in its turn.
+    require(session->startVideo(2, 640, 480, 30));
+    require(camera->videoSize(0) == Size(1920, 1080) && camera->videoSize(2) == Size(640, 480));
+    session->stopVideo(2);
+
+    // A camera that has no format a multi-camera session takes at its size cannot be joined.
+    require(session->startVideo(0, 3840, 2160, 30));
+    require(camera->videoSize(0) == Size(3840, 2160));
+    require(!session->startVideo(1, 640, 480, 30));
+    require(camera->videoSize(0) == Size(3840, 2160) && !camera->videoRunning(1));
+    // Nor can it be moved by a request for a size no format of its kind covers at that rate.
+    session->stopVideo(0);
+    require(session->startVideo(1, 1920, 1080, 30));
+    require(!session->startVideo(0, 3840, 2160, 30));
+    require(camera->videoSize(1) == Size(1920, 1080) && !camera->videoRunning(0));
+}
+
+// A Bayer still the platform refuses, or that fails alone, leaves what else the
+// capture asked for.
+void rawFailures()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    CameraStillRequest request;
+    request.jpegWidth = 1000;
+    request.jpegHeight = 700;
+    request.raw = true;
+    camera->refuseRaw(true);
+    require(!session->takeStill(0, request));
+    request.raw = false;
+    require(session->takeStill(0, request));
+    camera->pump(0, 0);
+    require(recorder.stills.back().second.ok && !recorder.stills.back().second.jpeg.empty());
+
+    camera->refuseRaw(false);
+    camera->failRaw(true);
+    request.raw = true;
+    request.token = 3;
+    require(session->takeStill(0, request));
+    camera->pump(0, 0);
+    const auto& partial = recorder.stills.back().second;
+    require(partial.ok && partial.token == 3 && !partial.jpeg.empty() && partial.raw.empty());
+    request.jpegWidth = 0;
+    request.token = 4;
+    require(session->takeStill(0, request));
+    camera->pump(0, 0);
+    require(!recorder.stills.back().second.ok && recorder.stills.back().second.token == 4);
+}
+
+// The cause of an interruption outlives a session: one opened while it lasts is
+// interrupted as it starts, with the same reason.
+void interruptionOutlivesSession()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    {
+        Recorder first;
+        auto session = camera->openSession(first);
+        camera->interrupt(CameraEventKind::interruptedBySystemPressure);
+        require(first.events.size() == 1 && first.events[0].kind == CameraEventKind::interruptedBySystemPressure);
+        session->stop();
+    }
+    Recorder second;
+    auto session = camera->openSession(second);
+    require(second.events.size() == 1 && second.events[0].kind == CameraEventKind::interruptedBySystemPressure &&
+            second.events[0].camera == allCameras);
+    camera->resume();
+    require(second.events.size() == 2 && second.events[1].kind == CameraEventKind::resumed);
+    session->stop();
+    Recorder third;
+    session = camera->openSession(third);
+    require(third.events.empty());
+    // post() delivers an event and changes nothing else.
+    camera->post({1, CameraEventKind::unavailable});
+    require(third.events.size() == 1 && third.events[0].kind == CameraEventKind::unavailable && third.events[0].camera == 1);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->pump(0, 1);
+    require(third.frames.size() == 1);
+}
+
 void stills()
 {
     const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
@@ -406,6 +514,9 @@ int main()
     controls();
     zoomCamera();
     multiCamera();
+    multiCameraFormats();
+    rawFailures();
+    interruptionOutlivesSession();
     stills();
     interruptions();
     threaded();

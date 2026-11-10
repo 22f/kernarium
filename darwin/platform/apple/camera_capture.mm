@@ -96,6 +96,13 @@ std::vector<Entry> discover()
         AVCaptureDeviceTypeBuiltInDualCamera, AVCaptureDeviceTypeBuiltInDualWideCamera,
         AVCaptureDeviceTypeBuiltInTripleCamera
     ]];
+    // The foldable's two ultra wide cameras exist from iOS 27.1; on 27.0 the
+    // constants are null, so they are named only where they exist.
+    if (@available(iOS 27.1, *)) {
+        [types addObjectsFromArray:@[
+            AVCaptureDeviceTypeBuiltInOuterUltraWideCamera, AVCaptureDeviceTypeBuiltInInnerUltraWideCamera
+        ]];
+    }
 #endif
     AVCaptureDeviceDiscoverySession* session =
         [AVCaptureDeviceDiscoverySession discoverySessionWithDeviceTypes:types
@@ -116,13 +123,18 @@ std::vector<Entry> discover()
         info.lens = CameraLensKind::external;
         if ([type isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) info.lens = CameraLensKind::wide;
 #if TARGET_OS_IOS
-        if ([type isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera]) info.lens = CameraLensKind::ultraWide;
+        bool ultraWide = [type isEqualToString:AVCaptureDeviceTypeBuiltInUltraWideCamera];
+        if (@available(iOS 27.1, *))
+            ultraWide = ultraWide || [type isEqualToString:AVCaptureDeviceTypeBuiltInOuterUltraWideCamera] ||
+                [type isEqualToString:AVCaptureDeviceTypeBuiltInInnerUltraWideCamera];
+        if (ultraWide) info.lens = CameraLensKind::ultraWide;
         else if ([type isEqualToString:AVCaptureDeviceTypeBuiltInTelephotoCamera]) info.lens = CameraLensKind::telephoto;
         else if (device.virtualDevice) info.lens = CameraLensKind::zoom;
         if (info.position == CameraPosition::external) info.lens = CameraLensKind::external;
 #endif
         info.autofocus = [device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus];
-        info.flash = device.hasFlash;
+        // A front camera's flash is the screen's, which no guest camera unit models.
+        info.flash = device.hasFlash && info.position != CameraPosition::front;
         info.torch = device.hasTorch;
         const bool zoomCamera = info.lens == CameraLensKind::zoom;
 
@@ -259,12 +271,29 @@ using uml::platform::SessionState;
 @interface UMLPhotoDelegate : NSObject <AVCapturePhotoCaptureDelegate>
 - (instancetype)initWithCamera:(size_t)camera
                          token:(uint64_t)token
+                      wantJpeg:(BOOL)wantJpeg
                        wantRaw:(BOOL)wantRaw
                          state:(std::shared_ptr<SessionState>)state;
 @end
 
+#if TARGET_OS_IOS
+// Reports the level of a device's system pressure (heat, mostly) as it changes.
+@interface UMLPressureObserver : NSObject
+- (instancetype)initWithDevice:(AVCaptureDevice*)device handler:(void (^)(AVCaptureSystemPressureLevel))handler;
+- (void)invalidate;
+@end
+#endif
+
 namespace uml::platform {
 namespace {
+
+// What the system's pressure leaves of the rate a camera was asked for. The
+// pressure observer reads and writes it on any thread.
+struct PressureThrottle {
+    std::atomic<std::uint32_t> requestedRate {0};
+    // The most frames a second the pressure allows; zero is no limit.
+    std::atomic<std::uint32_t> cap {0};
+};
 
 struct RunningCamera {
     AVCaptureDeviceInput* input {};
@@ -272,13 +301,50 @@ struct RunningCamera {
     AVCapturePhotoOutput* photoOutput {};
     UMLCameraOutputDelegate* delegate {};
     AVCaptureConnection* connection {};
+    AVCaptureDeviceFormat* format {};
+#if TARGET_OS_IOS
+    UMLPressureObserver* pressure {};
+#endif
+    std::shared_ptr<PressureThrottle> throttle {std::make_shared<PressureThrottle>()};
     bool video {};
     CameraSettings settings;
+    // What the camera was asked for, which its format covers.
     std::uint32_t width {};
     std::uint32_t height {};
     std::uint32_t frameRate {};
     std::uint32_t focusSerial {};
 };
+
+// The rate a device runs at while the pressure caps it: the one asked for,
+// lowered to the cap, and no lower than the format allows.
+std::uint32_t throttledRate(const PressureThrottle& throttle, AVCaptureDeviceFormat* format)
+{
+    std::uint32_t rate = throttle.requestedRate;
+    const std::uint32_t cap = throttle.cap;
+    if (cap != 0 && cap < rate) rate = cap;
+    double floorRate = 1.0;
+    for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges) floorRate = std::max(floorRate, range.minFrameRate);
+    return std::max<std::uint32_t>(rate, std::uint32_t(std::ceil(floorRate)));
+}
+
+// Sets a device's format and frame rate; false when the device refuses either.
+bool setFormat(AVCaptureDevice* device, AVCaptureDeviceFormat* format, std::uint32_t frameRate)
+{
+    NSError* error = nil;
+    if (![device lockForConfiguration:&error]) return false;
+    bool ok = true;
+    @try {
+        // A format the session does not take raises instead of failing.
+        device.activeFormat = format;
+        const CMTime duration = CMTimeMake(1, std::int32_t(frameRate));
+        device.activeVideoMinFrameDuration = duration;
+        device.activeVideoMaxFrameDuration = duration;
+    } @catch (NSException*) {
+        ok = false;
+    }
+    [device unlockForConfiguration];
+    return ok;
+}
 
 class AppleCamera;
 
@@ -316,6 +382,9 @@ public:
                                            if (reason.integerValue ==
                                                AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableWithMultipleForegroundApps)
                                                kind = CameraEventKind::interruptedByMultitasking;
+                                           else if (reason.integerValue ==
+                                                    AVCaptureSessionInterruptionReasonVideoDeviceNotAvailableDueToSystemPressure)
+                                               kind = CameraEventKind::interruptedBySystemPressure;
 #else
                                            (void)note;
 #endif
@@ -327,17 +396,30 @@ public:
                                    usingBlock:^(NSNotification*) {
                                        post({allCameras, CameraEventKind::resumed});
                                    }];
+        // A restart after a runtime error ends with the session running again,
+        // which is no interruption ending: the capture tells its client itself.
+        // The blocks hold locals only: a block that read an instance variable
+        // would hold this object, which may be gone when the notification comes.
+        auto restarting = restarting_;
+        AVCaptureSession* observed = session_;
+        dispatch_queue_t queue = queue_;
         failed_ = [center addObserverForName:AVCaptureSessionRuntimeErrorNotification
                                       object:session_
                                        queue:nil
                                   usingBlock:^(NSNotification*) {
                                       // A media-services reset is the recoverable case; try once.
+                                      restarting->store(true);
                                       post({allCameras, CameraEventKind::interrupted});
-                                      AVCaptureSession* session = session_;
-                                      dispatch_async(queue_, ^{
-                                          if (!session.running) [session startRunning];
+                                      dispatch_async(queue, ^{
+                                          if (!observed.running) [observed startRunning];
                                       });
                                   }];
+        started_ = [center addObserverForName:AVCaptureSessionDidStartRunningNotification
+                                       object:session_
+                                        queue:nil
+                                   usingBlock:^(NSNotification*) {
+                                       if (restarting->exchange(false)) post({allCameras, CameraEventKind::resumed});
+                                   }];
     }
 
     ~AppleSession() override { stop(); }
@@ -353,11 +435,39 @@ public:
         auto& running = cameras_[camera];
         if (running.video && running.width == width && running.height == height && running.frameRate == frameRate)
             return true;
-        AVCaptureDeviceFormat* format = chooseFormat(entry, width, height, frameRate);
+        // Cameras that run together in a multi-camera session need formats it
+        // takes. A camera alone may use any format (applications linked on or
+        // after iOS 26 are not held to the rule for a single input), so the
+        // cameras already running move to such a format when another joins, or
+        // the new one is refused and nothing changes.
+        std::vector<std::size_t> others;
+        for (const auto& [index, other] : cameras_)
+            if (index != camera && other.video) others.push_back(index);
+        const bool several = multiCamera_ && !others.empty();
+        AVCaptureDeviceFormat* format = chooseFormat(entry, width, height, frameRate, several);
         if (format == nil) return false;
+        std::vector<std::pair<std::size_t, AVCaptureDeviceFormat*>> moves;
+        if (several) {
+            for (const auto index : others) {
+                const auto& other = cameras_[index];
+                if (formatTakenByMultiCamera(other.format)) continue;
+                AVCaptureDeviceFormat* moved = chooseFormat(entries_[index], other.width, other.height, other.frameRate, true);
+                if (moved == nil) return false;
+                moves.emplace_back(index, moved);
+            }
+        }
         bool ok = true;
         onQueue([&] {
-            ok = configureVideo(camera, entry, running, format, width, height, frameRate);
+            for (const auto& [index, moved] : moves) {
+                auto& other = cameras_[index];
+                other.throttle->requestedRate = other.frameRate;
+                if (!setFormat(entries_[index].device, moved, throttledRate(*other.throttle, moved))) {
+                    ok = false;
+                    break;
+                }
+                other.format = moved;
+            }
+            if (ok) ok = configureVideo(camera, entry, running, format, width, height, frameRate);
             if (ok && !session_.running) [session_ startRunning];
         });
         return ok;
@@ -374,12 +484,33 @@ public:
             running.videoOutput = nil;
             running.delegate = nil;
             running.connection = nil;
-            if (running.photoOutput == nil && running.input) {
-                [session_ removeInput:running.input];
-                running.input = nil;
+            running.video = false;
+            // A camera that no longer streams leaves the session, and so does the
+            // photo output made for it unless a still is still on its way; the
+            // camera's indicator and its share of a multi-camera budget go with it.
+            if (!stillsInFlight(camera)) {
+                if (running.photoOutput) [session_ removeOutput:running.photoOutput];
+                running.photoOutput = nil;
+                if (running.input) {
+                    [session_ removeInput:running.input];
+                    running.input = nil;
+                }
             }
             [session_ commitConfiguration];
-            running.video = false;
+            endPressureWatch(running);
+            // A camera left alone may use the format it would have had alone.
+            if (multiCamera_) {
+                std::vector<std::size_t> remaining;
+                for (const auto& [index, other] : cameras_)
+                    if (other.video) remaining.push_back(index);
+                if (remaining.size() == 1) {
+                    auto& last = cameras_[remaining.front()];
+                    AVCaptureDeviceFormat* best = chooseFormat(entries_[remaining.front()], last.width, last.height, last.frameRate, false);
+                    if (best != nil && best != last.format &&
+                        setFormat(entries_[remaining.front()].device, best, throttledRate(*last.throttle, best)))
+                        last.format = best;
+                }
+            }
         });
     }
 
@@ -523,8 +654,15 @@ public:
 #endif
         UMLPhotoDelegate* delegate = [[UMLPhotoDelegate alloc] initWithCamera:camera
                                                                          token:request.token
+                                                                      wantJpeg:request.jpegWidth != 0
                                                                        wantRaw:request.raw
                                                                          state:state_];
+        // The photo output holds its delegate weakly, so the session keeps it
+        // until the capture finishes, or none of its callbacks would arrive.
+        {
+            std::lock_guard lock(photoMutex_);
+            photos_[request.token] = {camera, delegate};
+        }
         [output capturePhotoWithSettings:settings delegate:delegate];
         return true;
     }
@@ -537,10 +675,10 @@ public:
             state_->session = nullptr;
         }
         NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
-        for (id token : {interrupted_, resumed_, failed_}) {
+        for (id token : {interrupted_, resumed_, failed_, started_}) {
             if (token) [center removeObserver:token];
         }
-        interrupted_ = resumed_ = failed_ = nil;
+        interrupted_ = resumed_ = failed_ = started_ = nil;
         AVCaptureSession* session = session_;
         onQueue([session] {
             if (session.running) [session stopRunning];
@@ -555,6 +693,14 @@ public:
                 [device unlockForConfiguration];
             }
 #endif
+        }
+        {
+            std::lock_guard lock(photoMutex_);
+            photos_.clear();
+        }
+        for (auto& [camera, running] : cameras_) {
+            (void)camera;
+            endPressureWatch(running);
         }
         cameras_.clear();
         session_ = nil;
@@ -591,7 +737,15 @@ public:
         delegate_.cameraFrame(camera, std::move(frame));
     }
 
-    void deliverStill(std::size_t camera, CameraStillResult result) { delegate_.cameraStill(camera, std::move(result)); }
+    // A capture is over: its delegate is no longer needed, and the result goes on.
+    void deliverStill(std::size_t camera, CameraStillResult result)
+    {
+        {
+            std::lock_guard lock(photoMutex_);
+            photos_.erase(result.token);
+        }
+        delegate_.cameraStill(camera, std::move(result));
+    }
 
     CameraExposure exposureOf(std::size_t camera, CMSampleBufferRef sample) const
     {
@@ -645,15 +799,21 @@ public:
     const Entry& entry(std::size_t camera) const { return entries_[camera]; }
 
 private:
-    AVCaptureDeviceFormat* chooseFormat(const Entry& entry, std::uint32_t width, std::uint32_t height,
-                                        std::uint32_t frameRate) const
+    static bool formatTakenByMultiCamera(AVCaptureDeviceFormat* format)
+    {
+#if TARGET_OS_IOS
+        return format != nil && format.multiCamSupported;
+#else
+        (void)format;
+        return true;
+#endif
+    }
+
+    AVCaptureDeviceFormat* chooseFormat(const Entry& entry, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate,
+                                        bool multiCameraOnly) const
     {
         AVCaptureDeviceFormat* best = nil;
         std::uint64_t bestArea = 0;
-        // A second camera must use formats a multi-camera session accepts; so
-        // must the first, which is restarted on one when the second joins.
-        const bool needMultiCamera = multiCamera_ &&
-            (cameras_.size() > 1 || (!cameras_.empty() && !cameras_.contains(indexOf(entry))));
         for (AVCaptureDeviceFormat* format in entry.device.formats) {
             const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
             if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
@@ -661,11 +821,7 @@ private:
                 continue;
             const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
             if (std::uint32_t(dimensions.width) < width || std::uint32_t(dimensions.height) < height) continue;
-#if TARGET_OS_IOS
-            if (needMultiCamera && !format.multiCamSupported) continue;
-#else
-            (void)needMultiCamera;
-#endif
+            if (multiCameraOnly && !formatTakenByMultiCamera(format)) continue;
             bool rate = false;
             for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges)
                 rate |= range.minFrameRate <= frameRate + 1e-3 && range.maxFrameRate >= frameRate - 1e-3;
@@ -679,11 +835,6 @@ private:
             }
         }
         return best;
-    }
-
-    std::size_t indexOf(const Entry& entry) const
-    {
-        return std::size_t(&entry - entries_.data());
     }
 
     bool configureVideo(std::size_t camera, const Entry& entry, RunningCamera& running, AVCaptureDeviceFormat* format,
@@ -706,14 +857,9 @@ private:
                 ok = false;
             }
         }
-        if (ok && [entry.device lockForConfiguration:&error]) {
-            entry.device.activeFormat = format;
-            const CMTime duration = CMTimeMake(1, std::int32_t(frameRate));
-            entry.device.activeVideoMinFrameDuration = duration;
-            entry.device.activeVideoMaxFrameDuration = duration;
-            [entry.device unlockForConfiguration];
-        } else {
-            ok = false;
+        if (ok) {
+            running.throttle->requestedRate = frameRate;
+            ok = setFormat(entry.device, format, throttledRate(*running.throttle, format));
         }
         if (ok && running.videoOutput == nil) {
             AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
@@ -754,11 +900,54 @@ private:
         [session_ commitConfiguration];
         if (ok) {
             running.video = true;
+            running.format = format;
             running.width = width;
             running.height = height;
             running.frameRate = frameRate;
+            beginPressureWatch(entry, running);
         }
         return ok;
+    }
+
+    // The system's pressure on a camera lowers the rate it runs at, as Apple
+    // advises (heat that goes on rising ends in the session's interruption);
+    // the capture's client sees fewer frames, and the interruption itself
+    // arrives as an event of its own.
+    void beginPressureWatch(const Entry& entry, RunningCamera& running)
+    {
+#if TARGET_OS_IOS
+        if (running.pressure != nil) return;
+        AVCaptureDevice* device = entry.device;
+        auto throttle = running.throttle;
+        dispatch_queue_t queue = queue_;
+        running.pressure = [[UMLPressureObserver alloc] initWithDevice:device
+                                                               handler:^(AVCaptureSystemPressureLevel level) {
+            std::uint32_t cap = 0;
+            if ([level isEqualToString:AVCaptureSystemPressureLevelSerious]) cap = 20;
+            else if ([level isEqualToString:AVCaptureSystemPressureLevelCritical] ||
+                     [level isEqualToString:AVCaptureSystemPressureLevelShutdown])
+                cap = 15;
+            if (throttle->cap.exchange(cap) == cap) return;
+            dispatch_async(queue, ^{
+                AVCaptureDeviceFormat* active = device.activeFormat;
+                (void)setFormat(device, active, throttledRate(*throttle, active));
+            });
+        }];
+#else
+        (void)entry;
+        (void)running;
+#endif
+    }
+
+    static void endPressureWatch(RunningCamera& running)
+    {
+#if TARGET_OS_IOS
+        [running.pressure invalidate];
+        running.pressure = nil;
+#else
+        (void)running;
+#endif
+        running.throttle->cap = 0;
     }
 
     bool prepareStill(std::size_t camera, const Entry& entry, RunningCamera& running)
@@ -821,15 +1010,30 @@ private:
         return ok;
     }
 
+    // The captures on their way: their delegates are held here.
+    struct Photo {
+        std::size_t camera {};
+        UMLPhotoDelegate* delegate {};
+    };
+    bool stillsInFlight(std::size_t camera)
+    {
+        std::lock_guard lock(photoMutex_);
+        return std::any_of(photos_.begin(), photos_.end(), [camera](const auto& entry) { return entry.second.camera == camera; });
+    }
+
     std::vector<Entry> entries_;
     CameraSessionDelegate& delegate_;
     std::shared_ptr<SessionState> state_;
+    std::mutex photoMutex_;
+    std::map<std::uint64_t, Photo> photos_;
     AVCaptureSession* session_ {};
     dispatch_queue_t queue_;
     dispatch_queue_t outputQueue_;
     id interrupted_ {};
     id resumed_ {};
     id failed_ {};
+    id started_ {};
+    std::shared_ptr<std::atomic_bool> restarting_ {std::make_shared<std::atomic_bool>(false)};
     bool multiCamera_ {};
     std::atomic_bool stopped_ {};
     std::map<std::size_t, RunningCamera> cameras_;
@@ -939,24 +1143,25 @@ std::unique_ptr<Camera> makeAppleCamera()
 @implementation UMLPhotoDelegate {
     size_t _camera;
     uint64_t _token;
+    BOOL _wantJpeg;
     BOOL _wantRaw;
     std::shared_ptr<SessionState> _state;
     uml::platform::CameraStillResult _result;
-    bool _failed;
 }
 
 - (instancetype)initWithCamera:(size_t)camera
                          token:(uint64_t)token
+                      wantJpeg:(BOOL)wantJpeg
                        wantRaw:(BOOL)wantRaw
                          state:(std::shared_ptr<SessionState>)state
 {
     if ((self = [super init])) {
         _camera = camera;
         _token = token;
+        _wantJpeg = wantJpeg;
         _wantRaw = wantRaw;
         _state = std::move(state);
         _result.token = token;
-        _failed = false;
     }
     return self;
 }
@@ -966,25 +1171,19 @@ std::unique_ptr<Camera> makeAppleCamera()
                        error:(NSError*)error
 {
     (void)output;
-    if (error != nil) {
-        _failed = true;
-        return;
-    }
+    // A part that fails leaves its field empty and the other part alone: a Bayer
+    // still that cannot be made does not take the person's JPEG with it.
+    if (error != nil || photo == nil) return;
     NSData* data = photo.fileDataRepresentation;
 #if TARGET_OS_IOS
     if (photo.isRawPhoto) {
         CVPixelBufferRef pixels = photo.pixelBuffer;
-        if (pixels == nullptr || data == nil) {
-            _failed = true;
-            return;
-        }
+        if (pixels == nullptr || data == nil) return;
         const auto order = uml::platform::bayerOrderOf(CVPixelBufferGetPixelFormatType(pixels));
         const auto width = CVPixelBufferGetWidth(pixels);
         const auto height = CVPixelBufferGetHeight(pixels);
-        if (order == uml::platform::BayerOrder::none || CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
-            _failed = true;
+        if (order == uml::platform::BayerOrder::none || CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
             return;
-        }
         const auto* base = static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(pixels));
         const auto stride = CVPixelBufferGetBytesPerRow(pixels);
         _result.raw.resize(width * height);
@@ -1019,9 +1218,62 @@ std::unique_ptr<Camera> makeAppleCamera()
 {
     (void)output;
     (void)resolvedSettings;
-    _result.ok = error == nil && !_failed && (!_result.jpeg.empty() || !_result.raw.empty());
+    (void)error;
+    // The session drops its hold on this object when it delivers, which can be
+    // the last one.
+    __strong UMLPhotoDelegate* keepAlive = self;
+    (void)keepAlive;
+    // Whatever arrived stands; the capture failed only when nothing asked for did.
+    _result.ok = (_wantJpeg && !_result.jpeg.empty()) || (_wantRaw && !_result.raw.empty());
     std::lock_guard lock(_state->mutex);
     if (_state->session) static_cast<uml::platform::AppleSession*>(_state->session)->deliverStill(_camera, std::move(_result));
 }
 
 @end
+
+#if TARGET_OS_IOS
+@implementation UMLPressureObserver {
+    AVCaptureDevice* _device;
+    void (^_handler)(AVCaptureSystemPressureLevel);
+    BOOL _observing;
+}
+
+- (instancetype)initWithDevice:(AVCaptureDevice*)device handler:(void (^)(AVCaptureSystemPressureLevel))handler
+{
+    if ((self = [super init])) {
+        _device = device;
+        _handler = [handler copy];
+        [device addObserver:self forKeyPath:@"systemPressureState" options:NSKeyValueObservingOptionNew context:nil];
+        _observing = YES;
+    }
+    return self;
+}
+
+- (void)observeValueForKeyPath:(NSString*)keyPath
+                      ofObject:(id)object
+                        change:(NSDictionary*)change
+                       context:(void*)context
+{
+    (void)change;
+    (void)context;
+    if (![keyPath isEqualToString:@"systemPressureState"]) return;
+    AVCaptureSystemPressureState* state = static_cast<AVCaptureDevice*>(object).systemPressureState;
+    if (state != nil && _handler != nil) _handler(state.level);
+}
+
+- (void)invalidate
+{
+    if (!_observing) return;
+    _observing = NO;
+    [_device removeObserver:self forKeyPath:@"systemPressureState"];
+    _handler = nil;
+    _device = nil;
+}
+
+- (void)dealloc
+{
+    [self invalidate];
+}
+
+@end
+#endif

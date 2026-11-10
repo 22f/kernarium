@@ -46,9 +46,13 @@ constexpr std::size_t maximumHeld = 128;
 constexpr std::size_t maximumControls = 256;
 constexpr std::size_t metaBacklogLimit = 16;
 constexpr std::size_t inboxFrameLimit = 3;
-/* A group of still buffers that has not completed this long after its first
- * buffer arrived completes with an error. */
+/* A group of still buffers whose last buffer has not arrived this long after
+ * its first completes with an error. */
 constexpr std::uint64_t groupTimeoutNanoseconds = 2'000'000'000;
+/* A capture that has started has this long to deliver before its buffers
+ * complete with an error: a long exposure, a flash and a 48 MP capture need
+ * more than the assembly of a group does. */
+constexpr std::uint64_t captureTimeoutNanoseconds = 10'000'000'000;
 /* How long a session that failed to open waits before it is tried again. */
 constexpr std::uint64_t sessionRetryNanoseconds = 1'000'000'000;
 constexpr std::uint32_t userIdent = 0;
@@ -156,7 +160,7 @@ public:
         std::uint64_t token {};
         bool fired {};
     };
-    enum class Interruption : std::uint8_t { none, interrupted, multitasking };
+    enum class Interruption : std::uint8_t { none, interrupted, multitasking, pressure };
     struct Runtime {
         Runtime(CameraDescription d, bool blocked, std::uint32_t orientation)
             : description(std::move(d)), controls(description.info, orientation, blocked), values(controls.defaults())
@@ -170,9 +174,15 @@ public:
         std::uint64_t sequence {};
         std::optional<CameraExposure> latest;
         Interruption interruption {Interruption::none};
+        /* The capture is starting and has not delivered a frame yet. */
         bool resuming {};
         bool videoRunning {};
         bool failed {};
+        /* The guest has been told the camera is interrupted (or gone) and not
+         * yet that it is back; it is told once each way. */
+        bool told {};
+        bool toldUnavailable {};
+        std::uint64_t videoRetry {};
         std::uint32_t runWidth {};
         std::uint32_t runHeight {};
         std::uint32_t runRate {};
@@ -204,6 +214,7 @@ public:
     std::uint64_t nextToken {1};
     uml::gpu::UniqueDescriptor queue;
     std::vector<std::uint8_t> staging;
+    std::unique_ptr<uml::platform::Nv12Transformer> transformer;
     CameraState reported {CameraState::idle};
     std::uint64_t lastRetry {};
     bool sessionFailed {};
@@ -223,6 +234,8 @@ public:
         if (queue.get() < 0) throw std::runtime_error("Virtio camera event queue failed");
         calibration = options.calibration ? options.calibration : std::make_shared<CalibrationStore>();
         model = host->hostModel();
+        transformer = host->makeFrameTransformer();
+        if (!transformer) throw std::invalid_argument("the platform camera has no frame transformer");
         ArrangementOptions arrangement;
         arrangement.tier = options.tier;
         arrangement.sensorOrientation = options.sensorOrientation;
@@ -298,14 +311,75 @@ public:
             runtime.controls.testPattern(runtime.values);
     }
 
-    /* The dequeue flags of a black frame. */
+    [[nodiscard]] static bool down(const Runtime& runtime) noexcept
+    {
+        return runtime.interruption != Interruption::none || runtime.failed;
+    }
+
+    /* The dequeue flags of a black frame. A capture that is starting is
+     * resuming; one that cannot run is interrupted, whether or not it is also
+     * starting. */
     [[nodiscard]] std::uint32_t blackFlags(const Runtime& runtime) const
     {
         std::uint32_t flags = VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLACK;
         if (blocked()) flags |= VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLOCKED;
-        if (runtime.interruption != Interruption::none || runtime.failed) flags |= VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED;
-        if (runtime.resuming) flags |= VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_RESUMING;
+        if (down(runtime)) flags |= VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED;
+        else if (runtime.resuming) flags |= VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_RESUMING;
         return flags;
+    }
+
+    /* The same state in the metadata record of the frame. */
+    [[nodiscard]] std::uint32_t blackMetaFlags(const Runtime& runtime) const
+    {
+        std::uint32_t flags = VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK;
+        if (blocked()) flags |= VIRTIO_VIDEO_CAMERA_FRAME_F_BLOCKED;
+        if (down(runtime)) flags |= VIRTIO_VIDEO_CAMERA_FRAME_F_INTERRUPTED;
+        else if (runtime.resuming) flags |= VIRTIO_VIDEO_CAMERA_FRAME_F_RESUMING;
+        return flags;
+    }
+
+    /* The camera cannot run, for a reason that ends by itself. The guest is
+     * told when it was not already; the events of the platform tell it again. */
+    void markDown(Runtime& runtime, std::uint32_t eventType, bool always)
+    {
+        runtime.resuming = false;
+        if (runtime.told && !always) return;
+        runtime.told = true;
+        runtime.toldUnavailable = eventType == VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE;
+        event(runtime.description.index, eventType);
+    }
+
+    /* A camera that was told to be down and is up tells the guest so, once. */
+    void settle(Runtime& runtime)
+    {
+        if (!runtime.told || down(runtime)) return;
+        runtime.told = false;
+        event(runtime.description.index, runtime.toldUnavailable ? VIRTIO_VIDEO_EVENT_CAMERA_AVAILABLE
+                                                                 : VIRTIO_VIDEO_EVENT_CAMERA_RESUMED);
+    }
+
+    /* The interruptions belong to the session they happened in: when it ends,
+     * so do they. */
+    void endInterruptions()
+    {
+        for (auto& runtime : runtimes) {
+            runtime.interruption = Interruption::none;
+            runtime.resuming = false;
+            // A stream that still waits for frames has no capture now: its
+            // camera is down until the capture is started again.
+            runtime.failed = wantsVideo(runtime);
+            settle(runtime);
+            updateBlackTimers(runtime);
+        }
+    }
+
+    [[nodiscard]] bool wantsVideo(const Runtime& runtime) const
+    {
+        for (const auto& [id, stream] : streams) {
+            (void)id;
+            if (stream.camera == runtime.description.index && startedVideo(stream)) return true;
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------------
@@ -322,10 +396,17 @@ public:
         session = host->openSession(*this);
         sessionFailed = session == nullptr;
         if (session) {
+            // A session that opens runs; what interrupted the last one is over.
+            // A camera with a stream waiting for frames starts its capture again
+            // on its next turn, which is now.
             for (auto& runtime : runtimes) {
-                runtime.failed = false;
+                runtime.interruption = Interruption::none;
+                runtime.failed = wantsVideo(runtime);
                 runtime.appliedValid = false;
                 runtime.videoRunning = false;
+                runtime.videoRetry = 0;
+                settle(runtime);
+                updateBlackTimers(runtime);
             }
         }
         return session != nullptr;
@@ -343,6 +424,7 @@ public:
         std::lock_guard lock(inboxMutex);
         inboxFrames.clear();
         inboxStills.clear();
+        inboxEvents.clear();
     }
 
     [[nodiscard]] bool sessionNeeded() const
@@ -355,7 +437,9 @@ public:
 
     void releaseSessionIfIdle()
     {
-        if (session && !sessionNeeded()) closeSession();
+        if (!session || sessionNeeded()) return;
+        closeSession();
+        endInterruptions();
     }
 
     void applySettings(Runtime& runtime, bool force)
@@ -391,11 +475,13 @@ public:
             runtime.runWidth = runtime.runHeight = runtime.runRate = 0;
             runtime.failed = false;
             runtime.resuming = false;
+            settle(runtime);
             return;
         }
         if (blocked()) return;
         if (!ensureSession()) {
             runtime.failed = true;
+            markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, false);
             return;
         }
         if (runtime.videoRunning && runtime.runWidth == width && runtime.runHeight == height && runtime.runRate == rate) return;
@@ -405,7 +491,15 @@ public:
         runtime.runWidth = width;
         runtime.runHeight = height;
         runtime.runRate = rate;
-        if (ok) applySettings(runtime, true);
+        runtime.videoRetry = now();
+        if (ok) {
+            // The capture has to deliver before the stream has a picture of its own.
+            runtime.resuming = true;
+            applySettings(runtime, true);
+            settle(runtime);
+        } else {
+            markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, false);
+        }
     }
 
     [[nodiscard]] static std::uint32_t rateOf(const Stream& stream) noexcept
@@ -416,10 +510,11 @@ public:
     void reportState()
     {
         bool active = !groups.empty();
-        bool interrupted = false, multitasking = false;
+        bool interrupted = false, multitasking = false, pressure = false;
         for (const auto& runtime : runtimes) {
             active |= runtime.videoRunning;
             if (runtime.interruption == Interruption::multitasking) multitasking = true;
+            if (runtime.interruption == Interruption::pressure) pressure = true;
             if (runtime.interruption == Interruption::interrupted || runtime.failed) interrupted = true;
         }
         for (const auto& [id, stream] : streams) {
@@ -427,6 +522,7 @@ public:
             active |= startedVideo(stream);
         }
         CameraState state = !active ? CameraState::idle : multitasking ? CameraState::interruptedByMultitasking
+            : pressure ? CameraState::interruptedBySystemPressure
             : interrupted ? CameraState::interrupted : CameraState::streaming;
         if (state == reported) return;
         reported = state;
@@ -551,6 +647,25 @@ public:
         return pitchOf(stream) * (stream.height + stream.height / 2);
     }
 
+    /* A picture of the camera's size and orientation goes into the guest's
+     * rows as it is, with no copy of its own in between. */
+    bool copyRows(const Resource& resource, const Stream& stream, const CameraFrame& frame, uml::platform::Nv12Rect crop)
+    {
+        const auto pitch = pitchOf(stream);
+        uml::video::GuestPlaneWriter writer(mapper, regions.get(), resource.planes[0]);
+        for (std::uint32_t row = 0; row < crop.height; ++row) {
+            const std::span<const std::uint8_t> data(frame.luma.data() + std::size_t(crop.y + row) * frame.lumaStride + crop.x, crop.width);
+            if (!writer.write(std::uint64_t(row) * pitch, data)) return false;
+        }
+        const std::uint64_t chromaStart = std::uint64_t(pitch) * stream.height;
+        for (std::uint32_t row = 0; row < crop.height / 2; ++row) {
+            const std::span<const std::uint8_t> data(frame.chroma.data() + std::size_t(crop.y / 2 + row) * frame.chromaStride + crop.x,
+                                                     crop.width);
+            if (!writer.write(chromaStart + std::uint64_t(row) * pitch, data)) return false;
+        }
+        return true;
+    }
+
     bool writeVideo(const Stream& stream, Resource& resource, const CameraFrame* frame, std::uint32_t rotation)
     {
         const auto pitch = pitchOf(stream);
@@ -561,15 +676,22 @@ public:
                                           stream.width, stream.height};
         if (frame == nullptr) {
             uml::platform::fillNv12Black(target);
-        } else {
-            if (frame->luma.size() < frame->lumaStride * frame->height || frame->chroma.size() < frame->chromaStride * (frame->height / 2))
-                return false;
-            uml::platform::Nv12Source source {frame->luma.data(), frame->lumaStride, frame->chroma.data(), frame->chromaStride,
-                                              frame->width, frame->height};
-            const bool quarter = rotation == 90 || rotation == 270;
-            const auto crop = uml::platform::centredCrop(frame->width, frame->height, stream.width, stream.height, quarter);
-            if (crop.width == 0 || !uml::platform::transformNv12(source, crop, rotation, target)) return false;
+            return transferSegments(mapper, regions.get(), resource.planes[0], staging, true);
         }
+        if (frame->luma.size() < frame->lumaStride * frame->height || frame->chroma.size() < frame->chromaStride * (frame->height / 2))
+            return false;
+        const uml::platform::Nv12Source source {frame->luma.data(), frame->lumaStride, frame->chroma.data(), frame->chromaStride,
+                                                frame->width, frame->height, frame->native};
+        const bool quarter = rotation == 90 || rotation == 270;
+        const auto crop = uml::platform::centredCrop(frame->width, frame->height, stream.width, stream.height, quarter);
+        if (crop.width == 0) return false;
+        const bool copy = rotation == 0 && crop.width == stream.width && crop.height == stream.height;
+        if (copy) {
+            // The picture is the buffer's: the rows go straight in.
+            if (!uml::platform::validNv12Transform(source, crop, 0, target)) return false;
+            return copyRows(resource, stream, *frame, crop);
+        }
+        if (!transformer->transform(source, crop, rotation, target)) return false;
         return transferSegments(mapper, regions.get(), resource.planes[0], staging, true);
     }
 
@@ -621,8 +743,9 @@ public:
             disarm(stream);
             return;
         }
-        // A session that could not open is tried again.
-        if (!blocked() && !session && runtime->failed) reconfigure(*runtime);
+        // A capture that could not start is tried again, once a second, whether
+        // the session could not open or the camera could not join it.
+        if (!blocked() && runtime->failed && now() - runtime->videoRetry >= sessionRetryNanoseconds) reconfigure(*runtime);
         if (!blackMode(*runtime)) {
             disarm(stream);
             return;
@@ -644,10 +767,7 @@ public:
             ok = transferSegments(mapper, regions.get(), resource.planes[0], stream.black, true);
         }
         const auto sequence = ++runtime->sequence;
-        std::uint32_t metaFlags = VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK;
-        if (blocked()) metaFlags |= VIRTIO_VIDEO_CAMERA_FRAME_F_BLOCKED;
-        if (runtime->interruption != Interruption::none || runtime->failed) metaFlags |= VIRTIO_VIDEO_CAMERA_FRAME_F_INTERRUPTED;
-        if (runtime->resuming) metaFlags |= VIRTIO_VIDEO_CAMERA_FRAME_F_RESUMING;
+        const std::uint32_t metaFlags = blackMetaFlags(*runtime);
         ++stream.framesOut;
         complete(id, held, 0, (ok ? blackFlags(*runtime) : VIRTIO_VIDEO_DEQUEUE_FLAG_ERR), ok ? size : 0, sequence);
         CameraExposure black;
@@ -753,11 +873,18 @@ public:
         fire(*found, runtime);
     }
 
+    /* The captures a camera has with the platform. */
+    [[nodiscard]] std::size_t capturesInFlight(std::uint32_t camera) const
+    {
+        return std::size_t(std::count_if(groups.begin(), groups.end(),
+                                         [camera](const auto& group) { return group.fired && group.camera == camera; }));
+    }
+
     void fire(Group& group, Runtime& runtime)
     {
         CameraStillRequest request;
         std::uint32_t refusal = 0;
-        bool jpeg = false, raw = false;
+        bool jpeg = false, raw = false, calibrationRaw = false;
         for (const auto& member : group.members) {
             const auto& stream = streams.at(member.stream);
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
@@ -779,20 +906,34 @@ public:
             std::fabs(runtime.controls.settings(runtime.values).zoomRatio - 1.0f) < 1e-3f) {
             request.raw = true;
             request.speedPrioritized = true;
+            calibrationRaw = true;
             ++runtime.calibrationAttempts;
         }
         if (raw) request.speedPrioritized = true;
+        // A guest holds at most a pipeline's worth of captures with the platform.
+        if (capturesInFlight(runtime.description.index) >= limits.buffers) refusal = 1;
         if (refusal == 0 && !ensureSession()) refusal = 1;
         group.token = request.token = nextToken++;
         group.fired = true;
         if (refusal == 0) {
             applySettings(runtime, false);
-            if (!session->takeStill(runtime.description.platformIndex, request)) refusal = 1;
+            bool taken = session->takeStill(runtime.description.platformIndex, request);
+            if (!taken && calibrationRaw) {
+                // The colour data is a courtesy: the person's photo does not
+                // wait for it, so it is asked for again without it.
+                request.raw = request.speedPrioritized = false;
+                taken = session->takeStill(runtime.description.platformIndex, request);
+            }
+            if (!taken) refusal = 1;
         }
         if (refusal != 0) {
             failGroup(group, sessionFailed ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             eraseGroup(group.token);
             releaseSessionIfIdle();
+        } else {
+            // The group is whole; the capture has its own time.
+            group.deadline = now() + captureTimeoutNanoseconds;
+            armGroupTimer();
         }
         reportState();
     }
@@ -804,7 +945,7 @@ public:
         if (!group || wire == wireOfPlatform.end()) return;
         auto& runtime = runtimes[wire->second];
         if (!result.ok) {
-            failGroup(*group, 0);
+            failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             eraseGroup(result.token);
             releaseSessionIfIdle();
             reportState();
@@ -850,13 +991,20 @@ public:
         const std::uint32_t width = result.color.rawWidth;
         const std::uint32_t height = result.color.rawHeight;
         if (width != stream.width || height != stream.height || result.raw.size() != std::size_t(width) * height) return false;
-        const auto stride = rawPitch(2 * width);
+        const std::size_t rowBytes = std::size_t(width) * 2;
+        const auto stride = rawPitch(std::uint32_t(rowBytes));
         const std::uint64_t total = std::uint64_t(stride) * height;
         if (resource.capacity < total || resource.planes.empty()) return false;
         auto* bytes = reinterpret_cast<std::uint8_t*>(result.raw.data());
-        for (std::uint32_t row = 0; row < height; ++row) {
-            const std::span<std::uint8_t> data(bytes + std::size_t(row) * width * 2, std::size_t(width) * 2);
-            if (!transferSegments(mapper, regions.get(), resource.planes[0], data, true, std::uint64_t(row) * stride)) return false;
+        if (stride == rowBytes) {
+            // Tight rows are the buffer: one pass over the segments.
+            if (!transferSegments(mapper, regions.get(), resource.planes[0], std::span<std::uint8_t>(bytes, rowBytes * height), true))
+                return false;
+        } else {
+            uml::video::GuestPlaneWriter writer(mapper, regions.get(), resource.planes[0]);
+            for (std::uint32_t row = 0; row < height; ++row)
+                if (!writer.write(std::uint64_t(row) * stride, std::span<const std::uint8_t>(bytes + std::size_t(row) * rowBytes, rowBytes)))
+                    return false;
         }
         size = std::uint32_t(total);
         return true;
@@ -895,13 +1043,15 @@ public:
         switch (platformEvent.kind) {
         case CameraEventKind::interrupted:
         case CameraEventKind::interruptedByMultitasking:
+        case CameraEventKind::interruptedBySystemPressure:
         case CameraEventKind::unavailable:
             each([&](Runtime& runtime) {
                 runtime.interruption = platformEvent.kind == CameraEventKind::interruptedByMultitasking ? Interruption::multitasking
-                                                                                                          : Interruption::interrupted;
-                runtime.resuming = false;
-                event(runtime.description.index, platformEvent.kind == CameraEventKind::unavailable
-                                                     ? VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE : VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
+                    : platformEvent.kind == CameraEventKind::interruptedBySystemPressure ? Interruption::pressure
+                                                                                          : Interruption::interrupted;
+                markDown(runtime, platformEvent.kind == CameraEventKind::unavailable ? VIRTIO_VIDEO_EVENT_CAMERA_UNAVAILABLE
+                                                                                      : VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED,
+                         true);
                 updateBlackTimers(runtime);
             });
             break;
@@ -915,8 +1065,7 @@ public:
                 // bridge the gap until it delivers.
                 reconfigure(runtime);
                 runtime.resuming = runtime.videoRunning;
-                event(runtime.description.index, platformEvent.kind == CameraEventKind::available
-                                                     ? VIRTIO_VIDEO_EVENT_CAMERA_AVAILABLE : VIRTIO_VIDEO_EVENT_CAMERA_RESUMED);
+                settle(runtime);
                 updateBlackTimers(runtime);
             });
             break;
@@ -927,7 +1076,8 @@ public:
             lastRetry = now();
             each([&](Runtime& runtime) {
                 runtime.failed = true;
-                event(runtime.description.index, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED);
+                runtime.videoRunning = false;
+                markDown(runtime, VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED, true);
                 updateBlackTimers(runtime);
             });
             break;
@@ -1295,6 +1445,7 @@ public:
                 stream.intervalDenominator = rate;
                 if (changed && stream.started) {
                     reconfigure(runtime);
+                    updateBlackTimers(runtime);
                     if (stream.timerArmed) arm(stream);
                 }
             }
@@ -1415,10 +1566,20 @@ public:
         events.clear();
         eventBuffers.clear();
         completions.clear();
+        {
+            std::lock_guard lock(inboxMutex);
+            inboxFrames.clear();
+            inboxStills.clear();
+            inboxEvents.clear();
+        }
         for (auto& runtime : runtimes) {
             runtime.interruption = Interruption::none;
             runtime.resuming = false;
             runtime.failed = false;
+            runtime.told = false;
+            runtime.toldUnavailable = false;
+            runtime.videoRetry = 0;
+            runtime.calibrationAttempts = 0;
             runtime.values = runtime.controls.defaults();
             runtime.latest.reset();
             runtime.sequence = 0;

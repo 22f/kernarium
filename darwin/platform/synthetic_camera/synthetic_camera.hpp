@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <utility>
 
 namespace uml::platform {
 
@@ -28,6 +29,10 @@ enum class SyntheticCameraProfile : std::uint8_t {
     phone,
     // A tablet: a back wide camera and a front camera.
     tablet,
+    // An iPad's: a back wide camera and two front cameras (wide and ultra wide,
+    // one sensor behind both), each of which can run with the back camera. The
+    // back camera also has a size a multi-camera session does not take.
+    tabletDualFront,
     // A laptop: a front camera and nothing else.
     laptop,
 };
@@ -57,9 +62,18 @@ public:
     // clock only). The clock advances by one frame interval for each.
     virtual void pump(std::size_t camera, unsigned frames = 1) = 0;
     virtual void advanceClock(std::uint64_t nanoseconds) = 0;
+    // The size of the format a camera runs video at; 0 x 0 when it does not.
+    [[nodiscard]] virtual std::pair<std::uint32_t, std::uint32_t> videoSize(std::size_t camera) const = 0;
     // Interrupts every session, as the host does; no frames flow until resume().
     virtual void interrupt(CameraEventKind kind = CameraEventKind::interrupted) = 0;
     virtual void resume() = 0;
+    // Delivers an event to every session, as the host does, and changes
+    // nothing else (a failed session or an unavailable camera, for instance).
+    virtual void post(CameraEvent event) = 0;
+    // A Bayer still is refused when it is asked for; or it is taken and fails
+    // alone, leaving the JPEG of the same capture.
+    virtual void refuseRaw(bool refuse) = 0;
+    virtual void failRaw(bool fail) = 0;
 };
 
 [[nodiscard]] std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options = {});

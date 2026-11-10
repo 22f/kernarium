@@ -84,28 +84,48 @@ the style of `microphone_authorization.hpp`. A Virtio camera device maps the
 interface to the wire.
 
 - **Discovery** (`cameras()`, `concurrentSets()`) reads devices, formats, ranges
-  and the multi-camera sets and needs no authorization; it never prompts. An
-  iOS 27.1 device type is read only behind an availability check. The order is
-  stable, and every index in the interface is an index into it.
+  and the multi-camera sets and needs no authorization; it never prompts. The
+  iOS 27.1 outer and inner ultra wide device types (the foldable iPhone's) are
+  read only behind an availability check, and a device on 27.0 lists none. The
+  order is stable, and every index in the interface is an index into it. A
+  front camera publishes no flash: its flash is the screen's, which the guest's
+  camera unit does not model.
 - **Sessions.** `openSession()` is the one call that can light the system's
   capture indicator, and it returns null unless the system has granted access.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
   `AVCaptureSession` on macOS) with an input and a video data output per running
   camera and a photo output once a still is asked for. Frames are NV12, full
   range, delivered through `CameraSessionDelegate` with the exposure that made
-  them; holding a frame's `owner` holds the capture's buffer.
+  them; holding a frame's `owner` holds the capture's buffer, and its `native`
+  is the platform's own handle to the picture. A camera alone may run any
+  format; cameras that run together run formats a multi-camera session takes
+  (`multiCamera`): `startVideo()` moves the cameras already running to such a
+  format, or fails and changes nothing, and a camera left alone goes back to the
+  smallest format of any kind. A photo output's delegate is held by the session
+  until its capture ends.
 - **Controls** arrive as one `CameraSettings` per camera, and the session applies
   what differs. A zoom camera (a virtual device) takes automatic exposure, focus
   and white balance only.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
-  reveals it.
+  reveals it. A part that fails leaves the others: a capture fails only when
+  nothing it asked for arrived.
 - **Interruptions** (another application, a call, system pressure, iPad
-  multitasking) arrive as events; the session does not stop itself.
-- `nv12_transform.hpp` crops, rotates and scales NV12 pictures in portable C++.
+  multitasking) arrive as events; the session does not stop itself. System
+  pressure on a running camera also caps its frame rate (20 at serious, 15 at
+  critical), as Apple advises, before the session is interrupted. A restart
+  after a runtime error ends with a `resumed` event.
+- `nv12_transform.hpp` crops, rotates and scales NV12 pictures: the portable
+  `transformNv12()` is the reference, and `Camera::makeFrameTransformer()` gives
+  the host's fastest. The Apple camera's (`apple/accelerated_nv12.hpp`) scales a
+  picture that arrives as a pixel buffer on the system's pixel-transfer scaler
+  and turns quarter turns with vImage, with its buffers kept between frames; a
+  copy and a quarter turn are exact and a scale agrees with the portable one
+  within the filters' difference (`camera-apple-transform`).
 - The synthetic camera is `synthetic_camera/` (`UML::SyntheticCamera`), a
   platform camera with no hardware: profiles of a phone (a back zoom camera over
-  three lenses, and a front camera), a tablet and a laptop; a deterministic chart
+  three lenses, and a front camera), a tablet (and one with both of an iPad's
+  front cameras) and a laptop; the multi-camera format rule; a deterministic chart
   whose top row encodes the camera and the frame counter (`decodeChartMarker`);
   brightness, blur, tint and zoom that follow the settings; JPEG and Bayer
   stills; simulated interruptions; and, with a manual clock, frames that a test

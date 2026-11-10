@@ -129,6 +129,32 @@ Profile profileOf(SyntheticCameraProfile which)
         profile.sets = {{0, 1}};
         break;
     }
+    case SyntheticCameraProfile::tabletDualFront: {
+        profile.model = "SyntheticTablet2,1";
+        CameraInfo back = lens("synthetic-back", CameraPosition::back, CameraLensKind::wide);
+        back.flash = back.torch = true;
+        back.rawStills = true;
+        back.rawStillSize = {1008, 756};
+        // The smallest size that covers 1600 x 900, and a single camera's alone.
+        back.videoFormats = {format(640, 480, 60), format(1280, 720, 120), format(1600, 900, 60, false),
+                             format(1920, 1080, 60), format(3840, 2160, 60, false)};
+        CameraInfo front = lens("synthetic-front", CameraPosition::front, CameraLensKind::wide);
+        front.videoFormats = {format(640, 480, 60), format(1280, 720, 60), format(1920, 1080, 60)};
+        front.stillSizes = {{2016, 1512}, {1008, 756}};
+        front.pixelArrayWidth = 2016;
+        front.pixelArrayHeight = 1512;
+        front.zoomMaximum = 4.0f;
+        CameraInfo ultra = lens("synthetic-front-ultrawide", CameraPosition::front, CameraLensKind::ultraWide);
+        ultra.videoFormats = {format(640, 480, 60), format(1280, 720, 60), format(1920, 1080, 60)};
+        ultra.stillSizes = {{2016, 1512}, {1008, 756}};
+        ultra.pixelArrayWidth = 2016;
+        ultra.pixelArrayHeight = 1512;
+        ultra.zoomMinimum = 0.5f;
+        ultra.zoomMaximum = 2.0f;
+        profile.cameras = {back, front, ultra};
+        profile.sets = {{0, 1}, {0, 2}};
+        break;
+    }
     case SyntheticCameraProfile::laptop: {
         profile.model = "SyntheticLaptop1,1";
         CameraInfo front = lens("synthetic-front", CameraPosition::front, CameraLensKind::wide);
@@ -361,8 +387,12 @@ CameraColorData syntheticColor(const CameraInfo& info, BayerOrder order)
 class State;
 
 struct RunningVideo {
+    // The format it runs at.
     std::uint32_t width {};
     std::uint32_t height {};
+    // What it was asked for, which the format covers.
+    std::uint32_t requestedWidth {};
+    std::uint32_t requestedHeight {};
     std::uint32_t frameRate {};
     std::uint32_t counter {};
     std::chrono::steady_clock::time_point next;
@@ -391,9 +421,12 @@ public:
     std::atomic<unsigned> opened {0};
     std::atomic<unsigned> open {0};
     std::atomic<std::uint64_t> clock {1'000'000'000};
+    std::atomic<bool> rawRefused {false};
+    std::atomic<bool> rawFails {false};
     std::mutex mutex;  // guards the sessions list and the interrupted flag
     std::set<class Session*> sessions;
     bool interrupted {};
+    CameraEventKind interruptKind {CameraEventKind::interrupted};
 };
 
 class Session final : public CameraSession {
@@ -415,30 +448,38 @@ public:
     {
         std::lock_guard lock(mutex_);
         if (stopped_ || camera >= cameras_.size() || width == 0 || height == 0 || frameRate == 0) return false;
-        const auto& info = core_.profile_.cameras[camera];
-        // The smallest format that covers the size at the rate; a second camera
-        // needs a format a multi-camera session takes and a set both are in.
-        const bool several = std::any_of(cameras_.begin(), cameras_.end(), [&](const auto& other) {
-            return &other != &cameras_[camera] && other.video;
-        });
-        if (several && !joinable(camera)) return false;
-        const CameraVideoFormat* best = nullptr;
-        for (const auto& candidate : info.videoFormats) {
-            if (candidate.width < width || candidate.height < height) continue;
-            if (frameRate < candidate.minimumFrameRate || frameRate > candidate.maximumFrameRate) continue;
-            if (several && !candidate.multiCamera) continue;
-            if (!best || std::uint64_t(candidate.width) * candidate.height < std::uint64_t(best->width) * best->height)
-                best = &candidate;
+        std::set<std::size_t> running {camera};
+        for (std::size_t index = 0; index < cameras_.size(); ++index)
+            if (cameras_[index].video) running.insert(index);
+        // Cameras that run together lie in one concurrent set and use formats
+        // a multi-camera session takes; the ones already running move to such a
+        // format, or the new one is refused and nothing changes.
+        const bool several = running.size() > 1;
+        if (several && !joinable(running)) return false;
+        std::map<std::size_t, const CameraVideoFormat*> picks;
+        for (const auto index : running) {
+            const bool self = index == camera;
+            const auto askedWidth = self ? width : cameras_[index].video->requestedWidth;
+            const auto askedHeight = self ? height : cameras_[index].video->requestedHeight;
+            const auto askedRate = self ? frameRate : cameras_[index].video->frameRate;
+            const auto* pick = chooseFormat(core_.profile_.cameras[index], askedWidth, askedHeight, askedRate, several);
+            if (pick == nullptr) return false;
+            picks[index] = pick;
         }
-        if (!best) return false;
-        auto& state = cameras_[camera];
-        RunningVideo video;
-        video.width = best->width;
-        video.height = best->height;
-        video.frameRate = frameRate;
-        video.next = std::chrono::steady_clock::now();
-        if (state.video) video.counter = state.video->counter;
-        state.video = video;
+        for (const auto& [index, pick] : picks) {
+            auto& state = cameras_[index];
+            const bool self = index == camera;
+            if (!self && state.video->width == pick->width && state.video->height == pick->height) continue;
+            RunningVideo video;
+            video.width = pick->width;
+            video.height = pick->height;
+            video.requestedWidth = self ? width : state.video->requestedWidth;
+            video.requestedHeight = self ? height : state.video->requestedHeight;
+            video.frameRate = self ? frameRate : state.video->frameRate;
+            video.next = std::chrono::steady_clock::now();
+            if (state.video) video.counter = state.video->counter;
+            state.video = video;
+        }
         wake_.notify_all();
         return true;
     }
@@ -446,7 +487,19 @@ public:
     void stopVideo(std::size_t camera) override
     {
         std::lock_guard lock(mutex_);
-        if (camera < cameras_.size()) cameras_[camera].video.reset();
+        if (camera >= cameras_.size() || !cameras_[camera].video) return;
+        cameras_[camera].video.reset();
+        // A camera left alone goes back to the smallest format of any kind.
+        std::vector<std::size_t> running;
+        for (std::size_t index = 0; index < cameras_.size(); ++index)
+            if (cameras_[index].video) running.push_back(index);
+        if (running.size() != 1) return;
+        auto& state = cameras_[running.front()];
+        const auto* pick = chooseFormat(core_.profile_.cameras[running.front()], state.video->requestedWidth,
+                                        state.video->requestedHeight, state.video->frameRate, false);
+        if (pick == nullptr || (pick->width == state.video->width && pick->height == state.video->height)) return;
+        state.video->width = pick->width;
+        state.video->height = pick->height;
     }
 
     void apply(std::size_t camera, const CameraSettings& settings) override
@@ -460,7 +513,7 @@ public:
         std::lock_guard lock(mutex_);
         if (stopped_ || camera >= cameras_.size()) return false;
         const auto& info = core_.profile_.cameras[camera];
-        if (request.raw && (!info.rawStills || info.rawStillSize.width == 0)) return false;
+        if (request.raw && (!info.rawStills || info.rawStillSize.width == 0 || core_.rawRefused)) return false;
         if (request.jpegWidth != 0 && !stillSize(info, request.jpegWidth, request.jpegHeight)) return false;
         if (request.jpegWidth == 0 && !request.raw) return false;
         cameras_[camera].stills.push_back({request});
@@ -520,6 +573,12 @@ public:
         std::lock_guard lock(mutex_);
         return camera < cameras_.size() && cameras_[camera].video.has_value();
     }
+    std::pair<std::uint32_t, std::uint32_t> videoSize(std::size_t camera) const
+    {
+        std::lock_guard lock(mutex_);
+        if (camera >= cameras_.size() || !cameras_[camera].video) return {0, 0};
+        return {cameras_[camera].video->width, cameras_[camera].video->height};
+    }
     std::uint32_t rate(std::size_t camera) const
     {
         std::lock_guard lock(mutex_);
@@ -529,15 +588,27 @@ public:
 
 private:
     // Whether the cameras that would run all lie in one concurrent set.
-    bool joinable(std::size_t joining) const
+    bool joinable(const std::set<std::size_t>& running) const
     {
-        std::set<std::size_t> running {joining};
-        for (std::size_t index = 0; index < cameras_.size(); ++index)
-            if (cameras_[index].video) running.insert(index);
         return std::any_of(core_.profile_.sets.begin(), core_.profile_.sets.end(), [&](const auto& set) {
             return std::all_of(running.begin(), running.end(),
                                [&](auto member) { return std::find(set.begin(), set.end(), member) != set.end(); });
         });
+    }
+
+    // The smallest format that covers the size at the rate.
+    static const CameraVideoFormat* chooseFormat(const CameraInfo& info, std::uint32_t width, std::uint32_t height,
+                                                 std::uint32_t frameRate, bool multiCameraOnly)
+    {
+        const CameraVideoFormat* best = nullptr;
+        for (const auto& candidate : info.videoFormats) {
+            if (candidate.width < width || candidate.height < height) continue;
+            if (frameRate < candidate.minimumFrameRate || frameRate > candidate.maximumFrameRate) continue;
+            if (multiCameraOnly && !candidate.multiCamera) continue;
+            if (!best || std::uint64_t(candidate.width) * candidate.height < std::uint64_t(best->width) * best->height)
+                best = &candidate;
+        }
+        return best;
     }
 
     static const CameraStillSize* stillSize(const CameraInfo& info, std::uint32_t width, std::uint32_t height)
@@ -686,12 +757,12 @@ private:
                 result.jpeg = encodeSyntheticJpeg(picture.luma.data(), picture.width, picture.chroma.data(),
                                                   picture.width, picture.width, picture.height, request.jpegQuality);
             }
-            if (request.raw) {
+            if (request.raw && !core_.rawFails) {
                 const auto picture = render(base(state, info.rawStillSize.width, info.rawStillSize.height), outcome.scene);
                 result.raw = bayerStill(picture, BayerOrder::rggb, 0x5eed0000u + state.stillCounter);
                 result.color = syntheticColor(info, BayerOrder::rggb);
             }
-            result.ok = (request.jpegWidth == 0 || !result.jpeg.empty()) && (!request.raw || !result.raw.empty());
+            result.ok = (request.jpegWidth != 0 && !result.jpeg.empty()) || (request.raw && !result.raw.empty());
         }
         delegate_.cameraStill(camera, std::move(result));
     }
@@ -763,7 +834,18 @@ public:
     std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
     {
         if (!core_.options_.authorized) return nullptr;
-        return std::make_unique<Session>(core_, delegate);
+        auto session = std::make_unique<Session>(core_, delegate);
+        // The cause of an interruption outlives a session: one opened while it
+        // lasts is interrupted as it starts, as the host's is.
+        CameraEventKind kind {};
+        bool interrupted;
+        {
+            std::lock_guard lock(core_.mutex);
+            interrupted = core_.interrupted;
+            kind = core_.interruptKind;
+        }
+        if (interrupted) session->deliver({allCameras, kind});
+        return session;
     }
 
     unsigned sessionsOpened() const noexcept override { return core_.opened; }
@@ -800,10 +882,30 @@ public:
         {
             std::lock_guard lock(core_.mutex);
             core_.interrupted = true;
+            core_.interruptKind = kind;
             sessions.assign(core_.sessions.begin(), core_.sessions.end());
         }
         for (auto* session : sessions) session->deliver({allCameras, kind});
     }
+
+    std::pair<std::uint32_t, std::uint32_t> videoSize(std::size_t camera) const override
+    {
+        return withSessions([&](Session& session) { return session.videoSize(camera); },
+                            std::pair<std::uint32_t, std::uint32_t> {0, 0});
+    }
+
+    void post(CameraEvent event) override
+    {
+        std::vector<Session*> sessions;
+        {
+            std::lock_guard lock(core_.mutex);
+            sessions.assign(core_.sessions.begin(), core_.sessions.end());
+        }
+        for (auto* session : sessions) session->deliver(event);
+    }
+
+    void refuseRaw(bool refuse) override { core_.rawRefused = refuse; }
+    void failRaw(bool fail) override { core_.rawFails = fail; }
 
     void resume() override
     {
