@@ -4,12 +4,15 @@ import AndariumCore
 import SwiftUI
 
 /// The ribbon in Home's Start bar, just above Start, after an update with
-/// notes: the new features' tiles and names on one line of glass. A tap opens
-/// the notes; the close button, or a swipe down, puts it away. Start stays
-/// where it always is and is never covered.
+/// notes: the new features' tiles and names on one line of glass tinted with
+/// the accent, so it reads with Start rather than with the gray sections
+/// above. Its sparkle bounces once, the first time Home shows it in a launch.
+/// A tap opens the notes; the close button, or a swipe down, puts it away.
+/// Start stays where it always is and is never covered.
 struct WhatsNewRibbon: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     let entries: [WhatsNewEntry]
     let open: () -> Void
@@ -17,6 +20,10 @@ struct WhatsNewRibbon: View {
 
     /// How far a swipe has pulled the ribbon down.
     @State private var pull: CGFloat = 0
+    /// The sparkle bounces once, on arrival.
+    @State private var sparkle = 0
+    /// The ribbon has arrived in this launch; the sparkle does not bounce again.
+    @MainActor private static var arrived = false
     /// The close button's circle, which grows with the text.
     @ScaledMetric(relativeTo: .footnote) private var closeSize: CGFloat = 30
 
@@ -32,9 +39,18 @@ struct WhatsNewRibbon: View {
                             .accessibilityHidden(true)
                     }
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("What\u{2019}s New")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
+                        HStack(spacing: 5) {
+                            // Left out at the accessibility sizes, as the
+                            // deck is: there it wraps the title.
+                            if !typeSize.isAccessibilitySize {
+                                Image(systemName: "sparkles")
+                                    .foregroundStyle(Color.accentColor)
+                                    .symbolEffect(.bounce, value: sparkle)
+                            }
+                            Text("What\u{2019}s New")
+                                .foregroundStyle(.primary)
+                        }
+                        .font(.subheadline.weight(.semibold))
                         summary
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -68,10 +84,25 @@ struct WhatsNewRibbon: View {
         .padding(.trailing, 10)
         .padding(.vertical, 9)
         .frame(minHeight: 52)
-        .glassEffect(.regular.interactive(), in: shape)
+        // On a dark ground the tint needs more of the accent to read as jade.
+        .glassEffect(
+            .regular.tint(Color.accentColor.opacity(colorScheme == .dark ? 0.42 : 0.24)).interactive(), in: shape)
         .offset(y: pull)
         // A swipe that moves the ribbon is not also a tap on it.
         .highPriorityGesture(swipe)
+        .onAppear(perform: arrive)
+    }
+
+    /// The first time Home shows the ribbon in a launch, the sparkle bounces
+    /// once, a moment after Home appears. Without motion it does not.
+    private func arrive() {
+        guard !Self.arrived else { return }
+        Self.arrived = true
+        guard !reduceMotion else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(600))
+            sparkle += 1
+        }
     }
 
     private var shape: AnyShape {
@@ -98,8 +129,8 @@ struct WhatsNewRibbon: View {
         }
     }
 
-    /// "File browser · More memory · Graphics memory", "File browser · More
-    /// memory · 5 more", or "7 new features" when none is named.
+    /// "File browser · More memory", "File browser · More memory · 5 more",
+    /// or "7 new features" when none is named.
     static func summary(_ titles: [String], naming named: Int) -> String {
         guard named > 0 else {
             return titles.count == 1 ? "1 new feature" : "\(titles.count) new features"

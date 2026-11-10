@@ -4,13 +4,13 @@ import AndariumCore
 import UIKit
 
 /// The release notes and the stored record of the preview's What's New
-/// screens. The notes of build 6 are the bundled ones; those of builds 5 and
+/// screens. The notes of build 8 are the bundled ones; those of builds 5 and
 /// 4 are made up, to stand in for releases a person skipped (the application
-/// bundles notes from build 6 on). A device keeps the record in its defaults.
+/// bundles notes from build 8 on). A device keeps the record in its defaults.
 enum WhatsNewPreview {
     /// The build the preview's What's New screens run, the first with notes.
-    static let currentBuild = 6
-    static let appVersion = "1.0 (6)"
+    static let currentBuild = 8
+    static let appVersion = "1.0 (8)"
 
     static let releases: [WhatsNewRelease] = WhatsNewCatalog.load() + [
         WhatsNewRelease(build: 5, version: "1.0 (5)", date: "2026-11-09", entries: [
@@ -41,7 +41,7 @@ enum WhatsNewPreview {
 
     /// The screens of the design, and what each one stands for.
     static let screens: Set<String> = [
-        "whatsnew",                // first launch after the update to build 6
+        "whatsnew",                // first launch after the update to build 8
         "whatsnew-open",           // its notes, opened from the ribbon
         "whatsnew-skipped",        // first launch after skipping builds 4 and 5
         "whatsnew-skipped-open",   // the notes of all three
@@ -54,7 +54,7 @@ enum WhatsNewPreview {
     ]
 
     /// The record a screen's launch finds, and whether the install has a
-    /// guest: a record of build 5 is the update to 6, of build 3 an update
+    /// guest: a record of build 5 is the update to 8, of build 3 an update
     /// that skipped two releases.
     private static func stored(for screen: String) -> WhatsNewRecord? {
         switch screen {
@@ -79,7 +79,7 @@ enum WhatsNewPreview {
             memory: MemoryPolicy(
                 maximumsMiB: Array(repeating: pad ? 7_168 : 4_608, count: count),
                 defaultsMiB: Array(repeating: pad ? 4_096 : 3_072, count: count),
-                graphicsMiB: { memory, _ in min(max(limitMiB - 900 - memory, 384), memory / 2) }
+                graphicsMiB: { memory, _ in max(limitMiB - 900 - memory, 384) }
             ),
             freeStorageBytes: UInt64((pad ? 118.3 : 41.6) * Double(Limits.bytesPerGiB))
         )
