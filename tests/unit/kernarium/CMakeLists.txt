@@ -87,3 +87,12 @@ target_include_directories(uml_kernarium_statistics_tests PRIVATE
 uml_add_unit_test(NAME kernarium-statistics
     COMMAND uml_kernarium_statistics_tests
     LABELS kernarium)
+
+# How the application's location fix becomes the GNSS device's.
+add_executable(uml_kernarium_location_fix_tests location_fix_tests.cpp)
+target_include_directories(uml_kernarium_location_fix_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/darwin/device)
+uml_add_unit_test(NAME kernarium-location-fix
+    COMMAND uml_kernarium_location_fix_tests
+    LABELS kernarium)

@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 30U
+#define KERNARIUM_RUNTIME_API_VERSION 31U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -529,6 +529,72 @@ typedef int (*kernarium_runtime_connect_vsock_function)(
     uint32_t port,
     uint32_t timeout_ms);
 
+/* The host's location, offered to an Android guest as a GNSS receiver
+ * (darwin/device/gnss/README.md). A flag says which optional field is valid;
+ * a field without its flag is left out of the guest's stream, never written
+ * as zero. */
+enum {
+    /* The host knows the position only roughly (iOS's reduced accuracy). */
+    KERNARIUM_RUNTIME_LOCATION_APPROXIMATE = 1U << 0,
+    KERNARIUM_RUNTIME_LOCATION_HAS_ALTITUDE = 1U << 1,
+    KERNARIUM_RUNTIME_LOCATION_HAS_ELLIPSOIDAL_ALTITUDE = 1U << 2,
+    KERNARIUM_RUNTIME_LOCATION_HAS_HORIZONTAL_ACCURACY = 1U << 3,
+    KERNARIUM_RUNTIME_LOCATION_HAS_VERTICAL_ACCURACY = 1U << 4,
+    KERNARIUM_RUNTIME_LOCATION_HAS_SPEED = 1U << 5,
+    KERNARIUM_RUNTIME_LOCATION_HAS_SPEED_ACCURACY = 1U << 6,
+    KERNARIUM_RUNTIME_LOCATION_HAS_COURSE = 1U << 7,
+    KERNARIUM_RUNTIME_LOCATION_HAS_COURSE_ACCURACY = 1U << 8,
+};
+typedef struct kernarium_runtime_location_fix {
+    /* sizeof of this struct, set by the caller. */
+    uint32_t struct_size;
+    uint32_t flags;
+    /* The fix's own time: UTC in nanoseconds since 1970-01-01. */
+    int64_t utc_ns;
+    /* WGS 84, in degrees. */
+    double latitude;
+    double longitude;
+    /* Meters above sea level, and above the WGS 84 ellipsoid. */
+    double altitude;
+    double ellipsoidal_altitude;
+    /* Meters of radius for the horizontal accuracy, and of the vertical one. */
+    double horizontal_accuracy;
+    double vertical_accuracy;
+    /* Meters per second, and its accuracy. */
+    double speed;
+    double speed_accuracy;
+    /* Degrees clockwise from true north, and its accuracy. */
+    double course;
+    double course_accuracy;
+} kernarium_runtime_location_fix;
+
+/* `powered` is nonzero when the guest powers its GNSS receiver (an Android
+ * client wants a position) and zero when it stops, or when the guest ends or
+ * restarts with the receiver on. It runs on a runtime thread and must return
+ * promptly. */
+typedef void (*kernarium_runtime_location_receiver_callback)(
+    void* context,
+    int powered);
+/* Sets, or with a null callback clears, the one receiver of the guest's
+ * receiver-power events. A receiver that is already powered is reported to a
+ * new callback at once. Once it returns, no call to the previous callback is
+ * running or will start, so its context may be released; the callback must
+ * not call this. A runtime without a GNSS receiver keeps the entry and never
+ * calls back. */
+typedef void (*kernarium_runtime_set_location_receiver_callback_function)(
+    kernarium_runtime_location_receiver_callback callback,
+    void* context);
+
+/* Gives the guest's receiver the host's newest fix, which the receiver
+ * repeats for ten seconds (an approximate fix for twenty minutes) and then
+ * reports as no fix, and reports to the guest at once. A null `fix` drops the
+ * held fix: the guest sees no fix until the next one. Returns 0, -ENODEV when
+ * no guest with a receiver runs, or -EINVAL for a `struct_size` that does not
+ * cover the struct, a time or a position outside its range. It may be called
+ * from any thread with the receiver on or off. */
+typedef int (*kernarium_runtime_report_location_function)(
+    const kernarium_runtime_location_fix* fix);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -564,6 +630,9 @@ typedef struct kernarium_runtime_api {
     kernarium_runtime_quiesce_resident_function quiesce_resident;
     kernarium_runtime_read_graphics_memory_function read_graphics_memory;
     kernarium_runtime_prepare_jit_function prepare_jit;
+    kernarium_runtime_set_location_receiver_callback_function
+        set_location_receiver_callback;
+    kernarium_runtime_report_location_function report_location;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)
