@@ -40,6 +40,20 @@ if(TARGET UML::SyntheticCamera)
         LABELS "device;camera")
 endif()
 
+# The launcher's way to the platform cameras (UML::CameraSource), without a
+# session or a permission request.
+add_executable(uml_camera_source_tests camera_source_tests.cpp)
+target_link_libraries(uml_camera_source_tests PRIVATE UML::CameraSource)
+if(TARGET UML::SyntheticCamera)
+    target_compile_definitions(uml_camera_source_tests PRIVATE
+        UML_TEST_EXPECTS_SYNTHETIC=1)
+else()
+    target_compile_definitions(uml_camera_source_tests PRIVATE
+        UML_TEST_EXPECTS_SYNTHETIC=0)
+endif()
+uml_add_unit_test(NAME camera-source COMMAND uml_camera_source_tests
+    LABELS "device;camera")
+
 # The camera device's pure parts: each is a function of its inputs, checked
 # without a device.
 add_executable(uml_camera_jpeg_gap_tests camera_jpeg_gap_tests.cpp)

@@ -113,7 +113,7 @@ function(uml_add_macos_embedded_kernel_app
         UML::BatteryDevice
         UML::VideoDevice
         UML::CameraDevice
-        UML::AppleCamera
+        UML::CameraSource
         UML::ConsoleDevice
         UML::VsockDevice
         UML::GnssDevice
@@ -124,16 +124,6 @@ function(uml_add_macos_embedded_kernel_app
         UML::VirtioInput)
     if(TARGET uml_network_provider)
         target_link_libraries("${TARGET_NAME}" PRIVATE UML::NetworkProvider)
-    endif()
-    # The camera's chart is a test and launcher source; an App Store runtime has
-    # none, and the launcher then refuses --camera=synthetic.
-    if(TARGET UML::SyntheticCamera)
-        target_link_libraries("${TARGET_NAME}" PRIVATE UML::SyntheticCamera)
-        target_compile_definitions("${TARGET_NAME}" PRIVATE
-            UML_APP_HAS_SYNTHETIC_CAMERA=1)
-    else()
-        target_compile_definitions("${TARGET_NAME}" PRIVATE
-            UML_APP_HAS_SYNTHETIC_CAMERA=0)
     endif()
     target_compile_definitions("${TARGET_NAME}" PRIVATE
         UML_APP_HAS_SLIRP=$<BOOL:${UML_BUILD_NETWORK_PROVIDER}>)
