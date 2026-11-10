@@ -57,6 +57,7 @@ public:
     [[nodiscard]] virtual std::string diagnostic() const = 0;
 #if UML_VIDEO_ENCODER_TESTING
     virtual void loseSessionForTest(unsigned count) = 0;
+    virtual void invalidateSessionForTest() = 0;
 #endif
 };
 

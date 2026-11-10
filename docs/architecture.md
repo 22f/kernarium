@@ -486,7 +486,9 @@ plain hold for the next guest.
 
 The [Virtio video devices](../darwin/device/video/README.md) bridge the shared
 V4L2 drivers to the platform VideoToolbox decoder and encoder over their own
-vhost-user connections and need no GPU context. The
+vhost-user connections and need no GPU context. Their event queues never defer,
+so an idle device survives a guest suspend without a reset, and the platform
+sessions the system invalidates are rebuilt without a word to the guest. The
 [Virtio vsock device](../darwin/device/vsock/README.md) carries a byte stream
 from the host application to a service in the guest (adbd) with no listening
 socket on the host; the guest cannot open a connection to the host. The

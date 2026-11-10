@@ -28,6 +28,9 @@ public:
         std::span<const std::uint8_t> request, std::size_t responseCapacity) override;
     bool takeQueueCompletion(uml::virtio::VhostUserQueueCompletion&) override;
     void reset() noexcept override;
+    /* Readable while an event waits for a buffer of the guest's event queue. */
+    int eventDescriptor() const noexcept override;
+    void drainEventSource() override;
 
 private:
     class Implementation;

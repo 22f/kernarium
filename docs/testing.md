@@ -166,6 +166,9 @@ guest set. `ctest -N -L integration` lists the guest tests, and each runner or
 probe states in its header what it checks. A contract's owning README, such as
 [`../kernel/common/README.md`](../kernel/common/README.md), names the tests
 that check it.
+A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
+devices, suspends the guest both as the host's quiesce does and as the guest does
+by itself.
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
