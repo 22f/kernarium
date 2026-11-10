@@ -197,15 +197,16 @@ public enum SnapshotRules {
 
     /// Whether the last normal start on the disk reached `sys.boot_completed`
     /// and ended with Android's own power off: `lastCompleted` names the
-    /// record's release and is not earlier than the last start. Everything
-    /// else, from iOS closing a paused guest to a Recovery session, leaves
+    /// record's release and is later than the last start (a start in the same
+    /// second as the completion is not shut down: the clock has no finer
+    /// word). Everything else, from iOS closing a paused guest to a Recovery session, leaves
     /// the disk as a phone is left by a power cut.
     public static func wasShutDown(_ state: InstanceState) -> Bool {
         guard state.pendingUpdate == nil, let completed = state.lastCompleted,
             completed.releaseID == state.releaseID,
             let completedAt = SnapshotRecord.date(completed.at), let bootedAt = SnapshotRecord.date(state.lastBooted)
         else { return false }
-        return completedAt >= bootedAt
+        return completedAt > bootedAt
     }
 
     /// Why Create refuses on files with `state` (nil: no record) and whether

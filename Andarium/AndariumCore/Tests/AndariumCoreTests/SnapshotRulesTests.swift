@@ -25,8 +25,13 @@ struct SnapshotRulesTests {
 
     @Test func aDiskIsShutDownWhenTheLastStartCompletedAfterItBegan() {
         #expect(SnapshotRules.wasShutDown(state()))
-        // The same second counts: a completion is not earlier than the start.
-        #expect(SnapshotRules.wasShutDown(state(completed: "2026-11-10T10:00:00Z")))
+        #expect(SnapshotRules.wasShutDown(state(completed: "2026-11-10T10:00:01Z")))
+    }
+
+    @Test func aStartInTheSameSecondAsTheLastCompletionIsNotShutDown() {
+        // The clock has whole seconds: a start that follows a completion at once
+        // cannot be told from the completion of that start.
+        #expect(!SnapshotRules.wasShutDown(state(completed: "2026-11-10T10:00:00Z")))
     }
 
     @Test(arguments: [
