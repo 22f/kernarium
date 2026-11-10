@@ -89,16 +89,20 @@ application's statements (the sensor orientation, the rotation that
 The macOS launcher starts the device with its `--camera=` option, as the last of
 the Virtio devices it creates so that no other device's index moves; its
 argument handling in `darwin/app/macos/main.cpp` is the reference for the
-options and their values. The `host` source needs the system's camera
-permission granted to the program (or the terminal it runs in) beforehand:
-nothing in the launcher or the device asks for it, and the launcher refuses to
-start, saying how to grant it, when it is not. The tier follows the launch's GPU
-budget, and a state line goes to stderr when the host starts or stops capturing.
+options and their values. It reaches the platform cameras through
+`UML::CameraSource` (`camera_source.hpp`): the host's camera, the synthetic
+camera (an App Store runtime has none) and a read of the camera permission.
+The `host` source needs the system's camera permission granted to the program
+(or the terminal it runs in) beforehand: nothing in the launcher or the device
+asks for it, and the launcher refuses to start, saying how to grant it, when it
+is not. The tier follows the launch's GPU budget, and a state line goes to
+stderr when the host starts or stops capturing.
 
 ## Tests
 
 `camera-controls`, `camera-description`, `camera-jpeg-gap` and
-`camera-calibration` check the pure parts. `camera-device` drives the device
+`camera-calibration` check the pure parts, and `camera-source` the launcher's
+factories (nothing opened, no prompt). `camera-device` drives the device
 over both queues in front of the synthetic camera, including the invariant that
 a blocked session never opens a platform session, a hostile guest, a reset with
 streams and stills in flight, an event queue that retries and wakes the server,
