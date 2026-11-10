@@ -478,7 +478,11 @@ library and launcher over the storage layout
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
-library created.
+library created. `gnss-hal-nmea`, `gnss-hal-policy` and `gnss-hal-engine`
+(unit) compile the guest GNSS HAL's headers
+([Location](../android/lineage-24/README.md#location)) against the host
+writer's own epochs: the reading of the stream, the reporting rules and the
+session, with a pipe for the receiver and a counting wakelock.
 
 A release candidate is qualified on its image, opt-in, on every engine that
 runs Android (the Mac gadgets and JIT engines, the iPad gadgets). A `SIGILL`
