@@ -37,7 +37,6 @@ public final class ThermalSession: @unchecked Sendable {
     private let queue = DispatchQueue(label: "andarium-thermal-session")
 
     // Touched only on `queue`.
-    private var running = false
     private var booted = false
     private var inRun = false
     private var observed = HostThermalState.nominal
@@ -80,7 +79,6 @@ public final class ThermalSession: @unchecked Sendable {
     public func update(running: Bool, booted: Bool) {
         queue.async { [self] in
             let bootedNow = booted && !self.booted
-            self.running = running
             self.booted = booted
             if bootedNow { failedAttempts = 0 }
             if running {
