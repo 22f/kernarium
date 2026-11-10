@@ -25,6 +25,7 @@ RUNNERS = {
     "run_android_adb_debugging": (TESTS / "integration/android/run_android_adb_debugging.py", 5575),
     "run_android_oobe": (TESTS / "integration/android/run_android_oobe.py", 5576),
     "run_android_microg_spoofing": (TESTS / "integration/android/run_android_microg_spoofing.py", 5577),
+    "run_android_thermal": (TESTS / "integration/android/run_android_thermal.py", 5578),
     "android_launch_suite": (TESTS / "perf/android_launch_suite.py", 5601),
 }
 SLOT = "21300"

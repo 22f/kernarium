@@ -534,6 +534,11 @@ opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of
 [`microg/build-apks.sh`](../tests/integration/android/microg/README.md), and
 checks that only microG's own packages present Google's certificate.
+`android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
+names the release: the runner plays the host application over a vsock forward
+and checks the thermal manager, the display manager's vote, SurfaceFlinger's
+render rate and the frame rates at each severity, on a fresh data disk or, with
+`--instance`, over an older release's.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only
