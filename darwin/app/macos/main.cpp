@@ -26,6 +26,7 @@
 #include "guest_memory_argument.hpp"
 #include "options.hpp"
 #include "platform/camera.hpp"
+#include "platform/camera_authorization.hpp"
 #include "platform/microphone_authorization.hpp"
 #if UML_APP_HAS_SYNTHETIC_CAMERA
 #include "platform/synthetic_camera/synthetic_camera.hpp"
@@ -1478,7 +1479,9 @@ private:
 	/* Starts the Virtio camera device on the source --camera= names. Live
 	 * sources open a platform capture session only when the guest streams;
 	 * the blocked source never opens one. Nothing here asks the system for
-	 * the camera: that happens, for `host`, when a guest first streams. */
+	 * access: `host` needs the camera permission granted to this program (or
+	 * to the terminal it runs in) beforehand, and is refused here, with the
+	 * way to grant it, when it is not. */
 	[[nodiscard]] bool start_camera(std::vector<std::string> &kernel)
 	{
 		std::shared_ptr<uml::platform::Camera> source;
@@ -1524,6 +1527,19 @@ private:
 				return false;
 #endif
 			} else {
+				const auto permission =
+					uml::platform::makeAppleCameraAuthorization()
+						->permission();
+				if (permission != uml::platform::CameraPermission::granted) {
+					std::fputs(
+						"--camera=host needs the system's camera "
+						"permission, granted beforehand: allow the "
+						"terminal this runs in (or the program) under "
+						"System Settings > Privacy & Security > Camera, "
+						"then start again. Nothing asks for it here.\n",
+						stderr);
+					return false;
+				}
 				source = uml::platform::makeAppleCamera();
 			}
 		} catch (const std::exception &error) {
