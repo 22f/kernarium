@@ -200,10 +200,17 @@ Kernarium attaches:
   through which the application opens streams to guest ports (`connect_vsock`,
   runtime API 19; the guest cannot connect to the application);
 - an Android-only Virtio GNSS receiver ([the device](../darwin/device/gnss/README.md)),
-  the last Virtio device, which gives the guest the position the application
-  reports (`report_location`) and tells it when the guest powers the receiver
+  which gives the guest the position the application reports
+  (`report_location`) and tells it when the guest powers the receiver
   (`set_location_receiver_callback`; runtime API 32). The Linux runtime keeps
   both entries and answers `-ENODEV`;
+- an Android-only hardware keyboard, mouse and pointer
+  ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
+  unplugged until the application plugs them (`set_input_connected`) and then
+  fed with `send_keyboard_usage`, `send_pointer` and `send_mouse`; the guest's
+  lock lights and pointer capture come back through
+  `set_input_status_callback` (runtime API 33). The Linux runtime keeps the
+  entries and answers `-ENODEV`. Kernarium itself uses none of them;
 - a Virtio-GPU Metal framebuffer; and
 - the guest's `ttyS0` stream mirrored to a terminal view.
 
