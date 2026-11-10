@@ -17,8 +17,9 @@
  * exactly the same instructions. The difference between the two is the
  * price of a memory gadget's dispatch mispredicting.
  *
- * The including file defines WALK_RANDOM and WALK_STORE (0 or 1) and includes
- * x86_64_probe_harness.inc first.
+ * The including file includes x86_64_probe_harness.inc and
+ * x86_64_walk_order.inc first, then defines WALK_RANDOM and WALK_STORE (0
+ * or 1).
  */
 
 #ifndef BENCH_ITERATIONS
@@ -28,53 +29,11 @@
 #define WALK_ORDER 16384
 #define WALK_VALUE 0x5a5a
 
-.macro walk_family index
-.if ((\index) & 7) == 0
-	add	r10, r11
-.elseif ((\index) & 7) == 1
-	sub	r10, r11
-.elseif ((\index) & 7) == 2
-	xor	r10, r11
-.elseif ((\index) & 7) == 3
-	or	r10, r11
-.elseif ((\index) & 7) == 4
-	and	r10, r11
-.elseif ((\index) & 7) == 5
-	mov	r10, r11
-.elseif ((\index) & 7) == 6
-	lea	r10, [r10 + r11 * 2]
-.else
-	neg	r10
-.endif
-.endm
-
 	probe_start
 	lea	r14, [rip + .Lorder]
 	lea	r15, [rip + .Lblocks]
 	lea	rbx, [rip + .Lbuffer]
-	movabs	rax, 0x7f4a7c159e3779b9
-	xor	ecx, ecx
-.Lfill:
-#if WALK_RANDOM
-	mov	rdx, rax
-	shl	rdx, 13
-	xor	rax, rdx
-	mov	rdx, rax
-	shr	rdx, 7
-	xor	rax, rdx
-	mov	rdx, rax
-	shl	rdx, 17
-	xor	rax, rdx
-	mov	rdx, rax
-	shr	rdx, 32
-#else
-	mov	edx, ecx
-#endif
-	and	edx, WALK_BLOCKS - 1
-	mov	word ptr [r14 + rcx * 2], dx
-	add	ecx, 1
-	cmp	ecx, WALK_ORDER
-	jb	.Lfill
+	walk_order_fill WALK_ORDER, WALK_BLOCKS, WALK_RANDOM
 
 	mov	qword ptr [rbx], WALK_VALUE
 	mov	r9d, WALK_VALUE
