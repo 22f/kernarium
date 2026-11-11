@@ -8,6 +8,7 @@
  */
 #include "kernel_threads.hpp"
 #include "kernel_waits.hpp"
+#include "platform/host_state_figures.hpp"
 #include "platform/host_thermal.hpp"
 #include "platform/host_wait.hpp"
 #include "require.hpp"
@@ -247,6 +248,13 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 		"the third carrier is stalled on a device service's answer:\n" + during);
 	require(during.find("\nthermal ") != std::string::npos &&
 		during.find("\npower ") != std::string::npos, "transitions:\n" + during);
+	/* What the watch observed is what the session record's checkpoint reads
+	 * (platform/host_state_figures.hpp): the same observation, not a second
+	 * one. */
+	const auto published = uml::platform::publishedHostState();
+	require(published && published->thermal.level == HostThermalLevel::serious &&
+		published->thermal.activeProcessors == 4,
+		"the watch's observation was not published");
 
 	/* The service answers: the event closes. */
 	require(write(pipe_fds[1], "x", 1) == 1);
@@ -256,8 +264,11 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 		after.find(" ..a ") != std::string::npos,
 		"the event is closed:\n" + after);
 
-	/* Ending the watch leaves a valid slot of exactly its size. */
+	/* Ending the watch leaves a valid slot of exactly its size, and no state
+	 * that is observed no more. */
 	watch.reset();
+	require(!uml::platform::publishedHostState(),
+		"a host state was published after the watch ended");
 	const std::string last = stall_slot(path);
 	require(last.size() == session_stall_slot_bytes && last.back() == '\n');
 	/* The thermal source was read, and never from a thread the fence holds. */

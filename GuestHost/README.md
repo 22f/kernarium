@@ -23,11 +23,16 @@ Core/                                  GuestHostCore, a Swift package both
                                        (SpacePauser, SuspensionCheck,
                                        SpacePause), and the hardware keyboard and
                                        pointer (the keys held down, Caps Lock, the
-                                       pointer's position, buttons and scroll)
+                                       pointer's position, buttons and scroll), and
+                                       the display's scale: guest pixels to a point,
+                                       or native, with the pixels and density it
+                                       gives a view
 Sources/KernariumRuntimeLoader.h/.mm   loads the embedded runtime framework and
                                        wraps its C API (Runtime/KernariumRuntime.h)
 Sources/GuestDisplay.swift             the Metal view that shows the guest's display,
-                                       its view controller, and the SwiftUI wrapper
+                                       its view controller, and the SwiftUI wrapper;
+                                       the application gives it a scale
+                                       (GuestDisplayScale)
 Sources/GuestInput.swift               touch and pointer mapping onto the guest's
                                        touchscreen range, display viewport geometry
 Sources/GuestHardwareInput.swift       what the display does with hardware keys and
