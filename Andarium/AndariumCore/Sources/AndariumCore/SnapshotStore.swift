@@ -161,6 +161,16 @@ struct SnapshotStore: Sendable {
         }
     }
 
+    /// The record a restore that began and did not finish puts in place when
+    /// the next start or launch carries it through: the snapshot's copy of
+    /// `instance.json`. Nil where nothing is carried through: no restore, an
+    /// intent that cannot be read, or a snapshot that is no longer whole
+    /// (`recover` forgets such a restore and leaves the files as they are).
+    func recordOfUnfinishedRestore() -> InstanceState? {
+        guard case .readable(let id) = intent(), let found = entry(id), found.isComplete else { return nil }
+        return found.state
+    }
+
     // MARK: Create
 
     private struct CreateInputs {

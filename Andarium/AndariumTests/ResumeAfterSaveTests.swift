@@ -46,7 +46,7 @@ struct ResumeAfterSaveTests {
         let entry = AppEntry.fromArguments()
         let disk = GuestLocations(directory: AppEntry.guestDirectory(instance: entry.overrides.instance)).data
         try await withAndroidGuest { model, operations in
-            let included = try #require(model.guest?.includeInBackups)
+            let included = try #require(model.guest).includeInBackups
             _ = try await operations.shell("input keyevent KEYCODE_HOME", limit: .seconds(15))
             try await Task.sleep(for: Self.settle)
             let running = Self.footprint()

@@ -361,9 +361,15 @@ public enum InstanceRules {
 /// `clonefile(2)`, the one call every APFS clone of a guest's disk goes
 /// through.
 enum CloneFile {
-    struct Failure: Error, Equatable {
+    /// A POSIX error to everything that bridges it: its words are `strerror`'s
+    /// and its number the `errno`, not a Swift type name and a case index.
+    struct Failure: Error, Equatable, CustomNSError {
         /// The `errno` of the refused call.
         let code: Int32
+
+        static var errorDomain: String { NSPOSIXErrorDomain }
+        var errorCode: Int { Int(code) }
+        var errorUserInfo: [String: Any] { [NSLocalizedDescriptionKey: String(cString: strerror(code))] }
     }
 
     /// Clones `source` to the absent `destination`.
