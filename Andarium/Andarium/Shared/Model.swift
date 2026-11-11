@@ -92,6 +92,7 @@ final class AppModel {
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
             }
+            if (lifecycle.guest == nil) != (oldValue.guest == nil) { refreshNetworkWatch() }
         }
     }
     var host: HostDevice
@@ -312,7 +313,9 @@ final class AppModel {
     #endif
 
     /// The runtime and storage behind the screens; nil plays mock data.
-    var driver: (any RuntimeDriver)?
+    var driver: (any RuntimeDriver)? {
+        didSet { reportNetworkDenial() }
+    }
     /// The guest's data snapshots behind the screens: the runtime's, or the
     /// preview's seeded ones (`SnapshotDriver`).
     var snapshotDriver: (any SnapshotDriver)? {
@@ -431,6 +434,7 @@ final class AppModel {
             if applicationActive != oldValue {
                 refreshStatistics()
                 refreshGraphicsNotice()
+                refreshNetworkWatch()
                 #if !APP_STORE
                 refreshJit()
                 #endif
@@ -481,6 +485,22 @@ final class AppModel {
     }
     @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
 
+    // MARK: Network notice state
+
+    /// Whether iOS denies Andarium the network, from the path watcher. The
+    /// words and the Settings button are `NetworkWords`; nothing here is a
+    /// request of Andarium's own.
+    private(set) var networkNotice = NetworkNotice()
+    /// Watches the system's network path while a watch is wanted. The device
+    /// application has one over the system's path monitor; a test gives its
+    /// own, and the Simulator preview has none.
+    @ObservationIgnored var networkWatcher: NetworkAccessWatcher? {
+        didSet {
+            oldValue?.setWanted(false)
+            networkWatcher?.changed = { [weak self] in self?.networkWatcherChanged() }
+            refreshNetworkWatch()
+        }
+    }
     init(
         guest: Guest?, host: HostDevice, system: SystemInfo, capabilities: Capabilities,
         createRequirementBytes: UInt64
@@ -1567,6 +1587,55 @@ final class AppModel {
     func previewThermalNotice() {
         thermalNotice.show()
     }
+
+    // MARK: Network notice
+
+    /// The path is watched while Andarium is the active application and has a
+    /// guest, on Home or in a session: only then does the notice matter, and
+    /// the system's monitor calls back for a change of the path alone.
+    private var networkWatchWanted: Bool {
+        applicationActive && lifecycle.guest != nil
+    }
+
+    /// Starts the watch when it is wanted and stops it when it is not.
+    func refreshNetworkWatch() {
+        networkWatcher?.setWanted(networkWatchWanted)
+    }
+
+    private func networkWatcherChanged() {
+        guard let watcher = networkWatcher else { return }
+        networkNotice = watcher.notice
+        reportNetworkDenial()
+    }
+
+    /// The denial the notice is up for now, which Home and a session show;
+    /// nil when there is none, the person has dismissed it, or there is no
+    /// guest to be denied a network.
+    var networkDenialShowing: NetworkDenial? {
+        lifecycle.guest == nil ? nil : networkNotice.showing
+    }
+
+    /// Tells the runtime which denial is in force, dismissed or not, for the
+    /// session record: a bug report then says whether the person was told.
+    /// The runtime keeps it for the next session too, but exists only once a
+    /// run has loaded it, so the run says it again then.
+    func reportNetworkDenial() {
+        driver?.setNetworkNotice(networkNotice.denial)
+    }
+
+    /// The person dismisses the notice: on Home or in the session, for the
+    /// same cause, until the network has been allowed again.
+    func dismissNetworkNotice() {
+        networkWatcher?.dismiss()
+    }
+
+    #if !APP_STORE
+    /// The Simulator cannot be denied the network, so the preview plays a
+    /// denial. The App Store configuration leaves this out.
+    func previewNetworkNotice(_ denial: NetworkDenial) {
+        networkNotice.apply(.denied(denial))
+    }
+    #endif
 
     /// The debugger is preparing the JIT, which keeps the boot at its first step.
     private var preparingJitNow: Bool {
