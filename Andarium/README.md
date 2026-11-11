@@ -272,9 +272,10 @@ control out.
   per snapshot (Restore, its name, Delete) and a page on the space they use,
   with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds
   what Home and the sheet show (names first, then the figures; they give way
-  to the measuring state when an operation finishes or a run begins or ends,
-  and are measured when nothing was read, after an operation and when a run
-  ends, never because a view appeared or while the guest starts) and runs
+  to the measuring state when an operation other than a rename finishes or a
+  run begins or ends, and are measured when nothing was read, after an
+  operation and when a run ends, never because a view appeared or while the
+  guest starts) and runs
   each operation;
   `SnapshotWords` says every refusal, plan and figure in one place. A restore
   closes the sheet and Home says what happened, Start being next. The preview

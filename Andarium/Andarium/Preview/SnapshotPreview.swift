@@ -23,6 +23,7 @@ enum SnapshotPreview {
         "snapshots-low-space", "snapshots-erase", "snapshots-blocked", "snapshots-backup",
         "snapshots-unfinished", "snapshots-unfinished-sheet", "snapshots-unavailable-running", "snapshots-failed",
         "snapshots-unfinished-unknown", "snapshots-unfinished-unknown-sheet", "snapshots-taken-measuring",
+        "snapshots-unfinished-lost", "snapshots-unfinished-lost-sheet", "snapshots-unfinished-update",
     ]
 
     /// The device a screen needs instead of the idiom's own.
@@ -76,13 +77,16 @@ enum SnapshotPreview {
             seed.total = SnapshotFigure(bytes: seed.total?.bytes ?? 0, isLowerBound: true)
         case "snapshots-blocked":
             seed.dataRelease = SnapshotRelease(releaseID: PreviewSnapshotSeed.newerRelease, buildNumber: 1_794_000_000)
-        case "snapshots-unfinished", "snapshots-unfinished-sheet":
+        case "snapshots-unfinished", "snapshots-unfinished-sheet", "snapshots-unfinished-update":
             seed.unfinishedRestore = SnapshotUnfinishedRestore(
                 snapshot: seed.items[3].id,
                 lastFailure: SnapshotFailure(POSIXError(.ENOSPC)))
         case "snapshots-unfinished-unknown", "snapshots-unfinished-unknown-sheet":
             // Which snapshot it was cannot be read.
             seed.unfinishedRestore = SnapshotUnfinishedRestore()
+        case "snapshots-unfinished-lost", "snapshots-unfinished-lost-sheet":
+            // The record names a snapshot that is not there.
+            seed.unfinishedRestore = SnapshotUnfinishedRestore(snapshot: SnapshotID())
         case "snapshots-failed":
             seed.failure = POSIXError(.EIO)
         default:
@@ -107,6 +111,10 @@ enum SnapshotPreview {
             model.plan = .blocked(.mismatch)
         case "snapshots-blocked":
             model.plan = .blocked(.olderAndroid)
+        case "snapshots-unfinished-update":
+            // What the start plan is with a restore of an older snapshot unfinished:
+            // the update, which the card says; Home shows no update card beside it.
+            model.plan = .update(from: PreviewData.previousSystemRelease, to: PreviewData.systemRelease)
         case "snapshots-restored":
             model.planAfterRestore = .normal
         case "snapshots-restored-older":
@@ -133,7 +141,8 @@ enum SnapshotPreview {
     static func applyDeferred(screen: String, to model: AppModel) async {
         guard screen.hasPrefix("snapshots"),
               !["snapshots-home-none", "snapshots-home", "snapshots-low-space", "snapshots-blocked",
-                "snapshots-backup", "snapshots-unfinished", "snapshots-unfinished-unknown"].contains(screen)
+                "snapshots-backup", "snapshots-unfinished", "snapshots-unfinished-unknown", "snapshots-unfinished-lost",
+                "snapshots-unfinished-update"].contains(screen)
         else { return }
         let store = model.snapshots
         if screen == "snapshots-measuring" {
