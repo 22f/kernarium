@@ -352,6 +352,15 @@ final class AppModel {
     /// Settings is open over the session. A sheet has the keys, so the guest
     /// does not hold the keyboard focus meanwhile.
     var sessionSettingsOpen = false
+    /// The share sheet of a bug report is up over the session.
+    var shareSheetUp = false
+    /// The guest has the hardware keys unless something is over it that needs
+    /// them (Settings, a sheet, an alert, the share sheet): the sheet takes
+    /// the keys, and the guest takes them back when it goes. The pointer lock
+    /// goes with them.
+    var guestHasKeys: Bool {
+        !sessionSettingsOpen && sheet == nil && alert == nil && !shareSheetUp
+    }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
     var pointerLockWanted = false
@@ -1003,8 +1012,15 @@ final class AppModel {
 
     /// The report is deleted on every outcome of the sheet.
     private func share(_ file: URL) {
-        let shown = presentShare(file) { try? FileManager.default.removeItem(at: file) }
-        if !shown { try? FileManager.default.removeItem(at: file) }
+        shareSheetUp = true
+        let shown = presentShare(file) { [weak self] in
+            self?.shareSheetUp = false
+            try? FileManager.default.removeItem(at: file)
+        }
+        if !shown {
+            shareSheetUp = false
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     /// The preview's report: the same steps on the same overlay, ending in

@@ -193,6 +193,7 @@ final class LiveRuntime: RuntimeDriver {
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
         observeRotationPolicy()
+        observeOverlay()
         preferences.start()
     }
 
@@ -737,7 +738,24 @@ final class LiveRuntime: RuntimeDriver {
     /// display's keys and pointer reach them while the application is in front
     /// and the guest is not held still.
     private func updateKeyboardMouse() {
-        keyboardMouse.update(running: runActive && inputRunReady, foreground: active && !holdsGuestStill)
+        keyboardMouse.update(
+            running: runActive && inputRunReady, foreground: active && !holdsGuestStill,
+            overlaid: !(model?.guestHasKeys ?? true))
+    }
+
+    /// A sheet, an alert, Settings or the share sheet over the guest takes the
+    /// keys, and with them the pointer lock the guest's capture asked for.
+    private func observeOverlay() {
+        guard let model else { return }
+        withObservationTracking {
+            _ = model.guestHasKeys
+        } onChange: {
+            Task { @MainActor in
+                guard self.model != nil else { return }
+                self.updateKeyboardMouse()
+                self.observeOverlay()
+            }
+        }
     }
 
     func setPointerAsTouch(_ on: Bool) {
