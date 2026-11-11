@@ -9,3 +9,7 @@ persist.sys.kernarium.virtwifi_saved    u:object_r:kernarium_wifi_network_prop:s
 # The time zone the product applied last from the host's, so a zone the user
 # chose in the guest is told from it and never replaced.
 persist.sys.kernarium.timezone_applied    u:object_r:kernarium_time_zone_prop:s0 exact string
+
+# Set once the product has looked at a guest's on-screen keyboard setting, so a person who
+# turns it on afterwards keeps it on.
+persist.sys.kernarium.keyboard_default    u:object_r:kernarium_keyboard_default_prop:s0 exact bool

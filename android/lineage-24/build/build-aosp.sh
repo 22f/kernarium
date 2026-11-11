@@ -459,12 +459,16 @@ fi
 	fail "the suspend blocker that holds the guest awake for an adb host is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_net_setup "* ]] ||
 	fail "the network setup tool that configures eth0 and the virtual Wi-Fi is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_gamepad "* ]] ||
+	fail "the gamepad relay that turns the host's game controllers into HID devices is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_wifi_network_script "* ]] ||
 	fail "the script that saves the virtual Wi-Fi network is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_reclaim_boot_apps_script "* ]] ||
 	fail "the script that reclaims the cached boot-started apps is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_time_zone_script "* ]] ||
 	fail "the script that applies the host's time zone is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_keyboard_default_script "* ]] ||
+	fail "the script that moves an older guest to the on-screen keyboard default is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||

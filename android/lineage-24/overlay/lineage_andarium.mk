@@ -412,6 +412,21 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/config/displayconfig_default.xml:$(TARGET_COPY_OUT_VENDOR)/etc/displayconfig/default.xml
 
+# The host's keyboard and mouse are virtio-input devices (1af4:0003 to 0005) that
+# exist from boot and are plugged into Android only while the host reports the
+# hardware. Android finds a device's key layout and configuration by its vendor and
+# product, and /vendor/usr is one of the places it looks (libs/input/InputDevice.cpp).
+# The side-key keyboard (1af4:0002) gets a layout of its five keys alone, so that
+# Android stops counting it as a full keyboard. The keyboard and the mouse are
+# external, as a USB keyboard and mouse are, and the absolute pointer follows the
+# display's orientation. The three new devices have no layout or character map of
+# their own: Android's keyboard layout choice is the user's.
+PRODUCT_COPY_FILES += \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0002.kl:$(TARGET_COPY_OUT_VENDOR)/usr/keylayout/Vendor_1af4_Product_0002.kl \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0003.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0003.idc \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0004.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0004.idc \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0005.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0005.idc
+
 # Every device declares the location and GPS features, whether or not the host
 # has a position to give: the GNSS HAL (overlay/gnss) is the guest's GPS. The
 # platform's file declares both features; LocationManagerService creates the gps
@@ -483,6 +498,11 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/bin/kernarium_vk_presen
 # (init.vendor.rc runs it at post-fs-data).
 PRODUCT_PACKAGES += kernarium_net_setup
 
+# The host's game controllers become HID devices of the guest through /dev/uhid,
+# which the kernel's own drivers bind (overlay/gamepad). Every device has a host,
+# so every device runs the relay; it creates nothing until a controller connects.
+PRODUCT_PACKAGES += kernarium_gamepad
+
 # The Wi-Fi module's resources are overlaid by KernariumWifiOverlay
 # (rro/KernariumWifiOverlay): virt_wifi cannot change its MAC address, so the
 # framework must not randomize it.
@@ -511,6 +531,12 @@ PRODUCT_PACKAGES += kernarium_reclaim_boot_apps_script
 # while "Set time zone automatically" is on, and leaves a zone the user chose
 # with it off alone. It runs from system_ext in a core domain of its own.
 PRODUCT_PACKAGES += kernarium_time_zone_script
+
+# Android hides its on-screen keyboard while a hardware keyboard is attached unless
+# "Show on-screen keyboard" is on. The SettingsProvider overlay turns it off for a new
+# guest; once boot completes this script turns it off, once, for a guest whose settings
+# an older release created with it on. It runs from system_ext in a core domain of its own.
+PRODUCT_PACKAGES += kernarium_keyboard_default_script
 
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it

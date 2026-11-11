@@ -100,6 +100,30 @@ if(UML_ANDROID_GUEST_PROC_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The host's hardware keyboard and mouse (the image's device configuration,
+# the on-screen keyboard default and the pointer capture LED of the input
+# topic): the runner plays the display's user over the launcher's VNC display
+# with --hardware-input and reads Android's input dump and the probe app's log.
+# It boots Android with the macOS launcher, so it is opt-in: name the release
+# under test and the probe's APK (tests/integration/android/keymouse).
+set(UML_ANDROID_KEYMOUSE_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-keymouse test boots")
+set(UML_ANDROID_KEYMOUSE_PROBE_APK "" CACHE FILEPATH
+    "AndariumKeyMouseProbe APK that the android-keymouse test installs")
+if(UML_ANDROID_KEYMOUSE_RELEASE AND UML_ANDROID_KEYMOUSE_PROBE_APK AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-keymouse
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_keymouse.py
+            --release ${UML_ANDROID_KEYMOUSE_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --probe-apk ${UML_ANDROID_KEYMOUSE_PROBE_APK}
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The thermal HAL and the 30 fps cap (route p0007's display topic): the runner
 # plays the host application over a vsock forward to the HAL's port and checks
 # the thermal manager, the display manager's vote, SurfaceFlinger's render rate
@@ -114,6 +138,32 @@ if(UML_ANDROID_THERMAL_RELEASE AND TARGET uml-darwin-android17)
             ${CMAKE_CURRENT_SOURCE_DIR}/run_android_thermal.py
             --release ${UML_ANDROID_THERMAL_RELEASE}
             --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
+# The gamepad relay, a vendor daemon of the image's overlay
+# (android/lineage-24/overlay/gamepad): the runner plays the host application
+# over a vsock forward to the relay's port, creates a controller of each driver
+# family and checks what Android sees (devices, keys, axes), what comes back
+# (rumble, lights, the drivers' feature requests), hot plug, the relay's
+# recovery, and the guest's cost per report. It boots Android with the macOS
+# launcher, so it is opt-in: name the release under test and the probe app's
+# APK (tests/integration/android/gamepad/build-apk.sh).
+set(UML_ANDROID_GAMEPAD_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-gamepad test boots")
+set(UML_ANDROID_GAMEPAD_PROBE_APK "" CACHE FILEPATH
+    "AndariumGamepadProbe.apk that the android-gamepad test installs")
+if(UML_ANDROID_GAMEPAD_RELEASE AND UML_ANDROID_GAMEPAD_PROBE_APK AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-gamepad
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_gamepad.py
+            --release ${UML_ANDROID_GAMEPAD_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --probe-apk ${UML_ANDROID_GAMEPAD_PROBE_APK}
         LABELS guest;boot;android
         TIMEOUT 3600
         PROCESSORS 4

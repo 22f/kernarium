@@ -248,6 +248,34 @@ display topic of route `p0007` makes a display with no map of its own use.
 `tests/integration/android/run_android_thermal.py` drives the stream on a
 candidate image.
 
+### Game controllers
+
+The host application's game controllers are HID devices of the guest.
+`kernarium_gamepad` (`overlay/gamepad/`) is a vendor daemon that init starts at
+boot on every device, in a domain of its own. It listens on vsock port 5558,
+accepts only host CID 2, and creates a device through `/dev/uhid` for each
+controller the host describes: the node Android's Bluetooth stack uses for a
+paired controller, so the kernel's own driver for that device binds it and
+Android applies its stock key layout. The relay knows no controller family; the
+identity, the descriptor and the meaning of every report are the host's, so a
+fix to one ships in an application update. It moves the host's input reports
+into the device and the driver's output and feature requests (rumble, lights,
+calibration) back to the host.
+
+There is one device per controller, at most eight at a time. A connection that
+ends, or a host that connects again, removes every device, and the host creates
+its controllers again after the relay's `HELLO`. A driver request that the host
+cannot get is answered with `EIO` at once, so a driver never waits out uhid's
+five seconds. Writes to the host never block: a frame that does not go whole
+shuts the connection down. With no controller the relay only waits, and
+Recovery does not run it.
+`overlay/gamepad/gamepad_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/GamepadProtocol.swift` own the wire
+format, which the golden frames in `tests/unit/andarium/fixtures` pin.
+`tests/integration/android/run_android_gamepad.py` (`android-gamepad`) plays the
+host against a booted release; its probe app is
+[`tests/integration/android/gamepad`](../../tests/integration/android/gamepad/README.md).
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -288,6 +316,51 @@ percentage and charging state; on iOS the percentage is `UIDevice.batteryLevel`,
 which moves in 5% steps, so the guest's does too, and the Mac's is exact.
 The swipe lock screen can be turned on: `ro.lockscreen.disable.default` turns it
 off for user 0 of a fresh `/data` only.
+
+### Keyboard and mouse
+
+The host's keyboard and mouse are three virtio-input devices of the guest. They
+exist from boot and are plugged into Android only while the host reports the
+hardware: "Kernarium Hardware Keyboard" (1af4:0003), "Kernarium Mouse" (1af4:0004:
+the wheels, and relative motion while an app captures the pointer) and
+"Kernarium Pointer" (1af4:0005: the absolute position, which places Android's
+cursor). The ids and names are permanent, because Android keys a keyboard layout
+and its settings to a device's identity. The host sends key positions and never
+characters, so Android's own layout, key repeat and Caps Lock apply, and every
+key goes to Android.
+
+`overlay/input/` holds the configuration Android reads for them from
+`/vendor/usr`. The keyboard and the mouse are external, as USB devices are, so a
+key or a click wakes the screen; the pointer follows the display's orientation.
+None of the three has a key layout of its own: Android picks one for the
+keyboard from the language of the input method, asks when it cannot, and keeps
+the user's choice. The side-key keyboard (1af4:0002: Power, Volume Up and Down,
+Back and Home) has a layout of those five keys alone, so Android no longer counts
+it as a full keyboard that is always attached. The verifier requires each file's
+content.
+
+Android hides its on-screen keyboard while a hardware keyboard is attached
+unless "Show on-screen keyboard" is on, and the product's default is off (the
+SettingsProvider overlay): the keyboard shows until the host's keyboard is
+attached. SettingsProvider writes a default only when it first creates a guest's
+settings, so a guest that an older release created holds 1. Once boot completes,
+`kernarium_keyboard_default` (`overlay/tools`, a script in a core domain of its
+own) turns a stored 1 off, once; its marker property records that it has looked,
+so a person who turns the setting on afterwards keeps it on. The setting has no
+history that tells the old default from a person's choice of 1, so a 1 chosen
+earlier is turned off once as well.
+
+While an app holds pointer capture, Android lights the LED_MISC of a cursor
+device that advertises it, and puts it out when the capture ends; the mouse is
+that device, and the host reads the LED to take hold of its own pointer for the
+guest. A device without the LED sees no change. It is a topic of route `p0022`
+(`frameworks/native`), and the verifier requires its dump line in
+`libinputflinger.so`.
+
+init starts a service on a keychord whenever its keys are down together on any
+input device, so typing would fire one: the product's `bugreport` service has
+none (Cuttlefish's was A and B), and the verifier refuses a keychord in the
+product's init script. Bug reports are taken over adb.
 
 ### Debugging and adb
 
