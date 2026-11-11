@@ -23,9 +23,10 @@ The runner shows both:
   still off;
 - upgrade (only with --previous-release): the data disk of that release, on
   which the probes and a forgotten and saved network disable VirtWifi as the
-  stock platform does and which holds the network disabled after a restart of
-  its own guest, boots the release under test: the first boot saves the network
-  again, the station joins it, and the next boot leaves it alone.
+  stock platform does and which holds the network disabled, with the station
+  away from it, after a restart of its own guest, boots the release under test:
+  the first boot saves the network again, the station joins it, and the next
+  boot leaves it alone.
 
 The checks of one section do not stop the others, so a release that lacks the
 overlay shows every symptom; the run passes only if none failed. Every wait has a
@@ -87,6 +88,8 @@ POLL_SECONDS = 5
 SUSPEND_ATTEMPTS = 4
 STORE_SECONDS = 30
 MARGIN_SECONDS = 30
+# A saved network the disk holds enabled is joined well within this after boot_completed.
+BOOT_JOIN_SECONDS = 30
 BLACKHOLE = "192.0.2.1"
 UNRESOLVED_NAME = "no-such-host.invalid"
 SSID = "VirtWifi"
@@ -297,6 +300,9 @@ class Guest:
         self.log = log
         self.console = console
         self.private = private
+        # The boot script's denials found by every read of the log so far.
+        self.denials: list[str] = []
+        self.denial_reads = 0
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -331,6 +337,16 @@ class Guest:
     def script_log(self) -> str:
         """What the boot script logged since this boot."""
         return self.shell(f"logcat -d -s {SCRIPT_LOG_TAG}")
+
+    def read_denials(self) -> int:
+        """Keeps the boot script's SELinux denials that the log holds now; returns how many denials it
+        holds in all. The log is small and rotates, so it is read more than once and nothing is dropped."""
+        log = self.shell("logcat -d -b all", timeout=180)
+        for line in avc_denials(log, SCRIPT_DOMAIN):
+            if line not in self.denials:
+                self.denials.append(line)
+        self.denial_reads += 1
+        return log.count("avc:")
 
     def uptime(self) -> float:
         return float(self.shell("cat /proc/uptime").split()[0])
@@ -514,6 +530,8 @@ def check_overlay(guest: Guest) -> str | None:
 
 def check_saved_and_joined(guest: Guest) -> str | None:
     wait_for("VirtWifi is saved", 60, lambda: None if network_id(guest.listing()) is not None else "not saved", guest)
+    # The boot script has saved the network: the denials of its first commands are read before they rotate out.
+    guest.read_denials()
     guest.wait_joined(JOIN_SECONDS, "the station joins VirtWifi")
     status = selection_status(guest.dump())
     if status != "NETWORK_SELECTION_ENABLED":
@@ -631,12 +649,13 @@ def check_wifi_off_stays_off(guest: Guest, waits: Waits) -> str | None:
 
 def check_no_denials(guest: Guest) -> str | None:
     """The boot script runs in a domain of its own (overlay/sepolicy/system_ext/private); a rule it lacks
-    shows as a denial, and the script then fails without a word."""
-    log = guest.shell("logcat -d -b all", timeout=180)
-    denials = avc_denials(log, SCRIPT_DOMAIN)
-    if denials:
-        raise Failure(f"SELinux denied the boot script's domain {len(denials)} times:\n" + "\n".join(denials[:5]))
-    return f"{log.count('avc:')} denials logged in all, none for {SCRIPT_DOMAIN}"
+    shows as a denial, and the script then fails without a word. The denials earlier reads of this guest's
+    log found count too, since the log may have rotated them out since."""
+    logged = guest.read_denials()
+    if guest.denials:
+        raise Failure(f"SELinux denied the boot script's domain {len(guest.denials)} times:\n"
+                      + "\n".join(guest.denials[:5]))
+    return f"{logged} denials logged in all, none for {SCRIPT_DOMAIN} in {guest.denial_reads} reads of the log"
 
 
 def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
@@ -662,18 +681,56 @@ def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: 
 
 
 def check_repaired(guest: Guest, waits: Waits) -> str | None:
+    """The main log buffer is small and nearly full at boot, so the script's repair line is looked for at
+    every poll and kept once seen, and its denials are read early as well as by the later check."""
     state = selection_status(guest.dump())
+    logged = repair_logged(guest.script_log())
     print(f"     the network is {state} when the release under test has booted")
-    if state != "NETWORK_SELECTION_PERMANENTLY_DISABLED" and not repair_logged(guest.script_log()):
+    # The script has polled the station by now.
+    guest.read_denials()
+    if state != "NETWORK_SELECTION_PERMANENTLY_DISABLED" and not logged:
         raise Failure(f"the data disk holds the network {state}, not disabled: the previous release's disabled "
                       "state did not reach the disk, so no repair is shown")
-    guest.wait_joined(waits.repair, "the first boot of the release joins the network")
+
+    def joined() -> str | None:
+        nonlocal logged
+        station = guest.joined()
+        if not logged and repair_logged(guest.script_log()):
+            logged = True
+            # The script has saved the network again and logged it.
+            guest.read_denials()
+        return None if station else "the station has not joined"
+
+    wait_for("the first boot of the release joins the network", waits.repair, joined, guest, interval=POLL_SECONDS)
     status = selection_status(guest.dump())
     if status != "NETWORK_SELECTION_ENABLED":
         raise Failure(f"the network joined but is {status}")
-    if not repair_logged(guest.script_log()):
+    if not logged and not repair_logged(guest.script_log()):
         raise Failure("the network joined without the boot script saving it again")
     return None
+
+
+def check_disabled_on_disk(guest: Guest) -> None:
+    """The previous release's disk holds the network disabled: after a restart of its guest the station
+    stays away from the network and the dump says it is disabled. With the checks still failing, a
+    network the disk held enabled is joined at boot and disabled again in memory, which a dump alone does
+    not tell apart, so the station is watched first."""
+    guest.restart()
+    deadline = time.monotonic() + BOOT_JOIN_SECONDS
+    while True:
+        guest.alive()
+        if guest.joined():
+            raise Failure("the station joined the network after a restart of the previous release, so its "
+                          "disk holds the network enabled")
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(POLL_SECONDS)
+    state = selection_status(guest.dump())
+    if state != "NETWORK_SELECTION_PERMANENTLY_DISABLED":
+        raise Failure(f"the network is {state} after a restart of the previous release, so its "
+                      "disabled state did not reach the disk")
+    if guest.joined():
+        raise Failure("the station joined the network after a restart of the previous release")
 
 
 def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
@@ -699,11 +756,7 @@ def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report
                      else "still enabled", guest, interval=POLL_SECONDS)
             # The Wi-Fi service stores the change a few seconds later, and the disk the release under test
             # boots holds only what was stored: a restart of this guest shows what that is.
-            guest.restart()
-            state = selection_status(guest.dump())
-            if state != "NETWORK_SELECTION_PERMANENTLY_DISABLED":
-                raise Failure(f"the network is {state} after a restart of the previous release, so its "
-                              "disabled state did not reach the disk")
+            check_disabled_on_disk(guest)
             disabled = True
             return None
 

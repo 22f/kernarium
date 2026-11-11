@@ -7,18 +7,21 @@ run_android_wifi_network.py reads `cmd wifi status`, `cmd wifi list-networks`,
 commands print (WifiShellCommand, WifiConfiguration's dump and the overlay
 manager), so the runner's parsers run here; the runner also takes the boot
 script's waits from the tracked script, and reads the overlay's integers with the
-verifier's reader of compiled resource tables.
+verifier's reader of compiled resource tables. The upgrade section's checks run
+against a guest that answers from a script, on a clock that a sleep moves on.
 """
 
 from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import importlib.util
 import io
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 import zipfile
 
 REPOSITORY = Path(__file__).resolve().parents[3]
@@ -73,6 +76,44 @@ AUTOJOIN_OFF_DUMP = ENABLED_DUMP.replace("allowAutojoin=true", "allowAutojoin=fa
 DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): avc:  denied  "
           "{ read } for comm=\"cmd\" scontext=u:r:kernarium_wifi_network:s0 "
           "tcontext=u:object_r:system_file:s0 tclass=file permissive=0\n")
+REPAIR_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"
+WAITS = runner.Waits(45, 180)
+
+
+class FakeClock:
+    """The runner's clock: a sleep moves it on at once."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class ScriptedGuest(runner.Guest):
+    """A guest that answers each command from its list, one answer per call; the last answer repeats."""
+
+    COMMANDS = {"status": "cmd wifi status", "dump": "dumpsys wifi",
+                "script_log": f"logcat -d -s {runner.SCRIPT_LOG_TAG}", "log": "logcat -d -b all"}
+
+    def __init__(self, **answers: list[str]) -> None:
+        self.answers = {self.COMMANDS[name]: list(values) for name, values in answers.items()}
+        self.denials = []
+        self.denial_reads = 0
+        self.restarts = 0
+
+    def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+        answers = self.answers[command]
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    def alive(self) -> None:
+        pass
+
+    def restart(self) -> None:
+        self.restarts += 1
 
 
 class ReadingTests(unittest.TestCase):
@@ -177,6 +218,68 @@ class ScriptAndOverlayTests(unittest.TestCase):
         self.assertTrue(runner.PROBE_SETTINGS["private_dns_specifier"].endswith(".invalid"))
         for key in ("captive_portal_https_url", "captive_portal_http_url", "captive_portal_fallback_url"):
             self.assertIn(runner.BLACKHOLE, runner.PROBE_SETTINGS[key])
+
+
+class UpgradeCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clock = mock.patch.object(runner, "time", FakeClock())
+        clock.start()
+        self.addCleanup(clock.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+
+    def test_a_repair_line_that_rotates_out_before_the_join_is_kept(self) -> None:
+        guest = ScriptedGuest(dump=[DISABLED_DUMP, ENABLED_DUMP], script_log=["", "", REPAIR_LINE, ""],
+                              status=[NOT_JOINED, NOT_JOINED, NOT_JOINED, JOINED], log=[""])
+        self.assertIsNone(runner.check_repaired(guest, WAITS))
+
+    def test_a_join_without_the_repair_line_fails(self) -> None:
+        guest = ScriptedGuest(dump=[DISABLED_DUMP, ENABLED_DUMP], script_log=[""], status=[NOT_JOINED, JOINED],
+                              log=[""])
+        with self.assertRaisesRegex(runner.Failure, "without the boot script saving it again"):
+            runner.check_repaired(guest, WAITS)
+
+    def test_an_enabled_disk_without_the_repair_line_fails_at_once(self) -> None:
+        guest = ScriptedGuest(dump=[ENABLED_DUMP], script_log=[""], status=[JOINED], log=[""])
+        with self.assertRaisesRegex(runner.Failure, "not disabled"):
+            runner.check_repaired(guest, WAITS)
+
+    def test_a_denial_read_at_boot_fails_the_later_check(self) -> None:
+        guest = ScriptedGuest(dump=[DISABLED_DUMP, ENABLED_DUMP], script_log=[REPAIR_LINE],
+                              status=[NOT_JOINED, JOINED], log=[DENIAL, ""])
+        runner.check_repaired(guest, WAITS)
+        with self.assertRaisesRegex(runner.Failure, "denied the boot script's domain 1 times"):
+            runner.check_no_denials(guest)
+
+    def test_a_denial_read_when_the_repair_line_shows_fails_the_later_check(self) -> None:
+        guest = ScriptedGuest(dump=[DISABLED_DUMP, ENABLED_DUMP], script_log=["", REPAIR_LINE],
+                              status=[NOT_JOINED, NOT_JOINED, JOINED], log=["", DENIAL, ""])
+        runner.check_repaired(guest, WAITS)
+        with self.assertRaisesRegex(runner.Failure, "denied the boot script's domain 1 times"):
+            runner.check_no_denials(guest)
+
+    def test_a_log_without_the_scripts_denials_passes(self) -> None:
+        guest = ScriptedGuest(log=[DENIAL.replace("kernarium_wifi_network", "kernarium_net_setup")])
+        self.assertIn(f"none for {runner.SCRIPT_DOMAIN}", runner.check_no_denials(guest))
+
+    def test_a_station_that_joins_after_the_previous_release_restarts_fails(self) -> None:
+        # The join comes at the last poll of the watch.
+        guest = ScriptedGuest(status=[NOT_JOINED] * (runner.BOOT_JOIN_SECONDS // runner.POLL_SECONDS) + [JOINED],
+                              dump=[DISABLED_DUMP])
+        with self.assertRaisesRegex(runner.Failure, "disk holds the network enabled"):
+            runner.check_disabled_on_disk(guest)
+        self.assertEqual(guest.restarts, 1)
+
+    def test_a_disk_that_holds_the_network_disabled_passes(self) -> None:
+        guest = ScriptedGuest(status=[NOT_JOINED], dump=[DISABLED_DUMP])
+        runner.check_disabled_on_disk(guest)
+        self.assertEqual(guest.restarts, 1)
+
+    def test_a_network_enabled_after_the_previous_release_restarts_fails(self) -> None:
+        guest = ScriptedGuest(status=[NOT_JOINED], dump=[ENABLED_DUMP])
+        with self.assertRaisesRegex(runner.Failure, "did not reach the disk"):
+            runner.check_disabled_on_disk(guest)
 
 
 if __name__ == "__main__":

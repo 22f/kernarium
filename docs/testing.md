@@ -633,7 +633,8 @@ forgotten one stays forgotten and Wi-Fi that is off stays off.
 `UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` adds the upgrade section: a data
 disk on which that release left the network disabled is repaired once by the
 first boot of the release under test, and the next boot leaves it alone.
-`android17-wifi-network-runner` (tooling) runs its parsers without a guest.
+`android17-wifi-network-runner` (tooling) runs its parsers, and the upgrade
+section's checks against scripted answers, without a guest.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

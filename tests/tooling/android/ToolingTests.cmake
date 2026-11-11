@@ -142,7 +142,8 @@ uml_add_tooling_test(
     TIMEOUT 30)
 
 # The Wi-Fi network runner's reading of the guest's status, listing, dumps and
-# overlay list, and of the boot script's settle time.
+# overlay list, and of the boot script's settle time; its upgrade checks against
+# scripted answers.
 uml_add_tooling_test(
     NAME android17-wifi-network-runner
     COMMAND ${Python3_EXECUTABLE} -B
