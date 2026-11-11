@@ -273,4 +273,115 @@ Lrun_prologue_fallback\@:
 .purgem run_prologue_single
 .purgem run_prologue_pair
 
+/*
+ * A move head replaces a row of register moves the builder recognized,
+ * MOV Xd, Xm and MOV Wd, Wm (ORR with XZR, unshifted), and is the row's only
+ * group. A move cannot fault and touches no memory but CpuState, so the head
+ * has no fallback, and the block's retirement count, fault positions and
+ * inline suffixes count the row's instructions as its ordinary words would.
+ *
+ * The builder hands the head the row as a parallel copy of two to four moves
+ * with a destination each: a move that reads an earlier move's destination
+ * reads that move's source instead, at the narrower of their widths, and a
+ * move whose destination a later one writes is dropped. That is the row's
+ * result in order, so the head loads every source before it stores any
+ * destination.
+ *
+ * A head is named for the width of each move, the first first: run_moves_xw
+ * is a 64-bit and then a 32-bit move. It leaves the last move's value in x0,
+ * the register the builder forwards to the instruction behind the row; its
+ * _forward form takes the first move's source from x0, where the group in
+ * front of the row left it.
+ *
+ * The operand word holds the moves at bits 0, 15, 30 and 45: the source's
+ * CpuState byte offset (bits 9:0; XZR reads the zero slot), then the
+ * destination's CpuState index (bits 14:10).
+ */
+.macro run_move_load forward, width, scratch, value, shift
+	.if \forward
+	mov \width\value, \width\()0
+	.else
+	ubfx x\scratch, x8, #\shift, #10
+	ldr \width\value, [_vcpu, x\scratch]
+	.endif
+.endm
+
+.macro run_move_store value, scratch, shift
+	ubfx x\scratch, x8, #(\shift + 10), #5
+	str x\value, [_vcpu, x\scratch, lsl #3]
+.endm
+
+.macro run_moves forward, w0, w1, w2, w3
+	.ifnb \w3
+	.set Lrun_moves\@, 4
+	.else
+	.ifnb \w2
+	.set Lrun_moves\@, 3
+	.else
+	.set Lrun_moves\@, 2
+	.endif
+	.endif
+	.if \forward
+gadget run_moves_\w0\w1\w2\w3\()_forward
+	.else
+gadget run_moves_\w0\w1\w2\w3
+	.endif
+	ldr x8, [_stream], #8
+	run_move_load \forward, \w0, 9, 9, 0
+	.if Lrun_moves\@ == 2
+	run_move_load 0, \w1, 10, 0, 15
+	.else
+	run_move_load 0, \w1, 10, 10, 15
+	.endif
+	.if Lrun_moves\@ == 3
+	run_move_load 0, \w2, 11, 0, 30
+	.elseif Lrun_moves\@ == 4
+	run_move_load 0, \w2, 11, 11, 30
+	run_move_load 0, \w3, 12, 0, 45
+	.endif
+	run_move_store 9, 13, 0
+	.if Lrun_moves\@ == 2
+	run_move_store 0, 14, 15
+	.else
+	run_move_store 10, 14, 15
+	.endif
+	.if Lrun_moves\@ == 3
+	run_move_store 0, 15, 30
+	.elseif Lrun_moves\@ == 4
+	run_move_store 11, 15, 30
+	run_move_store 0, 16, 45
+	.endif
+	next_gadget
+.endm
+
+	.irp w0, x, w
+	.irp w1, x, w
+	run_moves 0, \w0, \w1
+	run_moves 1, \w0, \w1
+	.endr
+	.endr
+	.irp w0, x, w
+	.irp w1, x, w
+	.irp w2, x, w
+	run_moves 0, \w0, \w1, \w2
+	run_moves 1, \w0, \w1, \w2
+	.endr
+	.endr
+	.endr
+	.irp w0, x, w
+	.irp w1, x, w
+	.irp w2, x, w
+	.irp w3, x, w
+	run_moves 0, \w0, \w1, \w2, \w3
+	run_moves 1, \w0, \w1, \w2, \w3
+	.endr
+	.endr
+	.endr
+	.endr
+
+.purgem run_moves
+.purgem run_move_store
+.purgem run_move_load
+
+
 	.popsection

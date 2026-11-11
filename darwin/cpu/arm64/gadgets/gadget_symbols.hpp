@@ -2075,6 +2075,27 @@ void uml_arm64_gadget_run_prologue_6_0_0();
 void uml_arm64_gadget_run_prologue_6_0_1();
 void uml_arm64_gadget_run_prologue_6_1_0();
 void uml_arm64_gadget_run_prologue_6_1_1();
+/* The move run heads, by the width of each move from the first, and the
+ * forms of them that take the first move's source from x0. */
+#define UML_DECLARE_RUN_MOVES(widths) \
+	void uml_arm64_gadget_run_moves_##widths(); \
+	void uml_arm64_gadget_run_moves_##widths##_forward();
+#define UML_DECLARE_RUN_MOVES_2(prefix) \
+	UML_DECLARE_RUN_MOVES(prefix##x) UML_DECLARE_RUN_MOVES(prefix##w)
+#define UML_DECLARE_RUN_MOVES_3(prefix) \
+	UML_DECLARE_RUN_MOVES_2(prefix##x) UML_DECLARE_RUN_MOVES_2(prefix##w)
+#define UML_DECLARE_RUN_MOVES_4(prefix) \
+	UML_DECLARE_RUN_MOVES_3(prefix##x) UML_DECLARE_RUN_MOVES_3(prefix##w)
+UML_DECLARE_RUN_MOVES_2(x)
+UML_DECLARE_RUN_MOVES_2(w)
+UML_DECLARE_RUN_MOVES_3(x)
+UML_DECLARE_RUN_MOVES_3(w)
+UML_DECLARE_RUN_MOVES_4(x)
+UML_DECLARE_RUN_MOVES_4(w)
+#undef UML_DECLARE_RUN_MOVES_4
+#undef UML_DECLARE_RUN_MOVES_3
+#undef UML_DECLARE_RUN_MOVES_2
+#undef UML_DECLARE_RUN_MOVES
 /* Everything a condition has: the branch, its linked and inline forms, and
  * the fused CMP and B.cond in both widths with the same three forms. */
 #define UML_DECLARE_FUSED_COMPARE_BRANCH(kind, width, name) \
