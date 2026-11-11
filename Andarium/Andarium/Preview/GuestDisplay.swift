@@ -394,7 +394,7 @@ struct GuestVolumePanel: View {
         .allowsHitTesting(false)
         .accessibilityElement()
         .accessibilityLabel(Text(verbatim: "Volume"))
-        .accessibilityValue("\(level) of \(maximum)")
+        .accessibilityValue(Text(verbatim: "\(level) of \(maximum)"))
     }
 }
 
