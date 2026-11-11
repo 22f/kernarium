@@ -167,9 +167,18 @@ struct AppEntry {
         case "home-network-wifi":
             model.previewNetworkNotice(.wifi)
         case "home-ended":
-            model.notice = .sessionEnded(SessionEndNotice(
-                title: "Android's kernel panicked",
-                text: "Android stopped with a kernel panic: Attempted to kill init! exitcode=0x0000000b."))
+            // The card's own words, from the runtime's record of a kernel panic.
+            if let notice = SessionRecord(text: """
+                uml-session 1
+                state ended
+                end guest-panic
+                status 6
+                pid 1
+                message Attempted to kill init! exitcode=0x0000000b
+
+                """)?.notice(endedOutOfForeground: false) {
+                model.notice = .sessionEnded(notice)
+            }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask":
@@ -367,7 +376,7 @@ struct AppEntry {
             )
         default:
             return BusyState(
-                title: "Installing app",
+                title: String(localized: "Installing app"),
                 detail: "\(file) \u{00B7} \(Formats.size(bytes: PreviewData.sampleApkSizeBytes))",
                 progress: 0.45, cancel: cancel
             )
