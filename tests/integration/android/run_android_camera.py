@@ -172,23 +172,41 @@ def parse_camera_ids(text: str) -> list[str]:
     return re.findall(r'^\s*Device \d+ maps to "([^"]+)"', text, re.MULTILINE)
 
 
+def active_client_packages(text: str) -> set[str]:
+    """`dumpsys media.camera`: the packages in the Active Camera Clients block. The service prints a
+    list in brackets, `[]` when empty and otherwise one `(Camera ID: .., Client Package Name: .., ..)`
+    line per client between a `[` line and a `]` line."""
+    lines = text.splitlines()
+    packages: set[str] = set()
+    for index, line in enumerate(lines):
+        if line.strip() != "Active Camera Clients:":
+            continue
+        for client in lines[index + 1:]:
+            if client.strip() in ("[]", "]"):
+                break
+            if match := re.search(r"Client Package Name: ([\w.]+)", client):
+                packages.add(match[1])
+        break
+    return packages
+
+
 def camera_connected(text: str, package: str) -> bool:
     """Whether `dumpsys media.camera` shows the package holding a camera: among the active clients, or
     in the service's event log with a connect as the last event of some device (the log is most recent
-    first and its lines start with the time; a disconnect after the connect ends it)."""
+    first, each line indented by two spaces and starting with the time; a disconnect after the connect
+    ends it)."""
+    if package in active_client_packages(text):
+        return True
     escaped = re.escape(package)
     latest: dict[str, tuple[str, bool]] = {}  # device -> (time of the newest event, it was a connect)
     stamp = r"(?:(\d\d-\d\d \d\d:\d\d:\d\d)\s*:\s*)?"
-    event = rf"^{stamp}\b(CONNECT|DISCONNECT) device (\S+) client for package {escaped}\b"
+    event = rf"^[ \t]*{stamp}\b(CONNECT|DISCONNECT) device (\S+) client for package {escaped}\b"
     for match in re.finditer(event, text, re.MULTILINE):
         when, kind, device = match[1] or "", match[2], match[3]
         # The first line seen is the newest unless a later one carries a newer time.
         if device not in latest or when > latest[device][0]:
             latest[device] = (when, kind == "CONNECT")
-    if any(connected for _, connected in latest.values()):
-        return True
-    clients = re.search(r"Active Camera Clients:\s*\n(.*?)\n(?:\S|$)", text, re.DOTALL)
-    return bool(clients and package in clients[1])
+    return any(connected for _, connected in latest.values())
 
 
 @dataclass(frozen=True)

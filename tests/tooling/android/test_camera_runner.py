@@ -57,23 +57,29 @@ Active Camera Clients:
 Allowed user IDs: 0
 
 == Camera service events log (most recent at top): ==
-01-01 00:01:02 : CONNECT device 0 client for package org.lineageos.aperture (PID 1301) for Camera API 2 with Camera API 2.0 and cameraId 0
-01-01 00:00:55 : DISCONNECT device 1 client for package org.example.other (PID 900) (PRIORITY: 0)
+  01-01 00:01:02 : CONNECT device 0 client for package org.lineageos.aperture (PID 1301) for Camera API 2 with Camera API 2.0 and cameraId 0
+  01-01 00:00:55 : DISCONNECT device 1 client for package org.example.other (PID 900) (PRIORITY: 0)
 """
 
 # The log is most recent first: a disconnect above a connect ends it.
 MEDIA_CAMERA_DISCONNECTED = MEDIA_CAMERA.replace(
-    "01-01 00:01:02 : CONNECT device 0",
-    "01-01 00:01:30 : DISCONNECT device 0 client for package org.lineageos.aperture (PID 1301) (PRIORITY: 0)\n"
-    "01-01 00:01:02 : CONNECT device 0")
+    "  01-01 00:01:02 : CONNECT device 0",
+    "  01-01 00:01:30 : DISCONNECT device 0 client for package org.lineageos.aperture (PID 1301) (PRIORITY: 0)\n"
+    "  01-01 00:01:02 : CONNECT device 0")
 MEDIA_CAMERA_RECONNECTED = MEDIA_CAMERA_DISCONNECTED.replace(
-    "01-01 00:01:30 : DISCONNECT",
-    "01-01 00:02:10 : CONNECT device 1 client for package org.lineageos.aperture (PID 1330) for Camera API 2 with "
-    "Camera API 2.0 and cameraId 1\n01-01 00:01:30 : DISCONNECT")
+    "  01-01 00:01:30 : DISCONNECT",
+    "  01-01 00:02:10 : CONNECT device 1 client for package org.lineageos.aperture (PID 1330) for Camera API 2 with "
+    "Camera API 2.0 and cameraId 1\n  01-01 00:01:30 : DISCONNECT")
 
 MEDIA_CAMERA_IDLE = MEDIA_CAMERA.split("== Camera service events log")[0]
-MEDIA_CAMERA_ACTIVE = MEDIA_CAMERA_IDLE.replace(
-    "[]", "[(Client 0: org.lineageos.aperture, priority 100, pid 1301)]")
+# The service prints each client of the list on a line of its own (and runs "State" into "User Id").
+ACTIVE_CLIENTS = (
+    "[\n(Camera ID: 0, Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
+    "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n]")
+MEDIA_CAMERA_ACTIVE = MEDIA_CAMERA_IDLE.replace("[]", ACTIVE_CLIENTS)
+# Another package holds the camera, and the log says this one connected before.
+MEDIA_CAMERA_OTHER_ACTIVE = MEDIA_CAMERA.replace("[]", ACTIVE_CLIENTS.replace(
+    "org.lineageos.aperture", "org.example.other"))
 
 
 def static_info(facing: str, capabilities: str, flash: str, af_modes: str) -> str:
@@ -271,9 +277,14 @@ class GuestReaderTests(unittest.TestCase):
         # Another package's disconnect does not end this package's connection.
         self.assertTrue(runner.camera_connected(MEDIA_CAMERA, package))
         # An active client is a connection whatever the log says.
-        active = MEDIA_CAMERA_DISCONNECTED.replace(
-            "[]", "[(Client 0: org.lineageos.aperture, priority 100, pid 1301)]")
+        active = MEDIA_CAMERA_DISCONNECTED.replace("[]", ACTIVE_CLIENTS)
         self.assertTrue(runner.camera_connected(active, package))
+        # The clients are the lines of the list, and only another package's does not count.
+        self.assertEqual(runner.active_client_packages(MEDIA_CAMERA_ACTIVE), {package})
+        self.assertEqual(runner.active_client_packages(MEDIA_CAMERA_OTHER_ACTIVE), {"org.example.other"})
+        self.assertEqual(runner.active_client_packages(MEDIA_CAMERA_IDLE), set())
+        self.assertFalse(runner.camera_connected(
+            MEDIA_CAMERA_OTHER_ACTIVE.replace("CONNECT device 0", "DISCONNECT device 0"), package))
 
     def test_the_static_info_of_each_camera(self) -> None:
         infos = runner.parse_static_info(PHONE_STATIC_INFO)
