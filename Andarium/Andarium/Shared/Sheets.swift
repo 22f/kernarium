@@ -164,7 +164,7 @@ struct InfoSheet: View {
                     LabeledContent("Kernel", value: model.system.kernel)
                     LabeledContent("Architecture", value: model.system.architecture)
                     if !model.system.abis.isEmpty {
-                        LabeledContent("Supported architectures", value: model.system.abis.joined(separator: ", "))
+                        LabeledContent("Supported architectures", value: ListWords.join(model.system.abis))
                     }
                 }
                 Section {

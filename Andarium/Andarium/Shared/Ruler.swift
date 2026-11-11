@@ -375,7 +375,7 @@ struct StorageRow: View {
     var body: some View {
         SystemRow(
             symbol: "internaldrive", title: String(localized: "Storage"),
-            subtitle: String(localized: "\(Formats.size(bytes: guest.usedBytes)) of \(Formats.size(gib: guest.capacityGiB))"),
+            subtitle: MeterWords.storage(Formats.size(bytes: guest.usedBytes), of: Formats.size(gib: guest.capacityGiB)),
             button: SystemRowButton(
                 title: SystemRowButton.resize, identifier: "home-storage-resize", isEnabled: !atMaximum, action: resize
             )

@@ -81,7 +81,7 @@ struct Readout {
     /// "818 MiB of 2 GiB", with the guest's size. Every size goes through
     /// the one formatter.
     func memoryText(of memoryMiB: Int) -> String {
-        memoryUsedBytes.map { String(localized: "\(Formats.size(bytes: $0)) of \(Formats.size(mib: memoryMiB))") } ?? Self.unknown
+        memoryUsedBytes.map { MeterWords.of(Formats.size(bytes: $0), Formats.size(mib: memoryMiB)) } ?? Self.unknown
     }
 
     /// The memory in use alone, beside a bar that draws its share.
@@ -101,7 +101,7 @@ struct Readout {
 
     /// "412 MiB of 534 MiB".
     var vramText: String {
-        vram.map { String(localized: "\(Formats.size(bytes: $0.used)) of \(Formats.size(bytes: $0.budget))") } ?? Self.unknown
+        vram.map { MeterWords.of(Formats.size(bytes: $0.used), Formats.size(bytes: $0.budget)) } ?? Self.unknown
     }
     var vramUsedText: String { vram.map { Formats.size(bytes: $0.used) } ?? Self.unknown }
     var vramFraction: Double? { vram.map { Self.fraction($0.used, of: $0.budget) } }
@@ -112,11 +112,11 @@ struct Readout {
         let none = Self.unknownSpoken
         var parts = [
             String(localized: "CPU \(cpu.map { "\($0)%" } ?? none)"),
-            String(localized: "memory \(memoryUsedBytes.map { _ in memoryText(of: memoryMiB) } ?? none)"),
-            String(localized: "graphics memory \(vram.map { _ in vramText } ?? none)"),
+            String(localized: "memory \(memoryUsedBytes.map { MeterWords.spoken(Formats.size(bytes: $0), of: Formats.size(mib: memoryMiB)) } ?? none)"),
+            String(localized: "graphics memory \(vram.map { MeterWords.spoken(Formats.size(bytes: $0.used), of: Formats.size(bytes: $0.budget)) } ?? none)"),
         ]
         if !recovery { parts.append(String(localized: "frame rate \(fps.map { "\($0) fps" } ?? none)")) }
-        return parts.joined(separator: String(localized: ", ", comment: "Separates the parts of what VoiceOver reads"))
+        return ListWords.join(parts)
     }
 
     private static func bytes(mib: Int) -> UInt64 { UInt64(max(mib, 0)) * Limits.bytesPerMiB }

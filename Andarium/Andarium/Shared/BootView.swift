@@ -264,7 +264,7 @@ struct BootView: View {
             title: String(localized: "Linux kernel"),
             detail: String(localized: "\(kernelVersion) · \(CountWords.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB)) RAM"),
             seconds: 0.9)
-        let used = String(localized: "\(Formats.size(bytes: guest.usedBytes)) of \(Formats.size(gib: guest.capacityGiB))")
+        let used = MeterWords.storage(Formats.size(bytes: guest.usedBytes), of: Formats.size(gib: guest.capacityGiB))
         let growing = grewFromGiB.map {
             String(localized: "Growing from \(Formats.size(gib: $0)) to \(Formats.size(gib: guest.capacityGiB))")
         }

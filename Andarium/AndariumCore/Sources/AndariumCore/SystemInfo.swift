@@ -40,6 +40,13 @@ public struct SystemInfo: Equatable, Sendable {
         self.appVersion = appVersion
     }
 
+    /// "arm64, 4 KiB pages": the CPU architecture and the page size the guest kernel runs with.
+    public static func architecture(pageKiB: Int) -> String {
+        String(
+            localized: "arm64, \(pageKiB) KiB pages", bundle: .module,
+            comment: "The architecture row of the Info sheet: the CPU architecture, then the size of a memory page, as in arm64, 4 KiB pages.")
+    }
+
     /// "2026-10-01" as the system writes the day in `locale` ("1 October 2026"
     /// in British English, "2026年10月1日" in Japanese); nil for anything else.
     public static func patchLevel(_ text: String, locale: Locale = .current) -> String? {
@@ -93,7 +100,7 @@ public struct SystemInfo: Equatable, Sendable {
             version: String(major), release: release,
             buildID: android?["build_id"] as? String,
             securityPatch: (android?["security_patch"] as? String).flatMap { Self.patchLevel($0, locale: locale) },
-            kernel: "Linux \(version)", architecture: "arm64, \(pageSize / 1024) KiB pages",
+            kernel: "Linux \(version)", architecture: Self.architecture(pageKiB: pageSize / 1024),
             abis: (android?["abi_list"] as? [Any])?.compactMap { $0 as? String }.filter { !$0.isEmpty } ?? [],
             appVersion: appVersion
         )

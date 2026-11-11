@@ -63,7 +63,7 @@ struct WhatsNewRibbon: View {
             .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("What\u{2019}s New")
-            .accessibilityValue(entries.map { WhatsNewWords.localized($0.title) }.joined(separator: ", "))
+            .accessibilityValue(ListWords.join(entries.map { WhatsNewWords.localized($0.title) }))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(named: "Close", close)
             .accessibilityIdentifier("whats-new-ribbon")

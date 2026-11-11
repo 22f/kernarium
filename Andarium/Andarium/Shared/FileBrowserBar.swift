@@ -448,7 +448,7 @@ struct TransferCapsule: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
         case .moving:
-            Text("\(Formats.size(bytes: item.moved)) of \(Formats.size(bytes: item.size))")
+            Text(MeterWords.of(Formats.size(bytes: item.moved), Formats.size(bytes: item.size)))
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Color.accentColor)
                 .monospacedDigit()

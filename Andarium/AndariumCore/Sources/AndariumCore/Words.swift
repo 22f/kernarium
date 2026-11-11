@@ -21,7 +21,24 @@ public enum Sentences {
 
     public static func join(_ sentences: [String]) -> String {
         sentences.reduce("") { text, sentence in
-            text.isEmpty ? sentence : String(localized: "\(text) \(sentence)", bundle: .module)
+            text.isEmpty
+                ? sentence
+                : String(
+                    localized: "sentence.join", defaultValue: "\(text) \(sentence)", bundle: .module,
+                    comment: "Joins two whole sentences: a space in English, none in Chinese and Japanese.")
+        }
+    }
+}
+
+/// Parts of what VoiceOver reads, one after another, as the language lists them.
+public enum ListWords {
+    public static func join(_ parts: [String]) -> String {
+        parts.reduce("") { text, part in
+            text.isEmpty
+                ? part
+                : String(
+                    localized: "list.join", defaultValue: "\(text), \(part)", bundle: .module,
+                    comment: "Joins two parts of a spoken list: a comma and a space in English, the language's own comma in Chinese and Japanese.")
         }
     }
 }
