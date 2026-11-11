@@ -269,6 +269,12 @@ def host_lines(log_text: str) -> list[str]:
     return [line.strip() for line in log_text.splitlines() if line.startswith("Hardware ")]
 
 
+def plug_lines(lines: list[str]) -> list[str]:
+    """The lines that say the launcher plugged a device. Whole lines: the launcher's start line says the
+    devices are offered "unplugged", which contains the word."""
+    return [line for line in lines if line in (HOST_KEYBOARD_PLUGGED, HOST_MOUSE_PLUGGED)]
+
+
 def devices_added(events: list[Event]) -> dict[str, list[int]]:
     """The ids of each device name that the probe saw added or listed."""
     found: dict[str, list[int]] = {}
@@ -607,7 +613,7 @@ def check_before_any_client(guest: Guest) -> None:
     problem = unplugged_problem(dump) or side_keys_problem(dump)
     if problem:
         raise Failure(f"before any client: {problem}")
-    if any("plugged" in line for line in guest.host_lines()):
+    if plug_lines(guest.host_lines()):
         raise Failure(f"the launcher plugged a device before any client: {guest.host_lines()}")
     print("before any client: only the side keys' keyboard, non-alphabetic; none of the host's devices")
 
