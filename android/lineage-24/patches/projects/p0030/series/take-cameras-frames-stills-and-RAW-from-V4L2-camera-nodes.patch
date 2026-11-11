@@ -17,7 +17,8 @@ The sizes are the host's own plus the ones the camera API requires of every came
 1280x720, 640x480 and 320x240 as JPEG, those that fit the largest video size as YUV and PRIVATE, and
 1920x1440 with 1280x720 beside them for a camera that reaches that size). A size the host does not
 serve is cut from the smallest native NV12 mode that covers it, scaled with libyuv and, for a JPEG,
-encoded by the HAL's own compressor with the Exif data of the stock sensor.
+encoded by the HAL's own compressor with the Exif data of the stock sensor. The Exif thumbnail of
+such a picture is cropped to its aspect ratio before it is scaled, never stretched.
 
 The frame source queues the framework's gralloc buffer as a dma-buf where the node can import it
 (its chroma may start where the node's image puts it, padding included) and copies from the node's
@@ -30,8 +31,8 @@ neutral color point and the noise profile of a RAW) come from the metadata node'
 sequence.
 Stills are encoded by the host with a gap for the Exif data: the HAL builds the Exif data and a
 thumbnail from the result and writes them into the gap in place, then the blob header at the end of
-the buffer. RAW16 is copied from the still node. Discovery opens only the nodes that are not a
-codec's.
+the buffer. RAW16 is copied from the still node. Discovery opens only /dev/video10 and above, where
+the driver registers the camera's nodes; the codec nodes are below.
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
@@ -41,19 +42,19 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  10 +
  devices/EmulatedCamera/hwl/JpegCompressor.cpp |  22 +-
  devices/EmulatedCamera/hwl/JpegCompressor.h   |  30 +-
- .../hwl/V4l2Characteristics.cpp               | 407 ++++++++
+ .../hwl/V4l2Characteristics.cpp               | 403 ++++++++
  .../EmulatedCamera/hwl/V4l2Characteristics.h  |  37 +
- .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 913 ++++++++++++++++++
+ .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 922 ++++++++++++++++++
  devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 158 +++
  devices/EmulatedCamera/hwl/V4l2Stream.cpp     | 468 +++++++++
  devices/EmulatedCamera/hwl/V4l2Stream.h       | 179 ++++
  devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  | 180 ++++
  devices/EmulatedCamera/hwl/V4l2Thumbnail.h    |  36 +
- devices/EmulatedCamera/hwl/V4l2Utils.cpp      | 502 ++++++++++
- devices/EmulatedCamera/hwl/V4l2Utils.h        | 156 +++
+ devices/EmulatedCamera/hwl/V4l2Utils.cpp      | 479 +++++++++
+ devices/EmulatedCamera/hwl/V4l2Utils.h        | 154 +++
  devices/EmulatedCamera/hwl/configs/Android.bp |   6 +
- .../hwl/configs/emu_camera_v4l2.json          | 592 ++++++++++++
- 18 files changed, 3702 insertions(+), 13 deletions(-)
+ .../hwl/configs/emu_camera_v4l2.json          | 592 +++++++++++
+ 18 files changed, 3682 insertions(+), 13 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -279,10 +280,10 @@ index e836ca6a27cbb96c662db51f6993a2866463416c..8d0eb5ecd5ab93acfbd31035563ff846
    void ThreadLoop();
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae51a8555d037a14cf330856d091a2915d48545d
+index 0000000000000000000000000000000000000000..6cc1bb9ac5739abbacc164ad7abc4b68acaa7408
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,403 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -524,17 +525,13 @@ index 0000000000000000000000000000000000000000..ae51a8555d037a14cf330856d091a291
 +  Put(m, ANDROID_CONTROL_AWB_AVAILABLE_MODES, awb_modes);
 +
 +  if (has_af) {
-+    // AF OFF is a manual lens: a camera without manual focus has none (it keeps its minimum focus
-+    // distance, because the layouts declare autofocus).
-+    std::vector<uint8_t> af_modes;
-+    if ((desc.flags & abi::feature::manual_focus) != 0) {
-+      af_modes.push_back(ANDROID_CONTROL_AF_MODE_OFF);
-+    }
-+    af_modes.insert(af_modes.end(),
-+                    {static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_AUTO),
-+                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_MACRO),
-+                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_CONTINUOUS_VIDEO),
-+                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE)});
++    // AF OFF is always offered (CTS requires it of every LIMITED camera); on a camera without
++    // manual focus it holds the lens.
++    std::vector<uint8_t> af_modes = {static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_OFF),
++                                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_AUTO),
++                                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_MACRO),
++                                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_CONTINUOUS_VIDEO),
++                                     static_cast<uint8_t>(ANDROID_CONTROL_AF_MODE_CONTINUOUS_PICTURE)};
 +    Put(m, ANDROID_CONTROL_AF_AVAILABLE_MODES, af_modes);
 +  } else {
 +    Put<uint8_t>(m, ANDROID_CONTROL_AF_AVAILABLE_MODES, {ANDROID_CONTROL_AF_MODE_OFF});
@@ -735,10 +732,10 @@ index 0000000000000000000000000000000000000000..413d37e1691516ce3b8346be27a98014
 +#endif  // HW_EMULATOR_CAMERA_V4L2_CHARACTERISTICS_H
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..03133ad4e6c4232cf835e4c93f937169b66ab989
+index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3bea615df41
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
-@@ -0,0 +1,913 @@
+@@ -0,0 +1,922 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -1476,13 +1473,17 @@ index 0000000000000000000000000000000000000000..03133ad4e6c4232cf835e4c93f937169
 +  planes.cbcr_stride = width / 2;
 +  planes.cbcr_step = 1;
 +
-+  // The Exif thumbnail, scaled from the same frame and encoded.
++  // The Exif thumbnail: the window of the same frame that has the thumbnail's aspect
++  // ratio, centred, scaled and encoded (the picture is cropped to the shape, not
++  // stretched to it).
 +  std::vector<uint8_t> thumbnail;
 +  camera_metadata_ro_entry_t entry;
 +  if (result_metadata->Get(ANDROID_JPEG_THUMBNAIL_SIZE, &entry) == OK && entry.count == 2 &&
 +      entry.data.i32[0] > 1 && entry.data.i32[1] > 1) {
 +    const uint32_t thumb_width = static_cast<uint32_t>(entry.data.i32[0]) & ~1u;
 +    const uint32_t thumb_height = static_cast<uint32_t>(entry.data.i32[1]) & ~1u;
++    const andarium::camera::Window crop = andarium::camera::centred_window(
++        {width, height}, {thumb_width, thumb_height});
 +    const size_t thumb_luma = static_cast<size_t>(thumb_width) * thumb_height;
 +    std::vector<uint8_t> small(thumb_luma + thumb_luma / 2);
 +    YCbCrPlanes small_planes;
@@ -1492,12 +1493,17 @@ index 0000000000000000000000000000000000000000..03133ad4e6c4232cf835e4c93f937169
 +    small_planes.y_stride = thumb_width;
 +    small_planes.cbcr_stride = thumb_width / 2;
 +    small_planes.cbcr_step = 1;
-+    if (libyuv::I420Scale(y_plane, static_cast<int>(width), u_plane, static_cast<int>(width / 2),
-+                          v_plane, static_cast<int>(width / 2), static_cast<int>(width),
-+                          static_cast<int>(height), small_planes.img_y,
-+                          static_cast<int>(small_planes.y_stride), small_planes.img_cb,
-+                          static_cast<int>(small_planes.cbcr_stride), small_planes.img_cr,
-+                          static_cast<int>(small_planes.cbcr_stride),
++    // The window starts on even pixels, so the chroma of its corner is half.
++    const size_t luma_offset = static_cast<size_t>(crop.y) * width + crop.x;
++    const size_t chroma_offset = static_cast<size_t>(crop.y / 2) * (width / 2) + crop.x / 2;
++    if (crop.width >= 2 && crop.height >= 2 &&
++        libyuv::I420Scale(y_plane + luma_offset, static_cast<int>(width),
++                          u_plane + chroma_offset, static_cast<int>(width / 2),
++                          v_plane + chroma_offset, static_cast<int>(width / 2),
++                          static_cast<int>(crop.width), static_cast<int>(crop.height),
++                          small_planes.img_y, static_cast<int>(small_planes.y_stride),
++                          small_planes.img_cb, static_cast<int>(small_planes.cbcr_stride),
++                          small_planes.img_cr, static_cast<int>(small_planes.cbcr_stride),
 +                          static_cast<int>(thumb_width), static_cast<int>(thumb_height),
 +                          libyuv::kFilterBox) == 0) {
 +      thumbnail.resize(64 * 1024);  // an APP1 segment is limited to 64 KiB
@@ -2705,10 +2711,10 @@ index 0000000000000000000000000000000000000000..e671cdfd7b004559427cc93beb7c47c7
 +#endif  // HW_EMULATOR_CAMERA_V4L2_THUMBNAIL_H
 diff --git a/devices/EmulatedCamera/hwl/V4l2Utils.cpp b/devices/EmulatedCamera/hwl/V4l2Utils.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd5e74fed2
+index 0000000000000000000000000000000000000000..a45fffff8d38d7a0b9268cd1feffba260ebe57d2
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2Utils.cpp
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,479 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -2728,8 +2734,6 @@ index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd
 +#define LOG_TAG "V4l2Utils"
 +#include "V4l2Utils.h"
 +
-+#include <android-base/file.h>
-+#include <android-base/strings.h>
 +#include <dirent.h>
 +#include <fcntl.h>
 +#include <log/log.h>
@@ -2925,25 +2929,6 @@ index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd
 +  }
 +}
 +
-+// Whether a node may be a camera's. Opening a codec node starts a session on the
-+// host, so discovery does not open one: the kernel names every node it registers
-+// in <sysfs_dir>/<node>/name, and the codec driver names its nodes
-+// "stateful-decoder" and "stateful-encoder". A node whose name cannot be read
-+// is opened, as its bus_info decides.
-+bool MayBeCamera(const std::string& sysfs_dir, const std::string& node) {
-+  std::string name;
-+  if (!android::base::ReadFileToString(sysfs_dir + "/" + node + "/name", &name)) {
-+    return true;
-+  }
-+  name = android::base::Trim(name);
-+  for (const char* codec : {"decoder", "encoder", "stateful"}) {
-+    if (name.find(codec) != std::string::npos) {
-+      return false;
-+    }
-+  }
-+  return true;
-+}
-+
 +}  // namespace
 +
 +status_t ReadControl(int fd, uint32_t id, int64_t* value) {
@@ -3057,8 +3042,7 @@ index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd
 +  return result;
 +}
 +
-+std::vector<CameraNodes> DiscoverCameraNodes(const std::string& dev_dir,
-+                                             const std::string& sysfs_dir) {
++std::vector<CameraNodes> DiscoverCameraNodes(const std::string& dev_dir) {
 +  std::map<uint32_t, CameraNodes> by_index;
 +  DIR* dir = opendir(dev_dir.c_str());
 +  if (dir == nullptr) {
@@ -3067,7 +3051,9 @@ index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd
 +  }
 +  std::vector<std::string> names;
 +  while (struct dirent* entry = readdir(dir)) {
-+    if (strncmp(entry->d_name, "video", 5) == 0) {
++    // Only the camera device's nodes (video10 and above) are opened: opening a codec node starts
++    // a session on the host.
++    if (abi::may_be_camera_node(entry->d_name)) {
 +      names.push_back(entry->d_name);
 +    }
 +  }
@@ -3075,9 +3061,6 @@ index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd
 +  std::sort(names.begin(), names.end());
 +
 +  for (const auto& name : names) {
-+    if (!MayBeCamera(sysfs_dir, name)) {
-+      continue;
-+    }
 +    const std::string path = dev_dir + "/" + name;
 +    UniqueFd fd(open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC));
 +    if (!fd.valid()) {
@@ -3213,10 +3196,10 @@ index 0000000000000000000000000000000000000000..0f80b642026925a209c19bc80f894cbd
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/V4l2Utils.h b/devices/EmulatedCamera/hwl/V4l2Utils.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..975bdf9682322a045088b3b22985ce06095bc1a9
+index 0000000000000000000000000000000000000000..61c0f8a25514b7bbd1782ef8e79e3a4d9db0f071
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2Utils.h
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,154 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -3322,11 +3305,9 @@ index 0000000000000000000000000000000000000000..975bdf9682322a045088b3b22985ce06
 +
 +// Scans `dev_dir` for the camera device's capture and metadata nodes, reads
 +// each camera's description and formats, and returns the cameras that have both
-+// nodes, by ascending camera index. A node that `sysfs_dir` (the kernel's
-+// /sys/class/video4linux) names as a codec's is not opened.
-+std::vector<CameraNodes> DiscoverCameraNodes(
-+    const std::string& dev_dir = "/dev",
-+    const std::string& sysfs_dir = "/sys/class/video4linux");
++// nodes, by ascending camera index. Only video10 and above are opened
++// (abi::may_be_camera_node): the codec nodes below are not.
++std::vector<CameraNodes> DiscoverCameraNodes(const std::string& dev_dir = "/dev");
 +
 +// Writes the controls, one at a time so that one the camera lacks does not stop
 +// the rest. A control that the node does not have (VIDIOC_QUERY_EXT_CTRL says
