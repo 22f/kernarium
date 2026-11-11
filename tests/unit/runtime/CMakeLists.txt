@@ -42,7 +42,8 @@ uml_add_unit_test(
     NAME runtime-kernel-crash-frames
     COMMAND uml_runtime_kernel_crash_frames_tests)
 
-# The record of how a guest session ended and the kernel output it quotes.
+# The record of how a guest session ended and the kernel output it quotes,
+# and the network slot's text against the golden file AndariumCore parses too.
 add_executable(uml_runtime_session_record_tests
     session_record_tests.cpp)
 target_link_libraries(uml_runtime_session_record_tests PRIVATE
@@ -50,7 +51,8 @@ target_link_libraries(uml_runtime_session_record_tests PRIVATE
     UML::RuntimeGuestStatistics)
 uml_add_unit_test(
     NAME runtime-session-record
-    COMMAND uml_runtime_session_record_tests)
+    COMMAND uml_runtime_session_record_tests
+        ${PROJECT_SOURCE_DIR}/tests/unit/andarium/fixtures/network-slot-golden.txt)
 
 # The refusal to resume on a disk that changed: it ends the process, and the
 # session record says why.

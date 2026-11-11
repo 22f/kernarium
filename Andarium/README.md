@@ -501,6 +501,17 @@ requires reopening Andarium.
   It stands down while the guest's own low-memory killer reclaims the budget
   (`guest_reclaims`, runtime API 29), which is then the only one that ends an
   app.
+- **Network denied.** While the application is active and has a guest, the
+  model watches the system's network path (`NetworkAccessWatcher`, an
+  `NWPathMonitor` that calls back for a change of the path alone and makes no
+  request). A path unsatisfied because iOS denies Andarium cellular data or
+  Wi-Fi shows one notice per cause, a card on Home and a banner in a session
+  (`NetworkWords`), with Open Settings and a dismissal that holds until the
+  path has been allowed; no network at all, an inactive VPN and the Local
+  Network permission are not this notice. The runtime is told which denial is
+  in force (runtime API 36), and the session record notes it beside the counts
+  of the guest's network (`NetworkRecord`), which the bug report carries in
+  words.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end

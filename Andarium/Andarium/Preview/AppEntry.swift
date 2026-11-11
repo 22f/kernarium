@@ -158,6 +158,10 @@ struct AppEntry {
             model.plan = .blocked(.olderAndroid)
         case "home-closed":
             model.notice = .closedInBackground
+        case "home-network-cellular":
+            model.previewNetworkNotice(.cellular)
+        case "home-network-wifi":
+            model.previewNetworkNotice(.wifi)
         case "home-ended":
             model.notice = .sessionEnded(SessionEndNotice(
                 title: "Android's kernel panicked",
@@ -227,7 +231,7 @@ struct AppEntry {
             boot(.normal, stage: 1, seconds: 4)
         case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
-             "session-graphics-notice", "session-thermal-notice":
+             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -246,6 +250,8 @@ struct AppEntry {
             model.phase = .running(.normal)
             if screen == "session-graphics-notice" { model.previewGraphicsNotice() }
             if screen == "session-thermal-notice" { model.previewThermalNotice() }
+            if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
+            if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
             let session = model.session
