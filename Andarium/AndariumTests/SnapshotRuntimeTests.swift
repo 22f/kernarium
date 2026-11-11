@@ -392,12 +392,29 @@ struct SnapshotRuntimeTests {
         model.driver = driver
         model.refreshPlan()
 
-        for work in [SnapshotWork.restore, .create, .delete, .rename, .guestStorage] {
+        // An operation that holds the guest's files is not interleaved with a start.
+        for work in [SnapshotWork.restore, .create, .delete, .guestStorage] {
             model.snapshotActivity = SnapshotActivity(runtimeActive: false, operation: work, revision: 0)
             model.start(.normal)
             #expect(model.phase == .home && driver.begun.isEmpty && model.alert == nil, "\(work)")
         }
         model.snapshotActivity = SnapshotActivity(runtimeActive: false, operation: nil, revision: 1)
+        model.start(.normal)
+        #expect(model.phase == .booting(.normal) && driver.begun.count == 1)
+    }
+
+    /// A rename is not one: the runtime makes the start wait for it, and a
+    /// start tapped as the page goes is not lost.
+    @Test func aStartGoesAheadWhileARenameIsUnderWay() {
+        let host = AppEntry.hostDevice()
+        let model = AppModel(
+            guest: Guest.fresh(on: host), host: host,
+            system: SystemInfo(version: "17", release: "test", kernel: "Linux", architecture: "arm64", appVersion: "1"),
+            capabilities: .device, createRequirementBytes: 1)
+        let driver = StubDriver(plan: .normal)
+        model.driver = driver
+        model.refreshPlan()
+        model.snapshotActivity = SnapshotActivity(runtimeActive: false, operation: .rename, revision: 0)
         model.start(.normal)
         #expect(model.phase == .booting(.normal) && driver.begun.count == 1)
     }
