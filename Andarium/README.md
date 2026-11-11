@@ -472,8 +472,13 @@ requires reopening Andarium.
   runs (`StatsSampling.isWanted`). Memory is the guest's in use against its
   size, and VRAM the host GPU's usage against the guest's budget
   ([`docs/graphics.md`](../docs/graphics.md#device-memory-budget)), a dash
-  without one; each has a bar of its share, orange from 90%. Settings' Show on
-  screen is kept for the install and restored at launch, off on a fresh one
+  without one; each has a bar of its share, orange from 90%. The readings go
+  on every second, but one reaches the views only when it draws something
+  other than they show (`StatsPublishGate`, `Readout.Drawn`: the figures as
+  written, the bars to a thousandth and the sparkline's slots), so a steady
+  guest redraws nothing; the harness's console report prints every reading.
+  Settings' Show on screen is kept for the install and restored at launch,
+  off on a fresh one
   (`StatsPreference`, its own stored value beside `DisplayOptions`). A launch
   with any launch setting is a harness's and starts with them off, so a
   measured run never inherits the overlay; `ANDARIUM_STATS` (`1` or `0`) states

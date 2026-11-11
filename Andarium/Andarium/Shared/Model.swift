@@ -151,7 +151,11 @@ final class AppModel {
     var hostDrivesGuestRotation = false
 
     var sessionPreset = SessionPreset()
-    var session = SessionState()
+    var session = SessionState() {
+        // The new session shows no figures: the next reading is published
+        // whatever it draws.
+        didSet { statisticsGate.reset() }
+    }
     /// The release notes: Info's history and the ribbon above Start after an
     /// update.
     var whatsNew = WhatsNewModel()
@@ -439,6 +443,8 @@ final class AppModel {
     }
     /// The figures behind the screens, from the driver's readings.
     private(set) var statisticsMeter = StatsMeter()
+    /// Holds back the readings that draw what the views show already.
+    @ObservationIgnored private var statisticsGate = StatsPublishGate<Readout.Drawn>()
     #if !APP_STORE
     /// A launch for automation prints each reading.
     var printsStatistics = false
@@ -1456,8 +1462,19 @@ final class AppModel {
         }
     }
 
+    /// Hands the reading to the views when it draws something other than they
+    /// show. A published readout redraws the capsule and Settings' rows and has
+    /// iOS composite a frame, so a steady guest, whose figures and bars stay
+    /// where they are, costs none of that each second. The reading itself
+    /// stays as it is: the loop samples at the same rate and the console
+    /// report below prints every reading.
     private func publishStatistics() {
-        session.readout = Readout(statisticsMeter)
+        let readout = Readout(statisticsMeter)
+        // The size the views draw the shares against.
+        let memoryMiB = guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
+        if statisticsGate.admits(readout.drawn(memoryMiB: memoryMiB)) {
+            session.readout = readout
+        }
         #if !APP_STORE
         if printsStatistics {
             print(ConsoleReport.statistics(statisticsMeter, guestMemoryMiB: guest?.memoryMiB ?? 0))
