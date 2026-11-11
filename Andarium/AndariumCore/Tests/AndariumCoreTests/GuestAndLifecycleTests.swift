@@ -100,6 +100,29 @@ struct GuestTests {
         #expect(erased.memoryMiB == 2048)
     }
 
+    @Test func hapticsAreOnForANewGuestAndForOneStoredBefore() throws {
+        #expect(Guest.fresh(on: ipad).haptics)
+        // A record from before the switch has no such key: the guest behaves as it did.
+        let before = Data(#"{"cores":2,"memoryMiB":1024,"capacityGiB":8,"microphone":true,"includeInBackups":false}"#.utf8)
+        #expect(try JSONDecoder().decode(Guest.self, from: before).haptics)
+        #expect(Guest(cores: 2, memoryMiB: 1024, capacityGiB: 8).haptics)
+    }
+
+    @Test func theHapticsChoiceIsKeptAsChosenThroughSaveAndErase() throws {
+        var guest = Guest.fresh(on: ipad)
+        guest.haptics = false
+        let saved = try JSONEncoder().encode(guest)
+        #expect(try JSONDecoder().decode(Guest.self, from: saved).haptics == false)
+        #expect(try JSONDecoder().decode(Guest.self, from: JSONEncoder().encode(guest.erased)).haptics == false)
+        #expect(guest.erased.haptics == false)
+        guest.haptics = true
+        #expect(try JSONDecoder().decode(Guest.self, from: JSONEncoder().encode(guest)).haptics)
+        // It is a choice of its own: the other switches are as they were.
+        let off = Data(#"{"cores":2,"memoryMiB":1024,"capacityGiB":8,"microphone":true,"includeInBackups":false,"haptics":false}"#.utf8)
+        let decoded = try JSONDecoder().decode(Guest.self, from: off)
+        #expect(!decoded.haptics && decoded.microphone && decoded.motionChoice == nil && !decoded.location)
+    }
+
     @Test func onlyTheChoicesAreStored() throws {
         var guest = Guest.fresh(on: ipad)
         guest.usedBytes = 123

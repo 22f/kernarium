@@ -109,8 +109,15 @@ protocol RuntimeDriver: AnyObject {
     /// ends the run. Throws when Android cannot be asked; the guest runs on
     /// and the watch starts again then.
     func shutDownAfterSpacePause() async throws
+    /// Says which denial of the network the notice is up for (nil: none), for
+    /// the session record. The runtime keeps it; saying it again changes
+    /// nothing.
+    func setNetworkNotice(_ denial: NetworkDenial?)
     /// Enables or stops sharing motion with the guest.
     func setMotionSensors(_ on: Bool)
+    /// Lets the guest play its haptics on the device, or not: the Haptics
+    /// switch, which applies at once.
+    func setHaptics(_ on: Bool)
     /// Settings' "Use the pointer as touch" changed: the guest has no mouse
     /// while it is on.
     func setPointerAsTouch(_ on: Bool)
@@ -182,6 +189,8 @@ protocol RuntimeDriver: AnyObject {
 extension RuntimeDriver {
     /// A driver with no guest to read adds nothing.
     func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
+    /// A driver with no session record has nothing to tell.
+    func setNetworkNotice(_ denial: NetworkDenial?) {}
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

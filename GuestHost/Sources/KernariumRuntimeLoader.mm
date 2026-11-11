@@ -314,7 +314,8 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
         api->send_keyboard_usage == nullptr ||
         api->send_pointer == nullptr ||
         api->send_mouse == nullptr ||
-        api->set_input_status_callback == nullptr) {
+        api->set_input_status_callback == nullptr ||
+        api->set_network_notice == nullptr) {
         std::fputs("Kernarium: runtime API validation failed\n", stderr);
         return false;
     }
@@ -839,6 +840,12 @@ extern "C" void kernarium_runtime_loader_wake_for_input(void)
     const kernarium_runtime_api* runtime = api();
     if (runtime != nullptr && runtime->wake_for_input != nullptr)
         runtime->wake_for_input();
+}
+
+extern "C" int kernarium_runtime_loader_set_network_notice(int notice)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ? -ENODEV : runtime->set_network_notice(notice);
 }
 
 extern "C" int kernarium_runtime_loader_connect_vsock(

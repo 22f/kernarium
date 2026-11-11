@@ -10,22 +10,48 @@ protocol SceneGeometryObserver: AnyObject {
     func sceneGeometryDidChange()
 }
 
+extension Phase {
+    /// The guest's display is under the phase's screens: the boot and the
+    /// run. `GuestLayer` draws it, and the scene's root keeps everything
+    /// behind it black.
+    var showsGuestDisplay: Bool {
+        switch self {
+        case .booting, .running: true
+        case .home, .failed: false
+        }
+    }
+}
+
 /// The scene's root controller owns the orientation preference and, in a
 /// run, the screen edges that defer system gestures. A child of SwiftUI's
-/// default root cannot reliably supply these scene-wide preferences.
+/// default root cannot reliably supply these scene-wide preferences. It also
+/// owns what shows wherever SwiftUI has not drawn: while the guest's display
+/// is shown that is black, in the light appearance too.
 final class AndariumHostingController<Content: View>: UIHostingController<Content>, SceneGeometryObserver {
     private let model: AppModel
     private var lockRequested = false
     /// The run's deferred edges; nil leaves SwiftUI's preference in charge.
     private var deferredEdges: ScreenEdges?
     private var updateScheduled = false
+    /// What the last update found, which a later trigger compares with.
+    private var appliedInputs: SceneUpdateInputs?
+    /// Where the update reads its inputs when a test supplies them instead of
+    /// the scene and the model.
+    var inputsSource: (@MainActor () -> SceneUpdateInputs?)?
     private var phaseWatcher: PhaseWatcher?
     private var pointerLockWatcher: PointerLockWatcher?
+    /// The backing of the root view and of its window as they were before
+    /// the guest's display painted them black, for the screens that follow
+    /// the system appearance to get back.
+    private var viewPaintedForGuest = false
+    private var viewBackingBeforeGuest: UIColor?
+    private weak var windowPaintedForGuest: UIWindow?
+    private var windowBackingBeforeGuest: UIColor?
 
     init(rootView: Content, model: AppModel) {
         self.model = model
         super.init(rootView: rootView)
-        phaseWatcher = PhaseWatcher(model: model, target: self)
+        phaseWatcher = PhaseWatcher(model: model) { [weak self] in self?.phaseDidChange() }
         pointerLockWatcher = PointerLockWatcher(model: model, controller: self)
     }
 
@@ -59,8 +85,14 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         deferredEdges == nil ? super.childForScreenEdgesDeferringSystemGestures : nil
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        updateBacking()
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        updateBacking()
         scheduleUpdate()
     }
 
@@ -68,30 +100,97 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         scheduleUpdate()
     }
 
+    private func phaseDidChange() {
+        updateBacking()
+        sceneGeometryDidChange()
+    }
+
+    /// While the guest's display is shown, the root view and its window are
+    /// black whatever the appearance. SwiftUI's own black layer
+    /// (`GuestLayer`) covers only what SwiftUI has laid out, and what shows
+    /// beyond it (a rotation, a window resize, the first frame of a phase,
+    /// the area outside the safe area before it lays out) is these two, which
+    /// follow the system and are white in the light appearance. Home, sheets
+    /// and the session's own controls are SwiftUI's and keep following the
+    /// system. Every layout pass runs this, so a backing is assigned only when
+    /// it is not black already: a layer is not dirtied for nothing.
+    private func updateBacking() {
+        guard isViewLoaded else { return }
+        if model.phase.showsGuestDisplay {
+            if !viewPaintedForGuest {
+                viewPaintedForGuest = true
+                viewBackingBeforeGuest = view.backgroundColor
+            }
+            if view.backgroundColor != .black { view.backgroundColor = .black }
+            if let window = view.window {
+                if windowPaintedForGuest !== window {
+                    restoreWindowBacking()
+                    windowPaintedForGuest = window
+                    windowBackingBeforeGuest = window.backgroundColor
+                }
+                if window.backgroundColor != .black { window.backgroundColor = .black }
+            }
+        } else {
+            if viewPaintedForGuest {
+                viewPaintedForGuest = false
+                view.backgroundColor = viewBackingBeforeGuest
+                viewBackingBeforeGuest = nil
+            }
+            restoreWindowBacking()
+        }
+    }
+
+    private func restoreWindowBacking() {
+        guard let window = windowPaintedForGuest else { return }
+        window.backgroundColor = windowBackingBeforeGuest
+        windowPaintedForGuest = nil
+        windowBackingBeforeGuest = nil
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        // The window may have come after the phase did.
+        updateBacking()
         scheduleUpdate()
     }
 
+    /// What the update reads, or nil while the root is not in a scene.
+    private func currentInputs() -> SceneUpdateInputs? {
+        if let inputsSource { return inputsSource() }
+        guard let scene = view.window?.windowScene else { return nil }
+        let geometry = scene.effectiveGeometry
+        return SceneUpdateInputs(
+            scene: ObjectIdentifier(scene), driver: model.driver.map { ObjectIdentifier($0) },
+            sceneSize: geometry.coordinateSpace.bounds.size, screenSize: scene.screen.bounds.size,
+            interfaceOrientation: geometry.interfaceOrientation.rawValue,
+            interfaceLocked: geometry.isInterfaceOrientationLocked, phase: model.phase)
+    }
+
+    /// Every layout of the root, every geometry change and every phase change
+    /// asks for the update, and SwiftUI lays the root out after each redraw. An
+    /// update that would find every input where the last one did has nothing
+    /// to do, so it is not scheduled: what else the guest follows (the
+    /// foreground, its boot, the overlays, the sensors' switch, the location)
+    /// reaches it by its own trigger, not through the root.
     private func scheduleUpdate() {
         guard !updateScheduled else { return }
+        if let inputs = currentInputs(), inputs == appliedInputs { return }
         updateScheduled = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             updateScheduled = false
-            guard let scene = view.window?.windowScene else { return }
-            let size = scene.effectiveGeometry.coordinateSpace.bounds.size
+            guard let inputs = currentInputs() else { return }
+            appliedInputs = inputs
             let policy = SessionOrientationPolicy(
-                phase: model.phase, isPhone: UIDevice.current.userInterfaceIdiom == .phone,
-                sceneSize: size, screenSize: scene.screen.bounds.size,
-                interfaceLocked: scene.effectiveGeometry.isInterfaceOrientationLocked)
+                phase: inputs.phase, isPhone: UIDevice.current.userInterfaceIdiom == .phone,
+                sceneSize: inputs.sceneSize, screenSize: inputs.screenSize, interfaceLocked: inputs.interfaceLocked)
             if policy.requestInterfaceLock != lockRequested {
                 lockRequested = policy.requestInterfaceLock
                 setNeedsUpdateOfPrefersInterfaceOrientationLocked()
             }
             model.hostDrivesGuestRotation = policy.hostDrivesGuestRotation
             let deferral = SessionGestureDeferral(
-                phase: model.phase, sceneSize: size, screenSize: scene.screen.bounds.size)
+                phase: inputs.phase, sceneSize: inputs.sceneSize, screenSize: inputs.screenSize)
             if deferral.deferredEdges != deferredEdges {
                 deferredEdges = deferral.deferredEdges
                 setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
@@ -106,15 +205,15 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
 /// Tells the scene's root when the model's phase changes. Observation
 /// reports a change on whichever thread made it, so the hop back to the main
 /// actor must not carry the root's generic type: this class is not generic
-/// and reaches the root through the protocol, on the main actor only.
+/// and reaches the root through a closure, on the main actor only.
 @MainActor
 private final class PhaseWatcher {
     private let model: AppModel
-    private weak var target: (any SceneGeometryObserver)?
+    private let changed: @MainActor () -> Void
 
-    init(model: AppModel, target: any SceneGeometryObserver) {
+    init(model: AppModel, changed: @escaping @MainActor () -> Void) {
         self.model = model
-        self.target = target
+        self.changed = changed
         observe()
     }
 
@@ -124,7 +223,7 @@ private final class PhaseWatcher {
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 self?.observe()
-                self?.target?.sceneGeometryDidChange()
+                self?.changed()
             }
         }
     }

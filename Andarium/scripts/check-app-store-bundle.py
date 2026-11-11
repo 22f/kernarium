@@ -312,6 +312,9 @@ DEBUG_SYMBOLS = (
     ("launch harness", (b"13ConsoleReport", b"15environmentName", b"13applyDeferred",
                         b"16printsStatistics", b"13launchApplied",
                         b"15ThermalOverride")),
+    # The Simulator preview's denied-network notice (Model.previewNetworkNotice):
+    # the Simulator cannot be denied the network, so the preview plays it.
+    ("network notice preview", (b"20previewNetworkNotice",)),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.

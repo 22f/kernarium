@@ -66,6 +66,7 @@ struct AppEntry {
         "home-new-recovery": "erase",
         "home-display": "display",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
+        "home-haptics-off": "capabilities",
         "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
         "home-location-on": "capabilities", "home-location-denied": "capabilities",
         "home-location-approximate": "capabilities", "home-location-restricted": "capabilities",
@@ -129,6 +130,9 @@ struct AppEntry {
         model.fileBrowser = browser
         let freeze = !play
         model.jitAvailable = true
+        // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
+        // preview, like the device, has no Haptics row.
+        model.hapticsAvailable = host.name == "iPhone"
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil
@@ -158,6 +162,10 @@ struct AppEntry {
             model.plan = .blocked(.olderAndroid)
         case "home-closed":
             model.notice = .closedInBackground
+        case "home-network-cellular":
+            model.previewNetworkNotice(.cellular)
+        case "home-network-wifi":
+            model.previewNetworkNotice(.wifi)
         case "home-ended":
             model.notice = .sessionEnded(SessionEndNotice(
                 title: "Android's kernel panicked",
@@ -182,6 +190,8 @@ struct AppEntry {
             model.microphoneState = .denied
         case "home-gyroscope-unavailable":
             model.motionSensorsAvailable = false
+        case "home-haptics-off":
+            model.guest?.haptics = false
         case "home-location-on":
             model.guest?.location = true
             model.locationAuthorization = .precise
@@ -227,7 +237,7 @@ struct AppEntry {
             boot(.normal, stage: 1, seconds: 4)
         case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
-             "session-graphics-notice", "session-thermal-notice":
+             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -246,6 +256,8 @@ struct AppEntry {
             model.phase = .running(.normal)
             if screen == "session-graphics-notice" { model.previewGraphicsNotice() }
             if screen == "session-thermal-notice" { model.previewThermalNotice() }
+            if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
+            if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
             let session = model.session

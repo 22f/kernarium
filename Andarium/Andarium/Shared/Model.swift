@@ -92,6 +92,7 @@ final class AppModel {
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
             }
+            if (lifecycle.guest == nil) != (oldValue.guest == nil) { refreshNetworkWatch() }
         }
     }
     var host: HostDevice
@@ -151,7 +152,11 @@ final class AppModel {
     var hostDrivesGuestRotation = false
 
     var sessionPreset = SessionPreset()
-    var session = SessionState()
+    var session = SessionState() {
+        // The new session shows no figures: the next reading is published
+        // whatever it draws.
+        didSet { statisticsGate.reset() }
+    }
     /// The release notes: Info's history and the ribbon above Start after an
     /// update.
     var whatsNew = WhatsNewModel()
@@ -312,7 +317,9 @@ final class AppModel {
     #endif
 
     /// The runtime and storage behind the screens; nil plays mock data.
-    var driver: (any RuntimeDriver)?
+    var driver: (any RuntimeDriver)? {
+        didSet { reportNetworkDenial() }
+    }
     /// The guest's data snapshots behind the screens: the runtime's, or the
     /// preview's seeded ones (`SnapshotDriver`).
     var snapshotDriver: (any SnapshotDriver)? {
@@ -346,6 +353,10 @@ final class AppModel {
     var diskProgress: Double?
     var motionSensorsAvailable = true
     var motionSensorsProblem: String?
+    /// The device has haptics (a Taptic Engine) for the guest's vibrator to
+    /// play on. The runtime states it; an iPad, a Mac and the Simulator have
+    /// none, and Capabilities then has no Haptics row.
+    var hapticsAvailable = false
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
@@ -431,6 +442,7 @@ final class AppModel {
             if applicationActive != oldValue {
                 refreshStatistics()
                 refreshGraphicsNotice()
+                refreshNetworkWatch()
                 #if !APP_STORE
                 refreshJit()
                 #endif
@@ -439,6 +451,8 @@ final class AppModel {
     }
     /// The figures behind the screens, from the driver's readings.
     private(set) var statisticsMeter = StatsMeter()
+    /// Holds back the readings that draw what the views show already.
+    @ObservationIgnored private var statisticsGate = StatsPublishGate<Readout.Drawn>()
     #if !APP_STORE
     /// A launch for automation prints each reading.
     var printsStatistics = false
@@ -481,6 +495,22 @@ final class AppModel {
     }
     @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
 
+    // MARK: Network notice state
+
+    /// Whether iOS denies Andarium the network, from the path watcher. The
+    /// words and the Settings button are `NetworkWords`; nothing here is a
+    /// request of Andarium's own.
+    private(set) var networkNotice = NetworkNotice()
+    /// Watches the system's network path while a watch is wanted. The device
+    /// application has one over the system's path monitor; a test gives its
+    /// own, and the Simulator preview has none.
+    @ObservationIgnored var networkWatcher: NetworkAccessWatcher? {
+        didSet {
+            oldValue?.setWanted(false)
+            networkWatcher?.changed = { [weak self] in self?.networkWatcherChanged() }
+            refreshNetworkWatch()
+        }
+    }
     init(
         guest: Guest?, host: HostDevice, system: SystemInfo, capabilities: Capabilities,
         createRequirementBytes: UInt64
@@ -1252,6 +1282,19 @@ final class AppModel {
         driver?.setMotionSensors(on)
     }
 
+    /// The Haptics switch as the screens show it: the guest's choice, which
+    /// is on until the person turns it off.
+    var hapticsOn: Bool { guest?.haptics ?? true }
+
+    /// The Haptics switch. It asks for nothing and applies at once, in a run
+    /// too: the guest keeps its vibrator either way.
+    func setHaptics(_ on: Bool) {
+        guard guest != nil else { return }
+        guest?.haptics = on
+        persistNow()
+        driver?.setHaptics(on)
+    }
+
     /// The Microphone switch as the screens show it: the guest's choice is on
     /// and iOS lets Andarium record. Access that was refused or taken away
     /// shows it off, and the guest hears nothing then.
@@ -1456,8 +1499,19 @@ final class AppModel {
         }
     }
 
+    /// Hands the reading to the views when it draws something other than they
+    /// show. A published readout redraws the capsule and Settings' rows and has
+    /// iOS composite a frame, so a steady guest, whose figures and bars stay
+    /// where they are, costs none of that each second. The reading itself
+    /// stays as it is: the loop samples at the same rate and the console
+    /// report below prints every reading.
     private func publishStatistics() {
-        session.readout = Readout(statisticsMeter)
+        let readout = Readout(statisticsMeter)
+        // The size the views draw the shares against.
+        let memoryMiB = guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
+        if statisticsGate.admits(readout.drawn(memoryMiB: memoryMiB)) {
+            session.readout = readout
+        }
         #if !APP_STORE
         if printsStatistics {
             print(ConsoleReport.statistics(statisticsMeter, guestMemoryMiB: guest?.memoryMiB ?? 0))
@@ -1499,7 +1553,13 @@ final class AppModel {
         guard let driver else { return }
         while !Task.isCancelled, graphicsNoticeWanted {
             if let refusals = await driver.readGraphicsRefusals(), !Task.isCancelled {
-                graphicsNotice.record(refusals: refusals, at: graphicsNoticeClock())
+                // An in-place mutation tells the views even when it changes
+                // nothing, and the views' redraw lays the scene's root out;
+                // a reading that finds the same count and the same notice
+                // up is not published.
+                var next = graphicsNotice
+                next.record(refusals: refusals, at: graphicsNoticeClock())
+                if next != graphicsNotice { graphicsNotice = next }
             }
             guard !Task.isCancelled else { return }
             await reclaimGraphicsMemory(with: driver)
@@ -1567,6 +1627,55 @@ final class AppModel {
     func previewThermalNotice() {
         thermalNotice.show()
     }
+
+    // MARK: Network notice
+
+    /// The path is watched while Andarium is the active application and has a
+    /// guest, on Home or in a session: only then does the notice matter, and
+    /// the system's monitor calls back for a change of the path alone.
+    private var networkWatchWanted: Bool {
+        applicationActive && lifecycle.guest != nil
+    }
+
+    /// Starts the watch when it is wanted and stops it when it is not.
+    func refreshNetworkWatch() {
+        networkWatcher?.setWanted(networkWatchWanted)
+    }
+
+    private func networkWatcherChanged() {
+        guard let watcher = networkWatcher else { return }
+        networkNotice = watcher.notice
+        reportNetworkDenial()
+    }
+
+    /// The denial the notice is up for now, which Home and a session show;
+    /// nil when there is none, the person has dismissed it, or there is no
+    /// guest to be denied a network.
+    var networkDenialShowing: NetworkDenial? {
+        lifecycle.guest == nil ? nil : networkNotice.showing
+    }
+
+    /// Tells the runtime which denial is in force, dismissed or not, for the
+    /// session record: a bug report then says whether the person was told.
+    /// The runtime keeps it for the next session too, but exists only once a
+    /// run has loaded it, so the run says it again then.
+    func reportNetworkDenial() {
+        driver?.setNetworkNotice(networkNotice.denial)
+    }
+
+    /// The person dismisses the notice: on Home or in the session, for the
+    /// same cause, until the network has been allowed again.
+    func dismissNetworkNotice() {
+        networkWatcher?.dismiss()
+    }
+
+    #if !APP_STORE
+    /// The Simulator cannot be denied the network, so the preview plays a
+    /// denial. The App Store configuration leaves this out.
+    func previewNetworkNotice(_ denial: NetworkDenial) {
+        networkNotice.apply(.denied(denial))
+    }
+    #endif
 
     /// The debugger is preparing the JIT, which keeps the boot at its first step.
     private var preparingJitNow: Bool {
