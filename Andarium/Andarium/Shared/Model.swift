@@ -1516,7 +1516,13 @@ final class AppModel {
         guard let driver else { return }
         while !Task.isCancelled, graphicsNoticeWanted {
             if let refusals = await driver.readGraphicsRefusals(), !Task.isCancelled {
-                graphicsNotice.record(refusals: refusals, at: graphicsNoticeClock())
+                // An in-place mutation tells the views even when it changes
+                // nothing, and the views' redraw lays the scene's root out;
+                // a reading that finds the same count and the same notice
+                // up is not published.
+                var next = graphicsNotice
+                next.record(refusals: refusals, at: graphicsNoticeClock())
+                if next != graphicsNotice { graphicsNotice = next }
             }
             guard !Task.isCancelled else { return }
             await reclaimGraphicsMemory(with: driver)
