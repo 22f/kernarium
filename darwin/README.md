@@ -149,6 +149,12 @@ patches provide the behaviors the `slirp-network-*` tests check.
   the application to a local-network router, which needs the Local Network
   permission, and the guest follows the device's own resolver configuration.
   The wire rules are `network-dns-rules`.
+- The provider counts what became of the guest's DNS queries (answered, policy
+  denied, timed out, failed), its DHCP exchange and its TCP connection attempts
+  (established, unreachable, refused), as numbers only, and the runtime writes
+  them into the session record (`network-counters`, `slirp-network-counters`).
+  SLiRP drops the errno of a connect it could not make, so a denied connect
+  counts as unreachable and a timed-out one as unanswered.
 - Guest IPv4 multicast is dropped on the virtual link. The Local Network
   permission is asked for only when the guest itself reaches the local network.
 - The guest network driver has no transmit flow control, so a guest transmit

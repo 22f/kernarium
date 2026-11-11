@@ -628,11 +628,12 @@ ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
 was ended from outside without running, as a memory-limit end is. The file is
-text of a fixed layout (`uml-session 4`) that never passes 13312 bytes
-(`session_record_max_bytes`): a 4 KiB memory slot, a 4 KiB stall slot and the
-state with the kernel output it quotes, at most 5 KiB. Each part is rewritten in
-place by its own writer, so nothing grows with the session; layouts 1 to 3,
-which have the state where the stall slot is, still parse. The first 4 KiB are a
+text of a fixed layout (`uml-session 5`) that never passes 13824 bytes
+(`session_record_max_bytes`): a 4 KiB memory slot, a 4 KiB stall slot, a 512-byte
+network slot and the state with the kernel output it quotes, at most 5 KiB. Each
+part is rewritten in place by its own writer, so nothing grows with the session;
+layouts 1 to 4, which lack the network slot or the stall slot, still parse. The
+first 4 KiB are a
 memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest
@@ -665,6 +666,16 @@ a serial queue of system threads, and the main queue is asked only while a stall
 is open or being confirmed. A hold of the kernel's threads is not recorded as a
 stall. Andarium adds the previous and current records, the stalls in words and
 the guest's `/proc` counters to its bug report.
+
+The network slot holds the guest's user network in numbers: DNS queries
+answered, refused by the system (policy denied), timed out or failed; DHCP
+discovers, requests and acknowledgements; TCP connection attempts and how many
+were established, unreachable or refused (the provider counts them,
+[`darwin/README.md`](../darwin/README.md#user-network)). They are the share
+since the session began, rewritten at each checkpoint and at the end, and hold no
+address, port or name. The slot also notes the denial of the network that the
+application's notice was up for (runtime API 36, `set_network_notice`): how many
+denials began during the session and the one in force.
 
 A guest that restarts itself boots again in the same process, because iOS can
 neither re-exec nor respawn an application. The macOS launchers

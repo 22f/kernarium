@@ -54,20 +54,29 @@ namespace uml::runtime {
  *
  * The file is text of a fixed layout and of a size it never exceeds
  * (session_record_max_bytes), whatever the session does: the memory slot, the
- * stall slot, then the state with the kernel output it quotes. Each part is
- * rewritten in place by its own writer, so none grows with the session's
- * length. The stall slot is the stall watch's (runtime/stall_record.hpp).
- * The first line names the layout: "uml-session 4" has the stall slot between
- * the memory slot and the state; the earlier layouts (1 to 3) have the state
- * where the stall slot is now.
+ * stall slot, the network slot, then the state with the kernel output it
+ * quotes. Each part is rewritten in place by its own writer, so none grows
+ * with the session's length. The stall slot is the stall watch's
+ * (runtime/stall_record.hpp). The network slot holds the counts of the guest's
+ * user network (set_network_counts_reader) and whether the application showed
+ * its notice that iOS denies it the network (set_network_notice): numbers and
+ * words only, never an address, a port or a name. The first line names the
+ * layout: "uml-session 5" has the network slot between the stall slot and the
+ * state; "uml-session 4" has the stall slot between the memory slot and the
+ * state; the earlier layouts (1 to 3) have the state where the stall slot is
+ * now.
  */
 inline constexpr unsigned memory_checkpoint_interval_ms = 2000;
 /* The bytes of the memory slot at the start of the file, of the stall slot
- * after it, and where the session's state begins. */
+ * after it, of the network slot after that, and where the session's state
+ * begins. */
 inline constexpr std::size_t session_memory_slot_bytes = 4096;
 inline constexpr std::size_t session_stall_slot_bytes = 4096;
-inline constexpr std::size_t session_state_offset =
+inline constexpr std::size_t session_network_slot_bytes = 512;
+inline constexpr std::size_t session_network_offset =
 	session_memory_slot_bytes + session_stall_slot_bytes;
+inline constexpr std::size_t session_state_offset =
+	session_network_offset + session_network_slot_bytes;
 /* The kernel output the state quotes, and the most the state ever takes: its
  * lines, a message and that output. */
 inline constexpr std::size_t session_kernel_output_bytes = 4096;
@@ -105,6 +114,45 @@ using MemoryTermsReader = MemoryTerms (*)(bool read_malloc) noexcept;
 /* The reader the memory checkpoints use from now on; null for none, which
  * leaves the slot with the footprint alone. */
 void set_memory_terms_reader(MemoryTermsReader reader) noexcept;
+
+/* The counts of the guest's user network at one moment, each since the
+ * provider was made (device/network/slirp/network_counters.hpp says what each
+ * one counts). The record writes the difference between the reading at the
+ * session's start and the reading at each checkpoint and at its end. */
+struct SessionNetworkCounts final {
+	std::uint64_t dns_answered{};
+	std::uint64_t dns_policy_denied{};
+	std::uint64_t dns_timed_out{};
+	std::uint64_t dns_failed{};
+	std::uint64_t dhcp_discovers{};
+	std::uint64_t dhcp_requests{};
+	std::uint64_t dhcp_acks{};
+	std::uint64_t tcp_attempts{};
+	std::uint64_t tcp_established{};
+	std::uint64_t tcp_unreachable{};
+	std::uint64_t tcp_refused{};
+};
+
+/* What the checkpoints and the end ask for the network's counts: false when
+ * the guest has no network. Any thread, a signal handler included: it takes no
+ * lock and allocates nothing. */
+using SessionNetworkReader = bool (*)(SessionNetworkCounts &) noexcept;
+
+/* The reader the sessions use from now on; null for none, which leaves the
+ * network slot without counts. */
+void set_network_counts_reader(SessionNetworkReader reader) noexcept;
+
+/* Which iOS denial the application's notice is up for, as the application
+ * states it (runtime API 36): none, or cellular or Wi-Fi access denied. The
+ * record keeps how many times a denial began during the session, the session's
+ * start included when one was under way, and the one in force. Any thread. */
+enum class NetworkNotice : std::uint8_t {
+	none,
+	cellular_denied,
+	wifi_denied,
+};
+
+void set_network_notice(NetworkNotice notice) noexcept;
 
 enum class SessionEnd : std::uint8_t {
 	running,

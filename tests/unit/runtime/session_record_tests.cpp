@@ -145,7 +145,7 @@ void test_record_lifecycle()
 	const std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, {}));
 	std::string record = read_file(path);
-	require(record.starts_with("uml-session 4\nmemory at ") &&
+	require(record.starts_with("uml-session 5\nmemory at ") &&
 		record.size() > state_offset && record[slot_bytes - 1] == '\n' &&
 		record.substr(state_offset).starts_with(
 			"state running\nend running\n"),
@@ -430,7 +430,7 @@ void test_size_bound_and_stall_slot()
 {
 	using uml::runtime::session_record_max_bytes;
 	using uml::runtime::session_stall_slot_bytes;
-	static_assert(session_record_max_bytes == 13312,
+	static_assert(session_record_max_bytes == 13824,
 		"the record's largest size is stated in the documentation");
 	uml::runtime::reset_session_record();
 	const std::string path = temporary_record();
@@ -496,6 +496,122 @@ void test_size_bound_and_stall_slot()
 	unlink(path.c_str());
 }
 
+/* The counts a test's reader reports: a provider that has counted since the
+ * test began, and a switch for a guest with no network. */
+uml::runtime::SessionNetworkCounts reader_counts;
+bool reader_present = true;
+
+bool test_network_reader(uml::runtime::SessionNetworkCounts &counts) noexcept
+{
+	if (!reader_present)
+		return false;
+	counts = reader_counts;
+	return true;
+}
+
+/* The network slot sits between the stall slot and the state: it holds this
+ * session's share of the counts and the notice, rewritten at each checkpoint
+ * and at the end, and it touches no other part. */
+void test_network_slot()
+{
+	using uml::runtime::NetworkNotice;
+	using uml::runtime::session_network_offset;
+	using uml::runtime::session_network_slot_bytes;
+	static_assert(session_network_offset == 8192 &&
+			session_network_slot_bytes == 512 &&
+			state_offset == session_network_offset +
+				session_network_slot_bytes,
+		"the network slot sits after the stall slot");
+	const auto slot_of = [](const std::string &record) {
+		return record.substr(session_network_offset,
+			session_network_slot_bytes);
+	};
+	uml::runtime::reset_session_record();
+	uml::runtime::set_network_notice(NetworkNotice::none);
+	/* The provider counted before this session began. */
+	reader_counts = {.dns_answered = 10, .dns_failed = 2, .tcp_attempts = 7,
+			 .tcp_refused = 1};
+	reader_present = true;
+	uml::runtime::set_network_counts_reader(&test_network_reader);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	std::string record = read_file(path);
+	std::string slot = slot_of(record);
+	require(slot.starts_with("network 1\nnet-dns answered 0 policy-denied 0 "
+				 "timed-out 0 failed 0\n"
+				 "net-dhcp discovers 0 requests 0 acks 0\n"
+				 "net-tcp attempts 0 established 0 unreachable 0 "
+				 "refused 0\nnet-notice shown 0 now none\n") &&
+		slot.back() == '\n' && slot.size() == session_network_slot_bytes,
+		"a session does not start from the provider's reading: " + slot);
+
+	/* A checkpoint writes the share since the begin. */
+	reader_counts.dns_answered = 15;
+	reader_counts.dns_policy_denied = 3;
+	reader_counts.dhcp_discovers = 1;
+	reader_counts.dhcp_requests = 1;
+	reader_counts.dhcp_acks = 1;
+	reader_counts.tcp_attempts = 12;
+	reader_counts.tcp_established = 4;
+	reader_counts.tcp_unreachable = 2;
+	uml::runtime::set_network_notice(NetworkNotice::cellular_denied);
+	uml::runtime::checkpoint_session_memory();
+	record = read_file(path);
+	slot = slot_of(record);
+	require(has(slot, "net-dns answered 5 policy-denied 3 timed-out 0 "
+			  "failed 0\n") &&
+		has(slot, "net-dhcp discovers 1 requests 1 acks 1\n") &&
+		has(slot, "net-tcp attempts 5 established 4 unreachable 2 "
+			  "refused 0\n") &&
+		has(slot, "net-notice shown 1 now cellular\n"),
+		"a checkpoint wrote the wrong network slot: " + slot);
+	require(record.substr(state_offset).starts_with(
+			"state running\nend running\n") &&
+		record.substr(slot_bytes, 14) == "stalls 1 base ",
+		"the network slot touched another part");
+
+	/* The notice counts the denials that began, the one in force kept. */
+	uml::runtime::set_network_notice(NetworkNotice::cellular_denied);
+	uml::runtime::set_network_notice(NetworkNotice::none);
+	uml::runtime::set_network_notice(NetworkNotice::wifi_denied);
+	/* The end writes the last counts, which no checkpoint follows. */
+	reader_counts.dns_timed_out = 9;
+	uml::runtime::end_session_record(SessionEnd::powered_off, 0);
+	record = read_file(path);
+	slot = slot_of(record);
+	require(has(slot, "timed-out 9 failed 0\n") &&
+		has(slot, "net-notice shown 2 now wifi\n") &&
+		has(record.substr(state_offset), "state ended\n"),
+		"the end did not write the last network slot: " + slot);
+
+	/* A denial under way when the next session begins is one it saw, and a
+	 * provider made since is counted whole. */
+	reader_counts = {.dns_answered = 3};
+	require(uml::runtime::begin_session_record(path, {}));
+	slot = slot_of(read_file(path));
+	require(has(slot, "net-dns answered 0 ") &&
+		has(slot, "net-notice shown 1 now wifi\n"),
+		"the next session began wrong: " + slot);
+	reader_counts = {.dns_answered = 1};
+	uml::runtime::checkpoint_session_memory();
+	slot = slot_of(read_file(path));
+	require(has(slot, "net-dns answered 1 "),
+		"a provider made since was not counted whole: " + slot);
+
+	/* A guest with no network has the notice and no counts. */
+	reader_present = false;
+	uml::runtime::checkpoint_session_memory();
+	slot = slot_of(read_file(path));
+	require(slot.starts_with("network 1\nnet-notice shown 1 now wifi\n") &&
+		!has(slot, "net-dns"),
+		"a guest with no network was given counts: " + slot);
+
+	uml::runtime::set_network_counts_reader(nullptr);
+	uml::runtime::set_network_notice(NetworkNotice::none);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 void test_unopenable_record()
 {
 	uml::runtime::reset_session_record();
@@ -518,6 +634,7 @@ int main()
 		test_kept_output();
 		test_record_lifecycle();
 		test_memory_checkpoints();
+		test_network_slot();
 		test_memory_terms();
 		test_kernel_crash();
 		test_host_fault();
