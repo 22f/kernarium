@@ -1,23 +1,25 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yi Xie <imxieyi@users.noreply.github.com>
-Date: Wed, 11 Nov 2026 00:50:58 +0000
+Date: Wed, 11 Nov 2026 07:00:01 +0000
 Subject: [PATCH] run the torch, concurrency and conflicts of V4L2 cameras
 
 The cameras a host presents as V4L2 nodes stream together only as their descriptions say, and some
 cannot be open beside others. Report the sets of cameras whose concurrency masks agree as the
-concurrent streaming combinations (each camera of a set must still support the guaranteed stream
-combinations), and the cameras a camera's conflict mask names as its conflicting devices.
+concurrent streaming combinations (each set is reduced to the cameras that support the guaranteed
+stream combinations and reported when two remain), and the cameras a camera's conflict mask names as
+its conflicting devices.
 
 The torch is the camera device's flash control and needs no stream: turning it on writes
 FLASH_LED_MODE on the camera's capture node, and a camera whose session is blocked (privacy control
-set) has no torch.
+set) has no torch: its torch status is not available from the start.
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
- .../hwl/EmulatedCameraDeviceHWLImpl.cpp       |  3 +++
- .../hwl/EmulatedCameraProviderHWLImpl.cpp     | 24 +++++++++++++++++++
- .../EmulatedCamera/hwl/EmulatedTorchState.cpp | 14 +++++++++++
- 3 files changed, 41 insertions(+)
+ .../hwl/EmulatedCameraDeviceHWLImpl.cpp       |  3 ++
+ .../hwl/EmulatedCameraProviderHWLImpl.cpp     | 28 ++++++++++++++++
+ .../EmulatedCamera/hwl/EmulatedTorchState.cpp | 33 ++++++++++++++++---
+ .../EmulatedCamera/hwl/EmulatedTorchState.h   |  4 ++-
+ 4 files changed, 62 insertions(+), 6 deletions(-)
 
 diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceHWLImpl.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceHWLImpl.cpp
 index b17bdf7f59b300820e05833da01b41149c0a339e..3ec0243e17e50766cde2a2698d661f86909fcbf4 100644
@@ -41,7 +43,7 @@ index b17bdf7f59b300820e05833da01b41149c0a339e..3ec0243e17e50766cde2a2698d661f86
    return OK;
  }
 diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraProviderHWLImpl.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraProviderHWLImpl.cpp
-index 1ebc544d23251d8140d6c8575315c7a08e47b444..ce53b8f204dbe21addb41ba54974227d1df8cd34 100644
+index 1ebc544d23251d8140d6c8575315c7a08e47b444..d01a33a0f0bb6a5a36c1aee8aff69194e948defe 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedCameraProviderHWLImpl.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedCameraProviderHWLImpl.cpp
 @@ -30,6 +30,7 @@
@@ -52,29 +54,22 @@ index 1ebc544d23251d8140d6c8575315c7a08e47b444..ce53b8f204dbe21addb41ba54974227d
  #include "utils/HWLUtils.h"
  #include "vendor_tag_defs.h"
  
-@@ -182,6 +183,29 @@ status_t EmulatedCameraProviderHwlImpl::GetConcurrentStreamingCameraIds(
+@@ -182,6 +183,22 @@ status_t EmulatedCameraProviderHwlImpl::GetConcurrentStreamingCameraIds(
    if (combinations == nullptr) {
      return BAD_VALUE;
    }
 +  // The cameras the host presents as V4L2 nodes stream together as the host's
-+  // descriptions say; every camera of a set must also support the guaranteed
-+  // stream combinations.
-+  const auto host_sets = v4l2cam::CameraRegistry::Get().ConcurrentSets();
-+  if (!host_sets.empty() || !v4l2cam::CameraRegistry::Get().Ids().empty()) {
-+    for (const auto& host_set : host_sets) {
-+      std::unordered_set<uint32_t> ids;
-+      bool all_supported = true;
-+      for (uint32_t camera_id : host_set) {
-+        if (camera_id_map_.find(camera_id) == camera_id_map_.end() ||
-+            !SupportsMandatoryConcurrentStreams(camera_id)) {
-+          all_supported = false;
-+          break;
-+        }
-+        ids.insert(camera_id);
-+      }
-+      if (all_supported) {
-+        combinations->emplace_back(std::move(ids));
-+      }
++  // descriptions say. Each set the host names is reduced to the cameras that
++  // support the guaranteed stream combinations, and reported when two remain
++  // (camera_ids.hpp, reported_concurrent_sets; the camera layouts' `concurrent`
++  // feature is the same rule).
++  if (!v4l2cam::CameraRegistry::Get().Ids().empty()) {
++    for (const auto& set : v4l2cam::CameraRegistry::Get().ReportedConcurrentSets(
++             [this](uint32_t camera_id) {
++               return camera_id_map_.find(camera_id) != camera_id_map_.end() &&
++                      SupportsMandatoryConcurrentStreams(camera_id);
++             })) {
++      combinations->emplace_back(set.begin(), set.end());
 +    }
 +    return OK;
 +  }
@@ -82,11 +77,29 @@ index 1ebc544d23251d8140d6c8575315c7a08e47b444..ce53b8f204dbe21addb41ba54974227d
    // Collect all camera ids that support the guaranteed stream combinations
    // (720p YUV and IMPLEMENTATION_DEFINED) and put them in one set. We don't
    // make all possible combinations since it should be possible to stream all
+@@ -354,6 +371,17 @@ void EmulatedCameraProviderHwlImpl::WaitForStatusCallbackFuture() {
+ }
+ 
+ void EmulatedCameraProviderHwlImpl::NotifyPhysicalCameraUnavailable() {
++  // The framework starts a torch as available; one whose camera's session is
++  // blocked is not, from the start.
++  for (const auto& one_map : camera_id_map_) {
++    v4l2cam::CameraNodes nodes;
++    if (torch_cb_ != nullptr && v4l2cam::CameraRegistry::Get().Find(one_map.first, &nodes) &&
++        nodes.blocked &&
++        (nodes.desc.flags & (andarium::camera::abi::feature::flash |
++                             andarium::camera::abi::feature::torch)) != 0) {
++      torch_cb_(one_map.first, google_camera_hal::TorchModeStatus::kNotAvailable);
++    }
++  }
+   for (const auto& one_map : camera_id_map_) {
+     for (const auto& physical_device : one_map.second) {
+       if (physical_device.first != CameraDeviceStatus::kNotPresent) {
 diff --git a/devices/EmulatedCamera/hwl/EmulatedTorchState.cpp b/devices/EmulatedCamera/hwl/EmulatedTorchState.cpp
-index edb6311bfc62f7efa7391908f246bba9f16ca418..5749da6f4b91cd6ee87fdb22fca2671967bc3da3 100644
+index edb6311bfc62f7efa7391908f246bba9f16ca418..a98116fbed46eff39eb8eb8786948108dc6be4f3 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedTorchState.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedTorchState.cpp
-@@ -20,6 +20,8 @@
+@@ -20,10 +20,22 @@
  
  #include <log/log.h>
  
@@ -95,10 +108,25 @@ index edb6311bfc62f7efa7391908f246bba9f16ca418..5749da6f4b91cd6ee87fdb22fca26719
  namespace android {
  
  using android::google_camera_hal::TorchModeStatus;
-@@ -32,6 +34,18 @@ status_t EmulatedTorchState::SetTorchMode(TorchMode mode) {
+ 
++// The status of a torch nobody is using: off, or not available when the
++// camera's session is blocked (privacy), as the camera device reports it.
++TorchModeStatus EmulatedTorchState::IdleStatus() const {
++  v4l2cam::CameraNodes nodes;
++  if (v4l2cam::CameraRegistry::Get().Find(camera_id_, &nodes) && nodes.blocked) {
++    return TorchModeStatus::kNotAvailable;
++  }
++  return TorchModeStatus::kAvailableOff;
++}
++
+ status_t EmulatedTorchState::SetTorchMode(TorchMode mode) {
+   std::lock_guard<std::mutex> lock(mutex_);
+   if (camera_open_) {
+@@ -32,16 +44,26 @@ status_t EmulatedTorchState::SetTorchMode(TorchMode mode) {
      return UNKNOWN_ERROR;
    }
  
+-  torch_status_ = (mode == TorchMode::kOn) ? TorchModeStatus::kAvailableOn : TorchModeStatus::kAvailableOff;
 +  // The torch of a camera the host drives is the camera device's flash control.
 +  v4l2cam::CameraNodes nodes;
 +  if (v4l2cam::CameraRegistry::Get().Find(camera_id_, &nodes)) {
@@ -111,6 +139,43 @@ index edb6311bfc62f7efa7391908f246bba9f16ca418..5749da6f4b91cd6ee87fdb22fca26719
 +    }
 +  }
 +
-   torch_status_ = (mode == TorchMode::kOn) ? TorchModeStatus::kAvailableOn : TorchModeStatus::kAvailableOff;
++  torch_status_ = (mode == TorchMode::kOn) ? TorchModeStatus::kAvailableOn : IdleStatus();
    if (mode == TorchMode::kOff && support_torch_strength_control_) {
      new_torch_strength_level_ = default_level_;
+     ALOGV("%s: Turning torch OFF so reset the torch strength to default level:%d",
+           __FUNCTION__, default_level_);
+   }
+ 
+-  torch_cb_(camera_id_, (mode == TorchMode::kOn)
+-                            ? TorchModeStatus::kAvailableOn
+-                            : TorchModeStatus::kAvailableOff);
++  torch_cb_(camera_id_, torch_status_);
+   return OK;
+ }
+ 
+@@ -75,7 +97,8 @@ void EmulatedTorchState::AcquireFlashHw() {
+ void EmulatedTorchState::ReleaseFlashHw() {
+   std::lock_guard<std::mutex> lock(mutex_);
+   camera_open_ = false;
+-  torch_cb_(camera_id_, TorchModeStatus::kAvailableOff);
++  torch_status_ = IdleStatus();
++  torch_cb_(camera_id_, torch_status_);
+ }
+ 
+ int32_t EmulatedTorchState::GetTorchStrengthLevel() {
+diff --git a/devices/EmulatedCamera/hwl/EmulatedTorchState.h b/devices/EmulatedCamera/hwl/EmulatedTorchState.h
+index 126e16b1ce6c5e5f6167fa95bff9c4d285710539..4bf502a1411c7059bac0b7f45c10217e3272003e 100644
+--- a/devices/EmulatedCamera/hwl/EmulatedTorchState.h
++++ b/devices/EmulatedCamera/hwl/EmulatedTorchState.h
+@@ -48,8 +48,10 @@ class EmulatedTorchState {
+ 
+   uint32_t camera_id_;
+   HwlTorchModeStatusChangeFunc torch_cb_;
++  TorchModeStatus IdleStatus() const;
++
+   bool camera_open_ = false;
+-  TorchModeStatus torch_status_;
++  TorchModeStatus torch_status_ = TorchModeStatus::kAvailableOff;
+   int32_t new_torch_strength_level_ = 0;
+   bool support_torch_strength_control_ = false;
+   int32_t default_level_ = 0;
