@@ -312,7 +312,8 @@ an Apple silicon Mac (`xcodebuild test -scheme Andarium`). `SnapshotFileApiTests
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
-fail on it. The hosted tests
+fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
+screens' flows, refusals and words on a fake driver. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class

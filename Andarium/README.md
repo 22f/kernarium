@@ -259,6 +259,15 @@ control out.
   and the update's Restore waits while an operation runs. A listing is never
   older than the last finished operation (`revision`), can come without its
   figures, and names the release the data is on.
+  Home's Guest system section has a Snapshots row (how many, the space they
+  use, Manage) that opens the Snapshots sheet: the list newest first, a page
+  per snapshot (Restore, its name, Delete) and a page on the space they use,
+  with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds
+  what Home and the sheet show (names first, the figures when measured, the
+  last figure kept while a row is measured again) and runs each operation;
+  `SnapshotWords` says every refusal, plan and figure in one place. A restore
+  closes the sheet and Home says what happened, Start being next. The preview
+  plays the same screens on mock snapshots (`-screen snapshots-…`).
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
   from build 9 (build 5, the first public release, and builds 6 to 8 have
   none).
