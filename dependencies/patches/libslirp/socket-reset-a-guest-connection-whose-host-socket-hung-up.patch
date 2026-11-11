@@ -3,43 +3,71 @@ From: Yi Xie <imxieyi@users.noreply.github.com>
 Date: Wed, 11 Nov 2026 03:07:06 +0900
 Subject: [PATCH] socket: reset a guest connection whose host socket hung up
 
-A host socket shut down in both directions without an error made
-soread() meet end of file, and XNU answers getpeername() with EINVAL
-there where only ENOTCONN was known, so the connection was closed
-rather than dropped. Once the guest wrote, the socket was polled for
-writing only, XNU reported a hang-up at once, and every pass of
+A host socket that hangs up while libslirp cannot read it was handed
+to soread() all the same, in two states.
+
+A socket shut down in both directions without an error made soread()
+meet end of file, and XNU answers getpeername() with EINVAL there
+where only ENOTCONN was known, so the connection was closed rather
+than dropped. Once the guest wrote, the socket was polled for writing
+only, XNU reported a hang-up at once, and every pass of
 slirp_pollfds_poll called soread() again and re-armed the 2MSL timer:
 the event loop spun on one core for as long as the connection lived.
 
+A guest that does not take the data in so_snd leaves it full, so the
+socket is not polled for reading, but it still is for writing while
+the guest has data to send, and poll() reports a hang-up or an error
+whether it was asked for or not. soread() then had no room to read
+into and asserted; without assertions it called recv() on an
+uninitialised buffer.
+
 Map EINVAL from getpeername() to ENOTCONN, so the guest gets a reset.
-Send a socket that can no longer receive and reports a hang-up or an
-error to the new sohangup(): a pending socket error drops the
-connection, otherwise the guest's side is closed once and the socket
-is not polled again.
+Send a socket that reports a hang-up or an error and cannot be read,
+because its end of file was read or so_snd is full, to the new
+sohangup(). A pending socket error drops the connection. So does a
+socket that is no longer connected before its end of file was read,
+which the failed send() that put the guest's data aside may have left
+without an error. Otherwise the guest's side is closed once at the end
+of file; before it, the socket is only no longer written, and soread()
+ends the connection once the guest has made room.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/slirp.c  | 12 ++++++++++++
- src/socket.c | 26 ++++++++++++++++++++++++++
+ src/slirp.c  | 19 +++++++++++++++++++
+ src/socket.c | 49 +++++++++++++++++++++++++++++++++++++++++++++++++
  src/socket.h |  5 +++++
- 3 files changed, 43 insertions(+)
+ 3 files changed, 73 insertions(+)
 
 diff --git a/src/slirp.c b/src/slirp.c
-index 9b7526afdf9cc2be956356c1a69a80f9d5966cb1..7f4e08da4811fbc26a9e3c141f67d7714145d41e 100644
+index 9b7526afdf9cc2be956356c1a69a80f9d5966cb1..4b8a9fe283f00d0bbb09a349077d9a5420d3e879 100644
 --- a/src/slirp.c
 +++ b/src/slirp.c
-@@ -1068,6 +1068,18 @@ void slirp_pollfds_poll(Slirp *slirp, int select_error,
+@@ -787,6 +787,10 @@ void slirp_cleanup(Slirp *slirp)
+     (((so)->so_state & (SS_FCANTSENDMORE | SS_ISFCONNECTED)) == SS_ISFCONNECTED)
+ #define CONN_CANFRCV(so) \
+     (((so)->so_state & (SS_FCANTRCVMORE | SS_ISFCONNECTED)) == SS_ISFCONNECTED)
++/* The guest has not taken what so_snd holds: soread() has no room to read */
++#define CONN_NOROOM(so) \
++    (((so)->so_state & SS_ISFCONNECTED) && \
++     (so)->so_snd.sb_cc >= (so)->so_snd.sb_datalen)
+ 
+ static void slirp_update_timeout(Slirp *slirp, uint32_t *timeout)
+ {
+@@ -1068,6 +1072,21 @@ void slirp_pollfds_poll(Slirp *slirp, int select_error,
                  continue;
              }
  
 +            /*
-+             * A socket that can no longer receive is polled only to write the
++             * A socket that cannot be read is polled only to write the
 +             * guest's data, so a hang-up or an error there belongs to the
-+             * write side. soread() would only meet the end of file it already
-+             * handled and leave the socket ready on every pass.
++             * write side. That is so once its end of file has been read, and
++             * while the guest has not taken the data in so_snd and there is
++             * no room for more. soread() would only meet the end of file it
++             * already handled, or have nowhere to put what it reads, and
++             * leave the socket ready on every pass.
 +             */
-+            if ((so->so_state & SS_FCANTRCVMORE) &&
-+                (revents & (SLIRP_POLL_HUP | SLIRP_POLL_ERR))) {
++            if ((revents & (SLIRP_POLL_HUP | SLIRP_POLL_ERR)) &&
++                ((so->so_state & SS_FCANTRCVMORE) || CONN_NOROOM(so))) {
 +                sohangup(so);
 +                continue;
 +            }
@@ -48,7 +76,7 @@ index 9b7526afdf9cc2be956356c1a69a80f9d5966cb1..7f4e08da4811fbc26a9e3c141f67d771
              /*
               * Check for URG data
 diff --git a/src/socket.c b/src/socket.c
-index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b311ec102bbc7e4e9fc2d7ed2b98efce4741b780 100644
+index 6b65be197eea31e8bcb4ce22b1c29327a11198de..888155049dcfa42ed6058505960461ac54dc98b0 100644
 --- a/src/socket.c
 +++ b/src/socket.c
 @@ -208,6 +208,11 @@ int soread(struct socket *so)
@@ -63,7 +91,7 @@ index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b311ec102bbc7e4e9fc2d7ed2b98efce
                  } else {
                      if (getsockopt(so->s, SOL_SOCKET, SO_ERROR, &err, &elen) < 0) {
                          err = errno;
-@@ -978,6 +983,27 @@ void sofwdrain(struct socket *so)
+@@ -978,6 +983,50 @@ void sofwdrain(struct socket *so)
          sofcantsendmore(so);
  }
  
@@ -71,20 +99,43 @@ index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b311ec102bbc7e4e9fc2d7ed2b98efce
 +{
 +    int err = 0;
 +    socklen_t elen = sizeof(err);
++    bool eof = so->so_state & SS_FCANTRCVMORE;
 +
 +    /*
 +     * The guest's data waiting in so_rcv can no longer reach the peer. A
-+     * pending error resets the guest's connection, as soread() would have;
-+     * without one, stop polling the socket and close the guest's side once.
++     * pending error resets the guest's connection, as soread() would have.
 +     */
 +    if (getsockopt(so->s, SOL_SOCKET, SO_ERROR, &err, &elen) < 0) {
 +        err = errno;
 +    }
++    if (err == 0 && !eof && !(so->so_state & SS_FCANTSENDMORE)) {
++        struct sockaddr_storage addr;
++        socklen_t alen = sizeof(addr);
++
++        /*
++         * Nothing has shut the socket down, so a hang-up before its end of
++         * file was read means the peer is gone, and the error may have been
++         * taken already by a failed send(). soread() tells that from an
++         * orderly close by asking for the peer's address; it cannot read
++         * here, as there is no room, so ask the same.
++         */
++        if (getpeername(so->s, (struct sockaddr *)&addr, &alen) < 0) {
++            err = ENOTCONN;
++        }
++    }
 +    if (err != 0) {
 +        tcp_drop(sototcpcb(so), err);
 +    } else {
++        /*
++         * Without an error, stop polling the socket. At its end of file,
++         * close the guest's side once; before it, the guest still gets what
++         * the socket holds, and soread() ends the connection when there is
++         * room to read again.
++         */
 +        sofcantsendmore(so);
-+        tcp_sockclosed(sototcpcb(so));
++        if (eof) {
++            tcp_sockclosed(sototcpcb(so));
++        }
 +    }
 +}
 +
@@ -92,7 +143,7 @@ index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b311ec102bbc7e4e9fc2d7ed2b98efce
  {
      if (!s->disable_dns && so->so_faddr.s_addr == s->vnameserver_addr.s_addr) {
 diff --git a/src/socket.h b/src/socket.h
-index c7c683401eef71a0bedbabe31758cf3209a2b375..005fc6584f3ffbd284f4a5f5ce766b52d6417769 100644
+index c7c683401eef71a0bedbabe31758cf3209a2b375..49e944f6e0c42ed2943e3885d93327c1fb0c76f0 100644
 --- a/src/socket.h
 +++ b/src/socket.h
 @@ -217,6 +217,11 @@ void soisfconnected(register struct socket *);
@@ -100,8 +151,8 @@ index c7c683401eef71a0bedbabe31758cf3209a2b375..005fc6584f3ffbd284f4a5f5ce766b52
   */
  void sofwdrain(struct socket *);
 +/*
-+ * The host socket hung up while it is polled only for writing: give up the
-+ * connection to the guest
++ * The host socket reported a hang-up or an error while it cannot be read and
++ * is polled only for writing: reset the guest's connection, or stop writing
 + */
 +void sohangup(struct socket *);
  struct iovec; /* For win32 */
