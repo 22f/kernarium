@@ -115,9 +115,50 @@ struct SessionRecordTests {
         #expect(near.notice(endedOutOfForeground: false)?.title == "iOS ended Andarium")
     }
 
+    /// A layout 5 record, whose history rows have ten columns in a 4 KiB
+    /// memory slot, and a layout 6 record, whose rows add the figures of the
+    /// run in an 8 KiB one, carry the same slots, and the reader takes the
+    /// same fields from both. A layout 6 record of the largest size the
+    /// runtime writes is read whole.
+    @Test func aLayout5AndALayout6RecordReadAlike() throws {
+        let columns = "h 484 6100 43 4090 1250 900 238 258 790 614"
+        let figures = " 2000 120 45 2 1 12 5000 1 2 3 158 5900 5000 74 3000 11800"
+        let names = " span frames gap thermal pressure compressed internal reliefs shed renewals largest"
+            + " cpu vcpu perf mhz energy"
+        for layout in [5, 6] {
+            var memory = """
+                uml-session \(layout)
+                memory at 1794210239 footprint 6441524416 peak 6442458280 available 926528
+                terms guest 4090 gpu 1262/1251 age 0 graphics 905 media 0 cache 238 heaps 260 malloc 812/700 age 4 other 650 internal 5200 compressed 0
+                peak-terms at 1794210239 footprint 6143 guest 4090 gpu 1262/1251 age 0 graphics 905 media 0 cache 238 heaps 260 malloc 812/700 age 4 other 650 internal 5200 compressed 0
+                history seconds footprint available guest gpu graphics cache heaps malloc other\(layout == 6 ? names : "")
+                \(columns)\(layout == 6 ? figures : "")
+
+                """
+            memory = NetworkRecordTests.padded(String(memory.dropLast()), to: layout == 6 ? 8192 : 4096)
+            let text = memory + NetworkRecordTests.padded(try StallRecordTests.golden(), to: 4096)
+                + NetworkRecordTests.padded(try NetworkRecordTests.golden(), to: 512)
+                + "state running\nend running\nstatus 0\npid 20373\nstarted 1794209753\n"
+            let record = try #require(SessionRecord(text: text), "layout \(layout)")
+            #expect(record.running && record.nearMemoryLimit && record.processID == 20373, "layout \(layout)")
+            #expect(record.memory?.footprintBytes == 6_441_524_416 && record.memory?.availableBytes == 926_528)
+            #expect(record.terms?.hasPrefix("guest 4090 gpu 1262/1251") == true)
+            #expect(record.peakTerms?.hasPrefix("at 1794210239 footprint 6143 guest 4090") == true)
+            #expect(record.stalls?.total == 37 && record.network?.tcp?.attempts == 12, "layout \(layout)")
+        }
+        #expect(SessionRecord.maximumBytes >= 17920)
+        var largest = "uml-session 6\nmemory at 1 footprint 2 peak 3\n"
+        largest = NetworkRecordTests.padded(String(largest.dropLast()), to: 8192)
+        largest += NetworkRecordTests.padded("stalls 1 base 1 at 1 total 0 shown 0", to: 4096)
+        largest += NetworkRecordTests.padded("network 1\nnet-notice denials 0 now none", to: 512)
+        largest += "state running\nend running\nstatus 0\npid 3\n"
+        largest += String(repeating: "k", count: 17920 - largest.utf8.count)
+        #expect(largest.utf8.count == 17920 && SessionRecord(text: largest)?.running == true)
+    }
+
     @Test func otherTextIsNoRecord() {
         #expect(SessionRecord(text: "") == nil)
-        #expect(SessionRecord(text: "uml-session 6\nstate ended\nend powered-off\n") == nil)
+        #expect(SessionRecord(text: "uml-session 7\nstate ended\nend powered-off\n") == nil)
         #expect(SessionRecord(text: "uml-session 2\nstatus 0\n") == nil)
         #expect(SessionRecord.read(at: URL(fileURLWithPath: "/nonexistent/session.txt")) == nil)
     }

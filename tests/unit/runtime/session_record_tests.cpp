@@ -15,8 +15,11 @@
 #include <cstring>
 #include <exception>
 #include <fcntl.h>
+#include <mutex>
 #include <pthread.h>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -145,7 +148,7 @@ void test_record_lifecycle()
 	const std::string path = temporary_record();
 	require(uml::runtime::begin_session_record(path, {}));
 	std::string record = read_file(path);
-	require(record.starts_with("uml-session 5\nmemory at ") &&
+	require(record.starts_with("uml-session 6\nmemory at ") &&
 		record.size() > state_offset && record[slot_bytes - 1] == '\n' &&
 		record.substr(state_offset).starts_with(
 			"state running\nend running\n"),
@@ -258,6 +261,44 @@ std::size_t count_of(const std::string &text, const char *part)
 	return count;
 }
 
+std::vector<std::string> words(const std::string &line)
+{
+	std::vector<std::string> found;
+	std::istringstream stream{line};
+	for (std::string word; stream >> word;)
+		found.push_back(word);
+	return found;
+}
+
+/* The history rows of a memory slot, oldest first, as words. */
+std::vector<std::vector<std::string>> history_rows(const std::string &slot)
+{
+	std::vector<std::vector<std::string>> rows;
+	for (auto at = slot.find("\nh "); at != std::string::npos;
+	     at = slot.find("\nh ", at + 1))
+		rows.push_back(words(slot.substr(at + 1, slot.find('\n', at + 1) -
+			at - 1)));
+	return rows;
+}
+
+/* A row's figures from the span on: span frames gap thermal pressure
+ * compressed internal reliefs shed renewals largest cpu vcpu perf mhz
+ * energy. */
+constexpr std::size_t span_word = 11;
+constexpr std::size_t row_words = span_word + 16;
+
+std::vector<std::string> run_words(const std::vector<std::string> &row)
+{
+	require(row.size() == row_words, "a row has " +
+		std::to_string(row.size()) + " words");
+	return {row.begin() + span_word + 1, row.end()};
+}
+
+std::string slot_of(const std::string &record)
+{
+	return record.substr(0, slot_bytes);
+}
+
 void test_memory_terms()
 {
 	uml::runtime::reset_session_record();
@@ -272,7 +313,9 @@ void test_memory_terms()
 			"internal 5000 compressed 12\n") &&
 		has(first, "\npeak-terms at ") &&
 		has(first, "\nhistory seconds footprint available guest gpu "
-			"graphics cache heaps malloc other\n") &&
+			"graphics cache heaps malloc other span frames gap thermal "
+			"pressure compressed internal reliefs shed renewals largest "
+			"cpu vcpu perf mhz energy\n") &&
 		count_of(first, "\nh ") == 1,
 		"the first checkpoint has no terms: " + first);
 	/* Enough checkpoints to fill both histories, which then stay at their
@@ -323,9 +366,389 @@ void test_memory_terms()
 	require(each < 5000.0, "a memory checkpoint is far too slow");
 	require(has(read_file(path).substr(0, slot_bytes), " malloc "),
 		"the product's reader wrote no terms");
+
+	/* And with the run figures the product reads: what the checkpoint costs
+	 * with them, and what reading them costs alone. */
+	uml::runtime::set_run_figures_reader(&uml::runtime::run_figures);
+	const auto figures_start = std::chrono::steady_clock::now();
+	for (int index = 0; index < timed; ++index)
+		uml::runtime::checkpoint_session_memory();
+	const auto with_figures = std::chrono::duration<double, std::micro>(
+		std::chrono::steady_clock::now() - figures_start).count() / timed;
+	const auto read_start = std::chrono::steady_clock::now();
+	for (int index = 0; index < timed; ++index)
+		(void)uml::runtime::run_figures(false);
+	const auto read = std::chrono::duration<double, std::micro>(
+		std::chrono::steady_clock::now() - read_start).count() / timed;
+	std::printf("a memory checkpoint with its terms and the run figures takes "
+		"%.1f us; reading the run figures takes %.1f us\n", with_figures, read);
+	require(with_figures < 5000.0, "a memory checkpoint is far too slow");
+	const auto product_rows = history_rows(slot_of(read_file(path)));
+	require(!product_rows.empty() && product_rows.back().size() == row_words,
+		"the product's rows are not whole");
+	std::string newest;
+	for (const auto &word : product_rows.back())
+		newest += (newest.empty() ? "" : " ") + word;
+	std::printf("a row: %s\n", newest.c_str());
+	uml::runtime::set_run_figures_reader(nullptr);
 	uml::runtime::set_memory_terms_reader(nullptr);
 	uml::runtime::reset_session_record();
 	unlink(path.c_str());
+}
+
+/* ---- The figures of the run in the history rows. ---- */
+
+/* The run figures a test's reader reports: set by the test, one reading at a
+ * time, under a lock because the checkpoint thread may read too. */
+struct Script final {
+	std::mutex lock;
+	uml::runtime::RunFigures figures;
+	unsigned begins{};
+	std::uint64_t step{};
+};
+
+Script script;
+
+uml::runtime::RunFigures scripted_figures(bool session_begins) noexcept
+{
+	const std::lock_guard guard{script.lock};
+	if (session_begins)
+		++script.begins;
+	return script.figures;
+}
+
+void script_set(const uml::runtime::RunFigures &figures)
+{
+	const std::lock_guard guard{script.lock};
+	script.figures = figures;
+}
+
+/* A reader for a long run: the figures are a function of the step the test
+ * has reached, so a checkpoint the background thread adds changes none. Each
+ * step flushes 10 frames, the longest gap is 20 ms but at the step
+ * `spike_step`, uses 100 ms of CPU on the process and 80 ms on the carriers,
+ * 60 ms of it on performance cores, 300 million cycles and 200 million nJ. */
+constexpr std::uint64_t spike_step = 25;
+
+uml::runtime::RunFigures stepped_figures(bool) noexcept
+{
+	const std::lock_guard guard{script.lock};
+	const std::uint64_t step = script.step;
+	uml::runtime::RunFigures figures;
+	figures.sources = uml::runtime::RunFigures::frames |
+		uml::runtime::RunFigures::host | uml::runtime::RunFigures::cache |
+		uml::runtime::RunFigures::largest | uml::runtime::RunFigures::cpu |
+		uml::runtime::RunFigures::carriers | uml::runtime::RunFigures::usage |
+		uml::runtime::RunFigures::cycle_count;
+	figures.flushes = 1000 + 10 * step;
+	figures.longest_gap_ns = (step == spike_step ? 900 : 20) * 1'000'000ULL;
+	figures.thermal = static_cast<std::uint8_t>(step % 4);
+	figures.pressure = static_cast<std::uint8_t>(step % 3);
+	figures.reliefs = step / 10;
+	figures.shed_accounts = step / 5;
+	figures.renewals = step / 2;
+	figures.largest_open = 150ULL << 20;
+	figures.cpu_ns = 100'000'000ULL * step;
+	figures.carrier_ns = 80'000'000ULL * step;
+	figures.performance_ns = 60'000'000ULL * step;
+	figures.cycles = 300'000'000ULL * step;
+	figures.energy_nj = 200'000'000ULL * step;
+	return figures;
+}
+
+void set_step(std::uint64_t step)
+{
+	const std::lock_guard guard{script.lock};
+	script.step = step;
+}
+
+void finish_session(const std::string &path)
+{
+	uml::runtime::set_run_figures_reader(nullptr);
+	uml::runtime::set_memory_terms_reader(nullptr);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
+/* What a row says of the interval since the checkpoint before it: the
+ * difference of the counters, the longest gap, the states at the checkpoint
+ * and "-" for a source with nothing to say. */
+void test_run_figures_in_a_row()
+{
+	using F = uml::runtime::RunFigures;
+	constexpr std::uint64_t mib = std::uint64_t{1} << 20;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_memory_terms_reader(&fixed_terms);
+	uml::runtime::set_run_figures_reader(&scripted_figures);
+	F first;
+	first.sources = F::frames | F::host | F::cache | F::largest | F::cpu |
+		F::carriers | F::usage | F::cycle_count;
+	first.flushes = 1000;
+	first.thermal = 1;
+	first.pressure = 0;
+	first.reliefs = 3;
+	first.shed_accounts = 5;
+	first.renewals = 2;
+	first.largest_open = 150 * mib;
+	first.cpu_ns = 10'000'000'000ULL;
+	first.carrier_ns = 8'000'000'000ULL;
+	first.performance_ns = 6'000'000'000ULL;
+	first.cycles = 30'000'000'000ULL;
+	first.energy_nj = 20'000'000'000ULL;
+	script_set(first);
+	{
+		const std::lock_guard guard{script.lock};
+		script.begins = 0;
+	}
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	/* The session's first reading is told it opens the session, and the rest
+	 * are not; the background thread may add readings, never a begin. */
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	{
+		const std::lock_guard guard{script.lock};
+		require(script.begins == 1, "the session's first reading was not "
+			"told it begins the session");
+	}
+	auto rows = history_rows(slot_of(read_file(path)));
+	require(rows.size() == 1, "the begin wrote no row");
+	require((run_words(rows[0]) == std::vector<std::string>{"-", "-", "1",
+			"0", "12", "5000", "-", "-", "-", "150", "-", "-", "-", "-",
+			"-"}),
+		"the first row of a session has no interval to speak of");
+
+	/* The next checkpoint: 120 more frames, the longest gap 45 ms, a state a
+	 * step hotter, and the counters' differences. */
+	F second = first;
+	second.flushes = 1120;
+	second.longest_gap_ns = 45'000'000ULL;
+	second.thermal = 2;
+	second.pressure = 1;
+	second.reliefs = 4;
+	second.shed_accounts = 7;
+	second.renewals = 5;
+	second.largest_open = 158 * mib;
+	second.cpu_ns = 15'900'000'000ULL;
+	second.carrier_ns = 13'000'000'000ULL;
+	second.performance_ns = 10'400'000'000ULL;
+	second.cycles = 47'700'000'000ULL;
+	second.energy_nj = 31'800'000'000ULL;
+	script_set(second);
+	std::this_thread::sleep_for(std::chrono::milliseconds{20});
+	uml::runtime::checkpoint_session_memory();
+	rows = history_rows(slot_of(read_file(path)));
+	require(rows.size() == 2, "a checkpoint added no row");
+	const auto &row = rows[1];
+	const auto span = std::stoull(row[span_word]);
+	require(span >= 20 && span < 60000,
+		"the row's span is not the time since the checkpoint before: " +
+		row[span_word]);
+	/* 4.4 of 5.9 s on performance cores, 17.7 million cycles per 5.9 ms of
+	 * CPU time is 3000 MHz, and 11.8 J. */
+	require((run_words(row) == std::vector<std::string>{"120", "45", "2",
+			"1", "12", "5000", "1", "2", "3", "158", "5900", "5000", "74",
+			"3000", "11800"}),
+		"a row did not say what the run did in its interval");
+
+	/* A source that has nothing to say is "-": here the host's state, the
+	 * cache and the usage, while frames, CPU time and the carriers answer. */
+	F third = second;
+	third.sources = F::frames | F::cpu | F::carriers;
+	third.flushes = 1180;
+	third.longest_gap_ns = 16'000'000ULL;
+	third.cpu_ns = second.cpu_ns + 2'000'000'000ULL;
+	third.carrier_ns = second.carrier_ns + 1'000'000'000ULL;
+	script_set(third);
+	uml::runtime::checkpoint_session_memory();
+	rows = history_rows(slot_of(read_file(path)));
+	require(rows.size() == 3 &&
+		(run_words(rows[2]) == std::vector<std::string>{"60", "16", "-",
+			"-", "12", "5000", "-", "-", "-", "-", "2000", "1000", "-",
+			"-", "-"}),
+		"absent sources were not left out of a row");
+
+	/* A counter that fell, as the carriers' time does when one ends, counts
+	 * nothing for that interval, and the next is measured from the new
+	 * reading. */
+	F fourth = third;
+	fourth.carrier_ns = 400'000'000ULL;
+	fourth.flushes = 1180;
+	script_set(fourth);
+	uml::runtime::checkpoint_session_memory();
+	F fifth = fourth;
+	fifth.carrier_ns = 900'000'000ULL;
+	script_set(fifth);
+	uml::runtime::checkpoint_session_memory();
+	rows = history_rows(slot_of(read_file(path)));
+	require(rows.size() == 5 &&
+		run_words(rows[3])[0] == "0" && run_words(rows[3])[10] == "0" &&
+		run_words(rows[3])[11] == "0" && run_words(rows[4])[11] == "500",
+		"a counter that fell was not counted as nothing");
+
+	/* A platform with no source for the cycles (iOS) answers the rest of the
+	 * usage and leaves the cycles per CPU second out. */
+	F sixth = second;
+	sixth.sources = second.sources & ~F::cycle_count;
+	script_set(sixth);
+	uml::runtime::checkpoint_session_memory();
+	F seventh = sixth;
+	seventh.flushes += 60;
+	seventh.cpu_ns += 2'000'000'000ULL;
+	seventh.performance_ns += 1'500'000'000ULL;
+	seventh.energy_nj += 3'000'000'000ULL;
+	script_set(seventh);
+	uml::runtime::checkpoint_session_memory();
+	rows = history_rows(slot_of(read_file(path)));
+	require(rows.size() == 7 &&
+		run_words(rows[6])[0] == "60" && run_words(rows[6])[10] == "2000" &&
+		run_words(rows[6])[12] == "75" && run_words(rows[6])[13] == "-" &&
+		run_words(rows[6])[14] == "3000",
+		"a platform without cycles did not leave only them out");
+	finish_session(path);
+}
+
+/* A row of the older history stands for the checkpoints between it and the
+ * older row before, and says what the run did in all of them. */
+void test_older_rows_sum_their_window()
+{
+	using uml::runtime::memory_history_older;
+	using uml::runtime::memory_history_older_stride;
+	using uml::runtime::memory_history_recent;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_memory_terms_reader(&fixed_terms);
+	uml::runtime::set_run_figures_reader(&stepped_figures);
+	set_step(0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	constexpr std::uint64_t last = 400;
+	for (std::uint64_t step = 1; step <= last; ++step) {
+		set_step(step);
+		uml::runtime::checkpoint_session_memory();
+	}
+	const std::string slot = slot_of(read_file(path));
+	const auto rows = history_rows(slot);
+	require(rows.size() == memory_history_recent + memory_history_older,
+		"the history did not keep its sizes");
+	/* The recent rows are each one checkpoint: 10 frames, 100 ms of CPU
+	 * time, 60 of it on performance cores. */
+	for (std::size_t n = memory_history_older; n < rows.size(); ++n) {
+		const auto run = run_words(rows[n]);
+		require(run[0] == "10" && run[1] == "20" && run[10] == "100" &&
+			run[11] == "80" && run[12] == "60" && run[13] == "3000" &&
+			run[14] == "200", "a recent row is not one interval");
+	}
+	/* The older rows are the checkpoints at multiples of the stride that
+	 * have left the recent history, newest last. */
+	const std::uint64_t highest = ((last - memory_history_recent) /
+		memory_history_older_stride) * memory_history_older_stride;
+	const std::uint64_t oldest = highest -
+		(memory_history_older - 1) * memory_history_older_stride;
+	require(spike_step + memory_history_older_stride > oldest &&
+			spike_step <= oldest,
+		"the test's spike is not in the oldest older row's window");
+	for (std::size_t n = 0; n < memory_history_older; ++n) {
+		const std::uint64_t sampled = oldest + n * memory_history_older_stride;
+		const auto run = run_words(rows[n]);
+		/* frames over the stride's checkpoints, the longest gap among them,
+		 * the CPU times summed and the states at the sampled one. */
+		const bool spike = n == 0;
+		const auto per = [&](std::uint64_t divisor) {
+			return std::to_string(sampled / divisor -
+				(sampled - memory_history_older_stride) / divisor);
+		};
+		require(run[0] == std::to_string(10 * memory_history_older_stride) &&
+			run[1] == (spike ? "900" : "20") &&
+			run[2] == std::to_string(sampled % 4) &&
+			run[3] == std::to_string(sampled % 3) &&
+			run[6] == per(10) && run[7] == per(5) && run[8] == per(2) &&
+			run[9] == "150" &&
+			run[10] == std::to_string(100 * memory_history_older_stride) &&
+			run[11] == std::to_string(80 * memory_history_older_stride) &&
+			run[12] == "60" && run[13] == "3000" &&
+			run[14] == std::to_string(200 * memory_history_older_stride),
+			"an older row did not sum its window: " + std::to_string(n) +
+			" " + slot);
+	}
+	/* The seconds still rise through both histories. */
+	long previous = -1;
+	for (const auto &row : rows) {
+		const long seconds = std::strtol(row[1].c_str(), nullptr, 10);
+		require(seconds >= previous, "the history is out of order");
+		previous = seconds;
+	}
+	finish_session(path);
+}
+
+/* The terms a test's reader reports when everything is huge. */
+uml::runtime::MemoryTerms huge_terms(bool) noexcept
+{
+	constexpr std::uint64_t huge = std::uint64_t{900000000} << 20;
+	return {
+		.guest_held = huge, .gpu_budget = huge, .gpu_held = huge,
+		.gpu_age_ms = 3500, .graphics = huge, .media = huge, .cache = huge,
+		.heaps = huge, .malloc_allocated = huge, .malloc_in_use = huge,
+		.internal = huge, .compressed = huge,
+	};
+}
+
+uml::runtime::RunFigures huge_figures(bool) noexcept
+{
+	const std::lock_guard guard{script.lock};
+	const std::uint64_t huge = std::uint64_t{1} << 60;
+	uml::runtime::RunFigures figures;
+	figures.sources = 0xff;
+	figures.flushes = huge / 1000 * (script.step + 1);
+	figures.longest_gap_ns = huge;
+	figures.thermal = 3;
+	figures.pressure = 2;
+	figures.reliefs = huge / 1000 * (script.step + 1);
+	figures.shed_accounts = figures.reliefs;
+	figures.renewals = figures.reliefs;
+	figures.largest_open = huge;
+	figures.cpu_ns = huge / 1000 * (script.step + 1);
+	figures.carrier_ns = figures.cpu_ns;
+	figures.performance_ns = figures.cpu_ns;
+	figures.cycles = figures.cpu_ns;
+	figures.energy_nj = figures.cpu_ns;
+	return figures;
+}
+
+/* A row has a size whatever its figures are, and a history that does not fit
+ * the slot loses its oldest rows, never the newest. */
+void test_rows_never_overflow_the_slot()
+{
+	uml::runtime::reset_session_record();
+	uml::runtime::set_memory_terms_reader(&huge_terms);
+	uml::runtime::set_run_figures_reader(&huge_figures);
+	set_step(0);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	uml::runtime::end_session_record(SessionEnd::stopped, 0);
+	for (std::uint64_t step = 1; step <= 400; ++step) {
+		set_step(step);
+		uml::runtime::checkpoint_session_memory();
+	}
+	const std::string record = read_file(path);
+	const std::string slot = slot_of(record);
+	const auto rows = history_rows(slot);
+	require(!rows.empty() && slot[slot_bytes - 1] == '\n',
+		"the slot lost its end");
+	const auto &newest = rows.back();
+	require(newest.size() == row_words, "the newest row was cut");
+	/* The newest checkpoint is in the slot, which the seconds of a session
+	 * that ran nothing cannot tell from the one before it: the row count
+	 * shows rows were dropped from the old end. */
+	require(rows.size() < uml::runtime::memory_history_recent +
+			uml::runtime::memory_history_older &&
+		rows.size() >= uml::runtime::memory_history_recent,
+		"the oldest rows were not the ones dropped: " +
+		std::to_string(rows.size()));
+	for (const auto &row : rows)
+		require(row.size() == row_words, "a row was cut");
+	require(record.substr(state_offset).starts_with("state ended\n"),
+		"the slot touched the state");
+	finish_session(path);
 }
 
 void *crash_on_a_thread(void *)
@@ -430,7 +853,7 @@ void test_size_bound_and_stall_slot()
 {
 	using uml::runtime::session_record_max_bytes;
 	using uml::runtime::session_stall_slot_bytes;
-	static_assert(session_record_max_bytes == 13824,
+	static_assert(session_record_max_bytes == 17920,
 		"the record's largest size is stated in the documentation");
 	uml::runtime::reset_session_record();
 	const std::string path = temporary_record();
@@ -561,7 +984,7 @@ void test_network_slot()
 	using uml::runtime::NetworkNotice;
 	using uml::runtime::session_network_offset;
 	using uml::runtime::session_network_slot_bytes;
-	static_assert(session_network_offset == 8192 &&
+	static_assert(session_network_offset == 12288 &&
 			session_network_slot_bytes == 512 &&
 			state_offset == session_network_offset +
 				session_network_slot_bytes,
@@ -684,6 +1107,9 @@ int main(int argc, char **argv)
 		require(argc == 2, "the golden network slot file is not given");
 		the_network_slot_matches_the_golden_file(argv[1]);
 		test_memory_terms();
+		test_run_figures_in_a_row();
+		test_older_rows_sum_their_window();
+		test_rows_never_overflow_the_slot();
 		test_kernel_crash();
 		test_host_fault();
 		test_size_bound_and_stall_slot();
