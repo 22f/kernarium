@@ -9,6 +9,10 @@ import XCTest
 /// log the session shows as one accessibility element. XCUITest's synthetic
 /// keys and pointer events are the hardware.
 ///
+/// The probe's guest registers each device it is plugged, as a kernel with
+/// the hot-plug topic does; one test launches the other kind, which never
+/// registers (the accepted kernel).
+///
 /// XCUITest has no pointer on an iPhone ("Pointer events are not supported for
 /// this device"), so the iPhone's tests are the keys and the absence of the
 /// iPad's mouse setting.
@@ -19,11 +23,20 @@ final class HardwareInputUITests: XCTestCase {
     override func setUp() async throws {
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchEnvironment["ANDARIUM_INPUT_PROBE"] = "1"
+        try launch(probe: "1")
+    }
+
+    /// Launches the application with the input probe: `1` is a guest that
+    /// registers its devices, `unregistered` one that never does.
+    private func launch(probe mode: String) throws {
+        app.launchEnvironment["ANDARIUM_INPUT_PROBE"] = mode
         app.launch()
         XCTAssertTrue(probe.waitForExistence(timeout: 90), "the session did not open")
         // The display takes the keyboard focus once it is in a window.
         sleep(2)
+        // And it is not the software keyboard that it takes it with, before
+        // any hardware key has been typed either.
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the guest's focus raised the software keyboard at launch")
     }
 
     // MARK: Reading the guest's end
@@ -77,26 +90,48 @@ final class HardwareInputUITests: XCTestCase {
     /// around each synthetic event, and the first event after a launch can come
     /// before that report and reach no view (the display's own log shows no
     /// press at all); a person would press again.
+    ///
+    /// How many attempts it took goes to the results as an attachment, so that
+    /// a test that has come to need many shows it.
     @discardableResult
-    private func perform(_ action: () -> Void, until matches: (String) -> Bool, attempts: Int = 4) -> Bool {
-        for _ in 0..<attempts {
+    private func perform(
+        _ action: () -> Void, until matches: (String) -> Bool, attempts: Int = 4, in function: String = #function
+    ) -> Bool {
+        for attempt in 1...attempts {
             action()
-            if waitForLine(timeout: 8, matches) { return true }
+            if waitForLine(timeout: 8, matches) {
+                noteAttempts(attempt, of: attempts, in: function)
+                return true
+            }
         }
+        noteAttempts(attempts, of: attempts, in: function, succeeded: false)
         return false
     }
 
     /// The same for a condition that is not in the log.
-    private func perform(_ action: () -> Void, untilTrue condition: () -> Bool, attempts: Int = 4) -> Bool {
-        for _ in 0..<attempts {
+    private func perform(
+        _ action: () -> Void, untilTrue condition: () -> Bool, attempts: Int = 4, in function: String = #function
+    ) -> Bool {
+        for attempt in 1...attempts {
             action()
             let deadline = Date().addingTimeInterval(8)
             while Date() < deadline {
-                if condition() { return true }
+                if condition() {
+                    noteAttempts(attempt, of: attempts, in: function)
+                    return true
+                }
                 usleep(200_000)
             }
         }
+        noteAttempts(attempts, of: attempts, in: function, succeeded: false)
         return false
+    }
+
+    private func noteAttempts(_ used: Int, of attempts: Int, in function: String, succeeded: Bool = true) {
+        let note = XCTAttachment(string: "\(function): \(used) of \(attempts) attempts\(succeeded ? "" : ", failed")")
+        note.name = "attempts \(function)"
+        note.lifetime = .keepAlways
+        add(note)
     }
 
     private func waitForValue(of element: XCUIElement, _ value: String, timeout: TimeInterval = 15) -> Bool {
@@ -126,10 +161,16 @@ final class HardwareInputUITests: XCTestCase {
         // A tap can be lost while the host is loaded: tap Done again if the
         // sheet is still there.
         let bar = app.navigationBars["Settings"]
+        var taps = 0
         for _ in 0..<3 where bar.exists {
             app.buttons["Done"].tap()
+            taps += 1
             if bar.waitForNonExistence(timeout: 10) { break }
         }
+        let note = XCTAttachment(string: "closing Settings took \(taps) of 3 taps on Done")
+        note.name = "attempts closeSettings"
+        note.lifetime = .keepAlways
+        add(note)
         XCTAssertTrue(bar.waitForNonExistence(timeout: 20), "Settings did not close")
         sleep(1)
     }
@@ -216,12 +257,22 @@ final class HardwareInputUITests: XCTestCase {
     }
 
     func testASheetWithNoFieldTakesNoKeyFromTheGuestEither() {
+        // The guest does take a key while no sheet is up: the negative below
+        // is not a guest that takes none.
+        XCTAssertTrue(perform({ app.typeKey("d", modifierFlags: []) }, until: { $0 == "key 0x7 up" }), "log: \(lines)")
+        let before = lines.filter { $0.hasPrefix("key ") }.count
+
         openSettings()
+        // The field is not focused: no text view has the key, and the sheet
+        // does not give it to the guest behind it.
         app.typeKey("d", modifierFlags: [])
         sleep(2)
-        XCTAssertFalse(lines.contains { $0.contains("key 0x7") }, "log: \(lines)")
+        XCTAssertEqual(
+            lines.filter { $0.hasPrefix("key ") }.count, before, "the guest received a key the sheet took: \(lines)")
         closeSettings()
-        XCTAssertTrue(perform({ app.typeKey("d", modifierFlags: []) }, until: { $0 == "key 0x7 up" }), "log: \(lines)")
+        XCTAssertTrue(
+            perform({ app.typeKey("e", modifierFlags: []) }, until: { $0 == "key 0x8 up" }),
+            "the guest did not take the keys back: \(lines)")
     }
 
     // MARK: Pointer (iPad)
@@ -289,10 +340,12 @@ final class HardwareInputUITests: XCTestCase {
         let window = app.windows.firstMatch
         let a = window.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.3))
         let b = window.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5))
-        a.hover()
-        b.hover()
-        b.click()
-        sleep(4)
+        // The click is the touchscreen's: a finger down on the guest, and no
+        // mouse. (Without the touch the absence of the mouse proves nothing.)
+        XCTAssertTrue(
+            perform({ a.hover(); b.hover(); b.click() }, until: { $0.hasPrefix("touch ") && $0.hasSuffix(" down") }),
+            "the click was not a touch: \(lines)")
+        sleep(2)
         XCTAssertFalse(lines.contains { $0.hasPrefix("connect mouse") || $0.hasPrefix("pointer ") }, "log: \(lines)")
 
         openSettings()
@@ -302,6 +355,34 @@ final class HardwareInputUITests: XCTestCase {
         closeSettings()
         XCTAssertTrue(
             perform({ a.hover(); b.hover() }, until: { $0 == "connect mouse 1" }), "the mouse did not return: \(lines)")
+        // The click is the mouse's now, and no longer a finger.
+        let touchesBefore = lines.filter { $0.hasPrefix("touch ") }.count
+        XCTAssertTrue(
+            perform({ b.click() }, until: { $0.hasPrefix("pointer ") && $0.contains(" b1 ") }),
+            "the click was not the mouse's: \(lines)")
+        XCTAssertEqual(
+            lines.filter { $0.hasPrefix("touch ") }.count, touchesBefore, "the mouse's click was also a touch: \(lines)")
+    }
+
+    func testOnAGuestThatNeverRegistersTheMouseAClickStaysATouchAndStillPlugsTheMouse() throws {
+        try XCTSkipUnless(isPad, "XCUITest has no pointer on an iPhone")
+        // The accepted kernel follows no configuration change: the mouse is
+        // plugged and never registered, and the pointer must behave as it does
+        // with no mouse.
+        app.terminate()
+        try launch(probe: "unregistered")
+        let window = app.windows.firstMatch
+        let a = window.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.3))
+        let b = window.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.5))
+        XCTAssertTrue(
+            perform({ a.hover(); b.hover(); b.click() }, until: { $0.hasPrefix("touch ") && $0.hasSuffix(" down") }),
+            "the click was not a touch: \(lines)")
+        // Using the mouse plugs it, the click stays a tap, and the guest
+        // hears nothing from the pointer.
+        XCTAssertTrue(waitForLine(containing: "connect mouse 1"), "the mouse was not plugged: \(lines)")
+        b.scroll(byDeltaX: 0, deltaY: 60)
+        sleep(2)
+        XCTAssertFalse(lines.contains { $0.hasPrefix("pointer ") || $0.hasPrefix("mouse ") }, "log: \(lines)")
     }
 
     // MARK: iPhone

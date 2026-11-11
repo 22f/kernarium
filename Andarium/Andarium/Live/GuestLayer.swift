@@ -25,7 +25,8 @@ struct GuestLayer: View {
                     // keys and the system pointer, except while a sheet or an
                     // alert needs them.
                     hardwareInput: (model.driver as? LiveRuntime)?.keyboardMouse.input,
-                    hardwareFocus: model.guestHasKeys
+                    hardwareFocus: model.guestHasKeys,
+                    contactDidChange: { [model] slot, pressed in Self.contactDidChange(model, slot, pressed) }
                 ) { view, geometry in
                     (model.driver as? LiveRuntime)?.viewDidLayout(view, geometry)
                 }
@@ -39,6 +40,13 @@ struct GuestLayer: View {
                 SceneCoverageReader { coversScreen = $0 }
             }
         }
+    }
+
+    /// A UI test's launch sees which touches reach the guest's touchscreen.
+    private static func contactDidChange(_ model: AppModel, _ slot: Int, _ pressed: Bool) {
+        #if !APP_STORE
+        model.inputProbe?.record("touch \(slot) \(pressed ? "down" : "up")")
+        #endif
     }
 
     private var showsGuest: Bool {
