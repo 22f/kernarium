@@ -12,7 +12,7 @@ import Testing
 struct SendFeedbackTests {
     private func information(
         machine: SendFeedbackInformation.VirtualMachine? = .init(
-            vcpus: 6, memoryMiB: 2560, display: "1206 x 2622 px, Retina", graphicsMiB: 1157),
+            vcpus: 6, memoryMiB: 2560, display: "1206 x 2622 px, 480 dpi", graphicsMiB: 1157),
         running: Int? = 2520
     ) -> SendFeedbackInformation {
         SendFeedbackInformation(
@@ -61,7 +61,7 @@ struct SendFeedbackTests {
             "Device: iPhone18,1",
             "iOS: 27.2",
             "Language: en-US",
-            "Virtual machine: 6 vCPUs, 2.5 GiB memory, display 1206 x 2622 px, Retina, graphics memory about 1.13 GiB",
+            "Virtual machine: 6 vCPUs, 2.5 GiB memory, display 1206 x 2622 px, 480 dpi, graphics memory about 1.13 GiB",
             "Android: r20",
             "Running: yes, for 42 min",
             "Free space: 41.6 GiB",
@@ -77,8 +77,8 @@ struct SendFeedbackTests {
         #expect(stopped.lines.contains("Running: no"))
         #expect(stopped.lines.contains { $0.hasPrefix("Virtual machine: 6 vCPUs") })
         let withoutEstimate = information(
-            machine: .init(vcpus: 1, memoryMiB: 1536, display: "1x", graphicsMiB: nil))
-        #expect(withoutEstimate.lines.contains("Virtual machine: 1 vCPU, 1.5 GiB memory, display 1x"))
+            machine: .init(vcpus: 1, memoryMiB: 1536, display: "720 x 1560 px, 320 dpi", graphicsMiB: nil))
+        #expect(withoutEstimate.lines.contains("Virtual machine: 1 vCPU, 1.5 GiB memory, display 720 x 1560 px, 320 dpi"))
     }
 
     @Test func aRunningTimeIsInTheLargestUnitThatFits() {

@@ -19,9 +19,11 @@ extension AppModel {
     /// The basic information that ends the mail.
     func feedbackInformation() -> SendFeedbackInformation {
         let bundle = Bundle.main
+        // The display as the guest has it, in the plain words the receiver reads.
+        let display = resolutionLayout.map { "\($0.width) x \($0.height) px, \($0.dotsPerInch) dpi" } ?? "not measured"
         let machine = guest.map { guest in
             SendFeedbackInformation.VirtualMachine(
-                vcpus: guest.cores, memoryMiB: guest.memoryMiB, display: retina ? "Retina" : "1x",
+                vcpus: guest.cores, memoryMiB: guest.memoryMiB, display: display,
                 graphicsMiB: host.memory.graphicsMemoryMiB(forMemory: guest.memoryMiB, vCPUs: guest.cores))
         }
         return SendFeedbackInformation(

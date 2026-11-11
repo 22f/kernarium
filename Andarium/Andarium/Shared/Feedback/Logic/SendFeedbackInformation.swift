@@ -14,7 +14,7 @@ nonisolated struct SendFeedbackInformation: Equatable, Sendable {
     struct VirtualMachine: Equatable, Sendable {
         var vcpus: Int
         var memoryMiB: Int
-        /// How the display is set, in words ("1206 x 2622 px, Retina").
+        /// How the display is set, in plain words ("1206 x 2622 px, 480 dpi").
         var display: String
         /// The loader's estimate of graphics memory for these settings.
         var graphicsMiB: Int?
