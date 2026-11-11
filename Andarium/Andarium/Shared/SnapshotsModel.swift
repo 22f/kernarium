@@ -42,6 +42,7 @@ final class SnapshotsModel {
     /// has not changed has none yet, so a row shows its last figure and not a
     /// gap. An operation or a run clears them (`invalidate`).
     private var knownFigures: [SnapshotID: SnapshotFigure] = [:]
+    private var knownKept: [SnapshotID: SnapshotFigure] = [:]
     private var knownTotal: SnapshotFigure?
     private var knownUpdateCopy: SnapshotFigure?
 
@@ -67,6 +68,9 @@ final class SnapshotsModel {
     /// The snapshot just taken, marked for a moment.
     private(set) var fresh: SnapshotID?
 
+    /// The operation that was under way last, for the revision change that ends
+    /// it: the driver clears the operation before it counts it as finished.
+    @ObservationIgnored private var lastOperation: SnapshotWork?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var inFlight: (revision: Int, task: Task<Void, Never>)?
     @ObservationIgnored private var pendingName: (id: SnapshotID, name: String)?
@@ -112,9 +116,10 @@ final class SnapshotsModel {
         return isMeasured ? listing.space.snapshotsUse : knownTotal
     }
 
-    /// What it would take on its own, where the listing is measured and current; nil otherwise.
+    /// What it would take on its own, as `frees` has it: measured now, or the
+    /// last figure while a disk that did not change is read again; nil otherwise.
     func kept(_ item: SnapshotSummary) -> SnapshotFigure? {
-        isMeasured ? item.kept : nil
+        isMeasured ? item.kept : knownKept[item.id]
     }
 
     /// What an unfinished update's own copy holds; nil when none is.
@@ -259,6 +264,7 @@ final class SnapshotsModel {
         if new.isMeasured {
             stale = false
             knownFigures = Dictionary(uniqueKeysWithValues: new.items.map { ($0.id, $0.freesWhenDeleted) })
+            knownKept = Dictionary(uniqueKeysWithValues: new.items.map { ($0.id, $0.kept) })
             knownTotal = new.space.snapshotsUse
             knownUpdateCopy = new.space.updateCopy
         }
@@ -286,6 +292,7 @@ final class SnapshotsModel {
         inFlight = nil
         stale = true
         knownFigures = [:]
+        knownKept = [:]
         knownTotal = nil
         knownUpdateCopy = nil
     }
@@ -299,6 +306,7 @@ final class SnapshotsModel {
         selection = nil
         fresh = nil
         pendingName = nil
+        lastOperation = nil
         renameTask?.cancel()
         // What the screens held belongs to the guest that is gone.
         problem = nil
@@ -312,10 +320,17 @@ final class SnapshotsModel {
 
     /// The driver finished one more operation, or a run began or ended: the
     /// listing is older than the disk. Its figures give way to the measuring
-    /// state, and the disk is read again unless a run holds it.
+    /// state, and the disk is read again unless a run holds it. A rename that
+    /// finished changed no figure: the names are read again and the figures
+    /// stay shown (the Delete alert's size stays out until the new reading).
     func activityChanged(from old: SnapshotActivity, to new: SnapshotActivity) {
-        guard new.revision != old.revision || new.runtimeActive != old.runtimeActive else { return }
-        invalidate()
+        if let operation = new.operation { lastOperation = operation }
+        let finished = new.revision != old.revision
+        let runChanged = new.runtimeActive != old.runtimeActive
+        guard finished || runChanged else { return }
+        let renamed = finished && !runChanged && lastOperation == .rename
+        if finished { lastOperation = nil }
+        if !renamed { invalidate() }
         guard listing != nil, !new.runtimeActive else { return }
         Task { @MainActor [weak self] in await self?.reload() }
     }

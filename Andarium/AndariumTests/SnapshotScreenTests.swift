@@ -322,6 +322,38 @@ struct SnapshotsModelTests {
         }
     }
 
+    @Test func aRenameChangesNoFigureAndTheFiguresStayShown() async {
+        let a = SnapshotSample.item("a", frees: 5 << 20, kept: 2 << 30)
+        let b = SnapshotSample.item("b", ago: 2, frees: 7 << 20, kept: 3 << 30)
+        let s = setup([a, b])
+        await s.store.reload()
+        let total = s.store.total
+        #expect(total != nil)
+        // The name typed in a page is saved, and the disk is read again.
+        s.driver.holdMeasuring = true
+        s.store.edit(name: "A renamed", of: a.id)
+        let saving = Task { await s.store.flushName() }
+        #expect(await until { s.driver.log == ["rename A renamed"] && !s.store.isMeasured })
+        for item in s.store.items {
+            #expect(s.store.frees(item) != nil && s.store.kept(item) != nil, "\(item.name): no spinner for a rename")
+        }
+        #expect(s.store.frees(s.store.item(a.id)!) == SnapshotFigure(bytes: 5 << 20))
+        #expect(s.store.kept(s.store.item(b.id)!) == SnapshotFigure(bytes: 3 << 30))
+        #expect(s.store.total == total, "Home's row keeps its figure")
+        #expect(s.store.freesNow(s.store.item(a.id)!) == nil, "the Delete alert's size waits for the new reading")
+        s.driver.releaseMeasuring()
+        await saving.value
+        #expect(s.store.isMeasured && s.store.item(a.id)?.name == "A renamed")
+        #expect(s.store.frees(s.store.item(a.id)!) == SnapshotFigure(bytes: 5 << 20))
+        // An operation that does change figures still gives way to the measuring state.
+        s.driver.holdMeasuring = true
+        let deleting = Task { await s.store.delete(b.id) }
+        #expect(await until { s.store.count == 1 })
+        #expect(s.store.frees(s.store.items[0]) == nil && s.store.total == nil)
+        s.driver.releaseMeasuring()
+        await deleting.value
+    }
+
     @Test func theDeleteAlertNamesASizeOnlyFromAListingMeasuredNow() async {
         let a = SnapshotSample.item("a", frees: 5 << 20)
         let s = setup([a, SnapshotSample.item("b", ago: 2)])
