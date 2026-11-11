@@ -20,9 +20,15 @@
  * test-build hooks of the resolver inject what the daemon would do (a
  * refusal, a failed start, an answer that never comes, a dead connection, a
  * full table), and the guest must still get SERVFAIL for each.
+ *
+ * The last part reads a real session record: the provider's counts go through
+ * the C entry the runtime uses into the runtime's session record, as the
+ * Kernarium runtime wires them, and the record's network slot must show a DHCP
+ * exchange and the connections made.
  */
 #include "network_counters.hpp"
 #include "provider.hpp"
+#include "session_record.hpp"
 #include "slirp_tcp_harness.hpp"
 #include "uml_slirp_net.h"
 
@@ -34,6 +40,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <thread>
@@ -661,6 +669,110 @@ void check_resolver_wiring()
 	}
 }
 
+/* The provider the session record's reader reads, as the Kernarium runtime
+ * publishes its own for the runtime's reader. */
+uml::network::SlirpProvider *recorded_provider;
+
+bool read_recorded_counts(uml::runtime::SessionNetworkCounts &counts) noexcept
+{
+	uml_slirp_net_counters read{};
+	if (recorded_provider == nullptr ||
+	    uml_slirp_net_read_counters(recorded_provider, &read) != 0)
+		return false;
+	counts = {.dns_answered = read.dns_answered,
+		  .dns_policy_denied = read.dns_policy_denied,
+		  .dns_timed_out = read.dns_timed_out,
+		  .dns_failed = read.dns_failed,
+		  .dhcp_discovers = read.dhcp_discovers,
+		  .dhcp_requests = read.dhcp_requests,
+		  .dhcp_acks = read.dhcp_acks,
+		  .tcp_attempts = read.tcp_attempts,
+		  .tcp_established = read.tcp_established,
+		  .tcp_unreachable = read.tcp_unreachable,
+		  .tcp_reset = read.tcp_reset};
+	return true;
+}
+
+/* A guest that gets its lease and makes one connection and one that is reset,
+ * in a session record: the slot says so in words, as Andarium reads them. */
+void check_session_record()
+{
+	const char *label = "the session record";
+	Rig rig;
+	if (!rig.opened)
+		return;
+	/* The provider counted before the session began: the slot must hold only
+	 * what came after. */
+	const Address any{0, 0, 0, 0};
+	const Address broadcast{255, 255, 255, 255};
+	char name[] = "/tmp/uml-counters-probe-record-XXXXXX";
+	const int descriptor = ::mkstemp(name);
+	if (descriptor < 0) {
+		fail(label, "no temporary record");
+		return;
+	}
+	::close(descriptor);
+	const std::string path = name;
+	recorded_provider = &rig.provider;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_network_counts_reader(&read_recorded_counts);
+	if (!uml::runtime::begin_session_record(path, {})) {
+		fail(label, "the record did not open");
+		recorded_provider = nullptr;
+		uml::runtime::set_network_counts_reader(nullptr);
+		return;
+	}
+	if (!rig.guest.send(udp_frame(any, broadcast, 68, 67, dhcp_message(1))) ||
+	    !rig.guest.receive([](const Bytes &frame) {
+		    return server_dhcp_type(frame) == 2;
+	    }) ||
+	    !rig.guest.send(udp_frame(any, broadcast, 68, 67, dhcp_message(3))) ||
+	    !rig.guest.receive([](const Bytes &frame) {
+		    return server_dhcp_type(frame) == 5;
+	    }))
+		fail(label, "the guest did not get its lease");
+	Listener listener;
+	const std::uint16_t closed = unused_loopback_port();
+	(void)rig.guest.send(tcp_frame(guest_ip, gateway, 45000, listener.port,
+				       100, 0, tcp_syn, 65535));
+	(void)rig.guest.receive([&](const Bytes &frame) {
+		const auto segment = parse_tcp(frame);
+		return segment && segment->source_port == listener.port;
+	});
+	(void)rig.guest.send(tcp_frame(guest_ip, gateway, 45001, closed, 200, 0,
+				       tcp_syn, 65535));
+	(void)rig.guest.receive([&](const Bytes &frame) {
+		const auto segment = parse_tcp(frame);
+		return segment && segment->source_port == closed;
+	});
+	uml::runtime::checkpoint_session_memory();
+	std::ifstream file{path, std::ios::binary};
+	const std::string text{std::istreambuf_iterator<char>{file}, {}};
+	const std::size_t offset = uml::runtime::session_network_offset;
+	const std::string slot = text.size() >= offset +
+			uml::runtime::session_network_slot_bytes ?
+		text.substr(offset, uml::runtime::session_network_slot_bytes) :
+		std::string{};
+	const auto has = [&](const char *line) {
+		return slot.find(line) != std::string::npos;
+	};
+	if (!slot.starts_with("network 1\n") ||
+	    !has("net-dhcp discovers 1 requests 1 acks 1\n") ||
+	    !has("net-tcp attempts 2 established 1 unreachable 0 reset 1\n") ||
+	    !has("net-notice denials 0 now none\n"))
+		fail(label, "the network slot is wrong: " + slot);
+	/* The slot's lines, without the blanks that pad it. */
+	if (slot.size() > 2)
+		std::fprintf(stderr, "network slot:\n%.*s",
+			     static_cast<int>(slot.find_last_of(
+						      '\n', slot.size() - 2) + 1),
+			     slot.c_str());
+	uml::runtime::set_network_counts_reader(nullptr);
+	uml::runtime::reset_session_record();
+	recorded_provider = nullptr;
+	(void)::unlink(path.c_str());
+}
+
 /* The frames of an unmodified SLiRP, through the observer: a destination the
  * host cannot route to is answered with ICMP net unreachable, which the guest
  * reads as unreachable. */
@@ -725,6 +837,7 @@ int main(void)
 	check_provider();
 	check_slirp_errors();
 	check_resolver_wiring();
+	check_session_record();
 	if (failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", failures);
 		return 1;

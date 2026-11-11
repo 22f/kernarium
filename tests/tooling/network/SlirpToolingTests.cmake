@@ -63,4 +63,7 @@ if(UML_BUILD_NETWORK_PROVIDER)
             LABELS network
             TIMEOUT ${_uml_slirp_timeout})
     endforeach()
+    # The counters probe also reads a real session record.
+    target_link_libraries(uml_slirp_counters_tests PRIVATE
+        UML::RuntimeSessionRecord)
 endif()
