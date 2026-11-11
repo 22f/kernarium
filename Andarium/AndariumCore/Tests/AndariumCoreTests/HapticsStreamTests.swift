@@ -44,14 +44,11 @@ struct HapticsStreamTests {
         while !events.connected, Date() < deadline { usleep(2000) }
         #expect(events.connected)
         let acknowledgement = HapticsAcknowledgement(sequence: 1, microseconds: 5, result: .played)
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        let finished = returnsWithoutWaiting {
             // An acknowledgement is 17 bytes and the socket holds some hundred: more than it takes.
             for _ in 0..<2_000 { stream.send(acknowledgement) }
-            done.signal()
         }
-        // The peer is closed first if a regression left the sender blocked.
-        let finished = done.wait(timeout: .now() + 5) == .success
+        // The peer is closed if a regression left the sender blocked, which frees it.
         if !finished, let peer = guest.latest { close(peer) }
         #expect(finished, "a send waited for a guest that reads nothing")
         // What cannot be written is dropped (the guest never waits for it); the connection stays.
