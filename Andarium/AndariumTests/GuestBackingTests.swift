@@ -125,6 +125,11 @@ struct GuestBackingTests {
             )
             let seen = pixels(of: lease.window, at: outsideSamples(of: lease.window))
             #expect(!seen.isEmpty && seen.allSatisfy { $0 == [0, 0, 0, 255] }, "\(phase): \(seen)")
+            // Another layout pass leaves both as they are: exactly the black
+            // the controller compares against, so it assigns nothing.
+            controller.view.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            #expect(controller.view.backgroundColor == UIColor.black && lease.window.backgroundColor == UIColor.black, "\(phase)")
         }
 
         // Out of the guest's phases the screens are the system's again, as they were.

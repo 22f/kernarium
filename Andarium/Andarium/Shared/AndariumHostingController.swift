@@ -107,7 +107,8 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     /// the area outside the safe area before it lays out) is these two, which
     /// follow the system and are white in the light appearance. Home, sheets
     /// and the session's own controls are SwiftUI's and keep following the
-    /// system.
+    /// system. Every layout pass runs this, so a backing is assigned only when
+    /// it is not black already: a layer is not dirtied for nothing.
     private func updateBacking() {
         guard isViewLoaded else { return }
         if model.phase.showsGuestDisplay {
@@ -115,14 +116,14 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
                 viewPaintedForGuest = true
                 viewBackingBeforeGuest = view.backgroundColor
             }
-            view.backgroundColor = .black
+            if view.backgroundColor != .black { view.backgroundColor = .black }
             if let window = view.window {
                 if windowPaintedForGuest !== window {
                     restoreWindowBacking()
                     windowPaintedForGuest = window
                     windowBackingBeforeGuest = window.backgroundColor
                 }
-                window.backgroundColor = .black
+                if window.backgroundColor != .black { window.backgroundColor = .black }
             }
         } else {
             if viewPaintedForGuest {
