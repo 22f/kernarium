@@ -173,6 +173,83 @@ if(UML_V4L2_MMAP_CAPTURE_PROBE_BINARY)
         GPUS 1)
 endif()
 
+# The Virtio camera's capture and metadata nodes, on the synthetic camera's
+# tablet profile: live, where frames carry the chart and stills are taken, and
+# started blocked, where frames are black and a still fails. The probe builds
+# in the guest; a live session boots twice, because Bayer stills are offered
+# once the host has learned the camera's colour data.
+foreach(_camera IN ITEMS synthetic blocked)
+    if(_camera STREQUAL synthetic)
+        set(_camera_suffix "")
+        set(_camera_timeout 1500)
+    else()
+        set(_camera_suffix "-${_camera}")
+        set(_camera_timeout 900)
+    endif()
+    uml_add_guest_integration_test(
+        NAME guest-v4l2-capture${_camera_suffix}
+        SCRIPT video/run_camera_capture.py
+        ARGS --mode ${_camera}
+        LABELS guest;video
+        TIMEOUT ${_camera_timeout}
+        CPUS 2)
+endforeach()
+
+# A camera stream carries on across the guest's system suspend, by the host's
+# route and by the guest's own: the driver stops its streams first, so the
+# device holds nothing and is not reset.
+uml_add_guest_integration_test(
+    NAME guest-v4l2-capture-suspend
+    SCRIPT video/run_camera_suspend.py
+    LABELS guest;video
+    TIMEOUT 900
+    CPUS 2)
+
+# The Virtio camera driver against a device that is reset during a suspend
+# (the stream carries on, the zoom is written again, the sequences keep
+# rising) and against one that is late to stop a stream (the driver destroys
+# the stream, so the buffers it gives back are never written again, and the
+# late clears fall due with the rings disabled and are not lost), and against
+# one that is late to both the clear and the destroy (the buffers stay with the
+# device, and the stop waits for it). No switch in a production target can do
+# any of these, so the device is the production one behind the delayed-answer
+# shim, which resets it or holds its requests.
+if(TARGET UML::CameraSource AND TARGET UML::SyntheticCamera)
+    uml_add_freestanding_cxx_payload(UML_GUEST_CAMERA_RESET_INIT
+        guest-video-camera-reset-init
+        video/camera_reset_init.cpp
+        COMMENT "Building the freestanding arm64 init of the camera reset tests"
+        ARCH_OPTIONS -march=armv8-a)
+    add_executable(uml_camera_reset_tests video/camera_reset_tests.cpp)
+    target_link_libraries(uml_camera_reset_tests PRIVATE
+        UML::BootInitramfs
+        UML::CameraDevice
+        UML::CameraSource
+        UML::DelayedAnswerDevice
+        UML::Emulator)
+    target_link_options(uml_camera_reset_tests PRIVATE
+        "LINKER:-export_dynamic"
+        "LINKER:-force_load,$<TARGET_FILE:uml_emulator>")
+    add_dependencies(uml_camera_reset_tests
+        "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}")
+    add_dependencies(integration-test-binaries uml_camera_reset_tests)
+    get_target_property(_uml_camera_reset_kernel
+        "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}" UML_KERNEL_IMAGE)
+    foreach(_case IN ITEMS reset slow-clear slow-stop)
+        uml_add_integration_test(
+            NAME guest-video-camera-${_case}
+            COMMAND uml_camera_reset_tests
+                ${_uml_camera_reset_kernel}
+                ${UML_GUEST_CAMERA_RESET_INIT}
+                ${CMAKE_CURRENT_BINARY_DIR}/video-camera-${_case}
+                ${_case}
+            LABELS guest;kernel;video
+            TIMEOUT 600
+            PROCESSORS 2
+            RESOURCE_GROUPS cpus:2)
+    endforeach()
+endif()
+
 set(UML_FUTEX_PROBE_BINARY "" CACHE FILEPATH
     "Static guest executable built from tests/integration/futex/futex_atomic_probe.cpp")
 if(UML_FUTEX_PROBE_BINARY)

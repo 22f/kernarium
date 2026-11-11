@@ -129,3 +129,4 @@ patch	um-free-an-IRQ-entry-after-a-grace-period.patch
 patch	virt_wifi-give-the-device-its-own-lockdep-classes.patch
 patch	um-skip-the-IPI-pipe-drain-when-an-idle-wait-found-it-empty.patch
 patch	virtio_input-follow-configuration-changes.patch
+patch	media-virtio-video-add-the-Kernarium-host-camera.patch
