@@ -467,9 +467,19 @@ the GPU provider depends on `UML_BUILD_GPU`; the others build on the transport
 alone. A disabled ring is given no new data: a buffer the backend only fills (a
 virtio-input event) stays in the ring until it is enabled again, and a buffer
 that carries a request is consumed and dropped, because its sender may be
-waiting with interrupts off; only the GPU, whose requests are asynchronous, and
-the vsock and GNSS devices, whose requests the guest never waits on, ask to keep
-them.
+waiting with interrupts off; only the GPU, whose requests are asynchronous, the
+vsock and GNSS devices, whose requests the guest never waits on, and the video
+devices, whose streams outlive a suspend, ask to keep them. A ring disable also
+resets a device that holds a deferred request, unless the device asks to keep it
+(`keepsDeferredRequestsWhileDisabled()`, which the video devices do): the
+transport then leaves the device alone, keeps what it completes while a ring is
+disabled and writes it to the ring at its enable, in the order the device
+finished it. A message that changes the memory, the
+features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
+follows a teardown's disables included) resets such a device first. A
+`VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
+ring is handled as that ring's buffers are, and a kick that asks for no
+acknowledgement gets none.
 
 **Request gate.** A service can be given a request gate, which another thread
 closes to hold the device's requests back: a closed gate lets no request reach
@@ -487,7 +497,8 @@ plain hold for the next guest.
 The [Virtio video devices](../darwin/device/video/README.md) bridge the shared
 V4L2 drivers to the platform VideoToolbox decoder and encoder over their own
 vhost-user connections and need no GPU context. Their event queues never defer,
-so an idle device survives a guest suspend without a reset, and the platform
+and the devices keep the buffers a stream has queued, so a stream and an idle
+device alike survive a guest suspend without a reset, and the platform
 sessions the system invalidates are rebuilt without a word to the guest. The
 [Virtio vsock device](../darwin/device/vsock/README.md) carries a byte stream
 from the host application to a service in the guest (adbd) with no listening

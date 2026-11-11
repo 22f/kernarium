@@ -4,6 +4,8 @@
 
     video_suspend_probe.py LABEL decode PACKET FOURCC [FLAGFILE]
     video_suspend_probe.py LABEL encode [FLAGFILE]
+    video_suspend_probe.py LABEL decode-stream PACKET FOURCC FLAGFILE
+    video_suspend_probe.py LABEL encode-stream FLAGFILE
 
 A decode session opens the Virtio video decoder, queues one coded access
 unit, waits for the source-change event, sets up the capture queue that event
@@ -14,6 +16,13 @@ the node, which returns only if the device handed every buffer back.
 With FLAGFILE the node is opened first, `VSUSP LABEL ready` is printed, and
 the session starts once the file exists: a descriptor opened before a suspend
 and used after it, as a VA-API driver's pool of nodes opened ahead of use is.
+
+A stream session holds in the middle of its stream instead: it gets one
+picture or coded buffer, returns to the state between two pictures (every
+coded input back with the process, every output buffer queued with the
+device, which holds them as requests), prints `ready`, and waits for the file.
+After it, the next picture or coded buffer must arrive, and the queues stop
+and the node closes.
 
 Every line the probe prints starts with `VSUSP LABEL`, and the last one is
 `ok` or `FAIL: reason`; the exit status says the same. Every wait is bounded.
@@ -302,25 +311,19 @@ def finish(fd):
 
 def decode_picture(fd, inputs, outputs, packet):
     """Feeds the access unit again whenever a coded buffer is free and waits
-    for one decoded picture."""
-    free = list(range(1, len(inputs.maps)))
-    stamp = 8
+    for one decoded picture; returns the capture buffer's index."""
     deadline = time.monotonic() + WAIT
     while time.monotonic() < deadline:
-        while free:
-            index = free.pop()
+        while inputs.free:
+            index = inputs.free.pop()
             inputs.maps[index][0][: len(packet)] = packet
-            result = inputs.put(index, [len(packet)], stamp)
-            stamp += 1
+            result = inputs.put(index, [len(packet)], inputs.stamp)
+            inputs.stamp += 1
             if result:
                 raise Failure(f"QBUF coded: {os.strerror(-result)}")
         wait(fd, 0.2)
         events(fd)
-        while True:
-            result, buffer, _ = inputs.take()
-            if result:
-                break
-            free.append(buffer.index)
+        take_back(inputs)
         result, buffer, used = outputs.take()
         if result == -errno.EAGAIN:
             continue
@@ -330,19 +333,50 @@ def decode_picture(fd, inputs, outputs, packet):
             raise Failure("a capture buffer came back with the error flag")
         if used and used[0]:
             say(f"picture bytes={used}")
-            return
+            return buffer.index
     raise Failure(f"no picture in {WAIT:g} s")
 
 
-def decode(packet_path, coded, flag):
+def take_back(queue):
+    """Collects the buffers the device returned into the queue's free list."""
+    while True:
+        result, buffer, _ = queue.take()
+        if result:
+            return
+        queue.free.append(buffer.index)
+
+
+def settle_decoder(fd, inputs, outputs, picture):
+    """Feeds nothing more and returns to the state between two pictures:
+    every coded buffer back, every capture buffer queued with the device."""
+    outputs.put(picture)
+    deadline = time.monotonic() + WAIT
+    quiet = time.monotonic()
+    while time.monotonic() < deadline:
+        wait(fd, 0.2)
+        events(fd)
+        take_back(inputs)
+        result, buffer, _ = outputs.take()
+        if not result:
+            outputs.put(buffer.index)
+            quiet = time.monotonic()
+        elif time.monotonic() - quiet > 1.0 and len(inputs.free) == len(inputs.maps):
+            say("settled between two pictures")
+            return
+    raise Failure(f"the decoder did not settle in {WAIT:g} s")
+
+
+def decode(packet_path, coded, flag, midstream=False):
     packet = open(packet_path, "rb").read()
     fd = find("stateful-decoder")
     try:
-        if flag:
+        if flag and not midstream:
             hold_for(flag)
         subscribe(fd, EVENT_SOURCE_CHANGE)
         set_format(fd, OUTPUT, coded, 128, 96, len(packet))
         inputs = Queue(fd, OUTPUT, 2)
+        inputs.free = list(range(1, len(inputs.maps)))
+        inputs.stamp = 8
         inputs.maps[0][0][: len(packet)] = packet
         for name, request in (("STREAMON output", stream(fd, STREAMON, OUTPUT)),
                               ("QBUF coded", inputs.put(0, [len(packet)], 7))):
@@ -370,7 +404,11 @@ def decode(packet_path, coded, flag):
         result = stream(fd, STREAMON, CAPTURE)
         if result:
             raise Failure(f"STREAMON capture: {os.strerror(-result)}")
-        decode_picture(fd, inputs, outputs, packet)
+        picture = decode_picture(fd, inputs, outputs, packet)
+        if midstream:
+            settle_decoder(fd, inputs, outputs, picture)
+            hold_for(flag)
+            decode_picture(fd, inputs, outputs, packet)
     except BaseException:
         os.close(fd)
         raise
@@ -381,25 +419,20 @@ def decode(packet_path, coded, flag):
 
 
 def encode_frame(fd, coded, frames, sizes):
-    free = list(range(len(frames.maps)))
-    stamp = 1
+    """Queues raw frames until a coded buffer returns; returns its index."""
     deadline = time.monotonic() + WAIT
     while time.monotonic() < deadline:
-        if free:
-            index = free.pop()
+        if frames.free:
+            index = frames.free.pop()
             for plane, size in zip(frames.maps[index], sizes):
                 plane[:size] = bytes([0x80]) * size
-            result = frames.put(index, sizes, stamp)
-            stamp += 1
+            result = frames.put(index, sizes, frames.stamp)
+            frames.stamp += 1
             if result:
                 raise Failure(f"QBUF raw: {os.strerror(-result)}")
         wait(fd, 0.2)
         events(fd)
-        while True:
-            result, buffer, _ = frames.take()
-            if result:
-                break
-            free.append(buffer.index)
+        take_back(frames)
         result, buffer, used = coded.take()
         if result == -errno.EAGAIN:
             continue
@@ -409,14 +442,34 @@ def encode_frame(fd, coded, frames, sizes):
             raise Failure("a coded buffer came back with the error flag")
         if used and used[0]:
             say(f"coded bytes={used}")
-            return
+            return buffer.index
     raise Failure(f"no coded data in {WAIT:g} s")
 
 
-def encode(flag):
+def settle_encoder(fd, coded, frames, buffer):
+    """Feeds nothing more and returns to the state between two frames: every
+    raw frame back, every coded buffer queued with the device."""
+    coded.put(buffer)
+    deadline = time.monotonic() + WAIT
+    quiet = time.monotonic()
+    while time.monotonic() < deadline:
+        wait(fd, 0.2)
+        events(fd)
+        take_back(frames)
+        result, returned, _ = coded.take()
+        if not result:
+            coded.put(returned.index)
+            quiet = time.monotonic()
+        elif time.monotonic() - quiet > 1.0 and len(frames.free) == len(frames.maps):
+            say("settled between two frames")
+            return
+    raise Failure(f"the encoder did not settle in {WAIT:g} s")
+
+
+def encode(flag, midstream=False):
     fd = find("stateful-encoder")
     try:
-        if flag:
+        if flag and not midstream:
             hold_for(flag)
         subscribe(fd, EVENT_EOS)
         set_format(fd, CAPTURE, fourcc("H264"), 0, 0, 1 << 16)
@@ -429,6 +482,8 @@ def encode(flag):
         sizes = [raw.fmt.pix_mp.plane_fmt[i].sizeimage for i in range(raw.fmt.pix_mp.num_planes)]
         coded = Queue(fd, CAPTURE, 4)
         frames = Queue(fd, OUTPUT, 4)
+        frames.free = list(range(len(frames.maps)))
+        frames.stamp = 1
         for index in range(len(coded.maps)):
             result = coded.put(index)
             if result:
@@ -437,7 +492,11 @@ def encode(flag):
             result = stream(fd, STREAMON, queue)
             if result:
                 raise Failure(f"STREAMON {name}: {os.strerror(-result)}")
-        encode_frame(fd, coded, frames, sizes)
+        buffer = encode_frame(fd, coded, frames, sizes)
+        if midstream:
+            settle_encoder(fd, coded, frames, buffer)
+            hold_for(flag)
+            encode_frame(fd, coded, frames, sizes)
     except BaseException:
         os.close(fd)
         raise
@@ -447,13 +506,15 @@ def encode(flag):
 def main():
     global label
     label = sys.argv[1]
+    kind = sys.argv[2]
     try:
-        if sys.argv[2] == "decode":
-            decode(sys.argv[3], fourcc(sys.argv[4]), sys.argv[5] if len(sys.argv) > 5 else None)
-        elif sys.argv[2] == "encode":
-            encode(sys.argv[3] if len(sys.argv) > 3 else None)
+        if kind in ("decode", "decode-stream"):
+            decode(sys.argv[3], fourcc(sys.argv[4]), sys.argv[5] if len(sys.argv) > 5 else None,
+                   kind == "decode-stream")
+        elif kind in ("encode", "encode-stream"):
+            encode(sys.argv[3] if len(sys.argv) > 3 else None, kind == "encode-stream")
         else:
-            raise Failure(f"unknown session {sys.argv[2]}")
+            raise Failure(f"unknown session {kind}")
     except Failure as failure:
         say(f"FAIL: {failure}")
         return 1

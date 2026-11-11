@@ -1992,6 +1992,18 @@ void provisionalCaptureBuffers(bool drainFirst)
     video.device.reset();
 }
 
+/* A guest suspends by disabling its rings, and a codec stream outlives it: the
+ * device asks the transport to leave it alone at a ring's disable and to keep
+ * the request buffers a ring is given meanwhile (vhost_user_device.hpp). */
+void streamsOutliveASuspend()
+{
+    VideoFixture video(15, 8 * page, [](auto) { return std::make_unique<Decoder>(false); });
+    require(video.device.keepsDeferredRequestsWhileDisabled(),
+            "a ring disable resets the decoder, which drops the stream a suspend must keep");
+    require(video.device.keepsRequestsOnDisabledRing(),
+            "a request posted as the guest suspends is dropped by the decoder's transport");
+}
+
 /* The event queue never holds a buffer of the guest's. With no event waiting a
  * buffer offered stays in the guest's ring, however many are offered, and the
  * device does not wake the transport; an event raised later does, and the next
@@ -2082,6 +2094,7 @@ void gapInThePictures()
 int main()
 {
     try {
+        streamsOutliveASuspend();
         eventsWaitForABuffer();
         gapInThePictures();
         h264ProfileControls();

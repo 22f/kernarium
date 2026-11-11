@@ -239,12 +239,15 @@ void CameraControls::store(ControlValues& values, std::uint32_t id, std::int64_t
         setIfPublished(VIRTIO_VIDEO_CAMERA_CID_WB_GAIN_BLUE, std::int64_t(std::lround(gains[2] * float(q16One))));
     };
     if (id == UML_V4L2_CID_AUTO_FOCUS_START) {
-        // A press is counted: each one asks for a scan.
-        ++scalars[id];
+        // A press asks for one scan, and only with FOCUS_AUTO off: with it on, V4L2
+        // has the driver ignore the request.
+        const auto automatic = scalars.find(UML_V4L2_CID_FOCUS_AUTO);
+        if (automatic != scalars.end() && automatic->second == 0) ++scalars[id];
         return;
     }
     scalars[id] = value;
     switch (id) {
+    case UML_V4L2_CID_FOCUS_ABSOLUTE: ++values.focusDistanceWrites; break;
     case UML_V4L2_CID_EXPOSURE_ABSOLUTE:
         setIfPublished(VIRTIO_VIDEO_CAMERA_CID_EXPOSURE_NS, std::clamp<std::int64_t>(
             value * exposureUnitNanoseconds, signedValue(find(VIRTIO_VIDEO_CAMERA_CID_EXPOSURE_NS)->minimum),
@@ -325,7 +328,9 @@ CameraSettings CameraControls::settings(const ControlValues& values) const
         settings.exposureMode = CameraExposureMode::locked;
     }
     settings.exposureBiasStops = float(scalar(UML_V4L2_CID_AUTO_EXPOSURE_BIAS, 0)) / 1000.0f;
-    // Focus.
+    // Focus. With FOCUS_AUTO off the lens holds; a press of the focus button runs
+    // one scan, and a written FOCUS_ABSOLUTE moves it (the serials tell a new
+    // press or write from an old one).
     if (info_.autofocus) {
         if (scalar(UML_V4L2_CID_FOCUS_AUTO, 1) == 0)
             settings.focusMode = info_.manualFocus ? CameraFocusMode::manual : CameraFocusMode::locked;
@@ -333,6 +338,7 @@ CameraSettings CameraControls::settings(const ControlValues& values) const
             settings.focusMode = CameraFocusMode::locked;
         settings.focusDistanceDioptres = float(scalar(UML_V4L2_CID_FOCUS_ABSOLUTE, 0)) / 1000.0f;
         settings.focusTriggerSerial = std::uint32_t(scalar(UML_V4L2_CID_AUTO_FOCUS_START, 0));
+        settings.focusDistanceSerial = values.focusDistanceWrites;
         const auto af = regionOf(values.payloads.contains(VIRTIO_VIDEO_CAMERA_CID_AF_REGION)
                                      ? values.payloads.at(VIRTIO_VIDEO_CAMERA_CID_AF_REGION) : std::vector<std::uint8_t> {});
         if (af.weight > 0) settings.afRegion = af;

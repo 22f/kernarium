@@ -175,11 +175,23 @@ void testAliases()
     set(controls, values, UML_V4L2_CID_AUTO_N_PRESET_WHITE_BALANCE, UML_V4L2_WHITE_BALANCE_AUTO);
     require(values.scalars.at(UML_V4L2_CID_AUTO_WHITE_BALANCE) == 1, "the automatic preset is automatic white balance");
 
-    // A button counts its presses; a refused value stores nothing.
+    // The focus button counts its presses while FOCUS_AUTO is off; with it on a
+    // driver ignores the request. A written distance is counted too.
+    for (int press = 0; press < 2; ++press) controls.store(values, UML_V4L2_CID_AUTO_FOCUS_START, 1);
+    require(values.scalars.at(UML_V4L2_CID_AUTO_FOCUS_START) == 0, "presses with automatic focus on are ignored");
+    set(controls, values, UML_V4L2_CID_FOCUS_AUTO, 0);
     for (int press = 0; press < 3; ++press) controls.store(values, UML_V4L2_CID_AUTO_FOCUS_START, 1);
     require(values.scalars.at(UML_V4L2_CID_AUTO_FOCUS_START) == 3, "presses are counted");
     require(controls.read(values, UML_V4L2_CID_AUTO_FOCUS_START, nullptr) == 0, "a button reads zero");
-    require(controls.settings(values).focusTriggerSerial == 3, "the platform sees the serial");
+    auto settings = controls.settings(values);
+    require(settings.focusTriggerSerial == 3, "the platform sees the serial");
+    require(values.focusDistanceWrites == 0 && settings.focusDistanceSerial == 0, "no distance was written");
+    set(controls, values, UML_V4L2_CID_FOCUS_ABSOLUTE, 1000);
+    set(controls, values, UML_V4L2_CID_FOCUS_ABSOLUTE, 1000);
+    require(values.focusDistanceWrites == 2 && controls.settings(values).focusDistanceSerial == 2,
+            "each write of the distance counts, even of the same value");
+    require(controls.settings(values).focusTriggerSerial == 3, "and a write is not a press");
+    set(controls, values, UML_V4L2_CID_FOCUS_AUTO, 1);
 
     // A compound control keeps what the guest sent.
     const auto bytes = region(1000, 2000, 3000, 4000, 5);
