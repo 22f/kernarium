@@ -626,8 +626,9 @@ wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
-`screenrecord`'s encoder run across a suspend by the host's route and by the
-guest's own on one stream each, and the host closes no stream by a reset.
+`screenrecord`'s encoder run across a suspend by the host's route (asked again
+while the guest is busy, as the host does) and by the guest's own on one stream
+each, and the host closes no stream by a reset.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled and joined while the internet checks fail, joins again
