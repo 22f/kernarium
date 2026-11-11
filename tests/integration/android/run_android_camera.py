@@ -9,13 +9,16 @@ android/lineage-24/README.md ("Camera") and the layout set is android/lineage-24
 The runner checks, in this order:
 
 - the layout reached Android: the SKU, the media profiles variant that its init trigger selects, and
-  exactly the camera features the layout earns (and none beside them);
+  exactly the camera features the layout earns (and none beside them), which are also the features the
+  characteristics of the cameras Android lists earn (so that a layout that disagrees with the cameras
+  is caught, not only a guest that disagrees with the layout);
 - the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the back zoom camera (the
   primary back lens of a host without one, the front camera of a host without a back camera), "1" the
   front camera, and "2", "3" and "4" the wide, ultra wide and telephoto lenses a phone has;
 - live: the camera application previews the synthetic chart (a screenshot is not black), and the camera
   key takes one still, a complete JPEG with Exif data inside the layout's size cap;
-- blocked: the same cameras are listed, the preview is not the chart, and the camera key takes nothing;
+- blocked: the same cameras are listed, the preview is not the chart on two samples, and the camera key
+  takes nothing;
 - none: no camera feature and no camera at all.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the
@@ -88,6 +91,11 @@ PREVIEW_BOX = (0.2, 0.25, 0.8, 0.6)
 # can be for the picture to mean anything.
 STILL_MAXIMUM_PIXELS = {"small": 12_600_000, "large": 50_400_000}
 STILL_MINIMUM_SIDE = 480
+# A blocked session's preview is sampled twice, this far apart, so that a chart that appears late
+# (a camera that opened after all) is seen.
+BLOCKED_SAMPLES = 2
+BLOCKED_SAMPLE_GAP_SECONDS = 10
+CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
 
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
@@ -96,7 +104,15 @@ PROFILE_CAMERAS = {
     "tablet": ("back+front", ("0", "1")),
     "laptop": ("front", ("0",)),
 }
-DEFAULT_LAYOUTS = {"phone": "bf-large", "tablet": "bf-small", "laptop": "front"}
+# The layout each synthetic profile earns (darwin/platform/synthetic_camera): the phone's back lenses
+# have flash, manual control and RAW, its zoom and front cameras stream together, and its front
+# camera records 2160p; the tablet's back camera has flash, manual control and RAW, and its front
+# camera cannot make the guaranteed concurrent stream sizes; the laptop has one front camera.
+DEFAULT_LAYOUTS = {
+    "phone": "bf-large-flash-manual-raw-concurrent-front2160",
+    "tablet": "bf-small-flash-manual-raw",
+    "laptop": "front",
+}
 MODES = ("live", "blocked", "none")
 
 
@@ -157,13 +173,88 @@ def parse_camera_ids(text: str) -> list[str]:
 
 
 def camera_connected(text: str, package: str) -> bool:
-    """Whether `dumpsys media.camera` shows the package holding a camera: in the service's event log
-    or among the active clients."""
+    """Whether `dumpsys media.camera` shows the package holding a camera: among the active clients, or
+    in the service's event log with a connect as the last event of some device (the log is most recent
+    first and its lines start with the time; a disconnect after the connect ends it)."""
     escaped = re.escape(package)
-    if re.search(rf"CONNECT device \S+ client for package {escaped}", text):
+    latest: dict[str, tuple[str, bool]] = {}  # device -> (time of the newest event, it was a connect)
+    stamp = r"(?:(\d\d-\d\d \d\d:\d\d:\d\d)\s*:\s*)?"
+    event = rf"^{stamp}\b(CONNECT|DISCONNECT) device (\S+) client for package {escaped}\b"
+    for match in re.finditer(event, text, re.MULTILINE):
+        when, kind, device = match[1] or "", match[2], match[3]
+        # The first line seen is the newest unless a later one carries a newer time.
+        if device not in latest or when > latest[device][0]:
+            latest[device] = (when, kind == "CONNECT")
+    if any(connected for _, connected in latest.values()):
         return True
     clients = re.search(r"Active Camera Clients:\s*\n(.*?)\n(?:\S|$)", text, re.DOTALL)
     return bool(clients and package in clients[1])
+
+
+@dataclass(frozen=True)
+class StaticInfo:
+    """What a camera's static characteristics say, from the metadata dump of `dumpsys media.camera`."""
+    facing: str
+    capabilities: frozenset[str]
+    flash: bool
+    af_modes: frozenset[str]
+
+
+# The dump prints each camera's static metadata sorted by tag, as `name (tag): type[count]` and the
+# values on the lines under it in brackets (enum values by name), so a tag that does not rise starts the
+# next camera.
+STATIC_INFO_ENTRY = re.compile(r"^\s*(android\.[A-Za-z0-9_.]+) \(([0-9a-f]+)\): ")
+STATIC_INFO_VALUES = re.compile(r"^\s*\[([^\]]*)\]\s*$")
+
+
+def parse_static_info(text: str) -> list[StaticInfo]:
+    """`dumpsys media.camera`: the characteristics of each camera it dumps, in the order it dumps them."""
+    cameras: list[dict[str, list[str]]] = []
+    last_tag = -1
+    entry: list[str] | None = None
+    for line in text.splitlines():
+        header = STATIC_INFO_ENTRY.match(line)
+        if header:
+            tag = int(header[2], 16)
+            if not cameras or tag <= last_tag:
+                cameras.append({})
+            last_tag = tag
+            entry = cameras[-1].setdefault(header[1], [])
+            continue
+        values = STATIC_INFO_VALUES.match(line)
+        if values and entry is not None:
+            entry.extend(values[1].split())
+        else:
+            entry = None
+    return [StaticInfo(
+        facing=camera["android.lens.facing"][0],
+        capabilities=frozenset(camera.get("android.request.availableCapabilities", ())),
+        flash=camera.get("android.flash.info.available", ["FALSE"])[:1] == ["TRUE"],
+        af_modes=frozenset(camera.get("android.control.afAvailableModes", ())))
+        for camera in cameras if camera.get("android.lens.facing")]
+
+
+def features_of(infos: list[StaticInfo]) -> set[str]:
+    """The camera features the characteristics earn, by the rules of PackageManager's feature docs
+    (the back camera has the flash and the autofocus; some camera has the capabilities). The concurrent
+    feature is a property of combinations, not of a camera, and is not derived."""
+    features: set[str] = set()
+    back = [info for info in infos if info.facing == "BACK"]
+    if infos:
+        features.add("android.hardware.camera.any")
+    if back:
+        features.add("android.hardware.camera")
+    if any(info.facing == "FRONT" for info in infos):
+        features.add("android.hardware.camera.front")
+    if any("AUTO" in info.af_modes for info in back):
+        features.add("android.hardware.camera.autofocus")
+    if any(info.flash for info in back):
+        features.add("android.hardware.camera.flash")
+    if any("MANUAL_SENSOR" in info.capabilities for info in infos):
+        features.add("android.hardware.camera.capability.manual_sensor")
+    if any("RAW" in info.capabilities for info in infos):
+        features.add("android.hardware.camera.capability.raw")
+    return features
 
 
 def parse_listing(text: str) -> set[str]:
@@ -402,6 +493,32 @@ def check_camera_list(guest: Guest, plan: Plan) -> None:
     wait_for("the cameras Android lists", SETTLE_SECONDS if plan.camera_ids else 5, listed, guest)
 
 
+def check_characteristics(guest: Guest, plan: Plan) -> None:
+    """The features that the layout states are the ones the cameras' own characteristics earn."""
+    infos = parse_static_info(guest.media_camera())
+    if len(infos) != len(plan.camera_ids):
+        raise Failure(f"dumpsys media.camera has the characteristics of {len(infos)} cameras, not "
+                      f"{len(plan.camera_ids)}: the dump's format is not the one the runner reads")
+    derived = features_of(infos)
+    stated = set(plan.features) - {CONCURRENT_FEATURE}
+    if derived != stated:
+        raise Failure(f"the layout {plan.layout.name} states {sorted(stated)} but the characteristics of the "
+                      f"cameras earn {sorted(derived)}: extra {sorted(stated - derived)}, "
+                      f"missing {sorted(derived - stated)}")
+
+
+def blocked_preview(sample: Callable[[], tuple[float, float]], sleep: Callable[[float], None]) -> str | None:
+    """A blocked session's preview must not be the chart on any of BLOCKED_SAMPLES samples; the message
+    of the first sample that is, else None."""
+    for attempt in range(BLOCKED_SAMPLES):
+        if attempt:
+            sleep(BLOCKED_SAMPLE_GAP_SECONDS)
+        mean, deviation = sample()
+        if deviation >= CHART_MINIMUM_DEVIATION and mean > BLACK_MAXIMUM_MEAN:
+            return f"the preview shows a picture (mean {mean:.1f}, deviation {deviation:.1f}, sample {attempt + 1})"
+    return None
+
+
 def start_camera_application(guest: Guest) -> None:
     for permission in CAMERA_PERMISSIONS:
         guest.shell(f"pm grant {CAMERA_PACKAGE} {permission} 2>&1 || true")
@@ -435,10 +552,16 @@ def check_preview(guest: Guest, plan: Plan) -> None:
         wait_for("the preview showing the chart", PREVIEW_SECONDS, previewing, guest)
         print(f"  preview: mean {statistics[-1][0]:.1f}, deviation {statistics[-1][1]:.1f}")
     else:
-        message = previewing()
+        def sample() -> tuple[float, float]:
+            guest.alive()
+            statistics.append(luma_statistics(guest.screenshot()))
+            return statistics[-1]
+
+        message = blocked_preview(sample, time.sleep)
         if message:
             raise Failure(f"a blocked session {message}")
-        print(f"  blocked preview: mean {statistics[-1][0]:.1f}, deviation {statistics[-1][1]:.1f}")
+        print(f"  blocked preview ({BLOCKED_SAMPLES} samples): mean {statistics[-1][0]:.1f}, "
+              f"deviation {statistics[-1][1]:.1f}")
 
 
 def check_still(guest: Guest, plan: Plan, before: set[str]) -> None:
@@ -483,6 +606,8 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     print(f"layout {plan.layout.name}, profile {plan.profile}, {plan.mode}")
     check_layout(guest, plan)
     check_camera_list(guest, plan)
+    if plan.camera_ids:
+        check_characteristics(guest, plan)
     print(f"  cameras {list(plan.camera_ids)} and features {sorted(plan.features)}")
     if plan.mode == "none":
         return

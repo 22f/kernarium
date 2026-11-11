@@ -61,9 +61,51 @@ Allowed user IDs: 0
 01-01 00:00:55 : DISCONNECT device 1 client for package org.example.other (PID 900) (PRIORITY: 0)
 """
 
+# The log is most recent first: a disconnect above a connect ends it.
+MEDIA_CAMERA_DISCONNECTED = MEDIA_CAMERA.replace(
+    "01-01 00:01:02 : CONNECT device 0",
+    "01-01 00:01:30 : DISCONNECT device 0 client for package org.lineageos.aperture (PID 1301) (PRIORITY: 0)\n"
+    "01-01 00:01:02 : CONNECT device 0")
+MEDIA_CAMERA_RECONNECTED = MEDIA_CAMERA_DISCONNECTED.replace(
+    "01-01 00:01:30 : DISCONNECT",
+    "01-01 00:02:10 : CONNECT device 1 client for package org.lineageos.aperture (PID 1330) for Camera API 2 with "
+    "Camera API 2.0 and cameraId 1\n01-01 00:01:30 : DISCONNECT")
+
 MEDIA_CAMERA_IDLE = MEDIA_CAMERA.split("== Camera service events log")[0]
 MEDIA_CAMERA_ACTIVE = MEDIA_CAMERA_IDLE.replace(
     "[]", "[(Client 0: org.lineageos.aperture, priority 100, pid 1301)]")
+
+
+def static_info(facing: str, capabilities: str, flash: str, af_modes: str) -> str:
+    """One camera's static metadata as `dumpsys media.camera` prints it: sorted by tag, the values of an
+    entry in brackets under its header, and entries of other sections between those that are read."""
+    return f"""\
+Camera {facing} information:
+  Device static metadata:
+    android.colorCorrection.availableAberrationModes (00000): byte[3]
+        [OFF FAST HIGH_QUALITY ]
+    android.control.aeAvailableModes (1000e): byte[2]
+        [OFF ON ]
+    android.control.afAvailableModes (10012): byte[{len(af_modes.split())}]
+        [{af_modes} ]
+    android.flash.info.available (50000): byte[1]
+        [{flash} ]
+    android.lens.facing (80005): byte[1]
+        [{facing} ]
+    android.request.availableCapabilities (c0012): byte[{len(capabilities.split())}]
+        [{capabilities} ]
+    android.request.availableRequestKeys (c0013): int32[40]
+        [786432 786433 786434 786435 786436 786437 786438 786439 786440 786441 786442 786443 786444 786445 786446 786447 ]
+        [786448 786449 786450 786451 786452 786453 786454 786455 786456 786457 786458 786459 786460 786461 786462 786463 ]
+        [786464 786465 786466 786467 786468 786469 786470 786471 ]
+"""
+
+
+PHONE_STATIC_INFO = (
+    static_info("BACK", "BACKWARD_COMPATIBLE MANUAL_SENSOR RAW READ_SENSOR_SETTINGS",
+                "TRUE", "OFF AUTO MACRO CONTINUOUS_PICTURE CONTINUOUS_VIDEO")
+    + static_info("FRONT", "BACKWARD_COMPATIBLE MANUAL_SENSOR RAW", "FALSE", "OFF AUTO CONTINUOUS_PICTURE")
+    + "Dumping the request that is in flight:\n  android.control.mode (10001): byte[1]\n        [AUTO ]\n")
 
 
 def png(width: int, height: int, color: int, pixels: list[bytes], filters: list[int]) -> bytes:
@@ -144,6 +186,19 @@ class PlanTests(unittest.TestCase):
                 runner.make_plan(name, profile, "live")
                 runner.make_plan(name, profile, "blocked")
 
+    def test_the_default_layout_of_a_profile_is_the_synthetic_camera_it_presents(self) -> None:
+        # darwin/platform/synthetic_camera: the phone's back lenses have flash, manual control and RAW
+        # and its zoom and front cameras stream together; the tablet's front camera cannot make the
+        # guaranteed concurrent sizes; the laptop has one front camera.
+        phone = layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]]
+        self.assertEqual((phone.flash, phone.manual, phone.raw, phone.concurrent, phone.front2160),
+                         (True, True, True, True, True))
+        tablet = layouts.by_name()[runner.DEFAULT_LAYOUTS["tablet"]]
+        self.assertEqual((tablet.flash, tablet.manual, tablet.raw, tablet.concurrent),
+                         (True, True, True, False))
+        self.assertEqual(layouts.by_name()[runner.DEFAULT_LAYOUTS["laptop"]].features,
+                         ("android.hardware.camera.any", "android.hardware.camera.front"))
+
     def test_the_camera_ids_follow_the_hals_plan(self) -> None:
         header = (REPOSITORY / "android/lineage-24/overlay/camera/hal/camera_ids.hpp").read_text(encoding="utf-8")
         found = {name: int(value) for name, value in re.findall(
@@ -208,6 +263,59 @@ class GuestReaderTests(unittest.TestCase):
         self.assertTrue(runner.camera_connected(MEDIA_CAMERA_ACTIVE, package))
         self.assertFalse(runner.camera_connected(MEDIA_CAMERA_IDLE, package))
         self.assertFalse(runner.camera_connected(MEDIA_CAMERA, "org.example.absent"))
+
+    def test_a_disconnect_after_the_connect_ends_the_connection(self) -> None:
+        package = runner.CAMERA_PACKAGE
+        self.assertFalse(runner.camera_connected(MEDIA_CAMERA_DISCONNECTED, package))
+        self.assertTrue(runner.camera_connected(MEDIA_CAMERA_RECONNECTED, package))
+        # Another package's disconnect does not end this package's connection.
+        self.assertTrue(runner.camera_connected(MEDIA_CAMERA, package))
+        # An active client is a connection whatever the log says.
+        active = MEDIA_CAMERA_DISCONNECTED.replace(
+            "[]", "[(Client 0: org.lineageos.aperture, priority 100, pid 1301)]")
+        self.assertTrue(runner.camera_connected(active, package))
+
+    def test_the_static_info_of_each_camera(self) -> None:
+        infos = runner.parse_static_info(PHONE_STATIC_INFO)
+        self.assertEqual([info.facing for info in infos], ["BACK", "FRONT"])
+        self.assertEqual(infos[0].capabilities, {"BACKWARD_COMPATIBLE", "MANUAL_SENSOR", "RAW", "READ_SENSOR_SETTINGS"})
+        self.assertEqual((infos[0].flash, infos[1].flash), (True, False))
+        self.assertEqual(infos[0].af_modes, {"OFF", "AUTO", "MACRO", "CONTINUOUS_PICTURE", "CONTINUOUS_VIDEO"})
+        self.assertEqual(runner.parse_static_info("Number of camera devices: 0\n"), [])
+
+    def test_the_features_the_characteristics_earn(self) -> None:
+        infos = runner.parse_static_info(PHONE_STATIC_INFO)
+        earned = runner.features_of(infos)
+        self.assertEqual(earned, {
+            "android.hardware.camera", "android.hardware.camera.any", "android.hardware.camera.autofocus",
+            "android.hardware.camera.capability.manual_sensor", "android.hardware.camera.capability.raw",
+            "android.hardware.camera.flash", "android.hardware.camera.front"})
+        # They are what the phone's default layout states, bar the combination feature.
+        stated = set(layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]].features)
+        self.assertEqual(stated - earned, {runner.CONCURRENT_FEATURE})
+        # A back camera without flash or RAW, and a layout that says it has them, differ.
+        plain = runner.parse_static_info(static_info("BACK", "BACKWARD_COMPATIBLE", "FALSE", "OFF AUTO"))
+        self.assertEqual(runner.features_of(plain), {"android.hardware.camera", "android.hardware.camera.any",
+                                                     "android.hardware.camera.autofocus"})
+        # The flash and the autofocus of a front camera earn nothing: only the back camera's count.
+        front = runner.parse_static_info(static_info("FRONT", "BACKWARD_COMPATIBLE MANUAL_SENSOR", "TRUE", "OFF AUTO"))
+        self.assertEqual(runner.features_of(front), {"android.hardware.camera.any", "android.hardware.camera.front",
+                                                     "android.hardware.camera.capability.manual_sensor"})
+        self.assertEqual(runner.features_of([]), set())
+
+    def test_the_blocked_preview_is_sampled_twice(self) -> None:
+        chart, black = (120.0, 60.0), (2.0, 1.0)
+        sleeps: list[float] = []
+        for samples, expected in (([black, black], None),
+                                  ([black, chart], "the preview shows a picture (mean 120.0, deviation 60.0, sample 2)"),
+                                  ([chart, black], "the preview shows a picture (mean 120.0, deviation 60.0, sample 1)")):
+            with self.subTest(samples=samples):
+                taken = iter(samples)
+                sleeps.clear()
+                self.assertEqual(runner.blocked_preview(lambda: next(taken), sleeps.append), expected)
+                self.assertEqual(sleeps, [runner.BLOCKED_SAMPLE_GAP_SECONDS] if expected is None
+                                 or "sample 2" in expected else [])
+        self.assertEqual(runner.BLOCKED_SAMPLES, 2)
 
     def test_listings(self) -> None:
         self.assertEqual(runner.parse_listing("IMG_1.jpg\nIMG_2.jpg\n"), {"IMG_1.jpg", "IMG_2.jpg"})
