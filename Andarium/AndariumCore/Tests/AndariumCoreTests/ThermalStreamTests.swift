@@ -113,11 +113,20 @@ struct ThermalStreamTests {
             stream.stop()
             return
         }
-        // The record that did not fit closed the connection, and the next one starts with the latest severity.
+        // The record that did not fit closed the connection, and the next one carries the latest severity.
+        // Whether the loop was still running when it was made again decides what the new connection starts
+        // with, so the check is on the last record before a sentinel that nothing else sends.
         #expect(thermalEventually { guest.connections == 2 && events.lost == 1 })
-        stream.send(.critical)
-        let bytes = guest.read(count: 2 * ThermalProtocol.recordSize)
-        #expect(Array(bytes.prefix(ThermalProtocol.recordSize)) == (try frame("critical")))
+        stream.send(AndroidThermalSeverity.none)
+        let sentinel = try frame("none")
+        var record: [UInt8] = []
+        var previous: [UInt8] = []
+        repeat {
+            previous = record
+            record = guest.read(count: ThermalProtocol.recordSize)
+        } while record != sentinel && record.count == ThermalProtocol.recordSize
+        #expect(record == sentinel, "the sentinel never came")
+        #expect(previous == (try frame("critical")), "the last record before it is not the latest severity")
         stream.stop()
     }
 
