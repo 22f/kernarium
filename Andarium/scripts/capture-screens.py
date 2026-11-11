@@ -12,7 +12,13 @@ Device > Rotate, or a UI driver) between runs, and the orientation is read
 from each image.
 
     capture-screens.py --out DIR --device <udid> [--device <udid> ...]
+    capture-screens.py --out DIR --device <udid> --language ja
     capture-screens.py --list
+
+`--language` runs the Preview in one of Andarium's languages (en, zh-Hans,
+zh-Hant, ja): the launch carries `-AppleLanguages` and `-AppleLocale`, the
+file names and the manifest name the language, and the Simulator's own
+language stays as it is. Without it the Simulator's language decides.
 
 One run at a time captures into a directory: the runs would share the
 screenshots' working files and read and write manifest.json. A second run into
@@ -69,6 +75,8 @@ SETTLED_FRACTION = 0.003
 # How long the Preview has, after a launch, to report that it is the app in front.
 FRONT_SECONDS = 10
 STATE_FILE = "capture-state.json"
+# The languages of the application and the locale each is shown with.
+LANGUAGES = {"en": "en_US", "zh-Hans": "zh_CN", "zh-Hant": "zh_TW", "ja": "ja_JP"}
 LOCK_FILE = ".capture.lock"
 
 
@@ -92,8 +100,11 @@ class Shot:
     # SpringBoard is restarted after it.
     alert: bool = False
 
-    def launch_arguments(self) -> list[str]:
-        return ["-screen", self.screen, *self.args]
+    def launch_arguments(self, language: str | None = None) -> list[str]:
+        arguments = ["-screen", self.screen, *self.args]
+        if language is not None:
+            arguments += ["-AppleLanguages", f"({language})", "-AppleLocale", LANGUAGES[language]]
+        return arguments
 
 
 def s(id: str, group: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 3.0) -> Shot:
@@ -187,6 +198,10 @@ SHOTS: list[Shot] = [
     s("info-acknowledgements", "Info", "info-acknowledgements", "Acknowledgements: projects by group; the names and marks line is at the bottom.", dark=True),
     s("info-license", "Info", "info-license", "A project's page: copyright holders, the license name and the license text (Mesa, MIT).", dark=True),
     s("info-license-long", "Info", "info-license-gpl", "A page with a long license text (Linux: syscall exception and GPL v2)."),
+    # Snapshots and What's New (more of each are in the Preview: see SnapshotPreview and WhatsNewPreview)
+    s("snapshots", "Snapshots", "snapshots", "The Snapshots sheet over Home with mock snapshots: the list newest first, the space they use and Take snapshot at the foot."),
+    s("snapshots-detail", "Snapshots", "snapshots-detail", "One snapshot's page: its name, when it was taken, what deleting frees, Restore and Delete."),
+    s("whatsnew-open", "What's New", "whatsnew-open", "The notes of the update, opened from the ribbon above Start."),
     # Boot
     *boot_stages("boot", "boot", ["System image", "Linux kernel", "Storage", "Startup"], "Normal boot over the dimmed guest display, no progress bar"),
     s("boot-single-vcpu", "Boot", "boot-single-vcpu", "Normal boot of a guest with a single vCPU: the Linux kernel line says \"1 vCPU\"."),
@@ -381,7 +396,7 @@ def settled_screenshot(udid: str, shot_id: str, out: Path) -> tuple[Path | None,
     return temporary, settled
 
 
-def play_flow(udid: str, shot: Shot, pid: int) -> int | None:
+def play_flow(udid: str, shot: Shot, pid: int, language: str | None = None) -> int | None:
     """The steps that follow the launch of a shot whose state needs the app in the background; the process that
     ends them, or None. The Simulator ends an app whose permission changes, as iOS does, so the last step is a
     relaunch there; an app still running just comes forward, which is the activation."""
@@ -391,7 +406,7 @@ def play_flow(udid: str, shot: Shot, pid: int) -> int | None:
         elif step in ("grant", "revoke"):
             result = simctl("privacy", udid, step, shot.service, BUNDLE)
         elif step == "foreground":
-            result = simctl("launch", udid, BUNDLE, *shot.launch_arguments())
+            result = simctl("launch", udid, BUNDLE, *shot.launch_arguments(language))
             if result.returncode == 0:
                 again = launched_pid(result)
                 print(f"  {shot.id}: {'the app was still running' if again == pid else 'the permission change ended the app'}")
@@ -420,7 +435,10 @@ def clear_system_alert(udid: str) -> None:
     time.sleep(15.0)
 
 
-def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: float, orientation: str | None) -> dict | None:
+def capture(
+    udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: float, orientation: str | None,
+    language: str | None = None,
+) -> dict | None:
     """One shot, or None (with the reason on stderr) when the picture cannot be Andarium's: the app is not the
     launched process on the shot's screen in front, the frame is empty, or the device turned since the run began
     (`orientation`)."""
@@ -430,14 +448,14 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
         if privacy.returncode != 0:
             print(f"  {shot.id}: privacy {shot.privacy} failed: {privacy.stderr.strip()}", file=sys.stderr)
             return None
-    launched = simctl("launch", udid, BUNDLE, *shot.launch_arguments())
+    launched = simctl("launch", udid, BUNDLE, *shot.launch_arguments(language))
     pid = launched_pid(launched)
     if launched.returncode != 0 or pid is None:
         print(f"  {shot.id}: launch failed: {launched.stderr.strip()}", file=sys.stderr)
         return None
     time.sleep(max(wait, shot.wait))
     if shot.flow:
-        pid = play_flow(udid, shot, pid)
+        pid = play_flow(udid, shot, pid, language)
         if pid is None:
             return None
     reason = wait_in_front(udid, pid, shot)
@@ -460,7 +478,7 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
     if not settled:
         print(f"  {shot.id}: the screen kept changing; kept the last look", file=sys.stderr)
     idiom = "iPad" if "iPad" in name else "iPhone"
-    file = f"{idiom.lower()}-{now}-{appearance}-{shot.id}.png"
+    file = f"{idiom.lower()}-{now}-{appearance}-{shot.id}{'' if language is None else f'-{language}'}.png"
     temporary.replace(out / file)
     return {
         "file": file,
@@ -471,21 +489,22 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
         "group": shot.group,
         "id": shot.id,
         "screen": shot.screen,
-        "launch_arguments": " ".join(shot.launch_arguments()),
+        "launch_arguments": " ".join(shot.launch_arguments(language)),
+        "language": language,
         "pixels": [width, height],
         "settled": settled,
         "description": shot.description,
     }
 
 
-def preflight(udid: str, name: str, out: Path) -> str | None:
+def preflight(udid: str, name: str, out: Path, language: str | None = None) -> str | None:
     """Before the first shot: the Preview must come to the front on a plain screen. A permission alert left up by
     an earlier use of the Simulator is cleared (which turns an iPad upright, as is said). The result is the
     orientation the run keeps, or None when the Preview cannot be brought to the front."""
     probe = Shot("preflight", "", "home", "")
     for attempt in range(2):
         simctl("terminate", udid, BUNDLE)
-        launched = simctl("launch", udid, BUNDLE, *probe.launch_arguments())
+        launched = simctl("launch", udid, BUNDLE, *probe.launch_arguments(language))
         pid = launched_pid(launched)
         if pid is not None and wait_in_front(udid, pid, probe) is None:
             temporary = out / ".preflight.png"
@@ -537,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", metavar="REGEX", help="capture only shots whose id matches")
     parser.add_argument("--appearance", choices=("light", "dark"), help="capture only this appearance")
     parser.add_argument("--wait", type=float, default=0.0, help="minimum seconds after each launch")
+    parser.add_argument("--language", choices=sorted(LANGUAGES), help="show the Preview in this language (default: the Simulator's)")
     parser.add_argument("--list", action="store_true", help="list the shots and exit")
     args = parser.parse_args(argv)
     if args.list:
@@ -577,7 +597,7 @@ def capture_all(args: argparse.Namespace) -> int:
             "status_bar", udid, "override", "--time", "9:41", "--batteryState", "charged", "--batteryLevel", "100",
             "--cellularMode", "active", "--cellularBars", "4", "--wifiBars", "3", "--dataNetwork", "wifi",
         )
-        orientation = preflight(udid, name, args.out)
+        orientation = preflight(udid, name, args.out, args.language)
         if orientation is None:
             print(f"capture-screens.py: {name} ({udid}): the Preview does not come to the front; nothing captured", file=sys.stderr)
             status = 1
@@ -596,9 +616,9 @@ def capture_all(args: argparse.Namespace) -> int:
                     # upright, so the orientation of the start no longer holds.
                     clear_system_alert(udid)
                     orientation = None
-                entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation)
+                entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation, args.language)
                 if entry is None:
-                    entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation)
+                    entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation, args.language)
                 asked = asked or shot.alert
                 if entry is None:
                     status = 1
