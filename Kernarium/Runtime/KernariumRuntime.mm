@@ -42,6 +42,7 @@
 #include "gpu/protocol.hpp"
 #include "input/virtio/hardware_input.hpp"
 #include "input/virtio/hardware_input_run.hpp"
+#include "input/virtio/registration_summary.hpp"
 #include "input/virtio/in_process_service.hpp"
 #include "input/virtio/touchscreen.hpp"
 #include "block/android_boot.hpp"
@@ -189,6 +190,10 @@ uml::input::virtio::HardwareInputRun hardwareInputRun;
 std::mutex inputStatusCallbackMutex;
 kernarium_runtime_input_status_callback inputStatusCallback;
 void* inputStatusContext;
+/* What the guest has registered, for the registration statuses. Guarded by the
+ * same mutex, so the order the application hears them is the order they
+ * happened in. */
+uml::input::virtio::RegistrationSummary inputRegistrations;
 /* The GPU hold the application last asked for, and the GPU service it applies
  * to while a guest runs. A hold asked for before the guest's GPU exists takes
  * effect when it does. */
@@ -257,8 +262,24 @@ void wakeGuestForLocation()
     });
 }
 
-/* Android's lock lights and the pointer capture, from the guest's side of the
- * hardware keyboard and mouse. Registrations stay inside the host. */
+/* Calls the application's receiver of the input status with the mutex held. */
+void callInputStatus(int status, bool on)
+{
+    if (inputStatusCallback != nullptr)
+        inputStatusCallback(inputStatusContext, status, on ? 1 : 0);
+}
+
+[[nodiscard]] int registrationStatus(
+    uml::input::virtio::RegistrationSummary::Group group) noexcept
+{
+    return group == uml::input::virtio::RegistrationSummary::Group::keyboard ?
+        KERNARIUM_RUNTIME_INPUT_STATUS_KEYBOARD_REGISTERED :
+        KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_REGISTERED;
+}
+
+/* Android's lock lights and the pointer capture, and whether the guest has
+ * registered its keyboard and its pointer, from the guest's side of the
+ * hardware keyboard and mouse. */
 void publishInputStatus(uml::input::virtio::HardwareStatus status, bool on)
 {
     using uml::input::virtio::HardwareStatus;
@@ -276,12 +297,29 @@ void publishInputStatus(uml::input::virtio::HardwareStatus status, bool on)
     case HardwareStatus::pointerCapture:
         published = KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_CAPTURE;
         break;
+    case HardwareStatus::keyboardRegistered:
+    case HardwareStatus::mouseRegistered:
+    case HardwareStatus::pointerRegistered: {
+        std::lock_guard lock(inputStatusCallbackMutex);
+        if (const auto edge = inputRegistrations.update(status, on))
+            callInputStatus(registrationStatus(edge->group), edge->on);
+        return;
+    }
     default:
         return;
     }
     std::lock_guard lock(inputStatusCallbackMutex);
-    if (inputStatusCallback != nullptr)
-        inputStatusCallback(inputStatusContext, published, on ? 1 : 0);
+    callInputStatus(published, on);
+}
+
+/* A boot of the guest has ended, whether it restarts or the run is over: the
+ * guest registers nothing of the next until its drivers have probed, and the
+ * application is told so. */
+void publishRegistrationsLost()
+{
+    std::lock_guard lock(inputStatusCallbackMutex);
+    for (const auto& edge : inputRegistrations.reset())
+        callInputStatus(registrationStatus(edge.group), edge.on);
 }
 
 /* A key or a button going down, or a wheel step, wakes a guest that suspended
@@ -753,7 +791,11 @@ public:
 class ActiveHardwareInputRun final {
 public:
     ActiveHardwareInputRun() { hardwareInputRun.begin(); }
-    ~ActiveHardwareInputRun() { hardwareInputRun.end(); }
+    ~ActiveHardwareInputRun()
+    {
+        hardwareInputRun.end();
+        publishRegistrationsLost();
+    }
 
     ActiveHardwareInputRun(const ActiveHardwareInputRun&) = delete;
     ActiveHardwareInputRun& operator=(const ActiveHardwareInputRun&) = delete;
@@ -773,6 +815,7 @@ public:
     {
         if (const auto input = hardwareInputRun.detach())
             input->setStatusCallback({});
+        publishRegistrationsLost();
     }
 
     ActiveHardwareInputRegistration(const ActiveHardwareInputRegistration&) =
