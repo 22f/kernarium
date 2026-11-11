@@ -39,7 +39,8 @@ function asks it: the peer's close is a plain end of file, and the
 guest still gets everything queued for it, then a FIN. For a close
 that cannot yet be read, sohangup() shuts the socket's write side,
 which drops what the guest wrote, and soread() ends the connection
-once the guest has made room. The guest's later data for such a
+once the guest has made room; data the guest sends after that read is
+reset, as a closed TCP peer would. The guest's later data for such a
 socket is acknowledged and freed in every in-order path of
 tcp_input(), as tcp_reass() already did, not appended to so_rcv that
 nothing writes, or its window would fall to zero and hold the guest.
@@ -50,10 +51,10 @@ sowrite()'s disconnect path.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  src/slirp.c     |  20 ++++++++
- src/socket.c    | 124 +++++++++++++++++++++++++++++++++++++++++++++---
+ src/socket.c    | 129 +++++++++++++++++++++++++++++++++++++++++++++---
  src/socket.h    |   7 +++
- src/tcp_input.c |  41 ++++++++--------
- 4 files changed, 166 insertions(+), 26 deletions(-)
+ src/tcp_input.c |  41 ++++++++-------
+ 4 files changed, 171 insertions(+), 26 deletions(-)
 
 diff --git a/src/slirp.c b/src/slirp.c
 index 9b7526afdf9cc2be956356c1a69a80f9d5966cb1..c577ab4f380144b6f52ee285161e342f8549df27 100644
@@ -94,7 +95,7 @@ index 9b7526afdf9cc2be956356c1a69a80f9d5966cb1..c577ab4f380144b6f52ee285161e342f
              /*
               * Check for URG data
 diff --git a/src/socket.c b/src/socket.c
-index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b0036635e5d8474d4d6114cd8c579b6507d3ff6d 100644
+index 6b65be197eea31e8bcb4ce22b1c29327a11198de..3d72b938be4615a441a45a7df0cc61331cc9c174 100644
 --- a/src/socket.c
 +++ b/src/socket.c
 @@ -169,6 +169,58 @@ size_t sopreprbuf(struct socket *so, struct iovec *iov, int *np)
@@ -186,7 +187,7 @@ index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b0036635e5d8474d4d6114cd8c579b65
                  tcp_drop(sototcpcb(so), err);
              } else {
                  tcp_sockclosed(sototcpcb(so));
-@@ -978,6 +1027,67 @@ void sofwdrain(struct socket *so)
+@@ -978,6 +1027,72 @@ void sofwdrain(struct socket *so)
          sofcantsendmore(so);
  }
  
@@ -207,9 +208,14 @@ index 6b65be197eea31e8bcb4ce22b1c29327a11198de..b0036635e5d8474d4d6114cd8c579b65
 + *     the live peer;
 + *   - the descriptor leaves the poll set, as it is polled for reading only
 + *     below half full. The guest reads what the socket and so_snd hold, and
-+ *     when sbdrop() makes room soread() reads the end of file and sends the
-+ *     FIN. The socket has no user from then on, so data the guest sends
-+ *     after the FIN is answered with a reset (tcp_input()).
++ *     when sbdrop() makes room soread() reads the end of file: that marks
++ *     the socket as without a user (sofcantrcvmore() sets SS_NOFDREF, as
++ *     SS_FCANTSENDMORE is already set) and sends the FIN. From then on the
++ *     guest's next data segment resets the connection (tcp_input()) and
++ *     discards what so_snd still holds, the FIN with it, as a closed TCP
++ *     peer does to data sent to it. The guest keeps everything it is owed
++ *     only if it sends nothing between that read of the end of file and its
++ *     own read of the FIN.
 + * Only the guest holds that up. A guest that never reads keeps the connection
 + * for as long as it did while the peer was alive, and after the FIN one that
 + * sends nothing but window probes keeps it while they come more often than
