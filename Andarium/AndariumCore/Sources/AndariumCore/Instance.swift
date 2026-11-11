@@ -467,6 +467,9 @@ public struct InstanceFiles: Sendable {
             doomed.append(directory.appendingPathComponent(entry))
         }
         doomed.append(snapshots)
+        // The record of the walk the guest owes (`PartialSweepLedger`) is the
+        // disk's: a guest made after this one starts with a record of its own.
+        doomed.append(PartialSweepLedger.url(in: directory))
         var failure: Error?
         for url in doomed where manager.fileExists(atPath: url.path) {
             do { try manager.removeItem(at: url) } catch { failure = failure ?? error }
@@ -492,6 +495,8 @@ public struct InstanceFiles: Sendable {
                 throw InstanceError.refused("No update is pending.")
             }
             let snapshot = directory.appendingPathComponent(pending.snapshot)
+            // The data it puts back may hold partial files of earlier runs.
+            try PartialSweepLedger.markOwed(in: directory)
             try Self.clone(snapshot, to: data)
             var restored = InstanceState(
                 dataLayout: pending.from.dataLayout, releaseID: pending.from.releaseID,
@@ -510,6 +515,8 @@ public struct InstanceFiles: Sendable {
         if action == .create {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             try? manager.removeItem(at: data)
+            // A data disk that is made at the next start holds nothing.
+            if !manager.fileExists(atPath: data.path) { try PartialSweepLedger.markSettled(in: directory) }
             let created = InstanceState(creating: release, at: when)
             try write(created)
             return created

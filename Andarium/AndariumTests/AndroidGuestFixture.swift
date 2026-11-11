@@ -31,7 +31,11 @@ func withAndroidGuest(
     try #require(model.alert == nil, "\(String(describing: model.alert))")
 
     let identity = try entry.adbKeyStore.loadOrCreate()
-    let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: model.host.name)
+    // The run's mark is renewed when the runtime launches, which is after this
+    // line; the operations take it once Android is up, so that an import made
+    // through them is one of the run, which its own sweep spares.
+    var operations = AdbGuestOperations(
+        identity: identity, clock: GuestRunClock(), device: model.host.name, run: GuestRunMark.random())
     var restoreDisplayTimeout = "true"
     do {
         var booted = false
@@ -46,6 +50,7 @@ func withAndroidGuest(
             try await Task.sleep(for: .seconds(2))
         }
         try #require(booted, "Android did not finish booting: \(model.runReport)")
+        if let runtime = model.driver as? LiveRuntime { operations.run = runtime.runMark }
         let timeout = try await operations.shell("settings get system screen_off_timeout")
         let previousTimeout = timeout.text.trimmingCharacters(in: .whitespacesAndNewlines)
         try #require(previousTimeout == "null" || Int(previousTimeout) != nil)

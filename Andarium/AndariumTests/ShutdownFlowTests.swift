@@ -68,7 +68,7 @@ struct ShutdownFlowTests {
         #expect(model.guest?.usedBytes == 0)
 
         let identity = try entry.adbKeyStore.loadOrCreate()
-        let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device")
+        let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device", run: GuestRunMark.random())
         weak var display: GuestMetalView?
         if memorySnapshots {
             // Allow Instruments to attach before the first boot.
