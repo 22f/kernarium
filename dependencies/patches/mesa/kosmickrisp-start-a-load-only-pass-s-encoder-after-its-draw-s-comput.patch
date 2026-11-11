@@ -57,6 +57,18 @@ canonical driver takes 102 and 130 MiB. A direct capture writes its
 records to the pool and no longer pins the heap, which queued a reset
 after every pass of that kind, deferred or not.
 
+A split of the pass carries the segment too. Compute that must precede
+the encoder, when other work already lies in the main command buffer,
+closes the pass there and resumes it in a new main command buffer, and
+starting that encoder began a new segment while the reset of the one it
+left waits in the post-render command buffer, after both parts of the
+pass. The next draw to reserve counted its demand from zero on a heap
+that still held the earlier reservations, was refused, and lost its
+output; a pass that follows direct-capture passes is split by its first
+draw that reserves. The split saves the segment and restores it after
+the start, so the draws of both parts are counted together and the heap
+grows for them.
+
 Nothing rendered or captured changes. A pass that clears, resolves, has
 layers, secondary command buffer contents or no attachments starts its
 encoder when it begins, as before. The sample count an encoder started
@@ -65,14 +77,14 @@ no encoder behaves as it does.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/kosmickrisp/vulkan/kk_cmd_buffer.c |  55 ++++++++-
- src/kosmickrisp/vulkan/kk_cmd_buffer.h |  21 +++-
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c |  64 +++++++++-
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h |  23 +++-
  src/kosmickrisp/vulkan/kk_cmd_draw.c   | 154 +++++++++++++++++++++++--
  src/kosmickrisp/vulkan/kk_query_pool.c |   6 +
- 4 files changed, 223 insertions(+), 13 deletions(-)
+ 4 files changed, 234 insertions(+), 13 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-index 8390f70828acc23163e8924530cde655bb20980a..879e025d420c124a071127f216cad569a1400fa2 100644
+index 8390f70828acc23163e8924530cde655bb20980a..5c0582bdc8242b3c03c85e74e444c05306bba5c3 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 @@ -457,10 +457,18 @@ cs_get_render(struct kk_cmd_buffer *cmd)
@@ -98,7 +110,26 @@ index 8390f70828acc23163e8924530cde655bb20980a..879e025d420c124a071127f216cad569
        gfx->need_to_start_render_pass = false;
        cs_start_render(cmd);
     }
-@@ -644,6 +652,45 @@ cs_end(struct kk_cmd_buffer *cmd)
+@@ -493,9 +501,18 @@ kk_start_compute_encoder(struct kk_cmd_buffer *cmd,
+ static void
+ cs_split_render(struct kk_cmd_buffer *cmd)
+ {
++   /* The heap segment goes on across the split. The reset it queued waits in
++    * the post-render encoder, which runs after both parts of the pass, so the
++    * next draw to reserve from the heap counts its demand beside what the
++    * segment has reserved, not from zero on a heap that is not empty. */
++   const bool heap_in_segment = cmd->heap_in_segment;
++   const uint64_t heap_demand_B = cmd->heap_demand_B;
++
+    kk_stop_encoder(cmd, &cmd->gfx);
+    cs_end_main(cmd);
+    cs_start_render(cmd);
++   cmd->heap_in_segment = heap_in_segment;
++   cmd->heap_demand_B = heap_demand_B;
+    /* A draw being recorded flushed its state into the closed encoder and
+     * needs it in this one. Outside a draw the state need not be complete
+     * yet, a dynamic vertex input for one, and starting the encoder has
+@@ -644,6 +661,45 @@ cs_end(struct kk_cmd_buffer *cmd)
     }
  }
  
@@ -145,7 +176,7 @@ index 8390f70828acc23163e8924530cde655bb20980a..879e025d420c124a071127f216cad569
  void
  cs_flush(struct kk_cmd_buffer *cmd)
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
-index 65aa82c7d8b0798c393a709f5fa5a1f0485543a4..28d9eea8e7870326547b987455c502f85b55d7b9 100644
+index 65aa82c7d8b0798c393a709f5fa5a1f0485543a4..051ab13d7a5c4654e3927d3f9bd8651f17340d26 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 @@ -186,6 +186,16 @@ struct kk_rendering_state {
@@ -186,14 +217,16 @@ index 65aa82c7d8b0798c393a709f5fa5a1f0485543a4..28d9eea8e7870326547b987455c502f8
  void cs_flush(struct kk_cmd_buffer *cmd);
  /* Re-emits the graphics state of the draw being recorded into a render
   * encoder that restarted after the draw flushed it. */
-@@ -500,7 +517,9 @@ kk_cmd_buffer_dirty_all_gfx(struct kk_cmd_buffer *cmd)
+@@ -500,7 +517,11 @@ kk_cmd_buffer_dirty_all_gfx(struct kk_cmd_buffer *cmd)
     cmd->state.gfx.descriptors.root_dirty = true;
  
     /* The segment's heap reset is queued. A draw that needs the heap again
 -    * pins it for the new segment and queues another. */
-+    * pins it for the new segment and queues another. A draw that reserved
-+    * from the heap before its pass's encoder started is the exception: it
-+    * carries its segment across the start (kk_start_render_after_launch). */
++    * pins it for the new segment and queues another. Two starts carry the
++    * segment on instead, because what it reserved is still in the heap and
++    * its reset has not run: a draw that reserved before its pass's encoder
++    * started (kk_start_render_after_launch), and a split of the pass
++    * (cs_split_render). */
     cmd->heap_in_segment = false;
     cmd->heap_demand_B = 0;
  }

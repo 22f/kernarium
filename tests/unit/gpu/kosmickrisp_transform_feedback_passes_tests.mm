@@ -359,7 +359,10 @@ void check_heap_capture(const FeedbackChainConfig &config, const FeedbackChainRe
     }
 }
 
-/* Timestamps written in recording order read increasing times, each its own. */
+/* Timestamps written in recording order read increasing times, each its own.
+ * Vulkan needs less where no command lies between two writes, which may read
+ * one time or either order, but the driver keeps recording order for them and
+ * the cases that have no command between them guard that. */
 void check_timestamps(const FeedbackChainResult &result, size_t count, const std::string &what)
 {
     require(result.timestamps.size() == count, what + ": wrong number of timestamps");
@@ -600,7 +603,13 @@ int main(int argc, char **argv)
         }
 
         /* Timestamps that belong to no render stage, in the places a pass puts
-         * them: each must read the time it was written. */
+         * them. vkCmdWriteTimestamp2 latches the timer when the commands
+         * before it have completed its stage, so a query never reads a time
+         * after commands recorded later than it: the case with copies between
+         * the writes and "after a capture: top, transform feedback" are the
+         * ones that check this. The others have no command between their
+         * writes, which Vulkan lets read alike or either way round, and keep
+         * the driver's recording order as a regression guard. */
         struct TimestampCase {
             const char *name;
             std::vector<ChainOp> beforeMiddle;
@@ -616,6 +625,10 @@ int main(int argc, char **argv)
         const TimestampCase timestampCases[] = {
             /* Three in a row between two passes. */
             {"timestamps between passes", {top(0), bottom(1), xfb(2)}, {{Kind::Capture}}},
+            /* With a copy before and between: each reads a time that follows
+             * the copies before it and precedes the ones after it. */
+            {"timestamps between passes with copies between",
+             {top(0), {Kind::Copy}, bottom(1), {Kind::Copy}, top(2)}, {{Kind::Capture}}},
             /* In a pass that has no encoder yet. */
             {"timestamps before a pass's first draw",
              {top(0)}, {bottom(1), xfb(2), {Kind::Capture}}},
@@ -685,6 +698,40 @@ int main(int argc, char **argv)
             expect.extraSamples = kHeapRasterIndices;
             const FeedbackChainResult result = run_variant(context, name, config, expect, false);
             check_heap_capture(config, result, name);
+        }
+
+        /* Two draws that unroll from the geometry heap, in a pass that follows
+         * other work in its command buffer. The first draw's compute has to
+         * precede the pass's encoder, which splits the pass, and the heap
+         * segment goes on across the split: the second counts its demand
+         * beside the first's and the heap grows for both, instead of the
+         * second finding a heap that is not empty and being refused. */
+        struct SplitCase {
+            const char *name;
+            bool clearing;
+            bool raster_pass_before;
+        };
+        const SplitCase splitCases[] = {
+            {"heap segment across a split: load-only pass", false, false},
+            {"heap segment across a split: pass that begins with a clear", true, false},
+            {"heap segment across a split: after a raster pass", false, true},
+        };
+        for (const SplitCase &split : splitCases) {
+            if (!selected(split.name))
+                continue;
+            FeedbackChainConfig config = variant();
+            const uint32_t middle = config.steps / 2;
+            config.heap_raster_indices = kHeapRasterIndices;
+            if (split.clearing)
+                config.clearing_pass = middle;
+            if (split.raster_pass_before)
+                config.passes[middle - 1] = {{Kind::Raster}};
+            config.passes[middle] = {{Kind::HeapRaster}, {Kind::HeapRaster}, {Kind::Capture}};
+            Expect expect;
+            expect.blueBackground = split.clearing;
+            expect.rasterizingDraws = split.raster_pass_before ? 2 : 1;
+            expect.extraSamples = 2u * kHeapRasterIndices;
+            run_variant(context, split.name, config, expect, false);
         }
         return 0;
     } catch (const std::exception &error) {

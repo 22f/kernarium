@@ -6,26 +6,38 @@ Subject: [PATCH] kosmickrisp: give each timestamp of a compute encoder its own
 
 A timestamp whose stage has no render stage of its own is sampled by a
 compute encoder, always into entry 0 of the pool's counter heap, and
-read back when the encoder stops. Two such timestamps in one encoder
-read the same time: a top-of-pipe, a bottom-of-pipe and a transform
-feedback timestamp written in a row all return one value.
+read back when the encoder stops. Samples taken by one encoder overwrite
+each other, so every query of the encoder reads the time of the last
+one. When commands lie between the writes, a query then reports a time
+after commands recorded later than it, which vkCmdWriteTimestamp2 does
+not allow: it latches the timer when all previous commands have
+completed the stage. A top-of-pipe write, a copy, a bottom-of-pipe
+write, a second copy and a last top-of-pipe write, all between two
+passes, read one time.
 
 The encoder that runs ahead of the render encoder takes the top stages.
 It now stops before a second sample into a heap it has not resolved yet,
-and the next encoder samples entry 0 again; stopping it opens no command
-buffer, and the work around it stays in order. The encoder that runs
-after the render encoder takes the bottom stages inside a pass, and it
-cannot stop while the pass's render encoder is open: its command buffer
-would be submitted ahead of the pass, with the pass's post-render work
-in it. Each of its samples takes the next entry, which a heap has for
-every query of its pool; more samples into one heap than the pool has
-queries share the last entry. Only samples into a heap count: a
-pipeline-statistics publication takes none.
+and the next encoder samples entry 0 again. Outside a started pass that
+opens no command buffer: the encoder runs in order in the main one.
+Inside a started pass the encoder has a command buffer of its own, so
+each further top-stage timestamp into the same pool ends one command
+buffer and opens another. The encoder that runs after the render encoder
+takes the bottom stages inside a pass, and it cannot stop while the
+pass's render encoder is open: its command buffer would be submitted
+ahead of the pass, with the pass's post-render work in it. Each of its
+samples takes the next entry, which a heap has for every query of its
+pool; more samples into one heap than the pool has queries share the
+last entry. Only samples into a heap count: a pipeline-statistics
+publication takes none.
 
 The transform feedback stage is at the end of a pass, like bottom of
 pipe, because a draw's capture is done once the draws before it have
-run. It sampled before the pass, so a transform feedback timestamp
-written after a bottom-of-pipe one read an earlier time.
+run. A transform feedback timestamp written after a capture of the same
+pass was sampled by the encoder ahead of the pass, before that capture
+had run, and read the same time as the top-of-pipe write before it; it
+now follows the pass's draws. Writes with no command between them may
+read alike or either way round under Vulkan's rule. The encoders keep
+their recording order all the same, and the test checks that.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---

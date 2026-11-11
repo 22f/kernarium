@@ -416,7 +416,7 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
             ops.push_back({Kind::Raster});
         return ops;
     };
-    bool heap_capture_used = false, heap_used = false;
+    bool heap_capture_used = false, heap_used = false, copy_used = false;
     for (uint32_t step = 0; step <= config.steps; ++step) {
         for (const ChainOp &op : ops_of(step)) {
             heap_capture_used |= op.kind == Kind::HeapCapture;
@@ -426,9 +426,12 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         }
     }
     for (const auto &entry : config.before_pass) {
-        for (const ChainOp &op : entry.second)
-            require(op.kind == Kind::Timestamp && op.query < config.timestamp_queries,
-                    "only timestamps are recorded between passes");
+        for (const ChainOp &op : entry.second) {
+            copy_used |= op.kind == Kind::Copy;
+            require((op.kind == Kind::Timestamp && op.query < config.timestamp_queries) ||
+                        op.kind == Kind::Copy,
+                    "only timestamps and copies are recorded between passes");
+        }
     }
     require(!heap_used || api.index_uint8.indexTypeUint8, "uint8 indices unavailable");
     require(!heap_capture_used || config.heap_capture_indices != 0,
@@ -526,6 +529,11 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     }
     if (heap_used)
         heap_indexes = buffer(indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data());
+    Buffer copy_source{}, copy_target{};
+    if (copy_used) {
+        copy_source = buffer(config.copy_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, nullptr);
+        copy_target = buffer(config.copy_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, nullptr);
+    }
 
     VkImageCreateInfo image_info = structure<VkImageCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -886,6 +894,17 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         case Kind::Timestamp:
             VK_CALL(CmdWriteTimestamp2, command, op.stage, timestamps, op.query);
             break;
+        case Kind::Copy: {
+            VkBufferCopy2 region = structure<VkBufferCopy2>(VK_STRUCTURE_TYPE_BUFFER_COPY_2);
+            region.size = config.copy_bytes;
+            VkCopyBufferInfo2 copy = structure<VkCopyBufferInfo2>(VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2);
+            copy.srcBuffer = copy_source.buffer;
+            copy.dstBuffer = copy_target.buffer;
+            copy.regionCount = 1;
+            copy.pRegions = &region;
+            VK_CALL(CmdCopyBuffer2, command, &copy);
+            break;
+        }
         }
     };
 

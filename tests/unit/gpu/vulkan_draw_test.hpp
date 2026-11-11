@@ -242,6 +242,9 @@ struct ChainOp {
         Clear,
         // vkCmdWriteTimestamp2 of `stage` into timestamp query `query`.
         Timestamp,
+        // vkCmdCopyBuffer2 of a buffer of `copy_bytes`, recorded outside a
+        // pass: work for timestamps to lie either side of.
+        Copy,
     };
     Kind kind;
     VkPipelineStageFlags2 stage = 0;
@@ -260,11 +263,13 @@ struct FeedbackChainConfig {
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     // The commands of pass `step` (0 to steps), replacing the default.
     std::map<uint32_t, std::vector<ChainOp>> passes;
-    // Timestamps recorded outside any pass just before pass `step` begins;
-    // `steps + 1` is after the last pass. Only Timestamp commands.
+    // Timestamp and Copy commands recorded outside any pass just before pass
+    // `step` begins; `steps + 1` is after the last pass.
     std::map<uint32_t, std::vector<ChainOp>> before_pass;
     // The timestamp pool's size; its queries are all read back.
     uint32_t timestamp_queries = 0;
+    // The size of the buffer a Copy command copies.
+    uint32_t copy_bytes = 32u << 20;
     // A pass in the middle of the chain that has no draw.
     bool empty_pass = false;
     // The pass that begins with a clear load op (blue) rather than a load, so
