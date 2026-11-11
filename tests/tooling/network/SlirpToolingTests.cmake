@@ -14,6 +14,7 @@ if(UML_BUILD_NETWORK_PROVIDER)
         uml_slirp_transmit_backpressure_tests
         uml_slirp_dns_tests
         uml_slirp_dead_peer_tests
+        uml_slirp_counters_tests
         uml_slirp_full_buffer_hangup_tests)
     set(_uml_slirp_probe_sources
         slirp_arp_probe.cpp
@@ -27,6 +28,7 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp_transmit_backpressure_probe.cpp
         slirp_dns_probe.cpp
         slirp_dead_peer_probe.cpp
+        slirp_counters_probe.cpp
         slirp_full_buffer_hangup_probe.cpp)
     set(_uml_slirp_probe_tests
         slirp-network-arp
@@ -40,10 +42,11 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp-network-transmit-backpressure
         slirp-network-dns
         slirp-network-dead-peer
+        slirp-network-counters
         slirp-network-full-buffer-hangup)
     # The dead-peer and full-buffer probes run five connections one after
     # the other.
-    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 60)
+    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 30 60)
     foreach(_uml_slirp_target _uml_slirp_source _uml_slirp_test
             _uml_slirp_timeout IN ZIP_LISTS
             _uml_slirp_probe_targets
@@ -64,4 +67,7 @@ if(UML_BUILD_NETWORK_PROVIDER)
             LABELS network
             TIMEOUT ${_uml_slirp_timeout})
     endforeach()
+    # The counters probe also reads a real session record.
+    target_link_libraries(uml_slirp_counters_tests PRIVATE
+        UML::RuntimeSessionRecord)
 endif()

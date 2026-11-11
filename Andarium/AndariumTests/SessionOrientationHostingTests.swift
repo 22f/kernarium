@@ -104,14 +104,20 @@ struct SessionOrientationHostingTests {
         lease.window.rootViewController = controller
         #expect(await eventually { driver.geometryChanges > 0 })
         // Let the first layouts settle, then report a storm of geometry
-        // updates within one turn: the driver hears of it, and not once for
-        // each of them.
+        // updates within one turn: with the geometry where the last update
+        // found it, the driver hears nothing of them (`SceneUpdateTests` moves
+        // each input on its own).
         try await Task.sleep(for: .milliseconds(500))
         let before = driver.geometryChanges
         for _ in 0..<50 { controller.sceneGeometryDidChange() }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(driver.geometryChanges == before)
+        // A phase change is the scene root's to tell the driver of, once.
+        model.phase = .running(.normal)
         #expect(await eventually { driver.geometryChanges > before })
         try await Task.sleep(for: .milliseconds(200))
-        #expect(driver.geometryChanges - before <= 5)
+        #expect(driver.geometryChanges - before <= 2)
+        model.phase = .home
     }
 
     @Test func theBundleAllowsOnlyPortraitOnIPhone() throws {

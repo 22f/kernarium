@@ -42,6 +42,9 @@ final class StubDriver: RuntimeDriver {
     }
     var motionSensors = false
     var savedGuest: Guest?
+    /// The denials of the network the model told the driver, in order; nil is none.
+    private(set) var networkNotices: [NetworkDenial?] = []
+    func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }
     func setMotionSensors(_ on: Bool) { motionSensors = on }
     /// What "Use the pointer as touch" and the pointer lock told the driver.
     var pointerAsTouch = false
