@@ -6,23 +6,26 @@ The platform disables a saved network at its first failed internet check, and a
 disabled network is never joined again, so a guest whose first check failed has
 no network from then on (android/lineage-24/README.md, "Networking"). The image
 overlays the thresholds that disable it (rro/KernariumWifiOverlay) and a boot
-script saves it again when a boot finds Wi-Fi on and nothing joined
-(overlay/tools/kernarium_wifi_network.sh). The runner shows both:
+script saves the network again, until the station has joined it once, when a
+boot finds Wi-Fi on and nothing joined (overlay/tools/kernarium_wifi_network.sh).
+The runner shows both:
 
 - fresh: the module's overlay is applied (`cmd overlay list`) and holds the
-  largest threshold for both no-internet reasons; with the validation probes
-  pointed at a black hole, a strict private DNS name that does not resolve, and
-  VirtWifi forgotten and saved again, the network stays enabled and joined for a
-  minute and a half, and is joined again after a guest suspend and wake (the
-  host's route, `suspend` and `wake` on the management console) and after a
-  restart; a network the user marked metered keeps that after a restart (the
-  script saves nothing while the station joins); a forgotten network is still
-  forgotten after a restart; and Wi-Fi that was turned off is still off;
-- upgrade: the data disk of the previous release (the accepted one by default),
-  on which the probes and a forgotten and saved network disable VirtWifi as the
-  stock platform does, boots the release under test: the first boot saves the
-  network again and the station joins it, with the probes still pointed at the
-  black hole.
+  largest threshold for both no-internet reasons; the script ran without
+  SELinux denials; with the validation probes pointed at a black hole, a strict
+  private DNS name that does not resolve, and VirtWifi forgotten and saved
+  again, the network stays enabled and joined for a minute and a half, and is
+  joined again after a guest suspend and wake (the host's route, `suspend` and
+  `wake` on the management console) and after a restart; a network the user
+  marked metered, or turned Auto-connect off for, keeps that after a restart
+  (the script has nothing to save once the station has joined); a forgotten
+  network is still forgotten after a restart; and Wi-Fi that was turned off is
+  still off;
+- upgrade (only with --previous-release): the data disk of that release, on
+  which the probes and a forgotten and saved network disable VirtWifi as the
+  stock platform does and which holds the network disabled after a restart of
+  its own guest, boots the release under test: the first boot saves the network
+  again, the station joins it, and the next boot leaves it alone.
 
 The checks of one section do not stop the others, so a release that lacks the
 overlay shows every symptom; the run passes only if none failed. Every wait has a
@@ -54,6 +57,7 @@ import tempfile
 import time
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
@@ -89,6 +93,7 @@ SSID = "VirtWifi"
 OVERLAY_PACKAGE = "com.android.wifi.resources.kernarium"
 OVERLAY_FILE = "/vendor/overlay/KernariumWifiOverlay.apk"
 SCRIPT_LOG_TAG = "kernarium_wifi_network"
+SCRIPT_DOMAIN = "kernarium_wifi_network"
 SCRIPT_LOG_LINE = "VirtWifi saved again"
 PROBE_SETTINGS = {
     "captive_portal_https_url": f"https://{BLACKHOLE}/generate_204",
@@ -106,12 +111,40 @@ class Failure(RuntimeError):
 
 # ---- What the guest prints, read.
 
-def boot_settle_seconds(script: str) -> int:
-    """The seconds the boot script gives the station to join, from its `settle=` line."""
-    match = re.search(r"^settle=(\d+)\s*$", script, re.M)
+def script_seconds(script: str, name: str) -> int:
+    """A wait of the boot script, from its `name=` line."""
+    match = re.search(rf"^{name}=(\d+)\s*$", script, re.M)
     if match is None:
-        raise Failure("the boot script has no settle= line")
+        raise Failure(f"the boot script has no {name}= line")
     return int(match[1])
+
+
+def boot_settle_seconds(script: str) -> int:
+    """The seconds the boot script gives the station to join before it saves the network again."""
+    return script_seconds(script, "settle")
+
+
+def boot_rejoin_seconds(script: str) -> int:
+    """The seconds the boot script waits for the station to join after it saved the network again."""
+    return script_seconds(script, "rejoin")
+
+
+@dataclass(frozen=True)
+class Waits:
+    """How long a section waits after a boot for the script, which gives the station `settle` seconds
+    and, after saving the network again, `rejoin` more."""
+    settle: int
+    rejoin: int
+
+    @property
+    def quiet(self) -> int:
+        """Long enough after a boot to have seen the script save the network again, if it would."""
+        return self.settle + MARGIN_SECONDS
+
+    @property
+    def repair(self) -> int:
+        """Long enough after a boot for the script to save the network again and wait for the join."""
+        return self.settle + self.rejoin + MARGIN_SECONDS
 
 
 def wifi_enabled(status: str) -> bool:
@@ -156,15 +189,38 @@ def selection_disable_reason(dump: str) -> str | None:
 
 
 def no_internet_count(dump: str) -> int:
-    """How many failed internet checks the platform counted against the network, summed over both reasons."""
-    return sum(int(count) for count in re.findall(
-        r"^NETWORK_SELECTION_DISABLED_NO_INTERNET_(?:PERMANENT|TEMPORARY) counter:(\d+)\s*$", dump, re.M))
+    """How many failed internet checks the platform counted against the network, summed over both reasons.
+
+    The dump prints the network more than once, each time with its counters, so a reason counts once."""
+    total = 0
+    for reason in ("PERMANENT", "TEMPORARY"):
+        counts = re.findall(rf"^NETWORK_SELECTION_DISABLED_NO_INTERNET_{reason} counter:(\d+)\s*$", dump, re.M)
+        total += max((int(count) for count in counts), default=0)
+    return total
 
 
 def metered_override(dump: str) -> int | None:
     """The metered override of the saved network (0 none, 1 metered, 2 not metered)."""
     match = re.search(r"^\s*meteredOverride (\d+)\s*$", dump, re.M)
     return int(match[1]) if match else None
+
+
+def autojoin_values(dump: str) -> list[bool]:
+    """Auto-connect of the saved network, one value for each time `dumpsys wifi` prints it."""
+    return [value == "true" for value in re.findall(r"\ballowAutojoin=(true|false)\b", dump)]
+
+
+def avc_denials(log: str, domain: str) -> list[str]:
+    """The SELinux denials in a log that name the domain, its executable or its property type, as the
+    source or the target."""
+    named = re.compile(rf"u:(?:object_)?r:{domain}(?:_exec|_prop)?:")
+    return [line.strip() for line in log.splitlines()
+            if "avc:" in line and "denied" in line and named.search(line)]
+
+
+def repair_logged(log: str) -> bool:
+    """Whether the boot script's log shows that it saved the network again."""
+    return SCRIPT_LOG_LINE in log
 
 
 def overlay_enabled(listing: str) -> bool:
@@ -271,6 +327,10 @@ class Guest:
 
     def joined(self) -> bool:
         return wifi_joined(self.status())
+
+    def script_log(self) -> str:
+        """What the boot script logged since this boot."""
+        return self.shell(f"logcat -d -s {SCRIPT_LOG_TAG}")
 
     def uptime(self) -> float:
         return float(self.shell("cat /proc/uptime").split()[0])
@@ -502,81 +562,121 @@ def check_restart(guest: Guest) -> str | None:
     return None
 
 
-def check_metered_kept(guest: Guest, window: int) -> str | None:
+def check_no_repair_logged(guest: Guest, when: str) -> None:
+    if repair_logged(guest.script_log()):
+        raise Failure(f"the boot script saved the network again {when}")
+
+
+def check_metered_kept(guest: Guest, waits: Waits) -> str | None:
     guest.shell(f"cmd wifi add-network {SSID} open -m")
     wait_for("the metered network is joined", JOIN_SECONDS, lambda: None if guest.joined() else "not joined", guest)
     if metered_override(guest.dump()) != 1:
         raise Failure("the network is not marked metered")
     guest.restart()
     guest.wait_joined(JOIN_SECONDS, "the station joins after the restart")
-    time.sleep(window + MARGIN_SECONDS)
+    time.sleep(waits.quiet)
     if metered_override(guest.dump()) != 1:
         raise Failure("the boot script saved a joined network again and reset its metered setting")
-    if SCRIPT_LOG_LINE in guest.shell(f"logcat -d -s {SCRIPT_LOG_TAG}"):
-        raise Failure("the boot script saved the network again although the station had joined")
+    check_no_repair_logged(guest, "although the station had joined")
     return None
 
 
-def check_forgotten_stays_forgotten(guest: Guest, window: int) -> str | None:
+def check_autojoin_kept(guest: Guest, waits: Waits) -> str | None:
+    """Auto-connect turned off is a choice of the user's that no boot undoes (saving the network replaces it)."""
+    guest.shell(f"cmd wifi add-network {SSID} open -d")
+    def autojoin_off() -> str | None:
+        values = autojoin_values(guest.dump())
+        return None if values and not any(values) else "still on"
+
+    wait_for("Auto-connect is off", 60, autojoin_off, guest)
+    guest.restart()
+    time.sleep(waits.quiet)
+    dump = guest.dump()
+    if any(autojoin_values(dump)):
+        raise Failure("Auto-connect is on again after a restart: the boot script saved the network again")
+    check_no_repair_logged(guest, "although the user turned Auto-connect off")
+    return None
+
+
+def check_forgotten_stays_forgotten(guest: Guest, waits: Waits) -> str | None:
     identifier = network_id(guest.listing())
     if identifier is None:
         raise Failure("VirtWifi is not saved")
     guest.shell(f"cmd wifi forget-network {identifier}")
     wait_for("the network is forgotten", 30, lambda: None if network_id(guest.listing()) is None else "saved", guest)
     guest.restart()
-    time.sleep(window + MARGIN_SECONDS)
+    time.sleep(waits.quiet)
     if SSID in saved_ssids(guest.listing()):
         raise Failure("VirtWifi is saved again after a restart although the user forgot it")
+    check_no_repair_logged(guest, "although the user forgot the network")
     if not wifi_enabled(guest.status()):
         raise Failure("Wi-Fi is not on")
     return None
 
 
-def check_wifi_off_stays_off(guest: Guest, window: int) -> str | None:
+def check_wifi_off_stays_off(guest: Guest, waits: Waits) -> str | None:
     guest.shell(f"cmd wifi add-network {SSID} open")
     guest.wait_joined(JOIN_SECONDS, "the station joins the network saved again")
     guest.shell("cmd wifi set-wifi-enabled disabled")
     wait_for("Wi-Fi is off", 60, lambda: None if not wifi_enabled(guest.status()) else "still on", guest)
     guest.restart()
-    time.sleep(window + MARGIN_SECONDS)
+    time.sleep(waits.quiet)
     if wifi_enabled(guest.status()):
         raise Failure("Wi-Fi is on after a restart although the user turned it off")
+    check_no_repair_logged(guest, "although Wi-Fi was off")
     if network_id(guest.listing()) is None:
         raise Failure("the saved network is gone")
     return None
 
 
-def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, window: int) -> None:
+def check_no_denials(guest: Guest) -> str | None:
+    """The boot script runs in a domain of its own (overlay/sepolicy/system_ext/private); a rule it lacks
+    shows as a denial, and the script then fails without a word."""
+    log = guest.shell("logcat -d -b all", timeout=180)
+    denials = avc_denials(log, SCRIPT_DOMAIN)
+    if denials:
+        raise Failure(f"SELinux denied the boot script's domain {len(denials)} times:\n" + "\n".join(denials[:5]))
+    return f"{log.count('avc:')} denials logged in all, none for {SCRIPT_DOMAIN}"
+
+
+def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
     print("fresh data disk")
     guest = start_guest(options, adb, private, options.release, private / "fresh", provision=True)
     try:
         report.section("overlay is applied", guest, lambda: check_overlay(guest))
         report.section("VirtWifi is saved and joined at the first boot", guest, lambda: check_saved_and_joined(guest))
+        report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
         report.section("a failed internet check does not disable the network", guest,
                        lambda: check_not_disabled(guest))
         report.section("the station joins again after a suspend and wake", guest, lambda: check_suspend(guest))
         report.section("the station joins again after a restart", guest, lambda: check_restart(guest))
         report.section("a joined network keeps its metered setting across a restart", guest,
-                       lambda: check_metered_kept(guest, window))
+                       lambda: check_metered_kept(guest, waits))
+        report.section("a network with Auto-connect off keeps it across a restart", guest,
+                       lambda: check_autojoin_kept(guest, waits))
         report.section("a forgotten network stays forgotten", guest,
-                       lambda: check_forgotten_stays_forgotten(guest, window))
-        report.section("Wi-Fi that is off stays off", guest, lambda: check_wifi_off_stays_off(guest, window))
+                       lambda: check_forgotten_stays_forgotten(guest, waits))
+        report.section("Wi-Fi that is off stays off", guest, lambda: check_wifi_off_stays_off(guest, waits))
     finally:
         stop(guest)
 
 
-def check_repaired(guest: Guest, window: int) -> str | None:
+def check_repaired(guest: Guest, waits: Waits) -> str | None:
     state = selection_status(guest.dump())
     print(f"     the network is {state} when the release under test has booted")
-    guest.wait_joined(window + JOIN_SECONDS, "the first boot of the release joins the network")
+    if state != "NETWORK_SELECTION_PERMANENTLY_DISABLED" and not repair_logged(guest.script_log()):
+        raise Failure(f"the data disk holds the network {state}, not disabled: the previous release's disabled "
+                      "state did not reach the disk, so no repair is shown")
+    guest.wait_joined(waits.repair, "the first boot of the release joins the network")
     status = selection_status(guest.dump())
     if status != "NETWORK_SELECTION_ENABLED":
         raise Failure(f"the network joined but is {status}")
-    seen = SCRIPT_LOG_LINE in guest.shell(f"logcat -d -s {SCRIPT_LOG_TAG}")
-    return "the boot script logged its repair" if seen else "the boot script's log line was not found"
+    if not repair_logged(guest.script_log()):
+        raise Failure("the network joined without the boot script saving it again")
+    return None
 
 
-def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, window: int) -> None:
+def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
     previous = boot_android.release_path(options.previous_release)
     current = boot_android.release_path(options.release)
     if previous == current:
@@ -597,10 +697,17 @@ def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report
             wait_for("the previous release disables the network", HOLD_SECONDS + JOIN_SECONDS,
                      lambda: None if selection_status(guest.dump()) == "NETWORK_SELECTION_PERMANENTLY_DISABLED"
                      else "still enabled", guest, interval=POLL_SECONDS)
+            # The Wi-Fi service stores the change a few seconds later, and the disk the release under test
+            # boots holds only what was stored: a restart of this guest shows what that is.
+            guest.restart()
+            state = selection_status(guest.dump())
+            if state != "NETWORK_SELECTION_PERMANENTLY_DISABLED":
+                raise Failure(f"the network is {state} after a restart of the previous release, so its "
+                              "disabled state did not reach the disk")
             disabled = True
             return None
 
-        report.section("the previous release leaves VirtWifi disabled", guest, disable)
+        report.section("the previous release leaves VirtWifi disabled on its disk", guest, disable)
     finally:
         stop(guest)
     if not disabled:
@@ -608,9 +715,12 @@ def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report
     guest = start_guest(options, adb, private, options.release, instance, provision=False)
     try:
         report.section("the first boot of the release repairs the network", guest,
-                       lambda: check_repaired(guest, window))
+                       lambda: check_repaired(guest, waits))
+        report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
         report.section("the repaired network joins again after a suspend and wake", guest,
                        lambda: check_suspend(guest))
+        report.section("the next boot leaves the repaired network alone", guest,
+                       lambda: check_autojoin_kept(guest, waits))
     finally:
         stop(guest)
 
@@ -622,7 +732,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the macos-android17 uml-darwin-android17 (the launcher's default)")
     parser.add_argument("--release", type=pathlib.Path, help="installed Android release under test (default: accepted)")
     parser.add_argument("--previous-release", type=pathlib.Path,
-                        help="installed release whose data disk the upgrade section boots first (default: accepted)")
+                        help="installed release whose data disk the upgrade section boots first (the section "
+                        "runs only when this is given)")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
@@ -631,7 +742,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--memory", default="4G")
     parser.add_argument("--boot-timeout", type=int, default=BOOT_SECONDS,
                         help="seconds to wait for adbd and for boot_completed")
-    parser.add_argument("--skip-upgrade", action="store_true", help="run the fresh-disk section alone")
     return parser
 
 
@@ -641,14 +751,15 @@ def main() -> int:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
     adb = str(boot_android.resolve_executable(options.adb, sdk_fallback=True))
-    window = boot_settle_seconds(BOOT_SCRIPT.read_text(encoding="utf-8"))
+    script = BOOT_SCRIPT.read_text(encoding="utf-8")
+    waits = Waits(boot_settle_seconds(script), boot_rejoin_seconds(script))
     # Short, so the management console's socket path stays within sun_path.
     private = pathlib.Path(tempfile.mkdtemp(prefix="uml-awn-"))
     report = Report()
     try:
-        fresh(options, adb, private, report, window)
-        if not options.skip_upgrade:
-            upgrade(options, adb, private, report, window)
+        fresh(options, adb, private, report, waits)
+        if options.previous_release is not None:
+            upgrade(options, adb, private, report, waits)
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
         print(f"FAIL: {problem}", file=sys.stderr)
         report.failures.append(str(problem))

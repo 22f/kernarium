@@ -149,15 +149,15 @@ endif()
 # The guest's one Wi-Fi network (the Wi-Fi module's overlay and the boot script
 # of android/lineage-24): with the internet checks failing, the network stays
 # enabled and joined, and joins again after a suspend and after a restart; a
-# data disk that the previous release left with the network disabled is
-# repaired by the first boot of the release under test; a joined network keeps
-# its settings, a forgotten one stays forgotten and Wi-Fi that is off stays off.
-# It boots Android with the macOS launcher, so it is opt-in: name the release
-# under test, and the previous release when it is not the accepted one.
+# joined network keeps its settings, a forgotten one stays forgotten and Wi-Fi
+# that is off stays off. With a previous release named, a data disk that it
+# left with the network disabled is repaired by the first boot of the release
+# under test, once. It boots Android with the macOS launcher, so it is opt-in:
+# name the release under test, and the previous release for the upgrade section.
 set(UML_ANDROID_WIFI_NETWORK_RELEASE "" CACHE PATH
     "Installed Android release directory that the android-wifi-network test boots")
 set(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE "" CACHE PATH
-    "Installed Android release whose data disk the android-wifi-network test upgrades (default: accepted)")
+    "Installed Android release whose data disk the android-wifi-network test upgrades (empty: no upgrade section)")
 if(UML_ANDROID_WIFI_NETWORK_RELEASE AND TARGET uml-darwin-android17)
     set(wifi_network_previous)
     if(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE)
@@ -172,7 +172,7 @@ if(UML_ANDROID_WIFI_NETWORK_RELEASE AND TARGET uml-darwin-android17)
             --emulator $<TARGET_FILE:uml-darwin-android17>
             ${wifi_network_previous}
         LABELS guest;boot;android
-        TIMEOUT 3600
+        TIMEOUT 5400
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()

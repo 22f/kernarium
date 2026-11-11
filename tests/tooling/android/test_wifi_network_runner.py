@@ -6,8 +6,8 @@ run_android_wifi_network.py reads `cmd wifi status`, `cmd wifi list-networks`,
 `dumpsys wifi` and `cmd overlay list`. The texts below have the layout those
 commands print (WifiShellCommand, WifiConfiguration's dump and the overlay
 manager), so the runner's parsers run here; the runner also takes the boot
-script's settle time from the tracked script, and reads the overlay's integers
-with the verifier's reader of compiled resource tables.
+script's waits from the tracked script, and reads the overlay's integers with the
+verifier's reader of compiled resource tables.
 """
 
 from __future__ import annotations
@@ -67,7 +67,12 @@ ENABLED_DUMP = """\
 NETWORK_SELECTION_DISABLED_NO_INTERNET_PERMANENT counter:3
 NETWORK_SELECTION_DISABLED_NO_INTERNET_TEMPORARY counter:2
  meteredOverride 0
+ lcuid=0 allowAutojoin=true mAllowedAutoJoinInAdvancedProtection=true noInternetAccessExpected=false
 """
+AUTOJOIN_OFF_DUMP = ENABLED_DUMP.replace("allowAutojoin=true", "allowAutojoin=false")
+DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): avc:  denied  "
+          "{ read } for comm=\"cmd\" scontext=u:r:kernarium_wifi_network:s0 "
+          "tcontext=u:object_r:system_file:s0 tclass=file permissive=0\n")
 
 
 class ReadingTests(unittest.TestCase):
@@ -101,6 +106,31 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(runner.no_internet_count(ENABLED_DUMP), 5)
         self.assertEqual(runner.no_internet_count("nothing\n"), 0)
 
+    def test_a_network_the_dump_prints_three_times_is_counted_once(self) -> None:
+        self.assertEqual(runner.no_internet_count(ENABLED_DUMP * 3), 5)
+
+    def test_auto_connect_is_read_from_every_copy_of_the_network(self) -> None:
+        self.assertEqual(runner.autojoin_values(ENABLED_DUMP), [True])
+        self.assertEqual(runner.autojoin_values(AUTOJOIN_OFF_DUMP * 2), [False, False])
+        self.assertEqual(runner.autojoin_values(ENABLED_DUMP + AUTOJOIN_OFF_DUMP), [True, False])
+        self.assertEqual(runner.autojoin_values("mAutoJoinEnabled=false\n"), [])
+
+    def test_only_denials_of_the_scripts_domain_count(self) -> None:
+        domain = runner.SCRIPT_DOMAIN
+        self.assertEqual(len(runner.avc_denials(DENIAL, domain)), 1)
+        self.assertEqual(len(runner.avc_denials(DENIAL.replace("scontext=u:r:kernarium_wifi_network:s0",
+                                                               "scontext=u:r:init:s0")
+                                                .replace("system_file", "kernarium_wifi_network_exec"), domain)), 1)
+        self.assertEqual(len(runner.avc_denials(DENIAL.replace("kernarium_wifi_network", "kernarium_net_setup"),
+                                                domain)), 0)
+        self.assertEqual(runner.avc_denials(DENIAL.replace("denied", "granted"), domain), [])
+        self.assertEqual(runner.avc_denials("kernarium_wifi_network: VirtWifi saved again\n", domain), [])
+
+    def test_the_scripts_repair_line_is_found(self) -> None:
+        self.assertTrue(runner.repair_logged(
+            "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"))
+        self.assertFalse(runner.repair_logged("--------- beginning of main\n"))
+
     def test_the_metered_setting(self) -> None:
         self.assertEqual(runner.metered_override(DISABLED_DUMP), 1)
         self.assertEqual(runner.metered_override(ENABLED_DUMP), 0)
@@ -115,14 +145,23 @@ class ReadingTests(unittest.TestCase):
 
 
 class ScriptAndOverlayTests(unittest.TestCase):
-    def test_the_settle_time_comes_from_the_tracked_script(self) -> None:
-        settle = runner.boot_settle_seconds(runner.BOOT_SCRIPT.read_text(encoding="utf-8"))
+    def test_the_waits_come_from_the_tracked_script(self) -> None:
+        script = runner.BOOT_SCRIPT.read_text(encoding="utf-8")
+        settle = runner.boot_settle_seconds(script)
+        rejoin = runner.boot_rejoin_seconds(script)
         self.assertGreater(settle, 0)
         self.assertLessEqual(settle, 120)
-        with self.assertRaises(runner.Failure):
-            runner.boot_settle_seconds("marker=1\n")
+        self.assertGreater(rejoin, settle)
+        waits = runner.Waits(settle, rejoin)
+        self.assertGreater(waits.quiet, settle)
+        self.assertGreater(waits.repair, settle + rejoin)
+        for reader in (runner.boot_settle_seconds, runner.boot_rejoin_seconds):
+            with self.assertRaises(runner.Failure):
+                reader("marker=1\n")
 
-    def test_the_tracked_overlay_holds_what_the_runner_expects(self) -> None:
+    def test_the_runner_reads_the_integers_of_a_compiled_overlay(self) -> None:
+        # A synthetic resource table with the tracked overlay's resource names, read back through the
+        # verifier's reader; the tracked overlay's own values are checked by test_builder_lane.
         verifier = runner.load_verifier()
         table = synthetic_resource_table(
             [("config_fixture", [])],
