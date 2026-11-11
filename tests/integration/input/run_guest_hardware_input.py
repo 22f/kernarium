@@ -18,8 +18,10 @@ nodes by hardware_input_probe.py. The runner checks:
 - a key plugs the keyboard and nothing else: the input device appears with
   its identity and bitmaps, the host hears the guest's registration, keys
   arrive in order, a LED the guest writes reaches the host, and a client that
-  leaves with a key held ends it: the guest sees the release, the input
-  device goes and the host hears the unregistration;
+  leaves with a key held ends it: the input device goes and the host hears the
+  unregistration (a reader that has not read the key's release by then gets
+  ENODEV from the node, so it sees the release or loses it, and never sees
+  more);
 - a pointer event plugs the mouse and the pointer and no keyboard: the
   buttons, the pointer's contact and a wheel step arrive, and the same
   unplug;
