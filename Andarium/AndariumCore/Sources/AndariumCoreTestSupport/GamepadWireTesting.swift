@@ -90,7 +90,7 @@ extension GamepadProtocol {
 extension GamepadGuestFrame {
     /// The frame as it goes on the wire; the guest's relay sends these, and
     /// tests and the probe tool play the relay.
-    package var encoded: [UInt8] {
+    public var encoded: [UInt8] {
         var payload = [UInt8]()
         let type: GamepadProtocol.GuestType
         switch self {
@@ -128,21 +128,21 @@ extension GamepadGuestFrame {
 
 /// The host's frames out of a byte stream, for whatever plays the guest's
 /// relay: the same rules as `GamepadGuestFrameReader`.
-package struct GamepadHostFrameReader: Sendable {
-    package struct Output: Sendable {
-        package var frames: [GamepadHostFrame] = []
-        package var failure: GamepadProtocol.Failure?
+public struct GamepadHostFrameReader: Sendable {
+    public struct Output: Sendable {
+        public var frames: [GamepadHostFrame] = []
+        public var failure: GamepadProtocol.Failure?
     }
 
     private var buffer: [UInt8] = []
 
-    package init() {}
+    public init() {}
 
-    package var pendingByteCount: Int { buffer.count }
+    public var pendingByteCount: Int { buffer.count }
 
-    package mutating func reset() { buffer.removeAll() }
+    public mutating func reset() { buffer.removeAll() }
 
-    package mutating func feed(_ bytes: some Collection<UInt8>) -> Output {
+    public mutating func feed(_ bytes: some Collection<UInt8>) -> Output {
         buffer.append(contentsOf: bytes)
         var output = Output()
         while buffer.count >= GamepadProtocol.headerSize {

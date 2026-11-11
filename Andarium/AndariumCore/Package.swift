@@ -12,6 +12,11 @@ let package = Package(
     platforms: [.macOS("27.0"), .iOS("27.0")],
     products: [
         .library(name: "AndariumCore", targets: ["AndariumCore"]),
+        // For the application's hosted tests only: neither application links it.
+        // Dynamic like the application's own product: a static copy would
+        // give the test bundle a second AndariumCore, whose types the
+        // application's code does not recognise (`error as? AdbError`).
+        .library(name: "AndariumCoreTestSupport", type: .dynamic, targets: ["AndariumCoreTestSupport"]),
     ],
     dependencies: [
         .package(path: "../../GuestHost/Core"),
@@ -22,8 +27,8 @@ let package = Package(
             dependencies: [.product(name: "GuestHostCore", package: "Core")]
         ),
         // Simulated controllers and the guest end of the gamepad wire, for tests
-        // and the probe tool. It is not a product and the application never
-        // links it (the App Store bundle check refuses a build that does).
+        // and the probe tool. The application never links it (the App Store
+        // bundle check refuses a build that does); the hosted tests do.
         .target(
             name: "AndariumCoreTestSupport",
             dependencies: ["AndariumCore"]

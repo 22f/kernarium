@@ -180,6 +180,9 @@
           "product-name": "AndariumCore",
           "build-phase": { "build-phase": "frameworks" },
         }, {
+          "product-name": "AndariumCoreTestSupport",
+          "build-phase": { "build-phase": "frameworks" },
+        }, {
           "product-name": "GuestHostCore",
           "build-phase": { "build-phase": "frameworks" },
         },
