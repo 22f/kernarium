@@ -6,8 +6,10 @@ import Observation
 import Testing
 @testable import Andarium
 
-private final class Counter: @unchecked Sendable {
-    var value = 0
+/// Counts what a `@Sendable` closure reports; the tests read it on the main
+/// actor after the report.
+private nonisolated final class Counter: @unchecked Sendable {
+    nonisolated(unsafe) var value = 0
 }
 
 /// The runtime's gate on the snapshots: an operation that changes the data
