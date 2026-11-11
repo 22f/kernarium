@@ -295,18 +295,18 @@ private struct MockImportPicker: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Files") {
+                Section(header: Text(verbatim: "Files")) {
                     pick("3 photos", detail: "18 MiB", MockTree.photoPicks)
                     pick("A long video", detail: "4.7 GiB", [FilePick(name: "Lisbon walk, full.mov", size: 4 * Limits.bytesPerGiB + 716 * Limits.bytesPerMiB)])
                 }
-                Section("Cases") {
-                    Button("Names already in this folder") { finish(MockFolderProbe.clashes(files)) }
-                    Button("A file the guest has no room for") {
+                Section(header: Text(verbatim: "Cases")) {
+                    Button { finish(MockFolderProbe.clashes(files)) } label: { Text(verbatim: "Names already in this folder") }
+                    Button {
                         let name = "Disk image.iso"
                         files.failing[name] = "Not enough space in the guest"
                         finish([FilePick(name: name, size: 14 * Limits.bytesPerGiB)])
-                    }
-                    Button("One of three fails") {
+                    } label: { Text(verbatim: "A file the guest has no room for") }
+                    Button {
                         let name = "Unreadable.bin"
                         files.failing[name] = "The file couldn\u{2019}t be read"
                         files.recovering.insert(name)
@@ -315,10 +315,10 @@ private struct MockImportPicker: View {
                             FilePick(name: name, size: 40 * Limits.bytesPerMiB),
                             FilePick(name: "Scan.pdf", size: 2 * Limits.bytesPerMiB),
                         ])
-                    }
+                    } label: { Text(verbatim: "One of three fails") }
                 }
             }
-            .navigationTitle("Mock Picker")
+            .navigationTitle(Text(verbatim: "Mock Picker"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
