@@ -88,6 +88,7 @@ guest announces, and Android's lock LEDs and pointer capture, on stderr as
 ## Testing
 
 `ctest -R '^virtio-input-'` drives each device through its queues and its event
-descriptor with no guest, and the launcher's bridge from a display's events to
+descriptor with no guest, behind the real vhost-user transport for its
+configuration changes, and the launcher's bridge from a display's events to
 them. `run_launcher_refusals.py` (`tests/integration/boot`) covers the
 launcher option's refusals.

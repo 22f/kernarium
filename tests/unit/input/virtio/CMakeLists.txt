@@ -31,3 +31,17 @@ target_include_directories(uml_virtio_input_bridge_tests PRIVATE
 uml_add_unit_test(NAME virtio-input-bridge
     COMMAND uml_virtio_input_bridge_tests
     LABELS input)
+
+# A hardware device behind the real vhost-user transport: one configuration
+# change for each plug and each unplug, and the bitmaps read after it. The
+# front end it needs is the GPU tests', so their support header and the GPU
+# protocol it includes are on the path, ahead of the input library's own.
+add_executable(uml_virtio_input_transport_tests transport_tests.cpp)
+target_include_directories(uml_virtio_input_transport_tests BEFORE PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/unit/gpu
+    ${PROJECT_SOURCE_DIR}/darwin/device/gpu)
+target_link_libraries(uml_virtio_input_transport_tests PRIVATE
+    UML::VirtioInput UML::VhostUserTransport)
+uml_add_unit_test(NAME virtio-input-transport
+    COMMAND uml_virtio_input_transport_tests
+    LABELS input)
