@@ -372,6 +372,298 @@ void place(ProgramWords &words, InlineSuffixes &suffixes,
 
 } // namespace epilogue
 
+/* The prologue run a head in front of it can do whole: SP-based 64-bit
+ * stores, at least one of them a pair and at most one a single, at most one
+ * SUB SP, SP, #imm and exactly one ADD X29, SP, #imm (engine/run_heads.inc
+ * has what the head does and its operand words). */
+namespace prologue {
+
+inline constexpr std::size_t maximum_pairs = 6;
+inline constexpr std::size_t maximum_stores = maximum_pairs + 1;
+/* The longest run the builder looks back over; every element must still be
+ * in the ring of group starts. */
+inline constexpr std::size_t maximum_elements = 16;
+static_assert(maximum_elements < epilogue::ring);
+
+/* By pairs, then single stores, then SUB SP count. */
+using Heads = std::array<std::array<void (*)(), 2>, 2>;
+constexpr std::array<Heads, maximum_pairs> heads{{
+	{{{uml_arm64_gadget_run_prologue_1_0_0,
+	   uml_arm64_gadget_run_prologue_1_0_1},
+	  {uml_arm64_gadget_run_prologue_1_1_0,
+	   uml_arm64_gadget_run_prologue_1_1_1}}},
+	{{{uml_arm64_gadget_run_prologue_2_0_0,
+	   uml_arm64_gadget_run_prologue_2_0_1},
+	  {uml_arm64_gadget_run_prologue_2_1_0,
+	   uml_arm64_gadget_run_prologue_2_1_1}}},
+	{{{uml_arm64_gadget_run_prologue_3_0_0,
+	   uml_arm64_gadget_run_prologue_3_0_1},
+	  {uml_arm64_gadget_run_prologue_3_1_0,
+	   uml_arm64_gadget_run_prologue_3_1_1}}},
+	{{{uml_arm64_gadget_run_prologue_4_0_0,
+	   uml_arm64_gadget_run_prologue_4_0_1},
+	  {uml_arm64_gadget_run_prologue_4_1_0,
+	   uml_arm64_gadget_run_prologue_4_1_1}}},
+	{{{uml_arm64_gadget_run_prologue_5_0_0,
+	   uml_arm64_gadget_run_prologue_5_0_1},
+	  {uml_arm64_gadget_run_prologue_5_1_0,
+	   uml_arm64_gadget_run_prologue_5_1_1}}},
+	{{{uml_arm64_gadget_run_prologue_6_0_0,
+	   uml_arm64_gadget_run_prologue_6_0_1},
+	  {uml_arm64_gadget_run_prologue_6_1_0,
+	   uml_arm64_gadget_run_prologue_6_1_1}}},
+}};
+
+[[nodiscard]] constexpr bool is_element(std::uint32_t word) noexcept
+{
+	return (word & 0xfe40'03e0U) == 0xa800'03e0U ||  // STP Xt, Xt2, [SP..]
+		(word & 0xffc0'03e0U) == 0xf900'03e0U ||  // STR Xt, [SP, #imm]
+		((word & 0xffe0'03e0U) == 0xf800'03e0U && // STUR, STR Xt with
+		 ((word >> 10) & 3U) != 2U) ||            // writeback
+		(word & 0xff80'03ffU) == 0xd100'03ffU ||  // SUB SP, SP, #imm
+		(word & 0xff80'03ffU) == 0x9100'03fdU;    // ADD X29, SP, #imm
+}
+
+/* One store, at its address from SP at entry. A single store names its
+ * register as both halves. */
+struct Store final {
+	std::int64_t address{};
+	unsigned first{};
+	unsigned second{};
+	std::int64_t bytes{};
+};
+
+struct Plan final {
+	std::size_t pairs{};
+	std::size_t singles{};
+	std::size_t subs{};
+	std::size_t frames{};
+	/* X29 after the run, from SP at entry. */
+	std::int64_t frame{};
+	std::size_t stores{};
+	std::array<Store, maximum_stores> store{};
+};
+
+/* The head a plan selects and its store count, which fixes its operand
+ * words. */
+struct Head final {
+	void (*gadget)(){};
+	std::size_t stores{};
+};
+
+/* Adds one element, at SP offset `sp`, to `plan` and advances `sp` past
+ * its writeback. False for a form the head does not perform: a store through
+ * an SP the ordinary gadget would fault on as misaligned, a store of XZR, a
+ * store of X29 after the run set it, a seventh pair, a second single store,
+ * a second SUB SP or a second ADD X29. */
+[[nodiscard]] bool add(std::uint32_t word, std::int64_t &sp, Plan &plan) noexcept
+{
+	const auto immediate = static_cast<std::int64_t>(
+		((word >> 10) & 0xfffU) << ((word & 0x0040'0000U) != 0 ? 12U : 0U));
+	if ((word & 0xff80'03ffU) == 0xd100'03ffU) {
+		if (plan.subs != 0)
+			return false;
+		++plan.subs;
+		sp -= immediate;
+		return true;
+	}
+	if ((word & 0xff80'03ffU) == 0x9100'03fdU) {
+		if (plan.frames != 0)
+			return false;
+		++plan.frames;
+		plan.frame = sp + immediate;
+		return true;
+	}
+	if ((sp & 15) != 0 || plan.stores == maximum_stores)
+		return false;
+	Store store{};
+	if ((word & 0xfe40'03e0U) == 0xa800'03e0U) {
+		store.first = word & 31U;
+		store.second = (word >> 10) & 31U;
+		store.bytes = 16;
+		const auto mode = (word >> 23) & 3U;
+		const auto displacement =
+			sign_extend((word >> 15) & 0x7fU, 7) * 8;
+		store.address = mode == 1U ? sp : sp + displacement;
+		if (mode == 1U || mode == 3U)
+			sp += displacement;
+	} else if ((word & 0xffc0'03e0U) == 0xf900'03e0U) {
+		store.first = store.second = word & 31U;
+		store.bytes = 8;
+		store.address = sp + static_cast<std::int64_t>(
+			((word >> 10) & 0xfffU) << 3);
+	} else {
+		store.first = store.second = word & 31U;
+		store.bytes = 8;
+		const auto mode = (word >> 10) & 3U;
+		const auto displacement = sign_extend((word >> 12) & 0x1ffU, 9);
+		store.address = mode == 1U ? sp : sp + displacement;
+		if (mode != 0U)
+			sp += displacement;
+	}
+	if (store.first == 31U || store.second == 31U)
+		return false;
+	if (plan.frames != 0 && (store.first == 29U || store.second == 29U))
+		return false;
+	if (store.bytes == 16) {
+		if (plan.pairs == maximum_pairs)
+			return false;
+		++plan.pairs;
+	} else {
+		if (plan.singles != 0)
+			return false;
+		++plan.singles;
+	}
+	plan.store[plan.stores++] = store;
+	return true;
+}
+
+/* The head's operand words for the elements [start, end) of `window` into
+ * `operands`. The result is the head, without a gadget when it cannot do the
+ * elements. */
+[[nodiscard]] Head encode(std::span<const std::uint32_t> window,
+	std::size_t start, std::size_t end,
+	std::array<std::uintptr_t, 3> &operands) noexcept
+{
+	Plan plan{};
+	std::int64_t sp = 0;
+	for (std::size_t index = start; index < end; ++index)
+		if (!add(window[index], sp, plan))
+			return {};
+	if (plan.frames != 1 || plan.pairs == 0)
+		return {};
+	/* The single store goes first, where the head stores 8 bytes. */
+	for (std::size_t index = 0; index < plan.stores; ++index)
+		if (plan.store[index].bytes == 8)
+			std::rotate(plan.store.begin(),
+				plan.store.begin() +
+					static_cast<std::ptrdiff_t>(index),
+				plan.store.begin() +
+					static_cast<std::ptrdiff_t>(index) + 1);
+	/* The bytes each store writes are its own and no other store's. */
+	std::int64_t low = plan.store[0].address;
+	std::int64_t limit = low + plan.store[0].bytes;
+	for (std::size_t index = 0; index < plan.stores; ++index) {
+		const auto &store = plan.store[index];
+		if ((store.address & 7) != 0)
+			return {};
+		for (std::size_t other = 0; other < index; ++other) {
+			const auto &earlier = plan.store[other];
+			if (store.address < earlier.address + earlier.bytes &&
+			    earlier.address < store.address + store.bytes)
+				return {};
+		}
+		low = std::min(low, store.address);
+		limit = std::max(limit, store.address + store.bytes);
+	}
+	const auto last = limit - 1 - low;
+	const auto low_units = low / 8;
+	const auto frame = plan.frame - low;
+	if (low_units < -512 || low_units > 511 ||
+	    (sp & 15) != 0 || sp / 16 < -512 || sp / 16 > 511 ||
+	    frame < 0 || frame > 8 * 31 || (frame & 7) != 0)
+		return {};
+	/* A store's place in the span has 5 bits, which keeps the span's last
+	 * byte inside its 9. */
+	for (std::size_t index = 0; index < plan.stores; ++index)
+		if (plan.store[index].address - low > 8 * 31)
+			return {};
+	const auto packed = [&](std::size_t index) {
+		const auto &store = plan.store[index];
+		return static_cast<std::uintptr_t>((store.address - low) / 8) |
+			(static_cast<std::uintptr_t>(store.first) << 5) |
+			(static_cast<std::uintptr_t>(store.second) << 10);
+	};
+	operands = {};
+	operands[0] = (static_cast<std::uintptr_t>(low_units) & 0x3ffU) |
+		(static_cast<std::uintptr_t>(last) << 10) |
+		((static_cast<std::uintptr_t>(sp / 16) & 0x3ffU) << 19) |
+		(static_cast<std::uintptr_t>(frame / 8) << 29) |
+		(packed(0) << 34);
+	for (std::size_t index = 1; index < plan.stores; ++index)
+		operands[(index + 2) / 4] |= packed(index) <<
+			(index < 2 ? 49 : 15 * ((index - 2) % 4));
+	return {heads[plan.pairs - 1][plan.singles][plan.subs], plan.stores};
+}
+
+[[nodiscard]] constexpr std::size_t operand_words(std::size_t stores) noexcept
+{
+	return 1 + (stores + 1) / 4;
+}
+
+/* Put a head in front of the longest prologue run that ends right before
+ * instruction `end`, whose group is not emitted yet. `starts` holds where each
+ * recent instruction's group begins, and the entries of the run's elements
+ * move with them. The run's words stay where they are, behind the head, and
+ * are its fallback. True when a head was placed: the caller must then not
+ * forward a register from the run's last element into instruction `end`,
+ * since the head leaves none in the forwarding register. */
+bool place(ProgramWords &words, InlineSuffixes &suffixes,
+	std::span<const std::uint32_t> window, std::size_t end,
+	epilogue::Starts &starts
+#if UML_GADGET_EXECUTION_HISTOGRAM
+	, const epilogue::Predecessors &predecessors
+#endif
+	)
+{
+	std::size_t length = 0;
+	while (length < std::min(end, maximum_elements) &&
+	       is_element(window[end - 1 - length]))
+		++length;
+	for (; length > 1; --length) {
+		const auto start = end - length;
+		bool grouped = true;
+		for (std::size_t index = start; index < end; ++index) {
+			const auto next = index + 1 == end ? words.size() :
+				std::size_t{starts[(index + 1) % epilogue::ring]};
+			grouped = grouped && next == starts[index % epilogue::ring] +
+				epilogue::group_words;
+		}
+		if (!grouped)
+			continue;
+		std::array<std::uintptr_t, 3> operands{};
+		const auto [gadget, stores] = encode(window, start, end, operands);
+		if (gadget == nullptr)
+			continue;
+		const auto head = reinterpret_cast<std::uintptr_t>(gadget);
+		const std::size_t at = starts[start % epilogue::ring];
+		const auto inserted = epilogue::count_words + 1 +
+			operand_words(stores);
+		words.insert(at, inserted);
+		auto cursor = at;
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		/* As the epilogue head's: a group of no guest words, which the
+		 * run's first word names as its predecessor. */
+		words[cursor++] = reinterpret_cast<std::uintptr_t>(
+			diagnostics::uml_arm64_gadget_execution_count);
+		words[cursor++] = diagnostics::execution_histogram_slot(
+			predecessors[start % epilogue::ring],
+			reinterpret_cast<const void *>(head));
+		words[cursor++] = 0;
+#endif
+		words[cursor++] = head;
+		for (std::size_t index = 0; index < operand_words(stores); ++index)
+			words[cursor++] = operands[index];
+#if UML_GADGET_EXECUTION_HISTOGRAM
+		words[cursor + 1] = diagnostics::execution_histogram_slot(
+			reinterpret_cast<const void *>(head),
+			reinterpret_cast<const void *>(
+				words[cursor + epilogue::count_words]));
+#endif
+		for (std::size_t index = start; index < end; ++index)
+			starts[index % epilogue::ring] +=
+				static_cast<std::uint32_t>(inserted);
+		for (std::uint32_t index = 0; index < suffixes.count; ++index)
+			if (suffixes.word[index] >= at)
+				suffixes.word[index] +=
+					static_cast<std::uint32_t>(inserted);
+		return true;
+	}
+	return false;
+}
+
+} // namespace prologue
+
 } // namespace
 
 BuildResult Builder::build(
@@ -418,12 +710,33 @@ BuildResult Builder::build(
 #if UML_GADGET_EXECUTION_HISTOGRAM
 	epilogue::Predecessors group_predecessors{};
 #endif
+	/* Prologue heads go where epilogue heads do: not in a streaming program
+	 * and not in one built without indirect sites, as a single step is. */
+	const bool prologue_heads = !streaming &&
+		static_cast<bool>(resolve_indirect_link);
+	const auto place_prologue = [&] {
+		return prologue_heads && compiled != 0 &&
+			prologue::is_element(window[compiled - 1]) &&
+			prologue::place(words, suffixes, window, compiled,
+				group_starts
+#if UML_GADGET_EXECUTION_HISTOGRAM
+				, group_predecessors
+#endif
+				);
+	};
 	/* Indexed rather than ranged, because a decoder that fuses a pair needs to
 	 * see what follows the instruction it was handed. `compiled` is the loop
 	 * position as well as the retired count, and a fusing decoder advances it
 	 * past both instructions itself. */
 	while (compiled < window.size()) {
 		const auto instruction = window[compiled];
+		/* A run ends at the first instruction that is not an element of
+		 * one, before that instruction's group begins. Behind a head no
+		 * register is forwarded into it. */
+		if (!prologue::is_element(instruction) && place_prologue()) {
+			previous_scalar = scalar_no_register;
+			previous_vector = scalar_no_register;
+		}
 		program_accesses_fp_state = program_accesses_fp_state ||
 			uml::cpu::arm64::detail::
 				instruction_accesses_fp_state(instruction);
@@ -544,6 +857,7 @@ BuildResult Builder::build(
 				address, instruction};
 		++compiled;
 	}
+	(void)place_prologue();
 	const auto fallthrough = guest_address + compiled * sizeof(std::uint32_t);
 	if (resolve_link) {
 		emit(words, uml_arm64_gadget_branch_linked);

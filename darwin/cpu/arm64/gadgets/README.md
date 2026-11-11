@@ -56,10 +56,16 @@ behind them; a hint between the run and the RET that the virtual CPU runs as
 a NOP, such as AUTIASP, then emits no word. The head does the run and the
 return when SP is 16-byte aligned and every byte it reads lies in one page the
 TLB holds for reading; otherwise it dispatches the run's first word, so a
-fault, its resume and the retirement count see the ordinary words. Programs
-built without indirect sites, as single-step builds them, get no head.
-`arm64-gadget-run-heads` checks where heads go, each fallback, a fault inside
-one and its resume, and generated runs against a model of the instructions.
+fault, its resume and the retirement count see the ordinary words. A prologue
+run, SP-based 64-bit stores with at least one pair and at most one single, at
+most one SUB SP and one ADD X29, SP, begins with a head the same way, which
+does the stores, SP and X29 when SP is aligned and every byte it writes lies
+in one page the TLB holds for writing, and leaves no register forwarded into
+the instruction behind the run. Programs built without indirect sites, as
+single-step builds them, get no head. `arm64-gadget-run-heads` and
+`arm64-gadget-prologue-heads` check where heads go, each fallback, a fault
+inside one and its resume, and generated runs against a model of the
+instructions.
 
 ## Return ring and target table
 

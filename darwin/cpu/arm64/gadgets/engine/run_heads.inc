@@ -122,4 +122,155 @@ Lrun_epilogue_fallback\@:
 .purgem run_epilogue
 .purgem run_epilogue_load
 
+/*
+ * A prologue head stands in front of a run the builder recognized: SP-based
+ * 64-bit pair stores, at most one 64-bit single store, at most one
+ * SUB SP, SP, #imm and exactly one ADD X29, SP, #imm (MOV X29, SP among
+ * them), with at least one pair. The run's own words follow the head
+ * unchanged. When SP is 16-byte aligned and the TLB maps every byte the head
+ * writes in one guest page for writing, the head does the whole run: each
+ * store, then the final SP and X29, and continues behind the run's words.
+ * Otherwise it dispatches the run's first word, and the run executes, faults
+ * and retires exactly as it would without a head.
+ *
+ * The page test is the epilogue's with the write entry, which only a
+ * translation for writing fills, so a hit means the page is writable now. A
+ * page below the stack that the guest has not touched, a guard page and a
+ * read-only page all miss, as does a span across a page, and the head then
+ * stores nothing: the run's words fault where they would, at the store that
+ * reaches the page, with the words before it done. On a hit the head computes
+ * every address from SP at entry, stores each register as CpuState holds it,
+ * and writes SP and X29 last. That is the run's own order for every value:
+ * the builder refuses a run that stores X29 after setting it, and no store can
+ * name SP. Stores below SP before SP is lowered would be lost to a signal frame
+ * pushed between them, but nothing runs between them: a page the TLB holds
+ * for writing cannot fault, and an interrupt is taken only between blocks.
+ *
+ * A head is named for its pairs, its single store and its SUB SP count, which
+ * fix how far behind the head the run's words end, so the next dispatch waits
+ * for no operand word.
+ *
+ * The first operand word:
+ *   bits 9:0    the first byte the head writes, in 8-byte units from SP at
+ *               entry, signed
+ *   bits 18:10  the last byte it writes, in bytes from the first
+ *   bits 28:19  SP at exit, in 16-byte units from SP at entry, signed
+ *   bits 33:29  X29 at exit, in 8-byte units from the first byte
+ *   bits 48:34  the first store
+ *   bits 63:49  the second store
+ * then four stores a word, at bits 0, 15, 30 and 45. A store is its address
+ * in 8-byte units from the first byte (bits 4:0), then the CpuState indices
+ * of Rt (9:5) and Rt2 (14:10). The single store, when there is one, is the
+ * first and writes only Rt's 8 bytes.
+ */
+.macro run_prologue_pair word, shift
+	ubfx x11, \word, #\shift, #5
+	ubfx x12, \word, #(\shift + 5), #5
+	ubfx x13, \word, #(\shift + 10), #5
+	ldr x9, [_vcpu, x12, lsl #3]
+	ldr x10, [_vcpu, x13, lsl #3]
+	add x11, x16, x11, lsl #3
+	stp x9, x10, [x11]
+.endm
+
+.macro run_prologue_single word, shift
+	ubfx x11, \word, #\shift, #5
+	ubfx x12, \word, #(\shift + 5), #5
+	ldr x9, [_vcpu, x12, lsl #3]
+	str x9, [x16, x11, lsl #3]
+.endm
+
+/* The store in operand slot `slot`, of `kind` pair or single. */
+.macro run_prologue_slot slot, kind
+	.if \slot == 0
+	run_prologue_\kind x8, 34
+	.elseif \slot == 1
+	run_prologue_\kind x8, 49
+	.elseif \slot == 2
+	ldr x14, [_stream, #8]
+	run_prologue_\kind x14, 0
+	.elseif \slot == 3
+	run_prologue_\kind x14, 15
+	.elseif \slot == 4
+	run_prologue_\kind x14, 30
+	.elseif \slot == 5
+	run_prologue_\kind x14, 45
+	.elseif \slot == 6
+	ldr x14, [_stream, #16]
+	run_prologue_\kind x14, 0
+	.else
+	.error "a prologue head has at most seven stores"
+	.endif
+.endm
+
+.macro run_prologue pairs, single, subs
+	.set Lrun_operand_words\@, 1 + (\pairs + \single + 1) / 4
+	/* Past the operands and every element's group: one store each, the
+	 * SUB SP and the ADD X29. */
+	.set Lrun_elements\@, (\pairs + \single + \subs + 1) * (Lrun_count_words + 2)
+	.set Lrun_skip\@, Lrun_operand_words\@ + Lrun_elements\@
+gadget run_prologue_\pairs\()_\single\()_\subs
+	ldr x8, [_stream]
+	ldr x17, [_vcpu, #UML_GADGET_CPU_SP]
+	sbfx x9, x8, #0, #10
+	ubfx x10, x8, #10, #9
+	tst x17, #0xf
+	b.ne Lrun_prologue_fallback\@
+	add x16, x17, x9, lsl #3
+	add x11, x16, x10
+	ubfx x9, x16, #UML_GADGET_GUEST_PAGE_SHIFT, #UML_GADGET_TLB_INDEX_BITS
+	add x10, _swtlb, x9, lsl #UML_GADGET_TLB_SET_SHIFT
+	ldp x12, x13, [x10, #UML_GADGET_TLB_ENTRY_WRITE_PAGE]
+	lsr x11, x11, #UML_GADGET_GUEST_PAGE_SHIFT
+	cmp x12, x11
+	b.ne Lrun_prologue_fallback\@
+	sbfx x15, x8, #19, #10
+	add x17, x17, x15, lsl #4
+	ubfx x15, x8, #29, #5
+	add x15, x16, x15, lsl #3
+	add x16, x13, x16
+	.if \single
+	run_prologue_slot 0, single
+	.endif
+	.if \pairs > 0
+	run_prologue_slot (\single+0), pair
+	.endif
+	.if \pairs > 1
+	run_prologue_slot (\single+1), pair
+	.endif
+	.if \pairs > 2
+	run_prologue_slot (\single+2), pair
+	.endif
+	.if \pairs > 3
+	run_prologue_slot (\single+3), pair
+	.endif
+	.if \pairs > 4
+	run_prologue_slot (\single+4), pair
+	.endif
+	.if \pairs > 5
+	run_prologue_slot (\single+5), pair
+	.endif
+	str x17, [_vcpu, #UML_GADGET_CPU_SP]
+	str x15, [_vcpu, #(UML_GADGET_CPU_X0 + 8 * 29)]
+	add _stream, _stream, #(8 * Lrun_skip\@)
+	next_gadget
+Lrun_prologue_fallback\@:
+	/* As the epilogue's: the run's first word, which in a counting build
+	 * names the head as its predecessor. */
+	add _stream, _stream, #(8 * Lrun_operand_words\@)
+	next_gadget
+.endm
+
+	.irp pairs, 1, 2, 3, 4, 5, 6
+	run_prologue \pairs, 0, 0
+	run_prologue \pairs, 0, 1
+	run_prologue \pairs, 1, 0
+	run_prologue \pairs, 1, 1
+	.endr
+
+.purgem run_prologue
+.purgem run_prologue_slot
+.purgem run_prologue_single
+.purgem run_prologue_pair
+
 	.popsection
