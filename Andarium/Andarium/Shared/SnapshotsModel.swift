@@ -202,8 +202,9 @@ final class SnapshotsModel {
         return false
     }
 
-    /// An operation is under way (also one on the guest's storage).
-    var isWorking: Bool { app?.snapshotActivity.operation != nil }
+    /// An operation that holds the guest's files is under way (also one on
+    /// the guest's storage); a rename that follows the typing is not shown.
+    var isWorking: Bool { app?.snapshotActivity.holdsGuestFiles ?? false }
 
     // MARK: Reading
 

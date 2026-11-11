@@ -1077,9 +1077,10 @@ final class AppModel {
     /// guest is saved with the new capacity before the runtime, which grows
     /// the data disk in every kind of start, is handed it. A snapshot
     /// operation under way is not a reason to say anything: the start is
-    /// ignored, as the screens offer none while one runs (`snapshotGate`).
+    /// ignored, as the screens offer none while one runs (`snapshotGate`); a
+    /// rename is not one, and the start waits for it.
     func start(_ mode: StartMode) {
-        guard snapshotActivity.operation == nil else { return }
+        guard !snapshotActivity.holdsGuestFiles else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
             restoredSnapshot = nil

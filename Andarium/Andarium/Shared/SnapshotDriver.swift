@@ -22,6 +22,15 @@ struct SnapshotActivity: Equatable {
     /// The snapshot operations finished so far, including a guest's setup and
     /// erase. A listing older than this count is stale: read again.
     var revision = 0
+
+    /// An operation that holds the guest's files is under way: nothing else
+    /// that changes them starts beside it, and the screens offer none. A
+    /// rename is not one; it is allowed at any time, and a start or another
+    /// operation waits for it (`SnapshotDriver.renameSnapshot`).
+    var holdsGuestFiles: Bool {
+        guard let operation else { return false }
+        return operation != .rename
+    }
 }
 
 /// What the screens call to work with the snapshots of the guest's data disk
@@ -89,7 +98,7 @@ extension AppModel {
     var snapshotGate: SnapshotRefusal? {
         guard snapshotDriver != nil else { return .noData }
         return SnapshotRules.gate(
-            phase: phase, runtimeActive: snapshotActivity.runtimeActive, operationUnderWay: snapshotActivity.operation != nil)
+            phase: phase, runtimeActive: snapshotActivity.runtimeActive, operationUnderWay: snapshotActivity.holdsGuestFiles)
     }
 
     func takeSnapshot(named name: String) async -> SnapshotResult<SnapshotSummary> {

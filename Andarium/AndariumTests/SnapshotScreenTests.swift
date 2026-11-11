@@ -750,6 +750,25 @@ struct SnapshotsModelTests {
         #expect(s.store.count == 2)
     }
 
+    @Test func aRenameUnderWayDoesNotDimTheScreensOrStopAStart() async {
+        let item = SnapshotSample.item("a")
+        let s = setup([item])
+        await s.store.reload()
+        s.driver.holding = .rename
+        let renaming = Task { await s.store.rename(item.id, to: "b") }
+        #expect(await until { s.model.snapshotActivity.operation == .rename })
+        #expect(s.model.snapshotGate == nil)
+        #expect(s.store.takeRefusal == nil && s.store.restoreRefusal(of: s.store.items[0]) == nil)
+        #expect(s.store.deleteRefusal(of: s.store.items[0]) == nil)
+        #expect(!s.store.isWorking)
+        // The start goes ahead; the driver makes it wait for the rename.
+        s.model.start(.normal)
+        #expect(s.model.phase != .home)
+        s.driver.release()
+        await renaming.value
+        #expect(s.store.problem == nil)
+    }
+
     @Test func whileTheGuestRunsNothingIsOfferedAndTheWordsSayWhy() async {
         let item = SnapshotSample.item("a")
         let s = setup([item])
