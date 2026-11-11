@@ -575,9 +575,23 @@ means adding its entry to the script's table and running it.
 Andarium is in English, Simplified Chinese, Traditional Chinese (Taiwan usage)
 and Japanese, and follows the language of iOS and the per-app language setting.
 The strings are String Catalogs in `Localization/` (screens, permission texts,
-What's New notes) and in `AndariumCore`'s resources; `scripts/localization.py`
-checks them and syncs them with the compiler's extraction. Bug report and
-session record text, log lines and technical names stay English.
+What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
+catalog, table `JIT`, which the App Store configuration leaves out of the
+bundle and its check asserts is absent. English is the key (a readout or a
+joined list has a named key whose comment says which readout it serves), and
+the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
+and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
+number keeps its space before its unit. Bug report and session record text, log
+lines and technical names stay English.
+
+`scripts/localization.py check` is the catalogs' gate. After a build with
+`SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
+--stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
+or the reverse. It runs on a development build (the output of `Andarium` and
+`AndariumPreview` together) and on an App Store build with `--app-store`. A
+string no catalog reaches (a `String` built in code) shows as English under
+Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
+screen.
 
 ## Automation
 
