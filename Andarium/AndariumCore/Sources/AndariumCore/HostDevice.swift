@@ -39,9 +39,11 @@ public struct HostDevice: Equatable, Sendable {
 /// What Home says on a device that cannot draw the guest. The requirement is
 /// the chip's, so the words name the chip and leave the rest of the device out.
 public enum DeviceRequirement {
-    public static let title = "Needs an A14 chip or later"
+    public static let title = String(localized: "Needs an A14 chip or later", bundle: .module)
 
     public static func explanation(deviceName: String) -> String {
-        "Andarium draws the guest with Metal 4, which this \(deviceName) does not have, so the guest cannot start here."
+        String(
+            localized: "Andarium draws the guest with Metal 4, which this \(deviceName) does not have, so the guest cannot start here.",
+            bundle: .module)
     }
 }
