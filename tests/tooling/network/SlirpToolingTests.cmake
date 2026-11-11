@@ -44,9 +44,10 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp-network-dead-peer
         slirp-network-counters
         slirp-network-full-buffer-hangup)
-    # The dead-peer and full-buffer probes run five connections one after
-    # the other.
-    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 30 60)
+    # The dead-peer probe runs five connections one after the other. The
+    # full-buffer probe runs eight scenarios, each under its own 20 s alarm
+    # that names a stalled one, so its limit exceeds 8 x 20 s.
+    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 30 180)
     foreach(_uml_slirp_target _uml_slirp_source _uml_slirp_test
             _uml_slirp_timeout IN ZIP_LISTS
             _uml_slirp_probe_targets
