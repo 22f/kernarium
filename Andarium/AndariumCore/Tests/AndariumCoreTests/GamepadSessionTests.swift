@@ -95,17 +95,36 @@ struct GamepadSessionTests {
         return first
     }
 
-    private func noFrame(_ rig: Rig, within seconds: TimeInterval = 0.15) -> Bool {
-        rig.guest.nextFrame(timeout: seconds) == nil
+    /// Whether the session has sent nothing. The answer does not wait for a
+    /// time to pass: after the relay's hello it is a round trip (`barrier`), and
+    /// before it nothing can be in flight, so what the session wrote is
+    /// already in the socket once it has done what it was asked.
+    private func noFrame(_ rig: Rig) -> Bool {
+        guard rig.session.isConnected else {
+            rig.session.settle()
+            return rig.guest.nextFrame(timeout: 0.02) == nil
+        }
+        return barrier(rig)
+    }
+
+    /// The frames the host sent before it answered a marker, or nil if it never
+    /// did. The relay's frames are handled in order, after everything the
+    /// session was asked before, and the session answers a SET_REPORT of a slot
+    /// nobody holds: when that answer comes, everything sent before it has.
+    private func framesUntilBarrier(_ rig: Rig, id: UInt32 = 0xbeef) -> [GamepadHostFrame]? {
+        rig.guest.send(.setReport(slot: 7, reportType: GamepadReportType.feature, number: 0, id: id, data: []))
+        var frames: [GamepadHostFrame] = []
+        while let frame = rig.guest.nextFrame() {
+            if frame == .setReportReply(slot: 7, id: id, error: 0) { return frames }
+            frames.append(frame)
+        }
+        return nil
     }
 
     /// Returns once the session has handled every frame the guest sent before
-    /// this call: the relay's frames are handled in order, and the session
-    /// answers a SET_REPORT of a slot nobody holds. Answers false if anything
-    /// else came first.
+    /// this call. Answers false if the host sent anything else before it.
     private func barrier(_ rig: Rig, id: UInt32 = 0xbeef) -> Bool {
-        rig.guest.send(.setReport(slot: 7, reportType: GamepadReportType.feature, number: 0, id: id, data: []))
-        return rig.guest.nextFrame() == .setReportReply(slot: 7, id: id, error: 0)
+        framesUntilBarrier(rig, id: id)?.isEmpty == true
     }
 
     /// An output report of the DualSense's driver.
@@ -171,7 +190,7 @@ struct GamepadSessionTests {
     @Test func aNinthControllerHasNoSlotAndIsSaidSo() {
         let rig = greeted()
         for id in 1...9 { rig.session.connect(GamepadController(id: id, family: .generic, name: "P\(id)"), state: .neutral) }
-        let frames = rig.guest.frames(quiet: 0.3)
+        let frames = framesUntilBarrier(rig) ?? []
         #expect(frames.count == 8)
         rig.session.settle()
         #expect(rig.session.slot(ofController: 9) == nil)
@@ -182,7 +201,7 @@ struct GamepadSessionTests {
         let rig = greeted(slotCount: 2)
         let pads = (1...3).map { GamepadController(id: $0, family: .generic, name: "P\($0)") }
         for pad in pads { rig.session.connect(pad, state: .neutral) }
-        #expect(rig.guest.frames(quiet: 0.2) == [createFrame(pads[0], slot: 0), createFrame(pads[1], slot: 1)])
+        #expect(framesUntilBarrier(rig) == [createFrame(pads[0], slot: 0), createFrame(pads[1], slot: 1)])
         #expect(rig.session.slot(ofController: 3) == 2)
     }
 
@@ -359,7 +378,7 @@ struct GamepadSessionTests {
         for state in [GamepadState(buttons: .south), .neutral, GamepadState(buttons: .south), .neutral] {
             rig.session.submit(state, for: 1)
         }
-        let frames = rig.guest.frames(quiet: 0.2)
+        let frames = framesUntilBarrier(rig) ?? []
         #expect(frames.count == 4)
         let pressed = frames.compactMap { frame -> Bool? in
             if case .input(_, let report) = frame { report[8] & 0x20 != 0 } else { nil }

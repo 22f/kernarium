@@ -117,13 +117,6 @@ final class GamepadFakeGuest: GuestStreamOpener, @unchecked Sendable {
 
     private var pendingFrames: [GamepadHostFrame] = []
 
-    /// Every frame that arrives within `quiet` of the last one.
-    func frames(quiet: TimeInterval = 0.15) -> [GamepadHostFrame] {
-        var frames: [GamepadHostFrame] = []
-        while let frame = nextFrame(timeout: quiet) { frames.append(frame) }
-        return frames
-    }
-
     /// Whether the host closed the latest connection.
     func closedByHost(timeout: TimeInterval = 3) -> Bool {
         guard let peer = latest else { return false }

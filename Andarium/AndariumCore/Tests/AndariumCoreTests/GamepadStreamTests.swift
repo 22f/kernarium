@@ -231,9 +231,11 @@ struct GamepadStreamTests {
         #expect(rig.stream.send(.input(slot: 0, report: [1, 1])))
         #expect(rig.stream.send(.destroy(slot: 0)))
         #expect(rig.stream.send(.input(slot: 1, report: [1, 2])))
-        #expect(rig.guest.frames(quiet: 0.2) == [
-            .input(slot: 0, report: [1, 1]), .destroy(slot: 0), .input(slot: 1, report: [1, 2]),
-        ])
+        // A frame of its own ends the wait: nothing is read after a time has passed.
+        #expect(rig.stream.send(.destroy(slot: 7)))
+        var frames: [GamepadHostFrame] = []
+        while let frame = rig.guest.nextFrame(), frame != .destroy(slot: 7) { frames.append(frame) }
+        #expect(frames == [.input(slot: 0, report: [1, 1]), .destroy(slot: 0), .input(slot: 1, report: [1, 2])])
     }
 
     @Test func aStopWithReportsWaitingLeavesNothingBehind() {
