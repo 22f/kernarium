@@ -91,7 +91,7 @@ struct AppEntry {
 
     var hints: ScreenHints {
         ScreenHints(
-            scrollTarget: Self.scrollTargets[screen],
+            scrollTarget: Self.scrollTargets[screen] ?? SnapshotPreview.scrollTargets[screen],
             infoPage: Self.infoPages[screen]
         )
     }
@@ -114,7 +114,8 @@ struct AppEntry {
         CaptureState.begin(screen: screen)
         applyColorScheme()
         let lowSpace = lowSpace || ["create-low-space", "start-low-space", "home-low-space"].contains(screen)
-        let host = WhatsNewPreview.host(for: screen) ?? PreviewData.host(lowSpace: lowSpace, device: device)
+        let host = WhatsNewPreview.host(for: screen) ?? SnapshotPreview.host(for: screen)
+            ?? PreviewData.host(lowSpace: lowSpace, device: device)
         var guest: Guest? = PreviewData.sampleGuest(on: host)
         if let memoryMiB { guest?.memoryMiB = memoryMiB }
         if ["welcome", "create", "create-low-space"].contains(screen) { guest = nil }
@@ -305,8 +306,7 @@ struct AppEntry {
         }
         if systemMicrophone { useSystemMicrophone(in: model) }
         if systemLocation { useSystemLocation(in: model) }
-        // Seeded snapshots no screen opens yet; a state sets its own seed.
-        model.snapshotDriver = PreviewSnapshotDriver(.sample())
+        SnapshotPreview.apply(screen: screen, to: model)
         return model
     }
 
@@ -451,7 +451,7 @@ struct AppEntry {
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
         default:
-            break
+            await SnapshotPreview.applyDeferred(screen: screen, to: model)
         }
     }
 }

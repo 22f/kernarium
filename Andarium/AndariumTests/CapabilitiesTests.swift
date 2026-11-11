@@ -223,6 +223,14 @@ struct CapabilitiesFlowTests {
         #expect(setup(.notAsked).model.microphoneState == .notAsked)
     }
 
+    // MARK: The order of the rows
+
+    /// Location sits above Microphone and Gyroscope, as the person asked; the
+    /// section draws its rows in this order, which VoiceOver reads.
+    @Test func capabilitiesAreListedLocationMicrophoneGyroscope() {
+        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .gyroscope])
+    }
+
     // MARK: The preview and Gyroscope
 
     @Test func thePreviewWithoutAControllerTakesAccessAsGiven() {

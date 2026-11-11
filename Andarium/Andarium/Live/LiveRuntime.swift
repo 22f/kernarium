@@ -1306,14 +1306,22 @@ extension LiveRuntime: SnapshotDriver {
     func snapshotListing(measured: Bool) async -> SnapshotListing {
         let storage = self.storage
         while true {
-            await settleSnapshotOperation()
+            // A caller that was cancelled wants no answer: it gets what the
+            // files say now, unmeasured, without waiting or reading again.
+            // Waiting on a cancelled task would return at once and spin here.
+            let cancelled = Task.isCancelled
+            if !cancelled { await settleSnapshotOperation() }
             // A guest being set up or erased changes the files under a listing.
-            while storageBusy { try? await Task.sleep(for: .milliseconds(50)) }
+            while storageBusy, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(50)) }
             let revision = snapshotRevision
-            var listing = await Task.detached(priority: .utility) { storage.snapshotListing(measured: measured) }.value
+            let quick = cancelled || Task.isCancelled
+            // A cancellation reaches the measure, which stops between two
+            // files and answers unmeasured.
+            let reading = Task.detached(priority: .utility) { storage.snapshotListing(measured: measured && !quick) }
+            var listing = await withTaskCancellationHandler { await reading.value } onCancel: { reading.cancel() }
             // An operation that started or finished while this one read makes
             // it older than the files: read again.
-            guard snapshotOperation == nil, !storageBusy, snapshotRevision == revision else { continue }
+            guard quick || (snapshotOperation == nil && !storageBusy && snapshotRevision == revision) else { continue }
             listing.revision = revision
             listing.whileNotStopped = snapshotGate
             if var unfinished = listing.unfinishedRestore {

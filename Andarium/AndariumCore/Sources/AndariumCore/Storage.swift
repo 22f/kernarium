@@ -21,7 +21,9 @@ public protocol GuestStorage: Sendable {
     /// is where it was before the first one was set up.
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws
     /// What a start would be, from the instance on disk; nil when its record
-    /// cannot be read.
+    /// cannot be read. A snapshot restore that did not finish is planned as
+    /// the start that completes it will find the guest: from the snapshot's
+    /// record.
     func startPlan() -> StartPlan?
     /// The data Android has written: what the data disk occupies now, which
     /// the guest changes while it runs and `load` measures once. Zero where
@@ -185,7 +187,14 @@ public struct TwoDiskStorage: GuestStorage {
     }
 
     public func startPlan() -> StartPlan? {
-        files.startPlan(for: release)
+        // A snapshot restore that put its data in place and did not finish
+        // completes before a start reads the files (`prepareStart`): the guest
+        // then starts as the snapshot's record says, whatever the record it
+        // replaces says, and Start is offered on that.
+        if let restored = snapshotStore.recordOfUnfinishedRestore() {
+            return InstanceRules.plan(state: restored, dataDiskExists: true, snapshotExists: false, release: release)
+        }
+        return files.startPlan(for: release)
     }
 
     public func prepareStart(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
