@@ -168,7 +168,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "JITを使うには、StikDebugからAndariumを開いてください。"
+            "value" : "StikDebugからAndariumを開くとJITを使えます。"
           }
         },
         "zh-Hans" : {
