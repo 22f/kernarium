@@ -179,10 +179,32 @@ inline std::uint32_t fastest_rate(const Formats& formats, const Size& size) noex
     return fastest;
 }
 
+// The largest window of a frame with the aspect ratio of `shape`, centred, and the
+// frame itself when it has that aspect already. A cropped window starts and ends on
+// even pixels (the chroma of NV12 and I420 is half the size). A picture is cropped
+// like this before it is scaled to a shape, never stretched to it.
+inline Window centred_window(const Size& frame, const Size& shape) noexcept
+{
+    std::uint32_t width = frame.width;
+    std::uint32_t height = frame.height;
+    if (shape.width == 0 || shape.height == 0) return {0, 0, width, height};
+    const std::uint64_t wide = std::uint64_t(frame.width) * shape.height;
+    const std::uint64_t tall = std::uint64_t(frame.height) * shape.width;
+    if (wide != tall) {
+        if (wide > tall)
+            width = std::uint32_t(std::uint64_t(frame.height) * shape.width / shape.height);
+        else
+            height = std::uint32_t(std::uint64_t(frame.width) * shape.height / shape.width);
+        width &= ~1u;
+        height &= ~1u;
+    }
+    return {((frame.width - width) / 2) & ~1u, ((frame.height - height) / 2) & ~1u, width, height};
+}
+
 // How `target` is cut from the native video modes `natives`: the smallest mode
 // that covers it in both dimensions, one with the target's aspect ratio first;
-// otherwise the largest centred window of that aspect. Even sizes only (NV12's
-// chroma is half the size). Nothing when no mode covers it.
+// otherwise the largest centred window of that aspect (centred_window). Even sizes
+// only (NV12's chroma is half the size). Nothing when no mode covers it.
 inline std::optional<SizeSource> cut_from(const std::vector<Size>& natives, const Size& target)
 {
     if (target.width == 0 || target.height == 0 || ((target.width | target.height) & 1u) != 0) return std::nullopt;
@@ -204,17 +226,7 @@ inline std::optional<SizeSource> cut_from(const std::vector<Size>& natives, cons
     source.size = target;
     source.host = false;
     source.source = *best;
-    std::uint32_t width = best->width;
-    std::uint32_t height = best->height;
-    if (!best_same) {
-        if (std::uint64_t(best->width) * target.height > std::uint64_t(best->height) * target.width)
-            width = std::uint32_t(std::uint64_t(best->height) * target.width / target.height);
-        else
-            height = std::uint32_t(std::uint64_t(best->width) * target.height / target.width);
-        width &= ~1u;
-        height &= ~1u;
-    }
-    source.window = {((best->width - width) / 2) & ~1u, ((best->height - height) / 2) & ~1u, width, height};
+    source.window = centred_window(*best, target);
     return source;
 }
 

@@ -292,6 +292,28 @@ void check_derivation()
     require(!cut_from(natives, {0, 0}) && !cut_from({}, {320, 240}), "nothing to cut");
 }
 
+// The window of a frame that has the shape's aspect ratio, which a thumbnail is cropped to before it is scaled.
+void check_centred_window()
+{
+    require(centred_window({640, 480}, {320, 240}) == Window({0, 0, 640, 480}), "a frame of the aspect is kept whole");
+    require(centred_window({1920, 1080}, {4, 3}) == Window({240, 0, 1440, 1080}), "a wide frame loses its sides");
+    require(centred_window({640, 480}, {16, 9}) == Window({0, 60, 640, 360}), "a tall frame loses top and bottom");
+    require(centred_window({640, 480}, {240, 320}) == Window({140, 0, 360, 480}), "a portrait thumbnail of a landscape frame");
+    require(centred_window({640, 482}, {4, 3}) == Window({0, 0, 640, 480}), "an odd margin leaves the offset even");
+    require(centred_window({640, 480}, {0, 0}) == Window({0, 0, 640, 480}), "no shape keeps the frame");
+    require(centred_window({640, 480}, {2, 1000}).width == 0, "a shape too thin for the frame leaves an empty window");
+    for (const Size& frame : {Size{640, 480}, Size{1920, 1080}, Size{3840, 2160}, Size{480, 640}})
+        for (const Size& shape : {Size{320, 240}, Size{160, 90}, Size{240, 320}, Size{128, 128}, Size{20, 100}, Size{96, 96}}) {
+            const auto window = centred_window(frame, shape);
+            require(window.x + window.width <= frame.width && window.y + window.height <= frame.height, "inside the frame");
+            require(((window.x | window.y | window.width | window.height) & 1u) == 0, "even");
+            // The shape's ratio up to the evening of the window's sides.
+            const auto across = std::uint64_t(window.width) * shape.height, down = std::uint64_t(window.height) * shape.width;
+            require(across <= down + 2ull * shape.height && down <= across + 2ull * shape.width, "the aspect of the shape");
+            require(window.width == frame.width || window.height == frame.height, "the largest window of that aspect");
+        }
+}
+
 // The camera API and CTS want certain sizes of every camera, and LIMITED cameras
 // need their lists nested: the three rules, on each synthetic camera's formats.
 void check_cts_subsets()
@@ -450,6 +472,7 @@ int main()
     check_numbers();
     check_fps_ranges();
     check_derivation();
+    check_centred_window();
     check_cts_subsets();
     check_concurrent_feature();
     return 0;
