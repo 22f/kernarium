@@ -87,13 +87,14 @@ CONTROL_LIMIT_MS = 150.0
 # may take it from a CPU that is not running: that is the limit of the design.
 # How many holds that is depends on how long CPU0 spends inside its dispatch in
 # the phase, so each phase has its own allowance: the most failing holds out of
-# HOLD_SECONDS holds that the rate measured for the phase (the share of holds
-# that landed inside CPU0's dispatch: busy 3.0 %, spinner on CPU0 2.0 %, idle
-# 3.0 %) leaves a chance of under one in a thousand of exceeding.
+# HOLD_SECONDS holds that the phase's measured rate leaves a chance of under
+# one in a thousand of exceeding. The rate is the share of holds that fail
+# (nearly all land inside CPU0's dispatch), over about 400 holds per phase on
+# probe and plain kernels: busy 1.8 %, spinner on CPU0 1.5 %, idle 2.0 %.
 HOLDS_ALLOWED_TO_FAIL = {
-    "busy": 4,
+    "busy": 3,
     "spinner on CPU0": 3,
-    "idle": 4,
+    "idle": 3,
 }
 
 SERVER = "/opt/uml-test/irq_takeover_echo.py"
@@ -287,7 +288,12 @@ def run_phase(guest: Guest, library: HoldLibrary, port: int, name: str,
         before = len(library.holds())
         library.start()
         try:
-            held_echoes = run_echoes(guest, stream, HOLD_SECONDS, 1 << 20)
+            # The echoes outlast the last hold's start by half a period, so
+            # that hold is judged too.
+            held_echoes = run_echoes(
+                guest, stream, HOLD_SECONDS + HOLD_PERIOD_MILLISECONDS / 2000.0,
+                1 << 20,
+            )
         finally:
             library.stop()
         # The last hold may still be under way.
