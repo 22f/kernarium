@@ -34,13 +34,13 @@ A device that reports its events at probe registers as before.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- drivers/virtio/virtio_input.c     | 430 +++++++++++++++++++++++-------
+ drivers/virtio/virtio_input.c     | 460 ++++++++++++++++++++++++------
  drivers/virtio/virtio_input_uml.h |  35 +++
- 2 files changed, 371 insertions(+), 94 deletions(-)
+ 2 files changed, 401 insertions(+), 94 deletions(-)
  create mode 100644 drivers/virtio/virtio_input_uml.h
 
 diff --git a/drivers/virtio/virtio_input.c b/drivers/virtio/virtio_input.c
-index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a487327960383c 100644
+index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..b911ccfd2b423d2d18ad324e56e5f2095c9d7be5 100644
 --- a/drivers/virtio/virtio_input.c
 +++ b/drivers/virtio/virtio_input.c
 @@ -4,16 +4,53 @@
@@ -148,7 +148,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  		return 0;
  
  	stsbuf = kzalloc(sizeof(*stsbuf), GFP_ATOMIC);
-@@ -124,7 +171,32 @@ static int virtinput_status(struct input_dev *idev, unsigned int type,
+@@ -124,7 +171,48 @@ static int virtinput_status(struct input_dev *idev, unsigned int type,
  {
  	struct virtio_input *vi = input_get_drvdata(idev);
  
@@ -157,13 +157,24 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +}
 +
 +/*
++ * Read the configuration again. The queue is freezable, so that an input
++ * device is never registered or unregistered while the system suspends.
++ */
++static void virtinput_queue_config(struct virtio_input *vi)
++{
++	queue_work(system_freezable_wq, &vi->config_work);
++}
++
++/*
 + * Tell the device whether the input device exists, so that it holds the
 + * events it has for it until it does (virtio_input_uml.h). The status queue
 + * can be full for a moment, and a notice that is lost leaves the device
-+ * holding its events, so wait a little for room.
++ * holding its events, so wait a little for room. When there is still none,
++ * the configuration work runs again, which answers the change once more
++ * rather than leave it unanswered. Returns the result of the last try.
 + */
-+static void virtinput_notify_registration(struct virtio_input *vi,
-+					  bool registered)
++static int virtinput_notify_registration(struct virtio_input *vi,
++					 bool registered)
 +{
 +	int rc = 0, tries;
 +
@@ -175,14 +186,19 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +			break;
 +		msleep(5);
 +	}
-+	if (rc)
++	if (rc == -ENOSPC || rc == -ENOMEM) {
++		virtinput_queue_config(vi);
++	} else if (rc && rc != -ENODEV) {
++		/* -ENODEV is the device going away, at removal or freeze. */
 +		dev_warn(&vi->vdev->dev,
 +			 "cannot tell the device about its input device: %d\n",
 +			 rc);
++	}
++	return rc;
  }
  
  static u8 virtinput_cfg_select(struct virtio_input *vi,
-@@ -139,7 +211,8 @@ static u8 virtinput_cfg_select(struct virtio_input *vi,
+@@ -139,7 +227,8 @@ static u8 virtinput_cfg_select(struct virtio_input *vi,
  }
  
  static void virtinput_cfg_bits(struct virtio_input *vi, int select, int subsel,
@@ -192,7 +208,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  {
  	unsigned int bit;
  	u8 *virtio_bits;
-@@ -169,21 +242,23 @@ static void virtinput_cfg_bits(struct virtio_input *vi, int select, int subsel,
+@@ -169,21 +258,23 @@ static void virtinput_cfg_bits(struct virtio_input *vi, int select, int subsel,
  	kfree(virtio_bits);
  
  	if (select == VIRTIO_INPUT_CFG_EV_BITS)
@@ -227,7 +243,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  }
  
  static int virtinput_init_vqs(struct virtio_input *vi)
-@@ -219,122 +294,281 @@ static void virtinput_fill_evt(struct virtio_input *vi)
+@@ -219,122 +310,295 @@ static void virtinput_fill_evt(struct virtio_input *vi)
  	spin_unlock_irqrestore(&vi->lock, flags);
  }
  
@@ -343,11 +359,9 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  	virtinput_cfg_bits(vi, VIRTIO_INPUT_CFG_EV_BITS, EV_SND,
 -			   vi->idev->sndbit, SND_CNT);
 +			   cfg->sndbit, SND_CNT, cfg->evbit);
- 
--	if (test_bit(EV_ABS, vi->idev->evbit)) {
++
 +	if (test_bit(EV_ABS, cfg->evbit)) {
- 		for (abs = 0; abs < ABS_CNT; abs++) {
--			if (!test_bit(abs, vi->idev->absbit))
++		for (abs = 0; abs < ABS_CNT; abs++) {
 +			if (test_bit(abs, cfg->absbit))
 +				virtinput_cfg_abs(vi, abs, &cfg->abs[abs]);
 +		}
@@ -369,7 +383,8 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +{
 +	struct input_dev *idev;
 +	int abs, err, nslots;
-+
+ 
+-	if (test_bit(EV_ABS, vi->idev->evbit)) {
 +	idev = input_allocate_device();
 +	if (!idev)
 +		return -ENOMEM;
@@ -399,7 +414,8 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +	idev->event = virtinput_status;
 +
 +	if (test_bit(EV_ABS, idev->evbit)) {
-+		for (abs = 0; abs < ABS_CNT; abs++) {
+ 		for (abs = 0; abs < ABS_CNT; abs++) {
+-			if (!test_bit(abs, vi->idev->absbit))
 +			if (!test_bit(abs, idev->absbit))
  				continue;
 -			virtinput_cfg_abs(vi, abs);
@@ -419,9 +435,9 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  			if (err)
 -				goto err_mt_init_slots;
 +				goto err_free;
-+		}
-+	}
-+
+ 		}
+ 	}
+ 
 +	err = input_register_device(idev);
 +	if (err)
 +		goto err_free;
@@ -477,16 +493,30 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +		return;
 +
 +	cfg = kzalloc(sizeof(*cfg), GFP_KERNEL);
-+	if (!cfg)
++	if (!cfg) {
++		/* The change must not go unanswered; try again shortly. */
++		msleep(10);
++		virtinput_queue_config(vi);
 +		return;
++	}
 +	virtinput_read_config(vi, cfg);
++
++	/*
++	 * A change that came in while the device was read may have split the
++	 * reads between two states of it, and the work queued for that change
++	 * reads and answers it all again, so drop this one.
++	 */
++	if (work_pending(work)) {
++		kfree(cfg);
++		return;
++	}
 +
 +	if (rcu_access_pointer(vi->idev)) {
 +		if (!memcmp(cfg, vi->config, sizeof(*cfg))) {
 +			kfree(cfg);
 +			virtinput_notify_registration(vi, true);
 +			return;
- 		}
++		}
 +		virtinput_unregister(vi);
 +		virtinput_notify_registration(vi, false);
 +	}
@@ -510,7 +540,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +	struct virtio_input *vi = vdev->priv;
 +
 +	/* Called with the configuration lock held, and reading is a request. */
-+	schedule_work(&vi->config_work);
++	virtinput_queue_config(vi);
 +}
 +
 +static int virtinput_probe(struct virtio_device *vdev)
@@ -540,9 +570,9 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +	if (!cfg) {
 +		err = -ENOMEM;
 +		goto err_config_alloc;
- 	}
++	}
 +	virtinput_read_config(vi, cfg);
- 
++
  	virtio_device_ready(vdev);
  	vi->ready = true;
 -	err = input_register_device(vi->idev);
@@ -581,7 +611,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  	vdev->config->del_vqs(vdev);
  err_init_vq:
  	kfree(vi);
-@@ -351,9 +585,10 @@ static void virtinput_remove(struct virtio_device *vdev)
+@@ -351,9 +615,10 @@ static void virtinput_remove(struct virtio_device *vdev)
  	vi->ready = false;
  	spin_unlock_irqrestore(&vi->lock, flags);
  
@@ -593,7 +623,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  	while ((buf = virtqueue_detach_unused_buf(vi->sts)) != NULL)
  		kfree(buf);
  	vdev->config->del_vqs(vdev);
-@@ -371,6 +606,7 @@ static int virtinput_freeze(struct virtio_device *vdev)
+@@ -371,6 +636,7 @@ static int virtinput_freeze(struct virtio_device *vdev)
  	vi->ready = false;
  	spin_unlock_irqrestore(&vi->lock, flags);
  
@@ -601,7 +631,7 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
  	virtio_reset_device(vdev);
  	while ((buf = virtqueue_detach_unused_buf(vi->sts)) != NULL)
  		kfree(buf);
-@@ -390,6 +626,11 @@ static int virtinput_restore(struct virtio_device *vdev)
+@@ -390,6 +656,11 @@ static int virtinput_restore(struct virtio_device *vdev)
  	virtio_device_ready(vdev);
  	vi->ready = true;
  	virtinput_fill_evt(vi);
@@ -609,11 +639,11 @@ index 698cbaef9eec17322bf91eacc754c6e85fc8a1bd..5662dada905f2ef7907eb13416a48732
 +	 * The device was reset and may have been plugged or unplugged while
 +	 * the guest slept without a change reaching it.
 +	 */
-+	schedule_work(&vi->config_work);
++	virtinput_queue_config(vi);
  	return 0;
  }
  #endif
-@@ -409,6 +650,7 @@ static struct virtio_driver virtio_input_driver = {
+@@ -409,6 +680,7 @@ static struct virtio_driver virtio_input_driver = {
  	.id_table            = id_table,
  	.probe               = virtinput_probe,
  	.remove              = virtinput_remove,
