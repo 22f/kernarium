@@ -204,6 +204,18 @@ struct HomeView: View {
                 )
             )
         }
+        if let denial = model.networkDenialShowing {
+            NoticeCard(
+                symbol: NetworkWords.symbol(for: denial), color: .orange,
+                title: NetworkWords.title(for: denial), text: NetworkWords.text(for: denial),
+                action: NoticeAction(
+                    label: NetworkWords.settingsLabel, hint: NetworkWords.settingsHint,
+                    identifier: "network-notice-settings", perform: { model.openSettings() }),
+                onClose: { withAnimation { model.dismissNetworkNotice() } }
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("home-network-notice")
+        }
         switch model.plan {
         case .update(_, let release) where model.updateNoticeIsShown:
             // A restored older snapshot says itself that the next start updates it.
@@ -407,12 +419,21 @@ struct WelcomeView: View {
     }
 }
 
+/// A button under a card's message: the way to what the message asks.
+struct NoticeAction {
+    let label: String
+    var hint: String?
+    var identifier: String?
+    let perform: () -> Void
+}
+
 /// A dismissible message above the controls.
 struct NoticeCard: View {
     let symbol: String
     let color: Color
     let title: String
     let text: String
+    var action: NoticeAction?
     var onClose: (() -> Void)?
 
     var body: some View {
@@ -427,6 +448,14 @@ struct NoticeCard: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let action {
+                    Button(action.label, action: action.perform)
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .padding(.top, 8)
+                        .accessibilityHint(action.hint ?? "")
+                        .accessibilityIdentifier(action.identifier ?? "")
+                }
             }
             Spacer(minLength: 0)
             if let onClose {

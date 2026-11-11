@@ -178,6 +178,10 @@ final class LiveRuntime: RuntimeDriver {
             // itself; a guest records silence while access is out of reach.
             _ = kernarium_runtime_loader_set_microphone($0 ? 1 : 0)
         }
+        // iOS's denial of the network, from the system's path while a watch is
+        // wanted (the model decides when); the path monitor calls back for a
+        // change of the path alone.
+        model.networkWatcher = NetworkAccessWatcher(source: SystemNetworkPathSource())
         hostLocation.deliver = { [weak self] fix in self?.location.deliver(fix) }
         model.location = LocationController(model: model, source: hostLocation.access) { [weak self] in
             self?.updateLocation()
@@ -387,6 +391,9 @@ final class LiveRuntime: RuntimeDriver {
             end(startFailure: "the runtime could not be loaded")
             return
         }
+        // A denial of the network the notice is up for began before this run
+        // loaded the runtime; its record notes it from the start.
+        model?.reportNetworkDenial()
         // The runtime boots a guest that restarts itself again inside the
         // run, and says when. The loader delivers each event on the main
         // queue.
@@ -715,6 +722,17 @@ final class LiveRuntime: RuntimeDriver {
         updateGameControllers()
         updateLocation()
         updateKeyboardMouse()
+    }
+
+    func setNetworkNotice(_ denial: NetworkDenial?) {
+        // The runtime has the value only once a run has loaded it; the run
+        // says it again then (`launch`).
+        let notice: Int32 = switch denial {
+        case nil: 0
+        case .cellular?: 1
+        case .wifi?: 2
+        }
+        _ = kernarium_runtime_loader_set_network_notice(notice)
     }
 
     func setMotionSensors(_ on: Bool) {
