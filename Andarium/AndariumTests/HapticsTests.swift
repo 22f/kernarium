@@ -40,7 +40,8 @@ struct HapticsHostTests {
         let player = CoreHapticsPlayer(source: NoEngines())
         let score = HapticScore(sequence: 1, events: [.primitive(.click, durationMilliseconds: 12)])
         #expect(player.play(score) == .failed)
-        player.setToneIntensity(0.5, on: .device)
+        // No engine means no tone, so a session that asks plays one again.
+        #expect(!player.setToneIntensity(0.5, on: .device))
         player.stop(.device)
         player.prepare()
         player.stopAll()
