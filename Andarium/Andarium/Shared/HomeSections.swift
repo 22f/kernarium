@@ -418,7 +418,7 @@ struct HapticsRow: View {
     static let symbol = "iphone.radiowaves.left.and.right"
 
     var body: some View {
-        OptionRow(title: "Haptics", symbol: Self.symbol) {
+        OptionRow(title: String(localized: "Haptics"), symbol: Self.symbol) {
             Toggle("Haptics", isOn: Binding(
                 get: { model.hapticsOn },
                 set: { model.setHaptics($0) }

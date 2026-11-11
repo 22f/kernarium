@@ -436,7 +436,7 @@ struct NoticeCard: View {
     let text: String
     var action: NoticeAction?
     /// What VoiceOver says for the close button.
-    var closeLabel = "Dismiss"
+    var closeLabel = String(localized: "Dismiss")
     var onClose: (() -> Void)?
 
     var body: some View {
