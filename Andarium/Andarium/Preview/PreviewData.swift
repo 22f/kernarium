@@ -31,7 +31,7 @@ enum PreviewData {
         case "iphone-18-pro-max":
             return HostDevice(
                 name: "iPhone", processorCount: 6, memory: iPhone18ProMaxMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false
             )
         case "ipad-mini-6":
             return HostDevice(
@@ -62,7 +62,7 @@ enum PreviewData {
                 maximumsMiB: [3136, 3072, 3008, 2944, 2880, 2816], defaultsMiB: Array(repeating: 2560, count: 6),
                 graphicsMiB: { memory, count in budget(limitMiB: 4096, memoryMiB: memory, vCPUs: count) }
             ),
-            freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6)
+            freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false
         )
     }
 
