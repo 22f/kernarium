@@ -477,8 +477,9 @@ disabled and writes it to the ring at its enable, in the order the device
 finished it. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
 follows a teardown's disables included) resets such a device first. A
-`VRING_KICK` is accepted whatever the state of the rings: for a disabled ring it
-changes nothing, and a kick that asks for no acknowledgement gets none.
+`VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
+ring is handled as that ring's buffers are, and a kick that asks for no
+acknowledgement gets none.
 
 **Request gate.** A service can be given a request gate, which another thread
 closes to hold the device's requests back: a closed gate lets no request reach

@@ -133,8 +133,9 @@ public:
     }
     /* Whether a request the device deferred survives the disable of its
      * ring. A guest suspends by disabling its rings one after another and
-     * resumes by enabling them in the same order, sending nothing else, so
-     * a device that holds a request across the suspend, a codec stream's
+     * resumes by enabling them in the same order, sending nothing else but
+     * kicks, which keep or drop a disabled ring's request buffers as below,
+     * so a device that holds a request across the suspend, a codec stream's
      * queued buffer, is not reset by the disable: the transport keeps what
      * the device completes meanwhile and writes it to the ring when the ring
      * is enabled again. A message that changes the memory, the features, a
