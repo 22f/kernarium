@@ -769,8 +769,8 @@ void test_a_space_under_the_floor_is_left_alone()
 		"an executor let go of a space nobody closed");
 }
 
-/* The process's byte budget, past which the largest space is asked to shed,
- * reaches every executor that holds it. */
+/* The process's byte budget, past which a space is asked to shed, reaches
+ * every executor that holds it. */
 void test_the_budget_reaches_every_executor_of_a_space()
 {
 	constexpr std::size_t blocks = 3000;

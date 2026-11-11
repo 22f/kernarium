@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -25,19 +27,41 @@ namespace uml::cpu::gadget_cache {
  * fixes their bytes.
  *
  * The budget caps the accounts that are open. A store that finds them above it
- * calls relieve(), which asks the largest open accounts to shed until they hold
- * at most seven eighths of the budget. An account asked to shed tells its
- * engine (Notify), and every executor holding that address space lets go of it
- * at its next entry into translated code, as it lets go of a renewed space;
- * the storage goes with the last of them, and the address space starts afresh
- * in a new account when it runs again. Until then a shedding account's bytes,
- * whatever it charges or refunds after it was asked, are counted apart from
- * the open ones: every charge is attributed to one figure or the other exactly
- * once. Every store past the budget relieves it in turn, counting the open
- * accounts again under the ledger's lock, so the open accounts stay within the
- * budget but for the stores in flight, one per storing vCPU, and a closed
- * space that an idle vCPU still holds -- part of what was open when that vCPU
- * went idle -- leaves the whole at most twice the budget.
+ * calls relieve(), which asks open accounts to shed until they hold at most
+ * seven eighths of the budget, those the guest is least likely to run again at
+ * once first. An executor that enters translated code in an address space, or
+ * switches to it, tells its account (Account::ran()), which keeps one bit for
+ * each of the last 64 epochs (about 2.7 ms each, 175 ms in all) in which that
+ * happened: its activity. An account no executor entered in the window is
+ * idle, whatever it holds, and is asked first, the one idle longest first.
+ * The others follow by activity band, a quarter of the window each, the least
+ * active band first and the smallest account first within a band, so the
+ * address space the guest is running is asked last, and only when all the
+ * rest, shed, would still hold more than the target. Activity, not the epoch
+ * of the last entry, orders the running accounts: a stamp trails a run by a
+ * guest tick and a host preemption (up to 27 ms in a census of a 6-vCPU
+ * Android guest at host load 50 to 120), more than the few milliseconds
+ * between running accounts, and an order by it asked a running 88 MiB account
+ * to shed.
+ *
+ * An account asked to shed tells its engine (Notify), and every executor
+ * holding that address space lets go of it at its next entry into translated
+ * code, as it lets go of a renewed space; the storage goes with the last of
+ * them, and the address space starts afresh in a new account when it runs
+ * again. Until then a shedding account's bytes, whatever it charges or refunds
+ * after it was asked, are counted apart from the open ones: every charge is
+ * attributed to one figure or the other exactly once. Every store past the
+ * budget relieves it in turn, counting the open accounts again under the
+ * ledger's lock, so the open accounts stay within the budget but for the stores
+ * in flight, one per storing vCPU, and a closed space that an idle vCPU still
+ * holds -- part of what was open when that vCPU went idle -- leaves the whole
+ * at most twice the budget.
+ *
+ * Telling the account costs an entry a read of the host's counter and a load,
+ * and a store only when the epoch has moved on, once per epoch however many
+ * executors run the address space; no lock, no read-modify-write, nothing per
+ * block. The record is approximate by design: executors entering in the same
+ * epoch may overwrite one another's bit.
  *
  * The emulator sets the budget before any executor exists
  * (derive_budget()); a process that never does keeps fallback_budget.
@@ -46,6 +70,7 @@ namespace uml::cpu::gadget_cache {
 class Account;
 struct LedgerState;
 inline void relieve() noexcept;
+inline void relieve_at(std::uint64_t now) noexcept;
 [[nodiscard]] inline LedgerState ledger_state();
 
 namespace detail {
@@ -79,6 +104,30 @@ inline constexpr std::size_t minimum_budget = std::size_t{128} << 20;
 inline constexpr std::size_t limit_divisor = 8;
 /* The share of guest memory a budget takes, as a divisor. */
 inline constexpr std::size_t guest_memory_divisor = 4;
+
+/* The clock accounts are told their runs by: the host's counter (CNTVCT_EL0,
+ * 24 MHz on Apple silicon) with its low bits dropped, so an epoch is about
+ * 2.7 ms. Reading it is a register read, not a call. */
+inline constexpr unsigned epoch_shift = 16;
+
+[[nodiscard]] inline std::uint64_t epoch() noexcept
+{
+#if defined(__aarch64__)
+	std::uint64_t ticks;
+	asm volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+	return ticks >> epoch_shift;
+#else
+	return static_cast<std::uint64_t>(
+		std::chrono::steady_clock::now().time_since_epoch().count()) >>
+		(epoch_shift + 5);
+#endif
+}
+
+/* The epochs an account remembers entries for: the width of its history. */
+inline constexpr unsigned window_epochs = 64;
+/* An activity band is this many epochs of the window: four of them, and a few
+ * epochs missed seldom move an account to another. */
+inline constexpr unsigned band_epochs = 16;
 
 /* Never destroyed, under the exit contract in docs/architecture.md: carriers may
  * still store, and lock the ledger to relieve it, while exit() runs. */
@@ -143,8 +192,11 @@ class Account final {
 public:
 	using Notify = void (*)(void *owner) noexcept;
 
-	Account(Notify notify, void *owner) noexcept
-		: notify_{notify}, owner_{owner}
+	/* A new account counts as running from `opened` on: it opens because an
+	 * executor is about to run the address space. */
+	Account(Notify notify, void *owner,
+		std::uint64_t opened = epoch()) noexcept
+		: notify_{notify}, owner_{owner}, last_run_{opened}
 	{
 		auto &book = ledger();
 		const std::lock_guard guard{book.mutex};
@@ -195,6 +247,42 @@ public:
 			state_.load(std::memory_order_relaxed) & bytes_mask);
 	}
 
+	/* An executor entered translated code in the address space, or switched
+	 * to it, in epoch `at` (epoch()). A load and a compare, and two stores
+	 * only when the epoch has moved on: no lock and no read-modify-write,
+	 * and the executors running one address space mostly read the line. */
+	void ran(std::uint64_t at) noexcept
+	{
+		const auto last = last_run_.load(std::memory_order_relaxed);
+		if (at <= last)
+			return;
+		const auto gap = at - last;
+		const auto before = gap < window_epochs ?
+			recent_.load(std::memory_order_relaxed) << gap : 0;
+		recent_.store(before | 1, std::memory_order_relaxed);
+		last_run_.store(at, std::memory_order_relaxed);
+	}
+
+	/* The epoch of the account's last entry, or of its opening. */
+	[[nodiscard]] std::uint64_t last_run() const noexcept
+	{
+		return last_run_.load(std::memory_order_relaxed);
+	}
+
+	/* The epochs of the window ending in epoch `now` in which an executor
+	 * entered the address space: window_epochs for one that runs all the
+	 * time (and for a new one, until its history is its own), none for
+	 * one that no executor entered in the window. */
+	[[nodiscard]] unsigned activity(std::uint64_t now) const noexcept
+	{
+		const auto last = last_run_.load(std::memory_order_relaxed);
+		const auto gap = now > last ? now - last : 0;
+		if (gap >= window_epochs)
+			return 0;
+		return static_cast<unsigned>(std::popcount(
+			recent_.load(std::memory_order_relaxed) << gap));
+	}
+
 	/* Whether the address space was asked to shed: its executors let go
 	 * of it at their next entry, and none takes it up again. */
 	[[nodiscard]] bool shedding() const noexcept
@@ -204,7 +292,7 @@ public:
 	}
 
 private:
-	friend void relieve() noexcept;
+	friend void relieve_at(std::uint64_t now) noexcept;
 	friend LedgerState ledger_state();
 
 	static constexpr std::uint64_t shedding_flag = std::uint64_t{1} << 63;
@@ -236,19 +324,65 @@ private:
 	void *owner_;
 	/* What the account holds, with shedding_flag once it was asked to. */
 	std::atomic<std::uint64_t> state_{};
+	/* The epoch of the last entry, and one bit for each epoch of the window
+	 * ending there, the newest in bit 0, set where an executor entered.
+	 * A new account starts with every bit set. */
+	std::atomic<std::uint64_t> last_run_;
+	std::atomic<std::uint64_t> recent_{~std::uint64_t{}};
 	Account *previous_{};
 	Account *next_{};
 };
 
-/* Ask the largest open accounts to shed until the open ones hold at most seven
- * eighths of the budget, when they hold more than all of it. Every caller
- * takes its turn, however the lock is held: one that went on storing while
- * another held it, for an account opening or going, a census or a relief, could
- * take the open accounts past the budget by as much as it stored meanwhile. A
- * caller that waited counts again and finds the budget kept, or relieves it
- * once more. No one holding the ledger's lock waits for anything but the locks
- * taken after it, so the wait is short, and it comes only past the budget. */
-inline void relieve() noexcept
+namespace detail {
+
+/* An open account as relief weighs it. */
+struct Candidate final {
+	Account *account{};
+	/* 0 for an idle account, up to window_epochs / band_epochs. */
+	unsigned band{};
+	std::uint64_t last_run{};
+	std::size_t bytes{};
+};
+
+/* Whether `a` is asked to shed before `b`: the lower activity band first. In
+ * band 0 the account idle longest, and of those that last ran in the same
+ * epoch the larger, which frees more for the one translation it will cost;
+ * in the others the smaller, which stalls its program for less, and of equal
+ * size the one that ran earlier. Equal in every respect, neither is first. */
+[[nodiscard]] constexpr bool shed_before(const Candidate &a,
+	const Candidate &b) noexcept
+{
+	if (a.band != b.band)
+		return a.band < b.band;
+	if (a.band == 0) {
+		if (a.last_run != b.last_run)
+			return a.last_run < b.last_run;
+		return a.bytes > b.bytes;
+	}
+	if (a.bytes != b.bytes)
+		return a.bytes < b.bytes;
+	return a.last_run < b.last_run;
+}
+
+} // namespace detail
+
+/* Ask open accounts to shed until the open ones hold at most seven eighths of
+ * the budget, when they hold more than all of it, as epoch `now` sees them:
+ * in the order of detail::shed_before(), which puts the accounts the guest is
+ * running last, so that the one it runs most is asked only when all the others
+ * together would not bring the rest down to the target. An account holding
+ * nothing is never asked, and a budget smaller than one address space still
+ * holds. Of accounts equal in every respect, the one opened last is asked
+ * first.
+ *
+ * Every caller takes its turn, however the lock is held: one that went on
+ * storing while another held it, for an account opening or going, a census or
+ * a relief, could take the open accounts past the budget by as much as it
+ * stored meanwhile. A caller that waited counts again and finds the budget
+ * kept, or relieves it once more. No one holding the ledger's lock waits for
+ * anything but the locks taken after it, so the wait is short, and it comes
+ * only past the budget. */
+inline void relieve_at(std::uint64_t now) noexcept
 {
 	auto &book = ledger();
 	const std::lock_guard guard{book.mutex};
@@ -267,23 +401,35 @@ inline void relieve() noexcept
 	const auto target = budget - budget / 8;
 	bool relieved = false;
 	while (open > target) {
-		Account *largest = nullptr;
+		detail::Candidate chosen;
 		for (auto *account = book.first; account != nullptr;
-		     account = account->next_)
-			if (!account->shedding() &&
-			    (largest == nullptr ||
-			     account->bytes() > largest->bytes()))
-				largest = account;
-		if (largest == nullptr || largest->bytes() == 0)
+		     account = account->next_) {
+			if (account->shedding() || account->bytes() == 0)
+				continue;
+			const detail::Candidate candidate{account,
+				(account->activity(now) + band_epochs - 1) /
+					band_epochs,
+				account->last_run(), account->bytes()};
+			if (chosen.account == nullptr ||
+			    detail::shed_before(candidate, chosen))
+				chosen = candidate;
+		}
+		if (chosen.account == nullptr)
 			break;
-		const auto shed = largest->start_shedding();
+		const auto shed = chosen.account->start_shedding();
 		open = open > shed ? open - shed : 0;
 		book.shed_accounts.fetch_add(1, std::memory_order_relaxed);
 		relieved = true;
-		largest->notify_(largest->owner_);
+		chosen.account->notify_(chosen.account->owner_);
 	}
 	if (relieved)
 		book.reliefs.fetch_add(1, std::memory_order_relaxed);
+}
+
+/* relieve_at() by the clock. */
+inline void relieve() noexcept
+{
+	relieve_at(epoch());
 }
 
 /* What the ledger holds, for diagnostics and tests. */

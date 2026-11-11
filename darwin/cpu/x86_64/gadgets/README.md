@@ -235,7 +235,8 @@ sequence or a raised execution interrupt abandons a validation.
   reuses a generation number.
 - Each address space charges an account in the gadget engines' process-wide
   byte budget (`cpu/gadget_cache_budget.hpp`,
-  [`darwin/README.md`](../../../README.md)); an account asked to shed is let go
+  [`darwin/README.md`](../../../README.md)); a run's first block tells the
+  account the address space was entered, and an account asked to shed is let go
   of at the executor's next run.
 
 `UML_GADGET_CACHE_CENSUS=ON` builds record what each cache holds in the arm64

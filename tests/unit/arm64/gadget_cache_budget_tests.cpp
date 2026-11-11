@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /* The process's byte budget for the gadget caches' address spaces, on its own:
  * what it derives from a guest's memory and a host's limit, how the accounts
- * add up, and which of them relieve() asks to shed. The engines' own use of it
- * is tested with each engine. */
+ * add up, how an account remembers the epochs an executor entered it in, and
+ * which of them relieve() asks to shed. The engines' own use of it is tested
+ * with each engine. */
 #include "cpu/gadget_cache_budget.hpp"
 #include "require.hpp"
 
@@ -79,9 +80,28 @@ void notify(void *owner) noexcept
 		std::memory_order_relaxed);
 }
 
+/* The epoch the accounts of these tests open in, and a window's width. */
+constexpr std::uint64_t t0 = 100000;
+constexpr std::uint64_t window = cache::window_epochs;
+
 struct Holder final {
+	explicit Holder(std::uint64_t opened = t0) : account{notify, &owner, opened}
+	{}
+
+	/* An executor entered the address space in every epoch of [first, last]. */
+	void ran(std::uint64_t first, std::uint64_t last)
+	{
+		for (auto epoch = first; epoch <= last; ++epoch)
+			account.ran(epoch);
+	}
+
+	[[nodiscard]] bool asked() const
+	{
+		return owner.notified.load() != 0;
+	}
+
 	Owner owner;
-	cache::Account account{notify, &owner};
+	cache::Account account;
 };
 
 /* Whether the open and shedding figures every store reads are what the
@@ -94,11 +114,52 @@ struct Holder final {
 		book.shedding.load() == state.shedding;
 }
 
-/* Accounts add up, the largest are asked to shed until the open ones are
- * down to seven eighths of the budget, a shedding account's bytes count
- * apart however it changes, and an account that goes refunds what it held.
- * The figures every store reads stay exact throughout. */
-void relief_sheds_the_largest()
+/* An account remembers one bit for each epoch of a window in which an
+ * executor entered its address space: a new one every epoch of it, one that
+ * runs all the time all of them, one that stopped what it has left of the
+ * window, and one that has not been entered for a window none. Entering twice
+ * in an epoch counts once, and an entry in an epoch already passed counts for
+ * nothing. */
+void an_account_remembers_the_epochs_it_ran_in()
+{
+	Holder fresh{t0};
+	require(fresh.account.activity(t0) == window);
+	require(fresh.account.activity(t0 + 10) == window - 10);
+	require(fresh.account.activity(t0 + window - 1) == 1);
+	require(fresh.account.activity(t0 + window) == 0);
+	require(fresh.account.last_run() == t0);
+
+	Holder busy{t0};
+	busy.ran(t0 + 1, t0 + 3 * window);
+	require(busy.account.last_run() == t0 + 3 * window);
+	require(busy.account.activity(t0 + 3 * window) == window);
+	require(busy.account.activity(t0 + 3 * window + 40) == window - 40);
+
+	/* Every fourth epoch, with a repeat and a stale entry: 16 bits. */
+	Holder sparse{t0};
+	for (std::uint64_t epoch = t0 + 4; epoch <= t0 + 2 * window; epoch += 4) {
+		sparse.account.ran(epoch);
+		sparse.account.ran(epoch);
+		sparse.account.ran(epoch - 1);
+	}
+	require(sparse.account.last_run() == t0 + 2 * window);
+	require(sparse.account.activity(t0 + 2 * window) == window / 4);
+
+	/* An entry after a gap of a window or more forgets the history. */
+	Holder gap{t0};
+	gap.account.ran(t0 + 5 * window);
+	require(gap.account.activity(t0 + 5 * window) == 1);
+	require(gap.account.activity(t0 + 5 * window + 1) == 1);
+	/* A clock reading older than the last entry sees it as now. */
+	require(gap.account.activity(t0) == 1);
+}
+
+/* Accounts add up, and the open ones are asked to shed until they are down to
+ * seven eighths of the budget. A shedding account's bytes count apart however
+ * it changes, and an account that goes refunds what it held. The figures every
+ * store reads stay exact throughout. Accounts that all run all the time go
+ * smallest first. */
+void relief_accounting()
 {
 	cache::set_budget(64 * kib);
 	const auto base = cache::ledger_state();
@@ -114,48 +175,47 @@ void relief_sheds_the_largest()
 		state.shedding == 0);
 	require(cache::over_budget());
 
-	cache::relieve();
+	/* 90 against 64 KiB: down to 56, which the small one and the middle one
+	 * do, in that order, leaving the large one. */
+	cache::relieve_at(t0);
 	state = cache::ledger_state();
 	require(state.reliefs == base.reliefs + 1 &&
-		state.shed_accounts == base.shed_accounts + 1);
-	require(large->account.shedding() && !middle->account.shedding() &&
-		!small->account.shedding());
-	require(large->owner.notified == 1 && middle->owner.notified == 0);
-	require(state.shedding == 50 * kib && !cache::over_budget());
+		state.shed_accounts == base.shed_accounts + 2);
+	require(small->account.shedding() && middle->account.shedding() &&
+		!large->account.shedding());
+	require(small->owner.notified == 1 && middle->owner.notified == 1 &&
+		large->owner.notified == 0);
+	require(state.shedding == 40 * kib && !cache::over_budget());
 	require(state.peak_open >= 90 * kib);
 
 	/* A shedding address space may go on growing until its executors let
 	 * go of it; it counts apart, and the open ones are what the budget
 	 * bounds. */
-	large->account.charge(40 * kib);
+	small->account.charge(40 * kib);
 	require(!cache::over_budget());
-	require(cache::ledger_state().shedding == 90 * kib);
+	require(cache::ledger_state().shedding == 80 * kib);
 	require(figures_agree());
-	cache::relieve();
+	cache::relieve_at(t0);
 	require(cache::ledger_state().reliefs == base.reliefs + 1);
-	require(large->owner.notified == 1 && !cache::over_budget());
+	require(small->owner.notified == 1 && !cache::over_budget());
 
-	/* The open ones pass it again: both are asked, the larger first, until
-	 * the rest is within seven eighths. */
-	middle->account.charge(30 * kib);
-	small->account.charge(-5 * static_cast<std::ptrdiff_t>(kib));
+	/* The open one passes it alone: it is asked, whatever it is. */
+	large->account.charge(20 * kib);
 	require(cache::over_budget());
-	cache::relieve();
-	require(middle->account.shedding() && !small->account.shedding());
-	require(middle->owner.notified == 1 && small->owner.notified == 0);
+	cache::relieve_at(t0);
+	require(large->account.shedding() && large->owner.notified == 1);
 	state = cache::ledger_state();
-	require(state.total == 155 * kib && state.shedding == 150 * kib);
+	require(state.total == 150 * kib && state.shedding == 150 * kib);
 	require(!cache::over_budget() && figures_agree());
 
 	/* Address spaces that go refund what they held. */
-	large.reset();
+	small.reset();
 	middle.reset();
 	state = cache::ledger_state();
-	require(state.total == 5 * kib && state.shedding == 0 &&
+	require(state.total == 70 * kib && state.shedding == 70 * kib &&
 		state.accounts == 1);
-	require(!cache::over_budget());
-	small.reset();
-	require(cache::ledger_state().total == 0);
+	large.reset();
+	require(cache::ledger_state().total == 0 && figures_agree());
 	cache::set_budget(cache::fallback_budget);
 }
 
@@ -172,8 +232,10 @@ void a_shed_account_that_shrinks_leaves_the_open_ones_exact()
 	auto new_space = std::make_unique<Holder>();
 	old_space->account.charge(60 * kib);
 	new_space->account.charge(10 * kib);
+	/* The old one has not run for a window, the new one has. */
+	new_space->ran(t0 + 1, t0 + 2 * window);
 	require(cache::over_budget());
-	cache::relieve();
+	cache::relieve_at(t0 + 2 * window);
 	require(old_space->account.shedding() &&
 		!new_space->account.shedding());
 	old_space->account.charge(-50 * static_cast<std::ptrdiff_t>(kib));
@@ -181,12 +243,221 @@ void a_shed_account_that_shrinks_leaves_the_open_ones_exact()
 	require(!cache::over_budget() && figures_agree());
 	new_space->account.charge(5 * kib);
 	require(cache::over_budget());
-	cache::relieve();
+	cache::relieve_at(t0 + 2 * window);
 	require(new_space->account.shedding() && figures_agree());
 	require(cache::ledger_state().reliefs == base.reliefs + 2);
 	old_space.reset();
 	new_space.reset();
 	require(cache::ledger_state().total == 0 && figures_agree());
+	cache::set_budget(cache::fallback_budget);
+}
+
+/* The accounts that have not been entered for a window are idle and go first,
+ * the one idle longest first; the one that is running is not asked while they
+ * hold enough to bring the open ones down to the target, however large it is
+ * and however many of them there are. */
+void idle_accounts_go_before_the_one_running()
+{
+	const auto now = t0 + 4 * window;
+	cache::set_budget(100 * kib);
+	{
+		Holder game;
+		game.account.charge(70 * kib);
+		game.ran(t0 + 1, now);
+		Holder oldest;
+		Holder older;
+		Holder old;
+		oldest.account.charge(10 * kib);
+		older.account.charge(15 * kib);
+		old.account.charge(20 * kib);
+		oldest.ran(t0 + 1, t0 + 2);
+		older.ran(t0 + 1, t0 + 10);
+		old.ran(t0 + 1, t0 + 20);
+		require(oldest.account.activity(now) == 0 &&
+			old.account.activity(now) == 0 &&
+			game.account.activity(now) == window);
+		/* 115 KiB against 100: 87.5 is the target, 27.5 to shed. The
+		 * oldest and the older one, 25, are not enough; the third is, and
+		 * the game stays. */
+		cache::relieve_at(now);
+		require(oldest.asked() && older.asked() && old.asked());
+		require(!game.asked());
+		require(figures_agree());
+	}
+	/* Only as many as the target takes, the one idle longest first. */
+	{
+		Holder runner;
+		runner.account.charge(70 * kib);
+		runner.ran(t0 + 1, now);
+		Holder first;
+		Holder second;
+		first.account.charge(20 * kib);
+		second.account.charge(15 * kib);
+		first.ran(t0 + 1, t0 + 5);
+		second.ran(t0 + 1, t0 + 9);
+		cache::relieve_at(now);
+		require(first.asked() && !second.asked() && !runner.asked());
+	}
+	cache::set_budget(cache::fallback_budget);
+}
+
+/* The one that is running is asked when it alone holds more than the target,
+ * after the idle ones: nothing else could bring the open accounts down to it. */
+void the_account_running_is_asked_when_it_alone_exceeds_the_target()
+{
+	const auto now = t0 + 4 * window;
+	cache::set_budget(100 * kib);
+	{
+		Holder game;
+		game.account.charge(95 * kib);
+		game.ran(t0 + 1, now);
+		Holder idle;
+		idle.account.charge(10 * kib);
+		idle.ran(t0 + 1, t0 + 3);
+		cache::relieve_at(now);
+		require(idle.asked() && game.asked());
+		require(figures_agree() && !cache::over_budget());
+	}
+	/* Not before the budget is passed. */
+	{
+		const auto base = cache::ledger_state();
+		Holder holds;
+		holds.account.charge(100 * kib);
+		holds.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(!holds.asked() &&
+			cache::ledger_state().reliefs == base.reliefs);
+	}
+	cache::set_budget(cache::fallback_budget);
+}
+
+/* Between accounts that run, the less active goes first, a band of a quarter
+ * of the window at a time, and within a band the smaller. The few epochs by
+ * which two running accounts differ do not decide. */
+void running_accounts_go_by_activity_band_then_size()
+{
+	const auto now = t0 + 4 * window;
+	cache::set_budget(100 * kib);
+	{
+		/* Entered in 22 of the last 64 epochs: band 2. */
+		Holder bursty;
+		bursty.account.charge(50 * kib);
+		for (std::uint64_t epoch = now - 63; epoch <= now; epoch += 3)
+			bursty.account.ran(epoch);
+		require(bursty.account.activity(now) == 22);
+		Holder steady_small;
+		Holder steady_large;
+		steady_small.account.charge(30 * kib);
+		steady_large.account.charge(40 * kib);
+		steady_small.ran(t0 + 1, now);
+		steady_large.ran(t0 + 1, now);
+		/* 120 against 100, target 87.5: bursty covers the 32.5, though it
+		 * holds more than the steady ones and ran in the last epoch. */
+		cache::relieve_at(now);
+		require(bursty.asked() && !steady_small.asked() &&
+			!steady_large.asked());
+	}
+	/* In one band: 60 of 64 epochs against all 64 is no difference, and the
+	 * smaller goes, whichever is the more active. */
+	{
+		Holder missed;
+		missed.account.charge(70 * kib);
+		missed.ran(t0 + 1, now - 20);
+		missed.ran(now - 15, now);
+		require(missed.account.activity(now) == window - 4);
+		Holder all;
+		all.account.charge(40 * kib);
+		all.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(all.asked() && !missed.asked());
+	}
+	/* The accounts of a census of a 6-vCPU Android guest at a 192 MiB
+	 * budget: twelve idle ones of 1 MiB that freed too little, and running
+	 * ones of 17 and 88 MiB whose last entries were a few epochs before
+	 * (the 22 ms by which an order by last entry shed the 88 MiB one, which
+	 * was running). */
+	cache::set_budget(192 * mib);
+	{
+		Holder system_server;
+		Holder service;
+		Holder big;
+		system_server.account.charge(static_cast<std::ptrdiff_t>(88 * mib));
+		service.account.charge(static_cast<std::ptrdiff_t>(17 * mib));
+		big.account.charge(static_cast<std::ptrdiff_t>(77 * mib));
+		system_server.ran(t0 + 1, now - 8);
+		system_server.ran(now - 6, now - 5);
+		service.ran(t0 + 1, now);
+		big.ran(t0 + 1, now);
+		Holder others[12];
+		for (auto &other : others) {
+			other.account.charge(static_cast<std::ptrdiff_t>(mib));
+			other.ran(t0 + 1, now - 70);
+		}
+		/* 194 MiB against 192, target 168: 26 to shed. The idle ones give
+		 * 12 and the running ones are of one band, so the smallest of
+		 * them, 17 MiB, covers the 14 that are left. */
+		cache::relieve_at(now);
+		for (const auto &other : others)
+			require(other.asked());
+		require(service.asked() && !system_server.asked() && !big.asked());
+	}
+	cache::set_budget(cache::fallback_budget);
+}
+
+/* Accounts equal in every respect are asked newest-opened first, and an empty
+ * account is never asked, however far over the rest are. */
+void ties_and_empty_accounts()
+{
+	const auto now = t0 + 4 * window;
+	cache::set_budget(64 * kib);
+	/* Idle, last ran in one epoch, one size. */
+	{
+		Holder first;
+		Holder second;
+		first.account.charge(40 * kib);
+		second.account.charge(40 * kib);
+		first.ran(t0 + 1, t0 + 2);
+		second.ran(t0 + 1, t0 + 2);
+		cache::relieve_at(now);
+		require(second.asked() && !first.asked());
+	}
+	/* Idle, last ran in one epoch: the larger first. */
+	{
+		Holder small;
+		Holder large;
+		small.account.charge(30 * kib);
+		large.account.charge(50 * kib);
+		small.ran(t0 + 1, t0 + 2);
+		large.ran(t0 + 1, t0 + 2);
+		cache::relieve_at(now);
+		require(large.asked() && !small.asked());
+	}
+	/* Running, equally active, one size: the one that ran earlier. */
+	{
+		Holder earlier;
+		Holder later;
+		earlier.account.charge(40 * kib);
+		later.account.charge(40 * kib);
+		earlier.ran(t0 + 1, now - 1);
+		later.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(earlier.asked() && !later.asked());
+	}
+	/* Within the budget nothing is asked, and an empty account never is. */
+	{
+		const auto base = cache::ledger_state();
+		Holder empty;
+		Holder full;
+		full.account.charge(64 * kib);
+		require(!cache::over_budget());
+		cache::relieve_at(now);
+		require(cache::ledger_state().reliefs == base.reliefs);
+		require(!full.account.shedding() && full.owner.notified == 0);
+		full.account.charge(1);
+		cache::relieve_at(now);
+		require(full.account.shedding() && !empty.account.shedding());
+		require(empty.owner.notified == 0);
+	}
 	cache::set_budget(cache::fallback_budget);
 }
 
@@ -213,26 +484,6 @@ void relief_waits_for_the_lock()
 	require(space.account.shedding() && space.owner.notified == 1);
 	holder.join();
 	require(!cache::over_budget() && figures_agree());
-	cache::set_budget(cache::fallback_budget);
-}
-
-/* Within the budget nothing is asked to shed, and an empty account never
- * is, however far over the rest are. */
-void within_the_budget_nothing_sheds()
-{
-	cache::set_budget(64 * kib);
-	const auto base = cache::ledger_state();
-	Holder empty;
-	Holder full;
-	full.account.charge(64 * kib);
-	require(!cache::over_budget());
-	cache::relieve();
-	require(cache::ledger_state().reliefs == base.reliefs);
-	require(!full.account.shedding() && full.owner.notified == 0);
-	full.account.charge(1);
-	cache::relieve();
-	require(full.account.shedding() && !empty.account.shedding());
-	require(empty.owner.notified == 0);
 	cache::set_budget(cache::fallback_budget);
 }
 
@@ -287,10 +538,14 @@ int main()
 	require(cache::budget() == cache::fallback_budget);
 	derived_budgets();
 	measured_workloads_stay_well_within_their_budget();
-	relief_sheds_the_largest();
+	an_account_remembers_the_epochs_it_ran_in();
+	relief_accounting();
 	a_shed_account_that_shrinks_leaves_the_open_ones_exact();
+	idle_accounts_go_before_the_one_running();
+	the_account_running_is_asked_when_it_alone_exceeds_the_target();
+	running_accounts_go_by_activity_band_then_size();
+	ties_and_empty_accounts();
 	relief_waits_for_the_lock();
-	within_the_budget_nothing_sheds();
 	concurrent_charges_add_up();
 	return 0;
 }
