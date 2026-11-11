@@ -23,8 +23,11 @@ nonisolated struct SendFeedbackInformation: Equatable, Sendable {
     var appVersion: String
     var build: String
     var configuration: String
-    /// The hardware's machine identifier ("iPhone18,1").
-    var deviceModel: String
+    /// The hardware's machine identifier ("iPhone18,1"); the Mac's model for
+    /// an iPad app on a Mac; nil or empty when it cannot be read.
+    var deviceModel: String?
+    /// The app is the iPad app running on a Mac ("Designed for iPad").
+    var runsOnMac = false
     var systemVersion: String
     var language: String
     /// nil before a virtual machine is created.
@@ -36,10 +39,22 @@ nonisolated struct SendFeedbackInformation: Equatable, Sendable {
     var freeSpaceBytes: UInt64
     var thermalState: String
 
+    /// The device line's value: never empty, and never an iPhone's identifier
+    /// for a Mac. What is known is said when the model is not.
+    var deviceText: String {
+        let model = deviceModel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch (model.isEmpty, runsOnMac) {
+        case (false, false): return model
+        case (false, true): return "\(model), iPad app on a Mac"
+        case (true, true): return "a Mac, iPad app"
+        case (true, false): return "unknown"
+        }
+    }
+
     var lines: [String] {
         var lines = [
             "App: Andarium \(appVersion) (\(build)), \(configuration)",
-            "Device: \(deviceModel)",
+            "Device: \(deviceText)",
             "iOS: \(systemVersion)",
             "Language: \(language)",
         ]

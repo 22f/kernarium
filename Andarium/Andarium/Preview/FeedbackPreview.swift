@@ -29,8 +29,8 @@ enum FeedbackPreview {
         services.presentMail = { _, _ in true }
         services.captureScreen = { _ in guestPicture() }
         services.runningSeconds = { _ in 2520 }
-        services.opensAtLaunch = opensSheet(screen)
-        services.prepare = { feedback in await prepare(screen: screen, feedback: feedback) }
+        services.previewOpensAtLaunch = opensSheet(screen)
+        services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
         model.feedbackServices = services
         guard opensSheet(screen) else { return }
         if overInfo(screen) {
@@ -69,10 +69,11 @@ enum FeedbackPreview {
             // The real report lasts a few seconds: hold its overlay part way.
             let app = feedback.app
             app.busyOverSheet = true
-            app.busy = BusyState(
-                title: "Creating bug report",
-                detail: "The guest is collecting its logs and state. This can take several minutes.",
-                progress: 0.6, cancel: BusyCancel {})
+            // The words are the app's own: the overlay of a real report.
+            var overlay = AppModel.bugReportState
+            overlay.progress = 0.6
+            overlay.cancel = BusyCancel {}
+            app.busy = overlay
         case "feedback-info-filled":
             feedback.form.problem = words.suggestion
             feedback.form.details = words.suggestionDetails

@@ -31,6 +31,7 @@ extension AppModel {
             build: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?",
             configuration: Self.buildConfiguration,
             deviceModel: Self.machineIdentifier,
+            runsOnMac: ProcessInfo.processInfo.isiOSAppOnMac,
             systemVersion: UIDevice.current.systemVersion,
             language: bundle.preferredLocalizations.first ?? Locale.preferredLanguages.first ?? "en",
             virtualMachine: machine,
@@ -51,15 +52,22 @@ extension AppModel {
     }
 
     /// The hardware's machine identifier ("iPhone18,1"); in the Simulator, the
-    /// model it plays.
-    private static var machineIdentifier: String {
-        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] { return simulated }
+    /// model it plays; for an iPad app on a Mac, the Mac's model, as the
+    /// identifier there names no model. nil when it cannot be read.
+    private static var machineIdentifier: String? {
+        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"], !simulated.isEmpty {
+            return simulated
+        }
+        return sysctlString(ProcessInfo.processInfo.isiOSAppOnMac ? "hw.model" : "hw.machine")
+    }
+
+    private static func sysctlString(_ name: String) -> String? {
         var size = 0
-        sysctlbyname("hw.machine", nil, &size, nil, 0)
-        guard size > 0 else { return "unknown" }
-        var name = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.machine", &name, &size, nil, 0)
-        return String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
+        let text = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        return text.isEmpty ? nil : text
     }
 
     private static func thermalName(_ state: ProcessInfo.ThermalState) -> String {

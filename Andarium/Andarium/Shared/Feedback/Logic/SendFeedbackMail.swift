@@ -30,13 +30,42 @@ nonisolated enum SendFeedbackMail {
         return head + separator + "\n" + information.text + "\n"
     }
 
-    /// Whether `address` can be a receiver: one `@` between a local part and
-    /// a dotted domain, no spaces.
+    /// Whether `address` can be a receiver. One strict shape, the one the
+    /// App Store bundle check holds the build's address to
+    /// (`Andarium/scripts/check-app-store-bundle.py`): a local part of 1 to 64
+    /// letters, digits and `. _ % + -` that starts and ends with a letter or
+    /// digit and has no two dots in a row, then `@`, then at least two
+    /// dot-separated labels of letters, digits and hyphens (none starts or
+    /// ends with a hyphen) whose last is two or more letters. Quotes, angle
+    /// brackets, a trailing semicolon, spaces and a second `@` make no address.
     static func isWellFormed(address: String) -> Bool {
-        let parts = address.split(separator: "@", omittingEmptySubsequences: false)
-        guard parts.count == 2, !parts[0].isEmpty, !address.contains(where: \.isWhitespace) else { return false }
-        let domain = parts[1].split(separator: ".", omittingEmptySubsequences: false)
-        return domain.count >= 2 && domain.allSatisfy { !$0.isEmpty }
+        let bytes = Array(address.utf8)
+        guard bytes.count <= 254 else { return false }
+        let parts = bytes.split(separator: UInt8(ascii: "@"), omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return false }
+        let local = Array(parts[0])
+        guard (1...64).contains(local.count),
+              local.allSatisfy({ isAlphanumeric($0) || ".%_+-".utf8.contains($0) }),
+              isAlphanumeric(local[0]), isAlphanumeric(local[local.count - 1]),
+              !zip(local, local.dropFirst()).contains(where: { $0 == UInt8(ascii: ".") && $1 == UInt8(ascii: ".") })
+        else { return false }
+        let labels = parts[1].split(separator: UInt8(ascii: "."), omittingEmptySubsequences: false)
+        guard labels.count >= 2 else { return false }
+        for label in labels.dropLast() {
+            guard (1...63).contains(label.count),
+                  label.allSatisfy({ isAlphanumeric($0) || $0 == UInt8(ascii: "-") }),
+                  isAlphanumeric(label.first!), isAlphanumeric(label.last!) else { return false }
+        }
+        let top = labels[labels.count - 1]
+        return (2...63).contains(top.count) && top.allSatisfy(isLetter)
+    }
+
+    private static func isLetter(_ byte: UInt8) -> Bool {
+        (byte >= 0x41 && byte <= 0x5A) || (byte >= 0x61 && byte <= 0x7A)
+    }
+
+    private static func isAlphanumeric(_ byte: UInt8) -> Bool {
+        isLetter(byte) || (byte >= 0x30 && byte <= 0x39)
     }
 }
 

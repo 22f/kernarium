@@ -212,6 +212,84 @@ struct SendFeedbackScreenTests {
         #expect(!sheet.folder.exists)
     }
 
+    @Test func aReportCancelledAsItFinishesIsNotAttachedAndItsFileGoes() async throws {
+        let fixture = fixture()
+        let file = try report(in: fixture)
+        let gate = Gate()
+        let started = Gate()
+        fixture.driver.bugReport = { _ in
+            started.release()
+            // Ignores the cancel: a separate task waits, the report is returned.
+            await Task.detached { while !gate.isOpen { try? await Task.sleep(for: .milliseconds(5)) } }.value
+            return file
+        }
+        let sheet = fixture.sheet()
+        sheet.createBugReport()
+        #expect(await eventually { started.isOpen })
+        try #require(fixture.app.feedbackBusy?.cancel).action()
+        gate.release()
+        #expect(await eventually { fixture.app.busy == nil })
+        #expect(sheet.form.attachments.isEmpty && sheet.failure == nil && fixture.app.alert == nil)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(sheet.state.canMakeBugReport, "the person can try again")
+        sheet.close()
+    }
+
+    @Test func theBugReportControlFollowsWhatTheAppCanMake() throws {
+        let fixture = fixture()
+        let sheet = fixture.sheet()
+        #expect(sheet.state.bugReportPossible && sheet.state.canMakeBugReport)
+        // A file transfer holds the guest's one adb channel, as for the Create
+        // bug report row.
+        let browser = FileBrowserModel(backend: FileBrowserModelTests.ScriptedBackend(), center: NotificationCenter())
+        fixture.app.fileBrowser = browser
+        browser.transfer = FileTransfer(direction: .importing, folder: GuestPath.root, items: [])
+        #expect(browser.busy && !fixture.app.canCreateBugReport)
+        #expect(!sheet.state.bugReportPossible && !sheet.state.canMakeBugReport)
+        #expect(sheet.state.canTakeScreenshot && sheet.state.canAddMedia, "the rest of the bar works")
+        sheet.createBugReport()
+        #expect(fixture.app.busy == nil && !fixture.app.busyOverSheet && sheet.failure == nil)
+        browser.transfer = nil
+        #expect(sheet.state.canMakeBugReport)
+        // Another task under the overlay (an install).
+        fixture.app.busy = BusyState(title: "Installing", detail: "Detail", progress: nil)
+        #expect(!sheet.state.canMakeBugReport)
+        fixture.app.busy = nil
+        #expect(sheet.state.canMakeBugReport)
+        sheet.close()
+        // Recovery mode runs a guest but makes no bug report.
+        let recovery = self.fixture(phase: .running(.recovery))
+        let other = recovery.sheet()
+        #expect(other.state.running && !other.state.canMakeBugReport && other.state.canTakeScreenshot)
+        other.close()
+    }
+
+    // MARK: Closing under a parent that goes
+
+    @Test func closingTheSheetGivesTheOverlayAndTheFlagBackToTheScreens() async throws {
+        let fixture = fixture()
+        let gate = Gate()
+        fixture.driver.bugReport = { _ in
+            while !gate.isOpen { try await Task.sleep(for: .milliseconds(5)) }
+            throw CancellationError()
+        }
+        fixture.app.feedbackSheetOpen = true
+        let sheet = fixture.sheet()
+        sheet.createBugReport()
+        #expect(fixture.app.busyOverSheet && fixture.app.feedbackBusy != nil)
+        // The parent goes under the sheet (the low-space pause, the end of a
+        // run): the sheet closes with a report under way.
+        sheet.close()
+        #expect(!fixture.app.busyOverSheet && !fixture.app.feedbackSheetOpen)
+        #expect(fixture.app.feedbackBusy == nil, "the sheet draws no overlay of its own")
+        let overlay = try #require(fixture.app.busy, "the screens draw it")
+        #expect(overlay.cancel != nil, "and its Cancel works")
+        overlay.cancel?.action()
+        gate.release()
+        #expect(await eventually { fixture.app.busy == nil })
+        #expect(!fixture.app.busyOverSheet && sheet.form.attachments.isEmpty)
+    }
+
     // MARK: From Info
 
     @Test func fromInfoThereIsNoBugReportAndNoScreenshotAndTheRestWorks() throws {
@@ -295,6 +373,53 @@ struct SendFeedbackScreenTests {
         await sheet.importMedia([missing, good])
         #expect(sheet.form.attachments.count == 1)
         #expect(sheet.failure?.title == "One item wasn\u{2019}t added")
+        sheet.close()
+    }
+
+    @Test func theImportingStateBeginsBeforeTheFirstLoadAndSendWaitsForIt() async throws {
+        let fixture = fixture()
+        let sheet = fixture.sheet()
+        sheet.form.problem = "Photos"
+        let good = try pickedPhoto(in: fixture)
+        let started = Gate()
+        let gate = Gate()
+        let loaders: [SendFeedbackModel.MediaLoader] = [
+            {
+                started.release()
+                // The load (an iCloud video coming down) lasts.
+                while !gate.isOpen { try? await Task.sleep(for: .milliseconds(5)) }
+                return good
+            }
+        ]
+        let importing = Task { await sheet.importMedia(loading: loaders) }
+        #expect(await eventually { started.isOpen })
+        #expect(sheet.state.importingMedia, "the state began before the file was there")
+        #expect(!sheet.state.canSend && !sheet.state.canAddMedia && !sheet.state.canMakeBugReport)
+        sheet.send()
+        #expect(fixture.composer.request == nil, "Send waits for the files it will carry")
+        gate.release()
+        await importing.value
+        #expect(!sheet.state.importingMedia && sheet.state.canSend && sheet.form.attachments.count == 1)
+        sheet.send()
+        #expect(fixture.composer.request?.attachments.count == 1)
+        sheet.close()
+    }
+
+    @Test func anItemThatDoesNotLoadCountsAsNotAddedAndIsReported() async throws {
+        let fixture = fixture()
+        let sheet = fixture.sheet()
+        let good = try pickedPhoto(in: fixture)
+        let several: [SendFeedbackModel.MediaLoader] = [{ nil }, { good }, { nil }]
+        await sheet.importMedia(loading: several)
+        #expect(sheet.form.attachments.count == 1 && !sheet.state.importingMedia)
+        #expect(sheet.failure?.title == "2 items weren\u{2019}t added")
+        #expect(sheet.failure?.message.hasPrefix("They couldn\u{2019}t be copied. ") == true)
+        sheet.failure = nil
+        let one: [SendFeedbackModel.MediaLoader] = [{ nil }]
+        await sheet.importMedia(loading: one)
+        #expect(sheet.failure?.title == "One item wasn\u{2019}t added")
+        #expect(sheet.failure?.message.hasPrefix("It couldn\u{2019}t be copied. ") == true)
+        #expect(!sheet.state.importingMedia)
         sheet.close()
     }
 

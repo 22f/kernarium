@@ -48,7 +48,29 @@ struct SendFeedbackTests {
     @Test func anAddressNeedsALocalPartAndADottedDomain() {
         #expect(SendFeedbackMail.isWellFormed(address: "feedback@example.com"))
         #expect(SendFeedbackMail.isWellFormed(address: "a.b+c@mail.example.org"))
+        #expect(SendFeedbackMail.isWellFormed(address: "a_b%c-d@x-y.example.org"))
         for bad in ["", "feedback", "feedback@", "@example.com", "a@b", "a@b.", "a@.com", "a b@example.com", "a@b@c.com"] {
+            #expect(!SendFeedbackMail.isWellFormed(address: bad), "\(bad)")
+        }
+    }
+
+    /// The same rules as the App Store bundle check's pattern
+    /// (tests/tooling/andarium/test_check_app_store_bundle.py holds the other half).
+    @Test func anAddressIsOneStrictShape() {
+        let longLocal = String(repeating: "a", count: 65) + "@example.com"
+        let longLabel = "a@" + String(repeating: "b", count: 64) + ".com"
+        let longAddress = "a@" + (0..<26).map { _ in String(repeating: "b", count: 9) }.joined(separator: ".") + ".com"
+        #expect(SendFeedbackMail.isWellFormed(address: String(repeating: "a", count: 64) + "@example.com"))
+        #expect(SendFeedbackMail.isWellFormed(address: "a@" + String(repeating: "b", count: 63) + ".com"))
+        for bad in [
+            "\"feedback@example.com\"", "\"a\"@example.com", "<feedback@example.com>",
+            "Name <feedback@example.com>", "feedback@example.com;", "feedback@example.com,", "feedback@example.com>",
+            "a..b@example.com", ".a@example.com", "a.@example.com", "-a@example.com", "a-@example.com",
+            "a@-b.com", "a@b-.com", "a@b..com", "a@b.c", "a@b.c1", "a@b.123", "a@b_c.com", "a@b.com.",
+            "a@example.com\n", " a@example.com", "a@example.com ", "a;b@example.com", "a(b)@example.com",
+            "\u{00E9}@example.com", "a@\u{00E9}xample.com", "a@example.c\u{00F6}m",
+            longLocal, longLabel, longAddress,
+        ] {
             #expect(!SendFeedbackMail.isWellFormed(address: bad), "\(bad)")
         }
     }
@@ -79,6 +101,29 @@ struct SendFeedbackTests {
         let withoutEstimate = information(
             machine: .init(vcpus: 1, memoryMiB: 1536, display: "720 x 1560 px, 320 dpi", graphicsMiB: nil))
         #expect(withoutEstimate.lines.contains("Virtual machine: 1 vCPU, 1.5 GiB memory, display 720 x 1560 px, 320 dpi"))
+    }
+
+    /// The device line is never empty, and an iPad app on a Mac does not pass
+    /// for a phone: what is known is said where the model is not.
+    @Test func theDeviceLineSaysWhatIsKnown() {
+        var info = information()
+        #expect(info.deviceText == "iPhone18,1" && info.lines.contains("Device: iPhone18,1"))
+        info.deviceModel = "Mac15,3"
+        info.runsOnMac = true
+        #expect(info.deviceText == "Mac15,3, iPad app on a Mac")
+        #expect(info.lines.contains("Device: Mac15,3, iPad app on a Mac"))
+        for unreadable in [nil, "", "  \n"] {
+            info.deviceModel = unreadable
+            #expect(info.deviceText == "a Mac, iPad app", "\(String(describing: unreadable)) on a Mac")
+            #expect(info.lines.contains("Device: a Mac, iPad app"))
+        }
+        info.runsOnMac = false
+        for unreadable in [nil, "", " "] {
+            info.deviceModel = unreadable
+            #expect(info.deviceText == "unknown")
+            #expect(info.lines.contains("Device: unknown"))
+        }
+        #expect(info.lines.count == 9 && !info.lines.contains("Device: "))
     }
 
     @Test func aRunningTimeIsInTheLargestUnitThatFits() {
@@ -210,6 +255,19 @@ struct SendFeedbackTests {
         #expect(!form.canMakeBugReport)
         #expect(form.canTakeScreenshot)
         form.attachments.remove(form.attachments.items[0].id)
+        #expect(form.canMakeBugReport)
+    }
+
+    /// The app says whether a bug report can start now (the Create bug report
+    /// row's rule, with no other task under the overlay): the control follows it.
+    @Test func aBugReportNeedsTheAppToBeAbleToMakeOne() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        form.problem = "x"
+        #expect(form.bugReportPossible && form.canMakeBugReport)
+        form.bugReportPossible = false
+        #expect(!form.canMakeBugReport)
+        #expect(form.canTakeScreenshot && form.canAddMedia && form.canSend, "the rest of the form works")
+        form.bugReportPossible = true
         #expect(form.canMakeBugReport)
     }
 

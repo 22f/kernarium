@@ -59,7 +59,7 @@ enum SendFeedbackComposer {
             case .sent: .sent
             case .saved: .saved
             case .cancelled: .cancelled
-            case .failed: .failed(error?.localizedDescription ?? "Mail could not send the message.")
+            case .failed: .failed(error?.localizedDescription ?? String(localized: "Mail couldn\u{2019}t send the message.", table: "Feedback"))
             @unknown default: .cancelled
             }
             controller.dismiss(animated: true) { self.finished(outcome) }

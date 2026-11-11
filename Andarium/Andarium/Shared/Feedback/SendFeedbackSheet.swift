@@ -24,6 +24,26 @@ struct SendFeedbackSheet: View {
     private enum Field { case problem, details }
     private static let endID = "feedback-end"
 
+    /// The words more than one place uses, in the feature's table.
+    private enum Words {
+        static let bugReport = LocalizedStringResource("Bug report", table: "Feedback")
+        static let screenshot = LocalizedStringResource("Screenshot", table: "Feedback")
+        static let photos = LocalizedStringResource("Photos", table: "Feedback")
+        static let addPhotos = LocalizedStringResource("Add photos or videos", table: "Feedback")
+        static let attached = LocalizedStringResource("Attached", table: "Feedback")
+        static let onlyWhileRunning = LocalizedStringResource(
+            "Only while the virtual machine is running", table: "Feedback")
+        static let createBugReport = LocalizedStringResource("Create bug report", table: "Feedback")
+        static let cancel = LocalizedStringResource("Cancel", table: "Feedback")
+        static let discard = LocalizedStringResource("Discard", table: "Feedback")
+        static let keepEditing = LocalizedStringResource("Keep editing", table: "Feedback")
+        static let ok = LocalizedStringResource("OK", table: "Feedback")
+        static let hide = LocalizedStringResource("Hide", table: "Feedback")
+        static let show = LocalizedStringResource("Show", table: "Feedback")
+        static let hideDetails = LocalizedStringResource("Hide app and device details", table: "Feedback")
+        static let showDetails = LocalizedStringResource("Show app and device details", table: "Feedback")
+    }
+
     init(app: AppModel) {
         _model = State(initialValue: SendFeedbackModel(app: app))
     }
@@ -71,11 +91,11 @@ struct SendFeedbackSheet: View {
             }
             .background(Color(.systemBackground))
             .safeAreaBar(edge: .bottom) { bar }
-            .navigationTitle("Send feedback")
+            .navigationTitle(Text("Send feedback", tableName: "Feedback"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", systemImage: "xmark", role: .cancel, action: cancel)
+                    Button(Words.cancel, systemImage: "xmark", role: .cancel, action: cancel)
                         .accessibilityIdentifier("feedback-cancel")
                 }
             }
@@ -85,7 +105,8 @@ struct SendFeedbackSheet: View {
                 BusyOverlay(state: busy)
             } else if model.sent {
                 BusyOverlay(state: BusyState(
-                    title: "Feedback sent", detail: "Thank you for helping make Andarium better.",
+                    title: String(localized: "Feedback sent", table: "Feedback"),
+                    detail: String(localized: "Thank you for helping make Andarium better.", table: "Feedback"),
                     result: BusyResult(failed: false, dismiss: BusyCancel { dismiss() })))
             }
         }
@@ -95,16 +116,16 @@ struct SendFeedbackSheet: View {
         .interactiveDismissDisabled(state.hasContent || state.makingBugReport)
         // An alert, not a dialog: on an iPad a dialog is a popover that leaves out
         // its cancel button, and both choices must show.
-        .alert("Discard this feedback?", isPresented: $model.confirmingDiscard) {
-            Button("Discard", role: .destructive) { dismiss() }
-            Button("Keep editing", role: .cancel) {}
+        .alert(Text("Discard this feedback?", tableName: "Feedback"), isPresented: $model.confirmingDiscard) {
+            Button(Words.discard, role: .destructive) { dismiss() }
+            Button(Words.keepEditing, role: .cancel) {}
         }
         .alert(
             model.failure?.title ?? "",
             isPresented: Binding(get: { model.failure != nil }, set: { if !$0 { model.failure = nil } }),
             presenting: model.failure
         ) { _ in
-            Button("OK", role: .cancel) {}
+            Button(Words.ok, role: .cancel) {}
         } message: { failure in
             Text(failure.message)
         }
@@ -126,7 +147,9 @@ struct SendFeedbackSheet: View {
             try? await Task.sleep(for: .seconds(1.8))
             dismiss()
         }
-        .task { await model.app.feedbackServices.prepare(model) }
+        #if !APP_STORE
+        .task { await model.app.feedbackServices.previewPrepare(model) }
+        #endif
         .onDisappear { model.close() }
         .presentationSizing(.page)
     }
@@ -140,11 +163,9 @@ struct SendFeedbackSheet: View {
     }
 
     private func importPicked(_ items: [PhotosPickerItem]) async {
-        var files: [SendFeedbackPickedFile] = []
-        for item in items {
-            if let file = try? await item.loadTransferable(type: SendFeedbackPickedFile.self) { files.append(file) }
-        }
-        await model.importMedia(files)
+        await model.importMedia(loading: items.map { item in
+            { try? await item.loadTransferable(type: SendFeedbackPickedFile.self) }
+        })
     }
 
     // MARK: Mail not available
@@ -156,9 +177,11 @@ struct SendFeedbackSheet: View {
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Mail can\u{2019}t send from this \(model.app.host.name)")
+                Text("Mail can\u{2019}t send from this \(model.app.host.name)", tableName: "Feedback")
                     .font(.subheadline.weight(.semibold))
-                Text("Feedback is sent with the Mail app. Add a mail account in Settings \u{203A} Apps \u{203A} Mail \u{203A} Mail Accounts, then come back.")
+                Text(
+                    "Feedback is sent with the Mail app. Add a mail account in Settings \u{203A} Apps \u{203A} Mail \u{203A} Mail Accounts, then come back.",
+                    tableName: "Feedback")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -176,10 +199,12 @@ struct SendFeedbackSheet: View {
     private var subject: some View {
         @Bindable var model = model
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("Problem")
+            Text("Problem", tableName: "Feedback")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            TextField("Problem", text: $model.form.problem, prompt: Text("What went wrong?"))
+            TextField(text: $model.form.problem, prompt: Text("What went wrong?", tableName: "Feedback")) {
+                Text("Problem", tableName: "Feedback")
+            }
                 .fontWeight(.semibold)
                 .focused($focus, equals: .problem)
                 .submitLabel(.next)
@@ -193,9 +218,11 @@ struct SendFeedbackSheet: View {
     private var bodyText: some View {
         @Bindable var model = model
         return TextField(
-            "Details", text: $model.form.details,
-            prompt: Text("What did you do, and what happened?"), axis: .vertical
-        )
+            text: $model.form.details,
+            prompt: Text("What did you do, and what happened?", tableName: "Feedback"), axis: .vertical
+        ) {
+            Text("Details", tableName: "Feedback")
+        }
         .lineLimit(6...)
         .focused($focus, equals: .details)
         .padding(.horizontal, 20)
@@ -209,14 +236,15 @@ struct SendFeedbackSheet: View {
                 row(attachment)
             }
             let total = Formats.size(bytes: state.attachments.totalBytes)
-            let count = String(AttributedString(localized: "^[\(state.attachments.count) attachment](inflect: true)").characters)
+            let count = String(AttributedString(
+                localized: "^[\(state.attachments.count) attachment](inflect: true)", table: "Feedback").characters)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if state.attachments.exceedsWarningSize {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .accessibilityHidden(true)
-                    Text("\(count) \u{00B7} \(total). Some mail services refuse mail over 20 MiB.")
+                    Text("\(count) \u{00B7} \(total). Some mail services refuse mail over 20 MiB.", tableName: "Feedback")
                 } else {
-                    Text("\(count) \u{00B7} \(total)")
+                    Text("\(count) \u{00B7} \(total)", tableName: "Feedback")
                 }
             }
             .font(.footnote)
@@ -293,21 +321,21 @@ struct SendFeedbackSheet: View {
         }
     }
 
-    private static func title(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringKey {
+    private static func title(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
         switch kind {
-        case .bugReport: "Bug report"
-        case .screenshot: "Screenshot"
-        case .photo: "Photo"
-        case .video: "Video"
+        case .bugReport: Words.bugReport
+        case .screenshot: Words.screenshot
+        case .photo: LocalizedStringResource("Photo", table: "Feedback")
+        case .video: LocalizedStringResource("Video", table: "Feedback")
         }
     }
 
-    private static func removeLabel(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringKey {
+    private static func removeLabel(_ kind: SendFeedbackAttachment.Kind) -> LocalizedStringResource {
         switch kind {
-        case .bugReport: "Remove bug report"
-        case .screenshot: "Remove screenshot"
-        case .photo: "Remove photo"
-        case .video: "Remove video"
+        case .bugReport: LocalizedStringResource("Remove bug report", table: "Feedback")
+        case .screenshot: LocalizedStringResource("Remove screenshot", table: "Feedback")
+        case .photo: LocalizedStringResource("Remove photo", table: "Feedback")
+        case .video: LocalizedStringResource("Remove video", table: "Feedback")
         }
     }
 
@@ -321,18 +349,16 @@ struct SendFeedbackSheet: View {
         return parts.joined(separator: " \u{00B7} ")
     }
 
-    /// What VoiceOver reads for a row: its kind, a video's length and its size.
+    /// What VoiceOver reads for a row: its kind, a video's length ("1 second",
+    /// "42 seconds") and its size.
     private static func spoken(_ attachment: SendFeedbackAttachment) -> String {
-        let kind = switch attachment.kind {
-        case .bugReport: String(localized: "Bug report")
-        case .screenshot: String(localized: "Screenshot")
-        case .photo: String(localized: "Photo")
-        case .video: String(localized: "Video")
-        }
+        var parts = [String(localized: title(attachment.kind))]
         if let seconds = attachment.durationSeconds {
-            return "\(kind), \(seconds) \(String(localized: "seconds")), \(attachment.size)"
+            parts.append(String(AttributedString(
+                localized: "^[\(seconds) second](inflect: true)", table: "Feedback").characters))
         }
-        return "\(kind), \(attachment.size)"
+        parts.append(attachment.size)
+        return parts.joined(separator: ", ")
     }
 
     /// The block as it ends the mail, folded to its first lines.
@@ -346,11 +372,11 @@ struct SendFeedbackSheet: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(model.showsInformation ? nil : 2)
-            Button(model.showsInformation ? "Hide" : "Show") {
+            Button(model.showsInformation ? Words.hide : Words.show) {
                 withAnimation(.snappy) { model.showsInformation.toggle() }
             }
             .font(.caption.weight(.semibold))
-            .accessibilityLabel(model.showsInformation ? "Hide app and device details" : "Show app and device details")
+            .accessibilityLabel(model.showsInformation ? Words.hideDetails : Words.showDetails)
         }
         .padding(.horizontal, 20)
         .accessibilityElement(children: .contain)
@@ -396,34 +422,35 @@ struct SendFeedbackSheet: View {
                 // From Info neither can be made: dimmed, they bring the card
                 // with the way to them back.
                 let showWay = { withAnimation(.snappy) { model.hintDismissed = false } }
-                source(symbol: "ladybug.fill", title: "Bug report", enabled: false, id: "feedback-bug-report",
-                       hint: "Only while the virtual machine is running", action: showWay)
-                source(symbol: "camera.viewfinder", title: "Screenshot", enabled: false, id: "feedback-screenshot",
-                       hint: "Only while the virtual machine is running", action: showWay)
+                source(symbol: "ladybug.fill", title: Words.bugReport, enabled: false, id: "feedback-bug-report",
+                       hint: Words.onlyWhileRunning, action: showWay)
+                source(symbol: "camera.viewfinder", title: Words.screenshot, enabled: false, id: "feedback-screenshot",
+                       hint: Words.onlyWhileRunning, action: showWay)
             } else if state.attachments.bugReport != nil {
                 // One report at most: attached, the button says so and does
                 // nothing more; its row in the body removes it.
-                source(symbol: "checkmark.circle.fill", title: "Bug report", enabled: true,
-                       id: "feedback-bug-report", value: "Attached", action: {})
+                source(symbol: "checkmark.circle.fill", title: Words.bugReport, enabled: true,
+                       id: "feedback-bug-report", value: Words.attached, action: {})
                     .allowsHitTesting(false)
-                source(symbol: "camera.viewfinder", title: "Screenshot", enabled: state.canTakeScreenshot,
+                source(symbol: "camera.viewfinder", title: Words.screenshot, enabled: state.canTakeScreenshot,
                        id: "feedback-screenshot", action: model.takeScreenshot)
             } else {
-                source(symbol: "ladybug.fill", title: "Bug report", enabled: state.canMakeBugReport,
+                source(symbol: "ladybug.fill", title: Words.bugReport, enabled: state.canMakeBugReport,
                        id: "feedback-bug-report", action: model.createBugReport)
-                source(symbol: "camera.viewfinder", title: "Screenshot", enabled: state.canTakeScreenshot,
+                source(symbol: "camera.viewfinder", title: Words.screenshot, enabled: state.canTakeScreenshot,
                        id: "feedback-screenshot", action: model.takeScreenshot)
             }
-            source(symbol: "photo.on.rectangle.angled", title: "Photos", enabled: state.canAddMedia,
-                   id: "feedback-photos", spoken: "Add photos or videos") { picking = true }
+            source(symbol: "photo.on.rectangle.angled", title: Words.photos, enabled: state.canAddMedia,
+                   id: "feedback-photos", spoken: Words.addPhotos) { picking = true }
             Spacer(minLength: 8)
             sendButton(style)
         }
     }
 
     private func source(
-        symbol: String, title: LocalizedStringKey, enabled: Bool, id: String, hint: LocalizedStringKey? = nil,
-        value: LocalizedStringKey? = nil, spoken: LocalizedStringKey? = nil, action: @escaping () -> Void
+        symbol: String, title: LocalizedStringResource, enabled: Bool, id: String,
+        hint: LocalizedStringResource? = nil, value: LocalizedStringResource? = nil,
+        spoken: LocalizedStringResource? = nil, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             VStack(spacing: 3) {
@@ -441,9 +468,9 @@ struct SendFeedbackSheet: View {
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(spoken ?? title)
-        .accessibilityValue(value ?? "")
-        .accessibilityHint(hint ?? "")
+        .accessibilityLabel(Text(spoken ?? title))
+        .accessibilityValue(value.map { Text($0) } ?? Text(verbatim: ""))
+        .accessibilityHint(hint.map { Text($0) } ?? Text(verbatim: ""))
         .accessibilityIdentifier(id)
         .accessibilityShowsLargeContentViewer()
     }
@@ -454,8 +481,10 @@ struct SendFeedbackSheet: View {
         Button(action: model.send) {
             Group {
                 switch style {
-                case .words: HStack(spacing: 5) { Image(systemName: "arrow.up"); Text("Send feedback") }
-                case .short: HStack(spacing: 5) { Image(systemName: "arrow.up"); Text("Send") }
+                case .words:
+                    HStack(spacing: 5) { Image(systemName: "arrow.up"); Text("Send feedback", tableName: "Feedback") }
+                case .short:
+                    HStack(spacing: 5) { Image(systemName: "arrow.up"); Text("Send", tableName: "Feedback") }
                 case .icon: Image(systemName: "arrow.up")
                 }
             }
@@ -470,7 +499,7 @@ struct SendFeedbackSheet: View {
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .capsule)
         .disabled(!state.canSend)
-        .accessibilityLabel("Send feedback")
+        .accessibilityLabel(Text("Send feedback", tableName: "Feedback"))
         .accessibilityIdentifier("feedback-send")
         .fixedSize()
     }
@@ -485,19 +514,21 @@ struct SendFeedbackSheet: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
                 if state.running {
-                    Text("For any bug, attach a bug report. It tells us what the virtual machine and the app were doing.")
+                    Text(
+                        "For any bug, attach a bug report. It tells us what the virtual machine and the app were doing.",
+                        tableName: "Feedback")
                         .font(.footnote)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("Create bug report", action: model.createBugReport)
+                    Button(Words.createBugReport, action: model.createBugReport)
                         .buttonStyle(.glassProminent)
                         .controlSize(.small)
                         .disabled(!state.canMakeBugReport)
                         .accessibilityIdentifier("feedback-create-bug-report")
                 } else {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Reporting a bug?")
+                        Text("Reporting a bug?", tableName: "Feedback")
                             .font(.subheadline.weight(.semibold))
-                        Text("A bug report and a screenshot need the virtual machine running.")
+                        Text("A bug report and a screenshot need the virtual machine running.", tableName: "Feedback")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -514,7 +545,7 @@ struct SendFeedbackSheet: View {
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss")
+            .accessibilityLabel(Text("Dismiss", tableName: "Feedback"))
         }
         .padding(14)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
@@ -531,14 +562,14 @@ struct SendFeedbackSteps: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            step(1, "Start the virtual machine.")
-            step(2, "Make the problem happen again.")
-            step(3, "Tap the side keys, then Settings \u{203A} Send feedback.")
+            step(1, LocalizedStringResource("Start the virtual machine.", table: "Feedback"))
+            step(2, LocalizedStringResource("Make the problem happen again.", table: "Feedback"))
+            step(3, LocalizedStringResource("Tap the side keys, then Settings \u{203A} Send feedback.", table: "Feedback"))
         }
         .accessibilityElement(children: .combine)
     }
 
-    private func step(_ number: Int, _ words: LocalizedStringKey) -> some View {
+    private func step(_ number: Int, _ words: LocalizedStringResource) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text("\(number)")
                 .font(.caption.weight(.bold))

@@ -22,10 +22,10 @@ struct SendFeedbackEntrance: View {
                     .accessibilityHidden(true)
                 switch place {
                 case .info:
-                    Text("Send feedback")
+                    Text("Send feedback", tableName: "Feedback")
                         .foregroundStyle(Color(.label))
                 case .settings:
-                    Text("Send feedback\u{2026}")
+                    Text("Send feedback\u{2026}", tableName: "Feedback")
                         .foregroundStyle(Color.accentColor)
                 }
                 Spacer()
@@ -46,14 +46,16 @@ extension View {
                 .environment(app)
                 .statusBarHidden(app.virtualMachineRuns)
         }
+        #if !APP_STORE
         .task {
             // The Simulator preview opens it once Info or Settings has
             // settled, as a tap would; a sheet presented while its presenter
             // still moves is laid out inside it.
-            guard app.feedbackServices.opensAtLaunch else { return }
+            guard app.feedbackServices.previewOpensAtLaunch else { return }
             try? await Task.sleep(for: .milliseconds(1600))
             app.feedbackSheetOpen = true
         }
+        #endif
     }
 }
 

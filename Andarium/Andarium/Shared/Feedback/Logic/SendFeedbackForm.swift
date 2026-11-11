@@ -16,6 +16,10 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     /// A virtual machine runs: the sheet was opened from the session's
     /// Settings. Without one no bug report or screenshot can be made.
     var running: Bool
+    /// The app can start a bug report now: a normal session whose runtime
+    /// makes one, with the guest's adb channel and the progress overlay free
+    /// (no file transfer or install is under way).
+    var bugReportPossible = true
     /// A bug report is being made, under the progress overlay.
     var makingBugReport = false
     /// A screenshot is being taken.
@@ -36,7 +40,9 @@ nonisolated struct SendFeedbackForm: Equatable, Sendable {
     /// The fields can be edited.
     var fieldsEnabled: Bool { mailAvailable && !makingBugReport }
 
-    var canMakeBugReport: Bool { mailAvailable && running && !isBusy && attachments.bugReport == nil }
+    var canMakeBugReport: Bool {
+        mailAvailable && running && bugReportPossible && !isBusy && attachments.bugReport == nil
+    }
     var canTakeScreenshot: Bool { mailAvailable && running && !isBusy }
     var canAddMedia: Bool { mailAvailable && !isBusy }
     var canSend: Bool { mailAvailable && !isBusy && !trimmedProblem.isEmpty }

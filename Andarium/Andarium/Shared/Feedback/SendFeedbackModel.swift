@@ -50,11 +50,14 @@ final class SendFeedbackModel {
         folder.removeAll()
     }
 
-    /// The form with what the app says now: whether a virtual machine runs and
-    /// whether the bug report is being made.
+    /// The form with what the app says now: whether a virtual machine runs,
+    /// whether it can make a bug report (the Create bug report row's own
+    /// rule, and no other task under the overlay) and whether the bug report
+    /// is being made.
     var state: SendFeedbackForm {
         var state = form
         state.running = app.virtualMachineRuns
+        state.bugReportPossible = app.canCreateBugReport && app.busy == nil
         state.makingBugReport = app.feedbackBusy != nil
         return state
     }
@@ -99,7 +102,7 @@ final class SendFeedbackModel {
             }
         } catch {
             try? FileManager.default.removeItem(at: file)
-            fail("Bug report not attached", error.localizedDescription)
+            fail(String(localized: "Bug report not attached", table: "Feedback"), error.localizedDescription)
         }
     }
 
@@ -109,7 +112,11 @@ final class SendFeedbackModel {
     func takeScreenshot() {
         guard state.canTakeScreenshot else { return }
         guard let image = app.feedbackServices.captureScreen(app) else {
-            fail("Screenshot not taken", "The virtual machine\u{2019}s display isn\u{2019}t available right now.")
+            fail(
+                String(localized: "Screenshot not taken", table: "Feedback"),
+                String(
+                    localized: "The virtual machine\u{2019}s display isn\u{2019}t available right now.",
+                    table: "Feedback"))
             return
         }
         form.takingScreenshot = true
@@ -133,7 +140,7 @@ final class SendFeedbackModel {
                 form.attachments.add(attachment)
                 thumbnails[attachment.id] = thumbnail
             case .failure(let error):
-                fail("Screenshot not taken", error.localizedDescription)
+                fail(String(localized: "Screenshot not taken", table: "Feedback"), error.localizedDescription)
             }
         }
     }
@@ -156,46 +163,80 @@ final class SendFeedbackModel {
 
     // MARK: Photos and videos
 
-    /// Takes in what the picker returned: each file moves into the sheet's
-    /// folder and becomes a row with its picture, size and, for a video, its
-    /// length.
-    func importMedia(_ files: [SendFeedbackPickedFile]) async {
-        guard !files.isEmpty else { return }
+    /// How one picked item becomes a file of ours: the picker hands over an
+    /// item that loads slowly (a video comes down from iCloud) and may not
+    /// load at all.
+    typealias MediaLoader = @MainActor () async -> SendFeedbackPickedFile?
+
+    /// Takes in what the picker returned: each item loads, then moves into the
+    /// sheet's folder and becomes a row with its picture, size and, for a
+    /// video, its length. The importing state lasts from before the first
+    /// load to after the last, so Send waits for the files it will carry; an
+    /// item that does not load counts as one that was not added.
+    func importMedia(loading loaders: [MediaLoader]) async {
+        guard !loaders.isEmpty else { return }
         form.importingMedia = true
         var failed = 0
-        for file in files {
-            let source = file.url
-            // The picker's copy sits in a folder of its own.
-            defer {
-                let parent = source.deletingLastPathComponent()
-                if parent.deletingLastPathComponent().standardizedFileURL == staging.incoming.standardizedFileURL {
-                    try? FileManager.default.removeItem(at: parent)
-                }
-            }
-            guard !closed else { continue }
-            do {
-                let kind = file.isVideo ? "video" : "photo"
-                let ext = source.pathExtension.isEmpty ? (file.isVideo ? "mov" : "jpg") : source.pathExtension
-                let staged = try folder.adopt(source, named: "\(kind).\(ext)")
-                let inspection = await SendFeedbackMedia.inspect(staged, isVideo: file.isVideo)
-                guard !closed else {
-                    folder.remove(staged)
-                    continue
-                }
-                let attachment = SendFeedbackAttachment(
-                    kind: file.isVideo ? .video : .photo, url: staged, bytes: Self.size(of: staged),
-                    pixels: inspection.pixels, durationSeconds: inspection.durationSeconds)
-                form.attachments.add(attachment)
-                if let data = inspection.thumbnail { thumbnails[attachment.id] = UIImage(data: data) }
-            } catch {
+        for load in loaders {
+            if let file = await load() {
+                if await take(file) == false { failed += 1 }
+            } else {
                 failed += 1
             }
         }
         form.importingMedia = false
-        if failed > 0 {
+        guard failed > 0, !closed else { return }
+        let device = app.host.name
+        if failed == 1 {
             fail(
-                failed == 1 ? "One item wasn\u{2019}t added" : "\(failed) items weren\u{2019}t added",
-                "They couldn\u{2019}t be copied. Check the free space on this \(app.host.name), then try again.")
+                String(localized: "One item wasn\u{2019}t added", table: "Feedback"),
+                String(
+                    localized: "It couldn\u{2019}t be copied. Check the free space on this \(device), then try again.",
+                    table: "Feedback"))
+        } else {
+            fail(
+                String(localized: "\(failed) items weren\u{2019}t added", table: "Feedback"),
+                String(
+                    localized: "They couldn\u{2019}t be copied. Check the free space on this \(device), then try again.",
+                    table: "Feedback"))
+        }
+    }
+
+    /// Takes in files that are already loaded.
+    func importMedia(_ files: [SendFeedbackPickedFile]) async {
+        await importMedia(loading: files.map { file in { file } })
+    }
+
+    /// Moves one loaded file into the sheet's folder and makes its row; false
+    /// when it could not be copied. A sheet that closed meanwhile takes
+    /// nothing, and the file goes.
+    private func take(_ file: SendFeedbackPickedFile) async -> Bool {
+        let source = file.url
+        // The picker's copy sits in a folder of its own.
+        defer {
+            let parent = source.deletingLastPathComponent()
+            if parent.deletingLastPathComponent().standardizedFileURL == staging.incoming.standardizedFileURL {
+                try? FileManager.default.removeItem(at: parent)
+            }
+        }
+        guard !closed else { return true }
+        do {
+            let kind = file.isVideo ? "video" : "photo"
+            let ext = source.pathExtension.isEmpty ? (file.isVideo ? "mov" : "jpg") : source.pathExtension
+            let staged = try folder.adopt(source, named: "\(kind).\(ext)")
+            let inspection = await SendFeedbackMedia.inspect(staged, isVideo: file.isVideo)
+            guard !closed else {
+                folder.remove(staged)
+                return true
+            }
+            let attachment = SendFeedbackAttachment(
+                kind: file.isVideo ? .video : .photo, url: staged, bytes: Self.size(of: staged),
+                pixels: inspection.pixels, durationSeconds: inspection.durationSeconds)
+            form.attachments.add(attachment)
+            if let data = inspection.thumbnail { thumbnails[attachment.id] = UIImage(data: data) }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -230,7 +271,9 @@ final class SendFeedbackModel {
         }
         if !shown {
             presentingMail = false
-            fail("Mail not opened", "Andarium couldn\u{2019}t open the mail composer.")
+            fail(
+                String(localized: "Mail not opened", table: "Feedback"),
+                String(localized: "Andarium couldn\u{2019}t open the mail composer.", table: "Feedback"))
         }
     }
 
@@ -247,16 +290,21 @@ final class SendFeedbackModel {
         case .saved, .cancelled:
             break
         case .failed(let message):
-            fail("Feedback not sent", message)
+            fail(String(localized: "Feedback not sent", table: "Feedback"), message)
         }
     }
 
     // MARK: Closing
 
-    /// The sheet is closed or the mail is sent: nothing stays behind.
+    /// The sheet is closed or the mail is sent: nothing stays behind. A
+    /// parent torn down under the sheet (the low-space pause, the end of a
+    /// run) closes it too, so the sheet's claim on the overlay of a task under
+    /// way goes with it: the screens draw that overlay, and its Cancel, again.
     func close() {
         guard !closed else { return }
         closed = true
+        app.busyOverSheet = false
+        app.feedbackSheetOpen = false
         cleanUp()
     }
 

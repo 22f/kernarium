@@ -32,11 +32,15 @@ struct SendFeedbackServices {
     var captureScreen: @MainActor (AppModel) -> UIImage? = { $0.driver?.captureGuestDisplay() }
     /// Seconds the virtual machine has run.
     var runningSeconds: @MainActor (AppModel) -> Int? = { $0.driver?.runningSeconds() }
+    #if !APP_STORE
+    // The Simulator preview's hooks. The App Store product has neither the
+    // properties nor the code that reads them.
     /// Opens the sheet once Info or Settings has settled, as a launch of the
     /// Simulator preview asks; never in the application.
-    var opensAtLaunch = false
+    var previewOpensAtLaunch = false
     /// Runs when the sheet appears: the Simulator preview fills a draft with it.
-    var prepare: @MainActor (SendFeedbackModel) async -> Void = { _ in }
+    var previewPrepare: @MainActor (SendFeedbackModel) async -> Void = { _ in }
+    #endif
 }
 
 /// Where the receiver's address is read from.
