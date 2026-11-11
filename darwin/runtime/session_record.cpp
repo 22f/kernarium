@@ -368,7 +368,7 @@ SessionNetworkCounts network_since(const SessionNetworkCounts &now,
 		now.tcp_attempts < baseline.tcp_attempts ||
 		now.tcp_established < baseline.tcp_established ||
 		now.tcp_unreachable < baseline.tcp_unreachable ||
-		now.tcp_refused < baseline.tcp_refused;
+		now.tcp_reset < baseline.tcp_reset;
 	if (replaced)
 		return now;
 	return {
@@ -383,7 +383,7 @@ SessionNetworkCounts network_since(const SessionNetworkCounts &now,
 		.tcp_attempts = now.tcp_attempts - baseline.tcp_attempts,
 		.tcp_established = now.tcp_established - baseline.tcp_established,
 		.tcp_unreachable = now.tcp_unreachable - baseline.tcp_unreachable,
-		.tcp_refused = now.tcp_refused - baseline.tcp_refused,
+		.tcp_reset = now.tcp_reset - baseline.tcp_reset,
 	};
 }
 
@@ -428,9 +428,9 @@ void write_network_slot(int descriptor) noexcept
 		text.text("net-tcp attempts ").number(n(counts.tcp_attempts))
 			.text(" established ").number(n(counts.tcp_established))
 			.text(" unreachable ").number(n(counts.tcp_unreachable))
-			.text(" refused ").number(n(counts.tcp_refused)).text("\n");
+			.text(" reset ").number(n(counts.tcp_reset)).text("\n");
 	}
-	text.text("net-notice shown ")
+	text.text("net-notice denials ")
 		.number(notice_times.load(std::memory_order_relaxed))
 		.text(" now ")
 		.text(notice_word(notice_now.load(std::memory_order_relaxed)))

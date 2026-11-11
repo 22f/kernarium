@@ -38,9 +38,9 @@ struct NetworkRecordTests {
         #expect(record.dns == .init(answered: 5, policyDenied: 3, timedOut: 2, failed: 1))
         #expect(record.dns?.total == 11)
         #expect(record.dhcp == .init(discovers: 1, requests: 2, acks: 1))
-        #expect(record.tcp == .init(attempts: 12, established: 4, unreachable: 2, refused: 1))
+        #expect(record.tcp == .init(attempts: 12, established: 4, unreachable: 2, reset: 1))
         #expect(record.tcp?.unanswered == 5)
-        #expect(record.noticeShown == 2 && record.noticeNow == "wifi")
+        #expect(record.noticeDenials == 2 && record.noticeNow == "wifi")
     }
 
     @Test func aLayout5RecordCarriesTheSlot() throws {
@@ -62,32 +62,33 @@ struct NetworkRecordTests {
         let four = StallRecordTests.record(
             stalls: try StallRecordTests.golden() + String(repeating: " ", count: 100) + "\n",
             state: "state running\nend running\nstatus 0\npid 77\n")
-        let session = try #require(SessionRecord(text: four + "network 1\nnet-notice shown 1 now wifi\n"))
+        let session = try #require(SessionRecord(text: four + "network 1\nnet-notice denials 1 now wifi\n"))
         #expect(session.network == nil)
         for format in 1...3 {
             let text = "uml-session \(format)\nmemory at 1 footprint 2 peak 3\nstate ended\nend powered-off\nnetwork 1\n"
-                + "net-notice shown 1 now wifi\n"
+                + "net-notice denials 1 now wifi\n"
             #expect(SessionRecord(text: text)?.network == nil, "layout \(format)")
         }
     }
 
     @Test func aGuestWithoutANetworkHasTheNoticeAndNoCounts() throws {
-        let record = try #require(NetworkRecord(text: "network 1\nnet-notice shown 1 now cellular\n"))
+        let record = try #require(NetworkRecord(text: "network 1\nnet-notice denials 1 now cellular\n"))
         #expect(record.dns == nil && record.dhcp == nil && record.tcp == nil)
-        #expect(record.noticeShown == 1 && record.noticeNow == "cellular")
+        #expect(record.noticeDenials == 1 && record.noticeNow == "cellular")
         let words = record.report()
         #expect(words.contains("DNS: not counted.") && words.contains("DHCP: not counted.")
             && words.contains("TCP: not counted."))
-        #expect(words.contains("shown for 1 denial during the session; the cellular denial in force"))
+        #expect(words.contains("Denials of the network by iOS: 1 began during the session, each raising the notice; "
+            + "the cellular denial in force at the last write."))
     }
 
     @Test func aSlotOfAVersionOrShapeThisReaderDoesNotKnowIsNoRecord() {
         #expect(NetworkRecord(text: "") == nil)
-        #expect(NetworkRecord(text: "network 2\nnet-notice shown 1 now wifi\n") == nil)
-        #expect(NetworkRecord(text: "net-notice shown 1 now wifi\n") == nil)
+        #expect(NetworkRecord(text: "network 2\nnet-notice denials 1 now wifi\n") == nil)
+        #expect(NetworkRecord(text: "net-notice denials 1 now wifi\n") == nil)
         // The notice line is the slot's one constant line.
         #expect(NetworkRecord(text: "network 1\nnet-dns answered 1 policy-denied 0 timed-out 0 failed 0\n") == nil)
-        #expect(NetworkRecord(text: "network 1\nnet-notice shown x now wifi\n") == nil)
+        #expect(NetworkRecord(text: "network 1\nnet-notice denials x now wifi\n") == nil)
     }
 
     @Test func aLineWithABadNumberIsDroppedAndTheRestIsKept() throws {
@@ -95,13 +96,13 @@ struct NetworkRecordTests {
             network 1
             net-dns answered -1 policy-denied 0 timed-out 0 failed 0
             net-dhcp discovers 1 requests 1 acks 99999999999999999999999
-            net-tcp attempts 3 established 1 unreachable 1 refused 0
-            net-notice shown 0 now none
+            net-tcp attempts 3 established 1 unreachable 1 reset 0
+            net-notice denials 0 now none
 
             """
         let record = try #require(NetworkRecord(text: text))
         #expect(record.dns == nil && record.dhcp == nil)
-        #expect(record.tcp == .init(attempts: 3, established: 1, unreachable: 1, refused: 0))
+        #expect(record.tcp == .init(attempts: 3, established: 1, unreachable: 1, reset: 0))
     }
 
     @Test func aLaterRuntimeMayAddFieldsAndLines() throws {
@@ -110,8 +111,8 @@ struct NetworkRecordTests {
             net-dns answered 5 policy-denied 3 timed-out 2 failed 1 cancelled 7
             net-quic attempts 4
             net-dhcp requests 2 discovers 1 acks 1
-            net-tcp attempts 12 established 4 unreachable 2 refused 1 blocked 9
-            net-notice shown 2 now wifi since 1794114290
+            net-tcp attempts 12 established 4 unreachable 2 reset 1 blocked 9
+            net-notice denials 2 now wifi since 1794114290
             """
         let record = try #require(NetworkRecord(text: text))
         #expect(record.dns == .init(answered: 5, policyDenied: 3, timedOut: 2, failed: 1))
@@ -122,8 +123,8 @@ struct NetworkRecordTests {
     @Test func unansweredNeverGoesNegative() {
         // A reading taken between the two counters of a reply can show more
         // answers than attempts.
-        #expect(NetworkRecord.TCP(attempts: 1, established: 2, unreachable: 0, refused: 1).unanswered == 0)
-        #expect(NetworkRecord.TCP(attempts: 0, established: 0, unreachable: 0, refused: 0).unanswered == 0)
+        #expect(NetworkRecord.TCP(attempts: 1, established: 2, unreachable: 0, reset: 1).unanswered == 0)
+        #expect(NetworkRecord.TCP(attempts: 0, established: 0, unreachable: 0, reset: 0).unanswered == 0)
     }
 
     @Test func theReportIsWordsWithNumbersOnly() throws {
@@ -132,11 +133,13 @@ struct NetworkRecordTests {
         #expect(words.contains("DNS: 11 queries to the system's resolver: 5 answered"))
         #expect(words.contains("3 refused by the system, 2 timed out, 1 failed otherwise."))
         #expect(words.contains("DHCP: the guest sent 1 discover and 2 request messages; 1 leases were acknowledged."))
-        #expect(words.contains("TCP: 12 outbound connection attempts: 4 connected, 2 answered with ICMP unreachable"))
-        #expect(words.contains("1 reset, 5 with no answer yet."))
-        #expect(words.contains("shown for 2 denials during the session; the wifi denial in force at the last write."))
-        let none = try #require(NetworkRecord(text: "network 1\nnet-notice shown 0 now none\n"))
-        #expect(none.report().contains("not shown; no denial in force."))
+        #expect(words.contains("TCP: 12 outbound connection attempts: 4 connected, 2 unreachable (connect() failed at once"))
+        #expect(words.contains("1 reset (refused, timed out on the host after 75 seconds, or failed after it started), "
+            + "5 with no answer (under way, given up by the guest, or pushed out of the table of waiting attempts)."))
+        #expect(words.contains("Denials of the network by iOS: 2 began during the session, each raising the notice; "
+            + "the wifi denial in force at the last write."))
+        let none = try #require(NetworkRecord(text: "network 1\nnet-notice denials 0 now none\n"))
+        #expect(none.report().contains("Denials of the network by iOS: 0; no denial in force."))
     }
 
     @Test func aHostileRecordOfValidLinesStaysSmall() throws {
@@ -145,7 +148,7 @@ struct NetworkRecordTests {
             text += "net-dns answered 18446744073709551615 policy-denied 18446744073709551615 "
                 + "timed-out 18446744073709551615 failed 18446744073709551615\n"
         }
-        text += "net-notice shown 2147483647 now wifi\n"
+        text += "net-notice denials 2147483647 now wifi\n"
         let record = try #require(NetworkRecord(text: text))
         // The total wraps rather than traps.
         #expect(record.dns?.total != nil)
@@ -168,7 +171,7 @@ struct NetworkRecordTests {
             .write(
                 to: directory.appendingPathComponent(BugReportAttachments.previousSessionRecord),
                 atomically: true, encoding: .utf8)
-        try Self.record(network: "network 1\nnet-notice shown 0 now none\n")
+        try Self.record(network: "network 1\nnet-notice denials 0 now none\n")
             .write(
                 to: directory.appendingPathComponent(BugReportAttachments.sessionRecord),
                 atomically: true, encoding: .utf8)
@@ -180,7 +183,7 @@ struct NetworkRecordTests {
         #expect(words.contains("== The previous session (process 31) =="))
         #expect(words.contains("3 refused by the system"))
         #expect(words.contains("== The current session (process 77) =="))
-        #expect(words.contains("Notice that iOS denies Andarium the network: not shown; no denial in force."))
+        #expect(words.contains("Denials of the network by iOS: 0; no denial in force."))
         // The raw record carries the same numbers.
         #expect(String(decoding: entries[0].data, as: UTF8.self).contains("net-dns answered 5 policy-denied 3"))
     }

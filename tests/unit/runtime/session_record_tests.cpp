@@ -535,7 +535,7 @@ void the_network_slot_matches_the_golden_file(const char *golden_path)
 			 .dhcp_discovers = 1, .dhcp_requests = 2,
 			 .dhcp_acks = 1, .tcp_attempts = 12,
 			 .tcp_established = 4, .tcp_unreachable = 2,
-			 .tcp_refused = 1};
+			 .tcp_reset = 1};
 	uml::runtime::set_network_notice(NetworkNotice::cellular_denied);
 	uml::runtime::set_network_notice(NetworkNotice::none);
 	uml::runtime::set_network_notice(NetworkNotice::wifi_denied);
@@ -574,7 +574,7 @@ void test_network_slot()
 	uml::runtime::set_network_notice(NetworkNotice::none);
 	/* The provider counted before this session began. */
 	reader_counts = {.dns_answered = 10, .dns_failed = 2, .tcp_attempts = 7,
-			 .tcp_refused = 1};
+			 .tcp_reset = 1};
 	reader_present = true;
 	uml::runtime::set_network_counts_reader(&test_network_reader);
 	const std::string path = temporary_record();
@@ -585,7 +585,7 @@ void test_network_slot()
 				 "timed-out 0 failed 0\n"
 				 "net-dhcp discovers 0 requests 0 acks 0\n"
 				 "net-tcp attempts 0 established 0 unreachable 0 "
-				 "refused 0\nnet-notice shown 0 now none\n") &&
+				 "reset 0\nnet-notice denials 0 now none\n") &&
 		slot.back() == '\n' && slot.size() == session_network_slot_bytes,
 		"a session does not start from the provider's reading: " + slot);
 
@@ -606,8 +606,8 @@ void test_network_slot()
 			  "failed 0\n") &&
 		has(slot, "net-dhcp discovers 1 requests 1 acks 1\n") &&
 		has(slot, "net-tcp attempts 5 established 4 unreachable 2 "
-			  "refused 0\n") &&
-		has(slot, "net-notice shown 1 now cellular\n"),
+			  "reset 0\n") &&
+		has(slot, "net-notice denials 1 now cellular\n"),
 		"a checkpoint wrote the wrong network slot: " + slot);
 	require(record.substr(state_offset).starts_with(
 			"state running\nend running\n") &&
@@ -624,7 +624,7 @@ void test_network_slot()
 	record = read_file(path);
 	slot = slot_of(record);
 	require(has(slot, "timed-out 9 failed 0\n") &&
-		has(slot, "net-notice shown 2 now wifi\n") &&
+		has(slot, "net-notice denials 2 now wifi\n") &&
 		has(record.substr(state_offset), "state ended\n"),
 		"the end did not write the last network slot: " + slot);
 
@@ -634,7 +634,7 @@ void test_network_slot()
 	require(uml::runtime::begin_session_record(path, {}));
 	slot = slot_of(read_file(path));
 	require(has(slot, "net-dns answered 0 ") &&
-		has(slot, "net-notice shown 1 now wifi\n"),
+		has(slot, "net-notice denials 1 now wifi\n"),
 		"the next session began wrong: " + slot);
 	reader_counts = {.dns_answered = 1};
 	uml::runtime::checkpoint_session_memory();
@@ -646,7 +646,7 @@ void test_network_slot()
 	reader_present = false;
 	uml::runtime::checkpoint_session_memory();
 	slot = slot_of(read_file(path));
-	require(slot.starts_with("network 1\nnet-notice shown 1 now wifi\n") &&
+	require(slot.starts_with("network 1\nnet-notice denials 1 now wifi\n") &&
 		!has(slot, "net-dns"),
 		"a guest with no network was given counts: " + slot);
 
@@ -679,8 +679,10 @@ int main(int argc, char **argv)
 		test_record_lifecycle();
 		test_memory_checkpoints();
 		test_network_slot();
-		if (argc == 2)
-			the_network_slot_matches_the_golden_file(argv[1]);
+		/* The registration passes the golden file; a run without it
+		 * fails rather than skipping the check. */
+		require(argc == 2, "the golden network slot file is not given");
+		the_network_slot_matches_the_golden_file(argv[1]);
 		test_memory_terms();
 		test_kernel_crash();
 		test_host_fault();

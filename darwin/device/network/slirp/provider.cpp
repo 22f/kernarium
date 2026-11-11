@@ -29,6 +29,15 @@
 namespace uml::network {
 namespace {
 
+/* An IPv4 address as the number the frame parser reads (network order bytes
+ * read big endian). */
+constexpr std::uint32_t ipv4_value(const dns::Ipv4Address &address) noexcept
+{
+	return (static_cast<std::uint32_t>(address[0]) << 24) |
+		(static_cast<std::uint32_t>(address[1]) << 16) |
+		(static_cast<std::uint32_t>(address[2]) << 8) | address[3];
+}
+
 using uml::platform::UniqueDescriptor;
 
 constexpr std::array<unsigned char, 6> default_mac{
@@ -220,6 +229,11 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 							"over TCP at %s\n", server);
 				}
 			}
+			/* A SYN to a name server whose forward carries DNS is
+			 * answered by SLiRP itself: no connection attempt. */
+			observer_.serve_dns_streams(
+				name_server_stream_ ? ipv4_value(nameserver_ipv4) : 0,
+				gateway_stream_ ? ipv4_value(host_alias_ipv4) : 0);
 			worker_ = std::jthread{[this](std::stop_token stop_token) {
 				event_loop(stop_token);
 			}};
@@ -632,7 +646,7 @@ extern "C" int uml_slirp_net_read_counters(
 		.tcp_attempts = counts.tcp_attempts,
 		.tcp_established = counts.tcp_established,
 		.tcp_unreachable = counts.tcp_unreachable,
-		.tcp_refused = counts.tcp_refused,
+		.tcp_reset = counts.tcp_reset,
 	};
 	return 0;
 }

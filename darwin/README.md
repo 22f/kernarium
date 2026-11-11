@@ -150,11 +150,19 @@ patches provide the behaviors the `slirp-network-*` tests check.
   permission, and the guest follows the device's own resolver configuration.
   The wire rules are `network-dns-rules`.
 - The provider counts what became of the guest's DNS queries (answered, policy
-  denied, timed out, failed), its DHCP exchange and its TCP connection attempts
-  (established, unreachable, refused), as numbers only, and the runtime writes
-  them into the session record (`network-counters`, `slirp-network-counters`).
-  SLiRP drops the errno of a connect it could not make, so a denied connect
-  counts as unreachable and a timed-out one as unanswered.
+  denied, timed out, failed), its DHCP exchange and its TCP connection attempts,
+  as numbers only, and the runtime writes them into the session record
+  (`network-counters`, `slirp-network-counters`). An attempt is a SYN that
+  SLiRP connects for; DNS over TCP to the name server or the gateway, which the
+  guest forward answers itself, is not one. Each attempt is classed by what the
+  guest was told: established (a SYN-ACK); unreachable (an ICMP net or host
+  unreachable, which SLiRP sends when `connect()` fails at once with anything
+  but `ECONNREFUSED`); reset (a reset: `ECONNREFUSED` at once, a connect that
+  failed after it had started, whose errno SLiRP has dropped, or SLiRP's own
+  75 s timer on a connect nothing answered); unanswered (the rest: still under
+  way, given up by the guest, or pushed out of the 64-entry table of waiting
+  attempts). A connect the system denies lands in unreachable or reset, by how
+  `connect()` fails.
 - Guest IPv4 multicast is dropped on the virtual link. The Local Network
   permission is asked for only when the guest itself reaches the local network.
 - The guest network driver has no transmit flow control, so a guest transmit

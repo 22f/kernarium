@@ -9,10 +9,11 @@
  * The resolver is confined to kDNSServiceInterfaceIndexLocalOnly, which needs
  * no network. A listener on the host's loopback, reached through the gateway,
  * is a connection that is made; the same address with no listener is one that
- * is refused; a connect to port 0 of a documentation address is one SLiRP
- * leaves unanswered. The classes SLiRP's ICMP errors fall in (unreachable)
- * come from SLiRP itself, in the second part, which feeds the observer the
- * frames of an unmodified SLiRP.
+ * is reset (ECONNREFUSED at once); a connect to port 0 of a documentation
+ * address is one SLiRP leaves unanswered. A SYN to port 53 of the name server
+ * is answered by the guest forward and is no attempt at all. The classes
+ * SLiRP's ICMP errors fall in (unreachable) come from SLiRP itself, in the
+ * second part, which feeds the observer the frames of an unmodified SLiRP.
  */
 #include "network_counters.hpp"
 #include "provider.hpp"
@@ -30,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -66,7 +68,7 @@ std::string describe(const NetworkCounts &counts)
 		std::to_string(counts.tcp_attempts) + "/" +
 		std::to_string(counts.tcp_established) + "/" +
 		std::to_string(counts.tcp_unreachable) + "/" +
-		std::to_string(counts.tcp_refused);
+		std::to_string(counts.tcp_reset);
 }
 
 Bytes udp_frame(const Address &source, const Address &destination,
@@ -308,7 +310,7 @@ void check_provider()
 		       counts.dhcp_acks == 1,
 	       counts);
 
-	/* TCP made, refused, and unanswered. */
+	/* TCP made, reset, and unanswered. */
 	Listener listener;
 	if (listener.port == 0) {
 		fail("listener", "no loopback listener");
@@ -328,24 +330,24 @@ void check_provider()
 	counts = provider.counters();
 	expect(label,
 	       counts.tcp_attempts == 1 && counts.tcp_established == 1 &&
-		       counts.tcp_refused == 0 && counts.tcp_unanswered() == 0,
+		       counts.tcp_reset == 0 && counts.tcp_unanswered() == 0,
 	       counts);
 
-	label = "a connection that is refused";
+	label = "a connection that is reset";
 	const std::uint16_t closed = unused_loopback_port();
 	(void)guest.send(tcp_frame(guest_ip, gateway, 42001, closed, 200, 0,
 				   tcp_syn, 65535));
-	const auto refused = guest.receive([&](const Bytes &frame) {
+	const auto reset = guest.receive([&](const Bytes &frame) {
 		const auto segment = parse_tcp(frame);
 		return segment && segment->source_port == closed &&
 			segment->destination_port == 42001;
 	});
-	if (!refused || (parse_tcp(*refused)->flags & tcp_rst) == 0)
+	if (!reset || (parse_tcp(*reset)->flags & tcp_rst) == 0)
 		fail(label, "no reset");
 	counts = provider.counters();
 	expect(label,
 	       counts.tcp_attempts == 2 && counts.tcp_established == 1 &&
-		       counts.tcp_refused == 1 && counts.tcp_unanswered() == 0,
+		       counts.tcp_reset == 1 && counts.tcp_unanswered() == 0,
 	       counts);
 
 	/* Port 0 of a documentation address: Darwin refuses it before sending
@@ -363,7 +365,31 @@ void check_provider()
 	counts = provider.counters();
 	expect(label,
 	       counts.tcp_attempts == 3 && counts.tcp_established == 1 &&
-		       counts.tcp_refused == 1 && counts.tcp_unanswered() == 1,
+		       counts.tcp_reset == 1 && counts.tcp_unanswered() == 1,
+	       counts);
+
+	/* DNS over TCP to the name server and to the gateway is answered by the
+	 * guest forward itself: the SYN-ACK says nothing about the network, so it
+	 * is neither an attempt nor a connection made. */
+	label = "DNS over TCP";
+	for (const auto &[server, port] :
+	     {std::pair<Address, std::uint16_t>{name_server, 42003},
+	      std::pair<Address, std::uint16_t>{gateway, 42004}}) {
+		(void)guest.send(tcp_frame(guest_ip, server, port, 53, 400, 0,
+					   tcp_syn, 65535));
+		const auto forward = guest.receive([&](const Bytes &frame) {
+			const auto segment = parse_tcp(frame);
+			return segment && segment->source_port == 53 &&
+				segment->destination_port == port;
+		});
+		if (!forward || (parse_tcp(*forward)->flags & (tcp_syn | tcp_ack)) !=
+					(tcp_syn | tcp_ack))
+			fail(label, "no SYN-ACK from the guest forward");
+	}
+	counts = provider.counters();
+	expect(label,
+	       counts.tcp_attempts == 3 && counts.tcp_established == 1 &&
+		       counts.tcp_reset == 1 && counts.tcp_unanswered() == 1,
 	       counts);
 
 	/* DNS: a name in /etc/hosts and a missing one are both answers. */
@@ -392,7 +418,7 @@ void check_provider()
 	    read.dns_answered != 2 || read.dhcp_discovers != 1 ||
 	    read.dhcp_requests != 1 || read.dhcp_acks != 1 ||
 	    read.tcp_attempts != 3 || read.tcp_established != 1 ||
-	    read.tcp_unreachable != 0 || read.tcp_refused != 1)
+	    read.tcp_unreachable != 0 || read.tcp_reset != 1)
 		fail(label, "the counts differ from the provider's");
 	if (uml_slirp_net_read_counters(nullptr, &read) >= 0 ||
 	    uml_slirp_net_read_counters(&provider, nullptr) >= 0)
@@ -424,7 +450,7 @@ void check_slirp_errors()
 	NetworkCounters counters;
 	TrafficObserver observer{counters};
 	const auto send = [&](const Bytes &frame) {
-		observer.from_guest(frame, TrafficObserver::Clock::now());
+		observer.from_guest(frame);
 		network.input(frame);
 	};
 	const auto collect = [&] {
@@ -444,7 +470,7 @@ void check_slirp_errors()
 	auto counts = counters.read();
 	expect("ICMP net unreachable",
 	       counts.tcp_attempts == 1 && counts.tcp_unreachable == 1 &&
-		       counts.tcp_refused == 0 && counts.tcp_unanswered() == 0,
+		       counts.tcp_reset == 0 && counts.tcp_unanswered() == 0,
 	       counts);
 
 	/* A reset in answer to a SYN, as SLiRP writes it. */
@@ -453,7 +479,7 @@ void check_slirp_errors()
 	collect();
 	counts = counters.read();
 	expect("a reset",
-	       counts.tcp_attempts == 2 && counts.tcp_refused == 1 &&
+	       counts.tcp_attempts == 2 && counts.tcp_reset == 1 &&
 		       counts.tcp_unreachable == 1,
 	       counts);
 

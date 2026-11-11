@@ -38,7 +38,7 @@ typedef struct uml_slirp_net_counters {
     uint64_t tcp_attempts;
     uint64_t tcp_established;
     uint64_t tcp_unreachable;
-    uint64_t tcp_refused;
+    uint64_t tcp_reset;
 } uml_slirp_net_counters;
 
 /* Fills `counters`; returns 0, or -EINVAL for a null argument. Any thread; it

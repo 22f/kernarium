@@ -476,7 +476,7 @@ bool readPublishedNetwork(uml::runtime::SessionNetworkCounts& counts) noexcept
         .tcp_attempts = read.tcp_attempts,
         .tcp_established = read.tcp_established,
         .tcp_unreachable = read.tcp_unreachable,
-        .tcp_refused = read.tcp_refused,
+        .tcp_reset = read.tcp_reset,
     };
     return true;
 }

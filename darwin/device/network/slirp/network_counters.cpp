@@ -18,8 +18,10 @@ constexpr std::uint8_t tcp_syn = 0x02;
 constexpr std::uint8_t tcp_rst = 0x04;
 constexpr std::uint8_t tcp_ack = 0x10;
 constexpr std::uint8_t icmp_destination_unreachable = 3;
+constexpr std::uint8_t icmp_host_unreachable = 1;
 constexpr std::uint16_t bootp_server_port = 67;
 constexpr std::uint16_t bootp_client_port = 68;
+constexpr std::uint16_t dns_port = 53;
 /* The BOOTP message is 236 bytes, then the magic cookie, then the options. */
 constexpr std::size_t bootp_fixed = 236;
 constexpr std::uint8_t dhcp_message_type_option = 53;
@@ -140,7 +142,7 @@ NetworkCounts NetworkCounters::read() const noexcept
 	counts.tcp_attempts = tcp_attempts_.load(order);
 	counts.tcp_established = tcp_established_.load(order);
 	counts.tcp_unreachable = tcp_unreachable_.load(order);
-	counts.tcp_refused = tcp_refused_.load(order);
+	counts.tcp_reset = tcp_reset_.load(order);
 	return counts;
 }
 
@@ -192,6 +194,18 @@ void TrafficObserver::connection_attempt(
 void TrafficObserver::from_guest(std::span<const std::uint8_t> frame,
 				 Clock::time_point now) noexcept
 {
+	observe_guest(frame, [now] { return now; });
+}
+
+void TrafficObserver::from_guest(std::span<const std::uint8_t> frame) noexcept
+{
+	observe_guest(frame, [] { return Clock::now(); });
+}
+
+template <typename Now>
+void TrafficObserver::observe_guest(std::span<const std::uint8_t> frame,
+				    Now now) noexcept
+{
 	const auto packet = ipv4_packet(frame);
 	if (!packet)
 		return;
@@ -216,8 +230,12 @@ void TrafficObserver::from_guest(std::span<const std::uint8_t> frame,
 	const std::uint8_t flags = payload[13];
 	if ((flags & (tcp_syn | tcp_ack | tcp_rst)) != tcp_syn)
 		return;
-	connection_attempt(packet->destination, read16(payload, 2),
-			   read16(payload, 0), now);
+	const std::uint16_t port = read16(payload, 2);
+	/* The guest forward answers DNS over TCP itself. */
+	if (port == dns_port && serves_dns_stream(packet->destination))
+		return;
+	connection_attempt(packet->destination, port, read16(payload, 0),
+			   now());
 }
 
 void TrafficObserver::from_network(
@@ -249,7 +267,7 @@ void TrafficObserver::from_network(
 		if (entry == nullptr)
 			return;
 		if (reset)
-			counters_.tcp_refused();
+			counters_.tcp_reset();
 		else
 			counters_.tcp_established();
 		*entry = {};
@@ -258,8 +276,11 @@ void TrafficObserver::from_network(
 	case protocol_icmp: {
 		/* The error quotes the packet that caused it: its IP header and
 		 * the first eight bytes of its TCP header, the two ports. */
+		/* SLiRP sends net (0) and host (1) unreachable for a connect() that
+		 * failed at once; any other code is not that. */
 		if (payload.size() < 8 + 20 + 8 ||
-		    payload[0] != icmp_destination_unreachable)
+		    payload[0] != icmp_destination_unreachable ||
+		    payload[1] > icmp_host_unreachable)
 			return;
 		const auto quoted = payload.subspan(8);
 		const std::size_t header = (quoted[0] & 0x0fU) * 4U;

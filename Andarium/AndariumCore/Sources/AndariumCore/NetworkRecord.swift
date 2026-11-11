@@ -31,18 +31,24 @@ public struct NetworkRecord: Equatable, Sendable {
     }
 
     /// The guest's attempts to open a TCP connection to an outside address,
-    /// by what the guest was told.
+    /// by what the guest was told. DNS over TCP to the name server or the
+    /// gateway is answered by the user network itself and is not one.
     public struct TCP: Equatable, Sendable {
         public var attempts: UInt64
+        /// A SYN-ACK.
         public var established: UInt64
-        /// An ICMP net or host unreachable: the stack's answer to most
-        /// connections the system refuses or cannot route.
+        /// An ICMP net or host unreachable: the host's connect() failed at
+        /// once with anything but a refusal (no route, for one).
         public var unreachable: UInt64
-        public var refused: UInt64
+        /// A reset: the connection was refused, or the host's connect timed
+        /// out after 75 seconds, or it failed after it had started.
+        public var reset: UInt64
 
-        /// Attempts nothing had answered when the slot was written.
+        /// Attempts with no answer when the slot was written: still under
+        /// way, given up by the guest, or pushed out of the table of waiting
+        /// attempts when it was full.
         public var unanswered: UInt64 {
-            let answered = established &+ unreachable &+ refused
+            let answered = established &+ unreachable &+ reset
             return attempts > answered ? attempts - answered : 0
         }
     }
@@ -52,10 +58,10 @@ public struct NetworkRecord: Equatable, Sendable {
     public var dns: DNS?
     public var dhcp: DHCP?
     public var tcp: TCP?
-    /// How many denials of the network the application's notice was up for
-    /// during the session; one that was already in force when the session
-    /// began counts once.
-    public var noticeShown: Int
+    /// How many denials of the network began during the session, each one
+    /// raising the application's notice (which the person may have dismissed
+    /// or not seen); one already in force when the session began counts once.
+    public var noticeDenials: Int
     /// The denial the notice was up for when the slot was written, in the
     /// runtime's word: none, cellular or wifi.
     public var noticeNow: String
@@ -68,7 +74,7 @@ public struct NetworkRecord: Equatable, Sendable {
         var dns: DNS?
         var dhcp: DHCP?
         var tcp: TCP?
-        var shown: Int?
+        var denials: Int?
         var now: String?
         // The kernel's quoted output is not the record's own lines.
         let own = text.components(separatedBy: "\nkernel-output\n")[0]
@@ -95,27 +101,27 @@ public struct NetworkRecord: Equatable, Sendable {
             case "net-tcp":
                 let values = Self.values(words)
                 if let attempts = values["attempts"], let established = values["established"],
-                    let unreachable = values["unreachable"], let refused = values["refused"]
+                    let unreachable = values["unreachable"], let reset = values["reset"]
                 {
                     tcp = TCP(
                         attempts: attempts, established: established, unreachable: unreachable,
-                        refused: refused)
+                        reset: reset)
                 }
             case "net-notice":
-                // net-notice shown N now WORD
-                if let at = words.firstIndex(of: "shown"), at + 1 < words.count, let count = Int(words[at + 1]) {
-                    shown = count
+                // net-notice denials N now WORD
+                if let at = words.firstIndex(of: "denials"), at + 1 < words.count, let count = Int(words[at + 1]) {
+                    denials = count
                 }
                 if let at = words.firstIndex(of: "now"), at + 1 < words.count { now = String(words[at + 1]) }
             default:
                 break
             }
         }
-        guard header, let shown, let now else { return nil }
+        guard header, let denials, let now else { return nil }
         self.dns = dns
         self.dhcp = dhcp
         self.tcp = tcp
-        noticeShown = shown
+        noticeDenials = denials
         noticeNow = now
     }
 
@@ -151,17 +157,19 @@ public struct NetworkRecord: Equatable, Sendable {
         if let tcp {
             lines.append(
                 "TCP: \(tcp.attempts) outbound connection attempts: \(tcp.established) connected, "
-                    + "\(tcp.unreachable) answered with ICMP unreachable (a connection the system refused is "
-                    + "counted here), \(tcp.refused) reset, \(tcp.unanswered) with no answer yet.")
+                    + "\(tcp.unreachable) unreachable (connect() failed at once, but not with a refusal), "
+                    + "\(tcp.reset) reset (refused, timed out on the host after 75 seconds, or failed after it "
+                    + "started), \(tcp.unanswered) with no answer (under way, given up by the guest, or pushed "
+                    + "out of the table of waiting attempts).")
         } else {
             lines.append("TCP: not counted.")
         }
         let now = noticeNow == "none" ? "no denial in force" : "the \(noticeNow) denial in force"
         lines.append(
-            noticeShown == 0
-                ? "Notice that iOS denies Andarium the network: not shown; \(now)."
-                : "Notice that iOS denies Andarium the network: shown for \(noticeShown) denial"
-                    + "\(noticeShown == 1 ? "" : "s") during the session; \(now) at the last write.")
+            noticeDenials == 0
+                ? "Denials of the network by iOS: 0; \(now)."
+                : "Denials of the network by iOS: \(noticeDenials) began during the session, each raising the "
+                    + "notice; \(now) at the last write.")
         return lines.joined(separator: "\n")
     }
 }

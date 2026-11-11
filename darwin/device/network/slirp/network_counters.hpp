@@ -38,21 +38,31 @@ struct NetworkCounts final {
 	std::uint64_t dhcp_requests{};
 	std::uint64_t dhcp_acks{};
 	/* The guest's attempts to open a TCP connection that the provider hands
-	 * to SLiRP, which connects to the address on the host's network (the
-	 * guest's DNS over TCP is answered by the provider and is not one; a
-	 * retransmitted SYN is not another attempt), and how the attempts ended
-	 * as the guest saw it: connected (SYN-ACK), ICMP net or host unreachable,
-	 * or reset. The rest, `tcp_unanswered()`, had no answer yet when the
-	 * reading was taken. */
+	 * to SLiRP, which connects to the address on the host's network. DNS over
+	 * TCP to the name server or the gateway is answered by SLiRP's guest
+	 * forward and says nothing about the network, so it is no attempt (DNS has
+	 * its own counts); a retransmitted SYN is not another attempt either. Each
+	 * attempt ends as the guest was told, by one of:
+	 *  - established: a SYN-ACK;
+	 *  - unreachable: an ICMP net or host unreachable (codes 0 and 1), which
+	 *    SLiRP sends when connect() fails at once with anything but
+	 *    ECONNREFUSED: no route, an address the host cannot reach;
+	 *  - reset: an RST, which SLiRP sends for ECONNREFUSED at once, for a
+	 *    connect that failed after it started (the errno is gone by then, so
+	 *    a refusal and any other asynchronous failure look alike) and when
+	 *    its own 75 s timer gives up on a connect nothing answered.
+	 * The rest, `tcp_unanswered()`, had no answer when the reading was taken:
+	 * the attempt is still under way, the guest gave up before SLiRP did, or
+	 * a full table of waiting attempts pushed it out. */
 	std::uint64_t tcp_attempts{};
 	std::uint64_t tcp_established{};
 	std::uint64_t tcp_unreachable{};
-	std::uint64_t tcp_refused{};
+	std::uint64_t tcp_reset{};
 
 	[[nodiscard]] constexpr std::uint64_t tcp_unanswered() const noexcept
 	{
 		const std::uint64_t answered =
-			tcp_established + tcp_unreachable + tcp_refused;
+			tcp_established + tcp_unreachable + tcp_reset;
 		return tcp_attempts > answered ? tcp_attempts - answered : 0;
 	}
 };
@@ -78,7 +88,7 @@ public:
 	void tcp_attempt() noexcept { add(tcp_attempts_); }
 	void tcp_established() noexcept { add(tcp_established_); }
 	void tcp_unreachable() noexcept { add(tcp_unreachable_); }
-	void tcp_refused() noexcept { add(tcp_refused_); }
+	void tcp_reset() noexcept { add(tcp_reset_); }
 
 	[[nodiscard]] NetworkCounts read() const noexcept;
 
@@ -98,17 +108,15 @@ private:
 	std::atomic_uint64_t tcp_attempts_{};
 	std::atomic_uint64_t tcp_established_{};
 	std::atomic_uint64_t tcp_unreachable_{};
-	std::atomic_uint64_t tcp_refused_{};
+	std::atomic_uint64_t tcp_reset_{};
 };
 
 /*
  * Reads the guest's DHCP and TCP connection set-up off the frames that cross
- * the provider, to count them. SLiRP answers every connect it cannot make with
- * a reset or an ICMP error, and the errno is gone by then, so the classes are
- * what the guest was told: refused is a reset in answer to a SYN, unreachable
- * an ICMP net or host unreachable (SLiRP uses it for every other synchronous
- * failure of connect(), a denied one included). A connection nothing answered
- * is the difference of the counts.
+ * the provider, to count them. SLiRP answers a connect it cannot make with a
+ * reset or an ICMP error, and the errno is gone by then, so the classes are
+ * what the guest was told (NetworkCounts says what each one covers). A
+ * connection nothing answered is the difference of the counts.
  *
  * One thread uses an observer: the provider's event loop, which carries every
  * frame both ways. `now` is the clock of that thread.
@@ -128,14 +136,24 @@ public:
 	{
 	}
 
-	/* A frame from the guest that goes to SLiRP. */
+	/* A frame from the guest that goes to SLiRP, at `now`. */
 	void from_guest(std::span<const std::uint8_t> frame,
 			Clock::time_point now) noexcept;
+	/* The same at the present moment, which it reads for a SYN alone: the
+	 * rest of the guest's frames, the bulk, never touch the clock. */
+	void from_guest(std::span<const std::uint8_t> frame) noexcept;
 	/* A frame from SLiRP to the guest. */
 	void from_network(std::span<const std::uint8_t> frame) noexcept;
 	/* Forgets the attempts waiting for an answer: a new link, while no frame
 	 * crosses. */
 	void reset() noexcept;
+	/* The addresses (IPv4, host byte order; 0 for none) whose port 53 SLiRP's
+	 * guest forward answers itself: a SYN to one is no connection attempt.
+	 * Set while no frame crosses. */
+	void serve_dns_streams(std::uint32_t first, std::uint32_t second) noexcept
+	{
+		stream_servers_ = {first, second};
+	}
 
 private:
 	struct Pending final {
@@ -146,6 +164,15 @@ private:
 		bool used{};
 	};
 
+	template <typename Now>
+	void observe_guest(std::span<const std::uint8_t> frame,
+			   Now now) noexcept;
+	[[nodiscard]] bool serves_dns_stream(std::uint32_t destination) const noexcept
+	{
+		return destination != 0 &&
+			(destination == stream_servers_[0] ||
+			 destination == stream_servers_[1]);
+	}
 	void connection_attempt(std::uint32_t destination,
 				std::uint16_t destination_port,
 				std::uint16_t source_port,
@@ -156,6 +183,7 @@ private:
 		      std::uint16_t source_port) noexcept;
 
 	NetworkCounters &counters_;
+	std::array<std::uint32_t, 2> stream_servers_{};
 	std::array<Pending, pending_limit> pending_{};
 };
 

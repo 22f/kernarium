@@ -32,6 +32,7 @@ using Clock = TrafficObserver::Clock;
 
 constexpr Address guest{10, 0, 2, 15};
 constexpr Address gateway{10, 0, 2, 2};
+constexpr Address name_server{10, 0, 2, 3};
 constexpr Address internet{93, 184, 216, 34};
 constexpr Address elsewhere{198, 51, 100, 7};
 
@@ -142,6 +143,14 @@ Bytes dhcp_frame(bool from_guest, std::uint8_t type, bool with_cookie = true)
 
 const Clock::time_point start{std::chrono::seconds{1000}};
 
+/* An address as the observer is told it: the four bytes read big endian. */
+constexpr std::uint32_t value_of(const Address &address)
+{
+	return (std::uint32_t{address[0]} << 24) |
+		(std::uint32_t{address[1]} << 16) |
+		(std::uint32_t{address[2]} << 8) | address[3];
+}
+
 void everyCountIsANumber()
 {
 	static_assert(std::is_trivially_copyable_v<NetworkCounts>);
@@ -227,17 +236,17 @@ void aConnectionThatIsAnsweredIsCountedOnce()
 	observer.from_network(syn_ack_for(internet, 40000));
 	auto counts = counters.read();
 	require(counts.tcp_attempts == 1 && counts.tcp_established == 1 &&
-		counts.tcp_unreachable == 0 && counts.tcp_refused == 0 &&
+		counts.tcp_unreachable == 0 && counts.tcp_reset == 0 &&
 		counts.tcp_unanswered() == 0);
 	/* The same answer again, or a reset of the established connection later,
 	 * answers nothing: the attempt is resolved. */
 	observer.from_network(syn_ack_for(internet, 40000));
 	observer.from_network(reset_for(internet, 40000));
 	counts = counters.read();
-	require(counts.tcp_established == 1 && counts.tcp_refused == 0);
+	require(counts.tcp_established == 1 && counts.tcp_reset == 0);
 }
 
-void aRefusalAndAnUnreachableNetworkAreClassed()
+void aResetAndAnUnreachableNetworkAreClassed()
 {
 	NetworkCounters counters;
 	TrafficObserver observer{counters};
@@ -248,9 +257,103 @@ void aRefusalAndAnUnreachableNetworkAreClassed()
 	observer.from_guest(guest_syn(elsewhere, 40002, 80), start);
 	observer.from_network(unreachable_for(elsewhere, 40002, 1, 80));
 	const auto counts = counters.read();
-	require(counts.tcp_attempts == 3 && counts.tcp_refused == 1 &&
+	require(counts.tcp_attempts == 3 && counts.tcp_reset == 1 &&
 		counts.tcp_unreachable == 2 && counts.tcp_established == 0 &&
 		counts.tcp_unanswered() == 0);
+}
+
+void onlyNetAndHostUnreachableAreUnreachable()
+{
+	NetworkCounters counters;
+	TrafficObserver observer{counters};
+	/* SLiRP sends codes 0 and 1 for a connect() that fails at once. The
+	 * others (protocol, port, fragmentation needed, administratively
+	 * prohibited) are not that, and leave the attempt unanswered. */
+	std::uint16_t port = 40000;
+	for (const std::uint8_t code : std::initializer_list<std::uint8_t>{
+		     2, 3, 4, 9, 10, 13, 255}) {
+		observer.from_guest(guest_syn(elsewhere, port), start);
+		observer.from_network(unreachable_for(elsewhere, port, code));
+		++port;
+	}
+	auto counts = counters.read();
+	require(counts.tcp_attempts == 7 && counts.tcp_unreachable == 0 &&
+		counts.tcp_unanswered() == 7);
+	for (const std::uint8_t code : std::initializer_list<std::uint8_t>{0, 1}) {
+		observer.from_guest(guest_syn(elsewhere, port), start);
+		observer.from_network(unreachable_for(elsewhere, port, code));
+		++port;
+	}
+	counts = counters.read();
+	require(counts.tcp_attempts == 9 && counts.tcp_unreachable == 2 &&
+		counts.tcp_unanswered() == 7);
+}
+
+void dnsOverTcpToTheGuestForwardIsNotAnAttempt()
+{
+	NetworkCounters counters;
+	TrafficObserver observer{counters};
+	/* The provider has put the guest forward on the name server and the
+	 * gateway: SLiRP answers a SYN to port 53 of either itself. */
+	observer.serve_dns_streams(value_of(name_server), value_of(gateway));
+	observer.from_guest(guest_syn(name_server, 40000, 53), start);
+	observer.from_guest(guest_syn(gateway, 40001, 53), start);
+	/* Its SYN-ACK says nothing about the network either. */
+	observer.from_network(syn_ack_for(name_server, 40000, 53));
+	observer.from_network(syn_ack_for(gateway, 40001, 53));
+	auto counts = counters.read();
+	require(counts.tcp_attempts == 0 && counts.tcp_established == 0 &&
+		counts.tcp_unanswered() == 0);
+	/* Another port of the same two hosts, port 53 of any other address, and
+	 * a retransmission of the skipped SYN are what they look like. */
+	observer.from_guest(guest_syn(gateway, 40002, 443), start);
+	observer.from_guest(guest_syn(name_server, 40003, 5353), start);
+	observer.from_guest(guest_syn(internet, 40004, 53), start);
+	observer.from_guest(guest_syn(name_server, 40000, 53),
+			    start + std::chrono::seconds{1});
+	counts = counters.read();
+	require(counts.tcp_attempts == 3 && counts.tcp_unanswered() == 3);
+	observer.from_network(syn_ack_for(internet, 40004, 53));
+	require(counters.read().tcp_established == 1);
+}
+
+void dnsOverTcpIsAnAttemptWhereNothingAnswersIt()
+{
+	NetworkCounters counters;
+	TrafficObserver observer{counters};
+	/* No forward on the gateway, only on the name server (the provider
+	 * passes 0 for an address with none); a zero address is no server. */
+	observer.serve_dns_streams(value_of(name_server), 0);
+	observer.from_guest(guest_syn(name_server, 40000, 53), start);
+	observer.from_guest(guest_syn(gateway, 40001, 53), start);
+	require(counters.read().tcp_attempts == 1);
+	/* And with neither, the SYN reaches SLiRP like any other. */
+	NetworkCounters bare;
+	TrafficObserver none{bare};
+	none.serve_dns_streams(0, 0);
+	none.from_guest(guest_syn(name_server, 40000, 53), start);
+	none.from_guest(guest_syn({0, 0, 0, 0}, 40001, 53), start);
+	require(bare.read().tcp_attempts == 2);
+}
+
+void theClockIsReadForASynAlone()
+{
+	NetworkCounters counters;
+	TrafficObserver observer{counters};
+	/* The overload without a time reads the clock when a SYN needs it. It
+	 * counts what the one with a time does. */
+	observer.from_guest(guest_syn(internet, 40000));
+	observer.from_guest(guest_syn(internet, 40000));
+	require(counters.read().tcp_attempts == 1);
+	observer.from_network(syn_ack_for(internet, 40000));
+	require(counters.read().tcp_established == 1);
+	observer.from_guest(dhcp_frame(true, 1));
+	observer.from_guest(tcp_frame(guest, internet, 40001, 443, tcp_ack));
+	Bytes udp = ip_frame(guest, internet, 17, Bytes(20, 0));
+	observer.from_guest(udp);
+	observer.from_guest({});
+	const auto counts = counters.read();
+	require(counts.tcp_attempts == 1 && counts.dhcp_discovers == 1);
 }
 
 void anAnswerForAnotherConnectionIsIgnored()
@@ -265,7 +368,7 @@ void anAnswerForAnotherConnectionIsIgnored()
 	observer.from_network(reset_for(elsewhere, 40000));
 	observer.from_network(unreachable_for(internet, 40009, 0));
 	auto counts = counters.read();
-	require(counts.tcp_attempts == 1 && counts.tcp_refused == 0 &&
+	require(counts.tcp_attempts == 1 && counts.tcp_reset == 0 &&
 		counts.tcp_unreachable == 0 && counts.tcp_unanswered() == 1);
 	/* The attempt nothing answered is the difference of the counts. */
 	observer.from_network(syn_ack_for(internet, 40000));
@@ -296,8 +399,8 @@ void everyConnectionHandedToSlirpIsCounted()
 {
 	NetworkCounters counters;
 	TrafficObserver observer{counters};
-	/* The virtual host included: SLiRP connects to it too. What the provider
-	 * answers itself (the name server's DNS) never reaches the observer. */
+	/* The virtual host included: SLiRP connects to it too. Without a guest
+	 * forward on port 53 there is no exception either. */
 	for (const Address &destination :
 	     {gateway, Address{10, 0, 3, 1}, Address{127, 0, 0, 1},
 	      Address{224, 0, 0, 1}})
@@ -380,7 +483,11 @@ int main()
 	outcomesAreCountedApart();
 	dhcpExchangesAreCounted();
 	aConnectionThatIsAnsweredIsCountedOnce();
-	aRefusalAndAnUnreachableNetworkAreClassed();
+	aResetAndAnUnreachableNetworkAreClassed();
+	onlyNetAndHostUnreachableAreUnreachable();
+	dnsOverTcpToTheGuestForwardIsNotAnAttempt();
+	dnsOverTcpIsAnAttemptWhereNothingAnswersIt();
+	theClockIsReadForASynAlone();
 	anAnswerForAnotherConnectionIsIgnored();
 	aRetransmittedSynIsNotAnotherAttempt();
 	everyConnectionHandedToSlirpIsCounted();

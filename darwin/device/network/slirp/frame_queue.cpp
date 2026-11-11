@@ -92,8 +92,7 @@ void SlirpProvider::process_transmit_queue() noexcept
 			continue;
 		observer_.from_guest(
 			{reinterpret_cast<const std::uint8_t *>(frame.data()),
-			 length},
-			TrafficObserver::Clock::now());
+			 length});
 		slirp_input(slirp_.get(),
 			reinterpret_cast<const std::uint8_t *>(frame.data()),
 			static_cast<int>(length));

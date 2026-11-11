@@ -642,8 +642,7 @@ text of a fixed layout (`uml-session 5`) that never passes 13824 bytes
 network slot and the state with the kernel output it quotes, at most 5 KiB. Each
 part is rewritten in place by its own writer, so nothing grows with the session;
 layouts 1 to 4, which lack the network slot or the stall slot, still parse. The
-first 4 KiB are a
-memory checkpoint that a thread of its own rewrites every 2 s
+first 4 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest
 RAM, the host GPU's use against its budget, graphics, the gadget cache, the
@@ -679,12 +678,14 @@ the guest's `/proc` counters to its bug report.
 The network slot holds the guest's user network in numbers: DNS queries
 answered, refused by the system (policy denied), timed out or failed; DHCP
 discovers, requests and acknowledgements; TCP connection attempts and how many
-were established, unreachable or refused (the provider counts them,
-[`darwin/README.md`](../darwin/README.md)). They are the share since the session
-began, rewritten at each checkpoint and at the end, and hold no address, port or
-name. The slot also notes the denial of the network that the application's
-notice was up for (runtime API 36, `set_network_notice`): how many denials began
-during the session and the one in force.
+were established, unreachable (`connect()` failed at once), reset (refused,
+timed out on the host after 75 s, or failed after it started) or unanswered
+(the rest), not counting DNS over TCP to the name server or the gateway (the
+provider counts them, [`darwin/README.md`](../darwin/README.md)). They are the
+share since the session began, rewritten at each checkpoint and at the end, and
+hold no address, port or name. The slot also holds `denials`, how many denials
+of the network by iOS began during the session (the application's notice goes up
+for each; runtime API 36, `set_network_notice`), and the one in force.
 
 A guest that restarts itself boots again in the same process, because iOS can
 neither re-exec nor respawn an application. The macOS launchers

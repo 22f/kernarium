@@ -271,12 +271,15 @@ public enum BugReportAttachments {
     public static func network(previous: SessionRecord?, current: SessionRecord?) -> String? {
         guard previous?.network != nil || current?.network != nil else { return nil }
         var lines = [
-            "What the guest's user network counted during a session, and whether Andarium told the person that",
-            "iOS denies it the network. Numbers only: no address, port, host name or queried name is recorded.",
+            "What the guest's user network counted during a session, and how often iOS denied Andarium the network",
+            "(each denial raises the notice). Numbers only: no address, port, host name or queried name is recorded.",
             "",
-            "A DNS query the system refuses (policy denied) is iOS denying the application its network. An",
-            "outbound connection the system cannot make is answered with ICMP unreachable or a reset; a refusal",
-            "by the system and a path with no route look alike to the guest and are not told apart here.",
+            "A DNS query the system refuses (policy denied) is iOS denying the application its network. A TCP",
+            "connection is classed by what the guest was told: unreachable (connect() failed at once, but not with",
+            "a refusal), reset (refused, timed out on the host after 75 seconds, or failed after it started) or no",
+            "answer (under way, given up by the guest, or pushed out of the table of waiting attempts). A refusal by",
+            "the system and a path with no route are not told apart. DNS over TCP to the name server or the gateway",
+            "is answered by the user network itself and is not counted as a connection.",
             "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
         ]
         for (title, record) in [("The previous session", previous), ("The current session", current)] {

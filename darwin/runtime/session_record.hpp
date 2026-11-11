@@ -130,7 +130,7 @@ struct SessionNetworkCounts final {
 	std::uint64_t tcp_attempts{};
 	std::uint64_t tcp_established{};
 	std::uint64_t tcp_unreachable{};
-	std::uint64_t tcp_refused{};
+	std::uint64_t tcp_reset{};
 };
 
 /* What the checkpoints and the end ask for the network's counts: false when
