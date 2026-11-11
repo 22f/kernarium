@@ -211,6 +211,14 @@ void check_wire_details()
     require(abi::region_words == 5 && abi::region_words * sizeof(std::uint32_t) == 20, "a region record");
     require(abi::exif_gap_length == uml::camera::exifGapLength, "the Exif gap the host reserves");
 
+    // The camera nodes are video10 and above; the codec nodes below them are never opened.
+    require(abi::first_camera_node == 10, "the first camera node");
+    for (const char* node : {"video10", "video11", "video99", "video100", "video4294967"})
+        require(abi::may_be_camera_node(node), "a camera node");
+    for (const char* node : {"video0", "video1", "video9", "video", "video-1", "video1x", "videoX", "video4linux", "vbi10",
+                             "media10", "", "xvideo10", "video10000000000"})
+        require(!abi::may_be_camera_node(node), "not a camera node");
+
     // The 3A and flash state numbers are Android's own (CONTROL_AE_STATE_*,
     // CONTROL_AF_STATE_*, CONTROL_AWB_STATE_*, FLASH_STATE_*), as the header says.
     namespace av = andarium::camera::android_value;

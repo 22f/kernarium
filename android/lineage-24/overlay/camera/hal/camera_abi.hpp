@@ -12,6 +12,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace andarium::camera::abi {
 
@@ -227,5 +228,26 @@ constexpr std::size_t region_words = 5;
 // Where the reserved Exif segment's payload of a JPEG still lies, and the
 // number of bytes the device reserves for it.
 constexpr std::uint32_t exif_gap_length = 65000;
+
+// The driver registers the camera device's nodes as /dev/video10 and above; the
+// codec nodes stay in video0 to video9 (the codec HAL scans only those). Discovery
+// opens a node only from video10 up, because opening a codec node starts a session
+// on the host.
+constexpr std::uint32_t first_camera_node = 10;
+
+// Whether an entry of /dev ("video" and a number) may be a camera node.
+constexpr bool may_be_camera_node(std::string_view name) noexcept
+{
+    constexpr std::string_view prefix = "video";
+    if (name.substr(0, prefix.size()) != prefix) return false;
+    name.remove_prefix(prefix.size());
+    if (name.empty() || name.size() > 9) return false;
+    std::uint32_t number = 0;
+    for (const char c : name) {
+        if (c < '0' || c > '9') return false;
+        number = number * 10 + std::uint32_t(c - '0');
+    }
+    return number >= first_camera_node;
+}
 
 } // namespace andarium::camera::abi
