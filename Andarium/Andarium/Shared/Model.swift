@@ -984,6 +984,7 @@ final class AppModel {
     ///
     /// `failed` says how a failure ends instead of the alert, for a task
     /// started from a sheet, where an alert of the screens could not show.
+    /// `finished` does not run for a cancelled operation.
     func runOperation<Output: Sendable>(
         _ state: BusyState, failure: String,
         ending: ((Output) -> (title: String, detail: String))? = nil,
@@ -1031,7 +1032,9 @@ final class AppModel {
             } else {
                 busy = nil
             }
-            if ending == nil, let result { finished(result) }
+            // A cancelled operation hands nothing on, even when its work
+            // finished before it saw the cancel.
+            if ending == nil, let result, !operationCancelled { finished(result) }
         }
     }
 
@@ -1122,6 +1125,11 @@ final class AppModel {
                     BugReportAttachments.attach(
                         to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
                 }.value
+            }
+            // A cancel that came as the report finished: nobody takes the file.
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: file)
+                throw CancellationError()
             }
             return file
         }

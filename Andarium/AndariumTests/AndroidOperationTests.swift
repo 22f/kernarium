@@ -111,6 +111,61 @@ struct AndroidOperationTests {
         #expect(!FileManager.default.fileExists(atPath: file.path))
     }
 
+    /// A report the driver finishes though the person cancelled (the cancel came
+    /// as it completed) is not offered, and its file does not stay behind. The
+    /// Send feedback sheet starts the same work and shares the rule.
+    @Test func aCancelledReportIsNotOfferedAndItsFileGoes() async throws {
+        let (model, driver) = running()
+        let file = try stagedFile()
+        let gate = Gate()
+        let started = Gate()
+        driver.bugReport = { _ in
+            started.release()
+            // Ignores the cancel: a separate task waits, the report is returned.
+            await Task.detached { while !gate.isOpen { try? await Task.sleep(for: .milliseconds(5)) } }.value
+            return file
+        }
+        var offered = false
+        model.presentShare = { _, _ in
+            offered = true
+            return true
+        }
+        model.createBugReport()
+        #expect(await eventually { started.isOpen })
+        try #require(model.busy?.cancel).action()
+        gate.release()
+        #expect(await eventually { model.busy == nil })
+        #expect(!offered && model.alert == nil)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+    }
+
+    /// `finished` is for an operation that was not cancelled, whatever its work
+    /// returned.
+    @Test func aCancelledOperationNeverRunsItsFinish() async throws {
+        let (model, _) = running()
+        let gate = Gate()
+        let started = Gate()
+        var finished: [Int] = []
+        model.runOperation(
+            BusyState(title: "Working", detail: "Detail", progress: 0), failure: "Not done",
+            { _ in
+                started.release()
+                await Task.detached { while !gate.isOpen { try? await Task.sleep(for: .milliseconds(5)) } }.value
+                return 7
+            },
+            finished: { finished.append($0) })
+        #expect(await eventually { started.isOpen })
+        try #require(model.busy?.cancel).action()
+        gate.release()
+        #expect(await eventually { model.busy == nil })
+        #expect(finished.isEmpty && model.alert == nil)
+        // The next operation, not cancelled, finishes as before.
+        model.runOperation(
+            BusyState(title: "Working", detail: "Detail", progress: 0), failure: "Not done",
+            { _ in 8 }, finished: { finished.append($0) })
+        #expect(await eventually { finished == [8] })
+    }
+
     @Test func progressOnlyMovesForward() async throws {
         let (model, driver) = running()
         let gate = Gate()
