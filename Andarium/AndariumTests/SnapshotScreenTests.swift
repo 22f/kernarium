@@ -150,6 +150,18 @@ struct SnapshotWordsTests {
         #expect(SnapshotWords.unfinishedText(item: SnapshotSample.item("x"), failure: failure).contains(failure.description))
     }
 
+    @Test func theLastFailureEndsTheTextWithOneFullStop() {
+        // The system's descriptions come with and without a full stop of their own.
+        let own = SnapshotFailure(CocoaError(.fileWriteOutOfSpace))
+        let bare = SnapshotFailure(POSIXError(.ENOSPC))
+        #expect(own.description.hasSuffix(".") && !bare.description.hasSuffix("."))
+        for failure in [own, bare] {
+            let text = SnapshotWords.unfinishedText(item: SnapshotSample.item("x"), failure: failure)
+            #expect(text.hasSuffix("stopped: \(failure.description.hasSuffix(".") ? failure.description : failure.description + ".")"))
+            #expect(!text.contains(".."))
+        }
+    }
+
     @Test func theSpacePageSaysWhatAppliesToTheDevice() {
         let plain = SnapshotWords.spaceParagraphs(device: "iPhone", lowerBound: false, hasUpdateCopy: false)
         let full = SnapshotWords.spaceParagraphs(device: "iPhone", lowerBound: true, hasUpdateCopy: true)

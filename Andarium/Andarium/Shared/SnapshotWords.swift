@@ -160,8 +160,16 @@ enum SnapshotWords {
         } else {
             text = "Andarium put a snapshot\u{2019}s data in place and could not finish the restore. Start finishes it."
         }
-        if let failure { text += " The last attempt stopped: \(failure.description)." }
+        if let failure { text += " The last attempt stopped: \(sentence(failure.description))" }
         return text
+    }
+
+    /// `text` ended by one full stop: some descriptions of the system's errors
+    /// carry theirs.
+    private static func sentence(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = trimmed.last, !".!?".contains(last) else { return trimmed }
+        return trimmed + "."
     }
 
     /// Erase guest's alert says what goes with the guest.
