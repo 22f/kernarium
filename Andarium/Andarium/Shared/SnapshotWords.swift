@@ -106,11 +106,11 @@ enum SnapshotWords {
         switch item.restore {
         case .asIs:
             return Sentences.join(
-                [String(localized: "Replaces the guest\u{2019}s current data with this snapshot.")]
+                [String(localized: "Replaces the virtual machine\u{2019}s current data with this snapshot.")]
                     + endingUpdate(endsUpdate))
         case .updatesAtNextStart(let from, let to):
             return Sentences.join(
-                [String(localized: "Replaces the guest\u{2019}s current data with this snapshot, which is from \(revision(of: from)).")]
+                [String(localized: "Replaces the virtual machine\u{2019}s current data with this snapshot, which is from \(revision(of: from)).")]
                     + [updatesAtNextStart(to: revision(of: to))] + endingUpdate(endsUpdate))
         case .refused(let reason):
             return refusal(reason, snapshot: item, appRevision: appRevision)
@@ -138,7 +138,7 @@ enum SnapshotWords {
 
     static func restoreMessage(of item: SnapshotSummary, endsUpdate: Bool) -> String {
         var sentences = [
-            String(localized: "The guest\u{2019}s current data is replaced by this snapshot from \(taken(item.created)), and anything not in it is deleted. Some apps may ask you to sign in again.")
+            String(localized: "The virtual machine\u{2019}s current data is replaced by this snapshot from \(taken(item.created)), and anything not in it is deleted. Some apps may ask you to sign in again.")
         ]
         if case .updatesAtNextStart(_, let to) = item.restore { sentences.append(updatesAtNextStart(to: revision(of: to))) }
         sentences += endingUpdate(endsUpdate)
@@ -162,7 +162,7 @@ enum SnapshotWords {
             cannotBeUndone)
     }
 
-    static let takeAlertMessage = String(localized: "A new snapshot takes no space. It grows as the guest changes after it.")
+    static let takeAlertMessage = String(localized: "A new snapshot takes no space. It grows as the virtual machine changes after it.")
 
     // MARK: Home
 
@@ -172,8 +172,8 @@ enum SnapshotWords {
     static func restoredText(_ notice: RestoredSnapshotNotice) -> String {
         var sentences = [
             notice.name.isEmpty
-                ? String(localized: "The guest\u{2019}s data is back to the snapshot from \(taken(notice.created)).")
-                : String(localized: "The guest\u{2019}s data is back to \u{201C}\(notice.name)\u{201D} from \(taken(notice.created)).")
+                ? String(localized: "The virtual machine\u{2019}s data is back to the snapshot from \(taken(notice.created)).")
+                : String(localized: "The virtual machine\u{2019}s data is back to \u{201C}\(notice.name)\u{201D} from \(taken(notice.created)).")
         ]
         if let updatesTo = notice.updatesTo { sentences.append(updatesAtNextStart(to: updatesTo)) }
         return Sentences.join(sentences)
@@ -198,7 +198,7 @@ enum SnapshotWords {
         } else {
             sentences = [
                 unfinishedReason(kind == .lost ? .lost : .unreadable),
-                String(localized: "The guest\u{2019}s data may be from before the restore or from the snapshot."),
+                String(localized: "The virtual machine\u{2019}s data may be from before the restore or from the snapshot."),
             ]
         }
         if let failure { sentences.append(String(localized: "The last attempt stopped: \(sentence(failure.description))")) }
@@ -217,32 +217,32 @@ enum SnapshotWords {
     static func eraseMessage(snapshots: Int) -> String {
         switch snapshots {
         case 0:
-            String(localized: "Everything the guest has stored is deleted. This can\u{2019}t be undone.")
+            String(localized: "Everything the virtual machine has stored is deleted. This can\u{2019}t be undone.")
         case 1:
-            String(localized: "Everything the guest has stored is deleted, and its snapshot with it. This can\u{2019}t be undone.")
+            String(localized: "Everything the virtual machine has stored is deleted, and its snapshot with it. This can\u{2019}t be undone.")
         default:
-            String(localized: "Everything the guest has stored is deleted, and its \(snapshots) snapshots with it. This can\u{2019}t be undone.")
+            String(localized: "Everything the virtual machine has stored is deleted, and its \(snapshots) snapshots with it. This can\u{2019}t be undone.")
         }
     }
 
     /// Low space says snapshots are a way out, when there are some.
     static func lowSpaceText(hasSnapshots: Bool, startReserve: String, device: String) -> String {
         hasSnapshots
-            ? String(localized: "The guest needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage, or delete snapshots.")
-            : String(localized: "The guest needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage.")
+            ? String(localized: "The virtual machine needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage, or delete snapshots.")
+            : String(localized: "The virtual machine needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage.")
     }
 
     /// The card for an app too old for the guest's data says an older snapshot
     /// is a way back, when there is one.
     static func blockedText(_ reason: StartBlock, hasOlderSnapshot: Bool) -> String {
         guard reason == .olderAndroid, hasOlderSnapshot else { return reason.explanation }
-        return String(localized: "This app version is older than the one the guest last started with, and its data does not go back. Install a newer version of Andarium, restore an older snapshot, or erase the guest to start again with this one.")
+        return String(localized: "This app version is older than the one the virtual machine last started with, and its data does not go back. Install a newer version of Andarium, restore an older snapshot, or erase the virtual machine to start again with this one.")
     }
 
     /// Backup's note says snapshots are not in a backup, when there are some.
     static func backupNote(device: String, hasSnapshots: Bool) -> String {
         Sentences.join(
-            [String(localized: "Puts the guest's apps and files in iCloud and computer backups of this \(device).")]
+            [String(localized: "Puts the virtual machine's apps and files in iCloud and computer backups of this \(device).")]
                 + (hasSnapshots ? [String(localized: "Snapshots are not included.")] : []))
     }
 
@@ -255,15 +255,15 @@ enum SnapshotWords {
     static func takeReason(_ refusal: SnapshotRefusal, restore: UnfinishedRestoreKind = .named) -> String? {
         switch refusal {
         case .busy: nil
-        case .guestNotStopped: String(localized: "Not while the guest is starting or running.")
-        case .noData: String(localized: "Start the guest once first. Until then there is no data to keep.")
-        case .unreadableRecord: String(localized: "The guest\u{2019}s records cannot be read, so its data cannot be snapshotted.")
+        case .guestNotStopped: String(localized: "Not while the virtual machine is starting or running.")
+        case .noData: String(localized: "Start the virtual machine once first. Until then there is no data to keep.")
+        case .unreadableRecord: String(localized: "The virtual machine\u{2019}s records cannot be read, so its data cannot be snapshotted.")
         case .notShutDown:
-            String(localized: "Android wasn\u{2019}t shut down when the guest last ran. Start the guest and shut it down from Android, then take a snapshot.")
+            String(localized: "Android wasn\u{2019}t shut down when the virtual machine last ran. Start the virtual machine and shut it down from Android, then take a snapshot.")
         case .unfinishedUpdate:
             String(localized: "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home.")
-        case .mismatch: String(localized: "Not while the guest\u{2019}s files do not match this app version.")
-        case .volumeCannotClone: String(localized: "The guest\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
+        case .mismatch: String(localized: "Not while the virtual machine\u{2019}s files do not match this app version.")
+        case .volumeCannotClone: String(localized: "The virtual machine\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
         case .restoreUnfinished: unfinishedReason(restore)
         default: nil
         }
@@ -285,7 +285,7 @@ enum SnapshotWords {
     /// what Restore does; nil for a refusal that is about the snapshot itself.
     static func nowReason(_ refusal: SnapshotRefusal, restore: UnfinishedRestoreKind = .named) -> String? {
         switch refusal {
-        case .guestNotStopped: String(localized: "Not while the guest is starting or running.")
+        case .guestNotStopped: String(localized: "Not while the virtual machine is starting or running.")
         case .busy: String(localized: "Another snapshot operation is under way.")
         case .restoreUnfinished: unfinishedReason(restore)
         default: nil
@@ -312,7 +312,7 @@ enum SnapshotWords {
     ) -> String {
         switch refusal {
         case .guestNotStopped:
-            return String(localized: "The guest is starting or running. Snapshots can be taken, restored and deleted only while it is stopped.")
+            return String(localized: "The virtual machine is starting or running. Snapshots can be taken, restored and deleted only while it is stopped.")
         case .busy:
             return String(localized: "Another snapshot operation is under way. Try again in a moment.")
         case .noData, .unreadableRecord, .notShutDown, .unfinishedUpdate, .mismatch, .volumeCannotClone:
@@ -349,7 +349,7 @@ enum SnapshotWords {
     /// and the unfinished update apply only when they do.
     static func spaceParagraphs(device: String, lowerBound: Bool, hasUpdateCopy: Bool) -> [String] {
         var paragraphs = [
-            String(localized: "A new snapshot takes no space. When Android later changes or deletes data, the snapshot keeps the old version, so it grows as the guest is used, and by a lot after an update of Android."),
+            String(localized: "A new snapshot takes no space. When Android later changes or deletes data, the snapshot keeps the old version, so it grows as the virtual machine is used, and by a lot after an update of Android."),
             String(localized: "The size beside a snapshot is what deleting it frees. Snapshots can share old data that none of them frees alone, so together they use more than their sizes add up to."),
         ]
         if lowerBound {
@@ -360,7 +360,7 @@ enum SnapshotWords {
         }
         paragraphs += [
             String(localized: "Deleting files in Android frees nothing a snapshot still keeps. Deleting or restoring a snapshot gives space back."),
-            String(localized: "Snapshots stay on this \(device). They are not in backups, and Erase guest deletes them."),
+            String(localized: "Snapshots stay on this \(device). They are not in backups, and Erase virtual machine deletes them."),
         ]
         return paragraphs
     }

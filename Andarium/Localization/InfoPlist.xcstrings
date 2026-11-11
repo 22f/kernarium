@@ -34,7 +34,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it."
+            "value" : "Andarium shares this device's location only when you turn on Location, so that apps in the virtual machine can use it."
           }
         },
         "ja" : {
@@ -62,7 +62,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium records from the microphone only when you turn on Microphone, so that apps in the guest can use it."
+            "value" : "Andarium records from the microphone only when you turn on Microphone, so that apps in the virtual machine can use it."
           }
         },
         "ja" : {

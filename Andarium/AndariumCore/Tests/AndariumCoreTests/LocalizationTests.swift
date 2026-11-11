@@ -36,9 +36,9 @@ private enum Say {
 
     @Test(arguments: ["ja", "zh-Hans", "zh-Hant"])
     func aWordOfTheModelIsTranslated(language: String) {
-        let english = Say.text("This guest cannot start", in: "en")
-        #expect(english == "This guest cannot start")
-        let translated = Say.text("This guest cannot start", in: language)
+        let english = Say.text("This virtual machine cannot start", in: "en")
+        #expect(english == "This virtual machine cannot start")
+        let translated = Say.text("This virtual machine cannot start", in: language)
         #expect(translated != english, "\(language) says it in English")
         #expect(!translated.isEmpty)
     }

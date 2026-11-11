@@ -43,7 +43,7 @@ public enum DeviceRequirement {
 
     public static func explanation(deviceName: String) -> String {
         String(
-            localized: "Andarium draws the guest with Metal 4, which this \(deviceName) does not have, so the guest cannot start here.",
+            localized: "Andarium draws the virtual machine with Metal 4, which this \(deviceName) does not have, so the virtual machine cannot start here.",
             bundle: .module)
     }
 }

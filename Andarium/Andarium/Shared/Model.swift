@@ -579,10 +579,10 @@ final class AppModel {
         }
         runBusy(
             BusyState(
-                title: "Creating guest",
+                title: "Creating virtual machine",
                 detail: "Setting up Andarium with \(Formats.size(gib: guest.effectiveCapacityGiB)).", progress: 0
             ),
-            failure: "The guest could not be created"
+            failure: "The virtual machine could not be created"
         ) { progress in
             let made = try await driver.create(guest, progress: progress)
             self.lifecycle.create(made)
@@ -605,7 +605,7 @@ final class AppModel {
         do {
             try await driver.restoreUpdate()
         } catch {
-            alert = AppAlert(title: "The guest could not be restored", message: error.localizedDescription)
+            alert = AppAlert(title: "The virtual machine could not be restored", message: error.localizedDescription)
         }
         refreshPlan()
     }
@@ -620,8 +620,8 @@ final class AppModel {
             return
         }
         runBusy(
-            BusyState(title: "Erasing guest", detail: "Deleting everything the guest stored.", progress: 0),
-            failure: "The guest could not be erased"
+            BusyState(title: "Erasing virtual machine", detail: "Deleting everything the virtual machine stored.", progress: 0),
+            failure: "The virtual machine could not be erased"
         ) { progress in
             // A choice saved a moment after the last change must not come
             // back after the files are gone.
@@ -992,7 +992,7 @@ final class AppModel {
         runOperation(
             BusyState(
                 title: "Creating bug report",
-                detail: "The guest is collecting its logs and state. This can take several minutes.", progress: 0
+                detail: "The virtual machine is collecting its logs and state. This can take several minutes.", progress: 0
             ),
             failure: "Bug report not created",
             { [driver, diagnosticsDirectory, diagnosticsContainers] update in
@@ -1080,7 +1080,7 @@ final class AppModel {
                 detail: "\(name) \u{00B7} \(Formats.size(bytes: size))", progress: 0
             ),
             failure: Self.installFailure,
-            ending: { _ in (title: "App installed", detail: "\(name) is installed in the guest.") },
+            ending: { _ in (title: "App installed", detail: "\(name) is installed in the virtual machine.") },
             { [driver] update in
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 if let driver {
@@ -1104,7 +1104,7 @@ final class AppModel {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: Double(step) / 20 * 0.8))
         }
-        update(BusyUpdate(detail: "The guest is installing the app\u{2026}", cancellable: false))
+        update(BusyUpdate(detail: "The virtual machine is installing the app\u{2026}", cancellable: false))
         try await Task.sleep(for: .milliseconds(1200))
     }
 

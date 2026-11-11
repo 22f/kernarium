@@ -200,11 +200,11 @@ struct SessionSettingsSheet: View {
             if let problem = session.adbProblem {
                 Text(problem).foregroundStyle(.red)
             } else if session.adb {
-                Text("The guest asks to allow the computer the first time it connects. ADB turns off when the guest stops or USB debugging is turned off.")
+                Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
             } else if !model.adbOverNetworkAvailable {
-                Text("Turn on USB debugging in the guest\u{2019}s Developer options to use ADB over network.")
+                Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
             } else {
-                Text("Lets a computer on the same network connect to the guest with adb.")
+                Text("Lets a computer on the same network connect to the virtual machine with adb.")
             }
         }
     }

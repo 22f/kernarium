@@ -75,8 +75,8 @@ struct HomeView: View {
         }
         .microphoneAccessAlert()
         .locationAccessAlert()
-        .alert("Erase guest?", isPresented: $model.confirmingErase) {
-            Button("Erase guest", role: .destructive) { model.erase() }
+        .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
+            Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count))
@@ -229,7 +229,7 @@ struct HomeView: View {
                 NoticeCard(
                     symbol: "moon.zzz.fill", color: .secondary,
                     title: String(localized: "iOS closed Andarium"),
-                    text: String(localized: "The guest was shut down in the background."),
+                    text: String(localized: "The virtual machine was shut down in the background."),
                     onClose: { withAnimation { model.notice = nil } }
                 )
             case .sessionEnded(let ended):
@@ -375,7 +375,7 @@ struct WelcomeView: View {
             Spacer(minLength: 20)
             StackMark(lit: false, width: 150)
                 .padding(.bottom, 34)
-            Text("No guest yet")
+            Text("No virtual machine yet")
                 .font(.title2.weight(.bold))
             if !model.host.runsGuestGraphics {
                 NoticeCard(
@@ -389,7 +389,7 @@ struct WelcomeView: View {
             Button {
                 model.sheet = .create
             } label: {
-                Text("Set up guest")
+                Text("Set up virtual machine")
                     .font(.body.weight(.semibold))
                     .frame(width: 220, height: 50)
             }
@@ -486,11 +486,11 @@ struct UnfinishedUpdateCard: View {
         case (true, true):
             String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or Restore puts back your data from before the update.")
         case (true, false):
-            String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the guest to start over.")
+            String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the virtual machine to start over.")
         case (false, true):
-            String(localized: "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the guest to start over.")
+            String(localized: "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the virtual machine to start over.")
         case (false, false):
-            String(localized: "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the guest to start over.")
+            String(localized: "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the virtual machine to start over.")
         }
     }
 }
@@ -530,7 +530,7 @@ struct RecoveryErasePanel: View {
                 } label: {
                     HStack(spacing: 12) {
                         IconTile(symbol: "trash.fill", color: .red)
-                        Text("Erase guest…")
+                        Text("Erase virtual machine…")
                             .foregroundStyle(.red)
                         Spacer()
                         if let guest = model.guest {

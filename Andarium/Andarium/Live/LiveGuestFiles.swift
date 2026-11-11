@@ -18,13 +18,13 @@ nonisolated enum GuestFilesFailure {
     static func message(_ error: GuestFilesError, device: String) -> String {
         switch error {
         case .refused: "Android doesn\u{2019}t allow this folder to be opened."
-        case .missing: "It is no longer in the guest."
+        case .missing: "It is no longer in the virtual machine."
         case .exists: "A file with that name is already there."
         case .folderInTheWay: "A folder with that name is already there."
         case .changed: "The file changed while it was being copied."
-        case .guestFull: "Not enough space in the guest."
+        case .guestFull: "Not enough space in the virtual machine."
         case .deviceFull: "Not enough space on this \(device)."
-        case .badPath: "The guest can\u{2019}t take a file with this name."
+        case .badPath: "The virtual machine can\u{2019}t take a file with this name."
         }
     }
 }
@@ -349,7 +349,7 @@ final class LiveGuestFiles: GuestFilesBackend {
         } catch GuestFilesError.refused {
             throw GuestFolderProblem.refused
         } catch GuestFilesError.missing {
-            throw GuestFolderProblem.unavailable("The folder is no longer in the guest.")
+            throw GuestFolderProblem.unavailable("The folder is no longer in the virtual machine.")
         }
     }
 

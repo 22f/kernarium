@@ -277,13 +277,13 @@ public enum MemoryRisk: Equatable, Sendable {
 /// the guest runs. Home and the memory picker use these words, so they say the
 /// same thing.
 public enum MemoryWarning {
-    public static let title = String(localized: "Guest memory is high", bundle: .module)
+    public static let title = String(localized: "Virtual machine memory is high", bundle: .module)
 
     /// Home's notice: the guest's size, the size that is safer, and where to
     /// lower it.
     public static func explanation(memoryMiB: Int, safeMiB: Int, deviceName: String) -> String {
         String(
-            localized: "iOS is likely to close Andarium with \(Formats.size(mib: memoryMiB)) of guest memory on this \(deviceName). \(Formats.size(mib: safeMiB)) or less is safer. Lower it with Edit under Guest system.",
+            localized: "iOS is likely to close Andarium with \(Formats.size(mib: memoryMiB)) of virtual machine memory on this \(deviceName). \(Formats.size(mib: safeMiB)) or less is safer. Lower it with Edit under Virtual machine.",
             bundle: .module)
     }
 
@@ -302,7 +302,7 @@ public enum GraphicsMemoryWarning {
 
     /// Beneath the estimate: what VRAM is relative to the memory above it.
     public static let separateNote = String(
-        localized: "VRAM is graphics memory, separate from the guest\u{2019}s RAM.", bundle: .module)
+        localized: "VRAM is graphics memory, separate from the virtual machine\u{2019}s RAM.", bundle: .module)
 
     /// The line beneath the memory picker above the graphics line
     /// (`MemoryPolicy.graphicsLineMiB`) and not above the safe size.

@@ -98,7 +98,7 @@ final class LiveRuntime: RuntimeDriver {
             let result = try await operations.shell(policy.command, limit: .seconds(15))
             guard result.exitCode == 0 else {
                 print("Andarium: display rotation command failed: \(result.text)")
-                throw AdbFailure(message: "The guest’s screen could not follow this window. Close and reopen Andarium to try again.")
+                throw AdbFailure(message: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again.")
             }
         }, changed: { [weak self] in
             self?.updateMotionSensors()
@@ -107,7 +107,7 @@ final class LiveRuntime: RuntimeDriver {
             guard let model = self?.model, model.alert == nil else { return }
             model.alert = AppAlert(
                 title: "Display rotation unavailable",
-                message: "The guest’s screen could not follow this window. Close and reopen Andarium to try again.")
+                message: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again.")
         })
     private var normalRun = false
     /// The runtime runs a guest, from its start until its run returns.

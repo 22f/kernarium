@@ -122,7 +122,7 @@ struct AppEntry {
         do {
             guest = try storage.load()
         } catch {
-            problem = problem ?? "The guest\u{2019}s settings could not be read: \(error.localizedDescription)"
+            problem = problem ?? "The virtual machine\u{2019}s settings could not be read: \(error.localizedDescription)"
         }
         // A stored memory size above the bound of its vCPU count comes down to
         // it; a size the launch states stays as stated.

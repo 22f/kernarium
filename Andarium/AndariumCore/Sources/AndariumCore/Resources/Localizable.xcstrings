@@ -104,7 +104,7 @@
         }
       }
     },
-    "Andarium draws the guest with Metal 4, which this %@ does not have, so the guest cannot start here." : {
+    "Andarium draws the virtual machine with Metal 4, which this %@ does not have, so the virtual machine cannot start here." : {
       "comment" : "%@ is the device name: iPhone, iPad or Mac.",
       "localizations" : {
         "ja" : {
@@ -193,30 +193,8 @@
         }
       }
     },
-    "Guest memory is high" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ゲストのメモリが多めです"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客户机内存偏高"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客體記憶體偏高"
-          }
-        }
-      }
-    },
     "If an app looks broken, swipe it away in Recents and open it again." : {
-      "comment" : "Recents is Android's list of recent apps inside the guest; use the guest's own name for it.",
+      "comment" : "Recents is Android's list of recent apps inside the virtual machine; use the virtual machine's own name for it.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -238,8 +216,8 @@
         }
       }
     },
-    "In Settings while the guest runs" : {
-      "comment" : "Where a feature is found: in the Settings sheet that opens while the guest runs.",
+    "In Settings while the virtual machine runs" : {
+      "comment" : "Where a feature is found: in the Settings sheet that opens while the virtual machine runs.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -283,8 +261,8 @@
         }
       }
     },
-    "iOS is likely to close Andarium with %@ of guest memory on this %@. %@ or less is safer. Lower it with Edit under Guest system." : {
-      "comment" : "Arguments: guest memory, device name, the safer size. Edit and Guest system are labels on Home.",
+    "iOS is likely to close Andarium with %@ of virtual machine memory on this %@. %@ or less is safer. Lower it with Edit under Virtual machine." : {
+      "comment" : "Arguments: virtual machine memory, device name, the safer size. Edit and Virtual machine are labels on Home.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -328,7 +306,7 @@
         }
       }
     },
-    "The guest's data uses a newer layout than this app version can open. Erase the guest to start again with this one." : {
+    "The virtual machine's data uses a newer layout than this app version can open. Erase the virtual machine to start again with this one." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -350,7 +328,7 @@
         }
       }
     },
-    "The guest's files do not match this app version. Erase the guest to start again." : {
+    "The virtual machine's files do not match this app version. Erase the virtual machine to start again." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -372,7 +350,7 @@
         }
       }
     },
-    "This app version is older than the one the guest last started with, and its data does not go back. Install a newer version of Andarium, or erase the guest to start again with this one." : {
+    "This app version is older than the one the virtual machine last started with, and its data does not go back. Install a newer version of Andarium, or erase the virtual machine to start again with this one." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -394,7 +372,7 @@
         }
       }
     },
-    "This guest cannot start" : {
+    "This virtual machine cannot start" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -416,8 +394,30 @@
         }
       }
     },
+    "Virtual machine memory is high" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストのメモリが多めです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机内存偏高"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體記憶體偏高"
+          }
+        }
+      }
+    },
     "VRAM" : {
-      "comment" : "Graphics memory of the guest (video RAM).",
+      "comment" : "Graphics memory of the virtual machine (video RAM).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -439,7 +439,7 @@
         }
       }
     },
-    "VRAM is graphics memory, separate from the guest’s RAM." : {
+    "VRAM is graphics memory, separate from the virtual machine’s RAM." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {

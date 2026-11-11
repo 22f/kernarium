@@ -56,21 +56,21 @@ nonisolated struct AdbFailure: LocalizedError, Equatable {
     init(_ error: AdbError, activity: AdbActivity) {
         switch error {
         case .refused:
-            message = "The guest isn\u{2019}t ready to \(activity.notReady). Try again in a moment."
+            message = "The virtual machine isn\u{2019}t ready to \(activity.notReady). Try again in a moment."
         case .notAnswering:
-            message = "The guest isn\u{2019}t answering yet. Try again once it has started."
+            message = "The virtual machine isn\u{2019}t answering yet. Try again once it has started."
         case .keyRejected:
-            message = "The guest didn\u{2019}t accept Andarium\u{2019}s key. Restart the guest and try again."
+            message = "The virtual machine didn\u{2019}t accept Andarium\u{2019}s key. Restart the virtual machine and try again."
         case .guestGone, .streamClosed:
             // adbd restarts when the guest's USB debugging turns off, which
             // ends a connection in use; the next try reaches the new one.
-            message = "The guest\u{2019}s debugging service restarted before \(activity.stoppedBefore). Try again."
+            message = "The virtual machine\u{2019}s debugging service restarted before \(activity.stoppedBefore). Try again."
         case .timedOut:
-            message = "The guest stopped responding while \(activity.whileDoing)."
+            message = "The virtual machine stopped responding while \(activity.whileDoing)."
         case let .remote(text):
             message = Self.remote(text, activity: activity)
         case .serviceRefused, .protocolViolation, .io, .cancelled:
-            message = "The guest couldn\u{2019}t \(activity.couldNot)."
+            message = "The virtual machine couldn\u{2019}t \(activity.couldNot)."
         }
     }
 
@@ -80,15 +80,15 @@ nonisolated struct AdbFailure: LocalizedError, Equatable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
         if activity == .bugReport, lower.contains("in progress") {
-            return "The guest is already making a bug report."
+            return "The virtual machine is already making a bug report."
         }
         if activity == .files {
-            if lower.contains("no space left") { return "Not enough space in the guest." }
+            if lower.contains("no space left") { return "Not enough space in the virtual machine." }
             if lower.contains("permission denied") || lower.contains("read-only") {
                 return "Android doesn\u{2019}t allow changes to this folder."
             }
         }
-        return trimmed.isEmpty ? "The guest couldn\u{2019}t \(activity.couldNot)." : trimmed
+        return trimmed.isEmpty ? "The virtual machine couldn\u{2019}t \(activity.couldNot)." : trimmed
     }
 }
 

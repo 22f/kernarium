@@ -74,7 +74,7 @@ nonisolated enum ApkInstallOperation {
                 // The package manager gave up early; what it printed says why.
             }
             update(BusyUpdate(
-                progress: sendingShare, detail: "The guest is installing the app\u{2026}", cancellable: false))
+                progress: sendingShare, detail: "The virtual machine is installing the app\u{2026}", cancellable: false))
             watchdog.arm(idle: nil, overall: commitLimit)
             let output = try stream.readToEnd(limit: 64 * 1024)
             if let message = PackageInstallMessages.failure(inOutput: String(decoding: output, as: UTF8.self)) {

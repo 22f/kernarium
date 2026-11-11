@@ -20,31 +20,31 @@ nonisolated enum PackageInstallMessages {
         ),
         (
             ["FAILED_UPDATE_INCOMPATIBLE", "FAILED_SHARED_USER_INCOMPATIBLE"],
-            "A version of this app signed by someone else is installed. Uninstall it in the guest first."
+            "A version of this app signed by someone else is installed. Uninstall it in the virtual machine first."
         ),
         (["FAILED_VERSION_DOWNGRADE"], "A newer version of this app is already installed."),
-        (["FAILED_OLDER_SDK"], "This app needs a newer system than this guest runs."),
+        (["FAILED_OLDER_SDK"], "This app needs a newer system than this virtual machine runs."),
         (
             ["FAILED_DEPRECATED_SDK_VERSION"],
-            "This app was made for a system version that this guest no longer installs."
+            "This app was made for a system version that this virtual machine no longer installs."
         ),
         (["FAILED_NO_MATCHING_ABIS"], "This app has no code for this device\u{2019}s processor."),
         (
             ["FAILED_INSUFFICIENT_STORAGE"],
-            "The guest doesn\u{2019}t have enough free space. Free some up in the guest, or give it more storage with Resize."
+            "The virtual machine doesn\u{2019}t have enough free space. Free some up in the virtual machine, or give it more storage with Resize."
         ),
         (
             ["FAILED_MISSING_SPLIT"],
             "This app comes in several parts, which Andarium can\u{2019}t install yet."
         ),
-        (["FAILED_MISSING_SHARED_LIBRARY"], "The app needs a system library this guest doesn\u{2019}t have."),
+        (["FAILED_MISSING_SHARED_LIBRARY"], "The app needs a system library this virtual machine doesn\u{2019}t have."),
         (
             ["FAILED_DUPLICATE_PERMISSION", "FAILED_CONFLICTING_PROVIDER", "FAILED_DUPLICATE_PACKAGE"],
             "The app conflicts with an app that\u{2019}s already installed."
         ),
         (
             ["FAILED_USER_RESTRICTED", "FAILED_VERIFICATION_FAILURE", "FAILED_ABORTED"],
-            "The guest refused to install the app."
+            "The virtual machine refused to install the app."
         ),
     ]
 
@@ -55,9 +55,9 @@ nonisolated enum PackageInstallMessages {
         let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
         if lines.contains(where: { $0.hasPrefix("Success") }) { return nil }
         guard let line = lines.last(where: { $0.hasPrefix("Failure") }) else {
-            return "The guest couldn\u{2019}t install the app."
+            return "The virtual machine couldn\u{2019}t install the app."
         }
-        guard let code = code(inFailure: line) else { return "The guest couldn\u{2019}t install the app." }
+        guard let code = code(inFailure: line) else { return "The virtual machine couldn\u{2019}t install the app." }
         return message(forCode: code)
     }
 
@@ -72,7 +72,7 @@ nonisolated enum PackageInstallMessages {
     }
 
     static func message(forCode code: String) -> String {
-        table.first { $0.codes.contains(code) }?.message ?? "The guest couldn\u{2019}t install the app (\(code))."
+        table.first { $0.codes.contains(code) }?.message ?? "The virtual machine couldn\u{2019}t install the app (\(code))."
     }
 
     /// Every code the table maps, for the test that checks the table.

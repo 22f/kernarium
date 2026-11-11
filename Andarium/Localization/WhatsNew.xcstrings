@@ -1,7 +1,7 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Browse the guest’s internal storage, and import or export files and folders." : {
+    "Browse the virtual machine’s internal storage, and import or export files and folders." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -139,7 +139,7 @@
         }
       }
     },
-    "Fixed the guest crashing on many iPhones" : {
+    "Fixed the virtual machine crashing on many iPhones" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -185,7 +185,7 @@
         }
       }
     },
-    "On devices that allow it, the guest’s RAM can now go above 4 GiB." : {
+    "On devices that allow it, the virtual machine’s RAM can now go above 4 GiB." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {

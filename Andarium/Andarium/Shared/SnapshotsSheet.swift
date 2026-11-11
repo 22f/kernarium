@@ -107,7 +107,7 @@ struct SnapshotList: View {
                 ContentUnavailableView {
                     Label("No snapshots", systemImage: "clock.arrow.circlepath")
                 } description: {
-                    Text("Take one to keep the guest\u{2019}s data as it is now and go back to it later.")
+                    Text("Take one to keep the virtual machine\u{2019}s data as it is now and go back to it later.")
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -340,7 +340,7 @@ struct SnapshotDetail: View {
                     LabeledContent("Frees if deleted") {
                         figure(store.frees(item))
                     }
-                    LabeledContent("Guest data") {
+                    LabeledContent("Virtual machine data") {
                         figure(store.kept(item))
                     }
                 }
@@ -443,7 +443,7 @@ struct SnapshotSpacePage: View {
                     }
                 }
                 if let guest = model.guest {
-                    LabeledContent("Guest data", value: Formats.size(bytes: guest.usedBytes))
+                    LabeledContent("Virtual machine data", value: Formats.size(bytes: guest.usedBytes))
                 }
                 if let copy = store.updateCopy {
                     LabeledContent("Unfinished update", value: SnapshotWords.size(copy))

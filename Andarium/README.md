@@ -235,7 +235,7 @@ control out.
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
-  and Erase guest deletes everything the guest has stored, its snapshots and
+  and Erase virtual machine deletes everything the guest has stored, its snapshots and
   the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Back up guest data. Its snapshots are never backed up.
@@ -267,7 +267,7 @@ control out.
   nothing and is waited for. A listing is never older than the last finished
   operation (`revision`), can come without its figures, and names the release
   the data is on; a cancelled one stops measuring.
-  Home's Guest system section has a Snapshots row (how many, the space they
+  Home's Virtual machine section has a Snapshots row (how many, the space they
   use, Manage) that opens the Snapshots sheet: the list newest first, a page
   per snapshot (Restore, its name, Delete) and a page on the space they use,
   with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds

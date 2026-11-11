@@ -125,7 +125,7 @@ enum LocationWords {
         case .approximate:
             Alert(
                 title: String(localized: "Approximate location"),
-                message: String(localized: "iOS is giving Andarium only the area you are in, because Precise Location is off for it. Apps in the guest see a wide area. To share the exact position, turn on Precise Location for Andarium in Settings."),
+                message: String(localized: "iOS is giving Andarium only the area you are in, because Precise Location is off for it. Apps in the virtual machine see a wide area. To share the exact position, turn on Precise Location for Andarium in Settings."),
                 offersSettings: true)
         case .precise, .notDetermined:
             nil

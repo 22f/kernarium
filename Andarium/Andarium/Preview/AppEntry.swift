@@ -195,9 +195,9 @@ struct AppEntry {
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
         case "busy-create":
-            model.busy = BusyState(title: "Creating guest", detail: "Setting up Andarium with 16 GiB.", progress: 0.42)
+            model.busy = BusyState(title: "Creating virtual machine", detail: "Setting up Andarium with 16 GiB.", progress: 0.42)
         case "busy-erase":
-            model.busy = BusyState(title: "Erasing guest", detail: "Deleting everything the guest stored.", progress: 0.65)
+            model.busy = BusyState(title: "Erasing virtual machine", detail: "Deleting everything the virtual machine stored.", progress: 0.65)
         case "boot":
             // The start applied the growth as it began.
             model.guest?.setCapacity(24)
@@ -329,18 +329,18 @@ struct AppEntry {
         case "bug-report":
             return BusyState(
                 title: "Creating bug report",
-                detail: "The guest is collecting its logs and state. This can take several minutes.",
+                detail: "The virtual machine is collecting its logs and state. This can take several minutes.",
                 progress: 0.6, cancel: cancel
             )
         case "install-done":
             return BusyState(
-                title: "App installed", detail: "\(file) is installed in the guest.",
+                title: "App installed", detail: "\(file) is installed in the virtual machine.",
                 result: BusyResult(failed: false, dismiss: dismiss)
             )
         case "install-failed":
             return BusyState(
                 title: AppModel.installFailure,
-                detail: "The guest couldn\u{2019}t install it: this app has no version for arm64 devices.",
+                detail: "The virtual machine couldn\u{2019}t install it: this app has no version for arm64 devices.",
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
         case "install-not-apk":

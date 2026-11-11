@@ -44,13 +44,13 @@ struct SnapshotWordsTests {
     }
 
     @Test func whatTakeSnapshotSaysWhenItIsUnavailable() {
-        #expect(SnapshotWords.takeReason(.volumeCannotClone) == "The guest\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
-        #expect(SnapshotWords.takeReason(.noData) == "Start the guest once first. Until then there is no data to keep.")
-        #expect(SnapshotWords.takeReason(.mismatch) == "Not while the guest\u{2019}s files do not match this app version.")
+        #expect(SnapshotWords.takeReason(.volumeCannotClone) == "The virtual machine\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
+        #expect(SnapshotWords.takeReason(.noData) == "Start the virtual machine once first. Until then there is no data to keep.")
+        #expect(SnapshotWords.takeReason(.mismatch) == "Not while the virtual machine\u{2019}s files do not match this app version.")
         #expect(SnapshotWords.takeReason(.unfinishedUpdate)
             == "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home.")
         #expect(SnapshotWords.takeReason(.notShutDown)
-            == "Android wasn\u{2019}t shut down when the guest last ran. Start the guest and shut it down from Android, then take a snapshot.")
+            == "Android wasn\u{2019}t shut down when the virtual machine last ran. Start the virtual machine and shut it down from Android, then take a snapshot.")
         // An operation under way shows itself and says nothing.
         #expect(SnapshotWords.takeReason(.busy) == nil)
         #expect(SnapshotWords.takeReason(.restoreUnfinished) != nil && SnapshotWords.takeReason(.guestNotStopped) != nil)
@@ -61,11 +61,11 @@ struct SnapshotWordsTests {
         let older = SnapshotSample.item("then", release: "20261108-los24-r18")
         let newer = SnapshotSample.item("later", release: "20261110-los24-r22", restore: .refused(.newerAndroid))
         #expect(SnapshotWords.restoreNote(of: current, appRevision: appRevision, endsUpdate: false)
-            == "Replaces the guest\u{2019}s current data with this snapshot.")
+            == "Replaces the virtual machine\u{2019}s current data with this snapshot.")
         #expect(SnapshotWords.restoreNote(of: current, appRevision: appRevision, endsUpdate: true)
-            == "Replaces the guest\u{2019}s current data with this snapshot. Andarium\u{2019}s unfinished update ends.")
+            == "Replaces the virtual machine\u{2019}s current data with this snapshot. Andarium\u{2019}s unfinished update ends.")
         #expect(SnapshotWords.restoreNote(of: older, appRevision: appRevision, endsUpdate: false)
-            == "Replaces the guest\u{2019}s current data with this snapshot, which is from r18. The next start updates it to r20.")
+            == "Replaces the virtual machine\u{2019}s current data with this snapshot, which is from r18. The next start updates it to r20.")
         #expect(SnapshotWords.restoreNote(of: newer, appRevision: appRevision, endsUpdate: false)
             == "This snapshot is from r22, newer than this app\u{2019}s r20. Update Andarium to restore it.")
         for (plan, words) in [
@@ -123,7 +123,7 @@ struct SnapshotWordsTests {
         #expect(SnapshotWords.restoreTitle(of: named) == "Restore \u{201C}Before r20\u{201D}?")
         #expect(SnapshotWords.restoreTitle(of: unnamed) == "Restore this snapshot?")
         #expect(SnapshotWords.restoreMessage(of: named, endsUpdate: false)
-            == "The guest\u{2019}s current data is replaced by this snapshot from \(date), and anything not in it is deleted. "
+            == "The virtual machine\u{2019}s current data is replaced by this snapshot from \(date), and anything not in it is deleted. "
             + "Some apps may ask you to sign in again. The next start updates it to r20. This can\u{2019}t be undone.")
         #expect(SnapshotWords.restoreMessage(of: unnamed, endsUpdate: true).contains(" Andarium\u{2019}s unfinished update ends. This"))
         #expect(SnapshotWords.deleteTitle(of: named) == "Delete \u{201C}Before r20\u{201D}?")
@@ -136,14 +136,14 @@ struct SnapshotWordsTests {
     }
 
     @Test func homeMentionsSnapshotsOnlyWhereTheyChangeADecision() {
-        #expect(SnapshotWords.eraseMessage(snapshots: 0) == "Everything the guest has stored is deleted. This can\u{2019}t be undone.")
+        #expect(SnapshotWords.eraseMessage(snapshots: 0) == "Everything the virtual machine has stored is deleted. This can\u{2019}t be undone.")
         #expect(SnapshotWords.eraseMessage(snapshots: 1)
-            == "Everything the guest has stored is deleted, and its snapshot with it. This can\u{2019}t be undone.")
+            == "Everything the virtual machine has stored is deleted, and its snapshot with it. This can\u{2019}t be undone.")
         #expect(SnapshotWords.eraseMessage(snapshots: 5)
-            == "Everything the guest has stored is deleted, and its 5 snapshots with it. This can\u{2019}t be undone.")
+            == "Everything the virtual machine has stored is deleted, and its 5 snapshots with it. This can\u{2019}t be undone.")
         #expect(SnapshotWords.lowSpaceText(hasSnapshots: false, startReserve: "2 GiB", device: "iPhone").hasSuffix("iPhone Storage."))
         #expect(SnapshotWords.lowSpaceText(hasSnapshots: true, startReserve: "2 GiB", device: "iPhone").hasSuffix("iPhone Storage, or delete snapshots."))
-        #expect(SnapshotWords.backupNote(device: "iPhone", hasSnapshots: false) == "Puts the guest's apps and files in iCloud and computer backups of this iPhone.")
+        #expect(SnapshotWords.backupNote(device: "iPhone", hasSnapshots: false) == "Puts the virtual machine's apps and files in iCloud and computer backups of this iPhone.")
         #expect(SnapshotWords.backupNote(device: "iPhone", hasSnapshots: true).hasSuffix(" Snapshots are not included."))
         #expect(SnapshotWords.blockedText(.olderAndroid, hasOlderSnapshot: false) == StartBlock.olderAndroid.explanation)
         #expect(SnapshotWords.blockedText(.olderAndroid, hasOlderSnapshot: true).contains("restore an older snapshot"))
@@ -154,9 +154,9 @@ struct SnapshotWordsTests {
         let created = Date(timeIntervalSince1970: 1_794_000_000)
         let date = SnapshotWords.taken(created)
         #expect(SnapshotWords.restoredText(RestoredSnapshotNotice(name: "Before r20", created: created, updatesTo: "r20"))
-            == "The guest\u{2019}s data is back to \u{201C}Before r20\u{201D} from \(date). The next start updates it to r20.")
+            == "The virtual machine\u{2019}s data is back to \u{201C}Before r20\u{201D} from \(date). The next start updates it to r20.")
         #expect(SnapshotWords.restoredText(RestoredSnapshotNotice(name: "", created: created))
-            == "The guest\u{2019}s data is back to the snapshot from \(date).")
+            == "The virtual machine\u{2019}s data is back to the snapshot from \(date).")
         let failure = SnapshotFailure(POSIXError(.ENOSPC))
         #expect(SnapshotWords.unfinishedText(.named, item: SnapshotSample.item("x"), failure: failure).contains(failure.description))
     }
@@ -173,7 +173,7 @@ struct SnapshotWordsTests {
             == "Andarium could not finish restoring the snapshot from \(SnapshotWords.taken(unnamed.created)). Start finishes it.")
         // Which snapshot it was cannot be read, or it names one that is gone or damaged: a start drops the
         // restore, so nothing is promised, and the two states are told apart.
-        let may = " The guest\u{2019}s data may be from before the restore or from the snapshot."
+        let may = " The virtual machine\u{2019}s data may be from before the restore or from the snapshot."
         let unreadable = "A snapshot restore did not finish, and Andarium cannot read which one."
         let lost = "A snapshot restore did not finish, and its snapshot is missing or damaged."
         for (kind, reason) in [(UnfinishedRestoreKind.unreadable, unreadable), (.lost, lost)] {
@@ -211,7 +211,7 @@ struct SnapshotWordsTests {
         let full = SnapshotWords.spaceParagraphs(device: "iPhone", lowerBound: true, hasUpdateCopy: true)
         #expect(plain.count == 4 && full.count == 6)
         #expect(full.contains { $0.contains("at least the size shown") } && full.contains { $0.contains("unfinished update") })
-        #expect(plain.last == "Snapshots stay on this iPhone. They are not in backups, and Erase guest deletes them.")
+        #expect(plain.last == "Snapshots stay on this iPhone. They are not in backups, and Erase virtual machine deletes them.")
     }
 }
 
@@ -960,9 +960,9 @@ struct SnapshotsModelTests {
         s.driver.gate = .guestNotStopped
         await s.store.reload()
         #expect(s.store.takeRefusal == .guestNotStopped)
-        #expect(s.store.takeReason == "Not while the guest is starting or running.")
+        #expect(s.store.takeReason == "Not while the virtual machine is starting or running.")
         #expect(s.store.restoreRefusal(of: item) == .guestNotStopped)
-        #expect(s.store.restoreNote(of: item) == "Not while the guest is starting or running.")
+        #expect(s.store.restoreNote(of: item) == "Not while the virtual machine is starting or running.")
         #expect(s.store.deleteRefusal(of: item) == .guestNotStopped)
         // What is wrong with the snapshot itself comes before what passes.
         let newer = SnapshotSample.item("later", release: "20261110-los24-r22", restore: .refused(.newerAndroid))

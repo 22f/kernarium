@@ -35,8 +35,8 @@ struct LocalizationTests {
 
     @Test(arguments: LocalizationTests.languages)
     func aScreenIsTranslated(language: String) {
-        #expect(text("Guest system", in: "en") == "Guest system")
-        #expect(text("Guest system", in: language) != "Guest system", "\(language) says it in English")
+        #expect(text("Virtual machine", in: "en") == "Virtual machine")
+        #expect(text("Virtual machine", in: language) != "Virtual machine", "\(language) says it in English")
     }
 
     @Test func aCountIsPluralInEnglishAndInOneFormInTheOthers() {

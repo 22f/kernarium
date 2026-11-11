@@ -127,7 +127,7 @@ struct SystemSection: View {
 
     var body: some View {
         if let guest = model.guest {
-            HomeSection(title: "Guest system") {
+            HomeSection(title: "Virtual machine") {
                 SystemRow(
                     symbol: "cpu", title: String(localized: "CPU and memory"), subtitle: Self.summary(of: guest),
                     button: SystemRowButton(
@@ -516,8 +516,8 @@ struct BackupOption: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        OptionRow(title: String(localized: "Back up guest data"), symbol: "icloud.fill") {
-            Toggle("Back up guest data", isOn: $isOn).labelsHidden()
+        OptionRow(title: String(localized: "Back up virtual machine data"), symbol: "icloud.fill") {
+            Toggle("Back up virtual machine data", isOn: $isOn).labelsHidden()
         }
     }
 }

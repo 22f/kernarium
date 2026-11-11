@@ -113,7 +113,7 @@
       }
     },
     "%@ of %@" : {
-      "comment" : "Storage in use of the guest's capacity: first the used size, then the capacity, as in 5.4 GiB of 16 GiB.",
+      "comment" : "Storage in use of the virtual machine's capacity: first the used size, then the capacity, as in 5.4 GiB of 16 GiB.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -453,7 +453,7 @@
         }
       }
     },
-    "A new snapshot takes no space. It grows as the guest changes after it." : {
+    "A new snapshot takes no space. It grows as the virtual machine changes after it." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -677,7 +677,7 @@
       }
     },
     "Apps" : {
-      "comment" : "The apps of the guest (Android apps).",
+      "comment" : "The apps of the virtual machine (Android apps).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -700,7 +700,7 @@
       }
     },
     "Architecture" : {
-      "comment" : "CPU architecture of the guest.",
+      "comment" : "CPU architecture of the virtual machine.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -768,8 +768,8 @@
         }
       }
     },
-    "Back up guest data" : {
-      "comment" : "Switch: include the guest's data in iCloud and computer backups.",
+    "Back up virtual machine data" : {
+      "comment" : "Switch: include the virtual machine's data in iCloud and computer backups.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -792,7 +792,7 @@
       }
     },
     "Backup" : {
-      "comment" : "Home section about backups of the guest's data.",
+      "comment" : "Home section about backups of the virtual machine's data.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -882,7 +882,7 @@
       }
     },
     "Capabilities" : {
-      "comment" : "Home section: what the guest may use of this device (location, microphone, gyroscope).",
+      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, gyroscope).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1060,7 +1060,7 @@
       }
     },
     "CPU and memory" : {
-      "comment" : "Row of Guest system: virtual processors and RAM of the guest.",
+      "comment" : "Row of the Virtual machine section: virtual processors and RAM of the virtual machine.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1281,7 +1281,7 @@
       }
     },
     "Display" : {
-      "comment" : "Home section for the screen options of the guest.",
+      "comment" : "Home section for the screen options of the virtual machine.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1371,7 +1371,7 @@
         }
       }
     },
-    "Erase guest" : {
+    "Erase virtual machine" : {
       "comment" : "Destructive button of the confirmation.",
       "localizations" : {
         "ja" : {
@@ -1394,7 +1394,7 @@
         }
       }
     },
-    "Erase guest?" : {
+    "Erase virtual machine?" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1416,7 +1416,7 @@
         }
       }
     },
-    "Erase guest…" : {
+    "Erase virtual machine…" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1438,7 +1438,7 @@
         }
       }
     },
-    "Everything the guest has stored is deleted, and its %lld snapshots with it. This can’t be undone." : {
+    "Everything the virtual machine has stored is deleted, and its %lld snapshots with it. This can’t be undone." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1460,7 +1460,7 @@
         }
       }
     },
-    "Everything the guest has stored is deleted, and its snapshot with it. This can’t be undone." : {
+    "Everything the virtual machine has stored is deleted, and its snapshot with it. This can’t be undone." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1482,7 +1482,7 @@
         }
       }
     },
-    "Everything the guest has stored is deleted. This can’t be undone." : {
+    "Everything the virtual machine has stored is deleted. This can’t be undone." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1505,7 +1505,7 @@
       }
     },
     "File browser" : {
-      "comment" : "Browses the guest's internal storage.",
+      "comment" : "Browses the virtual machine's internal storage.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1728,7 +1728,7 @@
       }
     },
     "graphics memory %@" : {
-      "comment" : "VoiceOver: the guest's graphics memory in use.",
+      "comment" : "VoiceOver: the virtual machine's graphics memory in use.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1790,51 +1790,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "下次啟動時擴增到 %@"
-          }
-        }
-      }
-    },
-    "Guest data" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ゲストのデータ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客户机数据"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客體資料"
-          }
-        }
-      }
-    },
-    "Guest system" : {
-      "comment" : "Home section: the Android system the app runs (CPU, memory, storage, snapshots).",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ゲストシステム"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客户机系统"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客體系統"
           }
         }
       }
@@ -1996,7 +1951,7 @@
       }
     },
     "Kernel" : {
-      "comment" : "The Linux kernel the guest runs.",
+      "comment" : "The Linux kernel the virtual machine runs.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2018,7 +1973,7 @@
         }
       }
     },
-    "Lets a computer on the same network connect to the guest with adb." : {
+    "Lets a computer on the same network connect to the virtual machine with adb." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2176,7 +2131,7 @@
       }
     },
     "Memory" : {
-      "comment" : "Row with the guest's RAM.",
+      "comment" : "Row with the virtual machine's RAM.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2199,7 +2154,7 @@
       }
     },
     "memory %@" : {
-      "comment" : "VoiceOver: the guest's memory in use, as in memory 1.4 GiB of 2.5 GiB.",
+      "comment" : "VoiceOver: the virtual machine's memory in use, as in memory 1.4 GiB of 2.5 GiB.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2309,28 +2264,6 @@
         }
       }
     },
-    "No guest yet" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ゲストはまだありません"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "还没有客户机"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "尚未建立客體"
-          }
-        }
-      }
-    },
     "no reading yet" : {
       "comment" : "What VoiceOver says for a figure that has no value yet.",
       "localizations" : {
@@ -2394,6 +2327,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "沒有快照"
+          }
+        }
+      }
+    },
+    "No virtual machine yet" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストはまだありません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还没有客户机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "尚未建立客體"
           }
         }
       }
@@ -2708,7 +2663,7 @@
       }
     },
     "Processor" : {
-      "comment" : "Row with the number of vCPUs of the guest.",
+      "comment" : "Row with the number of vCPUs of the virtual machine.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2774,7 +2729,7 @@
         }
       }
     },
-    "Puts the guest's apps and files in iCloud and computer backups of this %@." : {
+    "Puts the virtual machine's apps and files in iCloud and computer backups of this %@." : {
       "comment" : "%@ is the device name: iPhone, iPad or Mac.",
       "localizations" : {
         "ja" : {
@@ -2820,7 +2775,7 @@
       }
     },
     "Recovery and erase" : {
-      "comment" : "Home section with Start in recovery and Erase guest.",
+      "comment" : "Home section with Start in recovery and Erase virtual machine.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -2886,7 +2841,7 @@
         }
       }
     },
-    "Replaces the guest’s current data with this snapshot, which is from %@." : {
+    "Replaces the virtual machine’s current data with this snapshot, which is from %@." : {
       "comment" : "%@ is the Android release the snapshot was taken with, as r20.",
       "localizations" : {
         "ja" : {
@@ -2909,7 +2864,7 @@
         }
       }
     },
-    "Replaces the guest’s current data with this snapshot." : {
+    "Replaces the virtual machine’s current data with this snapshot." : {
       "comment" : "Beneath the Restore button of a snapshot.",
       "localizations" : {
         "ja" : {
@@ -2933,7 +2888,7 @@
       }
     },
     "Resize" : {
-      "comment" : "Button that opens the sheet where the guest's storage is made larger.",
+      "comment" : "Button that opens the sheet where the virtual machine's storage is made larger.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3088,7 +3043,7 @@
       }
     },
     "Retina mode" : {
-      "comment" : "Draw the guest at the screen's native pixel density. Applies at the next start.",
+      "comment" : "Draw the virtual machine at the screen's native pixel density. Applies at the next start.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3155,7 +3110,7 @@
         }
       }
     },
-    "Set up guest" : {
+    "Set up virtual machine" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3222,7 +3177,7 @@
       }
     },
     "Show on screen" : {
-      "comment" : "Switch: draw the statistics over the guest's screen.",
+      "comment" : "Switch: draw the statistics over the virtual machine's screen.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3311,7 +3266,7 @@
       }
     },
     "Snapshots" : {
-      "comment" : "A snapshot keeps the guest's data as it is at a moment so it can be restored later.",
+      "comment" : "A snapshot keeps the virtual machine's data as it is at a moment so it can be restored later.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3356,7 +3311,7 @@
       }
     },
     "Start" : {
-      "comment" : "Button that starts the guest.",
+      "comment" : "Button that starts the virtual machine.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3446,7 +3401,7 @@
         }
       }
     },
-    "Starting needs %@ free for the guest's own writes. This %@ has %@ free." : {
+    "Starting needs %@ free for the virtual machine's own writes. This %@ has %@ free." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3624,7 +3579,7 @@
       }
     },
     "Storage" : {
-      "comment" : "The guest's disk space (what the guest may store), as in iOS Settings > General > Storage.",
+      "comment" : "The virtual machine's disk space (what the virtual machine may store), as in iOS Settings > General > Storage.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3780,7 +3735,7 @@
         }
       }
     },
-    "Take one to keep the guest’s data as it is now and go back to it later." : {
+    "Take one to keep the virtual machine’s data as it is now and go back to it later." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3890,28 +3845,6 @@
         }
       }
     },
-    "The guest asks to allow the computer the first time it connects. ADB turns off when the guest stops or USB debugging is turned off." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "コンピュータが初めて接続するときに、ゲストが許可を求めます。ゲストが停止するか、USBデバッグがオフになると、ADBはオフになります。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客户机会在电脑首次连接时请求允许。客户机停止或关闭 USB 调试后，ADB 会关闭。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "客體會在電腦首次連線時請求允許。客體停止或關閉 USB 偵錯後，ADB 會關閉。"
-          }
-        }
-      }
-    },
     "The next start updates it to %@." : {
       "comment" : "Follows the note above when a restore brings an older system back; %@ is the release.",
       "localizations" : {
@@ -3931,6 +3864,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "下次啟動時會將其更新到 %@。"
+          }
+        }
+      }
+    },
+    "The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "コンピュータが初めて接続するときに、ゲストが許可を求めます。ゲストが停止するか、USBデバッグがオフになると、ADBはオフになります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机会在电脑首次连接时请求允许。客户机停止或关闭 USB 调试后，ADB 会关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體會在電腦首次連線時請求允許。客體停止或關閉 USB 偵錯後，ADB 會關閉。"
           }
         }
       }
@@ -4045,7 +4000,7 @@
         }
       }
     },
-    "Turn on USB debugging in the guest’s Developer options to use ADB over network." : {
+    "Turn on USB debugging in the virtual machine’s Developer options to use ADB over network." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -4245,8 +4200,53 @@
         }
       }
     },
+    "Virtual machine" : {
+      "comment" : "Home section: the Android system the app runs (CPU, memory, storage, snapshots).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストシステム"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机系统"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體系統"
+          }
+        }
+      }
+    },
+    "Virtual machine data" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストのデータ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机数据"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體資料"
+          }
+        }
+      }
+    },
     "VRAM" : {
-      "comment" : "Graphics memory of the guest (video RAM).",
+      "comment" : "Graphics memory of the virtual machine (video RAM).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -4268,7 +4268,7 @@
         }
       }
     },
-    "VRAM is graphics memory, separate from the guest’s RAM." : {
+    "VRAM is graphics memory, separate from the virtual machine’s RAM." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
