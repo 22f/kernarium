@@ -22,6 +22,7 @@ enum SnapshotPreview {
         "snapshots-space", "snapshots-space-update", "snapshots-space-lower-bound",
         "snapshots-low-space", "snapshots-erase", "snapshots-blocked", "snapshots-backup",
         "snapshots-unfinished", "snapshots-unfinished-sheet", "snapshots-unavailable-running", "snapshots-failed",
+        "snapshots-unfinished-unknown", "snapshots-unfinished-unknown-sheet", "snapshots-taken-measuring",
     ]
 
     /// The device a screen needs instead of the idiom's own.
@@ -79,6 +80,9 @@ enum SnapshotPreview {
             seed.unfinishedRestore = SnapshotUnfinishedRestore(
                 snapshot: seed.items[3].id,
                 lastFailure: SnapshotFailure(POSIXError(.ENOSPC)))
+        case "snapshots-unfinished-unknown", "snapshots-unfinished-unknown-sheet":
+            // Which snapshot it was cannot be read.
+            seed.unfinishedRestore = SnapshotUnfinishedRestore()
         case "snapshots-failed":
             seed.failure = POSIXError(.EIO)
         default:
@@ -107,7 +111,7 @@ enum SnapshotPreview {
             model.planAfterRestore = .normal
         case "snapshots-restored-older":
             model.planAfterRestore = .update(from: PreviewData.previousSystemRelease, to: PreviewData.systemRelease)
-        case "snapshots-taken", "snapshots-failed", "snapshots-deleted":
+        case "snapshots-taken", "snapshots-failed", "snapshots-deleted", "snapshots-taken-measuring":
             model.snapshots.freshDuration = .seconds(3600)
         default:
             break
@@ -129,7 +133,7 @@ enum SnapshotPreview {
     static func applyDeferred(screen: String, to model: AppModel) async {
         guard screen.hasPrefix("snapshots"),
               !["snapshots-home-none", "snapshots-home", "snapshots-low-space", "snapshots-blocked",
-                "snapshots-backup", "snapshots-unfinished"].contains(screen)
+                "snapshots-backup", "snapshots-unfinished", "snapshots-unfinished-unknown"].contains(screen)
         else { return }
         let store = model.snapshots
         if screen == "snapshots-measuring" {
@@ -176,6 +180,11 @@ enum SnapshotPreview {
         case "snapshots-taken":
             // The real operation: the new snapshot comes first and is marked.
             await store.take(name: "Before installing games")
+        case "snapshots-taken-measuring":
+            // After an operation the figures give way to the measuring state
+            // until the disk is read again, which here takes an hour.
+            (model.snapshotDriver as? PreviewSnapshotDriver)?.setMeasuringLatency(.seconds(3600))
+            Task { await store.take(name: "Before installing games") }
         case "snapshots-failed":
             await store.take(name: "Before installing games")
         case "snapshots-deleted":

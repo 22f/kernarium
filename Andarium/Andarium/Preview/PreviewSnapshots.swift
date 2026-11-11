@@ -151,6 +151,12 @@ final class PreviewSnapshotDriver: SnapshotDriver {
         }
     }
 
+    /// Slows the measuring from now on, so a capture can show the figures
+    /// giving way to the measuring state after an operation.
+    func setMeasuringLatency(_ latency: Duration) {
+        seed.measuringLatency = latency
+    }
+
     var snapshotGate: SnapshotRefusal? {
         seed.gate ?? (activity.operation != nil ? .busy : nil)
     }
