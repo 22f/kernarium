@@ -631,6 +631,29 @@
         }
       }
     },
+    "Andarium’s unfinished update ends." : {
+      "comment" : "Added when restoring a snapshot ends the update that did not finish.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumの未完了のアップデートは終了します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium 未完成的更新将会结束。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium 未完成的更新將會結束。"
+          }
+        }
+      }
+    },
     "Android version" : {
       "localizations" : {
         "ja" : {
@@ -2863,6 +2886,52 @@
         }
       }
     },
+    "Replaces the guest’s current data with this snapshot, which is from %@." : {
+      "comment" : "%@ is the Android release the snapshot was taken with, as r20.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストの現在のデータを、%@のこのスナップショットで置き換えます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将用此快照（来自 %@）替换客户机当前的数据。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將以此快照（來自 %@）取代客體目前的資料。"
+          }
+        }
+      }
+    },
+    "Replaces the guest’s current data with this snapshot." : {
+      "comment" : "Beneath the Restore button of a snapshot.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストの現在のデータをこのスナップショットで置き換えます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将用此快照替换客户机当前的数据。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將以此快照取代客體目前的資料。"
+          }
+        }
+      }
+    },
     "Resize" : {
       "comment" : "Button that opens the sheet where the guest's storage is made larger.",
       "localizations" : {
@@ -3839,6 +3908,51 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "客體會在電腦首次連線時請求允許。客體停止或關閉 USB 偵錯後，ADB 會關閉。"
+          }
+        }
+      }
+    },
+    "The next start updates it to %@." : {
+      "comment" : "Follows the note above when a restore brings an older system back; %@ is the release.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "次回の起動時に%@へアップデートされます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下次启动时会将其更新到 %@。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下次啟動時會將其更新到 %@。"
+          }
+        }
+      }
+    },
+    "This can’t be undone." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この操作は取り消せません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此操作无法撤销。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此操作無法還原。"
           }
         }
       }
