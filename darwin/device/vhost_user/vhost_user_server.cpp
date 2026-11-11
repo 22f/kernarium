@@ -408,6 +408,16 @@ VhostUserServer::VhostUserServer(
     if (!device_ || device_->queueCount() == 0 ||
         device_->queueCount() > maximumQueueCount)
         throw std::invalid_argument("invalid vhost-user device queue count");
+    /* The shared-memory map or unmap a request raises waits for the
+     * front-end's acknowledgement (awaitBackendAcknowledgement), answering
+     * a GET_FEATURES meanwhile; that resets a device that keeps deferred
+     * requests and would release the request being run. A device with a
+     * shared-memory region therefore cannot keep them. */
+    if (device_->keepsDeferredRequestsWhileDisabled() &&
+        device_->sharedMemoryRegion())
+        throw std::invalid_argument(
+            "a vhost-user device that keeps deferred requests cannot "
+            "have a shared-memory region");
     device_->setGuestMapper([this](std::uint64_t address, std::size_t length) {
         auto* pointer = translate(address, length, false);
         return pointer ? std::span(pointer, length) : std::span<std::uint8_t>{};
@@ -1389,7 +1399,9 @@ void VhostUserServer::processQueue(std::uint32_t index)
              * a request's response only after the ring is enabled again. */
             if (requestSize == 0 && responseCapacity != 0)
                 break;
-            if (requestSize != 0 && device_->keepsRequestsOnDisabledRing())
+            if (requestSize != 0 &&
+                (device_->keepsRequestsOnDisabledRing() ||
+                 device_->keepsDeferredRequestsWhileDisabled()))
                 break;
             const PendingRequest disabled {
                 .requestId = 0,

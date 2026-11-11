@@ -142,9 +142,14 @@ public:
      * ring's layout or base, or ends the connection resets such a device
      * first, as does the GET_FEATURES that closes a driver's teardown.
      * Without it, disabling a ring while the device holds a request resets
-     * the device. A device that sets it also keeps the request buffers on a
-     * disabled ring (keepsRequestsOnDisabledRing()), since the guest can post
-     * one before the ring's enable reaches the transport. */
+     * the device. Setting it also keeps the request buffers on a disabled
+     * ring, as keepsRequestsOnDisabledRing() does, since the guest can post
+     * one before the ring's enable reaches the transport. Such a device
+     * raises no shared-memory map or unmap, the backend requests a request
+     * can make: the GET_FEATURES the transport answers while it waits for
+     * the acknowledgement would reset the device and release the request
+     * being run. A device that also names a shared-memory region is refused
+     * with std::invalid_argument when the server is built. */
     [[nodiscard]] virtual bool keepsDeferredRequestsWhileDisabled() const noexcept
     {
         return false;

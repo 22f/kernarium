@@ -19,6 +19,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -59,6 +61,7 @@ public:
     struct Options {
         bool keepsRequests {};
         bool answersKicksFirst {};
+        bool sharedMemory {};
     };
 
     explicit HoldingDevice(Options options) : options_(options)
@@ -87,6 +90,13 @@ public:
     [[nodiscard]] bool answersKicksBeforeRunning() const noexcept override
     {
         return options_.answersKicksFirst;
+    }
+    [[nodiscard]] std::optional<uml::virtio::VhostUserSharedMemoryRegion>
+        sharedMemoryRegion() const noexcept override
+    {
+        if (!options_.sharedMemory)
+            return std::nullopt;
+        return uml::virtio::VhostUserSharedMemoryRegion {.id = 0, .size = 1U << 16};
     }
 
     [[nodiscard]] VhostUserQueueResult processQueue(
@@ -823,6 +833,24 @@ void deviceThatDoesNotOptInIsResetAtTheDisable()
     });
 }
 
+/* A device that keeps deferred requests cannot also have a shared-memory
+ * region: the map or unmap a request raises waits for the front end's
+ * acknowledgement, and the GET_FEATURES answered meanwhile would reset the
+ * device under the request it is running. The server refuses the pair when it
+ * is built. Either alone is accepted. */
+void keepingDeviceWithSharedMemoryIsRefused()
+{
+    bool refused = false;
+    try {
+        VhostUserServer server {std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, true})};
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    require(refused, "a device that keeps deferred requests was given a shared-memory region");
+    VhostUserServer region {std::make_unique<HoldingDevice>(HoldingDevice::Options {false, false, true})};
+    VhostUserServer keeping {std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, false})};
+}
+
 } // namespace
 
 /* With a case's name as its argument, runs that case alone. */
@@ -850,6 +878,7 @@ int main(int argc, char** argv)
     cases.push_back({"teardown", teardownRetiresHeldRequestsAtTheFeaturesRequest});
     cases.push_back({"reset-drops-completion", resetDropsAHeldCompletion});
     cases.push_back({"no-opt-in", deviceThatDoesNotOptInIsResetAtTheDisable});
+    cases.push_back({"shared-memory-refused", keepingDeviceWithSharedMemoryIsRefused});
     try {
         for (const auto& test : cases) {
             if (argc > 1 && std::string {argv[1]} != test.name)
