@@ -13,7 +13,8 @@ if(UML_BUILD_NETWORK_PROVIDER)
         uml_slirp_icmp_tests
         uml_slirp_transmit_backpressure_tests
         uml_slirp_dns_tests
-        uml_slirp_dead_peer_tests)
+        uml_slirp_dead_peer_tests
+        uml_slirp_full_buffer_hangup_tests)
     set(_uml_slirp_probe_sources
         slirp_arp_probe.cpp
         slirp_forward_probe.cpp
@@ -25,7 +26,8 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp_icmp_probe.cpp
         slirp_transmit_backpressure_probe.cpp
         slirp_dns_probe.cpp
-        slirp_dead_peer_probe.cpp)
+        slirp_dead_peer_probe.cpp
+        slirp_full_buffer_hangup_probe.cpp)
     set(_uml_slirp_probe_tests
         slirp-network-arp
         slirp-network-forward-specification
@@ -37,9 +39,11 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp-network-icmp
         slirp-network-transmit-backpressure
         slirp-network-dns
-        slirp-network-dead-peer)
-    # The dead-peer probe runs five connections one after the other.
-    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60)
+        slirp-network-dead-peer
+        slirp-network-full-buffer-hangup)
+    # The dead-peer and full-buffer probes run five connections one after
+    # the other.
+    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 60)
     foreach(_uml_slirp_target _uml_slirp_source _uml_slirp_test
             _uml_slirp_timeout IN ZIP_LISTS
             _uml_slirp_probe_targets
