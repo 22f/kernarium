@@ -12,6 +12,22 @@ private nonisolated final class Counter: @unchecked Sendable {
     nonisolated(unsafe) var value = 0
 }
 
+/// A guest's storage work held at its last step, off the main actor, until
+/// the test lets it go.
+private nonisolated final class Hold: @unchecked Sendable {
+    private let reached = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+
+    /// Called from the work's progress report: says it is there and waits (at
+    /// most a minute, so that a test that fails does not hang).
+    func park() {
+        reached.signal()
+        _ = released.wait(timeout: .now() + 60)
+    }
+
+    func release() { released.signal() }
+}
+
 /// The runtime's gate on the snapshots: an operation that changes the data
 /// runs only while the guest is stopped, one at a time, and what else changes
 /// the guest's files waits for it. A guest on a temporary directory that has
@@ -239,6 +255,36 @@ struct SnapshotRuntimeTests {
         let created = try #require(reported.firstIndex(of: .create))
         let setUp = try #require(reported.firstIndex(of: .guestStorage))
         #expect(created < setUp)
+    }
+
+    /// A listing waits for a guest being erased, and a cancelled one does not:
+    /// it answers at once instead of polling on the main actor.
+    @Test(.timeLimit(.minutes(2))) func aCancelledListingDuringAnEraseAnswersAtOnce() async throws {
+        let fixture = try await SnapshotTestGuest.make()
+        defer { fixture.remove() }
+        let (runtime, model) = make(fixture)
+        defer { withExtendedLifetime(model) {} }
+        let hold = Hold()
+        let erasing = Task { @MainActor in try await runtime.erase(progress: { _ in hold.park() }) }
+        #expect(await untilTrue { runtime.activity.operation == .guestStorage })
+
+        let waiting = Task { @MainActor in await runtime.snapshotListing() }
+        let cancelled = Task { @MainActor in await runtime.snapshotListing() }
+        for _ in 0..<20 { await Task.yield() }
+        cancelled.cancel()
+        // The cancelled caller returns while the erase still holds the files.
+        let answer = await cancelled.value
+        #expect(runtime.activity.operation == .guestStorage)
+        #expect(!answer.isMeasured)
+        // The other one is still waiting for the erase.
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(runtime.activity.operation == .guestStorage)
+
+        hold.release()
+        try await erasing.value
+        let after = await waiting.value
+        #expect(after.items.isEmpty && after.isMeasured && after.revision == runtime.activity.revision)
+        #expect(runtime.activity.operation == nil)
     }
 
     /// A start prepares its files after a restore that is under way, and from
