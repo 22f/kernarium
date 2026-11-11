@@ -1,9 +1,9 @@
 {
   "default-configuration": "Release",
   "configurations": [
-    { "name": "AppStore", "file": "Config/Signing.xcconfig" },
-    { "name": "Debug", "file": "Config/Signing.xcconfig" },
-    { "name": "Release", "file": "Config/Signing.xcconfig" },
+    { "name": "AppStore", "file": "Config/Andarium.xcconfig" },
+    { "name": "Debug", "file": "Config/Andarium.xcconfig" },
+    { "name": "Release", "file": "Config/Andarium.xcconfig" },
   ],
   "localizations": {
     "development": "en",
@@ -35,7 +35,8 @@
         { "path": "Andarium-Bridging-Header.h" },
         { "path": "Info.plist" },
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
-        { "path": "../../GuestHost/Config/Signing.xcconfig" },
+        { "path": "Andarium.xcconfig" },
+        { "path": "Feedback.local.xcconfig.example" },
       ],
     }, {
       "kind": "group",
@@ -134,6 +135,7 @@
         ],
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
+        "INFOPLIST_KEY_AndariumFeedbackAddress": "$(FEEDBACK_ADDRESS)",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
         "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Apps running in Andarium use this to connect to devices on your local network, such as printers, media servers and computers, and ADB over network uses it to let a computer on your network connect to Andarium. Internet access doesn't need it.",
         "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it.",
@@ -274,6 +276,7 @@
         "ENABLE_PREVIEWS": "YES",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
+        "INFOPLIST_KEY_AndariumFeedbackAddress": "$(FEEDBACK_ADDRESS)",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
         "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "The Simulator preview asks for the location only when launched with -systemLocation YES, to show the permission flow.",
         "INFOPLIST_KEY_NSMicrophoneUsageDescription": "The Simulator preview asks for the microphone only when launched with -systemMicrophone YES, to show the permission flow.",

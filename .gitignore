@@ -45,9 +45,11 @@ __pycache__/
 # CMakePresets.json.
 CMakeUserPresets.json
 
-# The signer's Apple Developer team for Kernarium and Andarium. The tracked
-# example documents the one setting.
+# The signer's Apple Developer team for Kernarium and Andarium, and the address
+# that receives Andarium's Send feedback mail. Each tracked example documents
+# its one setting.
 /GuestHost/Config/Signing.local.xcconfig
+/Andarium/Config/Feedback.local.xcconfig
 
 # Per-line kernel source locations. The tracked examples document the required
 # format; real paths are host-specific and must name case-sensitive

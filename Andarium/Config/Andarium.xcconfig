@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Andarium's base settings: the shared signing settings, and what decides
+// whether Send feedback is compiled in.
+//
+// Send feedback exists only in an AppStore build whose maker has the ignored
+// Feedback.local.xcconfig beside this file (Feedback.local.xcconfig.example)
+// with a receiver address, so a fork, or a Debug or Release build, carries
+// none of it and no address. FEEDBACK_ADDRESS is that address in AppStore and
+// empty elsewhere; a non-empty one adds the FEEDBACK_MAIL compilation
+// condition and puts the address in Info.plist. The tests and the screen
+// captures state `FEEDBACK_ADDRESS=feedback@example.com` on the xcodebuild
+// command line to build the views into a Debug build; the bundle check
+// refuses any other address outside AppStore.
+
+#include "../../GuestHost/Config/Signing.xcconfig"
+
+FEEDBACK_RECEIVER =
+#include? "Feedback.local.xcconfig"
+
+FEEDBACK_ADDRESS =
+FEEDBACK_ADDRESS[config=AppStore] = $(FEEDBACK_RECEIVER)
+
+// An empty address names the setting FEEDBACK_ARRANGED_ and gets NO_FEEDBACK_MAIL;
+// any other lands on an undefined name and gets FEEDBACK_MAIL.
+FEEDBACK_ARRANGED_ = NO_FEEDBACK_MAIL
+FEEDBACK_CONDITION = $(FEEDBACK_ARRANGED_$(FEEDBACK_ADDRESS:identifier):default=FEEDBACK_MAIL)
+
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FEEDBACK_CONDITION)
