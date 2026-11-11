@@ -64,10 +64,11 @@ public protocol GamepadIndicators: AnyObject, Sendable {
 /// sent matters: the connection keeps nothing for a guest that is not reading.
 ///
 /// **In front.** iOS delivers a controller's input to the application in front
-/// only. Leaving the front sends each device one neutral report, so that
-/// nothing stays pressed, stops every rumble and keeps the devices; returning
-/// to it sends each device its state, which the application refreshes from the
-/// controllers.
+/// only. Leaving the front lets go of every controller's state (a device still
+/// being made is given the neutral state too), sends each device one neutral
+/// report, so that nothing stays pressed, stops every rumble and keeps the
+/// devices; returning to it sends each device its state, which the application
+/// refreshes from the controllers.
 ///
 /// **Rumble.** An output report of the guest's driver sets a motor's level
 /// until the next one; each motor plays as a tone of the haptics' vocabulary on
@@ -218,7 +219,11 @@ public final class GamepadSession: @unchecked Sendable {
                 return
             }
             let profile = GamepadProfiles.profile(family: controller.family, name: controller.name, elements: controller.elements)
-            slots[index] = Slot(controller: controller, profile: profile, encoder: profile.makeEncoder(), state: state)
+            // A controller that connects while the application is away holds
+            // nothing: its input is not the application's to give.
+            slots[index] = Slot(
+                controller: controller, profile: profile, encoder: profile.makeEncoder(),
+                state: foreground ? state : state.released)
             tableLock.withLock { table[index] = controller.id }
             createIfPossible(index)
         }
@@ -380,8 +385,10 @@ public final class GamepadSession: @unchecked Sendable {
 
     private func leaveFront() {
         guard stream != nil else { return }
+        // Every controller's state is let go of, a device that is still being
+        // made included: it is given the neutral state when it is ready.
         for index in slots.indices {
-            guard var slot = slots[index], slot.phase == .ready else { continue }
+            guard var slot = slots[index] else { continue }
             slot.state = slot.state.released
             slots[index] = slot
             sendNow(index)

@@ -398,6 +398,30 @@ struct GamepadSessionTests {
         #expect(!rig.player.calls.contains(.stopAll))
     }
 
+    @Test func aButtonHeldOnADeviceStillBeingMadeIsLetGoOfWhenTheApplicationLeaves() {
+        let rig = greeted()
+        let pad = dualSense(1)
+        rig.session.connect(pad, state: GamepadState(buttons: .south))
+        #expect(rig.guest.nextFrame() == createFrame(pad, slot: 0))
+        rig.session.update(running: true, booted: true, foreground: false)
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.event(slot: 0, event: .start))
+        // The device is ready while the application is away: it is told nothing is pressed.
+        guard case .input(0, let report)? = rig.guest.nextFrame() else { Issue.record("no report"); return }
+        #expect(report[8] & 0x20 == 0)
+        #expect(rig.wakes.count == 0)
+    }
+
+    @Test func aControllerThatConnectsWhileTheApplicationIsAwayHoldsNothing() {
+        let rig = greeted(foreground: false)
+        let pad = dualSense(1)
+        rig.session.connect(pad, state: GamepadState(buttons: .south))
+        #expect(rig.guest.nextFrame() == createFrame(pad, slot: 0))
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.event(slot: 0, event: .start))
+        #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(pad, .neutral)))
+    }
+
     @Test func nothingIsSentWhileNotInFrontAndTheStateIsSentOnReturn() {
         let rig = greeted()
         let pad = dualSense(1)
