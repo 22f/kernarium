@@ -62,14 +62,21 @@ struct LocalizationTests {
         }
     }
 
+    /// Each permission text of the Info.plist reads differently in each
+    /// language: the Info.plist's own value is the English text, and the
+    /// language's `InfoPlist.strings` must hold another.
     @Test(arguments: LocalizationTests.languages)
     func thePermissionTextsAreTranslated(language: String) throws {
         let path = try #require(Bundle.main.path(
             forResource: "InfoPlist", ofType: "strings", inDirectory: nil, forLocalization: language))
         let strings = try #require(NSDictionary(contentsOfFile: path) as? [String: String])
-        for key in ["NSLocalNetworkUsageDescription", "NSLocationWhenInUseUsageDescription", "NSMicrophoneUsageDescription"] {
+        let info = try #require(Bundle.main.infoDictionary)
+        let keys = info.keys.filter { $0.hasPrefix("NS") && $0.hasSuffix("UsageDescription") }.sorted()
+        try #require(!keys.isEmpty)
+        for key in keys {
+            let english = try #require(info[key] as? String, "\(key) is no text")
             let value = try #require(strings[key], "\(language) has no \(key)")
-            #expect(!value.isEmpty && !value.hasPrefix("Andarium "), "\(language) shows \(key) in English")
+            #expect(!value.isEmpty && value != english, "\(language) shows \(key) in English")
         }
     }
 }

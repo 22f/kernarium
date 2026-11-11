@@ -23,6 +23,12 @@ private enum Say {
         String(localized: LocalizedStringResource(
             value, locale: Locale(identifier: language), bundle: .atURL(resources)))
     }
+
+    /// A string that has a name for its key and the English as its default.
+    static func named(_ key: StaticString, _ value: String.LocalizationValue, in language: String) -> String {
+        String(localized: LocalizedStringResource(
+            key, defaultValue: value, locale: Locale(identifier: language), bundle: .atURL(resources)))
+    }
 }
 
 @Suite struct LocalizationTests {
@@ -49,23 +55,33 @@ private enum Say {
     }
 
     @Test func japaneseAndChineseCountVcpusWithoutPluralForms() {
-        #expect(Say.text("\(1) vCPUs", in: "ja") == "1 vCPU")
-        #expect(Say.text("\(6) vCPUs", in: "ja") == "6 vCPU")
-        #expect(Say.text("\(1) vCPUs", in: "zh-Hans") == "1 个 vCPU")
-        #expect(Say.text("\(6) vCPUs", in: "zh-Hans") == "6 个 vCPU")
-        #expect(Say.text("\(6) vCPUs", in: "zh-Hant") == "6 個 vCPU")
+        #expect(Say.text("\(1) vCPUs", in: "ja") == "1個のvCPU")
+        #expect(Say.text("\(6) vCPUs", in: "ja") == "6個のvCPU")
+        #expect(Say.text("\(1) vCPUs", in: "zh-Hans") == "1个vCPU")
+        #expect(Say.text("\(6) vCPUs", in: "zh-Hans") == "6个vCPU")
+        #expect(Say.text("\(6) vCPUs", in: "zh-Hant") == "6個vCPU")
     }
 
     @Test func sentencesAreSeparatedAsTheLanguageWritesThem() {
         let first = "First.", second = "Second."
-        #expect(Say.text("\(first) \(second)", in: "en") == "First. Second.")
+        #expect(Say.named("sentence.join", "\(first) \(second)", in: "en") == "First. Second.")
         for language in ["ja", "zh-Hans", "zh-Hant"] {
-            #expect(Say.text("\(first) \(second)", in: language) == "First.Second.", "\(language)")
+            #expect(Say.named("sentence.join", "\(first) \(second)", in: language) == "First.Second.", "\(language)")
         }
+    }
+
+    @Test func spokenListsAreSeparatedAsTheLanguageWritesThem() {
+        let first = "One", second = "Two"
+        #expect(Say.named("list.join", "\(first), \(second)", in: "en") == "One, Two")
+        #expect(Say.named("list.join", "\(first), \(second)", in: "ja") == "One、Two")
+        #expect(Say.named("list.join", "\(first), \(second)", in: "zh-Hans") == "One，Two")
+        #expect(Say.named("list.join", "\(first), \(second)", in: "zh-Hant") == "One，Two")
     }
 
     @Test func joiningNothingOrOneSentenceAddsNothing() {
         #expect(Sentences.join([]) == "")
         #expect(Sentences.join("Only.") == "Only.")
+        #expect(ListWords.join([]) == "")
+        #expect(ListWords.join(["Only"]) == "Only")
     }
 }
