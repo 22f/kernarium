@@ -209,9 +209,11 @@ uml_add_guest_integration_test(
 # (the stream carries on, the zoom is written again, the sequences keep
 # rising) and against one that is late to stop a stream (the driver destroys
 # the stream, so the buffers it gives back are never written again, and the
-# late clears fall due with the rings disabled and are not lost). No switch in
-# a production target can do either, so the device is the production one behind
-# the delayed-answer shim, which resets it or holds its requests.
+# late clears fall due with the rings disabled and are not lost), and against
+# one that is late to both the clear and the destroy (the buffers stay with the
+# device, and the stop waits for it). No switch in a production target can do
+# any of these, so the device is the production one behind the delayed-answer
+# shim, which resets it or holds its requests.
 if(TARGET UML::CameraSource AND TARGET UML::SyntheticCamera)
     uml_add_freestanding_cxx_payload(UML_GUEST_CAMERA_RESET_INIT
         guest-video-camera-reset-init
@@ -233,7 +235,7 @@ if(TARGET UML::CameraSource AND TARGET UML::SyntheticCamera)
     add_dependencies(integration-test-binaries uml_camera_reset_tests)
     get_target_property(_uml_camera_reset_kernel
         "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}" UML_KERNEL_IMAGE)
-    foreach(_case IN ITEMS reset slow-clear)
+    foreach(_case IN ITEMS reset slow-clear slow-stop)
         uml_add_integration_test(
             NAME guest-video-camera-${_case}
             COMMAND uml_camera_reset_tests

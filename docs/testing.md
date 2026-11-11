@@ -172,9 +172,9 @@ by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
 disable. A driver path that only a misbehaving device reaches, such as a device
 that was reset during a suspend (`guest-video-camera-reset`) or is late to stop
-a stream (`guest-video-camera-slow-clear`), is reached by serving the guest the
-production device behind the test-only shim of `tests/support/vhost_user`; no
-production target carries a switch for it.
+a stream (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is
+reached by serving the guest the production device behind the test-only shim of
+`tests/support/vhost_user`; no production target carries a switch for it.
 A test that needs what only an earlier session leaves behind boots more than
 once: `guest-v4l2-capture` first lets the host learn the synthetic camera's
 colour data into a calibration directory of the run, because Bayer stills are

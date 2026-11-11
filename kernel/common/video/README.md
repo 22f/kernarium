@@ -14,8 +14,8 @@ ordinary checks use `sync-protocol.py --kernel-source PATH --verify`. Never edit
 generated patch output. A change to the driver runs `guest-v4l2-decode`,
 `guest-v4l2-encode`, `guest-video-teardown`, `guest-v4l2-capture`,
 `guest-v4l2-capture-blocked`, `guest-v4l2-capture-suspend` and the camera's
-reset cases (`guest-video-camera-reset`, `guest-video-camera-slow-clear`)
-before a kernel release.
+reset cases (`guest-video-camera-reset`, `guest-video-camera-slow-clear`,
+`guest-video-camera-slow-stop`) before a kernel release.
 
 `virtio_video_v4l2_ids.h` lists the V4L2 numbers the host uses, one
 `#define UML_<kernel symbol> <number>` per value. `sync-protocol.py` checks each
@@ -177,6 +177,17 @@ streams, and a metadata node, for its meta streams.
   sequences from the start again after a reset, so the driver adds an offset to
   every sequence of a camera, frames and metadata alike, and the sequences the
   client sees keep rising.
+- **Stopping a stream.** A file's buffers go back to the client only once the
+  device cannot write them any more. The driver sends the stream's clear and
+  waits for it; when the device is late the driver destroys the stream, and
+  goes on waiting for the buffers, without a limit, in steps of five seconds
+  that each log a warning, because the device completes every buffer it holds
+  when it processes either command. A removal of the device ends the wait.
+- **Queued buffers.** The device holds at most 96 buffers at once, of every
+  kind and every camera, which leaves 64 of the command queue's 256
+  descriptors to commands. The Android HAL queues at most 26 for a camera in
+  use (16 metadata buffers and two for each of five streams). A buffer over the
+  budget completes as failed at once.
 
 ### Guest nodes
 
@@ -191,9 +202,11 @@ checks the contract on the synthetic camera, live and blocked, and
 across a suspend by either route, with no failed buffer and no device reset.
 `guest-video-camera-reset` makes the host forget every stream during a suspend
 and checks that the stream carries on, the zoom is applied again and the
-sequences keep rising, and `guest-video-camera-slow-clear` delays the host's
+sequences keep rising, `guest-video-camera-slow-clear` delays the host's
 processing of a stream's clear past the driver's wait and checks that no
-buffer is written once the client has it.
+buffer is written once the client has it, and `guest-video-camera-slow-stop`
+delays both the clear and the stream's destruction and checks that the stop
+returns the buffers only after the device did its work.
 
 - **Files and streams.** Opening a node starts nothing. A file creates its host
   stream when it sets a format or asks for buffers, so two files of one node

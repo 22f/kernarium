@@ -28,10 +28,18 @@
  *               suspended, with its rings disabled, and the device must not be
  *               reset by that: every answer is still delivered afterwards.
  *
+ *   slow-stop   The device hears of a stream's QUEUE_CLEAR twelve seconds late
+ *               and of the STREAM_DESTROY the driver sends after its wait just
+ *               as late, with the buffers still at the device (a metadata
+ *               stream with no exposure to fill them). Both of the driver's
+ *               waits run out, and the buffers must still not go back to the
+ *               client until the device has done its work: the stop returns
+ *               only once the clear has reached the device.
+ *
  * A process boots one guest, so the run is a child process of this one, with
  * its console in a log the parent then checks.
  *
- *   uml_camera_reset_tests KERNEL INIT SCRATCH reset|slow-clear
+ *   uml_camera_reset_tests KERNEL INIT SCRATCH reset|slow-clear|slow-stop
  */
 #include "uml/emulator.h"
 
@@ -81,6 +89,10 @@ using uml::testing::DelayedAnswerDevice;
 /* The driver waits five seconds for a stream's clear. */
 constexpr auto slow_clear = 7000ms;
 
+/* Past the clear's wait, and past the destroy's: the stop is still waiting for
+ * the device when the clear reaches it. */
+constexpr auto slow_stop = 12000ms;
+
 /* The synthetic camera stamps every frame this long before it delivers it, so
  * a frame's age is known: the init checks that the buffers' timestamps are at
  * least this far behind the time they are dequeued, which a driver that did
@@ -101,6 +113,8 @@ constexpr std::string_view failures[]{
 constexpr char reset_line[] = "the device was reset: restoring the streams";
 constexpr char destroyed_line[] =
 	"the device did not stop a stream in time: destroying it";
+constexpr char waiting_line[] =
+	"still waiting for the device to give back a stream's buffers";
 
 /* The guest process, which a timed-out CTest's interrupt must not orphan. */
 volatile sig_atomic_t guest_process = 0;
@@ -146,6 +160,8 @@ const char *command_name(std::uint32_t type)
 
 bool is_reset_case(std::string_view name) { return name == "reset"; }
 
+bool is_stop_case(std::string_view name) { return name == "slow-stop"; }
+
 /* What the shim does for the case, shared with its callbacks. */
 struct Trigger final {
 	std::atomic<DelayedAnswerDevice *> shim {};
@@ -170,6 +186,7 @@ std::optional<virtio_video_cmd_hdr> command(std::uint32_t queue,
 	const std::string &scratch, std::string_view which)
 {
 	const bool reset_case = is_reset_case(which);
+	const bool stop_case = is_stop_case(which);
 	const auto kernel = read_file(kernel_path);
 	const uml_emulator_config config{
 		.abi_version = UML_EMULATOR_ABI_VERSION,
@@ -197,7 +214,11 @@ std::optional<virtio_video_cmd_hdr> command(std::uint32_t queue,
 	archive.addHostFile("/init", init_path, 0755);
 	std::vector<std::byte> alarm_bytes(alarm.size());
 	std::memcpy(alarm_bytes.data(), alarm.data(), alarm.size());
-	archive.addFile("/alarm", alarm_bytes, 0644, 0);
+	/* The stop case does not suspend: its init finds /stop instead. */
+	if (stop_case)
+		archive.addFile("/stop", std::vector<std::byte>{}, 0644, 0);
+	else
+		archive.addFile("/alarm", alarm_bytes, 0644, 0);
 	(void)::unlink(initrd.c_str());
 	uml::boot::writeNewFile(initrd, archive.serialize());
 	const int descriptor = ::open(disk.c_str(),
@@ -209,7 +230,7 @@ std::optional<virtio_video_cmd_hdr> command(std::uint32_t queue,
 	auto trigger = std::make_shared<Trigger>();
 	uml::gpu::InProcessVhostUserService service{
 		"Virtio camera", "uml-camera",
-		[trigger, reset_case] {
+		[trigger, reset_case, stop_case] {
 			uml::camera::CameraDeviceOptions options;
 			uml::platform::SyntheticCameraOptions camera;
 			camera.profile = uml::platform::SyntheticCameraProfile::tablet;
@@ -252,16 +273,22 @@ std::optional<virtio_video_cmd_hdr> command(std::uint32_t queue,
 				});
 			if (!reset_case)
 				shim->setPostponer(
-					[](std::uint32_t queue, std::span<const std::uint8_t> request)
+					[stop_case](std::uint32_t queue,
+						std::span<const std::uint8_t> request)
 						-> std::optional<std::chrono::milliseconds> {
 						if (queue != 0 ||
 						    request.size() < sizeof(virtio_video_cmd_hdr))
 							return std::nullopt;
 						const auto header =
 							uml::virtio::fromBytes<virtio_video_cmd_hdr>(request);
-						if (header.type != VIRTIO_VIDEO_CMD_QUEUE_CLEAR)
-							return std::nullopt;
-						return slow_clear;
+						if (header.type == VIRTIO_VIDEO_CMD_QUEUE_CLEAR)
+							return stop_case ? slow_stop : slow_clear;
+						/* The destroy the driver sends once its wait for
+						 * the clear has run out is as late. */
+						if (stop_case &&
+						    header.type == VIRTIO_VIDEO_CMD_STREAM_DESTROY)
+							return slow_stop;
+						return std::nullopt;
 					});
 			trigger->shim = shim.get();
 			return shim;
@@ -312,6 +339,7 @@ int run_driver(const char *self, const char *kernel_path,
 	const char *init_path, const std::string &scratch, std::string_view which)
 {
 	const bool reset_case = is_reset_case(which);
+	const bool stop_case = is_stop_case(which);
 	if (::mkdir(scratch.c_str(), 0700) != 0 && errno != EEXIST)
 		throw std::runtime_error{"cannot create " + scratch};
 	const std::string log_path = scratch + "/guest.log";
@@ -363,30 +391,40 @@ int run_driver(const char *self, const char *kernel_path,
 		if (log.find(failure) != std::string::npos)
 			problems.push_back("the guest printed \"" +
 				std::string{failure} + "\"");
-	for (const auto expected : {"CAMRESET streaming", "CAMRESET suspending", "CAMRESET ages",
-		     "PM: suspend entry", "PM: suspend exit",
-		     "CAMRESET resumed result=3", "CAMRESET after ",
-		     "CAMRESET streamoff ", "CAMRESET PASS"})
-		if (log.find(expected) == std::string::npos)
-			problems.push_back(std::string{"missing \""} + expected + "\"");
+	if (stop_case) {
+		for (const auto expected : {"CAMRESET holding", "CAMRESET streamoff ",
+			     "CAMRESET PASS"})
+			if (log.find(expected) == std::string::npos)
+				problems.push_back(std::string{"missing \""} + expected + "\"");
+	} else {
+		for (const auto expected : {"CAMRESET streaming", "CAMRESET suspending", "CAMRESET ages",
+			     "PM: suspend entry", "PM: suspend exit",
+			     "CAMRESET resumed result=3", "CAMRESET after ",
+			     "CAMRESET streamoff ", "CAMRESET PASS"})
+			if (log.find(expected) == std::string::npos)
+				problems.push_back(std::string{"missing \""} + expected + "\"");
+	}
 	if (log.find("CAMRESET FAIL") != std::string::npos)
 		problems.push_back("the guest reported a failure");
 
-	/* What the client saw, whichever the case. */
-	const std::string after = "CAMRESET after";
-	for (const auto key : {"errors", "wrongzoom", "frameregressions",
-		     "recordregressions", "recorderrors"})
-		if (field(log, after, key) != 0)
-			problems.push_back(std::string{"after the suspend: "} + key +
-				"=" + std::to_string(field(log, after, key)));
-	if (field(log, after, "matched") < 3)
-		problems.push_back("after the suspend: only " +
-			std::to_string(field(log, after, "matched")) +
-			" frames have a metadata record of their sequence");
-	if (field(log, "CAMRESET ages", "young") != 0 || field(log, "CAMRESET ages", "aged") < 20)
-		problems.push_back("the frames' timestamps do not show the capture age (" +
-			std::to_string(field(log, "CAMRESET ages", "young")) + " young, " +
-			std::to_string(field(log, "CAMRESET ages", "aged")) + " aged)");
+	if (!stop_case) {
+		/* What the client saw, whichever the case. */
+		const std::string after = "CAMRESET after";
+		for (const auto key : {"errors", "wrongzoom", "frameregressions",
+			     "recordregressions", "recorderrors"})
+			if (field(log, after, key) != 0)
+				problems.push_back(std::string{"after the suspend: "} + key +
+					"=" + std::to_string(field(log, after, key)));
+		if (field(log, after, "matched") < 3)
+			problems.push_back("after the suspend: only " +
+				std::to_string(field(log, after, "matched")) +
+				" frames have a metadata record of their sequence");
+		if (field(log, "CAMRESET ages", "young") != 0 ||
+		    field(log, "CAMRESET ages", "aged") < 20)
+			problems.push_back("the frames' timestamps do not show the capture age (" +
+				std::to_string(field(log, "CAMRESET ages", "young")) + " young, " +
+				std::to_string(field(log, "CAMRESET ages", "aged")) + " aged)");
+	}
 	if (field(log, "CAMRESET streamoff", "overwritten") != 0)
 		problems.push_back("a buffer the client had got back was written: " +
 			std::to_string(field(log, "CAMRESET streamoff", "overwritten")) +
@@ -410,6 +448,38 @@ int run_driver(const char *self, const char *kernel_path,
 		if (stopped_in < 0 || stopped_in >= 3000)
 			problems.push_back("STREAMOFF took " + std::to_string(stopped_in) +
 				" ms with a device that answers at once");
+	} else if (stop_case) {
+		const auto postponed = count_of(log, "shim postponed a request for");
+		const auto handed = count_of(log, "shim handed a postponed request");
+		const auto waiting = count_of(log, waiting_line);
+		/* The clear, then the destroy sent after the clear's wait. */
+		if (postponed < 2)
+			problems.push_back("only " + std::to_string(postponed) +
+				" requests were postponed (a clear and a destroy)");
+		if (handed < 1)
+			problems.push_back("the postponed clear never reached the device");
+		if (destroyed < 1)
+			problems.push_back("the stream was not destroyed after its clear "
+				"timed out");
+		if (waiting < 1)
+			problems.push_back("the stop did not say that it went on waiting");
+		/* The destroy is still held when the guest powers off, and the
+		 * device's reset then drops it; a drop before the run is over
+		 * would lose a request the test depends on. */
+		const auto dropped = log.find("shim reset dropped");
+		if (dropped != std::string::npos && dropped < log.find("CAMRESET PASS"))
+			problems.push_back("a reset dropped requests the device held");
+		if (resets != 0 || forced != 0)
+			problems.push_back("the device was reset");
+		/* A stop that gave the buffers back after the clear's wait and the
+		 * destroy's (ten seconds) would return before the clear reached the
+		 * device. */
+		if (stopped_in < 11000)
+			problems.push_back("STREAMOFF took " + std::to_string(stopped_in) +
+				" ms: the buffers went back before the device did its work");
+		if (stopped_in > 40000)
+			problems.push_back("STREAMOFF took " + std::to_string(stopped_in) +
+				" ms, long after the device did its work");
 	} else {
 		const auto postponed = count_of(log, "shim postponed a request for");
 		const auto handed = count_of(log, "shim handed a postponed request");
@@ -436,10 +506,14 @@ int run_driver(const char *self, const char *kernel_path,
 	}
 
 	if (problems.empty()) {
-		std::printf("camera %s: the stream carried on across the suspend "
-			    "(%s)\n", case_name.c_str(),
-			    reset_case ? "the device was reset meanwhile" :
-					 "the device was slow to stop a stream");
+		if (stop_case)
+			std::printf("camera %s: the buffers stayed with the device "
+				    "until it did its work\n", case_name.c_str());
+		else
+			std::printf("camera %s: the stream carried on across the suspend "
+				    "(%s)\n", case_name.c_str(),
+				    reset_case ? "the device was reset meanwhile" :
+						 "the device was slow to stop a stream");
 		return 0;
 	}
 	for (const auto &problem : problems)
@@ -459,9 +533,11 @@ int main(int argc, char **argv)
 		if (argc == 6 && std::string_view{argv[1]} == "--child")
 			run_child(argv[2], argv[3], argv[4], argv[5]);
 		if (argc != 5 || (std::string_view{argv[4]} != "reset" &&
-				  std::string_view{argv[4]} != "slow-clear")) {
+				  std::string_view{argv[4]} != "slow-clear" &&
+				  std::string_view{argv[4]} != "slow-stop")) {
 			std::fprintf(stderr,
-				"usage: %s KERNEL INIT SCRATCH reset|slow-clear\n", argv[0]);
+				"usage: %s KERNEL INIT SCRATCH reset|slow-clear|slow-stop\n",
+				argv[0]);
 			return 2;
 		}
 		return run_driver(argv[0], argv[1], argv[2], argv[3], argv[4]);

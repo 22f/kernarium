@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Freestanding arm64/Linux /init of guest-video-camera-reset and
-// guest-video-camera-slow-clear.
+// Freestanding arm64/Linux /init of guest-video-camera-reset,
+// guest-video-camera-slow-clear and guest-video-camera-slow-stop.
 //
 // The init streams the first camera's video next to its metadata, with the
 // zoom written, suspends the guest from /sys/power/state with an RTC alarm
@@ -18,6 +18,13 @@
 // either made the device forget every stream during the suspend, or held the
 // device's processing of a stream's clear past the driver's wait. The host
 // reads the "CAMRESET" lines this prints, and the kernel's own, from the log.
+//
+// The slow-stop case (the host's /stop file) does not suspend. Only the
+// metadata node streams, so no exposure fills its buffers and the device holds
+// them until it processes the stream's clear, which the host delays past every
+// wait of the driver's. The time STREAMOFF takes says whether the buffers went
+// back before the device did its work, and a pattern the client writes into
+// them afterwards must stay whole.
 
 namespace {
 
@@ -642,6 +649,40 @@ bool read_alarm(char *into, unsigned long room)
 	return true;
 }
 
+/* The slow-stop case: the metadata node alone, its buffers held by the device. */
+[[noreturn]] void run_slow_stop()
+{
+	for (int attempt = 0; attempt < 600 && !exists("/dev/video11"); ++attempt)
+		sleep_ms(100);
+	if (!open_node(metadata, "/dev/video11", buf_type_meta_capture))
+		fail("no metadata node");
+	if (!allocate(metadata, 4))
+		fail("REQBUFS");
+	for (unsigned i = 0; i < metadata.count; i++)
+		if (!queue(metadata, i))
+			fail("QBUF metadata");
+	if (!stream(metadata, true))
+		fail("STREAMON");
+	say("holding");
+	/* No video stream runs, so no record may come. */
+	sleep_ms(1500);
+	Dequeued record;
+	if (dequeue(metadata, record) != 0)
+		fail("a record came with no exposure");
+
+	const long stop = now_ms();
+	if (!stream(metadata, false))
+		fail("STREAMOFF metadata");
+	const long stopped = now_ms() - stop;
+	fill(metadata);
+	sleep_ms(3000);
+	const unsigned long overwritten = changed(metadata);
+	Line().text("CAMRESET streamoff ms=").number(stopped)
+		.text(" overwritten=").number(static_cast<long>(overwritten)).write();
+	say(overwritten == 0 ? "PASS" : "FAILED");
+	power_off();
+}
+
 } // namespace
 
 extern "C" void *memset(void *d, int c, unsigned long n)
@@ -669,6 +710,8 @@ extern "C" [[noreturn]] void _start()
 	sys(nr_mount, ptr("sysfs"), ptr("/sys"), ptr("sysfs"), 0, 0);
 	console = sys(nr_openat, at_fdcwd, ptr("/dev/console"), o_wronly);
 	say("started");
+	if (exists("/stop"))
+		run_slow_stop();
 
 	/* The first camera's capture and metadata nodes. */
 	for (int attempt = 0; attempt < 600 && !(exists("/dev/video10") &&
