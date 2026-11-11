@@ -520,8 +520,10 @@ PRODUCT_PACKAGES += KernariumWifiOverlay
 PRODUCT_PACKAGES += KernariumPinnerOverlay
 
 # Once boot completes, a script saves the virtual Wi-Fi network (VirtWifi, open)
-# the first time only. It does not turn Wi-Fi on, and a network the user forgets
-# stays forgotten. It runs from system_ext in a core domain of its own.
+# the first time, and saves it again on a boot before the station first joins it
+# that finds Wi-Fi on and nothing joined. It does not turn Wi-Fi on, and a network
+# the user forgets stays forgotten. It runs from system_ext in a core domain of
+# its own.
 PRODUCT_PACKAGES += kernarium_wifi_network_script
 
 # Cached apps the system starts at boot (privacy sandbox, backup, key
