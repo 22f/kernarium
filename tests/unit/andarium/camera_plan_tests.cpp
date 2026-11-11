@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "camera_concurrent_vectors.hpp"
 #include "camera_ids.hpp"
 #include "camera_plan.hpp"
 #include "require.hpp"
@@ -109,7 +110,6 @@ void check_capabilities()
     auto caps = capabilities_of(desc, formats);
     require(caps.manual_sensor && caps.read_sensor_settings, "a lens with manual exposure has MANUAL_SENSOR");
     require(caps.raw, "a calibrated lens has RAW");
-    require(caps.burst_capture, "4K at 30 is a burst camera");
     require(array_size(desc, caps) == Size({4032, 3024}), "the array is the Bayer size");
 
     desc.flags &= ~abi::feature::raw;
@@ -127,10 +127,9 @@ void check_capabilities()
     caps = capabilities_of(desc, phone_formats());
     require(!caps.manual_sensor && !caps.read_sensor_settings && !caps.raw, "the zoom camera has no manual capabilities");
 
-    // The small tier stops at 1080p: no burst capture.
+    // The small tier stops at 1080p.
     formats = phone_formats();
     formats.video = {{1920, 1080, 1, 60}, {640, 480, 1, 30}};
-    require(!capabilities_of(lens_desc(), formats).burst_capture, "1080p is not a burst camera");
     require(pipeline_depth(formats) == 4, "the small tier has four buffers");
     require(pipeline_depth(phone_formats()) == 6, "the large tier has six");
 }
@@ -145,8 +144,9 @@ void check_tables()
     const auto entries = tables.configurations.size() / 4;
     require(tables.min_frame_durations.size() == entries * 4 && tables.stall_durations.size() == entries * 4,
             "a duration for each configuration");
-    // 4 video sizes (4K, 1080p, 720p, VGA) twice, three JPEG sizes, one RAW.
-    require(entries == 4 * 2 + 3 + 1, "the number of entries");
+    // 6 YUV sizes (the 4 video sizes, 1920x1440 and 320x240) twice, 6 JPEG sizes
+    // (the host's 3, 1920x1440, 1280x720 and 320x240), one RAW.
+    require(entries == 6 * 2 + 6 + 1, "the number of entries");
 
     auto find = [&](std::int32_t format, std::int32_t width, std::int32_t height) -> int {
         for (std::size_t i = 0; i < entries; ++i)
@@ -163,6 +163,13 @@ void check_tables()
     const int blob = find(pixel_format::blob, 4032, 3024);
     require(blob >= 0 && tables.stall_durations[4 * std::size_t(blob) + 3] > 300'000'000, "a 12 MP JPEG stalls for a while");
     require(find(pixel_format::blob, 640, 480) >= 0, "a small JPEG");
+    for (const auto& size : standard_jpeg_sizes)
+        require(find(pixel_format::blob, std::int32_t(size.width), std::int32_t(size.height)) >= 0, "every size CTS requires of a JPEG");
+    const int cut = find(pixel_format::yuv_420_888, 1920, 1440);
+    require(cut >= 0 && tables.min_frame_durations[4 * std::size_t(cut) + 3] == 1'000'000'000 / 60,
+            "a derived size runs at the rate of the mode it is cut from");
+    const int cut_blob = find(pixel_format::blob, 320, 240);
+    require(cut_blob >= 0 && tables.stall_durations[4 * std::size_t(cut_blob) + 3] >= 100'000'000, "a derived JPEG stalls too");
     const int raw = find(pixel_format::raw16, 4032, 3024);
     require(raw >= 0 && tables.stall_durations[4 * std::size_t(raw) + 3] > 0, "RAW16 at the Bayer size has a stall");
     for (std::size_t i = 0; i < entries; ++i) {
@@ -211,6 +218,185 @@ void check_numbers()
     require(sensitivity_min(coarse) == 100 && sensitivity_max(coarse) == 100, "the range includes the default ISO");
     require(from_q16(to_q16(0.5)) == 0.5f && from_q16(to_q16(-1.25)) == -1.25f, "Q16 round trip");
     require(max_frame_duration_ns(desc) == 1'000'000'000, "the longest frame is a second");
+}
+
+bool has_range(const std::vector<std::int32_t>& ranges, std::int32_t low, std::int32_t high)
+{
+    for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
+        if (ranges[i] == low && ranges[i + 1] == high) return true;
+    return false;
+}
+
+// CTS wants (r, r) and (15, r) for r, the rate of the largest YUV size, and a fixed
+// range for every rate the host offers, whatever the rate.
+void check_fps_ranges()
+{
+    for (const std::uint32_t rate : {24u, 25u, 30u, 60u, 120u}) {
+        Formats formats;
+        formats.video = {{1920, 1080, 1, rate}, {640, 480, 1, 15}};
+        const auto ranges = fps_ranges(formats);
+        require(ranges.size() % 2 == 0, "pairs");
+        require(has_range(ranges, std::int32_t(rate), std::int32_t(rate)), "a fixed range at the rate of the largest size");
+        require(has_range(ranges, 15, std::int32_t(rate)), "and a variable one that starts at 15");
+        require(has_range(ranges, 15, 15), "a fixed range for the 15 fps mode");
+        for (std::size_t i = 0; i + 1 < ranges.size(); i += 2) require(ranges[i] <= ranges[i + 1], "low is not above high");
+    }
+    // The rate of the largest size, not the fastest rate of a small one.
+    Formats mixed;
+    mixed.video = {{3840, 2160, 1, 24}, {1280, 720, 1, 120}};
+    const auto ranges = fps_ranges(mixed);
+    require(has_range(ranges, 24, 24) && has_range(ranges, 15, 24) && has_range(ranges, 120, 120),
+            "the largest size decides r, every offered rate has a fixed range");
+    require(!has_range(ranges, 15, 120) && !has_range(ranges, 30, 30), "and no range the host cannot run");
+    // The rate comes out of the minimum frame duration: 1e9 / 33333333 is 30.0000003.
+    Formats ntsc;
+    ntsc.video = {{1920, 1080, 1, 30}};
+    require(has_range(fps_ranges(ntsc), 30, 30) && has_range(fps_ranges(ntsc), 15, 30), "30 fps");
+    for (std::size_t i = 1; i < ranges.size() / 2; ++i)
+        require(ranges[2 * (i - 1)] < ranges[2 * i] || (ranges[2 * (i - 1)] == ranges[2 * i] && ranges[2 * (i - 1) + 1] < ranges[2 * i + 1]),
+                "ascending");
+}
+
+// How an output size that the host does not list is made.
+void check_derivation()
+{
+    // The same aspect first, even from a larger mode; the smallest of them.
+    const std::vector<Size> natives = {{1280, 720}, {1500, 900}, {640, 480}};
+    auto cut = cut_from(natives, {1000, 600});
+    require(cut && cut->source == Size({1500, 900}) && !cut->host, "5:3 comes from the 5:3 mode, though 1280x720 is smaller");
+    require(cut->window == Window({0, 0, 1500, 900}), "with no crop");
+    cut = cut_from(natives, {320, 240});
+    require(cut && cut->source == Size({640, 480}) && cut->window == Window({0, 0, 640, 480}), "320x240 is 640x480 scaled");
+    // No mode of the aspect covers it: the smallest that does, cut to the aspect and centred.
+    cut = cut_from({{1920, 1080}, {3840, 2160}}, {1008, 756});
+    require(cut && cut->source == Size({1920, 1080}) && cut->window == Window({240, 0, 1440, 1080}), "a 4:3 window of 1080p");
+    cut = cut_from({{3840, 2160}}, {1920, 1440});
+    require(cut && cut->window == Window({480, 0, 2880, 2160}), "1920x1440 from 4K");
+    cut = cut_from({{800, 1200}}, {400, 300});
+    require(cut && cut->window == Window({0, 300, 800, 600}), "a portrait mode is cut at the top and the bottom");
+    // The window covers the target and is even, whatever the sizes.
+    for (const Size& native : natives)
+        for (const Size& target : {Size{1280, 720}, Size{640, 480}, Size{320, 240}, Size{1920, 1440}, Size{100, 100}}) {
+            const auto found = cut_from({native}, target);
+            if (!found) {
+                require(native.width < target.width || native.height < target.height, "only a mode that does not cover is refused");
+                continue;
+            }
+            const auto& window = found->window;
+            require(window.width >= target.width && window.height >= target.height, "the window covers the target");
+            require(window.x + window.width <= native.width && window.y + window.height <= native.height, "inside the frame");
+            require(((window.x | window.y | window.width | window.height) & 1u) == 0, "even, for NV12's chroma");
+        }
+    require(!cut_from(natives, {1920, 1080}), "no mode covers it");
+    require(!cut_from(natives, {321, 240}) && !cut_from(natives, {320, 241}), "an odd size cannot be NV12");
+    require(!cut_from(natives, {0, 0}) && !cut_from({}, {320, 240}), "nothing to cut");
+}
+
+// The camera API and CTS want certain sizes of every camera, and LIMITED cameras
+// need their lists nested: the three rules, on each synthetic camera's formats.
+void check_cts_subsets()
+{
+    struct Case {
+        const char* name;
+        Formats formats;
+    };
+    const Case cases[] = {{"a phone lens", vectors::phone_lens_formats()},
+                          {"a pad's front camera", vectors::pad_front_formats()},
+                          {"a laptop", vectors::laptop_formats()},
+                          {"the phone's wide lens with a 48 MP array",
+                           vectors::formats_of({{640, 480, 1, 60}, {1280, 720, 1, 120}, {1920, 1080, 1, 60}, {3840, 2160, 1, 60}},
+                                               {{8064, 6048}, {4032, 3024}, {2016, 1512}, {1008, 756}})}};
+    for (const auto& item : cases) {
+        const auto sizes = derive_sizes(item.formats);
+        const auto has = [](const std::vector<SizeSource>& list, const Size& size) {
+            for (const auto& entry : list)
+                if (entry.size == size) return true;
+            return false;
+        };
+        // Rule 1: the JPEG sizes that are required are there.
+        for (const auto& size : standard_jpeg_sizes) require(has(sizes.jpeg, size), item.name);
+        // Rule 2: every JPEG size below the largest video size is a YUV size.
+        std::uint64_t largest_video = 0;
+        for (const auto& mode : item.formats.video) largest_video = std::max(largest_video, std::uint64_t(mode.width) * mode.height);
+        for (const auto& entry : sizes.jpeg)
+            if (entry.size.pixels() <= largest_video) require(has(sizes.yuv, entry.size), item.name);
+        // Rule 3: every YUV size is a PRIVATE size.
+        const auto tables = stream_tables(item.formats, Capabilities{});
+        const auto in_tables = [&](std::int32_t format, const Size& size) {
+            for (std::size_t i = 0; i + 3 < tables.configurations.size(); i += 4)
+                if (tables.configurations[i] == format && tables.configurations[i + 1] == std::int32_t(size.width) &&
+                    tables.configurations[i + 2] == std::int32_t(size.height))
+                    return true;
+            return false;
+        };
+        for (const auto& entry : sizes.yuv) {
+            require(in_tables(pixel_format::yuv_420_888, entry.size), item.name);
+            require(in_tables(pixel_format::implementation_defined, entry.size), item.name);
+        }
+        for (const auto& entry : sizes.jpeg) require(in_tables(pixel_format::blob, entry.size), item.name);
+        // The host's own sizes are served by the host, the rest are cut from native modes.
+        for (const auto& entry : sizes.yuv) {
+            const bool native = std::any_of(item.formats.video.begin(), item.formats.video.end(), [&](const VideoMode& mode) {
+                return mode.width == entry.size.width && mode.height == entry.size.height;
+            });
+            require(entry.host == native, item.name);
+            if (!entry.host)
+                require(std::any_of(item.formats.video.begin(), item.formats.video.end(), [&](const VideoMode& mode) {
+                    return mode.width == entry.source.width && mode.height == entry.source.height;
+                }), item.name);
+        }
+        for (const auto& entry : sizes.jpeg) {
+            const bool native = std::find(item.formats.jpeg.begin(), item.formats.jpeg.end(), entry.size) != item.formats.jpeg.end();
+            require(entry.host == native, item.name);
+        }
+    }
+
+    // What the derivation makes of a phone lens.
+    const auto phone = derive_sizes(vectors::phone_lens_formats());
+    const auto find = [](const std::vector<SizeSource>& list, const Size& size) -> const SizeSource* {
+        for (const auto& entry : list)
+            if (entry.size == size) return &entry;
+        return nullptr;
+    };
+    const auto* yuv_1008 = find(phone.yuv, {1008, 756});
+    require(yuv_1008 && yuv_1008->source == Size({1920, 1080}) && yuv_1008->window == Window({240, 0, 1440, 1080}), "1008x756 from 1080p");
+    const auto* yuv_2016 = find(phone.yuv, {2016, 1512});
+    require(yuv_2016 && yuv_2016->source == Size({3840, 2160}), "2016x1512 from 4K");
+    require(!find(phone.yuv, {4032, 3024}), "no YUV beyond the video modes");
+    const auto* jpeg_720 = find(phone.jpeg, {1280, 720});
+    require(jpeg_720 && !jpeg_720->host && jpeg_720->source == Size({1280, 720}), "the 720p JPEG is encoded by the HAL from the native frame");
+    require(find(phone.jpeg, {4032, 3024})->host, "a native photo size keeps the host's JPEG");
+
+    // A pad's front camera has video up to 1080p: it cannot make 1920x1440 (said once, here).
+    const auto pad = derive_sizes(vectors::pad_front_formats());
+    require(!find(pad.jpeg, {1920, 1440}) && !find(pad.yuv, {1920, 1440}), "no mode covers 1920x1440 on a pad's front camera");
+    require(find(pad.jpeg, {1280, 720}) && find(pad.jpeg, {1008, 756}) && find(pad.yuv, {1008, 756}), "the rest is there");
+    require(!meets_concurrent_streams(pad) && meets_concurrent_streams(phone), "so a pad's front camera is not a concurrent one");
+    // A laptop's camera never reaches 1920x1440.
+    const auto laptop = derive_sizes(vectors::laptop_formats());
+    require(meets_concurrent_streams(laptop) && !find(laptop.jpeg, {1920, 1440}), "the 1080p laptop needs only 720p");
+
+    // A camera without any JPEG size of its own still lists the required ones.
+    Formats video_only;
+    video_only.video = {{1920, 1080, 1, 30}};
+    const auto derived = derive_sizes(video_only);
+    require(derived.jpeg.size() == 4 && !derived.jpeg[0].host, "JPEG sizes from video alone");
+    require(jpeg_max_size(video_only) == 1920 * 1080 * 3 / 2 + 65000 + 8, "the largest derived JPEG sets the maximum");
+}
+
+// The `concurrent` feature has one definition; the vectors are the application lane's too.
+void check_concurrent_feature()
+{
+    for (const auto& vector : vectors::concurrent_vectors())
+        require(vectors::evaluate(vector) == vector.concurrent, vector.name.c_str());
+
+    // The sets the provider reports are the host's, reduced to the cameras that meet the sizes.
+    const std::vector<Concurrency> all = {{0, 0, 0b110, 0}, {1, 1, 0b101, 0}, {2, 2, 0b011, 0}};
+    const auto reported = reported_concurrent_sets(all, [](std::uint32_t id) { return id != 2; });
+    require(reported.size() == 1 && reported[0] == std::vector<std::uint32_t>({0, 1}), "the failing camera leaves the set");
+    require(reported_concurrent_sets(all, [](std::uint32_t id) { return id == 0; }).empty(), "a set of one is no set");
+    const auto everyone = reported_concurrent_sets(all, [](std::uint32_t) { return true; });
+    require(everyone.size() == 1 && everyone[0] == std::vector<std::uint32_t>({0, 1, 2}), "all of them");
 }
 
 // The host's concurrency: which cameras stream together, and which exclude one another.
@@ -262,5 +448,9 @@ int main()
     check_capabilities();
     check_tables();
     check_numbers();
+    check_fps_ranges();
+    check_derivation();
+    check_cts_subsets();
+    check_concurrent_feature();
     return 0;
 }

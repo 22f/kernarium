@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "camera_abi.hpp"
@@ -123,6 +124,35 @@ inline std::vector<std::vector<std::uint32_t>> concurrent_sets(std::span<const C
     }
     std::sort(sets.begin(), sets.end());
     return sets;
+}
+
+// The sets the provider reports to Android: each host set reduced to the cameras
+// that meet the guaranteed concurrent stream sizes (`meets(id)`, camera_plan.hpp),
+// when at least two remain.
+template <typename Meets>
+std::vector<std::vector<std::uint32_t>> reported_concurrent_sets(std::span<const Concurrency> cameras, Meets&& meets)
+{
+    std::vector<std::vector<std::uint32_t>> reported;
+    for (auto set : concurrent_sets(cameras)) {
+        set.erase(std::remove_if(set.begin(), set.end(), [&](std::uint32_t id) { return !meets(id); }), set.end());
+        if (set.size() >= 2 && std::find(reported.begin(), reported.end(), set) == reported.end())
+            reported.push_back(std::move(set));
+    }
+    return reported;
+}
+
+// The `concurrent` feature of a camera layout, defined once for the layout
+// generator's documentation, the HAL and the application: the cameras "0" and "1"
+// are in one set that the host streams together, and both meet the guaranteed
+// concurrent stream sizes. It is what Android's CameraManager requires of the
+// feature (a reported combination holding the main back and front cameras).
+template <typename Meets>
+bool concurrent_feature(std::span<const Concurrency> cameras, Meets&& meets)
+{
+    for (const auto& set : reported_concurrent_sets(cameras, meets))
+        if (std::find(set.begin(), set.end(), 0u) != set.end() && std::find(set.begin(), set.end(), 1u) != set.end())
+            return true;
+    return false;
 }
 
 // The IDs of the cameras that cannot be open while this one is: the cameras its
