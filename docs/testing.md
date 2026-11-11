@@ -582,7 +582,7 @@ previous release's data disk to check the one-time on-screen keyboard change.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route and by the
-guest's own, and the host closes no stream by a reset.
+guest's own on one stream each, and the host closes no stream by a reset.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

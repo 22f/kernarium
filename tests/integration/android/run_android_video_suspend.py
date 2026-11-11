@@ -16,8 +16,9 @@ this runner shows it with the apps that use the devices:
   uninterruptible sleep, ``screenrecord`` ends with status 0 and a file, and
   Back closes the player, which returns only if the device handed every
   buffer back;
-- the host's video activity log shows each stream closed by a destroy, with no
-  buffer pending, and none closed by a reset.
+- the host's video activity log shows one decoder stream for the player and one
+  encoder stream for the recorder, each open until its app ends, closed by a
+  destroy with no buffer pending, and none closed by a reset.
 
 The clip is made in the guest: ``screenrecord`` films the settings list being
 scrolled, so the host needs no encoder tool. Every wait has a deadline. The
@@ -297,6 +298,11 @@ def check_player(guest: Guest, media_id: int, route: str) -> None:
     wait_for("the picture moves after the wake", MOVING_SECONDS,
              lambda: None if guest.moving() else "the picture is still", guest)
     check_no_thread_in_d(guest, route)
+    # One decoder stream, open since the player started: a close before Back
+    # means the player released its codec and the suspend held no stream.
+    early = [close for close in guest.closes()[opened:] if not close[0]]
+    if early:
+        raise Failure(f"the player's decoder stream closed before Back, so no stream spanned the {route} suspend: {early}")
     guest.shell("input keyevent KEYCODE_BACK")
 
     def decoder_closed() -> str | None:
@@ -336,9 +342,16 @@ def check_recording(guest: Guest, route: str) -> None:
     if size < 1 << 20:
         raise Failure(f"the recording is {size} bytes")
     check_no_thread_in_d(guest, route)
-    closes = [close for close in guest.closes()[opened:] if close[0]]
-    if not closes or closes[-1][1] != "destroy" or "errors=0" not in closes[-1][2]:
-        raise Failure(f"the encoder stream did not close cleanly: {closes}")
+
+    def encoder_closes() -> list[tuple[bool, str, str]]:
+        return [close for close in guest.closes()[opened:] if close[0]]
+
+    wait_for(f"the recorder's encoder stream is closed after the {route} suspend", CLOSE_SECONDS,
+             lambda: None if encoder_closes() else "no encoder stream was closed", guest)
+    # Exactly one stream, so the recording ran on the stream the suspend found.
+    closes = encoder_closes()
+    if len(closes) != 1 or closes[0][1] != "destroy" or "errors=0" not in closes[0][2]:
+        raise Failure(f"the encoder stream did not span the {route} suspend and close cleanly: {closes}")
 
 
 def run_checks(guest: Guest) -> None:
