@@ -131,6 +131,23 @@ public:
     {
         return false;
     }
+    /* Whether a request the device deferred survives the disable of its
+     * ring. A guest suspends by disabling its rings one after another and
+     * resumes by enabling them in the same order, sending nothing else, so
+     * a device that holds a request across the suspend, a codec stream's
+     * queued buffer, is not reset by the disable: the transport keeps what
+     * the device completes meanwhile and writes it to the ring when the ring
+     * is enabled again. A message that changes the memory, the features, a
+     * ring's layout or base, or ends the connection resets such a device
+     * first, as does the GET_FEATURES that closes a driver's teardown.
+     * Without it, disabling a ring while the device holds a request resets
+     * the device. A device that sets it also keeps the request buffers on a
+     * disabled ring (keepsRequestsOnDisabledRing()), since the guest can post
+     * one before the ring's enable reaches the transport. */
+    [[nodiscard]] virtual bool keepsDeferredRequestsWhileDisabled() const noexcept
+    {
+        return false;
+    }
     /* Whether the transport answers a guest's kick before it runs the
      * kicked queue rather than after. The kicking vCPU waits for that answer
      * with its interrupts off, so a device whose requests can run long, or
