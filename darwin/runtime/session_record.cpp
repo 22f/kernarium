@@ -17,6 +17,7 @@
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <string>
 #include <time.h>
@@ -696,10 +697,16 @@ bool begin_session_record(std::string_view path,
 		(void)atexit(record_process_exit);
 	session_started.store(now(), std::memory_order_relaxed);
 	forget_history();
+	/* A checkpoint thread of the session before may still be formatting the
+	 * network slot from the old baseline: write the new one between two
+	 * writers. This runs in no signal handler, so it may wait for the slot. */
+	while (network_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
 	network_baseline = {};
 	if (const auto reader = network_reader.load(std::memory_order_acquire);
 	    reader == nullptr || !reader(network_baseline))
 		network_baseline = {};
+	network_slot_busy.clear(std::memory_order_release);
 	/* A denial under way when the session begins is one the session saw. */
 	notice_times.store(
 		notice_now.load(std::memory_order_relaxed) != NetworkNotice::none ?
