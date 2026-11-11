@@ -26,7 +26,7 @@ add_executable(uml_virtio_input_bridge_tests hardware_bridge_tests.cpp)
 target_link_libraries(uml_virtio_input_bridge_tests PRIVATE
     UML::VirtioInput UML::VncInput)
 target_include_directories(uml_virtio_input_bridge_tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/darwin/app/macos
+    ${PROJECT_SOURCE_DIR}/darwin/emulator/src
     ${PROJECT_SOURCE_DIR}/darwin/device)
 uml_add_unit_test(NAME virtio-input-bridge
     COMMAND uml_virtio_input_bridge_tests

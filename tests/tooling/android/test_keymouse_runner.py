@@ -36,7 +36,7 @@ sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
 PROBE = TESTS / "integration/android/keymouse"
-BRIDGE = REPOSITORY / "darwin/app/macos/hardware_input_bridge.hpp"
+BRIDGE = REPOSITORY / "darwin/emulator/src/hardware_input_bridge.hpp"
 VNC_INPUT = REPOSITORY / "darwin/device/input/vnc/vnc_input.cpp"
 
 
