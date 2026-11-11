@@ -124,6 +124,28 @@ if(UML_ANDROID_KEYMOUSE_RELEASE AND UML_ANDROID_KEYMOUSE_PROBE_APK AND TARGET um
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The Virtio video devices across a guest suspend (the transport keeps a codec
+# stream's queued buffers, docs/architecture.md): the gallery plays a clip and
+# screenrecord films the screen while the guest suspends by the host's route and
+# by its own with its screen off; the picture moves again, screenrecord ends
+# cleanly, Back closes the player, and the host closes every stream by a destroy
+# and none by a reset. It boots Android with the macOS launcher, so it is
+# opt-in: name the release under test.
+set(UML_ANDROID_VIDEO_SUSPEND_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-video-suspend test boots")
+if(UML_ANDROID_VIDEO_SUSPEND_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-video-suspend
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_video_suspend.py
+            --release ${UML_ANDROID_VIDEO_SUSPEND_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The thermal HAL and the 30 fps cap (route p0007's display topic): the runner
 # plays the host application over a vsock forward to the HAL's port and checks
 # the thermal manager, the display manager's vote, SurfaceFlinger's render rate
