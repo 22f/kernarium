@@ -66,6 +66,7 @@ final class AndariumSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let entry = process.entry
         let model = process.model
         self.model = model
+        model.screenDidChange(nativeScale: Double(scene.screen.nativeScale))
         let window = UIWindow(windowScene: scene)
         window.rootViewController = AndariumHostingController(
             rootView: RootView(entry: entry).environment(model), model: model)

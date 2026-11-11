@@ -45,9 +45,9 @@ struct PreferenceKeeperTests {
         model.statsDecidedByLaunch = true
         #expect(model.showStatsToKeep == nil)
 
-        model.chooseRetina(true)
-        #expect(model.displayOptionsToKeep == DisplayOptions(chosenRetina: true))
-        model.retinaStatedByLaunch = true
+        model.chooseResolution(.native)
+        #expect(model.displayOptionsToKeep == DisplayOptions(chosenScale: .native))
+        model.launchScale = .points
         #expect(model.displayOptionsToKeep == nil)
     }
 
@@ -68,18 +68,30 @@ struct PreferenceKeeperTests {
         }
     }
 
-    @Test func aChoiceOfRetinaIsWrittenWhenMade() async throws {
+    @Test func aChoiceOfResolutionIsWrittenWhenMade() async throws {
         try await withDefaults { defaults in
             let model = model()
             let keeper = PreferenceKeeper(model: model, defaults: defaults)
             keeper.start()
 
-            model.chooseRetina(false)
+            model.chooseResolution(.points)
             try await written(by: keeper)
-            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenRetina: false))
-            model.chooseRetina(true)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .points))
+            model.chooseResolution(.native)
             try await written(by: keeper)
-            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenRetina: true))
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .native))
+            model.chooseResolution(.factor(1.5))
+            try await written(by: keeper)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .factor(1.5)))
+        }
+    }
+
+    @Test func aStoredRetinaChoiceMigratesWhenTheOptionsAreRead() async throws {
+        try await withDefaults { defaults in
+            defaults.set(Data(#"{"retina":false,"chosen":true}"#.utf8), forKey: DisplayOptions.storageKey)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .points))
+            defaults.set(Data(#"{"retina":true,"chosen":true}"#.utf8), forKey: DisplayOptions.storageKey)
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .native))
         }
     }
 
@@ -100,24 +112,23 @@ struct PreferenceKeeperTests {
         }
     }
 
-    @Test func aLaunchThatStatedRetinaLeavesTheStoredChoice() async {
+    @Test func aLaunchThatStatedTheResolutionLeavesTheStoredChoice() async {
         await withDefaults { defaults in
-            DisplayOptionsStore.save(DisplayOptions(chosenRetina: false), to: defaults)
-            // The launch states Retina mode over a stored choice of off.
+            DisplayOptionsStore.save(DisplayOptions(chosenScale: .points), to: defaults)
+            // The launch states native over a stored choice of 1.0.
             let model = model()
-            model.retina = true
-            model.retinaChosen = true
-            model.retinaStatedByLaunch = true
+            model.chosenScale = .points
+            model.launchScale = .native
             let keeper = PreferenceKeeper(model: model, defaults: defaults)
             keeper.start()
 
             // What the window does afterwards, and any change a write follows.
             model.hostDrivesGuestRotation = true
-            model.retina = true
+            model.launchScale = .native
             model.session.showStats = true
             await keeper.pending?.value
             keeper.keep()
-            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenRetina: false))
+            #expect(DisplayOptionsStore.load(from: defaults) == DisplayOptions(chosenScale: .points))
         }
     }
 

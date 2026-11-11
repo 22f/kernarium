@@ -18,7 +18,10 @@ struct GuestDisplayView: UIViewControllerRepresentable {
     /// Without it the view takes no text, so becoming first responder shows
     /// no keyboard and no shortcut bar, whatever has the focus.
     var keyboardVisible: Binding<Bool>?
-    let retinaMode: Bool
+    /// How many guest pixels the display draws to a point of the view, or the
+    /// screen's own pixels (`GuestDisplayScale`). The density the guest is told
+    /// follows it, so the guest's interface keeps its size.
+    let scale: GuestDisplayScale
     /// Told each time touches begin on the display, after their contacts have
     /// gone to the guest. An application that draws controls over the display
     /// uses it to put them away when a touch lands on the guest instead.
@@ -47,7 +50,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
         view.viewDidLayout = viewDidLayout
         view.touchDidBegin = touchDidBegin
         view.contactDidChange = contactDidChange
-        view.retinaMode = retinaMode
+        view.scale = scale
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         view.autoResizeDrawable = false
@@ -63,7 +66,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
         let view = controller.metalView
         view.touchDidBegin = touchDidBegin
         view.contactDidChange = contactDidChange
-        view.retinaMode = retinaMode
+        view.scale = scale
         view.hardwareInput = hardwareInput
         if let keyboardVisible {
             view.setKeyboardVisible(keyboardVisible.wrappedValue)
@@ -163,7 +166,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     ) -> Void)?
     var touchDidBegin: (@MainActor () -> Void)?
     var contactDidChange: (@MainActor (_ slot: Int, _ pressed: Bool) -> Void)?
-    var retinaMode = false
+    var scale = GuestDisplayScale.points
     @objc private(set) var umlGuestResizeInProgress = false
     private var touchContacts = GuestTouchContacts<ObjectIdentifier>()
     private var guestContentSize: CGSize?
@@ -214,27 +217,19 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     }
 
     func reportLayout() {
-        guard let screen = window?.screen else { return }
-        let scale = retinaMode ? screen.nativeScale : 1
-        guard bounds.width > 0, bounds.height > 0,
-              scale.isFinite, scale > 0 else { return }
-        // SwiftUI supplies safe-area-excluded point bounds. Point-resolution
-        // mode maps them directly to guest pixels; Retina mode converts them
-        // to physical backing pixels, including fractional native scales.
-        let pixelSize = CGSize(
-            width: (bounds.width * scale).rounded(.down),
-            height: (bounds.height * scale).rounded(.down)
-        )
-        guard pixelSize.width >= 1, pixelSize.height >= 1 else { return }
-        drawableSize = pixelSize
-        let dotsPerInch = UInt32(
-            (CGFloat(160) * scale).rounded()
-        )
+        guard let screen = window?.screen,
+              // SwiftUI supplies safe-area-excluded point bounds, which the
+              // scale turns into guest pixels, fractional native scales
+              // included.
+              let layout = GuestDisplayLayout(
+                  scale: scale, points: bounds.size, nativeScale: Double(screen.nativeScale)
+              ) else { return }
+        drawableSize = layout.pixelSize
         viewDidLayout?(
             self,
             GuestDisplayGeometry(
-                pixelSize: pixelSize,
-                dotsPerInch: dotsPerInch
+                pixelSize: layout.pixelSize,
+                dotsPerInch: UInt32(layout.dotsPerInch)
             )
         )
     }
