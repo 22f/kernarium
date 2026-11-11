@@ -339,6 +339,36 @@ final class AppModel {
     var diskProgress: Double?
     var motionSensorsAvailable = true
     var motionSensorsProblem: String?
+    /// Settings' "Use the pointer as touch": the system pointer's clicks are the
+    /// guest's touches and the guest has no mouse. Kept for the install
+    /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
+    var pointerAsTouch = false
+    /// The launch decided it (automation): the value belongs to that run and
+    /// is not kept.
+    var pointerAsTouchDecidedByLaunch = false
+    /// What is kept of the setting across launches; nil where the launch
+    /// decided it.
+    var pointerAsTouchToKeep: Bool? { pointerAsTouchDecidedByLaunch ? nil : pointerAsTouch }
+    /// Settings is open over the session. A sheet has the keys, so the guest
+    /// does not hold the keyboard focus meanwhile.
+    var sessionSettingsOpen = false
+    /// The share sheet of a bug report is up over the session.
+    var shareSheetUp = false
+    /// The guest has the hardware keys unless something is over it that needs
+    /// them (Settings, a sheet, an alert, the share sheet): the sheet takes
+    /// the keys, and the guest takes them back when it goes. The pointer lock
+    /// goes with them.
+    var guestHasKeys: Bool {
+        !sessionSettingsOpen && sheet == nil && alert == nil && !shareSheetUp
+    }
+    /// An Android application captured the pointer and the guest should have
+    /// the pointer lock; the scene's root asks iOS for it.
+    var pointerLockWanted = false
+    #if !APP_STORE
+    /// A UI test's launch: the guest's keyboard and mouse send to a log the
+    /// test reads, and Settings carries a text field to take the keys.
+    var inputProbe: InputProbe?
+    #endif
     var microphoneState = MicrophoneState.notAsked
     /// The question about a permission the person is being asked, if any.
     var permissionPrompt: PermissionPrompt?
@@ -982,8 +1012,15 @@ final class AppModel {
 
     /// The report is deleted on every outcome of the sheet.
     private func share(_ file: URL) {
-        let shown = presentShare(file) { try? FileManager.default.removeItem(at: file) }
-        if !shown { try? FileManager.default.removeItem(at: file) }
+        shareSheetUp = true
+        let shown = presentShare(file) { [weak self] in
+            self?.shareSheetUp = false
+            try? FileManager.default.removeItem(at: file)
+        }
+        if !shown {
+            shareSheetUp = false
+            try? FileManager.default.removeItem(at: file)
+        }
     }
 
     /// The preview's report: the same steps on the same overlay, ending in
@@ -1184,6 +1221,12 @@ final class AppModel {
     /// is on until the person turns it off, and only where the device has
     /// sensors to share.
     var motionSensorsOn: Bool { guest?.motionSensorsOn(available: motionSensorsAvailable) == true }
+
+    /// Settings' "Use the pointer as touch".
+    func setPointerAsTouch(_ on: Bool) {
+        pointerAsTouch = on
+        driver?.setPointerAsTouch(on)
+    }
 
     /// The Gyroscope switch. It asks for nothing and is kept as chosen; on a
     /// device without sensors there is nothing to turn on.

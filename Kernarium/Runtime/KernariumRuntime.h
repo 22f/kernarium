@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 34U
+#define KERNARIUM_RUNTIME_API_VERSION 35U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -624,9 +624,17 @@ typedef int (*kernarium_runtime_report_location_function)(
  * a guest that restarts itself has the devices plugged as the application left
  * them, and a plug asked for between two boots is kept for the next. A plug
  * that is asked for before the guest's driver has probed takes effect when it
- * has. An Android guest whose kernel lacks the hot-plug topic never plugs
- * them, and input sent to them is dropped. The Linux runtime keeps the entries
- * and answers -ENODEV, as does a runtime with no guest running.
+ * has. The guest registers each device once its driver has set it up, and the
+ * runtime says so with KERNARIUM_RUNTIME_INPUT_STATUS_KEYBOARD_REGISTERED and
+ * KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_REGISTERED (the pointer is registered
+ * while the mouse and the absolute pointer both are), and says they are not
+ * when the guest restarts and when the run ends. An Android guest whose kernel
+ * lacks the hot-plug topic never registers them: a plug changes nothing of
+ * what it sees, and input sent to them is dropped. An application that takes
+ * something from the guest for a device, such as the system pointer's clicks
+ * for the mouse, does so only while that device is registered. The Linux
+ * runtime keeps the entries and answers -ENODEV, as does a runtime with no
+ * guest running.
  *
  * Input for a device that is not plugged, or a key the keyboard has no code
  * for, is dropped and returns 0, and input sent between two boots returns
@@ -700,17 +708,25 @@ typedef int (*kernarium_runtime_send_mouse_function)(
     int32_t wheel,
     int32_t horizontal_wheel);
 
-/* What Android tells the host of the keyboard and the mouse: the lock lights
- * of its keyboard, and an application capturing or releasing the pointer. */
+/* What the guest tells the host of the keyboard and the mouse: the lock lights
+ * of its keyboard, an application capturing or releasing the pointer, and
+ * whether it has registered the devices. */
 enum {
     KERNARIUM_RUNTIME_INPUT_STATUS_NUM_LOCK = 1,
     KERNARIUM_RUNTIME_INPUT_STATUS_CAPS_LOCK = 2,
     KERNARIUM_RUNTIME_INPUT_STATUS_SCROLL_LOCK = 3,
     KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_CAPTURE = 4,
+    /* The guest registered the keyboard (on) or no longer has it (off). Off
+     * also when the guest restarts and when the run ends. */
+    KERNARIUM_RUNTIME_INPUT_STATUS_KEYBOARD_REGISTERED = 5,
+    /* The guest registered the mouse and the absolute pointer, both (on), or
+     * lost either (off). Off also when the guest restarts and when the run
+     * ends. */
+    KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_REGISTERED = 6,
 };
 
-/* `on` is nonzero when the light is lit or the pointer is captured. It runs
- * on a runtime thread and must return promptly. */
+/* `on` is nonzero when the light is lit, the pointer is captured or the device
+ * is registered. It runs on a runtime thread and must return promptly. */
 typedef void (*kernarium_runtime_input_status_callback)(
     void* context,
     int status,
