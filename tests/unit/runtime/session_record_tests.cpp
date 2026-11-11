@@ -438,7 +438,8 @@ uml::runtime::RunFigures stepped_figures(bool) noexcept
 	figures.sources = uml::runtime::RunFigures::frames |
 		uml::runtime::RunFigures::host | uml::runtime::RunFigures::cache |
 		uml::runtime::RunFigures::largest | uml::runtime::RunFigures::cpu |
-		uml::runtime::RunFigures::carriers | uml::runtime::RunFigures::usage;
+		uml::runtime::RunFigures::carriers | uml::runtime::RunFigures::usage |
+		uml::runtime::RunFigures::cycle_count;
 	figures.flushes = 1000 + 10 * step;
 	figures.longest_gap_ns = (step == spike_step ? 900 : 20) * 1'000'000ULL;
 	figures.thermal = static_cast<std::uint8_t>(step % 4);
@@ -481,7 +482,7 @@ void test_run_figures_in_a_row()
 	uml::runtime::set_run_figures_reader(&scripted_figures);
 	F first;
 	first.sources = F::frames | F::host | F::cache | F::largest | F::cpu |
-		F::carriers | F::usage;
+		F::carriers | F::usage | F::cycle_count;
 	first.flushes = 1000;
 	first.thermal = 1;
 	first.pressure = 0;
@@ -583,6 +584,26 @@ void test_run_figures_in_a_row()
 		run_words(rows[3])[0] == "0" && run_words(rows[3])[10] == "0" &&
 		run_words(rows[3])[11] == "0" && run_words(rows[4])[11] == "500",
 		"a counter that fell was not counted as nothing");
+
+	/* A platform with no source for the cycles (iOS) answers the rest of the
+	 * usage and leaves the cycles per CPU second out. */
+	F sixth = second;
+	sixth.sources = second.sources & ~F::cycle_count;
+	script_set(sixth);
+	uml::runtime::checkpoint_session_memory();
+	F seventh = sixth;
+	seventh.flushes += 60;
+	seventh.cpu_ns += 2'000'000'000ULL;
+	seventh.performance_ns += 1'500'000'000ULL;
+	seventh.energy_nj += 3'000'000'000ULL;
+	script_set(seventh);
+	uml::runtime::checkpoint_session_memory();
+	rows = history_rows(slot_of(read_file(path)));
+	require(rows.size() == 7 &&
+		run_words(rows[6])[0] == "60" && run_words(rows[6])[10] == "2000" &&
+		run_words(rows[6])[12] == "75" && run_words(rows[6])[13] == "-" &&
+		run_words(rows[6])[14] == "3000",
+		"a platform without cycles did not leave only them out");
 	finish_session(path);
 }
 
@@ -676,7 +697,7 @@ uml::runtime::RunFigures huge_figures(bool) noexcept
 	const std::lock_guard guard{script.lock};
 	const std::uint64_t huge = std::uint64_t{1} << 60;
 	uml::runtime::RunFigures figures;
-	figures.sources = 0x7f;
+	figures.sources = 0xff;
 	figures.flushes = huge / 1000 * (script.step + 1);
 	figures.longest_gap_ns = huge;
 	figures.thermal = 3;

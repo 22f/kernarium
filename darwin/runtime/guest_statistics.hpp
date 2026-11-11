@@ -104,6 +104,7 @@ struct RunFigures final {
 	static constexpr std::uint32_t cpu = 1U << 4;
 	static constexpr std::uint32_t carriers = 1U << 5;
 	static constexpr std::uint32_t usage = 1U << 6;
+	static constexpr std::uint32_t cycle_count = 1U << 7;
 	std::uint32_t sources{};
 
 	/* Scanout flushes since the process began (platform/frame_figures.hpp),
@@ -125,17 +126,20 @@ struct RunFigures final {
 	 * in nanoseconds. */
 	std::uint64_t cpu_ns{};
 	std::uint64_t carrier_ns{};
-	/* From proc_pid_rusage: the part of the process's CPU time spent on
-	 * performance cores, its cycles and its energy in nanojoules. */
+	/* From the system's power information of the task (task_info,
+	 * TASK_POWER_INFO_V2, on every platform): the part of the process's CPU
+	 * time spent on performance cores, and its energy in nanojoules. */
 	std::uint64_t performance_ns{};
-	std::uint64_t cycles{};
 	std::uint64_t energy_nj{};
+	/* The CPU cycles the process has run, from proc_pid_rusage where
+	 * <libproc.h> exists (macOS); iOS has no such source. */
+	std::uint64_t cycles{};
 };
 
 /* The figures now; any thread, and it never waits on the guest. `session_begins`
  * starts the frame gaps afresh for a guest that is about to run. It costs the
- * reading of the carriers' times (guest_cpu_time) and one system call for the
- * process's usage, and holds no lock. */
+ * reading of the carriers' times (guest_cpu_time) and a system call each for
+ * the process's usage and, on macOS, its cycles, and holds no lock. */
 [[nodiscard]] RunFigures run_figures(bool session_begins) noexcept;
 
 /* The terms now; any thread, and it never waits on the guest. With

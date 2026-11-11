@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -385,13 +386,27 @@ void the_cache_ledger_is_read_after_a_forced_relief()
 }
 
 /* The process's CPU time and usage come from the system, and the carriers'
- * from the threads' names; none runs backwards. */
+ * from the threads' names; none runs backwards. The CPU time is the task's
+ * power information in mach ticks converted to nanoseconds, and agrees with
+ * what getrusage says of the same process; the cycles have a source on macOS
+ * only. */
 void the_cpu_figures_come_from_the_system()
 {
 	using uml::runtime::RunFigures;
+	const auto rusage_ns = [] {
+		struct rusage usage {};
+		require(getrusage(RUSAGE_SELF, &usage) == 0, "getrusage failed");
+		const auto ns = [](const timeval &time) {
+			return static_cast<std::uint64_t>(time.tv_sec) * 1'000'000'000ULL +
+				static_cast<std::uint64_t>(time.tv_usec) * 1000ULL;
+		};
+		return ns(usage.ru_utime) + ns(usage.ru_stime);
+	};
 	NamedSpinner carrier {"uml-vcpu-0-carrier", std::chrono::milliseconds {60}};
 	const std::uint64_t spent = carrier.awaitSpent();
+	const std::uint64_t before = rusage_ns();
 	const auto first = uml::runtime::run_figures(false);
+	const std::uint64_t after = rusage_ns();
 	require((first.sources & RunFigures::cpu) != 0 &&
 		(first.sources & RunFigures::usage) != 0 &&
 		(first.sources & RunFigures::carriers) != 0,
@@ -399,6 +414,18 @@ void the_cpu_figures_come_from_the_system()
 	require(first.cpu_ns > 0 && first.performance_ns <= first.cpu_ns &&
 		first.carrier_ns + millisecond_ns >= spent,
 		"the CPU figures are implausible");
+	/* The unit is nanoseconds: the same process's time between two readings of
+	 * it by another interface (getrusage), give or take their granularity. */
+	require(first.cpu_ns + 5 * millisecond_ns >= before &&
+		first.cpu_ns <= after + 5 * millisecond_ns,
+		"the process's CPU time is not in nanoseconds of the process's own");
+#if __has_include(<libproc.h>)
+	require((first.sources & RunFigures::cycle_count) != 0 && first.cycles > 0,
+		"macOS gave no cycles for the process");
+#else
+	require((first.sources & RunFigures::cycle_count) == 0 && first.cycles == 0,
+		"a platform without libproc.h reported cycles");
+#endif
 	/* This thread's own work moves the process's time forward. */
 	volatile std::uint64_t sink = 0;
 	const auto until = std::chrono::steady_clock::now() +
@@ -408,6 +435,7 @@ void the_cpu_figures_come_from_the_system()
 	const auto second = uml::runtime::run_figures(false);
 	require(second.cpu_ns > first.cpu_ns && second.cycles >= first.cycles &&
 		second.energy_nj >= first.energy_nj &&
+		second.performance_ns >= first.performance_ns &&
 		second.carrier_ns >= first.carrier_ns,
 		"a counter ran backwards");
 }

@@ -17,15 +17,16 @@
 #include <mach/mach_time.h>
 #include <malloc/malloc.h>
 #include <mutex>
-#include <sys/resource.h>
-#include <unistd.h>
 
+/* The cycles a process has run come from proc_pid_rusage, which the iOS SDK
+ * does not publish: libproc.h exists on macOS only, and no iOS product
+ * declares the call itself. */
 #if __has_include(<libproc.h>)
 #include <libproc.h>
+#include <unistd.h>
+#define UML_PROCESS_CYCLES 1
 #else
-/* The iOS SDK exports the call from libSystem and declares the flavors and
- * the structure in <sys/resource.h>, but ships no libproc.h. */
-extern "C" int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);
+#define UML_PROCESS_CYCLES 0
 #endif
 
 namespace uml::runtime {
@@ -105,15 +106,19 @@ namespace {
 struct ProcessUsage final {
 	std::uint64_t cpu_ns{};
 	std::uint64_t performance_ns{};
-	std::uint64_t cycles{};
 	std::uint64_t energy_nj{};
 };
 
+/* TASK_POWER_INFO_V2 (a public interface on every Apple platform): the user
+ * and system time and the time on performance cores in mach ticks, and the
+ * energy the system estimates in nanojoules. */
 bool process_usage(ProcessUsage &usage) noexcept
 {
-	rusage_info_v6 info{};
-	if (proc_pid_rusage(getpid(), RUSAGE_INFO_V6,
-		    reinterpret_cast<rusage_info_t *>(&info)) != 0)
+	task_power_info_v2_data_t info{};
+	mach_msg_type_number_t count = TASK_POWER_INFO_V2_COUNT;
+	if (task_info(mach_task_self(), TASK_POWER_INFO_V2,
+		    reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS ||
+	    count < TASK_POWER_INFO_V2_COUNT)
 		return false;
 	static const mach_timebase_info_data_t base = [] {
 		mach_timebase_info_data_t value{};
@@ -125,12 +130,27 @@ bool process_usage(ProcessUsage &usage) noexcept
 	const auto nanoseconds = [](std::uint64_t ticks) {
 		return ticks * base.numer / base.denom;
 	};
-	usage.cpu_ns = nanoseconds(info.ri_user_time + info.ri_system_time);
-	usage.performance_ns =
-		nanoseconds(info.ri_user_ptime + info.ri_system_ptime);
-	usage.cycles = info.ri_cycles;
-	usage.energy_nj = info.ri_energy_nj;
+	usage.cpu_ns = nanoseconds(
+		info.cpu_energy.total_user + info.cpu_energy.total_system);
+	usage.performance_ns = nanoseconds(info.task_ptime);
+	usage.energy_nj = info.task_energy;
 	return true;
+}
+
+/* The CPU cycles the process has run. macOS only: false elsewhere. */
+bool process_cycles(std::uint64_t &cycles) noexcept
+{
+#if UML_PROCESS_CYCLES
+	rusage_info_v6 info{};
+	if (proc_pid_rusage(getpid(), RUSAGE_INFO_V6,
+		    reinterpret_cast<rusage_info_t *>(&info)) != 0)
+		return false;
+	cycles = info.ri_cycles;
+	return true;
+#else
+	(void)cycles;
+	return false;
+#endif
 }
 
 } // namespace
@@ -170,8 +190,11 @@ RunFigures run_figures(bool session_begins) noexcept
 		figures.sources |= RunFigures::cpu | RunFigures::usage;
 		figures.cpu_ns = usage.cpu_ns;
 		figures.performance_ns = usage.performance_ns;
-		figures.cycles = usage.cycles;
 		figures.energy_nj = usage.energy_nj;
+	}
+	if (std::uint64_t cycles; process_cycles(cycles)) {
+		figures.sources |= RunFigures::cycle_count;
+		figures.cycles = cycles;
 	}
 	return figures;
 }

@@ -250,7 +250,8 @@ Text &history_line(Text &text, const HistoryEntry &entry, bool older) noexcept
 		run.cpu_ns != 0;
 	figure(text, used, run.performance_ns * 100 / std::max<std::uint64_t>(
 		run.cpu_ns, 1));
-	figure(text, used && run.cycles != 0, run.cycles * 1000 /
+	figure(text, has(RunFigures::cycle_count) && has(RunFigures::cpu) &&
+		run.cpu_ns != 0 && run.cycles != 0, run.cycles * 1000 /
 		std::max<std::uint64_t>(run.cpu_ns, 1));
 	figure(text, has(RunFigures::usage), run.energy_nj / 1'000'000);
 	return text.text("\n");
@@ -364,8 +365,11 @@ Interval interval_between(const RunFigures &now, const RunFigures &before,
 		interval.known |= RunFigures::usage;
 		interval.performance_ns =
 			delta(now.performance_ns, before.performance_ns);
-		interval.cycles = delta(now.cycles, before.cycles);
 		interval.energy_nj = delta(now.energy_nj, before.energy_nj);
+	}
+	if (both(RunFigures::cycle_count)) {
+		interval.known |= RunFigures::cycle_count;
+		interval.cycles = delta(now.cycles, before.cycles);
 	}
 	return interval;
 }

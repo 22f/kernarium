@@ -53,8 +53,9 @@ namespace uml::runtime {
  * and the longest gap between two (frame rate and worst frame), the host's
  * thermal state and memory pressure, the gadget cache's reliefs, shed
  * accounts, renewals and largest account, the CPU time of the process and of
- * the vCPU carriers, and from the system's per-process usage the share of that
- * time on performance cores, the cycles per CPU second and the energy. A row
+ * the vCPU carriers, and from the task's power information the share of that
+ * time on performance cores and the energy, and on macOS the cycles per CPU
+ * second ("-" on iOS, which has no published source for them). A row
  * of the recent history covers the time since the checkpoint before it; a row
  * of the older history covers the memory_history_older_stride checkpoints it
  * stands for, so that nothing between two older rows goes unseen. A figure

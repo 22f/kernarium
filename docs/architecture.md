@@ -652,8 +652,9 @@ Each history row also says how the run went in the time it covers: the
 scanout flushes (the device counts each) and the longest gap between two, the
 host's thermal state and memory pressure as the stall watch observed them, the
 gadget cache's reliefs, shed accounts, renewals and largest open account, the
-CPU time of the process and of the vCPU carriers, and the performance-core
-share, cycles and energy from `proc_pid_rusage`; a row of the older history
+CPU time of the process and of the vCPU carriers, the performance-core share
+and energy from the task's power information (`TASK_POWER_INFO_V2`) and, on
+macOS only, the cycles from `proc_pid_rusage`; a row of the older history
 sums the checkpoints it stands for, and the checkpoint reads them all without a
 lock, a thread or a timer of its own (`RunFigures`).
 Reading malloc's term stalls every thread that allocates, so it is read only at
