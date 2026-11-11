@@ -544,6 +544,7 @@ final class AppModel {
         guard let driver else {
             lifecycle.create(guest)
             plan = .firstStart
+            forgetSnapshots()
             return
         }
         runBusy(
