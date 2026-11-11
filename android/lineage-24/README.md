@@ -72,7 +72,7 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   are 4 KiB aligned. ABI support does not lower the minimum installable target
   SDK; test an older APK with `adb install --bypass-low-target-sdk-block`.
 - **Applications.** Settings, Trebuchet, Files, Package Installer, the LineageOS
-  WebView, LatinIME, ThemePicker and a curated set (gallery, music, calendar,
+  WebView, LatinIME, ThemePicker and a curated set (camera, gallery, music, calendar,
   calculator, PDF viewer, backup). There is no browser, app store, install
   restriction, Google or microG. Applications that need absent hardware or
   LineageOS cloud services are excluded by name in the product makefile, and the
@@ -89,9 +89,10 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   entry, the Bluetooth developer option, the media output switcher, and the
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
-- **Hardware not advertised.** Telephony, NFC, UWB, Thread, camera,
+- **Hardware not advertised.** Telephony, NFC, UWB, Thread,
   biometric, secure element, USB, Bluetooth and Trusty; the vibrator only on a
-  device with haptics ([Haptics](#haptics)). The host's position is declared on
+  device with haptics ([Haptics](#haptics)) and the cameras only as the host
+  has them ([Camera](#camera)). The host's position is declared on
   every device ([Location](#location)). SecureElement is kept but not
   persistent (route `p0024`): nothing starts it at boot, and the first
   `SEService` client that binds it starts it.
@@ -275,6 +276,64 @@ format, which the golden frames in `tests/unit/andarium/fixtures` pin.
 `tests/integration/android/run_android_gamepad.py` (`android-gamepad`) plays the
 host against a booted release; its probe app is
 [`tests/integration/android/gamepad`](../../tests/integration/android/gamepad/README.md).
+
+### Camera
+
+The host's cameras are the guest's. The camera device (Virtio ID 65533, the
+video device's camera function) gives each camera a V4L2 capture node and a
+metadata node, and the emulated camera HAL of `hardware/google/camera` (route
+`p0030`) takes the cameras, their frames, stills, RAW and per-frame metadata
+from them and writes the controls back. Its provider is the lazy service
+`android.hardware.camera.provider@2.7-service-google-lazy`
+(`ICameraProvider/internal/0`, declared once in the vendor manifest): init
+starts it when an application opens a camera or the torch, and no process
+exists while none does. The image expects the driver to register the camera
+nodes as `/dev/video10` and above; the codec nodes stay in `video0` to
+`video9`, which the HAL never opens. The HAL's rules (the wire, camera IDs,
+controls, Exif, concurrency) are the headers of `overlay/camera/hal/`, which
+the HAL includes and the `andarium-camera-*` unit tests compile without
+Android. The camera application is LineageOS's Aperture, without its Google
+Lens launcher and button (route `p0031`), and its lens selector lists each
+lens of the host as a camera of its own (a static overlay in
+`overlay/overlay/packages/apps/Aperture`).
+
+The image states no camera feature of its own. The host composes a camera
+layout from the cameras it has and passes its name as
+`androidboot.product.vendor.sku`; the vendor permission directory
+`sku_<layout>/` declares the features that layout earns, and an init trigger on
+the name selects the media profiles file that matches its size caps. The set is
+closed, and `tools/camera_layouts.py` is its only source
+(`overlay/camera/generated/layouts.tsv` lists every layout with its dimensions
+and fallbacks):
+
+- `none` (no camera), `front` (a front camera) and `front-manual` (a front
+  camera with manual sensor control);
+- `bf-<small|large>[-flash][-manual[-raw]][-concurrent][-front2160]`, a back
+  and a front camera: `small` caps video at 1080p, `large` at 4K; `flash` is
+  the back flash, `manual` manual sensor control, `raw` RAW capture (only with
+  `manual`), `concurrent` streaming both cameras at once (cameras "0" and "1"
+  in one set the host streams together, both meeting the guaranteed concurrent
+  stream sizes), and `front2160` the front camera's video at 2160p (only with
+  `large`).
+
+That is 39 layouts. A host whose combination the image lacks takes the nearest
+by dropping dimensions in this order: concurrent, RAW, front 2160p, flash,
+large to small, manual; then `front`, then `none`. The layouts differ in
+features and media profiles and never in HALs: there is no manifest per layout,
+and none declares `android.hardware.camera.level.full`.
+
+A session started with Camera off lists the same cameras and delivers black
+frames. The image expects the always-registered side-key device (1af4:0002) to
+report `SW_CAMERA_LENS_COVER` as 1 for the whole boot of such a session and 0
+otherwise; the framework overlay reads that switch
+(`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
+state. The host also sends black frames while it interrupts a camera, and the
+HAL passes them on as frames of the camera. Output sizes the host lacks that
+CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
+smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
+smallest native video mode that covers them, scaled in the HAL and, for a
+JPEG, encoded there. `BURST_CAPTURE` is never declared. The candidate's smoke
+test is `tests/integration/android/run_android_camera.py` (`android-camera`).
 
 ### Networking
 
