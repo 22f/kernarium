@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "cpu/gadget_cache_budget.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -481,6 +483,8 @@ public:
 		if (!space->close())
 			return;
 		Space::note_closed();
+		if (!space->shedding())
+			ledger().renewals.fetch_add(1, std::memory_order_relaxed);
 		const std::lock_guard guard{mutex_};
 		withdraw(space);
 		space->request_renewal();
