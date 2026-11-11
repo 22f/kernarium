@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import Foundation
+
+/// What the scene root's update reads, which is all that can change what the
+/// update does. The root runs it after a layout, a geometry change or a phase
+/// change, and it only has something to do when one of these differs from
+/// where the last run found it: the interface lock and the deferred edges
+/// follow the phase, the scene, its screen and the lock; the guest follows the
+/// policy and the interface orientation (the sensors' mount). Everything else
+/// the guest follows reaches it by its own trigger, not through the root.
+public struct SceneUpdateInputs: Equatable, Sendable {
+    /// The scene the root is in, and the driver the update tells.
+    public var scene: ObjectIdentifier
+    public var driver: ObjectIdentifier?
+    public var sceneSize: CGSize
+    public var screenSize: CGSize
+    /// `UIInterfaceOrientation`'s raw value.
+    public var interfaceOrientation: Int
+    public var interfaceLocked: Bool
+    public var phase: Phase
+
+    public init(
+        scene: ObjectIdentifier, driver: ObjectIdentifier?, sceneSize: CGSize, screenSize: CGSize,
+        interfaceOrientation: Int, interfaceLocked: Bool, phase: Phase
+    ) {
+        self.scene = scene
+        self.driver = driver
+        self.sceneSize = sceneSize
+        self.screenSize = screenSize
+        self.interfaceOrientation = interfaceOrientation
+        self.interfaceLocked = interfaceLocked
+        self.phase = phase
+    }
+}
