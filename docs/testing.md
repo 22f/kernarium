@@ -150,14 +150,14 @@ process must be as it was before the first run.
 
 `guest-irq-takeover` models a host that does not run a vCPU: its runner inserts
 a library into the launcher (`DYLD_INSERT_LIBRARIES`, as `runtime-restart-*` does
-its process audit) which suspends CPU0's carrier thread for 300 ms every second,
-and the test requires a vsock echo that begins in a hold to return within 60 ms
-of the slowest echo without one, with every CPU busy, with only CPU0 busy and
-with every CPU idle. Work already queued on CPU0 when a hold begins, and a hold
-that lands inside CPU0's dispatch, stay with CPU0, so the test does not judge
-an echo already under way and allows 4 failing holds of 20 per phase; a host so
-busy that an echo without a hold takes over 150 ms is refused, not judged. The
-library is test support and nothing in the product loads it.
+its process audit) which suspends CPU0's carrier thread for a while every second,
+and the test requires a vsock echo that begins in a hold to return soon after the
+slowest echo without one, with every CPU busy, with only CPU0 busy and with
+every CPU idle. An echo already under way when a hold begins is not judged, and
+a hold that lands inside CPU0's dispatch stays with CPU0, so a few holds per
+phase may fail. A phase with too few judged holds, and a host so busy that an
+echo without a hold is already slow, fail the run. The library is test support
+and nothing in the product loads it.
 
 ## Integration prerequisites and workflows
 

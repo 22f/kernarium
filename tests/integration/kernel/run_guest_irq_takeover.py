@@ -22,8 +22,11 @@ BOUND_ALLOWANCE_MS of the slowest echo of the same phase with no hold. Without
 the takeover it comes back when the host lets CPU0 run, up to
 HOLD_MILLISECONDS after the request. An echo already under way when a hold
 begins may have work queued on CPU0, which no other CPU can run; it is not
-judged. A hold that lands inside CPU0's dispatch leaves the events to it, so
-a few holds per phase may fail.
+judged. A hold that lands inside CPU0's dispatch leaves the events to it, so a
+few holds per phase may fail, as many as that phase's duty cycle of CPU0 inside
+its dispatch makes likely (HOLDS_ALLOWED_TO_FAIL). A hold in which no echo began
+is not judged either, and is reported; a phase with fewer than
+HOLDS_JUDGED_MINIMUM judged holds fails the run.
 """
 
 from __future__ import annotations
@@ -67,6 +70,9 @@ CONTROL_SECONDS = 4.0
 HOLD_SECONDS = 20.0
 HOLDS_MINIMUM = 15
 ECHOES_MINIMUM = 400
+# A hold in which no echo began judges nothing. A phase needs this many holds
+# that judged at least one echo, or the run fails: it said nothing about them.
+HOLDS_JUDGED_MINIMUM = 15
 
 # What the takeover may add to an echo: two clock ticks without a dispatch
 # (20 ms) plus a tick and the wake of the server, and room for the host. An
@@ -76,11 +82,19 @@ BOUND_ALLOWANCE_MS = 60.0
 # is too busy for this test to say anything: with the allowance, the bound is
 # then still well under what an echo takes when nothing takes over.
 CONTROL_LIMIT_MS = 150.0
-# Without the takeover most holds fail (an echo already under way when a hold
-# begins is not judged). A hold that stops CPU0 inside its dispatch, which holds
-# the token, fails with it, as does one that stops a worker CPU0 was running:
-# that is a few holds in a hundred, so a few may fail per phase.
-HOLDS_ALLOWED_TO_FAIL = 4
+# Without the takeover most holds fail. A hold that stops CPU0 inside its own
+# dispatch fails with it, since the dispatch holds the token and no other CPU
+# may take it from a CPU that is not running: that is the limit of the design.
+# How many holds that is depends on how long CPU0 spends inside its dispatch in
+# the phase, so each phase has its own allowance: the most failing holds out of
+# HOLD_SECONDS holds that the rate measured for the phase (the share of holds
+# that landed inside CPU0's dispatch: busy 3.0 %, spinner on CPU0 2.0 %, idle
+# 3.0 %) leaves a chance of under one in a thousand of exceeding.
+HOLDS_ALLOWED_TO_FAIL = {
+    "busy": 4,
+    "spinner on CPU0": 3,
+    "idle": 4,
+}
 
 SERVER = "/opt/uml-test/irq_takeover_echo.py"
 SPINNER = "/opt/uml-test/irq_takeover_spin.py"
@@ -232,29 +246,36 @@ def set_spinners(guest: Guest, cpus: tuple[int, ...]) -> None:
 
 def judge_holds(holds: list[tuple[int, int]],
                 echoes: list[tuple[float, int]],
-                bound_ms: float) -> tuple[list[tuple[int, float, float]], int, int]:
+                bound_ms: float) -> dict:
     """Judge the echoes that began while a hold lasted.
 
-    Returns the holds with an echo over the bound, each as (hold number,
-    slowest milliseconds, when it began in milliseconds from the hold's
-    start), how many echoes were judged, and how many were under way when a
-    hold began, which are not.
+    Returns "failed", the holds with an echo over the bound, each as (hold
+    number, slowest milliseconds, when it began in milliseconds from the hold's
+    start); "unjudged", the numbers of the holds in which no echo began, which
+    judge nothing; and "judged" and "skipped", how many echoes were judged and
+    how many were under way when a hold began, which are not.
     """
     failed: list[tuple[int, float, float]] = []
+    unjudged: list[int] = []
     judged = 0
     skipped = 0
     for number, (lasted, begin) in enumerate(holds):
         worst = (0.0, 0.0)
+        began_in_hold = 0
         for ms, started in echoes:
             if started < begin:
                 skipped += started + ms * 1e6 > begin
             elif started <= begin + lasted:
-                judged += 1
+                began_in_hold += 1
                 if ms > worst[0]:
                     worst = (ms, (started - begin) / 1e6)
-        if worst[0] > bound_ms:
+        judged += began_in_hold
+        if not began_in_hold:
+            unjudged.append(number)
+        elif worst[0] > bound_ms:
             failed.append((number, worst[0], worst[1]))
-    return failed, judged, skipped
+    return {"failed": failed, "unjudged": unjudged, "judged": judged,
+            "skipped": skipped}
 
 
 def run_phase(guest: Guest, library: HoldLibrary, port: int, name: str,
@@ -275,19 +296,23 @@ def run_phase(guest: Guest, library: HoldLibrary, port: int, name: str,
     held = [ms for ms, _ in held_echoes]
     control_max = max(control)
     bound_ms = control_max + BOUND_ALLOWANCE_MS
-    failed, judged, skipped = judge_holds(holds, held_echoes, bound_ms)
+    verdict = judge_holds(holds, held_echoes, bound_ms)
+    failed, unjudged = verdict["failed"], verdict["unjudged"]
+    judged_holds = len(holds) - len(unjudged)
     outcome = {
         "phase": name,
         "control_echoes": len(control),
         "control_max_ms": round(control_max, 1),
         "bound_ms": round(bound_ms, 1),
         "echoes": len(held),
-        "judged": judged,
-        "skipped_under_way": skipped,
+        "judged": verdict["judged"],
+        "skipped_under_way": verdict["skipped"],
         "p50_ms": round(percentile(held, 0.50), 1),
         "p99_ms": round(percentile(held, 0.99), 1),
         "max_ms": round(max(held), 1),
         "holds": len(holds),
+        "holds_judged": judged_holds,
+        "holds_unjudged": len(unjudged),
         "holds_failed": len(failed),
         "held_min_ms": round(min(lasted for lasted, _ in holds) / 1e6, 1)
         if holds else 0.0,
@@ -296,14 +321,18 @@ def run_phase(guest: Guest, library: HoldLibrary, port: int, name: str,
         f"{name}: {len(held)} echoes through {len(holds)} holds of CPU{HOLD_CPU} "
         f"(each at least {outcome['held_min_ms']} ms): median "
         f"{outcome['p50_ms']} ms, p99 {outcome['p99_ms']} ms, slowest "
-        f"{outcome['max_ms']} ms; {judged} began in a hold and {skipped} were "
-        f"under way when one began; {len(failed)} holds had an echo over "
+        f"{outcome['max_ms']} ms; {verdict['judged']} began in a hold and "
+        f"{verdict['skipped']} were under way when one began; {judged_holds} holds "
+        f"judged an echo and {len(failed)} of them had one over "
         f"{outcome['bound_ms']} ms (the slowest of {len(control)} echoes without "
         f"a hold, {outcome['control_max_ms']} ms, plus {BOUND_ALLOWANCE_MS:g})"
     )
     for number, ms, offset in failed:
         print(f"  hold {number}: an echo took {ms:.1f} ms, begun {offset:+.1f} ms "
               f"from the start of the hold")
+    if unjudged:
+        print(f"  holds in which no echo began, not judged: "
+              f"{', '.join(map(str, unjudged))}")
     if len(holds) < HOLDS_MINIMUM:
         raise RuntimeError(
             f"{name}: only {len(holds)} holds, {HOLDS_MINIMUM} were needed"
@@ -312,6 +341,12 @@ def run_phase(guest: Guest, library: HoldLibrary, port: int, name: str,
         raise RuntimeError(
             f"{name}: a hold lasted {outcome['held_min_ms']} ms, under "
             f"{HELD_MINIMUM_NS / 1e6:.0f} ms"
+        )
+    if judged_holds < HOLDS_JUDGED_MINIMUM:
+        raise RuntimeError(
+            f"{name}: only {judged_holds} of {len(holds)} holds judged an echo "
+            f"({HOLDS_JUDGED_MINIMUM} were needed): the run says nothing about "
+            f"the others"
         )
     if len(held) < ECHOES_MINIMUM:
         raise RuntimeError(f"{name}: only {len(held)} echoes in the hold run")
@@ -373,9 +408,10 @@ def main() -> int:
             # Every phase runs before the bound judges any of them.
             slow = [
                 f"{outcome['phase']}: {outcome['holds_failed']} of "
-                f"{outcome['holds']} holds"
+                f"{outcome['holds_judged']} judged holds (allowed "
+                f"{HOLDS_ALLOWED_TO_FAIL[outcome['phase']]})"
                 for outcome in report
-                if outcome["holds_failed"] > HOLDS_ALLOWED_TO_FAIL
+                if outcome["holds_failed"] > HOLDS_ALLOWED_TO_FAIL[outcome["phase"]]
             ]
             log = guest.check_command("cat /run/irq-takeover-echo.log", 30).strip()
             if log:
@@ -384,8 +420,8 @@ def main() -> int:
             print(json.dumps(report))
             if slow:
                 raise RuntimeError(
-                    f"echoes took too long while CPU{HOLD_CPU} was held (more than "
-                    f"{HOLDS_ALLOWED_TO_FAIL} failing hold): " + "; ".join(slow)
+                    f"echoes took too long while CPU{HOLD_CPU} was held: "
+                    + "; ".join(slow)
                 )
             if not guest.shutdown(60):
                 raise RuntimeError("the guest did not power off")
