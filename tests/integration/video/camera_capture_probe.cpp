@@ -47,12 +47,14 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <csignal>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -1127,6 +1129,74 @@ struct MetaStream {
     }
 };
 
+void command_blocked(int)
+{
+    static const char text[] = "FAIL: a command blocked with the buffer budget full\n";
+    (void)!::write(STDOUT_FILENO, text, sizeof(text) - 1);
+    ::_exit(1);
+}
+
+// The device holds at most 96 buffers (the driver's VIRTIO_VIDEO_CAMERA_MAX_QUEUED)
+// of every kind and camera, so that queued buffers can never take the command
+// queue's whole ring. Metadata streams with no exposure to fill them hold their
+// buffers for good: eight files of sixteen, the surplus of the first ninety-six
+// is refused as failed buffers at once, a command still completes with the
+// budget full, and the room is there again when the streams stop.
+void test_buffer_budget(const Camera& camera)
+{
+    constexpr unsigned budget = 96, per_file = 16, files = budget / per_file + 2;
+    std::vector<std::unique_ptr<Node>> nodes;
+    for (unsigned i = 0; i < files; ++i) {
+        nodes.push_back(std::make_unique<Node>(camera.meta_path(), true));
+        if (!nodes.back()->open_file() || !nodes.back()->allocate(per_file, V4L2_MEMORY_MMAP)) {
+            CHECK(false, "metadata file %u: %s", i, std::strerror(errno));
+            return;
+        }
+    }
+    for (auto& node : nodes) CHECK(node->queue_all() && node->stream_on(), "metadata start: %s", std::strerror(errno));
+
+    unsigned refused = 0, answered = 0;
+    for (auto& node : nodes) {
+        Dequeued buffer;
+        while (node->dequeue(buffer, 0) > 0) {
+            if (buffer.flags & V4L2_BUF_FLAG_ERROR) ++refused;
+            else ++answered;
+        }
+    }
+    CHECK(refused == files * per_file - budget, "%u of %u metadata buffers were refused, not %u", refused, files * per_file,
+          files * per_file - budget);
+    CHECK(answered == 0, "%u metadata buffers came with no exposure", answered);
+
+    // A command goes through with the budget full: the zoom is written and read back.
+    Node capture(camera.capture_path(), false);
+    std::signal(SIGALRM, command_blocked);
+    alarm(60);
+    const bool opened = capture.open_file();
+    const bool wrote = opened && set_control(capture.fd, kCidZoomQ16, 0x20000);
+    alarm(0);
+    std::signal(SIGALRM, SIG_DFL);
+    CHECK(wrote, "the zoom write with the budget full: %s", std::strerror(errno));
+    std::int64_t zoom = 0;
+    CHECK(opened && get_control(capture.fd, kCidZoomQ16, zoom) && zoom == 0x20000, "the zoom reads %#llx", static_cast<long long>(zoom));
+    if (opened) set_control(capture.fd, kCidZoomQ16, 0x10000);
+
+    for (auto& node : nodes) CHECK(node->stream_off(), "STREAMOFF: %s", std::strerror(errno));
+    nodes.clear();
+
+    // The room is back: a fresh file's buffers are all accepted.
+    Node again(camera.meta_path(), true);
+    if (!again.open_file() || !again.allocate(per_file, V4L2_MEMORY_MMAP)) {
+        CHECK(false, "metadata file after the budget: %s", std::strerror(errno));
+        return;
+    }
+    CHECK(again.queue_all() && again.stream_on(), "metadata start after the budget: %s", std::strerror(errno));
+    unsigned failed = 0;
+    Dequeued buffer;
+    while (again.dequeue(buffer, 0) > 0) ++failed;
+    CHECK(failed == 0, "%u of a fresh file's metadata buffers were refused after the streams stopped", failed);
+    CHECK(again.stream_off(), "STREAMOFF: %s", std::strerror(errno));
+}
+
 // Reads video and metadata together until `done` accepts a record or the time is up.
 template <typename Done>
 bool pump(Node& video, MetaStream& meta, VideoStats* stats, std::vector<CameraMeta>& seen, Done done, int seconds)
@@ -1621,6 +1691,8 @@ int main(int argc, char** argv)
     test_meta(*back);
     step("two metadata streams");
     test_two_meta(*back);
+    step("buffer budget");
+    test_buffer_budget(*back);
     step("stills");
     test_stills(*back);
 
