@@ -7,19 +7,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストの内部ストレージを閲覧し、ファイルやフォルダを読み込んだり書き出したりできます。"
+            "value" : "仮想マシンの内部ストレージを閲覧し、ファイルやフォルダを読み込んだり書き出したりできます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "浏览客户机的内部存储空间，并导入或导出文件和文件夹。"
+            "value" : "浏览虚拟机的内部存储空间，并导入或导出文件和文件夹。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "瀏覽客體的內部儲存空間，並匯入或匯出檔案和檔案夾。"
+            "value" : "瀏覽虛擬機器的內部儲存空間，並輸入或輸出檔案和檔案夾。"
           }
         }
       }
@@ -59,13 +59,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修复了从后台返回 Andarium 时崩溃的问题"
+            "value" : "修复了从后台返回Andarium时崩溃的问题"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修正了從背景返回 Andarium 時當機的問題"
+            "value" : "修正從背景返回Andarium時當機的問題"
           }
         }
       }
@@ -88,7 +88,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修正了使用陀螺儀時當機的問題"
+            "value" : "修正使用陀螺儀時當機的問題"
           }
         }
       }
@@ -105,13 +105,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修复了某些 3D 游戏和应用崩溃的问题"
+            "value" : "修复了某些3D游戏和应用崩溃的问题"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修正了某些 3D 遊戲和應用程式當機的問題"
+            "value" : "修正部分3D遊戲和應用程式當機的問題"
           }
         }
       }
@@ -128,13 +128,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修复了网络连接中断后 CPU 占用高和发热的问题"
+            "value" : "修复了网络连接中断后CPU占用高和发热的问题"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修正了網路連線中斷後 CPU 使用率偏高和發熱的問題"
+            "value" : "修正網路連線中斷後CPU使用率偏高和發熱的問題"
           }
         }
       }
@@ -145,19 +145,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "多くのiPhoneでゲストがクラッシュする問題を修正しました"
+            "value" : "多くのiPhoneで仮想マシンがクラッシュする問題を修正しました"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修复了客户机在许多 iPhone 上崩溃的问题"
+            "value" : "修复了虚拟机在许多iPhone上崩溃的问题"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修正了客體在許多 iPhone 上當機的問題"
+            "value" : "修正虛擬機器在許多iPhone上當機的問題"
           }
         }
       }
@@ -191,19 +191,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "対応するデバイスでは、ゲストのRAMを4 GiBより大きくできるようになりました。"
+            "value" : "対応するデバイスでは、仮想マシンのRAMを4 GiBより大きくできるようになりました。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在支持的设备上，客户机的 RAM 现在可以超过 4 GiB。"
+            "value" : "在支持的设备上，虚拟机的RAM现在可以超过4 GiB。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在支援的裝置上，客體的 RAM 現在可以超過 4 GiB。"
+            "value" : "在支援的裝置上，虛擬機器的RAM現在可以超過4 GiB。"
           }
         }
       }
@@ -226,7 +226,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "減少了高負載下的卡頓和聲音中斷"
+            "value" : "減少高負載時的畫面停頓和聲音斷續"
           }
         }
       }
@@ -237,7 +237,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安定性の修正"
+            "value" : "安定性の向上"
           }
         },
         "zh-Hans" : {
