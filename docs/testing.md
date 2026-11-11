@@ -168,7 +168,9 @@ probe states in its header what it checks. A contract's owning README, such as
 that check it.
 A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
-by itself.
+by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
+checks the transport's rules for a device that holds requests across a ring
+disable.
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
@@ -593,6 +595,10 @@ through Android's input dump and the probe's log, that the host's devices
 plug, are configured as the image says, deliver keys, the cursor, buttons and
 wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
+`android-video-suspend` (integration) registers when
+`UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
+`screenrecord`'s encoder run across a suspend by the host's route and by the
+guest's own on one stream each, and the host closes no stream by a reset.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

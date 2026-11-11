@@ -87,8 +87,29 @@ private:
         std::vector<DescriptorSegment> segments;
     };
 
+    /* A completion of a deferred request whose ring was disabled when the
+     * device finished it, kept until the ring is enabled again. */
+    struct HeldCompletion {
+        std::uint64_t requestId {};
+        std::vector<std::uint8_t> response;
+    };
+
     void resetConnection() noexcept;
     void resetDeviceState() noexcept;
+    /* Whether the device holds deferred requests across a ring disable that
+     * has happened: it opts in, a request is pending and a configured ring is
+     * disabled. */
+    [[nodiscard]] bool requestsAreHeld() const noexcept;
+    /* Resets the device first when requestsAreHeld(): the caller is about to
+     * change what the held requests refer to, or the guest is tearing down. */
+    void retireHeldRequests() noexcept;
+    [[nodiscard]] bool everyConfiguredRingIsEnabled() const noexcept;
+    /* Writes the held completions of queue `index` to its used ring, in the
+     * order the device finished them, and notifies the guest once. */
+    void publishHeldCompletions(std::uint32_t index);
+    /* The queues have been enabled again: whatever the device finished or
+     * raised while one could not run is published and run. */
+    void resumeQueues();
     void resetQueues() noexcept;
     void clearMappings() noexcept;
     void handleMessage(int socket, VhostUserMessage& message);
@@ -160,6 +181,7 @@ private:
     std::vector<Mapping> mappings_;
     std::vector<Queue> queues_;
     std::unordered_map<std::uint64_t, PendingRequest> pendingRequests_;
+    std::deque<HeldCompletion> heldCompletions_;
     std::uint64_t nextRequestId_ {1};
     std::uint64_t negotiatedFeatures_ {};
     std::uint64_t negotiatedProtocolFeatures_ {};

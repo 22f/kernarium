@@ -1667,6 +1667,18 @@ void severalStreams()
     require(Fixture::completionOf(done, c).buffer().timestamp == 333, "the surviving stream stopped");
 }
 
+/* A guest suspends by disabling its rings, and a codec stream outlives it: the
+ * device asks the transport to leave it alone at a ring's disable and to keep
+ * the request buffers a ring is given meanwhile (vhost_user_device.hpp). */
+void streamsOutliveASuspend()
+{
+    Fixture f;
+    require(f.device.keepsDeferredRequestsWhileDisabled(),
+            "a ring disable resets the encoder, which drops the stream a suspend must keep");
+    require(f.device.keepsRequestsOnDisabledRing(),
+            "a request posted as the guest suspends is dropped by the encoder's transport");
+}
+
 /* The event queue never holds a buffer of the guest's. With no event waiting a
  * buffer offered stays in the guest's ring, and the device does not wake the
  * transport; an event raised later does, and the next buffer takes it. An
@@ -2289,6 +2301,7 @@ int main()
 {
     try {
         identity();
+        streamsOutliveASuspend();
         queries();
         streams();
         parameters();

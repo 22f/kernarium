@@ -75,13 +75,18 @@ lock and run in `check-gpu`.
 
 ## Suspend and session loss
 
-A guest suspend disables the rings, and a ring disable resets a device that
-still holds a request. Neither video device holds one while idle: the event
-queue never defers, so with no event waiting the guest's buffer stays in its
-ring and the device raises its event descriptor when an event comes. An idle
-device is not reset, a descriptor opened before the suspend works after it, and
-a session started after it gets its source change. A suspend with a stream open
-and a buffer queued still resets the device, as the transport's rule says.
+A guest suspend disables the rings one after another and enables them in the
+same order, and a ring disable resets a device that still holds a request.
+Neither video device is reset: the event queue never defers, so with no event
+waiting the guest's buffer stays in its ring and the device raises its event
+descriptor when an event comes, and the device asks the transport to keep the
+requests it holds (`keepsDeferredRequestsWhileDisabled()`), the buffers a
+stream has queued. What the device completes while a ring is disabled is
+written to the ring at its enable. A stream therefore goes on after a suspend
+with the next picture or coded buffer, a descriptor opened before it works
+after it, and a session started after it gets its source change. A message that
+changes what a stream refers to, or a driver's teardown, still resets the
+device.
 
 The system may invalidate a platform session, as iOS does to an app that was in
 the background. The decoder then rebuilds it from the stream's stored parameter
@@ -181,7 +186,10 @@ encoder (`tests/support/video`) and then the host's hardware encoder;
 device and that the wire lists exactly what discovery found.
 
 `virtio-video-suspend` runs the decoder behind the real transport through a ring
-disable and enable, `platform-video-decoder-recovery` and
-`platform-video-encoder-recovery` lose the VideoToolbox session, and
-`guest-video-suspend` suspends a Linux guest by the host's route and its own with
-both devices idle.
+disable and enable, and `vhost-user-held-requests` checks the transport's side
+of it: requests held, completions and events written at the enable, kicks with
+and without an acknowledgement, and the messages that reset.
+`platform-video-decoder-recovery` and `platform-video-encoder-recovery` lose the
+VideoToolbox session, and `guest-video-suspend` suspends a Linux guest by the
+host's route and its own with both devices idle, with a node opened ahead of
+use, and with a decode and an encode stream in progress.
