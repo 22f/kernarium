@@ -19,9 +19,11 @@ import Testing
 /// route is two launches of one guest, ANDARIUM_FILES_SWEEP_ROUTE=1 and
 /// ANDARIUM_GUEST_INSTANCE=files-sweep-route, with ANDARIUM_FILES_SWEEP_PHASE=1
 /// (an import is cut off by the application's abrupt end, which the test
-/// brings about itself, so the launch ends as a crash) and then =2 (the guest
-/// starts again and nothing is done: the record the abrupt end left is what
-/// makes the run sweep).
+/// brings about itself, so the launch ends as a crash), =2 (the guest starts
+/// again and nothing is done: the record the abrupt end left is what makes the
+/// run sweep) and =3 (an ordinary second start: nothing is owed, so no sweep is
+/// sent, and a leftover planted at the end of the second launch is still there;
+/// this one removes the test's guest).
 /// The background test needs a device: it runs alone on an iPad with
 /// ANDARIUM_FILES_BACKGROUND=1 and ANDARIUM_GUEST_INSTANCE=filex-bg, and a
 /// harness that sends the application to the background and back when the
@@ -43,6 +45,8 @@ struct GuestFilesGuestTests {
     /// test stops the transfers the way the notification does.
     private static let simulatesBackground = environment["ANDARIUM_FILES_BACKGROUND_SIMULATE"] == "1"
     private static let folder = GuestPath.child("FilexTest", of: GuestPath.child("Download", of: GuestPath.root))
+    /// A partial file of an unknown earlier run, which the route's third launch looks for.
+    private static let plantedLeftover = ".andarium-12345678-abcdef01.part"
     private static let cleanup = "rm -rf '\(folder)' /storage/emulated/0/Pictures/fx_*; su 0 rm -rf /data/media/0/FilexRefused"
     private let mib = Limits.bytesPerMiB
 
@@ -823,18 +827,19 @@ struct GuestFilesGuestTests {
         }
     }
 
-    /// The real route, in two launches of one guest. First an import is cut
+    /// The real route, in three launches of one guest. First an import is cut
     /// off by the application's abrupt end (the test ends its own process
     /// with SIGKILL, as iOS ends an application in the background: the guest
     /// goes with it, and its guest-side writes were synced first, so the
     /// partial file is on the disk). Then the guest starts again, nothing is
     /// done, and the partial file is gone, with a new import that began
-    /// during the run's sweep arriving whole.
+    /// during the run's sweep arriving whole. A third start is an ordinary
+    /// one: it sends no sweep.
     @Test(.timeLimit(.minutes(40)))
     func aCutOffImportsPartialFileIsGoneWhenTheNextRunStarts() async throws {
         guard Self.routeEnabled else { return }
         try #require(Self.environment["ANDARIUM_GUEST_INSTANCE"] == "files-sweep-route")
-        let phase = try #require(Self.environment["ANDARIUM_FILES_SWEEP_PHASE"].flatMap { ["1", "2"].contains($0) ? $0 : nil })
+        let phase = try #require(Self.environment["ANDARIUM_FILES_SWEEP_PHASE"].flatMap { ["1", "2", "3"].contains($0) ? $0 : nil })
         let work = GuestPath.child("FilexSweepRoute", of: GuestPath.child("Download", of: GuestPath.root))
         let record = try #require(FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first)
             .appendingPathComponent("filex-sweep-route.txt")
@@ -880,6 +885,22 @@ struct GuestFilesGuestTests {
                 kill(getpid(), SIGKILL)
                 try await Task.sleep(for: .seconds(120))
                 Issue.record("the application did not end")
+                return
+            }
+
+            if phase == "3" {
+                // An ordinary second start: the second run's sweep settled the record and its
+                // import ended cleanly, so nothing is owed and no sweep is sent. A leftover
+                // planted at the end of the second run, which a sweep would remove, is still there.
+                let sweeper = try #require(runtime.partialSweep, "a normal run has a sweep")
+                try await waitUntil("the run has looked at the record", seconds: 300) { sweeper.currentPhase == .settled }
+                #expect(sweeper.attempts == 0, "a guest that owes nothing is not swept")
+                #expect(!runtime.partials.isOwed && !PartialSweepLedger.isOwed(in: runtime.partials.url.deletingLastPathComponent()))
+                let planted = work + "/" + Self.plantedLeftover
+                let there = try await guest.run("[ -f '\(planted)' ] && echo yes || echo no").text
+                #expect(there.trimmingCharacters(in: .whitespacesAndNewlines) == "yes", "the second start sent a sweep: \(planted) is gone")
+                note("third run: no sweep was sent, the planted leftover is still there")
+                _ = try await guest.run("rm -rf '\(work)'", seconds: 300)
                 return
             }
 
@@ -940,8 +961,10 @@ struct GuestFilesGuestTests {
             // The folder (with the many files phase 1 may have made) goes before the guest is shut down,
             // which allows a minute for its own cleanup.
             _ = try await guest.run("rm -rf '\(work)'", seconds: 1_200)
+            // A leftover that only a sweep would remove, for the third start to find or not.
+            _ = try await guest.run("mkdir -p '\(work)' && : > '\(work)/\(Self.plantedLeftover)'", seconds: 120)
         }
-        if phase == "2", let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first {
+        if phase == "3", let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first {
             try? FileManager.default.removeItem(at: library.appendingPathComponent("TestGuests/files-sweep-route", isDirectory: true))
         }
     }
