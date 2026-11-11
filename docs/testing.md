@@ -182,6 +182,10 @@ devices, suspends the guest both as the host's quiesce does and as the guest doe
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
 disable.
+`guest-hardware-input` (needs a GPU slot) checks that a Linux guest started
+with `--hardware-input` registers and unregisters the keyboard, mouse and
+pointer input devices as a VNC client plugs and unplugs them
+([contract](../kernel/common/input/README.md)).
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
@@ -589,11 +593,12 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
-- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
-  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
-  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
-  default devices and again with the option and a connected client; a result
-  that differs from the accepted release's is explained
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`;
+  `guest-hardware-input` is the Linux guest's check). `android-keymouse`
+  passes, and `CtsInputTestCases`, `CtsHardwareTestCases`, `CtsViewTestCases`
+  and `CtsInputMethodTestCases` pass with the launcher's default devices and
+  again with the option and a connected client; a result that differs from the
+  accepted release's is explained
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts

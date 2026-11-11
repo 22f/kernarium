@@ -311,6 +311,15 @@ it. The bridge fields used below are defined by the comments in
   suspend disables the device's queues, so the host fills them after the
   resume, and the host wakes a guest that suspended itself while the receiver
   is powered; the driver is not a wake source. `guest-gnss-receiver` checks it.
+- The Virtio-input driver follows its device's configuration changes: a device
+  that reports no event type has no input device, every change reads every
+  bitmap again and registers the input device afresh when one differs, and the
+  driver answers with the private registration notice ([wire
+  contract](input/README.md)). It posts its event buffers at probe whether or
+  not it registered an input device, because the host plugs a device only after
+  that. A device that reports its events at probe registers as before.
+  `guest-hardware-input` checks it for the hot-pluggable keyboard, mouse and
+  pointer.
 - A virtio-gpu PRIME export is always read-write. A device with 3D refuses a
   dma-buf another driver exported with `-ENODEV`; do not restore the stable
   change that routed it to the generic importer. Hardware video and Android's
