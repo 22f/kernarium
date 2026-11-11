@@ -267,6 +267,9 @@ struct FeedbackChainConfig {
     uint32_t timestamp_queries = 0;
     // A pass in the middle of the chain that has no draw.
     bool empty_pass = false;
+    // The pass that begins with a clear load op (blue) rather than a load, so
+    // that its encoder starts when it begins and stays; `steps + 1` for none.
+    uint32_t clearing_pass = UINT32_MAX;
     // One pipeline-statistics query over the whole chain, counting input
     // assembly vertices and vertex shader invocations.
     bool statistics_query = false;

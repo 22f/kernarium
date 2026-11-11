@@ -745,6 +745,13 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     rendering.pColorAttachments = &attachment;
     rendering.pDepthAttachment = config.depth ? &depth_attachment : nullptr;
 
+    VkRenderingAttachmentInfo cleared_attachment = attachment;
+    cleared_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    cleared_attachment.clearValue.color.float32[2] = 1.0f;
+    cleared_attachment.clearValue.color.float32[3] = 1.0f;
+    VkRenderingInfo clearing_rendering = rendering;
+    clearing_rendering.pColorAttachments = &cleared_attachment;
+
     /* Setup, outside the span the caller measures: reset the queries, give
      * the attachment its first layout and contents. */
     {
@@ -906,7 +913,8 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
                 VK_CALL(CmdPipelineBarrier2, command, &handoff_dependency);
             }
             between(step);
-            VK_CALL(CmdBeginRendering, command, &rendering);
+            VK_CALL(CmdBeginRendering, command,
+                    step == config.clearing_pass ? &clearing_rendering : &rendering);
             for (const ChainOp &op : ops_of(step))
                 record_op(command, op);
             VK_CALL(CmdEndRendering, command);

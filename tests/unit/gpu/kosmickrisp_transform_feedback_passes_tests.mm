@@ -340,6 +340,25 @@ void check_results(const FeedbackChainConfig &config, const FeedbackChainResult 
     }
 }
 
+/* What a HeapCapture captured: each of its uvec4 maps a word x of the chain's
+ * state when it ran to 3x + c, as a capture does. */
+void check_heap_capture(const FeedbackChainConfig &config, const FeedbackChainResult &result,
+                        const std::string &what)
+{
+    require(result.heap_captured.size() == size_t(kHeapCaptureIndices) * 4,
+            what + ": the capture has the wrong size");
+    for (size_t word = 0; word < result.heap_captured.size(); ++word) {
+        const size_t vertex = (word / 4) % config.points;
+        const uint32_t input =
+            step_word(uint32_t(vertex * 4 + word % 4), result.heap_captures);
+        const uint32_t expected = input * 3u + uint32_t(word % 4) + 1u;
+        require(result.heap_captured[word] == expected,
+                what + ": word " + std::to_string(word) + " captured " +
+                    std::to_string(result.heap_captured[word]) + ", expected " +
+                    std::to_string(expected));
+    }
+}
+
 /* Timestamps written in recording order read increasing times, each its own. */
 void check_timestamps(const FeedbackChainResult &result, size_t count, const std::string &what)
 {
@@ -642,18 +661,30 @@ int main(int argc, char **argv)
             expect.extraSamples = kHeapRasterIndices;
             const FeedbackChainResult result =
                 run_variant(context, "heap segment", config, expect, false);
-            require(result.heap_captured.size() == size_t(kHeapCaptureIndices) * 4,
-                    "heap segment: the capture has the wrong size");
-            for (size_t word = 0; word < result.heap_captured.size(); ++word) {
-                const size_t vertex = (word / 4) % config.points;
-                const uint32_t input = step_word(uint32_t(vertex * 4 + word % 4),
-                                                 result.heap_captures);
-                const uint32_t expected = input * 3u + uint32_t(word % 4) + 1u;
-                require(result.heap_captured[word] == expected,
-                        "heap segment: word " + std::to_string(word) + " captured " +
-                            std::to_string(result.heap_captured[word]) + ", expected " +
-                            std::to_string(expected));
-            }
+            check_heap_capture(config, result, "heap segment");
+        }
+        /* The same draws in a pass that begins with a clear load op: its
+         * encoder starts when the pass begins and stays, so the draws launch
+         * their compute with it open and the heap resets after the pass, as
+         * they do outside a late start. The boolean query leaves the heap
+         * draw's capture as the check that the heap served it. */
+        for (bool precise : {true, false}) {
+            const char *name = precise ? "heap segment in a started pass, precise"
+                                       : "heap segment in a started pass, boolean";
+            if (!selected(name))
+                continue;
+            FeedbackChainConfig config = variant();
+            config.heap_capture_indices = kHeapCaptureIndices;
+            config.heap_raster_indices = kHeapRasterIndices;
+            config.clearing_pass = config.steps / 2;
+            config.precise_occlusion = precise;
+            config.passes[config.steps / 2] = {
+                {Kind::HeapCapture}, {Kind::HeapRaster}, {Kind::Capture}};
+            Expect expect;
+            expect.blueBackground = true;
+            expect.extraSamples = kHeapRasterIndices;
+            const FeedbackChainResult result = run_variant(context, name, config, expect, false);
+            check_heap_capture(config, result, name);
         }
         return 0;
     } catch (const std::exception &error) {
