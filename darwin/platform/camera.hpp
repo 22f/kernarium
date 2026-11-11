@@ -203,10 +203,17 @@ struct CameraSettings {
     std::uint64_t exposureNanoseconds {};
     std::uint32_t iso {};
     float exposureBiasStops {};
+    // continuousAuto: the camera focuses by itself. locked: the lens holds where
+    // it is. manual: the lens goes to focusDistanceDioptres when the guest writes
+    // it (focusDistanceSerial changes) and holds from then on.
     CameraFocusMode focusMode {CameraFocusMode::continuousAuto};
     float focusDistanceDioptres {};
-    // A focus mode of continuousAuto runs a single scan whenever this changes.
+    // Whatever the focus mode, a change of this runs one scan; the lens then
+    // holds where the scan ends, or goes back to continuous focus in
+    // continuousAuto.
     std::uint32_t focusTriggerSerial {};
+    // A change moves the lens in manual mode; an unchanged value leaves the lens alone.
+    std::uint32_t focusDistanceSerial {};
     CameraWhiteBalanceMode whiteBalanceMode {CameraWhiteBalanceMode::continuousAuto};
     std::array<float, 3> whiteBalanceGains {1.0f, 1.0f, 1.0f};
     float zoomRatio {1.0f};

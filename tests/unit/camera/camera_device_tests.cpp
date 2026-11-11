@@ -1029,6 +1029,7 @@ void testControlsOnStreams()
             "and reads back");
 
     // A button counts presses; the focus status follows the exposure.
+    rig.setOk(1, {{UML_V4L2_CID_FOCUS_AUTO, 0, {}}});
     for (int press = 0; press < 3; ++press) rig.setOk(1, {{UML_V4L2_CID_AUTO_FOCUS_START, 1, {}}});
     require(rig.camera->appliedSettings(0).focusTriggerSerial == 3, "three presses of the focus button");
     rig.setOk(1, {{UML_V4L2_CID_FOCUS_AUTO, 1, {}}});

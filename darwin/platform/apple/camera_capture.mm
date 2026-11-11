@@ -313,6 +313,7 @@ struct RunningCamera {
     std::uint32_t height {};
     std::uint32_t frameRate {};
     std::uint32_t focusSerial {};
+    std::uint32_t focusDistanceSerial {};
     // Settings have been applied to the device at least once, so that a format
     // change (which reverts some of them) can put them back.
     bool applied {};
@@ -538,17 +539,28 @@ public:
             if (settings.aeRegion && settings.aeRegion->weight > 0 && device.exposurePointOfInterestSupported)
                 device.exposurePointOfInterest = CGPointMake(settings.aeRegion->x + settings.aeRegion->width / 2,
                                                              settings.aeRegion->y + settings.aeRegion->height / 2);
-            // Focus.
+            // Focus. A new trigger runs one scan in any mode (the device locks where
+            // it ends). Otherwise a manual lens goes to the distance only when the
+            // guest has written it anew, and holds from then on, as does a locked
+            // one; the continuous mode is the rest. A format change reverts the
+            // focus, so `force` puts a written distance back.
             if (info.autofocus) {
-                if (settings.focusMode == CameraFocusMode::manual && info.manualFocus) {
-                    [device setFocusModeLockedWithLensPosition:lensPositionOf(settings.focusDistanceDioptres,
-                                                                              info.minimumFocusDistanceMillimetres)
-                                             completionHandler:nil];
-                } else if (settings.focusMode == CameraFocusMode::locked) {
-                    if ([device isFocusModeSupported:AVCaptureFocusModeLocked]) device.focusMode = AVCaptureFocusModeLocked;
-                } else if (settings.focusTriggerSerial != running.focusSerial &&
-                           [device isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
+                const bool scan = settings.focusTriggerSerial != running.focusSerial;
+                const bool move = settings.focusDistanceSerial != running.focusDistanceSerial ||
+                    (force && settings.focusDistanceSerial != 0);
+                if (scan && [device isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
                     device.focusMode = AVCaptureFocusModeAutoFocus;
+                } else if (settings.focusMode == CameraFocusMode::manual && info.manualFocus) {
+                    if (move) {
+                        [device setFocusModeLockedWithLensPosition:lensPositionOf(settings.focusDistanceDioptres,
+                                                                                  info.minimumFocusDistanceMillimetres)
+                                                 completionHandler:nil];
+                    } else if (device.focusMode == AVCaptureFocusModeContinuousAutoFocus &&
+                               [device isFocusModeSupported:AVCaptureFocusModeLocked]) {
+                        device.focusMode = AVCaptureFocusModeLocked;
+                    }
+                } else if (settings.focusMode != CameraFocusMode::continuousAuto) {
+                    if ([device isFocusModeSupported:AVCaptureFocusModeLocked]) device.focusMode = AVCaptureFocusModeLocked;
                 } else if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
                     device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
                 }
@@ -596,6 +608,7 @@ public:
         [device unlockForConfiguration];
         running.settings = settings;
         running.focusSerial = settings.focusTriggerSerial;
+        running.focusDistanceSerial = settings.focusDistanceSerial;
         running.applied = true;
     }
 
