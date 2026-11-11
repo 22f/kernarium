@@ -258,7 +258,8 @@ extension AdbGuestOperations {
 
     /// Checks the room an import of `bytes` needs in the guest and on this
     /// device (`hostFree`). A partial file an earlier run left is not this
-    /// import's business: the run's own sweep removes it (`sweepPartialFiles`).
+    /// import's business: the next boot that the guest's record
+    /// (`PartialSweepLedger`) says may find one removes it (`sweepPartialFiles`).
     func prepareImport(bytes: UInt64, into folder: String, hostFree: UInt64) async throws {
         guard GuestFilePath.isInsideRoot(folder) else { throw GuestFilesFailure.presented(GuestFilesError.badPath, device: device) }
         guard TransferRoom.deviceHasRoom(for: bytes, free: hostFree) else {
