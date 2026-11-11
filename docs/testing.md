@@ -169,13 +169,10 @@ that check it.
 A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself.
-`guest-hardware-input` (GPU) boots a guest with `--hardware-input` on a VNC
-display and plays the display's user: its keys plug the keyboard, its pointer
-plugs the mouse and the pointer, and its departure unplugs them. The guest's
-Virtio-input driver ([contract](../kernel/common/input/README.md)) must
-register and unregister their input devices to follow, with keys, buttons and
-the wheel arriving in between, for each kind, again after an unplug, and under
-quick plugging and unplugging; a kernel without that handling fails it.
+`guest-hardware-input` (needs a GPU slot) checks that a Linux guest started
+with `--hardware-input` registers and unregisters the keyboard, mouse and
+pointer input devices as a VNC client plugs and unplugs them
+([contract](../kernel/common/input/README.md)).
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
