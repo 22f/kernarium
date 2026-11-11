@@ -349,8 +349,16 @@ airplane mode off takes apps offline while adb keeps working. The platform
 validates a Wi-Fi network without probes (route `p0029`): NetworkMonitor sends
 none and reports the network validated once private DNS passes, so a blocked
 validation server never leaves a no-internet state or a sign-in notification. A
-VPN, a test network, DNS and the private DNS settings keep the stock rules. There
-is no SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped.
+VPN, a test network, DNS and the private DNS settings keep the stock rules. The
+product's one network, VirtWifi, is saved once and never disabled for lack of
+internet, because the platform never joins a disabled network again: the module's
+overlay (`overlay/rro/KernariumWifiOverlay`) raises both no-internet disable
+thresholds to the largest value, and a boot that finds Wi-Fi on, VirtWifi still
+saved and nothing joined after a short wait saves it again
+(`overlay/tools/kernarium_wifi_network.sh`), which also repairs a data disk that an
+earlier release left with the network disabled. Wi-Fi that is off stays off and a
+forgotten network stays forgotten. There is no SoftAP, Wi-Fi Direct, Aware or RTT,
+and `wificond` is not shipped.
 
 ### Audio, settings and lock screen defaults
 
