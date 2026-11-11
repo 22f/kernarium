@@ -17,9 +17,12 @@ import Foundation
 ///
 /// **In front.** Only while the application is in front does anything play.
 /// A frame that arrives otherwise is dropped, and answered as such. Leaving the
-/// front, losing the connection and ending the run each stop every target and
-/// the engine; returning to the front with a connection has the engine ready
-/// before the first touch.
+/// front and ending the run stop every target and the engine; losing the
+/// connection stops what the guest started and nothing else, because the
+/// player is shared with the game controllers' rumble (`GamepadSession`), which
+/// the guest's vibrator never reaches: a frame for one of their targets is
+/// answered as a failure and plays nothing. Returning to the front with a
+/// connection has the engine ready before the first touch.
 ///
 /// Every call returns at once. The work is in order on one queue, and the
 /// player and the stream are only touched there.
@@ -139,6 +142,13 @@ public final class HapticsSession: @unchecked Sendable {
         player.stopAll()
     }
 
+    /// Stops the targets the guest played on, and nothing else: the player is
+    /// shared, and a game controller's rumble is not the guest's to end.
+    private func letGoOfTheGuestsTargets() {
+        for target in playing.keys { player.stop(target) }
+        playing.removeAll()
+    }
+
     private func handle(_ event: HapticsStream.Event) {
         switch event {
         case .connected:
@@ -151,7 +161,7 @@ public final class HapticsSession: @unchecked Sendable {
             if failedAttempts >= Self.attemptsAfterBoot { giveUp() }
         case .lost:
             connected = false
-            letGo()
+            letGoOfTheGuestsTargets()
         case .frame(let frame, let receivedAt):
             handle(frame, receivedAt: receivedAt)
         }
@@ -163,7 +173,7 @@ public final class HapticsSession: @unchecked Sendable {
         stream?.stop()
         stream = nil
         connected = false
-        letGo()
+        letGoOfTheGuestsTargets()
     }
 
     // MARK: Frames
@@ -171,6 +181,12 @@ public final class HapticsSession: @unchecked Sendable {
     private func handle(_ frame: HapticsFrame, receivedAt: UInt64) {
         guard foreground else {
             acknowledge(frame.sequence, since: receivedAt, .notInFront, dropped: true)
+            return
+        }
+        // The guest's vibrator has the device's actuator, and no other: the
+        // targets from where the controllers begin are the gamepad session's.
+        guard frame.target.rawValue < HapticTarget.firstControllerTarget else {
+            acknowledge(frame.sequence, since: receivedAt, .engineFailed)
             return
         }
         switch frame {
@@ -184,8 +200,11 @@ public final class HapticsSession: @unchecked Sendable {
                 acknowledge(score.sequence, since: receivedAt, .engineFailed)
             }
         case .intensity(let target, let sequence, let intensity):
-            if let current = playing[target], current.score.playsTone(atMilliseconds: millisecondsSince(current.began)) {
-                player.setToneIntensity(intensity, on: target)
+            if let current = playing[target], current.score.playsTone(atMilliseconds: millisecondsSince(current.began)),
+                !player.setToneIntensity(intensity, on: target)
+            {
+                // Something else ended the tone.
+                playing[target] = nil
             }
             acknowledge(sequence, since: receivedAt, .played)
         case .stop(let target, let sequence):

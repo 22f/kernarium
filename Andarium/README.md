@@ -301,6 +301,24 @@ requires reopening Andarium.
   session screen says so once. There is no switch. A system without the HAL
   hears nothing and shows no notice; the
   [Android README](../android/lineage-24/README.md) owns the HAL.
+- **Game controllers.** Each game controller iOS has connected is a HID
+  device in the guest, made through the guest's relay over vsock 5558
+  (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
+  relay's test shares in `tests/unit/andarium/fixtures`). A DualSense,
+  DualSense Edge, DualShock 4 or Xbox Wireless Controller presents as that
+  device, bound by the guest's own driver, and any other as a plain HID
+  gamepad that lists only what the controller has. Controllers are looked for
+  during a normal run, and nothing is scanned for or paired. Their input
+  reaches the guest only while Andarium is in front, and leaving the front
+  lets every button go. Home, Menu, Options and Share are taken from iOS's
+  gestures while a controller is held and reach Android as buttons (iOS's own
+  Home setting decides whether Andarium may have Home). A button going down
+  wakes a guest that suspended itself (`wake_for_input`, runtime API 34).
+  Rumble, the light and the player number follow the guest's drivers onto
+  the controller, and `Config/Info.plist` declares the extended gamepad
+  profile. There is no switch. An image without the relay is given up on
+  quietly after boot; the [Android README](../android/lineage-24/README.md)
+  owns the relay.
 - **Location.** Location is a per-guest switch under Capabilities on Home,
   off for a new guest and for one stored before. iOS is asked, for
   when-in-use access, only when the person turns it on; Andarium has no
