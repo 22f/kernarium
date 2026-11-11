@@ -287,6 +287,11 @@ void kernarium_runtime_loader_set_input_status_handler(
  * It does nothing when no runtime is loaded or the runtime has no such entry.
  * It may be called from any thread. */
 void kernarium_runtime_loader_wake_for_input(void);
+/* Tells the runtime which denial of the network the application's notice is up
+ * for, for the session record; see kernarium_runtime_set_network_notice_function.
+ * Returns 0, or a negated errno: -ENODEV when no runtime is loaded, -EINVAL for
+ * a value the runtime does not know. */
+int kernarium_runtime_loader_set_network_notice(int notice);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

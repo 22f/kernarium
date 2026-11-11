@@ -324,24 +324,33 @@ struct DisplaySection: View {
 // MARK: Capabilities
 
 /// What the guest may use of this device: the location and the microphone,
-/// which iOS asks about when they are turned on, and the gyroscope.
+/// which iOS asks about when they are turned on, the gyroscope, and the
+/// haptics on a device that has them.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
     /// The rows, top to bottom; VoiceOver reads them in this order.
     enum Row: CaseIterable {
-        case location, microphone, gyroscope
+        case location, microphone, gyroscope, haptics
+    }
+
+    /// The rows a device shows: Haptics only where there is a Taptic Engine
+    /// to switch. An iPad, a Mac and the Simulator have none, and a switch
+    /// that could do nothing is not shown.
+    static func rows(hapticsAvailable: Bool) -> [Row] {
+        Row.allCases.filter { $0 != .haptics || hapticsAvailable }
     }
 
     var body: some View {
         if model.guest != nil {
             HomeSection(title: "Capabilities") {
-                ForEach(Array(Row.allCases.enumerated()), id: \.element) { index, row in
+                ForEach(Array(Self.rows(hapticsAvailable: model.hapticsAvailable).enumerated()), id: \.element) { index, row in
                     if index > 0 { RowDivider() }
                     switch row {
                     case .location: LocationRow()
                     case .microphone: MicrophoneRow()
                     case .gyroscope: GyroscopeRow()
+                    case .haptics: HapticsRow()
                     }
                 }
             } footer: {
@@ -394,6 +403,28 @@ struct GyroscopeRow: View {
             ))
             .labelsHidden()
             .disabled(!model.motionSensorsAvailable)
+        }
+    }
+}
+
+/// What the guest plays on this device's Taptic Engine: Android's vibrator
+/// and haptic feedback. A game controller's rumble is the controller's and
+/// stays as it is.
+struct HapticsRow: View {
+    @Environment(AppModel.self) private var model
+
+    /// The vibrating phone, which reads as haptics where "waveform" reads as
+    /// sound.
+    static let symbol = "iphone.radiowaves.left.and.right"
+
+    var body: some View {
+        OptionRow(title: "Haptics", symbol: Self.symbol) {
+            Toggle("Haptics", isOn: Binding(
+                get: { model.hapticsOn },
+                set: { model.setHaptics($0) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("home-haptics-switch")
         }
     }
 }

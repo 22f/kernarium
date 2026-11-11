@@ -8,12 +8,14 @@ target_include_directories(uml_network_device PUBLIC
 target_link_libraries(uml_network_device PUBLIC UML::BridgeAbi)
 target_link_libraries(uml_network_device PRIVATE UML::RunRouting)
 
-# The wire rules of the guest's DNS: pure functions of bytes, so a unit test
-# links the objects the provider does, without a socket or the system resolver.
+# The wire rules of the guest's DNS and the counters of its network: pure
+# functions of bytes, so a unit test links the objects the provider does,
+# without a socket or the system resolver.
 if(UML_BUILD_NETWORK_PROVIDER OR UML_BUILD_UNIT_TESTS)
     add_library(uml_network_dns_rules STATIC
         slirp/dns_message.cpp
-        slirp/dns_frames.cpp)
+        slirp/dns_frames.cpp
+        slirp/network_counters.cpp)
     add_library(UML::NetworkDnsRules ALIAS uml_network_dns_rules)
     uml_declare_architecture_target(uml_network_dns_rules device)
 endif()

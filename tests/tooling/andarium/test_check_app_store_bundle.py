@@ -70,6 +70,8 @@ DEBUG_SUPPORT = (
     ("test tooling", "int _rfbGetScreen(void) { return 1; }\n"),
     ("launch harness", "int _s8Andarium8AppEntryV13applyDeferred2toyyF(void) { return 1; }\n"),
     ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    # The Simulator preview's denied-network notice.
+    ("network notice preview", "int _s8Andarium8AppModelC20previewNetworkNoticeyyAA0C6DenialOF(void) { return 1; }\n"),
     # The UI tests' probe of the guest's keyboard and mouse: its log, its launch,
     # the recording runtime, and the identifiers of its two elements.
     ("input probe", "int _s8Andarium10InputProbeC6recordyySSF(void) { return 1; }\n"),

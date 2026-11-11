@@ -32,6 +32,11 @@ public struct Guest: Equatable, Codable, Sendable {
     /// with the guest; nil until they choose, and then it follows the device
     /// (`motionSensorsOn(available:)`). Stored under `motionSensors`.
     public var motionChoice: Bool?
+    /// The person's choice to let the guest play its haptics (Android's
+    /// vibrator and haptic feedback) on this device's Taptic Engine. On for
+    /// a new guest and for one stored before the switch existed. A game
+    /// controller's rumble is the controller's and not governed by it.
+    public var haptics: Bool
     /// Whether iCloud and computer backups include the guest's files. Off by
     /// default: the guest is several GiB that Android can set up again.
     public var includeInBackups: Bool
@@ -43,14 +48,14 @@ public struct Guest: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case cores, memoryMiB, capacityGiB, pendingCapacityGiB, microphone
-        case includeInBackups, location
+        case includeInBackups, location, haptics
         case motionChoice = "motionSensors"
     }
 
     public init(
         cores: Int, memoryMiB: Int, capacityGiB: Int, pendingCapacityGiB: Int? = nil,
         microphone: Bool = false, includeInBackups: Bool = false, motionChoice: Bool? = nil,
-        location: Bool = false, usedBytes: UInt64 = 0
+        location: Bool = false, haptics: Bool = true, usedBytes: UInt64 = 0
     ) {
         self.cores = cores
         self.memoryMiB = memoryMiB
@@ -59,6 +64,7 @@ public struct Guest: Equatable, Codable, Sendable {
         self.microphone = microphone
         self.location = location
         self.motionChoice = motionChoice
+        self.haptics = haptics
         self.includeInBackups = includeInBackups
         self.usedBytes = usedBytes
     }
@@ -73,6 +79,7 @@ public struct Guest: Equatable, Codable, Sendable {
         location = try values.decodeIfPresent(Bool.self, forKey: .location) ?? false
         includeInBackups = try values.decode(Bool.self, forKey: .includeInBackups)
         motionChoice = try values.decodeIfPresent(Bool.self, forKey: .motionChoice)
+        haptics = try values.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
     }
 
     /// Whether the guest gets the device's motion: the person's choice, else
