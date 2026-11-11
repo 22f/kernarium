@@ -174,7 +174,13 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         didSet {
             guard hardwareInput !== oldValue else { return }
             oldValue?.releaseAll()
-            if hardwareInput == nil { removePointerRecognizers() } else { installPointerRecognizers() }
+            oldValue?.hidesSystemPointerDidChange = nil
+            if let hardwareInput {
+                hardwareInput.hidesSystemPointerDidChange = { [weak self] in self?.pointerStyleDidChange() }
+                installPointerRecognizers()
+            } else {
+                removePointerRecognizers()
+            }
         }
     }
 

@@ -55,18 +55,24 @@ final class GuestHardwareInput {
     /// then; leaving lifts every key and button and ends the pointer's contact.
     var isActive = false {
         didSet {
-            guard !isActive, oldValue else { return }
-            releaseAll()
+            guard isActive != oldValue else { return }
+            hidesSystemPointerDidChange?()
+            if !isActive { releaseAll() }
         }
     }
+
+    /// Called when `hidesSystemPointer` may have changed, so the view can ask
+    /// UIKit for the pointer's style again.
+    var hidesSystemPointerDidChange: (() -> Void)?
 
     /// The pointer of a mouse goes to the guest's mouse (the system's pointer
     /// clicks are not touches), and the system's own pointer is hidden over
     /// the display, since Android draws its cursor.
     var routesPointer = false {
         didSet {
-            guard !routesPointer, oldValue else { return }
-            releasePointer()
+            guard routesPointer != oldValue else { return }
+            hidesSystemPointerDidChange?()
+            if !routesPointer { releasePointer() }
         }
     }
 
@@ -76,12 +82,17 @@ final class GuestHardwareInput {
     var capturing = false {
         didSet {
             guard capturing, !oldValue else { return }
+            hoverInside = pointer.inRange
             releasePointer()
         }
     }
 
-    /// Whether the system's pointer is over the display.
-    var pointerIsOverDisplay: Bool { pointer.inRange }
+    /// Whether the system's pointer hovers over the display, which decides
+    /// whether raw motion reaches the guest when iOS refused the pointer lock.
+    /// While Android has the pointer UIKit still says where it hovers, and the
+    /// guest hears nothing of it.
+    var pointerIsOverDisplay: Bool { capturing ? hoverInside : pointer.inRange }
+    private var hoverInside = false
 
     var hidesSystemPointer: Bool { isActive && routesPointer }
 
@@ -134,6 +145,10 @@ final class GuestHardwareInput {
     /// on the display. `point` is where it is in the view, which says whether
     /// it moved.
     func hover(_ position: GuestPointerMapping.Position?, at point: CGPoint?, beginning: Bool) {
+        if capturing, isActive, routesPointer {
+            hoverInside = position?.inside ?? false
+            return
+        }
         guard routesMouse else { return }
         if let point {
             // A hover that starts without the pointer having moved, as the
