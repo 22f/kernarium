@@ -287,6 +287,46 @@ struct SnapshotsModelTests {
         #expect(s.driver.measuredReads == reads + 1)
     }
 
+    @Test func startingTheGuestPutsAReadingAwayAndItsMeasureStops() async {
+        let s = setup([SnapshotSample.item("a", frees: 5 << 20), SnapshotSample.item("b", ago: 2)])
+        s.driver.holdMeasuring = true
+        let reading = Task { await s.store.reload() }
+        #expect(await until { s.store.listing != nil && s.driver.measuredReads == 1 })
+        s.model.start(.normal)
+        #expect(s.model.restoredSnapshot == nil)
+        s.driver.releaseMeasuring()
+        await reading.value
+        #expect(s.driver.cancelledMeasures == 1, "the measure was told")
+        #expect(!s.store.isMeasured, "and what it answered is not taken for figures")
+        #expect(s.store.frees(s.store.items[0]) == nil && s.store.total == nil)
+        #expect(s.driver.measuredReads == 1, "no read goes on")
+    }
+
+    @Test func nothingIsMeasuredWhileARunHoldsTheDiskAndTheEndOfTheRunMeasuresOnce() async {
+        let s = setup([SnapshotSample.item("a", frees: 5 << 20)])
+        await s.store.reload()
+        let measured = s.driver.measuredReads
+        s.driver.setRuntimeActive(true)
+        #expect(!s.store.isMeasured && s.store.frees(s.store.items[0]) == nil, "the figures belong to the disk before the run")
+        await s.store.reload()
+        #expect(s.driver.measuredReads == measured, "only the names are read while it runs")
+        #expect(s.store.count == 1)
+        s.driver.setRuntimeActive(false)
+        #expect(await until { s.store.isMeasured })
+        #expect(s.driver.measuredReads == measured + 1)
+        // Home appearing again, or the sheet opening, measures nothing more.
+        await s.store.reload()
+        await s.store.reload()
+        #expect(s.driver.measuredReads == measured + 1)
+    }
+
+    @Test func theFirstReadingMeasuresWhenNothingWasRead() async {
+        let s = setup([SnapshotSample.item("a")])
+        #expect(s.store.listing == nil)
+        await s.store.reload()
+        #expect(s.driver.measuredReads == 1 && s.store.isMeasured)
+    }
+
     @Test func anOperationThatFinishedElsewhereMakesTheListingReadAgain() async {
         let s = setup([SnapshotSample.item("a")])
         await s.store.reload()

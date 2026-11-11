@@ -1083,6 +1083,7 @@ final class AppModel {
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
             restoredSnapshot = nil
+            snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
             preparingDisk = false

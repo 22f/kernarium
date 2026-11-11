@@ -186,8 +186,11 @@ final class SnapshotsModel {
 
     /// Reads the listing: the names first and the figures when they are
     /// measured. It does nothing when the listing is current and measured,
-    /// unless `force` (Home appearing after a run, which changed the disk).
-    /// A reading in flight for the same count of finished operations is joined.
+    /// unless `force`. A screen appearing does not ask for a new reading: the
+    /// disk is read when nothing was, after an operation, and when a run that
+    /// held it ends (`activityChanged`). While a run holds the disk only the
+    /// names are read. A reading in flight for the same count of finished
+    /// operations is joined.
     func reload(force: Bool = false) async {
         guard let app else { return }
         let revision = app.snapshotActivity.revision
@@ -211,6 +214,8 @@ final class SnapshotsModel {
             let quick = await app.snapshotListing(measured: false)
             guard mine == generation else { return }
             adopt(quick)
+            // A run holds the disk: the names are enough until it ends.
+            guard !app.snapshotActivity.runtimeActive else { return }
             let full = await app.snapshotListing(measured: true)
             guard mine == generation else { return }
             adopt(full)
@@ -231,6 +236,14 @@ final class SnapshotsModel {
         route.removeAll { if case .snapshot(let id) = $0 { !ids.contains(id) } else { false } }
         if case .snapshot(let id) = selection, !ids.contains(id) { selection = nil }
         if selection == nil, let first = new.items.first { selection = .snapshot(first.id) }
+    }
+
+    /// The guest starts: a reading in flight is put away, and its measure
+    /// stops before it runs on into the boot.
+    func cancelReads() {
+        generation += 1
+        inFlight?.task.cancel()
+        inFlight = nil
     }
 
     /// What was measured no longer describes the disk: the figures shown go,

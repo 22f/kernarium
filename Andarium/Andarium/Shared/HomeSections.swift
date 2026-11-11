@@ -257,8 +257,9 @@ extension SystemRow where Below == EmptyView {
 }
 
 /// The third row of Guest system: how many snapshots there are and the space
-/// all of them use, with Manage opening the Snapshots sheet. The reading
-/// happens each time Home appears, as the guest may have run since.
+/// all of them use, with Manage opening the Snapshots sheet. Home reads them
+/// when none was read, after an operation and when a run ends, not each time
+/// it appears (`SnapshotsModel.reload`).
 struct SnapshotsRow: View {
     @Environment(AppModel.self) private var model
 
@@ -275,7 +276,7 @@ struct SnapshotsRow: View {
                 action: { model.sheet = .snapshots }
             )
         )
-        .task { await store.reload(force: true) }
+        .task { await store.reload() }
     }
 }
 
