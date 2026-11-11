@@ -624,6 +624,17 @@ previous release's data disk to check the one-time on-screen keyboard change.
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
 `screenrecord`'s encoder run across a suspend by the host's route and by the
 guest's own on one stream each, and the host closes no stream by a reset.
+`android-wifi-network` (integration) registers when
+`UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
+network stays enabled and joined while the internet checks fail, joins again
+after a suspend and after a restart, and the boot script runs without SELinux
+denials; a joined network keeps its metered and Auto-connect settings, a
+forgotten one stays forgotten and Wi-Fi that is off stays off.
+`UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` adds the upgrade section: a data
+disk on which that release left the network disabled is repaired once by the
+first boot of the release under test, and the next boot leaves it alone.
+`android17-wifi-network-runner` (tooling) runs its parsers, and the upgrade
+section's checks against scripted answers, without a guest.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

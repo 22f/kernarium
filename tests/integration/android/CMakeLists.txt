@@ -146,6 +146,37 @@ if(UML_ANDROID_VIDEO_SUSPEND_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The guest's one Wi-Fi network (the Wi-Fi module's overlay and the boot script
+# of android/lineage-24): with the internet checks failing, the network stays
+# enabled and joined, and joins again after a suspend and after a restart; a
+# joined network keeps its settings, a forgotten one stays forgotten and Wi-Fi
+# that is off stays off. With a previous release named, a data disk that it
+# left with the network disabled is repaired by the first boot of the release
+# under test, once. It boots Android with the macOS launcher, so it is opt-in:
+# name the release under test, and the previous release for the upgrade section.
+set(UML_ANDROID_WIFI_NETWORK_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-wifi-network test boots")
+set(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE "" CACHE PATH
+    "Installed Android release whose data disk the android-wifi-network test upgrades (empty: no upgrade section)")
+if(UML_ANDROID_WIFI_NETWORK_RELEASE AND TARGET uml-darwin-android17)
+    set(wifi_network_previous)
+    if(UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE)
+        set(wifi_network_previous
+            --previous-release ${UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE})
+    endif()
+    uml_add_integration_test(
+        NAME android-wifi-network
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_wifi_network.py
+            --release ${UML_ANDROID_WIFI_NETWORK_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            ${wifi_network_previous}
+        LABELS guest;boot;android
+        TIMEOUT 5400
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The host's cameras (routes p0030 and p0031 and the camera layouts): the runner
 # boots the release with the launcher's synthetic camera and a camera layout on the
 # vendor SKU, and checks the layout's features and media profiles, the cameras
