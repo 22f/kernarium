@@ -2992,29 +2992,6 @@
         }
       }
     },
-    "Display" : {
-      "comment" : "Home section for the screen options of the virtual machine.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ディスプレイ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "显示"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "顯示"
-          }
-        }
-      }
-    },
     "Display rotation unavailable" : {
       "localizations" : {
         "ja" : {
@@ -5967,29 +5944,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在繼續…"
-          }
-        }
-      }
-    },
-    "Retina mode" : {
-      "comment" : "Draw the virtual machine at the screen's native pixel density. Applies at the next start.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Retinaモード"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Retina模式"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Retina模式"
           }
         }
       }
