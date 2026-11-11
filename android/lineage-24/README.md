@@ -356,7 +356,10 @@ disabled network again. Until the station has joined it once, a boot that finds
 Wi-Fi on and VirtWifi saved but not joined saves it again, which enables it
 (`overlay/tools/kernarium_wifi_network.sh`). Wi-Fi that is off stays off and a
 forgotten network stays forgotten. There is no SoftAP, Wi-Fi Direct, Aware or RTT,
-and `wificond` is not shipped.
+and `wificond` is not shipped. A VPN application that allows bypass carries the
+traffic of the applications it covers because netd puts the UID range rule of
+such a VPN ahead of the implicit network rules that the firewall installs for
+the default network (route `p0032`).
 
 ### Audio, settings and lock screen defaults
 
