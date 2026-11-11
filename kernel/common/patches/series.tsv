@@ -127,3 +127,4 @@ patch	gnss-add-the-Kernarium-host-receiver.patch
 patch	um-let-another-CPU-dispatch-Darwin-host-events-when-CPU0-is-late.patch
 patch	um-free-an-IRQ-entry-after-a-grace-period.patch
 patch	virt_wifi-give-the-device-its-own-lockdep-classes.patch
+patch	um-skip-the-IPI-pipe-drain-when-an-idle-wait-found-it-empty.patch

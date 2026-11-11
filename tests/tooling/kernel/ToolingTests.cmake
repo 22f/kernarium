@@ -98,6 +98,12 @@ uml_add_tooling_test(
     TIMEOUT 120)
 
 uml_add_tooling_test(
+    NAME kernel-darwin-ipi-drain
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/tooling/kernel/test_darwin_ipi_drain.py
+    LABELS kernel
+    TIMEOUT 120)
+
+uml_add_tooling_test(
     NAME aarch32-elf32-wrapper
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernel/test_make_elf32.py
