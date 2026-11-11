@@ -743,6 +743,35 @@ struct SnapshotsModelTests {
         #expect(!s.model.updateNoticeIsShown)
     }
 
+    @Test func homeShowsNoUpdateCardBesideAnUnfinishedRestoreThatSaysTheSame() async {
+        let now = SnapshotSample.item("now")
+        let older = SnapshotSample.item("then", release: "20261108-los24-r18")
+        let s = setup([now, older])
+        await s.store.reload()
+        #expect(s.model.updateNoticeIsShown)
+        // A restore of the older snapshot stands: its card says the next start updates it to r20.
+        s.driver.unfinishedRestore = SnapshotUnfinishedRestore(snapshot: older.id)
+        await s.store.reload(force: true)
+        #expect(s.store.unfinishedRestoreText?.contains("The next start updates it to r20.") == true)
+        #expect(s.store.unfinishedRestoreUpdates && !s.model.updateNoticeIsShown)
+        // A restore whose card says nothing of an update leaves the update card alone: a snapshot
+        // of this release, one that cannot be told, one that is gone.
+        for unfinished in [
+            SnapshotUnfinishedRestore(snapshot: now.id), SnapshotUnfinishedRestore(),
+            SnapshotUnfinishedRestore(snapshot: SnapshotID()),
+        ] {
+            s.driver.unfinishedRestore = unfinished
+            await s.store.reload(force: true)
+            #expect(s.store.unfinishedRestoreText?.contains("updates") == false)
+            #expect(s.model.updateNoticeIsShown)
+        }
+        // And the restored note of a finished restore still gives way.
+        s.driver.unfinishedRestore = nil
+        await s.store.reload(force: true)
+        s.model.restoredSnapshot = RestoredSnapshotNotice(name: "then", created: older.created, updatesTo: "r20")
+        #expect(!s.model.updateNoticeIsShown)
+    }
+
     @Test func homeShowsTheUnfinishedRestoreCardWhileTheListingSaysOneStands() async {
         let a = SnapshotSample.item("a")
         let s = setup([a])

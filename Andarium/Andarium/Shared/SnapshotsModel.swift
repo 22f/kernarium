@@ -139,6 +139,13 @@ final class SnapshotsModel {
         return item
     }
 
+    /// The unfinished restore's own card says the next start updates the
+    /// restored data, as the update card would.
+    var unfinishedRestoreUpdates: Bool {
+        if case .some(.updatesAtNextStart) = unfinishedRestoreSnapshot?.restore { return true }
+        return false
+    }
+
     /// What Home's card says of a guest this app version cannot start: the
     /// way out through an older snapshot is named where there is one.
     func blockedText(_ reason: StartBlock) -> String {
