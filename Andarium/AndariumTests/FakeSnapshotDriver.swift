@@ -28,6 +28,9 @@ final class FakeSnapshotDriver: SnapshotDriver {
     private(set) var log: [String] = []
     private(set) var measuredReads = 0
     private(set) var quickReads = 0
+    /// Measured readings that were cancelled while they waited: like the
+    /// runtime's, they answer unmeasured.
+    private(set) var cancelledMeasures = 0
     private var waiting: CheckedContinuation<Void, Never>?
     private var measuringWaiter: CheckedContinuation<Void, Never>?
 
@@ -61,14 +64,25 @@ final class FakeSnapshotDriver: SnapshotDriver {
         activity.revision += 1
     }
 
-    func snapshotListing(measured: Bool) async -> SnapshotListing {
-        if measured {
+    /// A run begins or ends, as the runtime reports it.
+    func setRuntimeActive(_ active: Bool) {
+        activity.runtimeActive = active
+    }
+
+    func snapshotListing(measured asked: Bool) async -> SnapshotListing {
+        // The state the reading starts from, as the runtime's reads it before it measures.
+        let revision = activity.revision
+        var measured = asked
+        if asked {
             measuredReads += 1
             if holdMeasuring { await withCheckedContinuation { measuringWaiter = $0 } }
+            if Task.isCancelled {
+                cancelledMeasures += 1
+                measured = false
+            }
         } else {
             quickReads += 1
         }
-        let revision = activity.revision
         var shown = items
         if !measured {
             let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)

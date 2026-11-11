@@ -10,7 +10,7 @@ struct SnapshotWordsTests {
 
     /// Every refusal the store has. The switch has no default, so a case added
     /// to `SnapshotRefusal` stops this file until the screens have words for it.
-    static let allRefusals: [SnapshotRefusal] = [
+    nonisolated static let allRefusals: [SnapshotRefusal] = [
         .guestNotStopped, .busy, .noData, .unreadableRecord, .notShutDown, .unfinishedUpdate, .mismatch,
         .volumeCannotClone, .notEnoughSpace, .newerAndroid, .olderDataLayout, .differentSystem,
         .diskSizeNotAccepted(gib: 64), .missing, .incomplete, .restoreUnfinished, .invalidName,
@@ -208,15 +208,71 @@ struct SnapshotsModelTests {
         #expect(s.store.total != nil)
     }
 
-    @Test func aRowKeepsItsLastFigureWhileTheNextReadingMeasures() async {
+    @Test func aRereadOfADiskThatDidNotChangeKeepsTheLastFigure() async {
         let s = setup([SnapshotSample.item("a", frees: 5 << 20)])
         await s.store.reload()
         let id = s.store.items[0].id
+        s.driver.holdMeasuring = true
+        let reading = Task { await s.store.reload(force: true) }
+        #expect(await until { !s.store.isMeasured })
+        #expect(s.store.frees(s.store.item(id)!) == SnapshotFigure(bytes: 5 << 20), "nothing changed: the last figure stays")
+        #expect(s.store.freesNow(s.store.item(id)!) == nil, "but it is not said as measured now")
+        s.driver.releaseMeasuring()
+        await reading.value
+        #expect(s.store.isMeasured)
+    }
+
+    @Test func whatAnOperationChangedIsShownAsMeasuringUntilItIs() async {
+        let old = SnapshotSample.item("old", frees: 5 << 20, kept: 2 << 30)
+        let s = setup([old])
+        await s.store.reload()
         #expect(s.store.frees(s.store.items[0]) == SnapshotFigure(bytes: 5 << 20))
+        #expect(s.store.freesNow(s.store.items[0]) == SnapshotFigure(bytes: 5 << 20))
+        #expect(s.store.total != nil && s.store.kept(s.store.items[0]) != nil)
+
+        // A snapshot is taken: the earlier numbers are not the disk's now.
+        s.driver.holdMeasuring = true
+        let taking = Task { await s.store.take(name: "new") }
+        #expect(await until { s.store.count == 2 })
+        for item in s.store.items {
+            #expect(s.store.frees(item) == nil && s.store.freesNow(item) == nil && s.store.kept(item) == nil, "\(item.name)")
+        }
+        #expect(s.store.total == nil && !s.store.isMeasured)
+        s.driver.releaseMeasuring()
+        await taking.value
+        #expect(s.store.isMeasured && s.store.total != nil)
+        #expect(s.store.items.allSatisfy { s.store.frees($0) != nil })
+
+        // The same after a delete, and after an operation that finished somewhere else.
+        for change in [0, 1] {
+            s.driver.holdMeasuring = true
+            if change == 0 {
+                let deleting = Task { await s.store.delete(s.store.items[0].id) }
+                #expect(await until { s.store.count == 1 })
+                s.driver.releaseMeasuring()
+                await deleting.value
+            } else {
+                s.driver.finishedElsewhere()
+                #expect(!s.store.isMeasured && s.store.total == nil)
+                #expect(s.store.frees(s.store.items[0]) == nil)
+                s.driver.releaseMeasuring()
+                #expect(await until { s.store.isMeasured })
+            }
+            #expect(s.store.isMeasured && s.store.frees(s.store.items[0]) != nil)
+        }
+    }
+
+    @Test func theDeleteAlertNamesASizeOnlyFromAListingMeasuredNow() async {
+        let a = SnapshotSample.item("a", frees: 5 << 20)
+        let s = setup([a, SnapshotSample.item("b", ago: 2)])
+        await s.store.reload()
+        let size = SnapshotFigure(bytes: 5 << 20)
+        #expect(SnapshotWords.deleteMessage(frees: s.store.freesNow(s.store.item(a.id)!)) == SnapshotWords.deleteMessage(frees: size))
+        // Something finished since: the number is not said, and the alert says only that it cannot be undone.
         s.driver.holdMeasuring = true
         s.driver.finishedElsewhere()
-        #expect(await until { !s.store.isMeasured })
-        #expect(s.store.frees(s.store.item(id)!) == SnapshotFigure(bytes: 5 << 20), "the last figure stays")
+        let message = SnapshotWords.deleteMessage(frees: s.store.freesNow(s.store.item(a.id)!))
+        #expect(message == "This can\u{2019}t be undone.")
         s.driver.releaseMeasuring()
         #expect(await until { s.store.isMeasured })
     }

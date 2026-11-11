@@ -520,7 +520,7 @@ struct SnapshotPrompts: ViewModifier {
                 Button("Delete", role: .destructive) { Task { await store.delete(item.id) } }
                 Button("Cancel", role: .cancel) {}
             } message: { item in
-                Text(SnapshotWords.deleteMessage(frees: store.frees(item)))
+                Text(SnapshotWords.deleteMessage(frees: store.freesNow(item)))
             }
             .alert(
                 store.problem?.title ?? "",

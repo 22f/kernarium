@@ -35,8 +35,12 @@ final class SnapshotsModel {
 
     /// What the driver last returned; nil until the first reading.
     private(set) var listing: SnapshotListing?
-    /// The figures last measured, kept while a newer reading has none yet, so
-    /// a row shows its last figure and not a gap.
+    /// An operation finished or a run began or ended since the listing was
+    /// read: its figures describe a disk that is not there any more.
+    private(set) var stale = false
+    /// The figures last measured, kept while a newer reading of a disk that
+    /// has not changed has none yet, so a row shows its last figure and not a
+    /// gap. An operation or a run clears them (`invalidate`).
     private var knownFigures: [SnapshotID: SnapshotFigure] = [:]
     private var knownTotal: SnapshotFigure?
     private var knownUpdateCopy: SnapshotFigure?
@@ -77,21 +81,33 @@ final class SnapshotsModel {
         return items.first { $0.id == id }
     }
 
-    /// The figures of the listing are measured.
-    var isMeasured: Bool { listing?.isMeasured ?? false }
+    /// The listing's figures are measured and describe the disk as it is now:
+    /// nothing finished or ran since it was read.
+    var isMeasured: Bool {
+        guard let listing, listing.isMeasured, !stale else { return false }
+        return listing.revision == app?.snapshotActivity.revision
+    }
 
-    /// What deleting a snapshot frees, last measured; nil before any.
+    /// What deleting a snapshot frees, for a row: the figure measured now, or
+    /// the last one while a new reading of a disk that has not changed
+    /// measures; nil (the row shows it is measuring) otherwise.
     func frees(_ item: SnapshotSummary) -> SnapshotFigure? {
         isMeasured ? item.freesWhenDeleted : knownFigures[item.id]
+    }
+
+    /// What deleting a snapshot frees, only where the listing is measured and
+    /// current: the Delete alert names a size from this and from nothing else.
+    func freesNow(_ item: SnapshotSummary) -> SnapshotFigure? {
+        isMeasured ? item.freesWhenDeleted : nil
     }
 
     /// What deleting every snapshot frees, last measured; nil before any.
     var total: SnapshotFigure? {
         guard let listing else { return nil }
-        return listing.isMeasured ? listing.space.snapshotsUse : knownTotal
+        return isMeasured ? listing.space.snapshotsUse : knownTotal
     }
 
-    /// What it would take on its own, last measured; nil before any.
+    /// What it would take on its own, where the listing is measured and current; nil otherwise.
     func kept(_ item: SnapshotSummary) -> SnapshotFigure? {
         isMeasured ? item.kept : nil
     }
@@ -99,7 +115,7 @@ final class SnapshotsModel {
     /// What an unfinished update's own copy holds; nil when none is.
     var updateCopy: SnapshotFigure? {
         guard let listing else { return nil }
-        return listing.isMeasured ? listing.space.updateCopy : knownUpdateCopy
+        return isMeasured ? listing.space.updateCopy : knownUpdateCopy
     }
 
     var unfinishedRestore: SnapshotUnfinishedRestore? { listing?.unfinishedRestore }
@@ -176,7 +192,7 @@ final class SnapshotsModel {
         guard let app else { return }
         let revision = app.snapshotActivity.revision
         if let inFlight, inFlight.revision == revision { return await inFlight.task.value }
-        if !force, let listing, listing.isMeasured, listing.revision == revision { return }
+        if !force, isMeasured { return }
         generation += 1
         let mine = generation
         let task = Task<Void, Never> { @MainActor [weak self] in
@@ -204,6 +220,7 @@ final class SnapshotsModel {
 
     private func adopt(_ new: SnapshotListing) {
         if new.isMeasured {
+            stale = false
             knownFigures = Dictionary(uniqueKeysWithValues: new.items.map { ($0.id, $0.freesWhenDeleted) })
             knownTotal = new.space.snapshotsUse
             knownUpdateCopy = new.space.updateCopy
@@ -216,14 +233,23 @@ final class SnapshotsModel {
         if selection == nil, let first = new.items.first { selection = .snapshot(first.id) }
     }
 
-    /// Forgets everything read: the guest was erased or made anew.
-    func reset() {
+    /// What was measured no longer describes the disk: the figures shown go,
+    /// and a reading in flight, which measures the disk as it was, is put away.
+    private func invalidate() {
         generation += 1
+        inFlight?.task.cancel()
         inFlight = nil
-        listing = nil
+        stale = true
         knownFigures = [:]
         knownTotal = nil
         knownUpdateCopy = nil
+    }
+
+    /// Forgets everything read: the guest was erased or made anew.
+    func reset() {
+        invalidate()
+        stale = false
+        listing = nil
         route = []
         selection = nil
         fresh = nil
@@ -231,9 +257,13 @@ final class SnapshotsModel {
         renameTask?.cancel()
     }
 
-    /// The driver finished one more operation: the listing is older than it.
+    /// The driver finished one more operation, or a run began or ended: the
+    /// listing is older than the disk. Its figures give way to the measuring
+    /// state, and the disk is read again unless a run holds it.
     func activityChanged(from old: SnapshotActivity, to new: SnapshotActivity) {
-        guard new.revision != old.revision, listing != nil else { return }
+        guard new.revision != old.revision || new.runtimeActive != old.runtimeActive else { return }
+        invalidate()
+        guard listing != nil, !new.runtimeActive else { return }
         Task { @MainActor [weak self] in await self?.reload() }
     }
 
