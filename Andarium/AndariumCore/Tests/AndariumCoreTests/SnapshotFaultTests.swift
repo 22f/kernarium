@@ -270,6 +270,31 @@ struct SnapshotUnfinishedRestoreTests {
         #expect(failure.domain == NSPOSIXErrorDomain && failure.code == Int(ENOSPC) && !failure.description.isEmpty)
     }
 
+    /// A clone that is refused while a restore finishes reaches the person in
+    /// the system's words for the errno, and the record keeps the errno, not a
+    /// Swift type name and a case index.
+    @Test func aCloneFailureThatStopsARestoreKeepsItsErrnoAndItsWords() async throws {
+        let faults = SnapshotFaults(guestDirectory: URL(fileURLWithPath: "/"))
+        let scenario = try await SnapshotCrashTests.Scenario.make(io: faults.operations)
+        defer { scenario.fixture.cleanUp() }
+        faults.restart()
+        faults.fail(when: { $0.name == "write" && $0.path.hasSuffix("/instance.json") })
+        #expect(throws: SnapshotRestoreUnfinished.self) { try scenario.app.restoreSnapshot(scenario.snapshot, guest: scenario.guest) }
+
+        let reason = String(cString: strerror(EIO))
+        faults.restart()
+        faults.fail(when: { $0.name == "clone" }, with: CloneFile.Failure(code: EIO))
+        do {
+            try scenario.app.recoverSnapshots()
+            Issue.record("the recovery was meant to fail")
+        } catch let unfinished as SnapshotRestoreUnfinished {
+            #expect(unfinished.localizedDescription == reason)
+            #expect(unfinished.errorDescription == reason)
+            let failure = SnapshotFailure(unfinished.cause)
+            #expect(failure.domain == NSPOSIXErrorDomain && failure.code == Int(EIO) && failure.description == reason)
+        }
+    }
+
     /// A restore that stopped after its commit, recovered on a launch whose
     /// backup choice is `includeInBackups`.
     @Test(arguments: [true, false])
