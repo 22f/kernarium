@@ -124,3 +124,4 @@ patch	um-fail-a-user-access-to-a-mapping-of-memory-outside-guest-RAM.patch
 patch	sysrq-report-whether-a-SysRq-operation-ran.patch
 patch	um-end-an-mconsole-console-command-with-a-status-reply.patch
 patch	gnss-add-the-Kernarium-host-receiver.patch
+patch	media-virtio-video-add-the-Kernarium-host-camera.patch

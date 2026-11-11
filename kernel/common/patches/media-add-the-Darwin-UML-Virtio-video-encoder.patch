@@ -58,8 +58,8 @@ which the host defines and no driver here binds yet.
  drivers/media/virtio/virtio_video_enc.c     | 1536 +++++++++++++++++++
  drivers/media/virtio/virtio_video_helpers.c |   15 +-
  drivers/media/virtio/virtio_video_vq.c      |  306 +++-
- include/uapi/linux/virtio_video.h           |  492 +++++-
- 12 files changed, 3005 insertions(+), 33 deletions(-)
+ include/uapi/linux/virtio_video.h           |  496 +++++-
+ 12 files changed, 3009 insertions(+), 33 deletions(-)
  create mode 100644 drivers/media/virtio/virtio_video_ctrls.c
  create mode 100644 drivers/media/virtio/virtio_video_enc.c
 
@@ -2958,7 +2958,7 @@ index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc0
 +	return 0;
 +}
 diff --git a/include/uapi/linux/virtio_video.h b/include/uapi/linux/virtio_video.h
-index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff25143974ee89 100644
+index 7898dd1a46feecae93407070a9315278ce70c9c7..9e9ec3e80f5e9f182a58315889c2eb608cc6426a 100644
 --- a/include/uapi/linux/virtio_video.h
 +++ b/include/uapi/linux/virtio_video.h
 @@ -66,7 +66,13 @@ enum {
@@ -3074,7 +3074,7 @@ index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff2514
  struct virtio_video_resource_queue_resp {
  	struct virtio_video_cmd_hdr hdr;
  	__le32 flags;
-@@ -524,6 +582,430 @@ struct virtio_video_set_control_resp {
+@@ -524,6 +582,434 @@ struct virtio_video_set_control_resp {
  	struct virtio_video_cmd_hdr hdr;
  };
  
@@ -3384,6 +3384,10 @@ index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff2514
 +   host application states). */
 +#define VIRTIO_VIDEO_CAMERA_CID_ROTATE_AND_CROP (VIRTIO_VIDEO_CAMERA_CID_BASE + 9)
 +#define VIRTIO_VIDEO_CAMERA_ROTATE_AUTOMATIC 4
++/* A read-only compound control (U8[328]) that the guest driver answers, not the
++   device: the struct virtio_video_camera_desc of the camera behind the node, as
++   VIRTIO_VIDEO_CMD_CAMERA_QUERY gave it. The device never lists it. */
++#define VIRTIO_VIDEO_CAMERA_CID_DESCRIPTION (VIRTIO_VIDEO_CAMERA_CID_BASE + 16)
 +
 +/* VIRTIO_VIDEO_CMD_CAMERA_QUERY_CONTROLS: the controls of one camera, in the
 +   answer of VIRTIO_VIDEO_CMD_QUERY_V4L2_CONTROLS. The values belong to the
@@ -3505,7 +3509,7 @@ index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff2514
  /*
   * Events
   */
-@@ -534,6 +1016,12 @@ enum virtio_video_event_type {
+@@ -534,6 +1020,12 @@ enum virtio_video_event_type {
  
  	/* For decoder only */
  	VIRTIO_VIDEO_EVENT_DECODER_RESOLUTION_CHANGED = 0x0200,

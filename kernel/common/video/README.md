@@ -170,3 +170,43 @@ streams, and a metadata node, for its meta streams.
   the buffers; the device keeps nothing across a reset and has stopped every
   capture (its camera indicator is off and no host buffer remains), and the
   first frames after a re-created stream are black and flagged `_RESUMING`.
+
+### Guest nodes
+
+The shared kernel topic "media: virtio-video: add the Kernarium host camera"
+(`drivers/media/virtio`) registers two V4L2 nodes for each camera, from
+`/dev/video10` up, because the codecs' nodes stay in the 0 to 9 window that
+Android's codec2 scans. The capture node is `virtio-camera<i>-capture` and the
+metadata node `virtio-camera<i>-meta`, `<i>` being the camera index of the wire,
+which `QUERYCAP`'s `bus_info` (`virtio-camera:<i>`) repeats. `guest-v4l2-capture`
+checks the contract on the synthetic camera, live and blocked, and
+`guest-v4l2-capture-suspend` the suspend contract above: a stream carries on
+across a suspend by either route, with no failed buffer and no device reset.
+
+- **Files and streams.** Opening a node starts nothing. A file creates its host
+  stream when it sets a format or asks for buffers, so two files of one node
+  stream independently, and a node can be open more often than the device has
+  streams. A file starts at NV12, the largest size no bigger than 1280 x 720.
+- **Capture node.** The multi-planar capture API with one plane, `MMAP` or
+  `DMABUF`; the layout is the device's. NV12 is a video stream whose rate the
+  device picks from the ranges of the size (`S_PARM` reports it); JPEG and the
+  Bayer formats are stills. The format list is what the device offered at probe
+  time, so Bayer stills appear in the session after the one in which the host
+  learned the camera's colour data.
+- **Still groups and timestamps.** `QBUF` takes a still's group from the
+  buffer: a non-zero `timestamp.tv_sec` is the cookie, and the buffers of a
+  cookie are exposed together up to the one flagged `V4L2_BUF_FLAG_LAST`. A
+  frame's timestamp is the driver's clock minus the frame's age. A still is
+  stamped when it completes, because the time of its exposure is in the
+  metadata. A still the device could not take completes with
+  `V4L2_BUF_FLAG_ERROR` and no payload.
+- **Metadata node.** One format, `VCAM`, a `virtio_video_camera_meta` per
+  buffer, and the same sequence as the frame or still of that exposure. Records
+  flow while a video or still stream of the camera runs.
+- **Controls.** Every file of a camera has the device's list of controls and
+  their ranges, one set of values for both nodes. A control needs a stream on
+  the wire, so a camera keeps a metadata stream that carries them: a torch is
+  writable with nothing streaming. The driver answers two controls itself:
+  `V4L2_CID_PRIVACY` (1 for a blocked session) and the read-only
+  `VIRTIO_VIDEO_CAMERA_CID_DESCRIPTION` (`U8[328]`), the camera's
+  `virtio_video_camera_desc` as `CAMERA_QUERY` gave it.

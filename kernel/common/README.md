@@ -6,7 +6,8 @@ contracts every product shares:
 - [`abi/`](abi/README.md): the canonical plain-C host/kernel bridge, its
   identity, generated-copy authority, and import policy;
 - `config/darwin-uml.fragment`: the configuration policy every product shares
-  (4 KiB guest pages, 64 KiB task stacks). Each product applies its own overlay
+  (4 KiB guest pages, 64 KiB task stacks, the printing task or CPU on every
+  kernel message). Each product applies its own overlay
   after it, which lists only where that product differs;
 - `artifacts/`: the prebuilt-kernel bundle schema, the local read-only verifier
   (source/ABI identity, page and module policy, ELF geometry, payload inventory,
@@ -285,6 +286,12 @@ it. The bridge fields used below are defined by the comments in
   suspend disables the device's queues, so the host fills them after the
   resume, and the host wakes a guest that suspended itself while the receiver
   is powered; the driver is not a wake source. `guest-gnss-receiver` checks it.
+- The host's cameras are `/dev/video10` and up, a capture node and a metadata
+  node for each, behind a local experimental Virtio device (ID 65533; the wire
+  and the nodes are in [`video/README.md`](video/README.md#camera-device-id-65533)).
+  Opening a node starts no capture, and a stream survives a suspend.
+  `guest-v4l2-capture` checks the nodes on the synthetic camera, live and
+  blocked, and `guest-v4l2-capture-suspend` the suspend.
 - A virtio-gpu PRIME export is always read-write. A device with 3D refuses a
   dma-buf another driver exported with `-ENODEV`; do not restore the stable
   change that routed it to the generic importer. Hardware video and Android's
