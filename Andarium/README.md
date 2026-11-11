@@ -578,7 +578,14 @@ is on. `AndariumCore/Adb` speaks the protocol.
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
-  original until the new file is whole. The move's own shell command then has
+  original until the new file is whole. A partial file that the guest's abrupt
+  end or iOS ending the application left behind is removed by the next boot
+  that may find one, whatever its folder and with no import or open Settings
+  needed: the boot looks when an import did not end cleanly, when an older data
+  disk was put in place (a snapshot or update restore), and on the first boot
+  of a guest an earlier version made, and an ordinary boot does not
+  (`PartialFileSweep`, `PartialSweepLedger`). An import in progress is never
+  touched. The move's own shell command then has
   the guest's media index complete the file's row (a file the shell user
   writes has only a pending one, which MediaStore keeps from other apps).
   A transfer stops when the application leaves the foreground, and its files

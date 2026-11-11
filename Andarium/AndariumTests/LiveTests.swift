@@ -398,7 +398,7 @@ struct RecoveryDisplayTests {
         // does not mean Recovery can read it under its SELinux policy.
         do {
             let identity = try AppEntry.fromArguments().adbKeyStore.loadOrCreate()
-            let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device")
+            let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device", run: GuestRunMark.random())
             let density = try await operations.shell("getprop ro.sf.lcd_density", limit: .seconds(5))
             let scale = model.resolution.resolved(nativeScale: Double(scene.screen.nativeScale)) ?? 1
             #expect(density.text.trimmingCharacters(in: .whitespacesAndNewlines) == String(GuestDisplayLayout.dotsPerInch(factor: scale)))

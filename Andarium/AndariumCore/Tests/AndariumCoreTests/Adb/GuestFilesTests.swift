@@ -279,8 +279,9 @@ struct GuestFilesTransferTests {
         let guest = storage([root + "/Download": .folder])
         let adbd = FakeAdbd(features: v2Features, services: guest.services)
         defer { adbd.shutdown() }
-        let temporary = GuestFiles.temporaryPath(in: root + "/Download", token: "ab12cd34")
-        #expect(temporary == root + "/Download/.andarium-ab12cd34.part")
+        let run = try #require(GuestRunMark("0a1b2c3d"))
+        let temporary = GuestFiles.temporaryPath(in: root + "/Download", run: run, token: "ab12cd34")
+        #expect(temporary == root + "/Download/.andarium-0a1b2c3d-ab12cd34.part")
         var steps: [UInt64] = []
         let length = try GuestFiles.upload(
             MemorySource(body), modified: Date(timeIntervalSince1970: 1_700_000_000),
@@ -466,10 +467,20 @@ struct GuestFilesHelperTests {
         #expect(GuestFileNames.distinct([]) == [])
     }
 
-    @Test func partialFilesAreRecognisedAndSweptByPattern() {
+    @Test func partialFilesAreRecognisedAndRemovedByName() {
         #expect(GuestFiles.isPartial(".andarium-0f1e2d3c.part"))
+        #expect(GuestFiles.isPartial(".andarium-0a1b2c3d-ab12cd34.part"))
         #expect(!GuestFiles.isPartial("clip.part") && !GuestFiles.isPartial(".andarium-x.txt"))
         #expect(GuestFiles.removeCommand(for: root + "/a/.andarium-1.part") == "rm -f -- '\(root)/a/.andarium-1.part'")
-        #expect(GuestFiles.removeStaleCommand(in: root + "/it's") == "rm -f -- '\(root)/it'\\''s'/.andarium-*.part")
+    }
+
+    @Test func anUploadWritesOnlyUnderAPartialName() throws {
+        let adbd = FakeAdbd(features: v2Features, services: storage([root + "/D": .folder]).services)
+        defer { adbd.shutdown() }
+        #expect(throws: GuestFilesError.badPath) {
+            try GuestFiles.upload(
+                MemorySource(Data(count: 10)), modified: .now, to: root + "/D/a", temporary: root + "/D/other.txt",
+                replacing: false, on: try connected(adbd), progress: { _ in })
+        }
     }
 }
