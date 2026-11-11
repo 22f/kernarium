@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import AndariumCore
+import Foundation
+import Testing
+@testable import Andarium
+
+/// The application ships its String Catalogs in every language. Each lookup
+/// names its language, so the result does not depend on the language of the
+/// device or Simulator the tests run on, and each reads the bundle the
+/// application ships. `tests/tooling/andarium` checks the catalogs' contents;
+/// these show the build carries them.
+struct LocalizationTests {
+    private static let languages = ["ja", "zh-Hans", "zh-Hant"]
+
+    private func text(_ key: String.LocalizationValue, table: String? = nil, in language: String) -> String {
+        String(localized: LocalizedStringResource(
+            key, table: table, locale: Locale(identifier: language), bundle: .main))
+    }
+
+    @Test func theApplicationShipsEveryLanguage() {
+        let shipped = Set(Bundle.main.localizations)
+        for language in ["en"] + Self.languages {
+            #expect(shipped.contains(language), "\(language) is not in \(shipped.sorted())")
+        }
+    }
+
+    @Test(arguments: LocalizationTests.languages)
+    func aScreenIsTranslated(language: String) {
+        #expect(text("Guest system", in: "en") == "Guest system")
+        #expect(text("Guest system", in: language) != "Guest system", "\(language) says it in English")
+    }
+
+    @Test func aCountIsPluralInEnglishAndInOneFormInTheOthers() {
+        #expect(text("\(1) snapshots", in: "en") == "1 snapshot")
+        #expect(text("\(3) snapshots", in: "en") == "3 snapshots")
+        for language in Self.languages {
+            let one = text("\(1) snapshots", in: language), three = text("\(3) snapshots", in: language)
+            #expect(one.contains("1") && three.contains("3"), "\(language): \(one), \(three)")
+            #expect(one.replacingOccurrences(of: "1", with: "3") == three, "\(language) has a form for one")
+        }
+    }
+
+    @Test(arguments: LocalizationTests.languages)
+    func everyNoteOfTheReleasesIsTranslated(language: String) throws {
+        let releases = WhatsNewCatalog.load()
+        let notes = releases.flatMap(\.entries).flatMap { entry in
+            [entry.title] + [entry.text].compactMap { $0 } + entry.points
+        }
+        try #require(!notes.isEmpty)
+        for note in notes {
+            let translated = text(String.LocalizationValue(note), table: "WhatsNew", in: language)
+            #expect(translated != note, "\(language) shows \"\(note)\" in English")
+        }
+    }
+
+    @Test(arguments: LocalizationTests.languages)
+    func thePermissionTextsAreTranslated(language: String) throws {
+        let path = try #require(Bundle.main.path(
+            forResource: "InfoPlist", ofType: "strings", inDirectory: nil, forLocalization: language))
+        let strings = try #require(NSDictionary(contentsOfFile: path) as? [String: String])
+        for key in ["NSLocalNetworkUsageDescription", "NSLocationWhenInUseUsageDescription", "NSMicrophoneUsageDescription"] {
+            let value = try #require(strings[key], "\(language) has no \(key)")
+            #expect(!value.isEmpty && !value.hasPrefix("Andarium "), "\(language) shows \(key) in English")
+        }
+    }
+}
