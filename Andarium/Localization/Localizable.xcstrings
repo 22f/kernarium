@@ -1,6 +1,29 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@ by %@" : {
+      "comment" : "What VoiceOver reads for a resolution, width then height (1206 by 2334). Written as words because VoiceOver reads the sign × as a letter in some languages.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@かける%2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@乘%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@乘%2$@"
+          }
+        }
+      }
+    },
     "%@ exported" : {
       "localizations" : {
         "ja" : {
@@ -406,6 +429,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld"
+          }
+        }
+      }
+    },
+    "%lld dpi" : {
+      "comment" : "Pixel density of a resolution, in dots per inch (480 dpi). The unit stays dpi in every language, as the Android settings write it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld dpi"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld dpi"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld dpi"
           }
         }
       }
@@ -2175,6 +2221,52 @@
         }
       }
     },
+    "Change" : {
+      "comment" : "Button on the Resolution row that opens the list of resolutions.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "変更"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更改"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更改"
+          }
+        }
+      }
+    },
+    "Change resolution" : {
+      "comment" : "What VoiceOver says for the Change button of the Resolution row.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解像度を変更"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更改分辨率"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更改解析度"
+          }
+        }
+      }
+    },
     "Check again" : {
       "localizations" : {
         "ja" : {
@@ -3343,6 +3435,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "失敗"
+          }
+        }
+      }
+    },
+    "Fastest" : {
+      "comment" : "Name of the resolution with the fewest pixels, which the virtual machine draws fastest, shown after the density: 160 dpi · Fastest.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最速"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最快"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最快"
           }
         }
       }
@@ -4638,6 +4753,29 @@
         }
       }
     },
+    "Native" : {
+      "comment" : "Name of the resolution that uses every pixel of this screen, shown after the resolution: 1206 × 2334 · Native.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ネイティブ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原生"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原生"
+          }
+        }
+      }
+    },
     "Needs a newer Andarium" : {
       "localizations" : {
         "ja" : {
@@ -5768,6 +5906,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "調整儲存空間"
+          }
+        }
+      }
+    },
+    "Resolution" : {
+      "comment" : "Title of the row and sheet where the screen resolution of the virtual machine is chosen. Applies at the next start.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解像度"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分辨率"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解析度"
           }
         }
       }
