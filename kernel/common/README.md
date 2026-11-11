@@ -242,7 +242,11 @@ it. The bridge fields used below are defined by the comments in
   vectors at safe kernel spin, retry, TLB-walk, and `cond_resched()` boundaries
   and in `schedule()` when the caller stays runnable, so a kernel retry loop
   must service them: the IPI signal is only a wake edge. An idle virtual CPU
-  never blocks while one of its IPI vectors is pending.
+  never blocks while one of its IPI vectors is pending. The byte in its wake
+  pipe only ends a wait and the vectors are the pending mask, so an idle exit
+  whose wait found the pipe empty drains it only if a vector is pending, and a
+  byte that lands later costs at most one spurious wait
+  (`kernel-darwin-ipi-drain`).
 - Darwin has no per-thread SIGIO, so a CPU collects the host's descriptor
   events at its clock tick and when it leaves idle, one CPU at a time: a
   non-blocking token guards the dispatch, and a CPU that finds it taken skips.
