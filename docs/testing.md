@@ -321,7 +321,10 @@ checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. The hosted tests
+screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
+exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
+command line ([Send feedback](../Andarium/README.md#send-feedback)), where the
+Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class

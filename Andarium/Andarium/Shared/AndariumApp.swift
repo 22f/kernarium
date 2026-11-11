@@ -42,6 +42,9 @@ final class AndariumProcess {
         // sweep the folder a running test stages its files in.
         BugReportStaging.sweep()
         GuestFileStaging.sweep()
+        #if FEEDBACK_MAIL
+        SendFeedbackStaging().sweep()
+        #endif
         model = entry.makeModel()
     }
 }
@@ -99,7 +102,7 @@ struct RootView: View {
                 }
             }
             .transition(.opacity)
-            if let busy = model.busy {
+            if let busy = model.busy, !model.busyOverSheet {
                 BusyOverlay(state: busy)
             }
             // Over everything the session shows, a Settings sheet aside: the

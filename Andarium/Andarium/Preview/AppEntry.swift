@@ -80,6 +80,7 @@ struct AppEntry {
     /// Where Settings scrolls to for a screen that shows a lower section.
     private static let settingsScrolls: [String: String] = [
         "settings-stats": "stats",
+        "settings-feedback": "diagnostics",
     ]
 
     /// The page of Info a screen opens on.
@@ -259,7 +260,7 @@ struct AppEntry {
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
+             "settings-feedback", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -310,6 +311,9 @@ struct AppEntry {
             break
         }
         WhatsNewPreview.apply(screen: screen, to: model)
+        #if FEEDBACK_MAIL
+        FeedbackPreview.configure(screen: screen, model: model)
+        #endif
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -439,7 +443,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history":
+             "whatsnew-history", "feedback-info", "feedback-info-filled":
             model.sheet = .info
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew

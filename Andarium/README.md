@@ -18,7 +18,8 @@ AndariumCore/         Swift package: the model and the adb client, no UIKit; it
                       re-exports GuestHostCore (../GuestHost/Core)
 AndariumTests/        hosted tests of the device app
 AndariumUITests/      UI tests of the device app in the Simulator
-Config/               entitlements, Info.plist, privacy manifest, bridging header
+Config/               entitlements, Info.plist, privacy manifest, bridging header,
+                      build settings (Andarium.xcconfig)
 scripts/              system staging, the App Store bundle check,
                       acknowledgements, screen capture
 Andarium.xcodeproj/   JSON project (project.xcproj) and its shared schemes
@@ -170,6 +171,8 @@ everything that exists for automation or only pretends:
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
+- It alone can carry [Send feedback](#send-feedback), and only when the
+  receiver's address is in the ignored `Config/Feedback.local.xcconfig`.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -185,6 +188,18 @@ of the frameworks (`Kernarium/PrivacyManifests`) declare exactly what the App
 Store build and the runtimes use. A release or harness build also reads the
 system uptime for its thermal report, which the application's manifest does
 not declare because only an App Store build is uploaded.
+
+### Send feedback
+
+Info and a running session's Settings open a sheet that writes an email to the
+developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
+compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
+ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
+names the receiver, so a fork, a sideload or a Debug or Release build holds none
+of it, and every configuration's bundle check says whether it does. Tests and
+captures turn it on for a build with `FEEDBACK_ADDRESS=feedback@example.com`
+on the `xcodebuild` line; its logic (`Shared/Feedback/Logic`) is also built, and
+tested, by AndariumCore's tests through a symlinked target no product links.
 
 ## Model and storage
 
