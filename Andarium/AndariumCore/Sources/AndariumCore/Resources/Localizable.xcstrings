@@ -1,29 +1,6 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "%@ %@" : {
-      "comment" : "Joins two whole sentences. English puts a space between them; Chinese and Japanese put none.",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@%2$@"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@%2$@"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@%2$@"
-          }
-        }
-      }
-    },
     "%lld vCPUs" : {
       "localizations" : {
         "en" : {
@@ -50,7 +27,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld vCPU"
+                  "value" : "%lld個のvCPU"
                 }
               }
             }
@@ -62,7 +39,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld 个 vCPU"
+                  "value" : "%lld个vCPU"
                 }
               }
             }
@@ -74,7 +51,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld 個 vCPU"
+                  "value" : "%lld個vCPU"
                 }
               }
             }
@@ -93,13 +70,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "超过 %@ 时，游戏可能会耗尽图形内存。"
+            "value" : "超过%@时，游戏可能会耗尽图形内存。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "超過 %@ 時，遊戲可能會耗盡圖形記憶體。"
+            "value" : "超過%@時，遊戲可能會耗盡圖形記憶體。"
           }
         }
       }
@@ -110,19 +87,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AndariumはMetal 4でゲストを描画しますが、この%@はMetal 4に対応していないため、ここではゲストを起動できません。"
+            "value" : "AndariumはMetal 4で仮想マシンを描画しますが、この%@はMetal 4に対応していないため、ここでは仮想マシンを起動できません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium 使用 Metal 4 绘制客户机，而此 %@ 不支持 Metal 4，因此客户机无法在此启动。"
+            "value" : "Andarium使用Metal 4绘制虚拟机，而此%@不支持Metal 4，因此虚拟机无法在此启动。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium 使用 Metal 4 繪製客體，而此 %@ 不支援 Metal 4，因此客體無法在此啟動。"
+            "value" : "Andarium使用Metal 4繪製虛擬機器，而此%@不支援Metal 4，因此虛擬機器無法在此啟動。"
           }
         }
       }
@@ -138,13 +115,58 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android 的图形内存不足"
+            "value" : "Android图形内存不足"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android 的圖形記憶體不足"
+            "value" : "Android圖形記憶體不足"
+          }
+        }
+      }
+    },
+    "Apps that come in several files can’t be installed yet. Choose a single .apk file." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "複数のファイルで構成されたアプリはまだインストールできません。単一の.apkファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂不支持安装由多个文件组成的应用。请选择单个.apk文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目前尚不支援安裝由多個檔案組成的應用程式。請選擇單一.apk檔案。"
+          }
+        }
+      }
+    },
+    "arm64, %lld KiB pages" : {
+      "comment" : "The architecture row of the Info sheet: the CPU architecture, then the size of a memory page, as in arm64, 4 KiB pages.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "arm64、%lld KiBページ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "arm64，%lld KiB页面"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "arm64，%lld KiB頁面"
           }
         }
       }
@@ -176,19 +198,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "デバイスが高温の間、フレームレートを下げています"
+            "value" : "デバイスが高温のため、フレームレートを下げています"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "设备发热期间已降低帧率"
+            "value" : "设备发热期间已降低帧速率"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裝置發熱期間已降低影格速率"
+            "value" : "裝置發熱期間已降低影格率"
           }
         }
       }
@@ -199,19 +221,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "アプリの表示がおかしい場合は、「最近使用したアプリ」でそのアプリを上にスワイプして終了し、もう一度開いてください。"
+            "value" : "アプリの表示がおかしい場合は、“最近使用したアプリ”でそのアプリを上にスワイプして終了し、もう一度開いてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "如果某个应用看起来出现异常，请在“最近任务”中将其划掉，然后重新打开。"
+            "value" : "如果应用显示异常，请在“最近使用的应用”中将其划掉，然后重新打开。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "如果某個應用程式看起來異常，請在「最近使用」中將其滑掉，然後重新開啟。"
+            "value" : "如果應用程式顯示異常，請在「最近使用的應用程式」中將其滑掉，然後重新開啟。"
           }
         }
       }
@@ -222,19 +244,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲスト実行中の設定画面で"
+            "value" : "仮想マシンの実行中は設定内で"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在客户机运行时的“设置”中"
+            "value" : "虚拟机运行期间，在设置中"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在客體執行時的「設定」中"
+            "value" : "虛擬機器執行期間，在設定中"
           }
         }
       }
@@ -250,13 +272,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "超过 %@ 时，iOS 很可能会关闭 Andarium。"
+            "value" : "超过%@时，iOS很可能会关闭Andarium。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "超過 %@ 時，iOS 很可能會關閉 Andarium。"
+            "value" : "超過%@時，iOS很可能會關閉Andarium。"
           }
         }
       }
@@ -267,19 +289,48 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この%2$@でゲストのメモリが%1$@の場合、iOSによってAndariumが終了される可能性が高くなります。%3$@以下にすると安全です。「ゲストシステム」の「編集」で下げてください。"
+            "value" : "この%2$@で仮想マシンのメモリが%1$@の場合、iOSによってAndariumが終了される可能性が高くなります。%3$@以下にすると安全です。“仮想マシン”の“編集”で下げてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 %2$@ 上的客户机内存为 %1$@ 时，iOS 很可能会关闭 Andarium。%3$@ 或更低更为安全。请使用“客户机系统”下的“编辑”降低内存。"
+            "value" : "此%2$@上的虚拟机内存为%1$@时，iOS很可能会关闭Andarium。%3$@或更低更为安全。请使用“虚拟机”下的“编辑”降低内存。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 %2$@ 上的客體記憶體為 %1$@ 時，iOS 很可能會關閉 Andarium。%3$@ 或更低更為安全。請使用「客體系統」下的「編輯」降低記憶體。"
+            "value" : "此%2$@上的虛擬機器記憶體為%1$@時，iOS很可能會關閉Andarium。%3$@或更低更為安全。請使用「虛擬機器」下的「編輯」降低記憶體。"
+          }
+        }
+      }
+    },
+    "list.join" : {
+      "comment" : "Joins two parts of a spoken list: a comma and a space in English, the language's own comma in Chinese and Japanese.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@, %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@、%2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@，%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@，%2$@"
           }
         }
       }
@@ -295,13 +346,64 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "需要 A14 或更新的芯片"
+            "value" : "需要A14或更新的芯片"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "需要 A14 或更新的晶片"
+            "value" : "需要A14或更新的晶片"
+          }
+        }
+      }
+    },
+    "sentence.join" : {
+      "comment" : "Joins two whole sentences: a space in English, none in Chinese and Japanese.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        }
+      }
+    },
+    "The virtual machine cannot start from %@: its name has a space, comma, colon or quotation mark." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンは%@から起動できません。名前にスペース、カンマ、コロン、引用符が含まれています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法从%@启动：其名称含有空格、逗号、冒号或引号。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法從%@啟動：其名稱含有空格、逗號、冒號或引號。"
           }
         }
       }
@@ -311,19 +413,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストのデータは、このAppのバージョンで開けるものより新しいレイアウトを使っています。ゲストを消去して、このバージョンで最初からやり直してください。"
+            "value" : "仮想マシンのデータは、このバージョンのアプリでは開けない新しい形式です。仮想マシンを消去して、このバージョンで最初からやり直してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机的数据使用的布局比此 App 版本能打开的更新。请抹掉客户机以使用此版本重新开始。"
+            "value" : "虚拟机数据的格式比此App版本支持的更新。请抹掉虚拟机，以便用此版本重新开始。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體的資料使用的配置比此 App 版本能開啟的更新。請清除客體以使用此版本重新開始。"
+            "value" : "虛擬機器資料的格式比此App版本支援的更新。請清除虛擬機器，以便用此版本重新開始。"
           }
         }
       }
@@ -333,19 +435,41 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストのファイルがこのAppのバージョンと一致しません。ゲストを消去して最初からやり直してください。"
+            "value" : "仮想マシンのファイルがこのバージョンのアプリと一致しません。仮想マシンを消去して最初からやり直してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机的文件与此 App 版本不匹配。请抹掉客户机以重新开始。"
+            "value" : "虚拟机的文件与此App版本不匹配。请抹掉虚拟机以重新开始。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體的檔案與此 App 版本不相符。請清除客體以重新開始。"
+            "value" : "虛擬機器的檔案與此App版本不相符。請清除虛擬機器以重新開始。"
+          }
+        }
+      }
+    },
+    "There is not enough free storage to set up the virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ストレージの空き容量が足りないため、仮想マシンを設定できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可用储存空间不足，无法设置虚拟机。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可用儲存空間不足，無法設定虛擬機器。"
           }
         }
       }
@@ -355,19 +479,63 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このAppのバージョンは、ゲストが前回起動したバージョンより古く、そのデータは元に戻せません。新しいバージョンのAndariumをインストールするか、ゲストを消去してこのバージョンで最初からやり直してください。"
+            "value" : "このバージョンのアプリは、仮想マシンが前回起動したときのバージョンより古く、仮想マシンのデータを古いバージョンに戻すことはできません。新しいバージョンのAndariumをインストールするか、仮想マシンを消去してこのバージョンで最初からやり直してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 App 版本比客户机上次启动时使用的版本更旧，而其数据无法回退。请安装更新版本的 Andarium，或抹掉客户机以使用此版本重新开始。"
+            "value" : "此App版本比虚拟机上次启动时使用的版本更旧，且虚拟机数据无法降级到旧版本。请安装更高版本的Andarium，或抹掉虚拟机以使用此版本重新开始。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 App 版本比客體上次啟動時使用的版本更舊，而其資料無法退回。請安裝較新版本的 Andarium，或清除客體以使用此版本重新開始。"
+            "value" : "此App版本比虛擬機器上次啟動時使用的版本更舊，且虛擬機器資料無法降級回舊版本。請安裝較新版本的Andarium，或清除虛擬機器以使用此版本重新開始。"
+          }
+        }
+      }
+    },
+    "This copy of Andarium does not carry a system." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このAndariumにはシステムが含まれていません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此Andarium副本不含系统。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此Andarium拷貝不含系統。"
+          }
+        }
+      }
+    },
+    "This isn’t an app. Choose a file that ends in .apk." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "これはアプリではありません。.apkで終わるファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这不是应用。请选择以.apk结尾的文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這不是應用程式。請選擇以.apk結尾的檔案。"
           }
         }
       }
@@ -377,19 +545,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このゲストは起動できません"
+            "value" : "この仮想マシンは起動できません"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此客户机无法启动"
+            "value" : "此虚拟机无法启动"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此客體無法啟動"
+            "value" : "此虛擬機器無法啟動"
           }
         }
       }
@@ -399,19 +567,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストのメモリが多めです"
+            "value" : "仮想マシンのメモリが大きすぎます"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机内存偏高"
+            "value" : "虚拟机内存偏高"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體記憶體偏高"
+            "value" : "虛擬機器記憶體偏高"
           }
         }
       }
@@ -444,19 +612,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAMはグラフィックスメモリで、ゲストのRAMとは別です。"
+            "value" : "VRAMはグラフィックスメモリで、仮想マシンのRAMとは別です。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAM 是图形内存，与客户机的 RAM 相互独立。"
+            "value" : "VRAM是图形内存，与虚拟机的RAM相互独立。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAM 是圖形記憶體，與客體的 RAM 各自獨立。"
+            "value" : "VRAM是圖形記憶體，與虛擬機器的RAM各自獨立。"
           }
         }
       }
