@@ -48,6 +48,20 @@ namespace uml::runtime {
  * every time, and so is the footprint less them ("other"), which follows
  * malloc and what no term names between readings.
  *
+ * With a run figures reader (set_run_figures_reader) each history row also says
+ * how the run went in the time it covers (RunFigures): the scanout flushes
+ * and the longest gap between two (frame rate and worst frame), the host's
+ * thermal state and memory pressure, the gadget cache's reliefs, shed
+ * accounts, renewals and largest account, the CPU time of the process and of
+ * the vCPU carriers, and from the task's power information the share of that
+ * time on performance cores and the energy, and on macOS the cycles per CPU
+ * second ("-" on iOS, which has no published source for them). A row
+ * of the recent history covers the time since the checkpoint before it; a row
+ * of the older history covers the memory_history_older_stride checkpoints it
+ * stands for, so that nothing between two older rows goes unseen. A figure
+ * whose source has nothing to say is "-". The reader runs at the checkpoint
+ * alone: nothing runs per frame but the device's count of its flushes.
+ *
  * Everything that runs at an end only formats into static storage and makes
  * system calls: it takes no lock and allocates nothing, so a panic, a signal
  * handler or a process whose other threads are suspended can run it.
@@ -61,16 +75,17 @@ namespace uml::runtime {
  * user network (set_network_counts_reader) and whether the application showed
  * its notice that iOS denies it the network (set_network_notice): numbers and
  * words only, never an address, a port or a name. The first line names the
- * layout: "uml-session 5" has the network slot between the stall slot and the
- * state; "uml-session 4" has the stall slot between the memory slot and the
- * state; the earlier layouts (1 to 3) have the state where the stall slot is
- * now.
+ * layout: "uml-session 6" has the history rows described above in a memory
+ * slot of 8 KiB; "uml-session 5" has the network slot between the stall slot
+ * and the state and shorter rows in a 4 KiB memory slot; "uml-session 4" has
+ * the stall slot between the memory slot and the state; the earlier layouts (1
+ * to 3) have the state where the stall slot is now.
  */
 inline constexpr unsigned memory_checkpoint_interval_ms = 2000;
 /* The bytes of the memory slot at the start of the file, of the stall slot
  * after it, of the network slot after that, and where the session's state
  * begins. */
-inline constexpr std::size_t session_memory_slot_bytes = 4096;
+inline constexpr std::size_t session_memory_slot_bytes = 8192;
 inline constexpr std::size_t session_stall_slot_bytes = 4096;
 inline constexpr std::size_t session_network_slot_bytes = 512;
 inline constexpr std::size_t session_network_offset =
@@ -114,6 +129,15 @@ using MemoryTermsReader = MemoryTerms (*)(bool read_malloc) noexcept;
 /* The reader the memory checkpoints use from now on; null for none, which
  * leaves the slot with the footprint alone. */
 void set_memory_terms_reader(MemoryTermsReader reader) noexcept;
+
+/* What the checkpoint asks for the figures of its history rows; any thread.
+ * `session_begins` is true for the reading that opens a session, which the
+ * rows are measured from. */
+using RunFiguresReader = RunFigures (*)(bool session_begins) noexcept;
+
+/* The reader the checkpoints use from now on; null for none, which leaves
+ * every figure of a row that it adds to the terms as "-". */
+void set_run_figures_reader(RunFiguresReader reader) noexcept;
 
 /* The counts of the guest's user network at one moment, each since the
  * provider was made (device/network/slirp/network_counters.hpp says what each

@@ -54,16 +54,18 @@ public struct SessionRecord: Equatable, Sendable {
     public var network: NetworkRecord?
 
     /// The layouts this reader knows: 1 to 3 keep the session's state right
-    /// after the memory slot, 4 puts the stall slot between them and 5 the
-    /// network slot after the stall slot.
+    /// after the memory slot, 4 puts the stall slot between them, 5 the
+    /// network slot after the stall slot and 6 the figures of the run in each
+    /// history row of an 8 KiB memory slot. The rows are for the person
+    /// reading the bug report; this reader takes none of them.
     static let layouts = [
-        "uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4", "uml-session 5",
+        "uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4", "uml-session 5", "uml-session 6",
     ]
 
-    /// The most a record file ever holds is 13824 bytes
+    /// The most a record file ever holds is 17920 bytes
     /// (`session_record_max_bytes`); a file longer than this is not one the
     /// runtime wrote, and is neither read nor copied beyond it.
-    public static let maximumBytes = 16 << 10
+    public static let maximumBytes = 20 << 10
 
     /// Reads a record's text; nil when it is not one.
     public init?(text: String) {
@@ -89,9 +91,10 @@ public struct SessionRecord: Equatable, Sendable {
         memory = fields["memory"].flatMap(Self.memory(from:))
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
-        let hasStalls = format == "uml-session 4" || format == "uml-session 5"
+        let hasStalls = ["uml-session 4", "uml-session 5", "uml-session 6"].contains(String(format))
         stalls = hasStalls ? StallRecord(text: parts[0]) : nil
-        network = format == "uml-session 5" ? NetworkRecord(text: parts[0]) : nil
+        let hasNetwork = ["uml-session 5", "uml-session 6"].contains(String(format))
+        network = hasNetwork ? NetworkRecord(text: parts[0]) : nil
     }
 
     /// "at T footprint F peak P [available A]".

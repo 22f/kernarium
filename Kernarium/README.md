@@ -315,7 +315,9 @@ decides what the lifecycle edges do and acts only through
 A guest's disk grows as the guest writes (the Linux overlay in the temporary
 directory, an Android bundle's `data.img`), and a write the device cannot take
 stops the guest. The thresholds and the pause itself are
-[GuestHostCore](../GuestHost/README.md), which Andarium shares.
+[GuestHostCore](../GuestHost/README.md), which Andarium shares, as is the
+figure: the space a write can use (`HostStorage`), which leaves out the
+purgeable space iOS Settings counts.
 
 - A start needs room for the guest's first writes (`StartSpace`: 1.5 GiB, and
   3 GiB for a bundle that has no data disk yet). On a device short of it a

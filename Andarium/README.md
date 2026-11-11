@@ -456,9 +456,12 @@ requires reopening Andarium.
   from the process's one Core Motion manager, which is never released (a
   released manager crashes inside Core Motion); the system image must include
   the [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
-- **Free space.** Once Android has booted a normal start, the application
-  reads the device's free space (`RunSpace.nextCheck`: every 2 s near the
-  limit, every 30 s on a roomy device) and pauses the guest below 1 GiB
+- **Free space.** Free space is the space a write can use (`HostStorage`,
+  `statfs(2)`), the one figure the watch, the start and transfer checks and
+  every screen use; it leaves out the purgeable space iOS Settings counts, so
+  Settings may show more. Once Android has booted a normal start, the
+  application reads it (`RunSpace.nextCheck`: every 2 s near the limit, every
+  30 s on a roomy device) and pauses the guest below 1 GiB
   (`RunSpace.pauseBelowBytes`), before the data disk, which Android mounts so
   that a failed write panics, can fail to grow. The pause is the runtime's
   suspension with the storage written back first and the RAM kept in the

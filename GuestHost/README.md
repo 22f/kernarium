@@ -16,10 +16,11 @@ package with no UIKit, SwiftUI or runtime dependency, tested with `swift test`
 ```text
 Core/                                  GuestHostCore, a Swift package both
                                        applications import: sizes and their text,
-                                       the device's free space (HostStorage), the
-                                       free-space thresholds (RunSpace), the start
-                                       check's text (StartSpace), and the pause
-                                       for space (SpacePauser, SuspensionCheck,
+                                       the space a write can use on the device
+                                       (HostStorage), the free-space thresholds
+                                       (RunSpace), the start check's text
+                                       (StartSpace), and the pause for space
+                                       (SpacePauser, SuspensionCheck,
                                        SpacePause), and the hardware keyboard and
                                        pointer (the keys held down, Caps Lock, the
                                        pointer's position, buttons and scroll)

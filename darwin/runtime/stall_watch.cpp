@@ -2,6 +2,7 @@
 #include "stall_watch.hpp"
 
 #include "kernel_threads.hpp"
+#include "platform/host_state_figures.hpp"
 #include "session_record.hpp"
 #include "stall_record.hpp"
 #include "vcpu_carrier_name.hpp"
@@ -142,17 +143,17 @@ std::int32_t main_queue_lateness_ms(std::uint64_t now_ns) noexcept
 	return static_cast<std::int32_t>(std::min<std::int64_t>(worst, 0x7fffffff));
 }
 
-/* ---- The memory pressure level. ---- */
-std::atomic<std::uint8_t> memory_pressure_level{0};
-
+/* ---- The memory pressure level. ----
+ * What the watch observes of the host is published process-wide
+ * (platform/host_state_figures.hpp), where the session record's checkpoint
+ * reads it too. */
 void memory_pressure_changed(void *context) noexcept
 {
 	const auto source = static_cast<dispatch_source_t>(context);
 	const auto flags = dispatch_source_get_data(source);
-	memory_pressure_level.store(
+	::uml::platform::publishMemoryPressure(
 		(flags & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0 ? 2 :
-		(flags & DISPATCH_MEMORYPRESSURE_WARN) != 0 ? 1 : 0,
-		std::memory_order_relaxed);
+		(flags & DISPATCH_MEMORYPRESSURE_WARN) != 0 ? 1 : 0);
 }
 
 /* ---- What the process's counters read at one moment. ---- */
@@ -235,7 +236,6 @@ struct StallWatch::State final {
 	dispatch_queue_t observer_queue{};
 	dispatch_source_t pressure_source{};
 	dispatch_source_t observer_timer{};
-	std::atomic<std::uint32_t> observed_thermal{0};
 
 	/* Thread-confined state. */
 	std::uint32_t fence_epoch{};
@@ -256,29 +256,17 @@ struct StallWatch::State final {
 
 	/* ---- What the host observer saw. ---- */
 
-	static std::uint32_t pack(const HostThermalState &state) noexcept
+	[[nodiscard]] static HostThermalState observed() noexcept
 	{
-		return static_cast<std::uint32_t>(state.level) |
-			(state.lowPowerMode ? 0x100U : 0U) |
-			static_cast<std::uint32_t>(state.activeProcessors) << 16;
-	}
-
-	[[nodiscard]] HostThermalState observed() const noexcept
-	{
-		const std::uint32_t word = observed_thermal.load(std::memory_order_relaxed);
-		HostThermalState state;
-		state.level = static_cast<HostThermalLevel>(word & 0xffU);
-		state.lowPowerMode = (word & 0x100U) != 0;
-		state.activeProcessors = static_cast<std::uint8_t>(word >> 16 & 0xffU);
-		return state;
+		const auto published = ::uml::platform::publishedHostState();
+		return published ? published->thermal : HostThermalState{};
 	}
 
 	/* On the observer's queue. */
 	static void observe_host(void *argument) noexcept
 	{
 		auto *self = static_cast<State *>(argument);
-		self->observed_thermal.store(pack(self->thermal->state()),
-			std::memory_order_relaxed);
+		::uml::platform::publishHostThermal(self->thermal->state());
 		send_main_queue_ping(continuous_ns());
 	}
 
@@ -426,8 +414,7 @@ struct StallWatch::State final {
 			changed = true;
 		}
 		host_state = state;
-		const std::uint8_t level = memory_pressure_level.load(
-			std::memory_order_relaxed);
+		const std::uint8_t level = ::uml::platform::publishedMemoryPressure();
 		if (level != pressure) {
 			record.pressure.push({at, level, pressure});
 			pressure = level;
@@ -446,7 +433,7 @@ struct StallWatch::State final {
 		event.thermal_start = static_cast<std::uint8_t>(state.level);
 		event.low_power = state.lowPowerMode;
 		event.processors_start = state.activeProcessors;
-		event.pressure = memory_pressure_level.load(std::memory_order_relaxed);
+		event.pressure = ::uml::platform::publishedMemoryPressure();
 		/* The five seconds before, from the samples the ring holds. */
 		if (recent_count >= 2) {
 			const Context &last = recent[recent_count - 1];
@@ -495,7 +482,7 @@ struct StallWatch::State final {
 		event.processors_end = state.activeProcessors;
 		event.low_power = event.low_power || state.lowPowerMode;
 		event.pressure = std::max(event.pressure,
-			memory_pressure_level.load(std::memory_order_relaxed));
+			::uml::platform::publishedMemoryPressure());
 	}
 
 	void handle(StallDetector::Change change, std::uint64_t now_ns) noexcept
@@ -608,7 +595,7 @@ struct StallWatch::State final {
 
 	void start_observer() noexcept
 	{
-		observed_thermal.store(pack(thermal->state()), std::memory_order_relaxed);
+		::uml::platform::publishHostThermal(thermal->state());
 		observer_queue = dispatch_queue_create("uml.stall-watch.host",
 			DISPATCH_QUEUE_SERIAL);
 		if (observer_queue == nullptr)
@@ -654,6 +641,7 @@ struct StallWatch::State final {
 			dispatch_release(observer_queue);
 			observer_queue = nullptr;
 		}
+		::uml::platform::withdrawHostState();
 	}
 
 	void start() noexcept
@@ -662,7 +650,7 @@ struct StallWatch::State final {
 		    KERN_SUCCESS)
 			return;
 		host = mach_host_self();
-		memory_pressure_level.store(0, std::memory_order_relaxed);
+		::uml::platform::withdrawHostState();
 		start_observer();
 		/* The thread takes no signal: the kernel's process-directed signals
 		 * must never pick it. */

@@ -25,6 +25,14 @@ uml_declare_architecture_target(uml_descriptor platform)
 target_include_directories(uml_descriptor INTERFACE
     ${PROJECT_SOURCE_DIR}/darwin)
 
+# Header-only: what the platform publishes for the runtime's session record to
+# read (frame_figures.hpp, host_state_figures.hpp, gpu_memory_figures.hpp).
+add_library(uml_published_figures INTERFACE)
+add_library(UML::PublishedFigures ALIAS uml_published_figures)
+uml_declare_architecture_target(uml_published_figures platform)
+target_include_directories(uml_published_figures INTERFACE
+    ${PROJECT_SOURCE_DIR}/darwin)
+
 set(UML_VIDEO_DECODER_SOURCES
     apple/video_decoder.mm
     apple/hevc_stream.cpp
