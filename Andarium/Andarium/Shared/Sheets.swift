@@ -26,7 +26,7 @@ struct NewGuestSheet: View {
                         NoticeCard(
                             symbol: "externaldrive.badge.exclamationmark", color: .orange,
                             title: StartSpaceWords.title,
-                            text: String(localized: "Setting up needs \(Formats.size(bytes: model.createRequirementBytes)) free for the virtual machine's setup. This \(model.host.name) has \(Formats.size(bytes: model.host.freeStorageBytes)). Free up space in Settings › General › \(model.host.name) Storage.")
+                            text: String(localized: "Setting up the virtual machine needs \(Formats.size(bytes: model.createRequirementBytes)) of free space. This \(model.host.name) has \(Formats.size(bytes: model.host.freeStorageBytes)). Free up space in Settings › General › \(model.host.name) Storage.")
                         )
                     }
                     StoragePanel(guest: draftBinding, host: model.host, stops: model.capacityStopsGiB)

@@ -11,7 +11,7 @@ enum StartSpaceWords {
 
     static func message(neededBytes: UInt64, freeBytes: UInt64, device: String) -> String {
         String(
-            localized: "Starting needs \(Formats.size(bytes: neededBytes)) free for the virtual machine's own writes. This \(device) has \(Formats.size(bytes: freeBytes)) free.")
+            localized: "The virtual machine needs \(Formats.size(bytes: neededBytes)) of free space to start, for the data it writes. This \(device) has \(Formats.size(bytes: freeBytes)) free.")
     }
 }
 

@@ -48,7 +48,7 @@ struct SnapshotWordsTests {
         #expect(SnapshotWords.takeReason(.noData) == "Start the virtual machine once first. Until then there is no data to keep.")
         #expect(SnapshotWords.takeReason(.mismatch) == "Not while the virtual machine\u{2019}s files do not match this app version.")
         #expect(SnapshotWords.takeReason(.unfinishedUpdate)
-            == "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home.")
+            == "Not while Andarium\u{2019}s update is unfinished. Update and start tries it again, or use Restore on Home.")
         #expect(SnapshotWords.takeReason(.notShutDown)
             == "Android wasn\u{2019}t shut down when the virtual machine last ran. Start the virtual machine and shut it down from Android, then take a snapshot.")
         // An operation under way shows itself and says nothing.
@@ -174,14 +174,14 @@ struct SnapshotWordsTests {
 
     @Test func aRestoreThatDidNotFinishSaysOnlyWhatIsKnown() {
         let older = SnapshotSample.item("Before r20", release: "20261108-los24-r18")
-        // The snapshot is known and whole: Start finishes it, and nothing says the data is back.
+        // The snapshot is known and whole: Starting finishes it, and nothing says the data is back.
         let known = SnapshotWords.unfinishedText(.named, item: older, failure: nil)
         #expect(known == "Andarium could not finish restoring \u{201C}Before r20\u{201D} from \(SnapshotWords.taken(older.created)). "
-            + "Start finishes it. The next start updates it to r20.")
+            + "Starting finishes it. The next start updates it to r20.")
         #expect(!known.contains("is back"))
         let unnamed = SnapshotSample.item("")
         #expect(SnapshotWords.unfinishedText(.named, item: unnamed, failure: nil)
-            == "Andarium could not finish restoring the snapshot from \(SnapshotWords.taken(unnamed.created)). Start finishes it.")
+            == "Andarium could not finish restoring the snapshot from \(SnapshotWords.taken(unnamed.created)). Starting finishes it.")
         // Which snapshot it was cannot be read, or it names one that is gone or damaged: a start drops the
         // restore, so nothing is promised, and the two states are told apart.
         let may = " The virtual machine\u{2019}s data may be from before the restore or from the snapshot."
@@ -190,7 +190,7 @@ struct SnapshotWordsTests {
         for (kind, reason) in [(UnfinishedRestoreKind.unreadable, unreadable), (.lost, lost)] {
             let text = SnapshotWords.unfinishedText(kind, item: nil, failure: nil)
             #expect(text == reason + may)
-            #expect(!text.contains("Start finishes it") && !text.contains("is back"))
+            #expect(!text.contains("Starting finishes it") && !text.contains("is back"))
             // The reasons Take and Restore give, and the refusal, follow.
             #expect(SnapshotWords.unfinishedReason(kind) == reason)
             #expect(SnapshotWords.takeReason(.restoreUnfinished, restore: kind) == reason)
@@ -201,7 +201,7 @@ struct SnapshotWordsTests {
             SnapshotWords.takeReason(.restoreUnfinished), SnapshotWords.nowReason(.restoreUnfinished),
             SnapshotWords.refusal(.restoreUnfinished), SnapshotWords.unfinishedReason(.named),
         ] {
-            #expect(text == "A restore did not finish. Start finishes it.")
+            #expect(text == "A restore did not finish. Starting finishes it.")
         }
     }
 
@@ -696,7 +696,7 @@ struct SnapshotsModelTests {
             await s.store.reload(force: true)
             #expect(s.store.unfinishedRestoreKind == kind && s.store.unfinishedRestoreSnapshot == nil)
             #expect(s.store.unfinishedRestoreText?.hasPrefix(reason) == true)
-            #expect(s.store.unfinishedRestoreText?.contains("Start finishes it") == false)
+            #expect(s.store.unfinishedRestoreText?.contains("Starting finishes it") == false)
             #expect(s.store.takeReason == reason)
             #expect(s.store.restoreNote(of: s.store.item(a.id)!) == reason)
             // A restore asked for anyway is told the same.
@@ -705,11 +705,11 @@ struct SnapshotsModelTests {
             #expect(s.store.problem?.message == reason)
             s.store.problem = nil
         }
-        // One that names a whole snapshot is known, and Start finishes it.
+        // One that names a whole snapshot is known, and Starting finishes it.
         s.driver.unfinishedRestore = SnapshotUnfinishedRestore(snapshot: a.id)
         await s.store.reload(force: true)
         #expect(s.store.unfinishedRestoreKind == .named && s.store.unfinishedRestoreSnapshot?.id == a.id)
-        #expect(s.store.takeReason == "A restore did not finish. Start finishes it.")
+        #expect(s.store.takeReason == "A restore did not finish. Starting finishes it.")
         #expect(s.store.unfinishedRestoreText?.hasPrefix("Andarium could not finish restoring") == true)
     }
 

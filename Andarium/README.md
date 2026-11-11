@@ -364,7 +364,7 @@ requires reopening Andarium.
   of access or of Precise Location drops the held position first. An
   approximate position is passed as approximate; the guest owns what apps see
   of it. The row is dimmed and off when iOS refuses, the device restricts
-  location or Location Services are off, and says Approximate, with an
+  location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to

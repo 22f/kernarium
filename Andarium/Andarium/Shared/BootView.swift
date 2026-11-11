@@ -266,7 +266,7 @@ struct BootView: View {
             seconds: 0.9)
         let used = MeterWords.storage(Formats.size(bytes: guest.usedBytes), of: Formats.size(gib: guest.capacityGiB))
         let growing = grewFromGiB.map {
-            String(localized: "Growing from \(Formats.size(gib: $0)) to \(Formats.size(gib: guest.capacityGiB))")
+            String(localized: "Grows from \(Formats.size(gib: $0)) to \(Formats.size(gib: guest.capacityGiB))")
         }
         let storage = String(localized: "Storage")
         let startup = String(localized: "Startup")
@@ -274,22 +274,22 @@ struct BootView: View {
         case .recovery:
             return [system, kernel,
                     Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
-                    Step(title: String(localized: "Recovery"), detail: String(localized: "Loading recovery"), seconds: 1.4)]
+                    Step(title: String(localized: "Recovery"), detail: String(localized: "Loads the recovery system"), seconds: 1.4)]
         case .firstStart:
             return [system, kernel,
                     Step(
                         title: storage,
-                        detail: String(localized: "Preparing \(Formats.size(gib: guest.effectiveCapacityGiB)) for first use"),
+                        detail: String(localized: "Prepares \(Formats.size(gib: guest.effectiveCapacityGiB)) for first use"),
                         seconds: 0.9),
-                    Step(title: startup, detail: String(localized: "Setting up for the first time"), seconds: 4.0)]
+                    Step(title: startup, detail: String(localized: "Sets up for the first time"), seconds: 4.0)]
         case .upgrade:
             return [system, kernel,
                     Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.7 : 1.2),
-                    Step(title: startup, detail: String(localized: "Updating apps for \(info.releaseRevision)"), seconds: 3.6)]
+                    Step(title: startup, detail: String(localized: "Updates apps for \(info.releaseRevision)"), seconds: 3.6)]
         case .normal, .restart:
             return [system, kernel,
                     Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
-                    Step(title: startup, detail: String(localized: "Starting services"), seconds: 1.8)]
+                    Step(title: startup, detail: String(localized: "Starts services"), seconds: 1.8)]
         }
     }
 }

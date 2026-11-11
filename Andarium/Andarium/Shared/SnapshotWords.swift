@@ -196,8 +196,8 @@ enum SnapshotWords {
         if kind == .named, let item {
             sentences = [
                 item.name.isEmpty
-                    ? String(localized: "Andarium could not finish restoring the snapshot from \(taken(item.created)). Start finishes it.")
-                    : String(localized: "Andarium could not finish restoring \u{201C}\(item.name)\u{201D} from \(taken(item.created)). Start finishes it.")
+                    ? String(localized: "Andarium could not finish restoring the snapshot from \(taken(item.created)). Starting finishes it.")
+                    : String(localized: "Andarium could not finish restoring \u{201C}\(item.name)\u{201D} from \(taken(item.created)). Starting finishes it.")
             ]
             if case .updatesAtNextStart(_, let to) = item.restore { sentences.append(updatesAtNextStart(to: revision(of: to))) }
         } else {
@@ -266,7 +266,7 @@ enum SnapshotWords {
         case .notShutDown:
             String(localized: "Android wasn\u{2019}t shut down when the virtual machine last ran. Start the virtual machine and shut it down from Android, then take a snapshot.")
         case .unfinishedUpdate:
-            String(localized: "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home.")
+            String(localized: "Not while Andarium\u{2019}s update is unfinished. Update and start tries it again, or use Restore on Home.")
         case .mismatch: String(localized: "Not while the virtual machine\u{2019}s files do not match this app version.")
         case .volumeCannotClone: String(localized: "The virtual machine\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
         case .restoreUnfinished: unfinishedReason(restore)
@@ -280,7 +280,7 @@ enum SnapshotWords {
     /// next start, which finishes nothing.
     static func unfinishedReason(_ kind: UnfinishedRestoreKind) -> String {
         switch kind {
-        case .named: String(localized: "A restore did not finish. Start finishes it.")
+        case .named: String(localized: "A restore did not finish. Starting finishes it.")
         case .unreadable: String(localized: "A snapshot restore did not finish, and Andarium cannot read which one.")
         case .lost: String(localized: "A snapshot restore did not finish, and its snapshot is missing or damaged.")
         }

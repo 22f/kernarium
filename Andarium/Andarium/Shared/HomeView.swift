@@ -516,13 +516,13 @@ struct UnfinishedUpdateCard: View {
         let revision = ReleaseLabel.revision(of: release)
         return switch (canRetry, canRestore) {
         case (true, true):
-            String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or Restore puts back your data from before the update.")
+            String(localized: "The update to \(revision) did not finish. Update and start tries it again, or Restore puts back your data from before the update.")
         case (true, false):
-            String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the virtual machine to start over.")
+            String(localized: "The update to \(revision) did not finish. Update and start tries it again, or erase the virtual machine to start over.")
         case (false, true):
             String(localized: "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the virtual machine to start over.")
         case (false, false):
-            String(localized: "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the virtual machine to start over.")
+            String(localized: "The update to \(revision) did not finish, and nothing from before it is left to put back. Erase the virtual machine to start over.")
         }
     }
 }

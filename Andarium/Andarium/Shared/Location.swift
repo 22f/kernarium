@@ -65,7 +65,7 @@ enum LocationWords {
     static let denied = String(localized: "Not allowed in Settings")
     static let restricted = String(localized: "Restricted on this device")
     static let servicesOff = String(localized: "Location Services are off")
-    static let approximate = String(localized: "Approximate")
+    static let approximate = String(localized: "Approximate location")
 
     /// The line under Location: why it cannot be used, or that it is
     /// approximate while it is on; none otherwise.
