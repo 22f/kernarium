@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """The camera layouts: their closed set, their fallback order and the generated files.
 
-generate-camera-layouts.py is the only source of the layout names, the permission
+camera_layouts.py is the only source of the layout names, the permission
 directories, the media profiles and the init file; overlay/camera/generated holds
 its output. The tests below state the set (39 names, the dimensions that make
 them), the fallback order that the runtime composes with, and that every checked-in
@@ -23,8 +23,8 @@ from xml.etree import ElementTree
 
 TESTS = Path(__file__).resolve().parents[2]
 REPOSITORY = TESTS.parent
-SCRIPT = REPOSITORY / "android/lineage-24/tools/generate-camera-layouts.py"
-SPEC = importlib.util.spec_from_file_location("generate_camera_layouts", SCRIPT)
+SCRIPT = REPOSITORY / "android/lineage-24/tools/camera_layouts.py"
+SPEC = importlib.util.spec_from_file_location("camera_layouts", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 generator = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = generator

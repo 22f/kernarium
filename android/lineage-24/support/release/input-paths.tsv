@@ -43,7 +43,7 @@ excluded	android/lineage-24/tools/android_image.py	the image verifiers' shared r
 excluded	android/lineage-24/tools/boot-image.py	verifies boot images
 excluded	android/lineage-24/tools/check-overlay-sepolicy.py	checks the overlay's sources before the policy build
 excluded	android/lineage-24/tools/default_wallpaper.py	the wallpaper rule of the target-files verifier
-excluded	android/lineage-24/tools/generate-camera-layouts.py	regenerates the camera layout files, which are the input
+excluded	android/lineage-24/tools/camera_layouts.py	regenerates the camera layout files, which are the input
 excluded	android/lineage-24/tools/generate-mesa-venus-port.py	regenerates the Mesa port series, which is the input
 excluded	android/lineage-24/tools/install-release.py	verifies and installs a published release
 excluded	android/lineage-24/tools/pinned_source.py	shared by the verifiers and regenerators
