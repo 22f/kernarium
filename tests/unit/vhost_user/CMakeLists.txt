@@ -18,3 +18,17 @@ target_link_libraries(uml_vhost_user_held_requests_tests PRIVATE
 uml_add_unit_test(NAME vhost-user-held-requests
     COMMAND uml_vhost_user_held_requests_tests
     LABELS vhost-user)
+
+# The in-process service around a device that posts work from its own thread:
+# the transport blocks while it is idle, and every kind of work reaches the
+# guest through the device's event descriptor alone.
+add_executable(uml_vhost_user_idle_transport_tests idle_transport_tests.cpp)
+target_include_directories(uml_vhost_user_idle_transport_tests BEFORE PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/unit/gpu
+    ${PROJECT_SOURCE_DIR}/darwin/device/gpu)
+target_link_libraries(uml_vhost_user_idle_transport_tests PRIVATE
+    UML::VhostUserTransport)
+uml_add_unit_test(NAME vhost-user-idle-transport
+    COMMAND uml_vhost_user_idle_transport_tests
+    TIMEOUT 120
+    LABELS vhost-user)

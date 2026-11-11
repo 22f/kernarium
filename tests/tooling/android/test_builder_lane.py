@@ -375,9 +375,11 @@ def tracked_erofs_parameters(android_root: Path) -> tuple[str, str]:
 def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
+    integers: list[tuple[str, int]] = (),
 ) -> bytes:
-    """A compiled resource table whose one package holds the given string-array resources and
-    bool resources (as compact entries when `compact` is set, as a recent aapt2 writes them)."""
+    """A compiled resource table whose one package holds the given string-array resources, bool
+    resources and integer resources (the latter two as compact entries when `compact` is set, as a
+    recent aapt2 writes them)."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -395,7 +397,7 @@ def synthetic_resource_table(
                 + struct.pack(f"<{len(strings)}I", *offsets) + data)
 
     values = sorted({item for _, items in arrays for item in items})
-    names = [name for name, _ in arrays] + [name for name, _ in booleans]
+    names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
     configuration = struct.pack("<I", 64) + b"\x00" * 60
     type_header = 20 + len(configuration)
 
@@ -422,8 +424,20 @@ def synthetic_resource_table(
             bool_entries.append(struct.pack("<HHI", index, 0x1200 | 0x08, data))
         else:
             bool_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x12, data))
-    chunks = type_chunk(1, array_entries) + (type_chunk(2, bool_entries) if booleans else b"")
-    type_pool, key_pool = pool(["array", "bool"] if booleans else ["array"]), pool(names)
+    integer_entries = []
+    for index, (_, value) in enumerate(integers, start=len(arrays) + len(booleans)):
+        data = value & 0xFFFFFFFF
+        if compact:
+            integer_entries.append(struct.pack("<HHI", index, 0x1000 | 0x08, data))
+        else:
+            integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
+    chunks = type_chunk(1, array_entries)
+    type_names = ["array"]
+    for type_name, typed in (("bool", bool_entries), ("integer", integer_entries)):
+        if typed:
+            type_names.append(type_name)
+            chunks += type_chunk(len(type_names), typed)
+    type_pool, key_pool = pool(type_names), pool(names)
     package_header = 288
     package = (struct.pack("<HHII", 0x0200, package_header,
                            package_header + len(type_pool) + len(key_pool) + len(chunks), 0x7F)
@@ -540,6 +554,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
 
     tool = load_tool(verifier)
     pinner_overlay_entry = tool.PINNER_OVERLAY
+    wifi_overlay_entry = tool.WIFI_OVERLAY
+    wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
+    wifi_permanent, wifi_temporary = tool.WIFI_NO_INTERNET_THRESHOLDS
     statistics_apks = tool.STATISTICS_APKS
     # The Setup Wizard overlay's artwork, as the build would carry it: the raw animation unchanged and
     # the compiled vector holding its path data as strings.
@@ -573,6 +590,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             fail(f"the resource bool reader misreads {'compact' if compact else 'full'} entries")
         if tool.resource_arrays(table) != expected_arrays:
             fail(f"the resource array reader misreads a table that also holds {'compact' if compact else 'full'} bools")
+    # ... and an integer resource, signed, in a table with or without bools, full or compact.
+    numbers = [("config_threshold", 2**31 - 1), ("config_low", 1), ("config_threshold", 0), ("config_negative", -1)]
+    expected_integers = {"config_threshold": [2**31 - 1, 0], "config_low": [1], "config_negative": [-1]}
+    for compact in (False, True):
+        for typed_booleans in ([], flags):
+            table = synthetic_resource_table(tables, booleans=typed_booleans, integers=numbers, compact=compact)
+            if tool.resource_integers(table) != expected_integers:
+                fail(f"the resource integer reader misreads {'compact' if compact else 'full'} entries")
+            if tool.resource_arrays(table) != expected_arrays:
+                fail("the resource array reader misreads a table that also holds integers")
     release_manifest = synthetic_compiled_manifest(None, debuggable=False)
     release_apk = synthetic_apk(debuggable=False)
     preopt_apks = sorted(tool.REQUIRED_PREOPT_APKS)
@@ -580,6 +607,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         entry for entry in tool.REQUIRED_ENTRIES
         if entry.endswith(".apk") and entry not in tool.REQUIRED_PREOPT_APKS
         and entry != pinner_overlay_entry
+        and entry != wifi_overlay_entry  # written with its own resources
         and entry != tool.CAMERA_APP  # written with its own resources
     )
     arm_preopt_apks = sorted(tool.REQUIRED_ARM_PREOPT_APKS)
@@ -945,6 +973,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           userdata_grow_policy_variant: str | None = None,
                           discrete_ops_variant: str | None = None,
                           pinner_overlay_variant: str | None = None,
+                          wifi_overlay_variant: str | None = None,
                           statistics_variant: str | None = None,
                           wizard_branding_variant: str | None = None,
                           navigation_variant: str | None = None,
@@ -1484,7 +1513,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             if wifi_network_variant == "no-add"
                             else "cmd wifi add-network VirtWifi open\n"
                         )
+                        + ("" if wifi_network_variant == "no-list" else "cmd wifi list-networks\n")
+                        + ("" if wifi_network_variant == "no-status" else "cmd wifi status\n")
                         + ('setprop "$marker" 1\n' if wifi_network_variant != "no-marker" else "")
+                        + (
+                            'setprop "$marker" 2\n'
+                            if wifi_network_variant not in ("no-marker", "no-joined-marker")
+                            else ""
+                        )
                         + {
                             "enables-wifi": "cmd wifi set-wifi-enabled enabled\n",
                             "connects": "cmd wifi connect-network VirtWifi open\n",
@@ -1749,7 +1785,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         ""
                         if wifi_network_variant == "missing-marker-context"
                         else "persist.sys.kernarium.virtwifi_saved    "
-                        "u:object_r:kernarium_wifi_network_prop:s0 exact bool\n"
+                        "u:object_r:kernarium_wifi_network_prop:s0 exact "
+                        + {
+                            "marker-type-bool": "bool",
+                            "marker-type-enum-one": "enum 1",
+                        }.get(wifi_network_variant or "", "enum 1 2")
+                        + "\n"
                     )
                     + (
                         ""
@@ -2188,6 +2229,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             else b"\x00config_pinnerHomePinBytes\x00",
                         )
                 archive.writestr(pinner_overlay_entry, pinner_overlay.getvalue())
+                # The Wi-Fi module's overlay: the thresholds that keep the guest's one network
+                # enabled, and the ways the table can lack or lower one.
+                permanent, temporary, never = wifi_permanent, wifi_temporary, wifi_never
+                wifi_thresholds = {
+                    None: [(permanent, never), (temporary, never)],
+                    "compact": [(permanent, never), (temporary, never)],
+                    "missing-permanent": [(temporary, never)],
+                    "missing-temporary": [(permanent, never)],
+                    "missing-both": [],
+                    "no-table": [],
+                    "permanent-one": [(permanent, 1), (temporary, never)],
+                    "temporary-zero": [(permanent, never), (temporary, 0)],
+                    "temporary-large-not-largest": [(permanent, never), (temporary, never - 1)],
+                    "permanent-negative": [(permanent, -1), (temporary, never)],
+                    "qualified-low": [(permanent, never), (temporary, never), (permanent, 1)],
+                }[wifi_overlay_variant]
+                wifi_overlay = io.BytesIO()
+                with zipfile.ZipFile(wifi_overlay, "w") as overlay:
+                    overlay.writestr("AndroidManifest.xml", release_manifest)
+                    if wifi_overlay_variant != "no-table":
+                        overlay.writestr(
+                            "resources.arsc",
+                            synthetic_resource_table(
+                                [("config_fixture", [])], integers=wifi_thresholds,
+                                compact=wifi_overlay_variant == "compact"),
+                        )
+                archive.writestr(wifi_overlay_entry, wifi_overlay.getvalue())
                 # The runtime resource overlay Soong generates from the product's
                 # SimpleDeviceConfig overlays. Its string pool holds each DeviceConfig list:
                 # LineageOS's, then the product's, which adds the ops of AOSP's default.
@@ -2876,7 +2944,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         run_tool(verifier, "--target-files", good, *kernel_options, check=True)
         # A recent aapt2 writes a resource that holds one value as a compact entry.
         compact_good = root / "compact-good.zip"
-        write_fixture(compact_good, flip_variant="compact", camera_variant="compact")
+        write_fixture(compact_good, flip_variant="compact", camera_variant="compact",
+                      wifi_overlay_variant="compact")
         run_tool(verifier, "--target-files", compact_good, *kernel_options, check=True)
         # Signed target files are checked with --signed: the release certificate alone is trusted,
         # and only a user build is signed. The unsigned fixtures above hold the test certificate's
@@ -3173,7 +3242,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-no-start", {"wifi_network_variant": "no-start"}),
             ("wifi-network-started-at-boot", {"wifi_network_variant": "started-at-boot"}),
             ("wifi-network-no-add", {"wifi_network_variant": "no-add"}),
+            ("wifi-network-no-list", {"wifi_network_variant": "no-list"}),
+            ("wifi-network-no-status", {"wifi_network_variant": "no-status"}),
             ("wifi-network-no-marker", {"wifi_network_variant": "no-marker"}),
+            ("wifi-network-no-joined-marker", {"wifi_network_variant": "no-joined-marker"}),
             ("wifi-network-enables-wifi", {"wifi_network_variant": "enables-wifi"}),
             ("wifi-network-connects", {"wifi_network_variant": "connects"}),
             ("wifi-network-settings-put", {"wifi_network_variant": "settings-put"}),
@@ -3184,12 +3256,24 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-missing-binder-transfer", {"wifi_network_variant": "missing-binder-transfer"}),
             ("wifi-network-missing-binder-call", {"wifi_network_variant": "missing-binder-call"}),
             ("wifi-network-missing-marker-context", {"wifi_network_variant": "missing-marker-context"}),
+            ("wifi-network-marker-type-bool", {"wifi_network_variant": "marker-type-bool"}),
+            ("wifi-network-marker-type-enum-one", {"wifi_network_variant": "marker-type-enum-one"}),
             ("wifi-network-script", {"missing_wifi_network_script": True}),
             ("wificond-present", {"entries": {"SYSTEM/bin/wificond": synthetic_aarch64_elf()}}),
             ("wifi-dirs-missing", {"wifi_dirs_variant": "missing"}),
             ("wifi-dirs-wrong-owner", {"wifi_dirs_variant": "wrong-owner"}),
             ("missing-wifi-feature", {"missing_wifi_feature": True}),
             ("missing-wifi-overlay", {"entries": {"VENDOR/overlay/KernariumWifiOverlay.apk": None}}),
+            ("wifi-overlay-missing-permanent", {"wifi_overlay_variant": "missing-permanent"}),
+            ("wifi-overlay-missing-temporary", {"wifi_overlay_variant": "missing-temporary"}),
+            ("wifi-overlay-missing-both", {"wifi_overlay_variant": "missing-both"}),
+            ("wifi-overlay-permanent-one", {"wifi_overlay_variant": "permanent-one"}),
+            ("wifi-overlay-temporary-zero", {"wifi_overlay_variant": "temporary-zero"}),
+            ("wifi-overlay-temporary-large-not-largest",
+             {"wifi_overlay_variant": "temporary-large-not-largest"}),
+            ("wifi-overlay-permanent-negative", {"wifi_overlay_variant": "permanent-negative"}),
+            ("wifi-overlay-qualified-low", {"wifi_overlay_variant": "qualified-low"}),
+            ("wifi-overlay-no-table", {"wifi_overlay_variant": "no-table"}),
             ("ethernet-feature", {"wifi_feature_file": "android.hardware.ethernet"}),
             ("wifi-aware-feature", {"wifi_feature_file": "android.hardware.wifi.aware"}),
             ("wifi-rtt-feature", {"wifi_feature_file": "android.hardware.wifi.rtt"}),
@@ -3701,8 +3785,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "starts kernarium_wifi_network under 'boot'"),
             ("wifi-network-no-add-cause", {"wifi_network_variant": "no-add"},
              "does not contain 'cmd wifi add-network VirtWifi open'"),
+            ("wifi-network-no-list-cause", {"wifi_network_variant": "no-list"},
+             "does not contain 'cmd wifi list-networks'"),
+            ("wifi-network-no-status-cause", {"wifi_network_variant": "no-status"},
+             "does not contain 'cmd wifi status'"),
             ("wifi-network-no-marker-cause", {"wifi_network_variant": "no-marker"},
-             "does not contain 'setprop'"),
+             re.escape("does not contain 'setprop \"$marker\" 1'")),
+            ("wifi-network-no-joined-marker-cause", {"wifi_network_variant": "no-joined-marker"},
+             re.escape("does not contain 'setprop \"$marker\" 2'")),
             ("wifi-network-enables-wifi-cause", {"wifi_network_variant": "enables-wifi"},
              "contains 'set-wifi-enabled'"),
             ("wifi-network-connects-cause", {"wifi_network_variant": "connects"},
@@ -3723,6 +3813,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "does not let system_server call the Wi-Fi network domain's binder"),
             ("wifi-network-missing-marker-context-cause", {"wifi_network_variant": "missing-marker-context"},
              "do not label persist.sys.kernarium.virtwifi_saved"),
+            ("wifi-network-marker-type-bool-cause", {"wifi_network_variant": "marker-type-bool"},
+             "type persist.sys.kernarium.virtwifi_saved as 'exact bool', which rejects 2"),
+            ("wifi-network-marker-type-enum-one-cause", {"wifi_network_variant": "marker-type-enum-one"},
+             "type persist.sys.kernarium.virtwifi_saved as 'exact enum 1', which rejects 2"),
             ("wifi-network-script-cause", {"missing_wifi_network_script": True},
              "SYSTEM_EXT/bin/kernarium_wifi_network.sh"),
             ("wificond-present-cause", {"entries": {"SYSTEM/bin/wificond": synthetic_aarch64_elf()}},
@@ -3808,6 +3902,27 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-wifi-overlay-cause",
              {"entries": {"VENDOR/overlay/KernariumWifiOverlay.apk": None}},
              "VENDOR/overlay/KernariumWifiOverlay.apk"),
+            ("wifi-overlay-missing-permanent-cause", {"wifi_overlay_variant": "missing-permanent"},
+             "KernariumWifiOverlay.apk does not set config_wifiDisableReasonNoInternetPermanentThreshold: "
+             "the platform would disable the guest's one network"),
+            ("wifi-overlay-missing-temporary-cause", {"wifi_overlay_variant": "missing-temporary"},
+             "KernariumWifiOverlay.apk does not set config_wifiDisableReasonNoInternetTemporaryThreshold"),
+            ("wifi-overlay-missing-both-cause", {"wifi_overlay_variant": "missing-both"},
+             "KernariumWifiOverlay.apk does not set config_wifiDisableReasonNoInternetPermanentThreshold"),
+            ("wifi-overlay-permanent-one-cause", {"wifi_overlay_variant": "permanent-one"},
+             "config_wifiDisableReasonNoInternetPermanentThreshold is not 2147483647 in .*"
+             "KernariumWifiOverlay.apk: a lower threshold is reached by the first failed internet check"),
+            ("wifi-overlay-temporary-zero-cause", {"wifi_overlay_variant": "temporary-zero"},
+             "config_wifiDisableReasonNoInternetTemporaryThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-temporary-large-not-largest-cause",
+             {"wifi_overlay_variant": "temporary-large-not-largest"},
+             "config_wifiDisableReasonNoInternetTemporaryThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-permanent-negative-cause", {"wifi_overlay_variant": "permanent-negative"},
+             "config_wifiDisableReasonNoInternetPermanentThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-qualified-low-cause", {"wifi_overlay_variant": "qualified-low"},
+             "config_wifiDisableReasonNoInternetPermanentThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-no-table-cause", {"wifi_overlay_variant": "no-table"},
+             "KernariumWifiOverlay.apk has no readable resource table"),
             ("ethernet-feature-cause", {"wifi_feature_file": "android.hardware.ethernet"},
              "VENDOR/etc/permissions/android.hardware.ethernet.xml"),
             ("wifi-aware-feature-cause", {"wifi_feature_file": "android.hardware.wifi.aware"},
@@ -5510,6 +5625,128 @@ def verify_host_cpu_name(root: Path, android_root: Path) -> None:
     expected = load_tool(android_root / "tools/verify-target-files.py").SOC_IDENTITY
     if expected["ro.soc.manufacturer"] + " " + expected["ro.soc.model"] != host:
         fail(f"the verifier expects a CPU other than the host's {host!r}: {expected}")
+
+
+def verify_wifi_network(android_root: Path) -> None:
+    """The tracked Wi-Fi network script, its init file and the module's overlay meet the rules the
+    verifier holds the built image to, and the overlay sets exactly the thresholds it requires."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    tools = android_root / "overlay/tools"
+    verifier.check_wifi_network(
+        (tools / "kernarium_wifi_network.rc").read_text(encoding="utf-8"),
+        (tools / "kernarium_wifi_network.sh").read_bytes(),
+    )
+    module = android_root / "overlay/rro/KernariumWifiOverlay"
+    thresholds = {
+        element.get("name"): int(element.text)
+        for element in ET.parse(module / "res/values/config.xml").getroot().iter("integer")
+    }
+    for name in verifier.WIFI_NO_INTERNET_THRESHOLDS:
+        if thresholds.get(name) != verifier.WIFI_NEVER_DISABLED_THRESHOLD:
+            fail(
+                f"the Wi-Fi overlay sets {name} to {thresholds.get(name)}, not "
+                f"{verifier.WIFI_NEVER_DISABLED_THRESHOLD}"
+            )
+    # The marker holds 1 and 2: the verifier's reading of a property type accepts both for an
+    # enum that lists them and rejects 2 for the types that cannot hold it.
+    accepts = verifier.property_type_accepts
+    for tokens, value, expected in (
+        (["exact", "enum", "1", "2"], "2", True),
+        (["exact", "enum", "1"], "2", False),
+        (["exact", "bool"], "2", False),
+        (["exact", "bool"], "1", True),
+        (["exact", "string"], "2", True),
+        (["exact", "int"], "2", True),
+        (["exact", "uint"], "-1", False),
+    ):
+        if accepts(tokens, value) is not expected:
+            fail(f"the verifier reads {' '.join(tokens)} as {'not ' * expected}accepting {value}")
+    # The script settles and rejoins for bounded times and ends; nothing in it waits for ever.
+    script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    for needle in ("settle=", "rejoin=", 'wait_joined "$settle"', 'wait_joined "$rejoin"', '"$waited" -ge "$1"'):
+        if needle not in code:
+            fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
+
+    # Run on stubs, the script sets 2 only once it has seen the station joined: a listing that
+    # fails prints what a forgotten network does, so neither marks the disk done.
+    marker = verifier.WIFI_NETWORK_MARKER
+
+    def run(stored: str, flags: tuple[str, ...], runs: int) -> tuple[list[int], list[str], str]:
+        """Runs the script `runs` times on one guest whose Wi-Fi the flags describe; returns each
+        run's exit status, every recorded call and the marker."""
+        with tempfile.TemporaryDirectory(prefix="wifi-network-script-") as temporary:
+            stubs = Path(temporary)
+            calls = stubs / "calls"
+            state = stubs / "state"
+            properties = state / "properties"
+            properties.mkdir(parents=True)
+            (properties / marker).write_text(stored + "\n")
+            for flag in flags:
+                (state / flag).touch()
+            for name, body in {
+                "getprop": f'cat {properties}/"$1" 2>/dev/null || echo\n',
+                "setprop": f'echo "setprop $*" >> {calls}\necho "$2" > {properties}/"$1"\n',
+                "cmd": (
+                    f'echo "cmd $*" >> {calls}\n'
+                    'case "$1 $2" in\n'
+                    '"wifi list-networks")\n'
+                    f'    if [ -f {state}/saved ] && [ ! -f {state}/listing-fails ]; then\n'
+                    '        echo "Network Id      SSID                         Security type"\n'
+                    '        echo "0            VirtWifi                         open"\n'
+                    '    else\n'
+                    '        echo "No networks"\n'
+                    '    fi\n'
+                    # One listing fails, as a Wi-Fi thread that does not answer in time does.
+                    f'    rm -f {state}/listing-fails ;;\n'
+                    '"wifi status")\n'
+                    f'    if [ -f {state}/off ]; then echo "Wifi is disabled"; exit 0; fi\n'
+                    '    echo "Wifi is enabled"\n'
+                    f'    if [ -f {state}/joined ]; then echo \'Wifi is connected to "VirtWifi"\'\n'
+                    '    else echo "Wifi is not connected"; fi ;;\n'
+                    '"wifi add-network")\n'
+                    f'    touch {state}/saved\n'
+                    f'    if [ -f {state}/joins-when-saved ]; then touch {state}/joined; fi ;;\n'
+                    "*) exit 2 ;;\n"
+                    "esac\n"
+                ),
+                "log": f'echo "log $*" >> {calls}\n',
+                "sleep": f'echo "sleep $*" >> {calls}\n',
+            }.items():
+                (stubs / name).write_text("#!/bin/sh\n" + body)
+                (stubs / name).chmod(0o755)
+            env = {"PATH": f"{stubs}:/usr/bin:/bin"}
+            statuses = [
+                subprocess.run(["/bin/sh", str(tools / "kernarium_wifi_network.sh")], env=env,
+                               capture_output=True, text=True, timeout=120).returncode
+                for _ in range(runs)
+            ]
+            recorded = calls.read_text().splitlines() if calls.exists() else []
+            return statuses, recorded, (properties / marker).read_text().strip()
+
+    for what, stored, flags, runs, expected in (
+        ("a first boot", "", ("joins-when-saved",), 1, ("2", 1, 0)),
+        ("a station that joins within the settle time", "1", ("saved", "joined"), 1, ("2", 0, 0)),
+        ("a disabled network", "1", ("saved", "joins-when-saved"), 1, ("2", 1, 1)),
+        ("a disabled network that does not join once saved again", "1", ("saved",), 1, ("1", 1, 1)),
+        ("a forgotten network", "1", (), 1, ("1", 0, 0)),
+        ("Wi-Fi that is off", "1", ("saved", "off"), 1, ("1", 0, 0)),
+        ("a listing that fails", "1", ("saved", "listing-fails", "joins-when-saved"), 1, ("1", 0, 0)),
+        ("a listing that fails, then a boot that lists the network", "1",
+         ("saved", "listing-fails", "joins-when-saved"), 2, ("2", 1, 1)),
+        ("a joined network", "2", ("saved",), 1, ("2", 0, 0)),
+    ):
+        statuses, recorded, marked = run(stored, flags, runs)
+        saves = len([line for line in recorded if line.startswith("cmd wifi add-network")])
+        notes = len([line for line in recorded if line.startswith("log ")])
+        if statuses != [0] * runs or (marked, saves, notes) != expected:
+            fail(
+                f"the Wi-Fi network script on {what}: exits {statuses}, marker {marked!r}, saves {saves}, "
+                f"repair lines {notes}; expected marker {expected[0]!r}, saves {expected[1]}, "
+                f"repair lines {expected[2]}"
+            )
+        if stored == "2" and any(line.startswith("cmd ") for line in recorded):
+            fail(f"the Wi-Fi network script asks the Wi-Fi service at marker 2: {recorded}")
 
 
 def verify_pinner_overlay(android_root: Path) -> None:
@@ -8129,6 +8366,7 @@ def main() -> None:
     verify_hardware_identity(android_root)
     verify_host_cpu_name(root, android_root)
     verify_pinner_overlay(android_root)
+    verify_wifi_network(android_root)
     verify_secondary_zygote_topic(android_root)
     verify_decoder_output_delay_topic(android_root)
     verify_secure_element_topic(android_root)

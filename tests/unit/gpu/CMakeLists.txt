@@ -208,7 +208,7 @@ if(TARGET uml_gpu_vulkan_draw_test_support)
             kosmickrisp_point_clipping kosmickrisp_tessellation_feedback
             kosmickrisp_raster_polygon
             kosmickrisp_raster_line kosmickrisp_raster_state
-            kosmickrisp_geometry_side_effects)
+            kosmickrisp_geometry_side_effects kosmickrisp_provoking_unroll)
         string(REPLACE "_" "-" test_name "gpu-${stem}")
         uml_add_gpu_unit_test(${test_name} uml_gpu_${stem}_tests
             ${stem}_tests.cpp
@@ -395,6 +395,16 @@ if(TARGET uml_gpu_service)
     uml_add_gpu_unit_test(gpu-host-gl-upload-refusal
         uml_gpu_host_gl_upload_refusal_tests
         host_gl_upload_refusal_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY TIMEOUT 240)
+
+    # glthread's shared upload buffer is refused with the rest of the budget;
+    # a glBufferSubData that meets the refusal neither faults the host nor
+    # blocks uploads once the memory is back.
+    uml_add_gpu_unit_test(gpu-host-gl-glthread-upload-refusal
+        uml_gpu_host_gl_glthread_upload_refusal_tests
+        host_gl_glthread_upload_refusal_tests.cpp
         LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY TIMEOUT 240)

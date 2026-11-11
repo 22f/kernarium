@@ -29,6 +29,7 @@ RUNNERS = {
     "run_android_gamepad": (TESTS / "integration/android/run_android_gamepad.py", 5579),
     "run_android_camera": (TESTS / "integration/android/run_android_camera.py", 5580),
     "run_android_keymouse": (TESTS / "integration/android/run_android_keymouse.py", 5582),
+    "run_android_wifi_network": (TESTS / "integration/android/run_android_wifi_network.py", 5584),
     "android_launch_suite": (TESTS / "perf/android_launch_suite.py", 5601),
 }
 SLOT = "21300"
