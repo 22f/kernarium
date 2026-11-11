@@ -125,3 +125,4 @@ patch	sysrq-report-whether-a-SysRq-operation-ran.patch
 patch	um-end-an-mconsole-console-command-with-a-status-reply.patch
 patch	gnss-add-the-Kernarium-host-receiver.patch
 patch	um-hold-a-Darwin-UBD-request-while-the-host-s-storage-is-full.patch
+patch	um-end-a-host-suspend-that-a-wake-overtook.patch

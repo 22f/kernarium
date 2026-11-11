@@ -379,10 +379,15 @@ it. The bridge fields used below are defined by the comments in
   ends only with the host's wake; a host that forwards a key also sends the
   wake, because Virtio input is not a wake source.
 - A wake request that arrives while a suspend is being entered is answered at
-  once and still ends that suspend. A host-asked suspend that ends with `-EBUSY`
-  is entered again up to three more times, and a request that gives up replies
-  `Suspend failed`. `guest-suspend-holds` checks the host's suspend under
-  traffic, early wakes, and every guest-started wake path.
+  once and still ends that suspend. It ends every host-asked suspend that
+  arrived before it, too, including one that waits behind another console
+  request: that suspend replies `Suspend failed: -16` when its turn comes and
+  does not put the guest to sleep, in whichever order queued requests run. A
+  host-asked suspend that ends with `-EBUSY` is entered again up to three more
+  times, and a request that gives up replies `Suspend failed`.
+  `guest-suspend-holds` checks the host's suspend under traffic, early wakes,
+  and every guest-started wake path; `kernel-darwin-mconsole-suspend` checks
+  the bookkeeping.
 - The Virtio sound driver starts a substream afresh after a suspend and pads the
   last period of a drain with silence (`guest-virtio-sound-suspend`).
 

@@ -609,7 +609,8 @@ in the process where a quiesce would [hibernate](#hibernation) it, for a host
 short of the space an image takes. `uml_emulator_resume()` sends the console
 wake edge, and
 `uml_emulator_wake()` sends it to a guest that is not quiesced, as a phone's
-power key does. Every console request ends the suspend; the
+power key does. Every console request ends the suspend, and a wake also ends
+a suspend still queued behind another request; the
 [shared kernel README](../kernel/common/README.md) gives the kernel's side.
 
 The suspend request has one bounded deadline; a refusal, or a guest that stays

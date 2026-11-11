@@ -105,6 +105,13 @@ uml_add_tooling_test(
     TIMEOUT 120)
 
 uml_add_tooling_test(
+    NAME kernel-darwin-mconsole-suspend
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/kernel/test_darwin_mconsole_suspend.py
+    LABELS kernel
+    TIMEOUT 120)
+
+uml_add_tooling_test(
     NAME aarch32-elf32-wrapper
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernel/test_make_elf32.py
