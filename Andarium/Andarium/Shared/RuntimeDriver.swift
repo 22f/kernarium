@@ -92,8 +92,9 @@ protocol RuntimeDriver: AnyObject {
     /// size, after the disk is ready.
     func begin(guest: Guest, mode: StartMode, kind: BootKind)
     /// Puts the data back to what the update that did not finish started
-    /// from; the guest does not start.
-    func restoreUpdate() throws
+    /// from; the guest does not start. It waits for a snapshot operation under
+    /// way, as a start does.
+    func restoreUpdate() async throws
     /// The person resumes a guest paused for want of space. Reads the space
     /// again and wakes the guest when it is at least `RunSpace.resumeAtBytes`;
     /// returns whether it did. The guest stays paused otherwise.

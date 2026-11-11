@@ -313,8 +313,21 @@ final class AppModel {
 
     /// The runtime and storage behind the screens; nil plays mock data.
     var driver: (any RuntimeDriver)?
+    /// The guest's data snapshots behind the screens: the runtime's, or the
+    /// preview's seeded ones (`SnapshotDriver`).
+    var snapshotDriver: (any SnapshotDriver)? {
+        didSet {
+            snapshotDriver?.activityChanged = { [weak self] in self?.snapshotActivity = $0 }
+            snapshotActivity = snapshotDriver?.activity ?? SnapshotActivity()
+        }
+    }
+    /// What the snapshot driver is doing, which it sets around each
+    /// operation: the controls of a screen follow `snapshotGate`.
+    var snapshotActivity = SnapshotActivity()
     /// A long task the screens wait for.
     var busy: BusyState?
+    /// The update's Restore is under way (waiting for a snapshot operation, or running).
+    private var restoringUpdate = false
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
@@ -540,14 +553,17 @@ final class AppModel {
 
     /// Restore: the data goes back to what the update that did not finish
     /// started from, and the guest does not start. Home then shows the
-    /// ordinary pending update.
-    func restoreUpdate() {
+    /// ordinary pending update. A snapshot operation under way finishes first.
+    func restoreUpdate() async {
         guard let driver else {
             if let planAfterRestore { plan = planAfterRestore }
             return
         }
+        guard !restoringUpdate else { return }
+        restoringUpdate = true
+        defer { restoringUpdate = false }
         do {
-            try driver.restoreUpdate()
+            try await driver.restoreUpdate()
         } catch {
             alert = AppAlert(title: "The guest could not be restored", message: error.localizedDescription)
         }
@@ -1044,8 +1060,11 @@ final class AppModel {
     }
 
     /// Starts the guest in `mode`. Start on an update that did not finish
-    /// tries the update again.
+    /// tries the update again. A snapshot operation under way is not a
+    /// reason to say anything: the start is ignored, as the screens offer
+    /// none while one runs (`snapshotGate`).
     func start(_ mode: StartMode) {
+        guard snapshotActivity.operation == nil else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
             frozenBootStage = nil
