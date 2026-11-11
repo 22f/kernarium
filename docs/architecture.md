@@ -484,10 +484,11 @@ acknowledgement gets none.
 **Idle transport.** An in-process transport blocks while it is idle: its thread
 wakes for a message from the guest, for its device's event descriptor, for the
 request gate and for `stop()`, which shuts the connection down, and for nothing
-else. A device must signal its event descriptor whenever it produces work that
-no guest message starts: a completion, a config change, an event for a buffer
-the guest queued, a timer. A config change that `claimConfigChange()` withholds
-is asked for again every 100 ms until it is claimed.
+else; a queue in polling mode adds a 1 ms wake. A device must signal its event
+descriptor whenever it produces work that no guest message starts: a
+completion, a config change, an event for a buffer the guest queued, a timer. A
+config change that `claimConfigChange()` withholds, or that a claim leaves
+partly pending, is asked for again every 100 ms until it is claimed in full.
 
 **Request gate.** A service can be given a request gate, which another thread
 closes to hold the device's requests back: a closed gate lets no request reach

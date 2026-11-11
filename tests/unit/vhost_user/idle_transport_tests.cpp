@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // An in-process vhost-user service blocks while it is idle: it wakes for a
-// message, a kick, its device's event descriptor and a stop, and for nothing
-// else. These tests drive the production service as a front end does, with a
+// message, a kick, its device's event descriptor, the request gate and a stop,
+// and for nothing else but the retry of a config change its device holds back.
+// These tests drive the production service as a front end does, with a
 // device that counts the passes of the serving loop and posts work from the
 // test's thread, the way a device's own threads do.
 // The front end is the GPU tests', so their support header and protocol header
@@ -93,18 +94,31 @@ public:
         const std::lock_guard lock {mutex_};
         return configPending_;
     }
-    /* Fails while the test withholds the change. */
+    /* Fails while the test withholds the change, except that a partly
+     * withheld change announces its other part once, as the GPU announces a
+     * memory report while its display is mid-resize. */
     [[nodiscard]] bool claimConfigChange() noexcept override
     {
         const std::lock_guard lock {mutex_};
         ++claims_;
-        return configPending_ && !withheld_;
+        partialClaim_ = false;
+        if (!configPending_)
+            return false;
+        if (!withheld_)
+            return true;
+        if (partial_ && !partDelivered_) {
+            partDelivered_ = true;
+            partialClaim_ = true;
+            return true;
+        }
+        return false;
     }
     void clearConfigChange() noexcept override
     {
         const std::lock_guard lock {mutex_};
-        configPending_ = false;
         ++announced_;
+        if (!partialClaim_)
+            configPending_ = false;
     }
     void reset() noexcept override
     {
@@ -146,8 +160,17 @@ public:
             const std::lock_guard lock {mutex_};
             configPending_ = true;
             withheld_ = withheld;
+            partial_ = false;
+            partDelivered_ = false;
         }
         wake();
+    }
+    /* Lets the next claim announce one part of the withheld change, with no
+     * signal: the claim computes it from state the device already holds. */
+    void offerPart()
+    {
+        const std::lock_guard lock {mutex_};
+        partial_ = true;
     }
     /* Ends the withholding with no signal, as the GPU's resize lifecycle ends
      * on the UI thread. */
@@ -196,6 +219,9 @@ private:
     unsigned announced_ {};
     bool configPending_ {};
     bool withheld_ {};
+    bool partial_ {};
+    bool partDelivered_ {};
+    bool partialClaim_ {};
     std::deque<Held> held_;
     std::deque<VhostUserQueueCompletion> finished_;
 };
@@ -370,6 +396,38 @@ void withheldConfigChangeIsAskedForAgain()
     require(passes <= 2, "the loop kept waking after the change was announced");
 }
 
+/* A claim that announces one part of a change while the device holds the
+ * other back leaves the change pending, and the rest is asked for again: the
+ * GPU announces a memory report while its display's resize is still under way,
+ * and that resize may end with no event. The part is announced by a retry, the
+ * last ask before the loop would block; the ask that follows an event is not
+ * the one that shows it, because the loop asks again after every event. */
+void partlyClaimedConfigChangeIsAskedForAgain()
+{
+    Session session;
+    session.roundTrip();
+    std::this_thread::sleep_for(300ms);
+
+    session.device().raiseConfigChange(true);
+    awaitCondition([&] { return session.device().claims() >= 4; });
+    session.device().offerPart();
+    auto request = readBackendRequest(
+        session.backend(), protocol::VhostSlaveRequest::configChange);
+    replyToBackend(session.backend(), request);
+    awaitCondition([&] { return session.device().announced() == 1; });
+
+    // The rest follows once the device lets go, with nothing to wake the loop.
+    session.device().release();
+    pollfd ready {.fd = session.backend(), .events = POLLIN};
+    require(
+        ::poll(&ready, 1, 2000) == 1,
+        "the rest of a partly announced change was never announced");
+    request = readBackendRequest(
+        session.backend(), protocol::VhostSlaveRequest::configChange);
+    replyToBackend(session.backend(), request);
+    awaitCondition([&] { return session.device().announced() == 2; });
+}
+
 } // namespace
 
 /* With a case's name as its argument, runs that case alone. */
@@ -385,6 +443,7 @@ int main(int argc, char** argv)
         {"completion", completionFromAnotherThreadReachesTheGuest},
         {"config-change", configChangeFromAnotherThreadReachesTheGuest},
         {"withheld-config-change", withheldConfigChangeIsAskedForAgain},
+        {"partial-config-change", partlyClaimedConfigChangeIsAskedForAgain},
     };
     try {
         for (const auto& test : cases) {

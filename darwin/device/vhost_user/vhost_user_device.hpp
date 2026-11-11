@@ -216,8 +216,9 @@ public:
         return false;
     }
     /* Whether the change is announced now. A claim that fails while the change
-     * stays pending is made again every 100 ms, for a device whose wait ends
-     * without an event on its descriptor. */
+     * stays pending, or that announces part of it and leaves the rest pending
+     * after clearConfigChange(), is made again every 100 ms, for a device
+     * whose wait ends without an event on its descriptor. */
     [[nodiscard]] virtual bool claimConfigChange() noexcept
     {
         return configChangePending();

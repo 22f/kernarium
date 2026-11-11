@@ -30,9 +30,11 @@ class VhostUserServer;
  * Every in-process device service is one of these around its own device.
  *
  * The thread blocks while it is idle: it wakes for a message from the guest,
- * for the device's event descriptor (`VhostUserDevice::eventDescriptor()`)
- * and for stop(), and for nothing else. A device that has work no guest
- * message starts must therefore signal its event descriptor. */
+ * for the device's event descriptor (`VhostUserDevice::eventDescriptor()`),
+ * for the request gate and for stop(), and for nothing else but the 100 ms
+ * retry of a config change the device holds back (the complete list is at
+ * `VhostUserServer::setStopShutsDownConnection()`). A device that has work no
+ * guest message starts must therefore signal its event descriptor. */
 class InProcessVhostUserService final {
 public:
     using DeviceFactory =

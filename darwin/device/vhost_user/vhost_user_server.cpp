@@ -886,6 +886,9 @@ void VhostUserServer::signalPendingConfigChange()
 
     awaitBackendAcknowledgement(header, "config-change");
     device_->clearConfigChange();
+    /* A claim may announce one part of the change while the device holds
+     * another back; that part is withheld too. */
+    configChangeWithheld_ = device_->configChangePending();
 }
 
 int VhostUserServer::mainPollTimeout(bool activePolling) const noexcept

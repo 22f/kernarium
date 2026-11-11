@@ -201,8 +201,9 @@ private:
     bool featuresConfigured_ {};
     bool stopShutsDownConnection_ {};
     /* The device has a config change pending that it would not claim at the
-     * last attempt (the GPU's display is mid-resize), and signals no edge
-     * when it will. The loop asks again until it does. */
+     * last attempt, or that the last claim left partly pending (the GPU's
+     * display is mid-resize), and signals no edge when it will. The loop asks
+     * again until it does. */
     bool configChangeWithheld_ {};
     const std::atomic_bool* connectionStopRequested_ {};
     /* The connection's main socket, while one is being served. */
