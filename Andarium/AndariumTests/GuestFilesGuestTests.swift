@@ -14,6 +14,13 @@ import Testing
 /// (KERNARIUM_ANDROID_DISK_SIZE_GIB), and runs in a guest of its own. The
 /// storage-readiness test runs alone with ANDARIUM_FILES_STORAGE=1 and
 /// ANDARIUM_GUEST_INSTANCE=filex-store (a first boot and a restart in place).
+/// The sweep of the partial files earlier runs left runs alone with
+/// ANDARIUM_FILES_SWEEP=1 and ANDARIUM_GUEST_INSTANCE=files-sweep; its real
+/// route is two launches of one guest, ANDARIUM_FILES_SWEEP_ROUTE=1 and
+/// ANDARIUM_GUEST_INSTANCE=files-sweep-route, with ANDARIUM_FILES_SWEEP_PHASE=1
+/// (an import is cut off by the application's abrupt end, which the test
+/// brings about itself, so the launch ends as a crash) and then =2 (the guest
+/// starts again and nothing is done).
 /// The background test needs a device: it runs alone on an iPad with
 /// ANDARIUM_FILES_BACKGROUND=1 and ANDARIUM_GUEST_INSTANCE=filex-bg, and a
 /// harness that sends the application to the background and back when the
@@ -29,6 +36,8 @@ struct GuestFilesGuestTests {
     private static let bigEnabled = enabled && environment["ANDARIUM_FILES_BIG"] == "1"
     private static let storageEnabled = enabled && environment["ANDARIUM_FILES_STORAGE"] == "1"
     private static let backgroundEnabled = enabled && environment["ANDARIUM_FILES_BACKGROUND"] == "1"
+    private static let sweepEnabled = enabled && environment["ANDARIUM_FILES_SWEEP"] == "1"
+    private static let routeEnabled = enabled && environment["ANDARIUM_FILES_SWEEP_ROUTE"] == "1"
     /// A rehearsal on a Mac, where nothing sends the application away: the
     /// test stops the transfers the way the notification does.
     private static let simulatesBackground = environment["ANDARIUM_FILES_BACKGROUND_SIMULATE"] == "1"
@@ -40,7 +49,8 @@ struct GuestFilesGuestTests {
 
     @Test(.timeLimit(.minutes(40)))
     func browsingImportingAndExportingOnARealGuest() async throws {
-        guard Self.enabled, !Self.bigEnabled, !Self.storageEnabled, !Self.backgroundEnabled else { return }
+        guard Self.enabled, !Self.bigEnabled, !Self.storageEnabled, !Self.backgroundEnabled, !Self.sweepEnabled,
+              !Self.routeEnabled else { return }
         try #require(Self.environment["ANDARIUM_GUEST_INSTANCE"] == "files")
         try await withAndroidGuest(cleanupCommand: Self.cleanup) { model, operations in
             let browser = try #require(model.fileBrowser)
@@ -689,6 +699,231 @@ struct GuestFilesGuestTests {
         // The guest is off. A device keeps nothing of the test's guest.
         if let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first {
             try? FileManager.default.removeItem(at: library.appendingPathComponent("TestGuests/filex-bg", isDirectory: true))
+        }
+    }
+
+    // MARK: Partial files that earlier runs left
+
+    /// A guest's own storage with partial files of every kind in it: the
+    /// sweep the application makes (`AdbGuestOperations.sweepPartialFiles`,
+    /// the same code and the guest's own `find`) removes exactly the leftover
+    /// ones, never this run's, which an import in flight is writing, and never
+    /// anything that only looks like one.
+    @Test(.timeLimit(.minutes(30)))
+    func theSweepRemovesExactlyTheLeftoverPartialFilesOnARealGuest() async throws {
+        guard Self.sweepEnabled else { return }
+        try #require(Self.environment["ANDARIUM_GUEST_INSTANCE"] == "files-sweep")
+        let work = GuestPath.child("FilexSweep", of: GuestPath.child("Download", of: GuestPath.root))
+        let outside = "/data/local/tmp/.andarium-outside.part"
+        let rootLevel = GuestPath.child(".andarium-ffffffff-00000000.part", of: GuestPath.root)
+        try await withAndroidGuest(cleanupCommand: "\(Self.cleanup); rm -rf '\(work)'; rm -f '\(outside)' '\(rootLevel)'") { model, operations in
+            let browser = try #require(model.fileBrowser)
+            let runtime = try #require(model.driver as? LiveRuntime)
+            let bench = try Bench()
+            defer { bench.remove() }
+            let guest = GuestSide(operations)
+            #expect(await guest.waitForStorage(), "internal storage did not come up")
+            // The run sweeps on its own once the storage is up, with no one asking.
+            let sweeper = try #require(runtime.partialSweep, "a normal run has a sweep")
+            try await waitUntil("the run's own sweep is over", seconds: 300) { sweeper.currentPhase == .settled }
+            #expect(sweeper.attempts == 1)
+            let watcher = try await openSettingsOnTheFiles(model, operations)
+            defer { watcher.cancel() }
+
+            // What the application's own sweep has: this run's mark.
+            let mark = runtime.runMark
+            let sweepOperations = AdbGuestOperations(
+                identity: operations.identity, clock: operations.clock, device: operations.device, run: mark)
+            let mine = ".andarium-\(mark.value)-"
+            let quote = "it's a $HOME `y` folder"
+            let leftovers = [
+                work + "/.andarium-ab12cd34.part",
+                work + "/Trips/2026/.andarium-9a8b7c6d-00000000.part",
+                work + "/\(quote)/.andarium-11223344-55667788.part",
+                work + "/\(quote)/deeper (x) $y/.andarium-aabbccdd.part",
+                work + "/Look/.andarium-dir.part/.andarium-deadbeef.part",
+                work + "/.andarium-ffffffff-\(mark.value)-5e6f7a8b.part",
+                rootLevel,
+            ]
+            let ownFiles = [
+                work + "/\(mine)aaaaaaaa.part", work + "/Trips/\(mine)bbbbbbbb.part", work + "/\(quote)/\(mine)cccccccc.part",
+            ]
+            let lookAlikes = [
+                work + "/.andarium-x.txt", work + "/andarium-1.part", work + "/.andarium.part", work + "/.Andarium-1.part",
+                work + "/notes.part", work + "/Look/.andarium-dir.part/keep.txt", work + "/Look/keep.txt",
+            ]
+            let lookAlikeFolders = [work + "/Look/.andarium-empty.part", work + "/Look/.andarium-\(mark.value)-folder.part"]
+            _ = try await guest.run("rm -rf '\(work)'; mkdir -p '\(work)'")
+            let make = (leftovers + ownFiles + lookAlikes).map { "mkdir -p \(GuestSide.quoted(GuestFilePath.parent(of: $0))) && : > \(GuestSide.quoted($0))" }
+                + lookAlikeFolders.map { "mkdir -p \(GuestSide.quoted($0))" }
+            let planted = try await guest.run(make.joined(separator: "; ") + "; : > '\(outside)'; echo planted")
+            #expect(planted.text.contains("planted"), "\(planted.text) \(String(decoding: planted.stderr, as: UTF8.self))")
+            let listing = "find '\(work)' | sort"
+            let before = try await guest.run(listing).text
+            let expectedAfter = Set(before.split(separator: "\n").map(String.init)).subtracting(leftovers.filter { $0.hasPrefix(work) })
+
+            // An import of this run is in flight while the sweep runs.
+            let large = try bench.pick("sweep large.bin", bytes: 700 * Int(mib), seed: 71, modified: .now)
+            browser.route = [FolderRoute(path: GuestPath.root), FolderRoute(path: work)]
+            await browser.load(work)
+            browser.received([large])
+            let transfer = try #require(browser.transfer)
+            try await waitUntil("the import has moved 32 MiB", seconds: 180) { transfer.items[0].moved >= 32 * mib || !transfer.running }
+            #expect(transfer.running, "the import is still running when the sweep starts: \(transfer.detail)")
+            let ownBefore = Set(ownFiles.map(GuestFilePath.name(of:)))
+            let inFlight = try await guest.names(work).filter { $0.hasPrefix(mine) && !ownBefore.contains($0) }
+            #expect(inFlight.count == 1, "the import's partial file carries this run's mark: \(inFlight)")
+
+            let removed = try await sweepOperations.sweepPartialFiles()
+            note("the sweep removed \(removed) while an import ran")
+            #expect(removed == leftovers.count, "\(removed)")
+            #expect(try await guest.names(work).contains(where: { inFlight.contains($0) }), "the import's partial file survived the sweep")
+            // Everything that was planted is as it should be: the leftovers are gone, the rest is whole.
+            let afterNames = Set(try await guest.run(listing).text.split(separator: "\n").map(String.init))
+            let inFlightPaths = Set(inFlight.map { work + "/" + $0 })
+            #expect(afterNames.subtracting(inFlightPaths) == expectedAfter, "\(afterNames.symmetricDifference(expectedAfter).sorted())")
+            for path in ownFiles + lookAlikes + [outside] {
+                let there = try await guest.run("[ -f \(GuestSide.quoted(path)) ] && echo yes || echo no").text
+                #expect(there.trimmingCharacters(in: .whitespacesAndNewlines) == "yes", "\(path) is still there")
+            }
+            for path in lookAlikeFolders {
+                let there = try await guest.run("[ -d \(GuestSide.quoted(path)) ] && echo yes || echo no").text
+                #expect(there.trimmingCharacters(in: .whitespacesAndNewlines) == "yes", "\(path) is still there")
+            }
+            for path in leftovers {
+                let there = try await guest.run("[ -e \(GuestSide.quoted(path)) ] && echo yes || echo no").text
+                #expect(there.trimmingCharacters(in: .whitespacesAndNewlines) == "no", "\(path) was removed")
+            }
+
+            // The import was not disturbed by it, and finishes whole.
+            try await settle(transfer, seconds: 900)
+            #expect(transfer.stage == .finished, "\(transfer.title) \(transfer.detail)")
+            #expect(try await guest.sha256(work + "/sweep large.bin") == bench.sha256(large), "the import in flight arrived whole")
+            let afterImport = try await guest.names(work)
+            #expect(!afterImport.contains(where: { inFlight.contains($0) }), "the finished import left no partial file: \(afterImport)")
+            browser.closeTransfer()
+
+            // This run never sweeps its own files; the next run, with another mark, does.
+            #expect(try await sweepOperations.sweepPartialFiles() == 0, "this run's own files are not swept by it")
+            let nextRun = AdbGuestOperations(
+                identity: operations.identity, clock: operations.clock, device: operations.device, run: GuestRunMark.random())
+            #expect(try await nextRun.sweepPartialFiles() == ownFiles.count, "the next run takes what this run's imports left")
+            // The run's own sweep happened once and not again while the guest stayed up.
+            #expect(sweeper.attempts == 1 && sweeper.currentPhase == .settled)
+            browser.sheetClosed()
+        }
+    }
+
+    /// The real route, in two launches of one guest. First an import is cut
+    /// off by the application's abrupt end (the test ends its own process
+    /// with SIGKILL, as iOS ends an application in the background: the guest
+    /// goes with it, and its guest-side writes were synced first, so the
+    /// partial file is on the disk). Then the guest starts again, nothing is
+    /// done, and the partial file is gone, with a new import that began
+    /// during the run's sweep arriving whole.
+    @Test(.timeLimit(.minutes(40)))
+    func aCutOffImportsPartialFileIsGoneWhenTheNextRunStarts() async throws {
+        guard Self.routeEnabled else { return }
+        try #require(Self.environment["ANDARIUM_GUEST_INSTANCE"] == "files-sweep-route")
+        let phase = try #require(Self.environment["ANDARIUM_FILES_SWEEP_PHASE"].flatMap { ["1", "2"].contains($0) ? $0 : nil })
+        let work = GuestPath.child("FilexSweepRoute", of: GuestPath.child("Download", of: GuestPath.root))
+        let record = try #require(FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first)
+            .appendingPathComponent("filex-sweep-route.txt")
+        try await withAndroidGuest { model, operations in
+            let browser = try #require(model.fileBrowser)
+            let runtime = try #require(model.driver as? LiveRuntime)
+            let bench = try Bench()
+            defer { bench.remove() }
+            let guest = GuestSide(operations)
+            _ = try? await guest.run("pm disable-user --user 0 org.lineageos.setupwizard")
+            if phase == "1" {
+                #expect(await guest.waitForStorage(), "internal storage did not come up")
+                let watcher = try await openSettingsOnTheFiles(model, operations)
+                defer { watcher.cancel() }
+                // Many files make the next run's walk last long enough for an import to overlap it.
+                let crowd = Int(Self.environment["ANDARIUM_FILES_SWEEP_CROWD"] ?? "") ?? 0
+                _ = try await guest.run("rm -rf '\(work)'; mkdir -p '\(work)'", seconds: 1_200)
+                for batch in 0..<(crowd / 2_000) {
+                    _ = try await guest.run(
+                        "mkdir -p '\(work)/crowd/\(batch)' && cd '\(work)/crowd/\(batch)' && for i in $(seq 1 20); do mkdir -p $i && (cd $i && touch $(seq 1 100)); done; echo made",
+                        seconds: 600)
+                }
+                browser.route = [FolderRoute(path: GuestPath.root), FolderRoute(path: work)]
+                await browser.load(work)
+                let large = try bench.pick("route large.bin", bytes: 900 * Int(mib), seed: 81, modified: .now)
+                browser.received([large])
+                let transfer = try #require(browser.transfer)
+                try await waitUntil("the import has moved 96 MiB", seconds: 300) { transfer.items[0].moved >= 96 * mib || !transfer.running }
+                #expect(transfer.running, "the import runs when the application ends: \(transfer.detail)")
+                let names = try await guest.names(work)
+                let partial = try #require(names.first(where: GuestFiles.isPartial), "the partial file exists: \(names)")
+                let size = try await guest.size(work + "/" + partial)
+                _ = try await guest.run("sync", seconds: 300)
+                let synced = try await guest.size(work + "/" + partial)
+                try Data("\(partial) \(synced)\n".utf8).write(to: record)
+                note("the application ends now: \(partial) is \(size) bytes, \(synced) after sync, mark \(runtime.runMark.value)")
+                fflush(stdout)
+                kill(getpid(), SIGKILL)
+                try await Task.sleep(for: .seconds(120))
+                Issue.record("the application did not end")
+                return
+            }
+
+            // Phase 2: the guest's second run. The application is not asked for anything.
+            let text = try String(contentsOf: record, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = text.split(separator: " ")
+            let partial = String(try #require(parts.first))
+            let leftSize = UInt64(parts.last ?? "") ?? 0
+            let partialPath = work + "/" + partial
+            #expect(GuestFiles.isPartial(partial) && leftSize > 0, "\(text)")
+            let sweeper = try #require(runtime.partialSweep, "the new run has a sweep")
+            note("second run: the sweep is \(sweeper.currentPhase) as the test begins, mark \(runtime.runMark.value)")
+            // An import that begins as soon as the browser may (what a person would do first).
+            let large = try bench.pick("route again.bin", bytes: 300 * Int(mib), seed: 82, modified: .now)
+            var phaseAtImport: PartialFileSweep.Phase?
+            var importStarted = false
+            let importer = Task { @MainActor in
+                while !Task.isCancelled, !model.filesAvailable {
+                    await model.refreshStorage()
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
+                guard !Task.isCancelled else { return }
+                browser.route = [FolderRoute(path: GuestPath.root), FolderRoute(path: work)]
+                phaseAtImport = sweeper.currentPhase
+                browser.received([large])
+                importStarted = true
+            }
+            defer { importer.cancel() }
+            var seenAt: ContinuousClock.Instant?
+            let deadline = ContinuousClock.now + .seconds(300)
+            var goneAfter: Duration?
+            let began = ContinuousClock.now
+            while ContinuousClock.now < deadline {
+                let there = (try? await guest.run("[ -e '\(partialPath)' ] && echo yes || echo no", seconds: 30).text) ?? "?"
+                if there.contains("yes"), seenAt == nil { seenAt = .now }
+                if there.contains("no") { goneAfter = ContinuousClock.now - began; break }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+            note("second run: the cut-off import's partial file (\(leftSize) bytes) was \(seenAt == nil ? "already gone at the first look" : "there at first and") gone after \(String(describing: goneAfter)); sweep \(sweeper.currentPhase)")
+            #expect(goneAfter != nil, "the partial file of the cut-off import is still in the guest")
+            try await waitUntil("the sweep is over", seconds: 300) { sweeper.currentPhase == .settled }
+            #expect(sweeper.attempts == 1)
+            try await waitUntil("the new import has begun", seconds: 300) { importStarted }
+            note("second run: the new import began while the sweep was \(String(describing: phaseAtImport))")
+            let transfer = try #require(browser.transfer)
+            try await settle(transfer, seconds: 900)
+            #expect(transfer.stage == .finished, "\(transfer.title) \(transfer.detail)")
+            #expect(try await guest.sha256(work + "/route again.bin") == bench.sha256(large), "the new import arrived whole")
+            await guest.expectNoPartials(work, "after the new import")
+            browser.closeTransfer()
+            browser.sheetClosed()
+            try? FileManager.default.removeItem(at: record)
+            // The folder (with the many files phase 1 may have made) goes before the guest is shut down,
+            // which allows a minute for its own cleanup.
+            _ = try await guest.run("rm -rf '\(work)'", seconds: 1_200)
+        }
+        if phase == "2", let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first {
+            try? FileManager.default.removeItem(at: library.appendingPathComponent("TestGuests/files-sweep-route", isDirectory: true))
         }
     }
 
