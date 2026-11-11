@@ -530,10 +530,10 @@ index 3f05efbb0b72b5b5ca7564475f4eac175d8f75b0..af62d43c89cfbd9ca95503ec6dae7ad4
                                          uint64_t addr);
  
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-index dee753c51689efdd6341e640adbddef2274ef0e8..82b6c1c1746ec4f16514704347f6aa7d27021090 100644
+index c569cb1cadd8076562a186e55b3915b6018f171b..a68a0473d53f4d2a9f6c31b2ec07d927098254aa 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-@@ -2177,7 +2177,7 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
+@@ -2178,7 +2178,7 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
     }
  }
  
@@ -542,7 +542,7 @@ index dee753c51689efdd6341e640adbddef2274ef0e8..82b6c1c1746ec4f16514704347f6aa7d
  kk_flush_gfx_state(struct kk_cmd_buffer *cmd)
  {
     struct kk_graphics_state *gfx = &cmd->state.gfx;
-@@ -3788,20 +3788,8 @@ kk_tess_heap_bound(struct kk_cmd_buffer *cmd, const struct kk_draw_data *draw)
+@@ -3831,20 +3831,8 @@ kk_tess_heap_bound(struct kk_cmd_buffer *cmd, const struct kk_draw_data *draw)
  }
  
  static void
@@ -564,7 +564,7 @@ index dee753c51689efdd6341e640adbddef2274ef0e8..82b6c1c1746ec4f16514704347f6aa7d
     data->restart = cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
     data->restart_index =
        cmd->vk.dynamic_graphics_state.ia.primitive_restart_index;
-@@ -3967,6 +3955,26 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -4015,6 +4003,26 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
     }
  }
  
