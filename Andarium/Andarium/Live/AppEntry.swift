@@ -65,8 +65,8 @@ struct AppEntry {
     /// The model for this launch. A copy of Andarium without its system, or
     /// with one it cannot read, still opens, and says so.
     @MainActor
-    /// `freeSpace` is the device's free space a run watches: the application's
-    /// own reading unless a test supplies another.
+    /// `freeSpace` is the space a run watches: the application's own reading
+    /// (`freeStorageBytes`) unless a test supplies another.
     func makeModel(freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() }) -> AppModel {
         let launch = overrides
         let bundle = Bundle.main
@@ -427,8 +427,9 @@ struct AppEntry {
         )
     }
 
-    /// The device's free space. It touches no state of the entry, and the
-    /// run's space watch reads it off the main actor.
+    /// The space a write can use on the device, the one figure the run's
+    /// watch, the start checks and every screen use. It touches no state of
+    /// the entry, so a `@Sendable` source can hold it.
     nonisolated static func freeStorageBytes() -> UInt64 {
         HostStorage.freeBytes()
     }
