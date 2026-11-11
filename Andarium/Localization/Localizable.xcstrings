@@ -9515,6 +9515,29 @@
           }
         }
       }
+    },
+    "≈ %@" : {
+      "comment" : "An estimated size of graphics memory, as in ≈ 1.68 GiB: the sign for about, then the size.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "約%@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "约%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "約%@"
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

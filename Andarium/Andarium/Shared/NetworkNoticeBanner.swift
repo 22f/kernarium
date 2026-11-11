@@ -10,12 +10,12 @@ import SwiftUI
 enum NetworkWords {
     static let settingsLabel = String(
         localized: "Open Settings",
-        comment: "The button of the network notice that opens Andarium's page in the iOS Settings app.")
+        comment: "A button that opens Andarium's page in the iOS Settings app.")
     static let settingsHint = String(
         localized: "Opens Andarium\u{2019}s page in Settings.",
         comment: "VoiceOver hint of the network notice's Open Settings button.")
     static let dismissLabel = String(
-        localized: "Dismiss", comment: "The button of the network notice that closes it; VoiceOver reads it too.")
+        localized: "Dismiss", comment: "A button that closes a notice; VoiceOver reads it too.")
     /// The name with a non-breaking hyphen, so a line never ends in "Wi-".
     static let wifiName = "Wi\u{2011}Fi"
 

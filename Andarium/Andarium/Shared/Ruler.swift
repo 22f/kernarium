@@ -314,7 +314,10 @@ struct GraphicsMemoryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ControlHeader(
-                title: GraphicsMemoryWarning.title, symbol: "cube", value: "\u{2248} " + Formats.size(mib: estimateMiB),
+                title: GraphicsMemoryWarning.title, symbol: "cube",
+                value: String(
+                    localized: "\u{2248} \(Formats.size(mib: estimateMiB))",
+                    comment: "An estimated size of graphics memory, as in ≈ 1.68 GiB: the sign for about, then the size."),
                 valueColor: warns ? .orange : .primary
             )
             Text(GraphicsMemoryWarning.separateNote)
