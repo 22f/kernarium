@@ -54,6 +54,7 @@ struct DrawContext::Impl {
     VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR address_commands = structure<VkPhysicalDeviceDeviceAddressCommandsFeaturesKHR>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_ADDRESS_COMMANDS_FEATURES_KHR);
     VkPhysicalDeviceMaintenance8FeaturesKHR maintenance8 = structure<VkPhysicalDeviceMaintenance8FeaturesKHR>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR);
     VkPhysicalDeviceMaintenance10FeaturesKHR maintenance10 = structure<VkPhysicalDeviceMaintenance10FeaturesKHR>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_10_FEATURES_KHR);
+    VkPhysicalDeviceIndexTypeUint8FeaturesEXT index_uint8 = structure<VkPhysicalDeviceIndexTypeUint8FeaturesEXT>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT);
     VkPhysicalDeviceLineRasterizationFeaturesKHR lines = structure<VkPhysicalDeviceLineRasterizationFeaturesKHR>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_KHR);
     VkPhysicalDeviceProvokingVertexFeaturesEXT provoking = structure<VkPhysicalDeviceProvokingVertexFeaturesEXT>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT);
     VkPhysicalDeviceTransformFeedbackFeaturesEXT xfb = structure<VkPhysicalDeviceTransformFeedbackFeaturesEXT>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT);
@@ -132,6 +133,8 @@ DrawContext::DrawContext(bool legacy_vertex_input, bool pipeline_statistics,
         append(api.maintenance8);
     if (extra_extensions.maintenance10)
         append(api.maintenance10);
+    if (extra_extensions.index_type_uint8)
+        append(api.index_uint8);
     *next = &api.lines;
     api.lines.pNext = &api.provoking;
     api.provoking.pNext = &api.xfb;
@@ -151,6 +154,8 @@ DrawContext::DrawContext(bool legacy_vertex_input, bool pipeline_statistics,
             "maintenance8 unavailable");
     require(!extra_extensions.maintenance10 || api.maintenance10.maintenance10,
             "maintenance10 unavailable");
+    require(!extra_extensions.index_type_uint8 || api.index_uint8.indexTypeUint8,
+            "uint8 indices unavailable");
     if (legacy_vertex_input) {
         require(api.legacy.legacyVertexAttributes && api.vertex_input.vertexInputDynamicState &&
                     api.dynamic3.extendedDynamicState3ProvokingVertexMode &&
@@ -206,6 +211,8 @@ DrawContext::DrawContext(bool legacy_vertex_input, bool pipeline_statistics,
         extensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
     if (extra_extensions.maintenance10)
         extensions.push_back(VK_KHR_MAINTENANCE_10_EXTENSION_NAME);
+    if (extra_extensions.index_type_uint8)
+        extensions.push_back(VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
     if (legacy_vertex_input) {
         extensions.push_back(VK_EXT_LEGACY_VERTEX_ATTRIBUTES_EXTENSION_NAME);
         extensions.push_back(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
@@ -380,6 +387,8 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     auto &api = *impl_;
     constexpr uint32_t extent = 16;
     constexpr VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    constexpr VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
+    using Kind = ChainOp::Kind;
     require(api.xfb.transformFeedback, "transform feedback unavailable");
     require(!config.step_vertex_shader.empty() && !config.raster_vertex_shader.empty() &&
                 !config.raster_fragment_shader.empty() && config.steps != 0 &&
@@ -388,10 +397,42 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     require(api.features.features.occlusionQueryPrecise, "precise occlusion queries unavailable");
     require(!config.statistics_query || api.features.features.pipelineStatisticsQuery,
             "pipeline statistics unavailable");
-    require(!config.timestamp_in_pass || api.timestamp_bits, "graphics timestamps unavailable");
+    require(!config.timestamp_queries || api.timestamp_bits, "graphics timestamps unavailable");
+    require(config.step_draw != FeedbackChainConfig::StepDraw::Indexed ||
+                api.index_uint8.indexTypeUint8,
+            "uint8 indices unavailable");
     const bool multisampled = config.samples != VK_SAMPLE_COUNT_1_BIT;
+    require(!config.depth || !multisampled, "the depth variant is single-sampled");
     const uint32_t middle = config.steps / 2;
     const VkDeviceSize chain_bytes = VkDeviceSize(config.points) * 4 * sizeof(uint32_t);
+
+    /* What each pass records: its configured commands, else the default. */
+    const auto ops_of = [&](uint32_t step) {
+        const auto found = config.passes.find(step);
+        if (found != config.passes.end())
+            return found->second;
+        std::vector<ChainOp> ops{{Kind::Capture}};
+        if (step == config.steps)
+            ops.push_back({Kind::Raster});
+        return ops;
+    };
+    bool heap_capture_used = false, heap_used = false;
+    for (uint32_t step = 0; step <= config.steps; ++step) {
+        for (const ChainOp &op : ops_of(step)) {
+            heap_capture_used |= op.kind == Kind::HeapCapture;
+            heap_used |= op.kind == Kind::HeapCapture || op.kind == Kind::HeapRaster;
+            require(op.kind != Kind::Timestamp || op.query < config.timestamp_queries,
+                    "a timestamp names a query the pool lacks");
+        }
+    }
+    for (const auto &entry : config.before_pass) {
+        for (const ChainOp &op : entry.second)
+            require(op.kind == Kind::Timestamp && op.query < config.timestamp_queries,
+                    "only timestamps are recorded between passes");
+    }
+    require(!heap_used || api.index_uint8.indexTypeUint8, "uint8 indices unavailable");
+    require(!heap_capture_used || config.heap_capture_indices != 0,
+            "a heap capture needs indices");
 
     Cleanup cleanup;
     const auto allocation = [&](VkMemoryRequirements requirements, VkMemoryPropertyFlags flags) {
@@ -453,10 +494,38 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
                                       buffer(chain_bytes, chain_usage, poison.data())};
     const Buffer pixels = buffer(VkDeviceSize(extent) * extent * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                  nullptr);
+    const Buffer depth_pixels = config.depth
+        ? buffer(VkDeviceSize(extent) * extent * sizeof(float), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                 nullptr)
+        : Buffer{};
     /* Each step saves its byte count, as a GL stack that may resume the
      * capture later does; no step resumes from it. */
     const Buffer counter = buffer(sizeof(uint32_t),
                                   VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT, nullptr);
+
+    /* The indices a capture draws with: the vertices in order, as uint8. */
+    std::vector<uint8_t> indices(std::max<size_t>(
+        {size_t(config.points), size_t(config.heap_capture_indices),
+         size_t(config.heap_raster_indices)}));
+    for (size_t i = 0; i < indices.size(); ++i)
+        indices[i] = uint8_t(i % config.points);
+    Buffer index_buffer{}, indirect_buffer{}, heap_capture{}, heap_indexes{};
+    if (config.step_draw == FeedbackChainConfig::StepDraw::Indexed)
+        index_buffer = buffer(config.points, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data());
+    if (config.step_draw == FeedbackChainConfig::StepDraw::Indirect) {
+        const VkDrawIndirectCommand command{config.points, 1, 0, 0};
+        indirect_buffer = buffer(sizeof(command), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, &command);
+    }
+    const VkDeviceSize heap_capture_bytes =
+        VkDeviceSize(config.heap_capture_indices) * 4 * sizeof(uint32_t);
+    if (heap_capture_used) {
+        const std::vector<uint32_t> heap_poison(size_t(heap_capture_bytes / sizeof(uint32_t)),
+                                                0xdeadbeefu);
+        heap_capture = buffer(heap_capture_bytes, VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT,
+                              heap_poison.data());
+    }
+    if (heap_used)
+        heap_indexes = buffer(indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data());
 
     VkImageCreateInfo image_info = structure<VkImageCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
     image_info.imageType = VK_IMAGE_TYPE_2D;
@@ -477,15 +546,28 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         VK_CHECK(BindImageMemory, api.device, result, memory, 0);
         return result;
     };
+    const auto make_view = [&](VkImage image, VkFormat view_format, VkImageAspectFlags aspect) {
+        VkImageViewCreateInfo view_info = structure<VkImageViewCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
+        view_info.image = image;
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = view_format;
+        view_info.subresourceRange = {aspect, 0, 1, 0, 1};
+        VkImageView view;
+        VK_CHECK(CreateImageView, api.device, &view_info, nullptr, &view);
+        cleanup.actions.emplace_back([&, view] { VK_CALL(DestroyImageView, api.device, view, nullptr); });
+        return view;
+    };
     const VkImage target = make_image(image_info);
-    VkImageViewCreateInfo view_info = structure<VkImageViewCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
-    view_info.image = target;
-    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = format;
-    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VkImageView target_view;
-    VK_CHECK(CreateImageView, api.device, &view_info, nullptr, &target_view);
-    cleanup.actions.emplace_back([&, target_view] { VK_CALL(DestroyImageView, api.device, target_view, nullptr); });
+    const VkImageView target_view = make_view(target, format, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkImage depth_image = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    if (config.depth) {
+        VkImageCreateInfo depth_info = image_info;
+        depth_info.format = depth_format;
+        depth_info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        depth_image = make_image(depth_info);
+        depth_view = make_view(depth_image, depth_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
     VkImage resolved = VK_NULL_HANDLE;
     if (multisampled) {
         VkImageCreateInfo resolve_info = image_info;
@@ -511,8 +593,8 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     const VkQueryPool occlusion = query_pool(VK_QUERY_TYPE_OCCLUSION, 1);
     const VkQueryPool statistics = config.statistics_query
         ? query_pool(VK_QUERY_TYPE_PIPELINE_STATISTICS, 1, statistics_flags) : VK_NULL_HANDLE;
-    const VkQueryPool timestamps = config.timestamp_in_pass
-        ? query_pool(VK_QUERY_TYPE_TIMESTAMP, 2) : VK_NULL_HANDLE;
+    const VkQueryPool timestamps = config.timestamp_queries
+        ? query_pool(VK_QUERY_TYPE_TIMESTAMP, config.timestamp_queries) : VK_NULL_HANDLE;
 
     VkPipelineLayoutCreateInfo layout_info = structure<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
     VkPipelineLayout layout;
@@ -536,6 +618,8 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     const VkPipelineShaderStageCreateInfo raster_stages[] = {
         shader(config.raster_vertex_shader, VK_SHADER_STAGE_VERTEX_BIT),
         shader(config.raster_fragment_shader, VK_SHADER_STAGE_FRAGMENT_BIT)};
+    /* The step's vertex stage with the rasterizer's fragment stage. */
+    const VkPipelineShaderStageCreateInfo step_raster_stages[] = {step_stages[0], raster_stages[1]};
 
     const VkVertexInputBindingDescription input_binding{0, uint32_t(chain_bytes / config.points),
                                                         VK_VERTEX_INPUT_RATE_VERTEX};
@@ -561,9 +645,15 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     VkPipelineColorBlendStateCreateInfo blend = structure<VkPipelineColorBlendStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO);
     blend.attachmentCount = 1;
     blend.pAttachments = &blend_attachment;
+    VkPipelineDepthStencilStateCreateInfo depth_state = structure<VkPipelineDepthStencilStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO);
+    depth_state.depthTestEnable = VK_TRUE;
+    depth_state.depthWriteEnable = VK_TRUE;
+    depth_state.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkPipelineRenderingCreateInfo rendering_formats = structure<VkPipelineRenderingCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO);
     rendering_formats.colorAttachmentCount = 1;
     rendering_formats.pColorAttachmentFormats = &format;
+    if (config.depth)
+        rendering_formats.depthAttachmentFormat = depth_format;
     const auto pipeline = [&](std::span<const VkPipelineShaderStageCreateInfo> stages, bool discard) {
         VkPipelineRasterizationStateCreateInfo raster = structure<VkPipelineRasterizationStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
         raster.lineWidth = 1.0f;
@@ -577,6 +667,7 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         info.pViewportState = &viewport_info;
         info.pRasterizationState = &raster;
         info.pMultisampleState = &multisample;
+        info.pDepthStencilState = config.depth ? &depth_state : nullptr;
         info.pColorBlendState = &blend;
         info.layout = layout;
         VkPipeline result;
@@ -586,6 +677,7 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     };
     const VkPipeline step_pipeline = pipeline(step_stages, true);
     const VkPipeline raster_pipeline = pipeline(raster_stages, false);
+    const VkPipeline step_raster_pipeline = pipeline(step_raster_stages, false);
 
     VkCommandPoolCreateInfo pool_info = structure<VkCommandPoolCreateInfo>(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO);
     pool_info.queueFamilyIndex = api.queue_family;
@@ -619,7 +711,8 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     const auto image_barrier = [&](VkCommandBuffer command, VkImage image, VkImageLayout from,
                                    VkImageLayout to, VkPipelineStageFlags2 source_stage,
                                    VkAccessFlags2 source_access, VkPipelineStageFlags2 destination_stage,
-                                   VkAccessFlags2 destination_access) {
+                                   VkAccessFlags2 destination_access,
+                                   VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT) {
         VkImageMemoryBarrier2 barrier = structure<VkImageMemoryBarrier2>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2);
         barrier.srcStageMask = source_stage;
         barrier.srcAccessMask = source_access;
@@ -628,7 +721,7 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         barrier.oldLayout = from;
         barrier.newLayout = to;
         barrier.image = image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier.subresourceRange = {aspect, 0, 1, 0, 1};
         VkDependencyInfo dependency = structure<VkDependencyInfo>(VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
         dependency.imageMemoryBarrierCount = 1;
         dependency.pImageMemoryBarriers = &barrier;
@@ -640,11 +733,17 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingAttachmentInfo depth_attachment = structure<VkRenderingAttachmentInfo>(VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
+    depth_attachment.imageView = depth_view;
+    depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering = structure<VkRenderingInfo>(VK_STRUCTURE_TYPE_RENDERING_INFO);
     rendering.renderArea = {{0, 0}, {extent, extent}};
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = 1;
     rendering.pColorAttachments = &attachment;
+    rendering.pDepthAttachment = config.depth ? &depth_attachment : nullptr;
 
     /* Setup, outside the span the caller measures: reset the queries, give
      * the attachment its first layout and contents. */
@@ -655,11 +754,17 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         if (statistics)
             VK_CALL(CmdResetQueryPool, setup, statistics, 0, 1);
         if (timestamps)
-            VK_CALL(CmdResetQueryPool, setup, timestamps, 0, 2);
+            VK_CALL(CmdResetQueryPool, setup, timestamps, 0, config.timestamp_queries);
         image_barrier(setup, target, VK_IMAGE_LAYOUT_UNDEFINED,
                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
                       VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        if (config.depth)
+            image_barrier(setup, depth_image, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+                          VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
         if (resolved)
             image_barrier(setup, resolved, VK_IMAGE_LAYOUT_UNDEFINED,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
@@ -668,24 +773,43 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         VkRenderingAttachmentInfo clear = attachment;
         clear.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         clear.clearValue.color.float32[3] = 1.0f;
+        VkRenderingAttachmentInfo depth_clear = depth_attachment;
+        depth_clear.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_clear.clearValue.depthStencil.depth = 1.0f;
         VkRenderingInfo clear_rendering = rendering;
         clear_rendering.pColorAttachments = &clear;
+        clear_rendering.pDepthAttachment = config.depth ? &depth_clear : nullptr;
         VK_CALL(CmdBeginRendering, setup, &clear_rendering);
         VK_CALL(CmdEndRendering, setup);
         VK_CHECK(EndCommandBuffer, setup);
         submit_and_wait(setup);
     }
 
-    /* Every step reads one buffer and captures into the other. */
-    const auto step_draw = [&](VkCommandBuffer command, uint32_t step) {
-        const VkDeviceSize zero = 0;
-        VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, step_pipeline);
-        VK_CALL(CmdBindVertexBuffers, command, 0, 1, &chain[step % 2].buffer, &zero);
-        VK_CALL(CmdBindTransformFeedbackBuffersEXT, command, 0, 1, &chain[(step + 1) % 2].buffer,
+    /* Every capture reads the buffer the one before wrote and writes the
+     * other. */
+    uint32_t captures = 0;
+    uint32_t heap_captures = 0;
+    const VkDeviceSize zero = 0;
+    const auto capture = [&](VkCommandBuffer command, VkPipeline draw_pipeline) {
+        VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, draw_pipeline);
+        VK_CALL(CmdBindVertexBuffers, command, 0, 1, &chain[captures % 2].buffer, &zero);
+        VK_CALL(CmdBindTransformFeedbackBuffersEXT, command, 0, 1, &chain[(captures + 1) % 2].buffer,
                 &zero, &chain_bytes);
         VK_CALL(CmdBeginTransformFeedbackEXT, command, 0, 0, nullptr, nullptr);
-        VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
+        switch (config.step_draw) {
+        case FeedbackChainConfig::StepDraw::Direct:
+            VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
+            break;
+        case FeedbackChainConfig::StepDraw::Indexed:
+            VK_CALL(CmdBindIndexBuffer, command, index_buffer.buffer, 0, VK_INDEX_TYPE_UINT8_EXT);
+            VK_CALL(CmdDrawIndexed, command, config.points, 1, 0, 0, 0);
+            break;
+        case FeedbackChainConfig::StepDraw::Indirect:
+            VK_CALL(CmdDrawIndirect, command, indirect_buffer.buffer, 0, 1, 0);
+            break;
+        }
         VK_CALL(CmdEndTransformFeedbackEXT, command, 0, 1, &counter.buffer, &zero);
+        ++captures;
     };
     VkMemoryBarrier2 handoff = structure<VkMemoryBarrier2>(VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
     handoff.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
@@ -699,14 +823,79 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     handoff_dependency.memoryBarrierCount = 1;
     handoff_dependency.pMemoryBarriers = &handoff;
 
+    const auto record_op = [&](VkCommandBuffer command, const ChainOp &op) {
+        switch (op.kind) {
+        case Kind::Capture:
+            capture(command, step_pipeline);
+            break;
+        case Kind::Raster:
+            VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, raster_pipeline);
+            VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
+            break;
+        case Kind::RasterCapture:
+            capture(command, step_raster_pipeline);
+            break;
+        case Kind::DiscardNoCapture:
+            VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, step_pipeline);
+            VK_CALL(CmdBindVertexBuffers, command, 0, 1, &chain[captures % 2].buffer, &zero);
+            VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
+            break;
+        case Kind::EmptyCapture:
+            VK_CALL(CmdBindTransformFeedbackBuffersEXT, command, 0, 1,
+                    &chain[(captures + 1) % 2].buffer, &zero, &chain_bytes);
+            VK_CALL(CmdBeginTransformFeedbackEXT, command, 0, 0, nullptr, nullptr);
+            VK_CALL(CmdEndTransformFeedbackEXT, command, 0, 1, &counter.buffer, &zero);
+            break;
+        case Kind::ClippedRaster:
+            VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, raster_pipeline);
+            VK_CALL(CmdDraw, command, config.points, 1, 100, 0);
+            break;
+        case Kind::HeapCapture:
+            VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, step_pipeline);
+            VK_CALL(CmdBindVertexBuffers, command, 0, 1, &chain[captures % 2].buffer, &zero);
+            VK_CALL(CmdBindIndexBuffer, command, heap_indexes.buffer, 0, VK_INDEX_TYPE_UINT8_EXT);
+            VK_CALL(CmdBindTransformFeedbackBuffersEXT, command, 0, 1, &heap_capture.buffer, &zero,
+                    &heap_capture_bytes);
+            VK_CALL(CmdBeginTransformFeedbackEXT, command, 0, 0, nullptr, nullptr);
+            VK_CALL(CmdDrawIndexed, command, config.heap_capture_indices, 1, 0, 0, 0);
+            VK_CALL(CmdEndTransformFeedbackEXT, command, 0, 1, &counter.buffer, &zero);
+            heap_captures = captures;
+            break;
+        case Kind::HeapRaster:
+            VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, raster_pipeline);
+            VK_CALL(CmdBindVertexBuffers, command, 0, 1, &chain[captures % 2].buffer, &zero);
+            VK_CALL(CmdBindIndexBuffer, command, heap_indexes.buffer, 0, VK_INDEX_TYPE_UINT8_EXT);
+            VK_CALL(CmdDrawIndexed, command, config.heap_raster_indices, 1, 0, 0, 0);
+            break;
+        case Kind::Clear: {
+            VkClearAttachment clear{};
+            clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clear.clearValue.color.float32[2] = 1.0f;
+            clear.clearValue.color.float32[3] = 1.0f;
+            const VkClearRect area{{{0, 0}, {extent, extent}}, 0, 1};
+            VK_CALL(CmdClearAttachments, command, 1, &clear, 1, &area);
+            break;
+        }
+        case Kind::Timestamp:
+            VK_CALL(CmdWriteTimestamp2, command, op.stage, timestamps, op.query);
+            break;
+        }
+    };
+
     if (config.recording_begins)
         config.recording_begins();
     {
         const VkCommandBuffer command = commands[1];
         begin_command(command);
-        if (timestamps)
-            VK_CALL(CmdWriteTimestamp2, command, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, timestamps, 0);
-        VK_CALL(CmdBeginQuery, command, occlusion, 0, VK_QUERY_CONTROL_PRECISE_BIT);
+        const auto between = [&](uint32_t step) {
+            const auto found = config.before_pass.find(step);
+            if (found == config.before_pass.end())
+                return;
+            for (const ChainOp &op : found->second)
+                record_op(command, op);
+        };
+        VK_CALL(CmdBeginQuery, command, occlusion, 0,
+                config.precise_occlusion ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
         if (statistics)
             VK_CALL(CmdBeginQuery, command, statistics, 0, 0);
         for (uint32_t step = 0; step <= config.steps; ++step) {
@@ -716,28 +905,25 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
                 VK_CALL(CmdEndRendering, command);
                 VK_CALL(CmdPipelineBarrier2, command, &handoff_dependency);
             }
+            between(step);
             VK_CALL(CmdBeginRendering, command, &rendering);
-            if (step == middle && config.clear_in_pass) {
-                VkClearAttachment clear{};
-                clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                clear.clearValue.color.float32[2] = 1.0f;
-                clear.clearValue.color.float32[3] = 1.0f;
-                const VkClearRect area{{{0, 0}, {extent, extent}}, 0, 1};
-                VK_CALL(CmdClearAttachments, command, 1, &clear, 1, &area);
-            }
-            if (step == middle && timestamps)
-                VK_CALL(CmdWriteTimestamp2, command, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-                        timestamps, 1);
-            step_draw(command, step);
-            if (last) {
-                VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, raster_pipeline);
-                VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
-            }
+            for (const ChainOp &op : ops_of(step))
+                record_op(command, op);
             VK_CALL(CmdEndRendering, command);
             if (!last)
                 VK_CALL(CmdPipelineBarrier2, command, &handoff_dependency);
         }
+        between(config.steps + 1);
         VK_CALL(CmdEndQuery, command, occlusion, 0);
+        if (config.reuse_occlusion) {
+            VK_CALL(CmdResetQueryPool, command, occlusion, 0, 1);
+            VK_CALL(CmdBeginQuery, command, occlusion, 0,
+                    config.precise_occlusion ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
+            VK_CALL(CmdBeginRendering, command, &rendering);
+            record_op(command, {Kind::Raster});
+            VK_CALL(CmdEndRendering, command);
+            VK_CALL(CmdEndQuery, command, occlusion, 0);
+        }
         if (statistics)
             VK_CALL(CmdEndQuery, command, statistics, 0);
         image_barrier(command, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -765,6 +951,20 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         copy.imageExtent = {extent, extent, 1};
         VK_CALL(CmdCopyImageToBuffer, command, readable, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 pixels.buffer, 1, &copy);
+        if (config.depth) {
+            image_barrier(command, depth_image, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                          VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                          VK_IMAGE_ASPECT_DEPTH_BIT);
+            VkBufferImageCopy depth_copy{};
+            depth_copy.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+            depth_copy.imageExtent = {extent, extent, 1};
+            VK_CALL(CmdCopyImageToBuffer, command, depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    depth_pixels.buffer, 1, &depth_copy);
+        }
         VkMemoryBarrier2 host = structure<VkMemoryBarrier2>(VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
         host.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
         host.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -781,10 +981,20 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
         config.recording_complete();
 
     FeedbackChainResult result;
+    result.captures = captures;
+    result.heap_captures = heap_captures;
     result.captured.resize(seed.size());
-    read(chain[(config.steps + 1) % 2], result.captured.data());
+    read(chain[captures % 2], result.captured.data());
     result.pixels.resize(size_t(extent) * extent);
     read(pixels, result.pixels.data());
+    if (config.depth) {
+        result.depth.resize(size_t(extent) * extent);
+        read(depth_pixels, result.depth.data());
+    }
+    if (heap_capture_used) {
+        result.heap_captured.resize(size_t(heap_capture_bytes / sizeof(uint32_t)));
+        read(heap_capture, result.heap_captured.data());
+    }
     const auto query_results = [&](VkQueryPool queries, uint32_t first, uint32_t count,
                                    uint32_t words) {
         std::vector<uint64_t> values(size_t(count) * words);
@@ -797,7 +1007,7 @@ FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &confi
     if (statistics)
         result.statistics = query_results(statistics, 0, 1, 2);
     if (timestamps)
-        result.timestamps = query_results(timestamps, 0, 2, 1);
+        result.timestamps = query_results(timestamps, 0, config.timestamp_queries, 1);
     return result;
 }
 

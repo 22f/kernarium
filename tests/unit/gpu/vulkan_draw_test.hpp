@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <source_location>
@@ -76,6 +77,7 @@ struct DrawExtensions {
     bool device_address_commands = false;
     bool maintenance8 = false;
     bool maintenance10 = false;
+    bool index_type_uint8 = false;
 };
 
 struct VertexInputDraw {
@@ -208,6 +210,44 @@ struct SubmitStormResult {
 // and then rasterizes one point per vertex over the attachment, so what the
 // discard passes did to the attachment (nothing) and what the rasterizing
 // draw did are both in the result. An occlusion query spans the whole chain.
+//
+// A pass records `ChainOp`s in order. A pass the configuration does not name
+// records a capture, the last one a capture and then the rasterizing draw.
+
+// One command of a pass.
+struct ChainOp {
+    enum class Kind {
+        // The chain's step: a discard draw that captures the next state.
+        Capture,
+        // A rasterizing draw of one point per vertex on row 8.
+        Raster,
+        // The step's vertex stage drawn with the rasterizer on: it captures and
+        // paints the same points as Raster.
+        RasterCapture,
+        // The step's discard draw with no capture active.
+        DiscardNoCapture,
+        // Begins and ends a capture with no draw between.
+        EmptyCapture,
+        // A rasterizing draw whose points all fall outside the clip volume.
+        ClippedRaster,
+        // An indexed discard draw of `heap_capture_indices` uint8 indices that
+        // captures into a buffer of its own. The driver unrolls the indices
+        // and sets the capture up from its geometry heap.
+        HeapCapture,
+        // An indexed rasterizing draw of `heap_raster_indices` uint8 indices,
+        // each of which paints a point. The driver unrolls the indices from
+        // its geometry heap.
+        HeapRaster,
+        // vkCmdClearAttachments, painting the whole attachment blue.
+        Clear,
+        // vkCmdWriteTimestamp2 of `stage` into timestamp query `query`.
+        Timestamp,
+    };
+    Kind kind;
+    VkPipelineStageFlags2 stage = 0;
+    uint32_t query = 0;
+};
+
 struct FeedbackChainConfig {
     std::span<const uint32_t> step_vertex_shader;
     std::span<const uint32_t> raster_vertex_shader;
@@ -218,16 +258,32 @@ struct FeedbackChainConfig {
     uint32_t points = 8;
     // The attachment's sample count. More than one is resolved after the chain.
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    // The commands of pass `step` (0 to steps), replacing the default.
+    std::map<uint32_t, std::vector<ChainOp>> passes;
+    // Timestamps recorded outside any pass just before pass `step` begins;
+    // `steps + 1` is after the last pass. Only Timestamp commands.
+    std::map<uint32_t, std::vector<ChainOp>> before_pass;
+    // The timestamp pool's size; its queries are all read back.
+    uint32_t timestamp_queries = 0;
     // A pass in the middle of the chain that has no draw.
     bool empty_pass = false;
-    // A vkCmdClearAttachments before the first draw of the middle pass; it
-    // paints the whole attachment blue.
-    bool clear_in_pass = false;
-    // A timestamp written in the middle pass before its first draw.
-    bool timestamp_in_pass = false;
     // One pipeline-statistics query over the whole chain, counting input
     // assembly vertices and vertex shader invocations.
     bool statistics_query = false;
+    // The occlusion query is precise, otherwise boolean.
+    bool precise_occlusion = true;
+    // After the chain, the occlusion query is reset and run again over one
+    // rasterizing pass, and the result is that second run's.
+    bool reuse_occlusion = false;
+    // A depth attachment loaded and stored by every pass, which the
+    // rasterizing draws test against and write.
+    bool depth = false;
+    // How a capture draws its vertices.
+    enum class StepDraw { Direct, Indexed, Indirect };
+    StepDraw step_draw = StepDraw::Direct;
+    // The indices of the HeapCapture and the HeapRaster draw.
+    uint32_t heap_capture_indices = 0;
+    uint32_t heap_raster_indices = 0;
     // Called just before the chain's command buffer begins recording, and
     // after the host has waited for everything it submitted. The resources the
     // chain needs are created and cleared before the first, so the span
@@ -237,17 +293,26 @@ struct FeedbackChainConfig {
 };
 
 struct FeedbackChainResult {
-    // The words the last discard draw captured: `points` uvec4.
+    // The words the last capture made: `points` uvec4.
     std::vector<uint32_t> captured;
+    // How many captures the chain made, so that the words are the seed after
+    // that many steps.
+    uint32_t captures = 0;
     // The 16 by 16 attachment (resolved when it is multisampled).
     std::vector<std::array<uint8_t, 4>> pixels;
+    // The 16 by 16 depth attachment; empty without one.
+    std::vector<float> depth;
     uint64_t occlusion_samples = 0;
     // Input assembly vertices, vertex shader invocations; empty without the
     // statistics query.
     std::vector<uint64_t> statistics;
-    // The timestamps before the chain and in the middle pass; empty without
-    // timestamp_in_pass.
+    // The timestamp queries; empty without a pool.
     std::vector<uint64_t> timestamps;
+    // What a HeapCapture captured, heap_capture_indices uvec4, and how many
+    // captures the chain had made before it, which is what its input is the
+    // seed after.
+    std::vector<uint32_t> heap_captured;
+    uint32_t heap_captures = 0;
 };
 
 struct DrawResult {

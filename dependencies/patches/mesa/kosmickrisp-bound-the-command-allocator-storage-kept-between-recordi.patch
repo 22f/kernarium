@@ -116,7 +116,7 @@ index d87a8dc077cdb06eab7902968a3aec805e9bb356..1c5ecad4c45b7daef95a04041addbf91
  mtl_begin_command_buffer(mtl_command_buffer *command_buffer,
                           mtl_command_allocator *allocator)
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
-index dad25321f7322a0d1baf618d188d91218d1cd92a..26c5803fb47ee8ef0767df9e3d28a5f08d045598 100644
+index 879e025d420c124a071127f216cad569a1400fa2..3d680f6b832f6058c3ff02eac2676b9bba47749a 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
 @@ -102,6 +102,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
@@ -334,10 +334,10 @@ index dad25321f7322a0d1baf618d188d91218d1cd92a..26c5803fb47ee8ef0767df9e3d28a5f0
     es->encoder = mtl_new_compute_command_encoder(es->cmd_buf);
  
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
-index d042c3018464fc6b07ac898ebae0871bde2ffde9..efadca31bea2f2e75114e13459cd9fe8e57e9621 100644
+index 28d9eea8e7870326547b987455c502f85b55d7b9..eee0c97f263963cfef30ca0a33c9cb2ae27886d6 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
 +++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
-@@ -350,6 +350,9 @@ struct kk_ts_sample {
+@@ -351,6 +351,9 @@ struct kk_ts_sample {
  struct kk_encoder_state {
     /* either a mtl_compute_encoder or a mtl_render_encoder */
     mtl_command_encoder *encoder;
@@ -347,7 +347,7 @@ index d042c3018464fc6b07ac898ebae0871bde2ffde9..efadca31bea2f2e75114e13459cd9fe8
     mtl_command_allocator *allocator;
     mtl_command_buffer *cmd_buf;
     /* Pending timestamp resolves and the availability words they and
-@@ -452,6 +455,10 @@ struct kk_cmd_buffer {
+@@ -453,6 +456,10 @@ struct kk_cmd_buffer {
     /* Metal command buffers are single-shot: a resubmission must re-record
      * by replaying the enqueued commands (see rerecord_cmd_buffer). */
     bool submitted;

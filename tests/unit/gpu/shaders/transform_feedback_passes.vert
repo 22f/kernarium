@@ -8,5 +8,9 @@ layout(location = 0, xfb_buffer = 0, xfb_offset = 0, xfb_stride = 16) out uvec4 
 void main()
 {
     next = previous * 3u + uvec4(1u, 2u, 3u, 4u);
-    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+    // The point the rasterizing stage draws for this vertex, so that a step
+    // drawn with the rasterizer on paints the same pixels.
+    float x = (float(gl_VertexIndex) * 2.0 + 1.0) / 16.0 - 1.0;
+    gl_Position = vec4(x, 1.0 / 16.0, 0.0, 1.0);
+    gl_PointSize = 1.0;
 }

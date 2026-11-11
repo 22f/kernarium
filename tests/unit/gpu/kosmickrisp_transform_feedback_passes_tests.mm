@@ -17,6 +17,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -44,14 +45,20 @@
  * and making a render or a compute encoder) and the allocator's reset, which
  * the driver calls once the GPU has finished with an allocator's storage; the
  * allocator's size at that reset is the storage the recording held. The counts
- * depend on what the driver records, not on how busy the host is. */
+ * depend on what the driver records, not on how busy the host is.
+ *
+ * The same chains pin what the late start and the stops must not change: the
+ * capture, the pixels, the depth, and the queries that span them. */
 
 namespace {
 
+using uml::gpu::test::ChainOp;
 using uml::gpu::test::DrawContext;
+using uml::gpu::test::DrawExtensions;
 using uml::gpu::test::FeedbackChainConfig;
 using uml::gpu::test::FeedbackChainResult;
 using uml::testing::require;
+using Kind = ChainOp::Kind;
 
 constexpr uint32_t kExtent = 16;
 constexpr auto kCompletionDeadline = std::chrono::seconds(30);
@@ -59,14 +66,24 @@ constexpr auto kCompletionDeadline = std::chrono::seconds(30);
  * The variants record in 1, the long chain in 3 (its statistics query adds two
  * of its own); a driver that opens one per pass records hundreds. */
 constexpr uint32_t kMaxCommandBuffers = 4;
-/* The largest allocator when the GPU is done with the recording. The 129-pass
- * chain holds 86 MiB (about 0.6 MiB a pass: a render and a compute encoder
- * that share a command buffer); the bound leaves half again for the Metal
- * versions and devices that size encoders differently. The driver that opened
- * a command buffer per pass held 656 MiB for the same chain. The 25-pass
- * variants hold 18 to 20 MiB against 130 MiB. */
+/* The largest allocator when the GPU is done with the recording. Command
+ * storage still grows with the passes, at about 0.6 MiB a pass (a render and a
+ * compute encoder that share a command buffer): the 129-pass chain holds 86
+ * MiB, and the bound leaves half again for the Metal versions and devices that
+ * size encoders differently. The driver that opened a command buffer per pass
+ * held 656 MiB for the same chain. The 25-pass variants hold 18 to 20 MiB
+ * against 130 MiB. */
 constexpr uint64_t kMaxChainAllocatorBytes = 128ull << 20;
 constexpr uint64_t kMaxVariantAllocatorBytes = 32ull << 20;
+/* The geometry heap the driver starts with, in MiB. A rasterizing draw of
+ * 250000 uint8 indices reserves 1000000 bytes of it for its unrolled indices,
+ * and an indexed capture before it in the same pass reserves a few hundred KiB
+ * more: the two do not fit together, and the driver knows the first draw's
+ * share only by the segment's accounting, which has to span them to grow the
+ * heap for both. */
+constexpr const char *kHeapMiB = "1";
+constexpr uint32_t kHeapCaptureIndices = 4000;
+constexpr uint32_t kHeapRasterIndices = 250000;
 
 struct Counters {
     std::atomic<uint32_t> commandBuffers{0};
@@ -94,32 +111,35 @@ IMP computeImplementation = nullptr;
 IMP resetImplementation = nullptr;
 
 /* The replacements forward to the originals through untyped function
- * pointers; ARC adds no retain or release around objects it only passes
- * through. */
-void countedBegin(id receiver, SEL command, id allocator)
+ * pointers, with the objects that cross the call as plain pointers. ARC
+ * still retains and releases each receiver around a replacement, in a
+ * balanced pair. The two make-selectors return their encoder as it came, an
+ * autoreleased +0 reference that a plain pointer passes on without a retain
+ * or a release, and the descriptor and the allocator are borrowed. The reset
+ * of an allocator reads the receiver as an object. */
+void countedBegin(id receiver, SEL command, void *allocator)
 {
     counters.commandBuffers.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard lock(mutex);
-        const void *key = (__bridge const void *)allocator;
-        allocators[key].beganAt = ++sequence;
+        allocators[allocator].beganAt = ++sequence;
         if (armed)
-            inRecording.insert(key);
+            inRecording.insert(allocator);
     }
-    reinterpret_cast<void (*)(id, SEL, id)>(beginImplementation)(receiver, command, allocator);
+    reinterpret_cast<void (*)(id, SEL, void *)>(beginImplementation)(receiver, command, allocator);
 }
 
-id countedRender(id receiver, SEL command, id descriptor)
+void *countedRender(id receiver, SEL command, void *descriptor)
 {
     counters.renderEncoders.fetch_add(1, std::memory_order_relaxed);
-    return reinterpret_cast<id (*)(id, SEL, id)>(renderImplementation)(receiver, command,
-                                                                       descriptor);
+    return reinterpret_cast<void *(*)(id, SEL, void *)>(renderImplementation)(receiver, command,
+                                                                              descriptor);
 }
 
-id countedCompute(id receiver, SEL command)
+void *countedCompute(id receiver, SEL command)
 {
     counters.computeEncoders.fetch_add(1, std::memory_order_relaxed);
-    return reinterpret_cast<id (*)(id, SEL)>(computeImplementation)(receiver, command);
+    return reinterpret_cast<void *(*)(id, SEL)>(computeImplementation)(receiver, command);
 }
 
 void countedReset(id receiver, SEL command)
@@ -228,27 +248,44 @@ Spent run(DrawContext &context, FeedbackChainConfig config, FeedbackChainResult 
 
 using Pixel = std::array<uint8_t, 4>;
 
-/* What the chain must have produced. Every step maps a word x to 3x + c with
- * c = 1, 2, 3, 4 for the four words of a vertex, and the seed is 1, 2, 3, ...;
- * there are steps + 1 discard draws, the last of them in the pass that
- * rasterizes. */
+/* What a chain must have produced, besides what its configuration says. */
+struct Expect {
+    /* A command cleared the whole attachment blue. */
+    bool blueBackground = false;
+    /* The draws that paint the row of points, whatever else they capture. */
+    uint32_t rasterizingDraws = 1;
+    /* Samples the draws outside the row of points count. */
+    uint64_t extraSamples = 0;
+    /* The statistics query counts the default chain's draws. */
+    bool defaultChain = false;
+};
+
+uint32_t step_word(uint32_t word, uint32_t steps)
+{
+    uint32_t value = word + 1u;
+    for (uint32_t step = 0; step < steps; ++step)
+        value = value * 3u + (word % 4) + 1u;
+    return value;
+}
+
+/* What the chain must have produced. Every capture maps a word x to 3x + c
+ * with c = 1, 2, 3, 4 for the four words of a vertex, and the seed is 1, 2,
+ * 3, ... */
 void check_results(const FeedbackChainConfig &config, const FeedbackChainResult &result,
-                   bool blueBackground, const std::string &what)
+                   const Expect &expect, const std::string &what)
 {
     require(result.captured.size() == size_t(config.points) * 4,
             what + ": the capture has the wrong size");
     for (size_t word = 0; word < result.captured.size(); ++word) {
-        uint32_t value = uint32_t(word) + 1u;
-        for (uint32_t step = 0; step <= config.steps; ++step)
-            value = value * 3u + uint32_t(word % 4) + 1u;
+        const uint32_t value = step_word(uint32_t(word), result.captures);
         require(result.captured[word] == value,
                 what + ": word " + std::to_string(word) + " captured " +
                     std::to_string(result.captured[word]) + ", expected " + std::to_string(value));
     }
 
     /* The discard passes leave the attachment as it was, whatever painted it
-     * last; the rasterizing draw adds one green point per vertex on row 8. */
-    const Pixel background = blueBackground ? Pixel{0, 0, 255, 255} : Pixel{0, 0, 0, 255};
+     * last; the rasterizing draws add one green point per vertex on row 8. */
+    const Pixel background = expect.blueBackground ? Pixel{0, 0, 255, 255} : Pixel{0, 0, 0, 255};
     const Pixel point{0, 255, 0, 255};
     require(result.pixels.size() == size_t(kExtent) * kExtent, what + ": wrong pixel count");
     for (uint32_t y = 0; y < kExtent; ++y) {
@@ -261,16 +298,39 @@ void check_results(const FeedbackChainConfig &config, const FeedbackChainResult 
                         std::to_string(got[2]) + "," + std::to_string(got[3]));
         }
     }
+    if (config.depth) {
+        /* The rasterizing draws write depth 0 where they paint; the discard
+         * passes loaded and stored the cleared 1 everywhere else. */
+        require(result.depth.size() == size_t(kExtent) * kExtent, what + ": wrong depth count");
+        for (uint32_t y = 0; y < kExtent; ++y) {
+            for (uint32_t x = 0; x < kExtent; ++x) {
+                const float got = result.depth[size_t(y) * kExtent + x];
+                const float want = (y == 8 && x < config.points) ? 0.0f : 1.0f;
+                require(got == want,
+                        what + ": depth (" + std::to_string(x) + ", " + std::to_string(y) +
+                            ") is " + std::to_string(got));
+            }
+        }
+    }
 
-    /* The query spans the passes and counts the samples of the one draw that
-     * rasterizes. */
-    const uint64_t samples = uint64_t(config.points) * uint32_t(config.samples);
-    require(result.occlusion_samples == samples,
-            what + ": the occlusion query counted " + std::to_string(result.occlusion_samples) +
-                " samples, expected " + std::to_string(samples));
+    /* The query spans the passes and counts the samples of the draws that
+     * rasterize. A boolean one reads some non-zero value. */
+    const uint64_t samples =
+        uint64_t(config.points) * uint32_t(config.samples) * expect.rasterizingDraws +
+        expect.extraSamples;
+    if (config.precise_occlusion) {
+        require(result.occlusion_samples == samples,
+                what + ": the occlusion query counted " +
+                    std::to_string(result.occlusion_samples) + " samples, expected " +
+                    std::to_string(samples));
+    } else {
+        require(result.occlusion_samples != 0,
+                what + ": the boolean occlusion query read zero for visible draws");
+    }
     if (!result.statistics.empty()) {
         /* Input assembly vertices, vertex shader invocations: every draw
          * assembles and shades its vertices, discarded or not. */
+        require(expect.defaultChain, what + ": the statistics need the default chain");
         const uint64_t vertices = uint64_t(config.points) * (config.steps + 2);
         require(result.statistics.size() == 2 && result.statistics[0] == vertices &&
                     result.statistics[1] == vertices,
@@ -278,10 +338,21 @@ void check_results(const FeedbackChainConfig &config, const FeedbackChainResult 
                     " and " + std::to_string(result.statistics[1]) + ", expected " +
                     std::to_string(vertices));
     }
-    if (!result.timestamps.empty()) {
-        require(result.timestamps.size() == 2 && result.timestamps[0] != 0 &&
-                    result.timestamps[1] >= result.timestamps[0],
-                what + ": the timestamps are not set in order");
+}
+
+/* Timestamps written in recording order read increasing times, each its own. */
+void check_timestamps(const FeedbackChainResult &result, size_t count, const std::string &what)
+{
+    require(result.timestamps.size() == count, what + ": wrong number of timestamps");
+    std::string values;
+    for (uint64_t value : result.timestamps)
+        values += " " + std::to_string(value);
+    for (size_t i = 0; i < count; ++i) {
+        require(result.timestamps[i] != 0, what + ": timestamp " + std::to_string(i) +
+                                               " was never written:" + values);
+        require(i == 0 || result.timestamps[i] > result.timestamps[i - 1],
+                what + ": timestamp " + std::to_string(i) + " does not follow the one before:" +
+                    values);
     }
 }
 
@@ -309,82 +380,281 @@ void check_spent(const char *what, const FeedbackChainConfig &config, const Spen
                 std::to_string(maxAllocatorBytes >> 20) + " MiB");
 }
 
+ChainOp stamp(VkPipelineStageFlags2 stage, uint32_t query)
+{
+    return {Kind::Timestamp, stage, query};
+}
+
+/* A chain of 25 passes, the variants' size. */
+FeedbackChainConfig variant()
+{
+    FeedbackChainConfig config;
+    config.steps = 24;
+    return config;
+}
+
+/* Runs a variant chain and checks its results and, unless told not to, the
+ * storage it cost. */
+FeedbackChainResult run_variant(DrawContext &context, const char *what,
+                                const FeedbackChainConfig &config, const Expect &expect,
+                                bool boundStorage = true)
+{
+    FeedbackChainResult result;
+    const Spent spent = run(context, config, result);
+    check_results(config, result, expect, what);
+    if (boundStorage)
+        check_spent(what, config, spent, kMaxVariantAllocatorBytes);
+    else
+        report(what, config, spent);
+    std::printf("PASS transform feedback passes: %s\n", what);
+    std::fflush(stdout);
+    return result;
+}
+
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+    /* With an argument, only the scenarios whose name contains it run: a
+     * failure that appears on a loaded host is run alone, and one that
+     * aborts the binary does not hide the scenarios after it. */
+    const auto selected = [&](std::string_view name) {
+        return argc < 2 || name.find(argv[1]) != std::string_view::npos;
+    };
     try {
+        /* The geometry heap starts at 1 MiB for the whole run; see kHeapMiB. */
+        setenv("MESA_KK_HEAP_SIZE_MIB", kHeapMiB, 1);
         count_metal();
-        DrawContext context;
+        DrawExtensions extensions;
+        extensions.index_type_uint8 = true;
+        DrawContext context(false, true, false, extensions);
         require(context.capabilities().driver_id == VK_DRIVER_ID_MESA_KOSMICKRISP,
                 "the guard counts the KosmicKrisp driver's Metal calls");
         require(context.capabilities().transform_feedback, "transform feedback unavailable");
         const bool statistics = context.capabilities().pipeline_statistics;
 
         /* The burst: a long chain with every query live over it. */
-        {
+        if (selected("chain")) {
             FeedbackChainConfig config;
             config.steps = 128;
             config.statistics_query = statistics;
             FeedbackChainResult result;
             const Spent spent = run(context, config, result);
-            check_results(config, result, false, "chain");
+            Expect expect;
+            expect.defaultChain = true;
+            check_results(config, result, expect, "chain");
             check_spent("chain", config, spent, kMaxChainAllocatorBytes);
+            std::puts("PASS transform feedback passes: chain");
         }
-        std::puts("PASS transform feedback passes: a long chain records in a few encoders");
 
         /* An all-LOAD pass over a multisampled attachment: the encoder that
          * starts at the rasterizing draw must be the attachment's sample count,
          * not a default. */
-        {
-            FeedbackChainConfig config;
-            config.steps = 24;
+        if (selected("multisampled")) {
+            FeedbackChainConfig config = variant();
             config.samples = VK_SAMPLE_COUNT_4_BIT;
-            FeedbackChainResult result;
-            const Spent spent = run(context, config, result);
-            check_results(config, result, false, "multisampled");
-            check_spent("multisampled", config, spent, kMaxVariantAllocatorBytes);
+            run_variant(context, "multisampled", config, {});
         }
-        std::puts("PASS transform feedback passes: a multisampled pass starts at its sample count");
 
         /* A pass with no draw at all starts no encoder and leaves the
          * attachment alone. */
-        {
-            FeedbackChainConfig config;
-            config.steps = 24;
+        if (selected("empty pass")) {
+            FeedbackChainConfig config = variant();
             config.empty_pass = true;
-            FeedbackChainResult result;
-            const Spent spent = run(context, config, result);
-            check_results(config, result, false, "empty pass");
-            check_spent("empty pass", config, spent, kMaxVariantAllocatorBytes);
+            run_variant(context, "empty pass", config, {});
         }
-        std::puts("PASS transform feedback passes: a pass without a draw records nothing");
 
         /* A clear in the middle pass touches the attachment, so that pass
          * starts its encoder: the cost is that one pass, not the chain. */
-        {
-            FeedbackChainConfig config;
-            config.steps = 24;
-            config.clear_in_pass = true;
-            FeedbackChainResult result;
-            const Spent spent = run(context, config, result);
-            check_results(config, result, true, "clear in pass");
-            check_spent("clear in pass", config, spent, kMaxVariantAllocatorBytes);
+        if (selected("clear in pass")) {
+            FeedbackChainConfig config = variant();
+            config.passes[config.steps / 2] = {{Kind::Clear}, {Kind::Capture}};
+            Expect expect;
+            expect.blueBackground = true;
+            run_variant(context, "clear in pass", config, expect);
         }
-        std::puts("PASS transform feedback passes: a clear starts the pass's encoder");
 
         /* A timestamp of a render stage belongs to the pass's render encoder,
          * which it starts. */
-        {
-            FeedbackChainConfig config;
-            config.steps = 24;
-            config.timestamp_in_pass = true;
-            FeedbackChainResult result;
-            const Spent spent = run(context, config, result);
-            check_results(config, result, false, "timestamp in pass");
-            check_spent("timestamp in pass", config, spent, kMaxVariantAllocatorBytes);
+        if (selected("timestamp in pass")) {
+            FeedbackChainConfig config = variant();
+            config.timestamp_queries = 2;
+            config.before_pass[0] = {stamp(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0)};
+            config.passes[config.steps / 2] = {
+                stamp(VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, 1), {Kind::Capture}};
+            const FeedbackChainResult result =
+                run_variant(context, "timestamp in pass", config, {});
+            check_timestamps(result, 2, "timestamp in pass");
         }
-        std::puts("PASS transform feedback passes: a render-stage timestamp starts the pass's encoder");
+
+        /* Attachments and draws the late start must carry over alike. */
+        if (selected("depth attachment")) {
+            FeedbackChainConfig config = variant();
+            config.depth = true;
+            run_variant(context, "depth attachment", config, {});
+        }
+        if (selected("rasterizing capture")) {
+            /* The middle pass's draw rasterizes as well as captures, and
+             * starts the pass's encoder as the first draw. */
+            FeedbackChainConfig config = variant();
+            config.passes[config.steps / 2] = {{Kind::RasterCapture}};
+            Expect expect;
+            expect.rasterizingDraws = 2;
+            run_variant(context, "rasterizing capture", config, expect);
+        }
+        if (selected("rasterize then capture")) {
+            /* The last pass rasterizes before it captures: the encoder is
+             * open when the capture's compute comes. */
+            FeedbackChainConfig config = variant();
+            config.passes[config.steps] = {{Kind::Raster}, {Kind::Capture}};
+            run_variant(context, "rasterize then capture", config, {});
+        }
+        if (selected("indexed capture")) {
+            /* Draws that unroll from the geometry heap, so their reset follows
+             * the pass: not a bound on storage, only on the results. */
+            FeedbackChainConfig config = variant();
+            config.step_draw = FeedbackChainConfig::StepDraw::Indexed;
+            run_variant(context, "indexed capture", config, {}, false);
+        }
+        if (selected("indirect capture")) {
+            FeedbackChainConfig config = variant();
+            config.step_draw = FeedbackChainConfig::StepDraw::Indirect;
+            run_variant(context, "indirect capture", config, {}, false);
+        }
+
+        /* An occlusion query across the encoders of its passes. Each sequence
+         * ends a Metal encoder between the draws that rasterize and the rest,
+         * and the query must keep the samples every encoder counted. */
+        struct OcclusionCase {
+            const char *name;
+            std::vector<ChainOp> last;
+            uint32_t rasterizingDraws;
+        };
+        const OcclusionCase occlusionCases[] = {
+            /* A discard draw whose pipeline masks every attachment restarts
+             * the encoder. */
+            {"occlusion: raster, discard draw", {{Kind::Raster}, {Kind::DiscardNoCapture}}, 1},
+            /* A capture begun and ended with no draw stops the encoder for its
+             * counter copy. */
+            {"occlusion: raster, empty capture, raster",
+             {{Kind::Raster}, {Kind::EmptyCapture}, {Kind::Raster}}, 2},
+            {"occlusion: raster, rasterizing capture, raster",
+             {{Kind::Raster}, {Kind::RasterCapture}, {Kind::Raster}}, 3},
+            {"occlusion: raster, empty capture, discard draw",
+             {{Kind::Raster}, {Kind::EmptyCapture}, {Kind::DiscardNoCapture}}, 1},
+            {"occlusion: raster, empty capture, clipped draw",
+             {{Kind::Raster}, {Kind::EmptyCapture}, {Kind::ClippedRaster}}, 1},
+        };
+        for (const OcclusionCase &occlusion : occlusionCases) {
+            for (bool precise : {true, false}) {
+                const std::string name =
+                    std::string(occlusion.name) + (precise ? ", precise" : ", boolean");
+                if (!selected(name))
+                    continue;
+                FeedbackChainConfig config = variant();
+                config.passes[config.steps] = occlusion.last;
+                config.precise_occlusion = precise;
+                Expect expect;
+                expect.rasterizingDraws = occlusion.rasterizingDraws;
+                run_variant(context, name.c_str(), config, expect, false);
+            }
+        }
+        for (bool precise : {true, false}) {
+            /* Across passes: the first pass rasterizes, the middle ones only
+             * capture, and the last draws points that clip away. */
+            const char *name = precise ? "occlusion: across passes, precise"
+                                       : "occlusion: across passes, boolean";
+            if (!selected(name))
+                continue;
+            FeedbackChainConfig config = variant();
+            config.passes[0] = {{Kind::Capture}, {Kind::Raster}};
+            config.passes[config.steps] = {{Kind::Capture}, {Kind::ClippedRaster}};
+            config.precise_occlusion = precise;
+            run_variant(context, name, config, {}, false);
+        }
+        if (selected("occlusion: a reset query")) {
+            /* A query reset and run again reads only its own samples, which is
+             * what lets the encoders add to its slot. */
+            FeedbackChainConfig config = variant();
+            config.reuse_occlusion = true;
+            run_variant(context, "occlusion: a reset query", config, {}, false);
+        }
+
+        /* Timestamps that belong to no render stage, in the places a pass puts
+         * them: each must read the time it was written. */
+        struct TimestampCase {
+            const char *name;
+            std::vector<ChainOp> beforeMiddle;
+            std::vector<ChainOp> middle;
+        };
+        const auto top = [](uint32_t q) { return stamp(VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, q); };
+        const auto bottom = [](uint32_t q) {
+            return stamp(VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, q);
+        };
+        const auto xfb = [](uint32_t q) {
+            return stamp(VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT, q);
+        };
+        const TimestampCase timestampCases[] = {
+            /* Three in a row between two passes. */
+            {"timestamps between passes", {top(0), bottom(1), xfb(2)}, {{Kind::Capture}}},
+            /* In a pass that has no encoder yet. */
+            {"timestamps before a pass's first draw",
+             {top(0)}, {bottom(1), xfb(2), {Kind::Capture}}},
+            /* After the capture, once the encoder has been stopped. */
+            {"timestamps after a capture: top, bottom",
+             {top(0)}, {{Kind::Capture}, top(1), bottom(2)}},
+            {"timestamps after a capture: top, transform feedback",
+             {top(0)}, {{Kind::Capture}, top(1), xfb(2)}},
+            /* In a pass whose encoder a clear started: the pass's end. */
+            {"timestamps in a started pass: bottom, bottom",
+             {top(0)}, {{Kind::Clear}, bottom(1), bottom(2), {Kind::Capture}}},
+            {"timestamps in a started pass: bottom, transform feedback",
+             {top(0)}, {{Kind::Clear}, bottom(1), xfb(2), {Kind::Capture}}},
+        };
+        for (const TimestampCase &timestamps : timestampCases) {
+            if (!selected(timestamps.name))
+                continue;
+            FeedbackChainConfig config = variant();
+            const uint32_t middle = config.steps / 2;
+            config.timestamp_queries = 4;
+            config.before_pass[middle] = timestamps.beforeMiddle;
+            config.passes[middle] = timestamps.middle;
+            config.before_pass[config.steps + 1] = {top(3)};
+            Expect expect;
+            expect.blueBackground = std::any_of(
+                timestamps.middle.begin(), timestamps.middle.end(),
+                [](const ChainOp &op) { return op.kind == Kind::Clear; });
+            const FeedbackChainResult result =
+                run_variant(context, timestamps.name, config, expect, false);
+            check_timestamps(result, 4, timestamps.name);
+        }
+
+        /* A draw that reserves from the geometry heap before its pass's
+         * encoder starts, and a second that reserves beside it: the heap resets
+         * after both, and the second finds room. */
+        if (selected("heap segment")) {
+            FeedbackChainConfig config = variant();
+            config.heap_capture_indices = kHeapCaptureIndices;
+            config.heap_raster_indices = kHeapRasterIndices;
+            config.passes[config.steps / 2] = {
+                {Kind::HeapCapture}, {Kind::HeapRaster}, {Kind::Capture}};
+            Expect expect;
+            expect.extraSamples = kHeapRasterIndices;
+            const FeedbackChainResult result =
+                run_variant(context, "heap segment", config, expect, false);
+            require(result.heap_captured.size() == size_t(kHeapCaptureIndices) * 4,
+                    "heap segment: the capture has the wrong size");
+            for (size_t word = 0; word < result.heap_captured.size(); ++word) {
+                const size_t vertex = (word / 4) % config.points;
+                const uint32_t input = step_word(uint32_t(vertex * 4 + word % 4),
+                                                 result.heap_captures);
+                const uint32_t expected = input * 3u + uint32_t(word % 4) + 1u;
+                require(result.heap_captured[word] == expected,
+                        "heap segment: word " + std::to_string(word) + " captured " +
+                            std::to_string(result.heap_captured[word]) + ", expected " +
+                            std::to_string(expected));
+            }
+        }
         return 0;
     } catch (const std::exception &error) {
         std::fprintf(stderr, "FAIL transform feedback passes: %s\n", error.what());

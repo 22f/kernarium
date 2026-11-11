@@ -501,13 +501,9 @@ project's Mesa series patches it; the series and its regression suites are in
   with the in-flight work of every process on the GPU.
 - A buffer load never covers more than sixteen bytes, because Apple's backend
   compiler can crash on a wider vector.
-- A render pass that only loads its attachments starts its Metal render encoder
-  at its first draw, after the compute that draw launches, and the counter
-  copies around a transform feedback capture stop that encoder instead of
-  opening a command buffer of their own, so a chain of such passes, which Zink
-  ends for every barrier, shares one main command buffer and its command
-  storage stays small (`gpu-kosmickrisp-transform-feedback-passes`). A pass
-  that clears, resolves or has layers starts its encoder when it begins.
+- A render pass that only loads its attachments may start its Metal render
+  encoder late and stop it between draws; consecutive such passes share one
+  main command buffer (`gpu-kosmickrisp-transform-feedback-passes`).
 
 ### Apple8 (A15) device behaviour
 
