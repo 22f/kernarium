@@ -193,7 +193,7 @@ struct DisplayAreaProbe: View {
     @Environment(AppModel.self) private var model
     let cornerEdges: Edge.Set
     @State private var size = CGSize.zero
-    @State private var window = WindowReading()
+    @State private var window: WindowReading?
 
     var body: some View {
         Color.clear
@@ -214,7 +214,9 @@ struct DisplayAreaProbe: View {
     }
 
     private func publish() {
-        guard size.width > 0, size.height > 0 else { return }
+        // Until the window has said what its safe area is, the size is not the
+        // session's.
+        guard size.width > 0, size.height > 0, let window else { return }
         model.displayPointsDidChange(
             SessionDisplayArea.size(
                 home: size, topInset: window.topInset, bottomInset: window.bottomInset, isPhone: window.isPhone))

@@ -15,8 +15,9 @@ import UIKit
 /// compare and read the `RESOLUTION_DP:` lines; with
 /// `TEST_RUNNER_ANDARIUM_RESOLUTION_IDLE_SECONDS` it then leaves the home screen
 /// idle that long and prints the process's footprint and graphics memory
-/// (`RESOLUTION_MEMORY:`). It needs the Android release
-/// and a Mac or a device (the Simulator draws on the CPU).
+/// (`RESOLUTION_MEMORY:`), and `TEST_RUNNER_ANDARIUM_RESOLUTION_WINDOW=WxH` asks a
+/// Mac for a window that size in points, to stand for a smaller device. It needs
+/// the Android release and a Mac or a device (the Simulator draws on the CPU).
 @MainActor
 struct ResolutionGuestTests {
     /// The number after `label` in `text`: "Physical size: 1206x2334" or
@@ -37,8 +38,23 @@ struct ResolutionGuestTests {
         try #require(environment["ANDARIUM_GUEST_INSTANCE"] != nil)
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let model = try #require((scene.delegate as? AndariumSceneDelegate)?.model)
-        // What Home states before the start, once the window has been read.
-        let deadline = ContinuousClock.now + .seconds(30)
+        let wanted: CGSize?
+        if let text = environment["ANDARIUM_RESOLUTION_WINDOW"] {
+            let parts = text.lowercased().split(separator: "x").compactMap { Double($0) }
+            try #require(parts.count == 2, "ANDARIUM_RESOLUTION_WINDOW is WxH")
+            let size = CGSize(width: parts[0], height: parts[1])
+            scene.sizeRestrictions?.minimumSize = size
+            scene.sizeRestrictions?.maximumSize = size
+            wanted = size
+        } else {
+            wanted = nil
+        }
+        // What Home states before the start, once the window has been read
+        // (and has the size asked for).
+        let deadline = ContinuousClock.now + .seconds(60)
+        while let wanted, abs((model.displayPoints?.width ?? 0) - wanted.width) > 1, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
         while model.resolutionLayout == nil, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(100))
         }
