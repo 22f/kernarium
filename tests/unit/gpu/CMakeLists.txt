@@ -339,6 +339,18 @@ if(TARGET uml_gpu_service)
         UNIT_DIRECTORY
         TIMEOUT 120)
 
+    # A context that draws a framebuffer-fetch fragment shader another context
+    # created, and that the screen's shader cache served, must still have the
+    # descriptor binding the shader reads. The read is past the end of a heap
+    # block, so the test runs its body in a child under Guard Malloc.
+    uml_add_gpu_unit_test(gpu-host-gl-fbfetch-shader-cache
+        uml_gpu_host_gl_fbfetch_shader_cache_tests
+        host_gl_fbfetch_shader_cache_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY
+        TIMEOUT 120)
+
     # A transfer a context refuses must not leave that context refusing every
     # later transfer: Android's gralloc mapper only ever transfers.
     uml_add_gpu_unit_test(gpu-transfer-context-error
@@ -602,7 +614,7 @@ if(TARGET uml_gpu_service)
         gpu-line-loop-statistics gpu-statistics-availability
         gpu-packed-yuv-planes gpu-texture-barrier-clear gpu-padded-row-transfer
         gpu-host-context-trim gpu-host-context-trim-concurrent
-        gpu-host-gl-trim-unbind
+        gpu-host-gl-trim-unbind gpu-host-gl-fbfetch-shader-cache
         gpu-host-gl-device-memory-budget gpu-host-gl-allocation-burst
         gpu-host-gl-surface-and-command-storage
         gpu-host-gl-reclaim-retry gpu-host-imported-memory

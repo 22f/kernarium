@@ -34,6 +34,12 @@ guest Mesa -> Virtio-GPU/Virgl -> vhost-user -> virglrenderer
 - Destroying a GL context returns the Metal pipelines and generated MSL it
   caused, so closing a guest application does not keep them for the life of
   the process.
+- All GL contexts share one Zink screen and its shader cache, so a context
+  that binds a cached fragment shader reading the framebuffer (advanced blend
+  is lowered to it) makes its own descriptor layout ready at the bind, not at
+  the creation that another context did (`gpu-host-gl-fbfetch-shader-cache`).
+  That read sees only what earlier render passes stored: a clear or draw of
+  the same pass is not visible to it.
 
 Presentation:
 
