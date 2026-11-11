@@ -52,6 +52,13 @@ struct AppEntry {
     }
 
     func configureTips() {
+        #if !APP_STORE
+        // The input probe's UI tests tap the side keys and Settings; a tip's
+        // popover over them is no part of what they check.
+        if InputProbeLaunch.requested(in: ProcessInfo.processInfo.environment) {
+            Tips.hideAllTipsForTesting()
+        }
+        #endif
         try? Tips.configure([.displayFrequency(.immediate)])
     }
 

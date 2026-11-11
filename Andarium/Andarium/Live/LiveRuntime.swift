@@ -734,12 +734,11 @@ final class LiveRuntime: RuntimeDriver {
 
     #if !APP_STORE
     /// A UI test's launch (`InputProbeLaunch`) has no guest: the session is
-    /// treated as one whose run has started and booted, so the guest's
-    /// keyboard and mouse can be exercised.
+    /// treated as one whose run has started, so the guest's keyboard and mouse
+    /// can be exercised. Nothing else of a run (rotation, sensors, haptics)
+    /// starts, because nothing answers it.
     func beginInputProbe() {
-        normalRun = true
         runActive = true
-        reachedBootCompleted = true
         inputRunReady = true
         updateKeyboardMouse()
     }
