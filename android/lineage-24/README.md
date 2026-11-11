@@ -465,6 +465,11 @@ outcomes are known and not defects of the image:
 
 - LineageOS's restricted networking default is kept; a CTS run sets
   `restricted_networking_mode` to 0 when the guest starts.
+- `HostsideVpnTests#testAutomaticOnOffKeepaliveModeClose`, `...NoClose` and
+  `#testDownloadWithDownloadManagerDisallowed` fail on LineageOS's netd, which
+  does not let traffic explicitly bound to a VPN network fall through to the
+  underlying network as AOSP does: a socket bound to a split-tunnel VPN cannot
+  reach the internet, and the DownloadManager's address lookup returns no data.
 - Tests that reboot the device cannot pass where reboots are disabled, as they
   must be when the emulator exits on reboot.
 - `JobSchedulingTest#testAnr_*` and `SurfaceSyncGroupTests#testProcessCrash`

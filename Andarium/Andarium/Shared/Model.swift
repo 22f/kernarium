@@ -13,7 +13,7 @@ enum StatisticsViewer: Hashable {
 }
 
 enum SheetKind: String, Identifiable, Hashable, CaseIterable {
-    case create, resize, info, system, whatsNew
+    case create, resize, info, system, whatsNew, snapshots
 
     var id: String { rawValue }
 }
@@ -323,7 +323,14 @@ final class AppModel {
     }
     /// What the snapshot driver is doing, which it sets around each
     /// operation: the controls of a screen follow `snapshotGate`.
-    var snapshotActivity = SnapshotActivity()
+    var snapshotActivity = SnapshotActivity() {
+        didSet { snapshots.activityChanged(from: oldValue, to: snapshotActivity) }
+    }
+    /// What the snapshot screens show and do (`SnapshotsModel`).
+    let snapshots = SnapshotsModel()
+    /// Home's notice after a snapshot was restored, until the guest starts or
+    /// the person puts it away.
+    var restoredSnapshot: RestoredSnapshotNotice?
     /// A long task the screens wait for.
     var busy: BusyState?
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
@@ -483,6 +490,7 @@ final class AppModel {
         self.system = system
         self.capabilities = capabilities
         self.createRequirementBytes = createRequirementBytes
+        snapshots.app = self
     }
 
     var guest: Guest? {
@@ -566,6 +574,7 @@ final class AppModel {
         guard let driver else {
             lifecycle.create(guest)
             plan = .firstStart
+            forgetSnapshots()
             return
         }
         runBusy(
@@ -577,6 +586,7 @@ final class AppModel {
         ) { progress in
             let made = try await driver.create(guest, progress: progress)
             self.lifecycle.create(made)
+            self.forgetSnapshots()
             self.refreshPlan()
         }
     }
@@ -606,6 +616,7 @@ final class AppModel {
         guard let driver, guest != nil else {
             lifecycle.erase()
             plan = .firstStart
+            forgetSnapshots()
             return
         }
         runBusy(
@@ -617,6 +628,7 @@ final class AppModel {
             self.persistTask?.cancel()
             try await driver.erase(progress: progress)
             self.lifecycle.erase()
+            self.forgetSnapshots()
             self.resizePreset = nil
             self.sheet = nil
             self.refreshPlan()
@@ -1102,11 +1114,14 @@ final class AppModel {
     /// guest is saved with the new capacity before the runtime, which grows
     /// the data disk in every kind of start, is handed it. A snapshot
     /// operation under way is not a reason to say anything: the start is
-    /// ignored, as the screens offer none while one runs (`snapshotGate`).
+    /// ignored, as the screens offer none while one runs (`snapshotGate`); a
+    /// rename is not one, and the start waits for it.
     func start(_ mode: StartMode) {
-        guard snapshotActivity.operation == nil else { return }
+        guard !snapshotActivity.holdsGuestFiles else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
+            restoredSnapshot = nil
+            snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
             preparingDisk = false
