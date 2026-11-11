@@ -492,6 +492,8 @@ struct GamepadSessionTests {
         guard case .input(0, let report)? = rig.guest.nextFrame() else { Issue.record("no report"); return }
         #expect(Array(report[8...10]) == [8, 0, 0])
         #expect(report[5] == 0)
+        // The neutral report is written before the rumble is stopped, in the same step of the session.
+        rig.session.settle()
         #expect(rig.player.calls.contains(.stop(.controller(slot: 0, locality: .leftHandle))))
         // The guest's vibrator is not this session's to stop.
         #expect(!rig.player.calls.contains(.stopAll))
