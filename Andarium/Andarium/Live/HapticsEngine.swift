@@ -64,13 +64,22 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
         private var failedAt: ContinuousClock.Instant?
         private var players: [any CHHapticPatternPlayer] = []
         private var tone: (any CHHapticPatternPlayer)?
+        /// When the tone ends by itself, on the engine's clock.
+        private var toneEnd: TimeInterval = 0
 
         init(engine: CHHapticEngine) {
             self.engine = engine
             // Whatever the reason, the engine is not running: the next score
-            // starts it. A reset also drops the players, which the engine
-            // says must be made again.
-            engine.stoppedHandler = { [weak self] _ in self?.lock.withLock { self?.running = false } }
+            // starts it, and what played has ended, so a tone is not there to
+            // change. A reset also drops the players, which the engine says
+            // must be made again.
+            engine.stoppedHandler = { [weak self] _ in
+                self?.lock.withLock {
+                    self?.running = false
+                    self?.players.removeAll()
+                    self?.tone = nil
+                }
+            }
             engine.resetHandler = { [weak self] in
                 self?.lock.withLock {
                     self?.running = false
@@ -111,15 +120,22 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
             lock.withLock { running = false }
         }
 
-        func hold(_ player: any CHHapticPatternPlayer, isTone: Bool) {
+        func hold(_ player: any CHHapticPatternPlayer, isTone: Bool, endingAt end: TimeInterval) {
             lock.withLock {
                 players.append(player)
-                if isTone { tone = player }
+                if isTone {
+                    tone = player
+                    toneEnd = end
+                }
             }
         }
 
-        var toneAndPlayers: (tone: (any CHHapticPatternPlayer)?, players: [any CHHapticPatternPlayer]) {
-            lock.withLock { (tone, players) }
+        /// The tone that plays now: none once it was cancelled, the engine
+        /// stopped, or its own end has passed.
+        var playingTone: (any CHHapticPatternPlayer)? {
+            let held = lock.withLock { (tone, toneEnd) }
+            guard let player = held.0, engine.currentTime < held.1 else { return nil }
+            return player
         }
 
         /// Cancels what the target plays.
@@ -173,12 +189,13 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
                 let start = event.startMilliseconds == 0
                     ? CHHapticTimeImmediate : channel.engine.currentTime + Double(event.startMilliseconds) / 1000
                 try player.start(atTime: start)
-                channel.hold(player, isTone: shape.toneIntensity != nil)
+                let end = (start == CHHapticTimeImmediate ? channel.engine.currentTime : start) + shape.end
+                channel.hold(player, isTone: shape.toneIntensity != nil, endingAt: end)
                 if let level = shape.toneIntensity {
                     if level < 1 { try player.sendParameters([Self.intensity(level)], atTime: start) }
                     // The event ends by itself; this ends it again, as the
                     // guest's duration says, if anything held it.
-                    try? player.stop(atTime: (start == CHHapticTimeImmediate ? channel.engine.currentTime : start) + shape.end)
+                    try? player.stop(atTime: end)
                 }
             }
             return .played
@@ -190,9 +207,14 @@ nonisolated final class CoreHapticsPlayer: HapticPlayer, @unchecked Sendable {
         }
     }
 
-    func setToneIntensity(_ intensity: Float, on target: HapticTarget) {
-        guard let channel = lock.withLock({ channels[target] }), let tone = channel.toneAndPlayers.tone else { return }
-        try? tone.sendParameters([Self.intensity(intensity)], atTime: CHHapticTimeImmediate)
+    func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool {
+        guard let channel = lock.withLock({ channels[target] }), let tone = channel.playingTone else { return false }
+        do {
+            try tone.sendParameters([Self.intensity(intensity)], atTime: CHHapticTimeImmediate)
+            return true
+        } catch {
+            return false
+        }
     }
 
     func stop(_ target: HapticTarget) {

@@ -102,6 +102,12 @@ struct HapticsSessionTests {
         private let lock = NSLock()
         private var recorded: [Call] = []
         var result = HapticPlayResult.played
+        /// Whether a tone is there for an intensity to change.
+        var toneAlive: Bool {
+            get { lock.withLock { alive } }
+            set { lock.withLock { alive = newValue } }
+        }
+        private var alive = true
         /// What a play takes, on the test's clock.
         let clock: TestClock
         var playMicroseconds: UInt64 = 300
@@ -116,7 +122,10 @@ struct HapticsSessionTests {
             clock.advance(microseconds: playMicroseconds)
             return result
         }
-        func setToneIntensity(_ intensity: Float, on target: HapticTarget) { record(.intensity(intensity, target)) }
+        func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool {
+            record(.intensity(intensity, target))
+            return toneAlive
+        }
         func stop(_ target: HapticTarget) { record(.stop(target)) }
         func stopAll() { record(.stopAll) }
         func prepare() { record(.prepare) }
@@ -309,11 +318,15 @@ struct HapticsSessionTests {
         #expect(!rig.session.isConnected)
     }
 
-    @Test func aLostConnectionStopsEverythingAndIsMadeAgain() throws {
+    @Test func aLostConnectionStopsWhatTheGuestPlayedAndIsMadeAgain() throws {
         let rig = try connected()
+        rig.guest.send(try frame("play-tone"))
+        _ = acknowledgement(rig)
         rig.guest.dropLatest()
         #expect(eventually { rig.guest.connections == 2 && rig.session.isConnected })
-        #expect(rig.player.calls.contains(.stopAll))
+        #expect(rig.player.calls.contains(.stop(.device)))
+        // The player is shared with the game controllers: their rumble is not the guest's to stop.
+        #expect(!rig.player.calls.contains(.stopAll))
         // The new connection is a working one, and the engine is made ready for it.
         #expect(eventually { rig.player.calls.filter { $0 == .prepare }.count == 2 })
         rig.guest.send(try frame("play-primitive-click"))
@@ -328,7 +341,56 @@ struct HapticsSessionTests {
         #expect(eventually { rig.guest.connections == 2 && rig.session.isConnected })
         let plays = rig.player.calls.filter { if case .play = $0 { true } else { false } }
         #expect(plays.count == 1)
-        #expect(rig.player.calls.contains(.stopAll))
+        #expect(rig.player.calls.contains(.stop(.device)))
+        #expect(!rig.player.calls.contains(.stopAll))
+    }
+
+    @Test func givingUpStopsWhatTheGuestPlayedAndNothingElse() throws {
+        let rig = try connected()
+        rig.guest.send(try frame("play-tone"))
+        _ = acknowledgement(rig)
+        rig.guest.accepting = false
+        rig.guest.dropLatest()
+        #expect(eventually { rig.session.hasGivenUp })
+        rig.session.settle()
+        #expect(rig.player.calls.contains(.stop(.device)))
+        #expect(!rig.player.calls.contains(.stopAll))
+    }
+
+    @Test func aToneThatSomethingElseEndedIsForgottenAndItsIntensityIsNotSentAgain() throws {
+        let rig = try connected()
+        rig.guest.send(try frame("play-tone"))
+        _ = acknowledgement(rig)
+        rig.clock.advance(milliseconds: 100)
+        // The system stopped the engine: the player says there is no tone.
+        rig.player.toneAlive = false
+        rig.guest.send(try frame("intensity-half"))
+        #expect(acknowledgement(rig).count == 17)
+        rig.guest.send(try frame("intensity-half"))
+        #expect(acknowledgement(rig).count == 17)
+        let intensities = rig.player.calls.filter { if case .intensity = $0 { true } else { false } }
+        #expect(intensities.count == 1)
+    }
+
+    // MARK: Controllers are not the guest's
+
+    @Test func aFrameForAControllerIsAnsweredAsFailedAndReachesNoPlayer() throws {
+        let rig = try connected()
+        for (name, sequence, target) in [("play-tone", UInt32(1), 16), ("intensity-half", 6, 21), ("stop", 8, 47)] {
+            var bytes = try frame(name)
+            bytes[HapticsProtocol.headerSize] = UInt8(target)
+            rig.guest.send(bytes)
+            #expect(
+                acknowledgement(rig)
+                    == Array(HapticsAcknowledgement(sequence: sequence, microseconds: 0, result: .engineFailed).encoded))
+        }
+        rig.session.settle()
+        // Only the engine's preparation was asked of the player.
+        #expect(rig.player.calls == [.prepare])
+        // The device's own actuator still plays.
+        rig.guest.send(try frame("play-tone"))
+        #expect(acknowledgement(rig).last == 0)
+        #expect(rig.player.calls.count == 2)
     }
 
     // MARK: Attempts

@@ -18,8 +18,12 @@ public protocol HapticPlayer: AnyObject, Sendable {
     /// plays past the end of the score: its elements are bounded by their
     /// durations.
     func play(_ score: HapticScore) -> HapticPlayResult
-    /// Sets the intensity of the tone the target plays now.
-    func setToneIntensity(_ intensity: Float, on target: HapticTarget)
+    /// Sets the intensity of the tone the target plays now. Answers whether
+    /// there was one: a tone ends without the caller's say when something else
+    /// stops the actuator (the system stopping the engine, a stop of every
+    /// target, the player's own bound on a tone), and a caller that kept a
+    /// record of it plays again.
+    func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool
     /// Stops what the target plays.
     func stop(_ target: HapticTarget)
     /// Stops every target and lets the engine go: the application left the

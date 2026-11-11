@@ -74,7 +74,10 @@ private final class PrintingPlayer: HapticPlayer, @unchecked Sendable {
         }
         return .played
     }
-    func setToneIntensity(_ intensity: Float, on target: HapticTarget) { say("rumble \(target.rawValue) \(intensity)") }
+    func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool {
+        say("rumble \(target.rawValue) \(intensity)")
+        return true
+    }
     func stop(_ target: HapticTarget) { say("rumble \(target.rawValue) 0") }
     func stopAll() { say("rumble stop-all") }
     func prepare() {}

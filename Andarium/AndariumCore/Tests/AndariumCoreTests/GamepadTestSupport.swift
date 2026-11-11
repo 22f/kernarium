@@ -195,6 +195,13 @@ final class GamepadFakePlayer: HapticPlayer, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [Call] = []
     var result = HapticPlayResult.played
+    /// Whether a tone is there for an intensity to change: false after
+    /// something else stopped the actuator.
+    var toneAlive: Bool {
+        get { lock.withLock { alive } }
+        set { lock.withLock { alive = newValue } }
+    }
+    private var alive = true
 
     var calls: [Call] { lock.withLock { recorded } }
     func clear() { lock.withLock { recorded.removeAll() } }
@@ -204,7 +211,10 @@ final class GamepadFakePlayer: HapticPlayer, @unchecked Sendable {
         record(.play(score))
         return result
     }
-    func setToneIntensity(_ intensity: Float, on target: HapticTarget) { record(.intensity(intensity, target)) }
+    func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool {
+        record(.intensity(intensity, target))
+        return toneAlive
+    }
     func stop(_ target: HapticTarget) { record(.stop(target)) }
     func forget(_ target: HapticTarget) { record(.forget(target)) }
     func stopAll() { record(.stopAll) }

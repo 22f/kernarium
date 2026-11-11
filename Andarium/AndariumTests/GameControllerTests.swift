@@ -260,7 +260,7 @@ struct GameControllersTests {
 
     private nonisolated final class Player: HapticPlayer, @unchecked Sendable {
         func play(_ score: HapticScore) -> HapticPlayResult { .failed }
-        func setToneIntensity(_ intensity: Float, on target: HapticTarget) {}
+        func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool { false }
         func stop(_ target: HapticTarget) {}
         func stopAll() {}
         func prepare() {}
