@@ -114,8 +114,15 @@ public final class ThermalStream: @unchecked Sendable {
                 return nil
             }
             guard let opened else { return false }
+            // `MSG_DONTWAIT` alone does not keep a send from blocking on a local
+            // stream socket on Darwin: a guest that does not read would hold the
+            // caller with the lock. The descriptor is this stream's own, so it is
+            // made non-blocking (every wait is on readiness, and the reads and
+            // writes here already take `EAGAIN`).
             var one: Int32 = 1
-            guard setsockopt(opened, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout.size(ofValue: one))) == 0 else {
+            guard setsockopt(opened, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout.size(ofValue: one))) == 0,
+                fcntl(opened, F_SETFL, fcntl(opened, F_GETFL) | O_NONBLOCK) == 0
+            else {
                 Darwin.close(opened)
                 return false
             }

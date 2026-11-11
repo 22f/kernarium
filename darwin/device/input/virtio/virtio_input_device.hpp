@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "held_input.hpp"
 #include "platform/descriptor.hpp"
 #include "protocol.hpp"
 #include "vhost_user_device.hpp"
@@ -68,7 +69,14 @@ struct StatusEvent final {
  *    see StatusEvent) and then go to it in order. A guest that never
  *    registers, as one without the kernel's hot-plug support, gets nothing:
  *    when the wait outgrows the limit everything held is dropped, and so is
- *    what comes after, until the registration. */
+ *    what comes after, until the registration.
+ *
+ * A report that does not fit the queue is dropped whole, and the queue follows
+ * what the guest was told is held (HeldInput) so that a dropped lift or key
+ * release does not leave a contact or a key down in it: one report ends
+ * everything held, ahead of the next report the queue accepts or, when the
+ * guest reads the queue empty first, at that read. Only a plugged device whose
+ * input device is registered owes that release. */
 class EventQueue final {
 public:
     enum class Attachment : std::uint8_t {
@@ -136,6 +144,10 @@ public:
 
 private:
     void wake() noexcept;
+    /* The guest's input device was created, destroyed or replaced: whatever
+     * the old one held is gone and nothing needs releasing, so the tracking
+     * starts again from the events still queued for the new one. */
+    void forgetGuestLocked() noexcept;
     void queueLocked(std::span<const protocol::InputEvent> events) noexcept;
     [[nodiscard]] bool holdLocked(
         std::span<const protocol::InputEvent> events) noexcept;
@@ -145,6 +157,12 @@ private:
     mutable std::mutex mutex_;
     std::deque<protocol::InputEvent> events_;
     std::deque<protocol::InputEvent> held_;
+    /* What the guest was told is held, from the events queued. */
+    HeldInput guestHolds_;
+    /* A report was dropped since the guest was last released: it may hold
+     * something the host has let go. Cleared, with the release queued, by
+     * whichever of enqueue() and take() comes first. */
+    bool dropped_ {};
     bool reportedOverflow_ {};
     bool reportedHoldOverflow_ {};
     const bool pluggable_;
