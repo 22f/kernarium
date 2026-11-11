@@ -627,6 +627,54 @@ struct SnapshotStoreTests {
         #expect(!exists(fixture.snapshots.appendingPathComponent("restore.json")))
     }
 
+    @Test func anUnfinishedRestorePlansTheStartFromTheSnapshotsRecord() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        let made = try fixture.storage.createSnapshot(named: "then")
+        // The guest moved on to a newer Android, which this older app cannot start.
+        let newer = fixture.app(on: snapshotNewer)
+        try await newer.prepareStart(fixture.guest)
+        try newer.completeRun()
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        #expect(newer.startPlan() == .normal)
+
+        // A restore of the older snapshot put its data in place and did not finish. A start completes it
+        // first, so the start is the snapshot's, and Start is offered on that.
+        try writeIntent(for: made.id, in: fixture)
+        #expect(fixture.storage.startPlan() == .normal)
+        #expect(fixture.storage.startPlan()?.allowsStart == true)
+        #expect(newer.startPlan() == .update(from: "20261031-los24-r4", to: "20261102-los24-r5"))
+
+        // What the plan said is what the start then is.
+        try await fixture.storage.prepareStart(fixture.guest)
+        #expect(!exists(fixture.snapshots.appendingPathComponent("restore.json")))
+        #expect(fixture.storage.startPlan() == .normal)
+    }
+
+    @Test func aRestoreThatCannotBeCarriedThroughLeavesThePlanAsTheFilesSayIt() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        let made = try fixture.storage.createSnapshot(named: "then")
+        let newer = fixture.app(on: snapshotNewer)
+        try await newer.prepareStart(fixture.guest)
+        try newer.completeRun()
+        let intent = fixture.snapshots.appendingPathComponent("restore.json")
+
+        // An intent that cannot be read: launch and Start drop it, so nothing changes.
+        try Data("garbage".utf8).write(to: intent)
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        // A snapshot that is no longer whole.
+        try writeIntent(for: made.id, in: fixture)
+        try FileManager.default.removeItem(at: fixture.snapshots.appendingPathComponent(made.id.rawValue).appendingPathComponent("data.img"))
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        // One that is not there at all.
+        try FileManager.default.removeItem(at: fixture.snapshots.appendingPathComponent(made.id.rawValue))
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        // And no restore: the same.
+        try FileManager.default.removeItem(at: intent)
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+    }
+
     /// A volume that cannot clone, and one that is full, refuse as values.
     @Test func theCallsOwnErrorsBecomeRefusalsAsValues() {
         let store = SnapshotStore(
