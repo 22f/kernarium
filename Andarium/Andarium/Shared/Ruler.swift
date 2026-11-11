@@ -358,7 +358,7 @@ struct StoragePanel: View {
     }
 }
 
-/// An existing guest's storage, the second row of Home's Guest system
+/// An existing guest's storage, the second row of Home's Virtual machine
 /// section: what the guest holds of its capacity, as words and on a bar, a
 /// pending growth or the largest size as a note under the bar, and Resize.
 struct StorageRow: View {

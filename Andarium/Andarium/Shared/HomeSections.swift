@@ -150,7 +150,7 @@ struct SystemSection: View {
     }
 }
 
-/// The button at the end of a Guest system row.
+/// The button at the end of a Virtual machine row.
 struct SystemRowButton {
     let title: String
     let identifier: String
@@ -180,7 +180,7 @@ extension VerticalAlignment {
     fileprivate static let headerCenter = VerticalAlignment(HeaderCenterID.self)
 }
 
-/// One row of the Guest system section: the icon tile, the title with one
+/// One row of the Virtual machine section: the icon tile, the title with one
 /// line under it, anything further under that line in the same column (a bar,
 /// a note), and the row's button at the end. The text column reads as one
 /// accessibility element; the button is the other. At accessibility text
@@ -275,7 +275,7 @@ extension SystemRow where Below == EmptyView {
     }
 }
 
-/// The third row of Guest system: how many snapshots there are and the space
+/// The third row of Virtual machine: how many snapshots there are and the space
 /// all of them use, with Manage opening the Snapshots sheet. Home reads them
 /// when none was read, after an operation and when a run ends, not each time
 /// it appears (`SnapshotsModel.reload`).

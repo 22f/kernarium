@@ -144,7 +144,7 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// JIT, right below Guest system, in the builds that have it. An App Store
+    /// JIT, right below Virtual machine, in the builds that have it. An App Store
     /// build has none and nothing takes its place.
     @ViewBuilder
     private var developmentSections: some View {
