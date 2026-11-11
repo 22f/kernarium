@@ -238,6 +238,40 @@ struct GuestHardwareInputTests {
         #expect(sink.events.last == .key(0x04, false))
     }
 
+    @Test func theDisplayHoldsTheKeyboardFocusOnceItIsInAWindowAndLetsGoWhenAsked() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = UIViewController()
+        lease.window.rootViewController = controller
+        controller.view.layoutIfNeeded()
+        let view = GuestMetalView(frame: controller.view.bounds, device: nil)
+        let input = GuestHardwareInput()
+        view.hardwareInput = input
+        // Wanted before there is a window: claimed when it arrives.
+        view.setHardwareFocus(true)
+        #expect(!view.isFirstResponder)
+        controller.view.addSubview(view)
+        #expect(await eventually { view.isFirstResponder })
+        // A sheet takes the keys, and the keys held are lifted with the focus.
+        view.setHardwareFocus(false)
+        #expect(!view.isFirstResponder)
+        view.setHardwareFocus(true)
+        #expect(view.isFirstResponder)
+        // Without an input there is nothing to hold the focus for.
+        let bare = GuestMetalView(frame: controller.view.bounds, device: nil)
+        controller.view.addSubview(bare)
+        bare.setHardwareFocus(true)
+        #expect(!bare.isFirstResponder)
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return condition()
+    }
+
     // MARK: Positions
 
     /// The pointer and the touchscreen share one range, so Android's cursor
