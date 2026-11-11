@@ -125,6 +125,20 @@ STAND_INS = (
     "int _ZN12_GLOBAL__N_117runtimePrepareJitEijj(void) { return 1; }\n"
     "unsigned int fixture_data[] = { 0xd43e01a0u, 0xd43e01a0u };\n"
 )
+# Send feedback as a binary holds it: a type, the subject's prefix and the
+# Info.plist key; the Mail framework is linked in by the build of the fixture.
+FEEDBACK_FEATURE = (
+    "extern void *MFMailComposeViewControllerFixture;\n"
+    "const char *fixture(void) {\n"
+    '  return "Andarium feedback: " "AndariumFeedbackAddress" "_$s8Andarium17SendFeedbackModelC";\n'
+    "}\n"
+    "int mail(void) { return MFMailComposeViewControllerFixture != 0; }\n"
+    "void *MFMailComposeViewControllerFixture;\n"
+)
+# The same without the Mail framework: a build that lost part of the feature.
+FEEDBACK_PARTIAL = (
+    'const char *fixture(void) { return "Andarium feedback: AndariumFeedbackAddress"; }\n'
+)
 # What a dependency compiles in from the prefix it was built under: a locale
 # directory on the volume that held the dependency prefixes, and a path in the
 # per-user temporary directory that held a build.
@@ -279,8 +293,8 @@ def main() -> int:
 
     failures: list[str] = []
 
-    def check(app: Path, *, passes: bool, expect: str = "") -> None:
-        result = run([sys.executable, "-B", str(options.checker), str(app)])
+    def check(app: Path, *, passes: bool, expect: str = "", args: list[str] | None = None) -> None:
+        result = run([sys.executable, "-B", str(options.checker), *(args or []), str(app)])
         label = app.parent.name
         if (result.returncode == 0) != passes:
             failures.append(f"{label}: expected {'a pass' if passes else 'a failure'}:\n{result.stdout}")
@@ -481,6 +495,69 @@ def main() -> int:
             else:
                 shutil.copyfile(clean, member)
             check(tested, passes=False, expect=f"{relative}: a test bundle or test framework")
+
+        # Send feedback is compiled in only where the build names a receiver. The
+        # fixtures stand for the application with it (the subject's prefix, the
+        # Info.plist key, the Mail framework, a type of the feature) and for the
+        # Debug build's code library; the receiver is a made-up address.
+        receiver = "person@receiver.fixture"
+        feature = build(root, "feature", FEEDBACK_FEATURE, ["-framework", "MessageUI"])
+        partial = build(root, "partial", FEEDBACK_PARTIAL)
+        feedback_info = app_info(AndariumFeedbackAddress=receiver)
+        appstore = ["--feedback-address", receiver]
+        arranged = ["--feedback-address", "feedback@example.com"]
+        check(make_app(root, "feedback-built", feature, feedback_info), passes=True,
+              expect="Send feedback is compiled in", args=appstore)
+        check(make_app(root, "feedback-absent", clean, app_info()), passes=True,
+              expect="Send feedback is not compiled in")
+        check(make_app(root, "feedback-no-key", feature, app_info()), passes=False,
+              expect="AndariumFeedbackAddress must be the receiver", args=appstore)
+        check(make_app(root, "feedback-other-key", feature, app_info(AndariumFeedbackAddress="other@receiver.fixture")),
+              passes=False, expect="must be the receiver the build names", args=appstore)
+        check(make_app(root, "feedback-not-built", clean, feedback_info), passes=False,
+              expect="lacks Send feedback", args=appstore)
+        check(make_app(root, "feedback-partial", partial, feedback_info), passes=False,
+              expect="MessageUI.framework", args=appstore)
+        # No receiver, so nothing of it: not the code, not the key, not the strings.
+        check(make_app(root, "feedback-code-without-receiver", feature, app_info()), passes=False,
+              expect="carries Send feedback")
+        check(make_app(root, "feedback-key-without-receiver", clean, feedback_info), passes=False,
+              expect="has AndariumFeedbackAddress though the build names no receiver")
+        check(make_app(root, "feedback-framework-without-receiver", clean, app_info(), framework=feature),
+              passes=False, expect="Runtime.framework/Runtime: carries Send feedback")
+        words = make_app(root, "feedback-words", clean, app_info())
+        (words / "en.lproj").mkdir()
+        (words / "en.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
+        check(words, passes=False, expect="has Send feedback strings")
+        # The receiver of the local configuration is an address, and a real one.
+        for address in ("person", "person@receiver", "@receiver.fixture", "a b@receiver.fixture",
+                        "person@example.com", "person@mail.example.org", "person@receiver.test",
+                        "person@receiver.invalid"):
+            check(make_app(root, f"feedback-address-{address}".replace("@", "-at-").replace(" ", "-"),
+                           feature, app_info(AndariumFeedbackAddress=address)),
+                  passes=False, expect="Send feedback: the receiver", args=["--feedback-address", address])
+        # The Debug build keeps the application's code in a library beside the
+        # stub executable; the check reads it.
+        debug = make_app(root, "feedback-debug-library", clean, app_info())
+        shutil.copyfile(feature, debug / "Fixture.debug.dylib")
+        check(debug, passes=False, expect="Fixture.debug.dylib: carries Send feedback")
+        # The other configurations: absent, or the arranged example address.
+        other = ["--feedback", "--configuration"]
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"feedback-{configuration}-absent", clean, app_info()), passes=True,
+                  expect=f"Send feedback is not compiled in ({configuration})", args=[*other, configuration])
+            check(make_app(root, f"feedback-{configuration}-arranged", feature,
+                           app_info(AndariumFeedbackAddress="feedback@example.com")),
+                  passes=True, expect=f"Send feedback is compiled in ({configuration})",
+                  args=[*other, configuration, *arranged])
+            # The local configuration's receiver never reaches them.
+            check(make_app(root, f"feedback-{configuration}-receiver", feature, feedback_info), passes=False,
+                  expect="not the arranged example address", args=[*other, configuration, *appstore])
+            check(make_app(root, f"feedback-{configuration}-code", feature, app_info()), passes=False,
+                  expect="carries Send feedback", args=[*other, configuration])
+            check(make_app(root, f"feedback-{configuration}-key", clean, feedback_info), passes=False,
+                  expect="though the build names no receiver", args=[*other, configuration])
 
         # The privacy manifests are checked too.
         check(make_app(root, "no-manifest", clean, app_info(), manifest=False),

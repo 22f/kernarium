@@ -41,7 +41,13 @@ application that must:
     executable when it archives, and strips nothing it embeds. A path that a
     dependency compiles in from its prefix is the dependencies' to avoid
     (dependencies/README.md, "No build-host paths"); and
-  - pass scripts/check-privacy-manifests.py.
+  - pass scripts/check-privacy-manifests.py; and
+  - carry Send feedback (Andarium/README.md#send-feedback) only when the build
+    names a receiver: the feature is compiled in exactly where the ignored
+    local configuration holds an address, in this configuration alone. A
+    product without an address holds nothing of it: no type, text, framework
+    or Info.plist key; a product with one holds all of it and the address
+    the build named.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -51,7 +57,11 @@ The console lines are long enough to be text in the binary, so a build whose
 code still holds one fails, whether or not anything calls it.
 
 The Xcode project runs it as the last build phase of the App Store
-configuration, so a build that breaks one of these rules fails.
+configuration, so a build that breaks one of these rules fails. In every other
+configuration a phase runs `--feedback`, which checks Send feedback alone: there
+the feature is absent unless a test or capture script arranged it with the
+example address. Both print one line that says whether Send feedback is
+compiled in.
 """
 
 from __future__ import annotations
@@ -104,6 +114,24 @@ LC_SYMTAB = 0x2
 N_STAB = 0xE0
 N_OSO = 0x66
 CHECKER = Path(__file__).resolve().parents[2] / "scripts" / "check-privacy-manifests.py"
+
+# Send feedback. The build writes the receiver to Info.plist under this key
+# only where the feature is compiled in (Andarium/Config/Andarium.xcconfig).
+FEEDBACK_KEY = "AndariumFeedbackAddress"
+# The only address a configuration other than AppStore may carry: the one the
+# test and capture scripts arrange.
+FEEDBACK_ARRANGED = "feedback@example.com"
+# What the feature leaves in a binary: its types (Swift writes a name's length
+# before it, so a fragment of the name matches), the subject's prefix, the
+# Info.plist key it reads, and the system frameworks only it uses.
+FEEDBACK_REQUIRED = (b"Andarium feedback: ", FEEDBACK_KEY.encode(), b"MessageUI.framework")
+FEEDBACK_FRAGMENTS = (
+    b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
+# Words the feature puts in a String Catalog.
+FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
+# Domains and top-level domains that name no mailbox (RFC 2606, RFC 6761).
+PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net")
+PLACEHOLDER_TLDS = ("example", "invalid", "localhost", "test")
 
 
 def thin_offset(data: bytes) -> int | None:
@@ -411,10 +439,108 @@ def test_support(app: Path) -> list[str]:
     return sorted(found)
 
 
+def feedback_files(app: Path) -> list[Path]:
+    """The Mach-O files that can hold the application's code: its executable,
+    the debug library a Debug build keeps the code in, and the frameworks."""
+    found = list(executables(app))
+    found.extend(path for path in sorted(app.glob("*.dylib")) if path not in found)
+    return found
+
+
+def feedback_address_problems(configuration: str, address: str) -> list[str]:
+    """What is wrong with the address a build names, whatever the product holds."""
+    if not address:
+        return []
+    if configuration != "AppStore":
+        if address != FEEDBACK_ARRANGED:
+            return [f"Send feedback: {configuration} names a receiver that is not the arranged example address; "
+                    "only the App Store configuration reads the local configuration"]
+        return []
+    local, _, domain = address.partition("@")
+    domain = domain.lower()
+    if (not local or any(character.isspace() for character in address) or address.count("@") != 1
+            or "." not in domain or domain.startswith(".") or domain.endswith(".") or ".." in domain):
+        return ["Send feedback: the receiver in the local configuration is not an email address"]
+    if (any(domain == name or domain.endswith("." + name) for name in PLACEHOLDER_DOMAINS)
+            or domain.rpartition(".")[2] in PLACEHOLDER_TLDS):
+        return ["Send feedback: the receiver in the local configuration is a placeholder address"]
+    return []
+
+
+def feedback_strings(app: Path) -> list[str]:
+    """The String Catalog tables of the application that mention Send feedback."""
+    found = []
+    for path in sorted(app.glob("*.lproj/*.strings")):
+        try:
+            with path.open("rb") as handle:
+                table = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if isinstance(table, dict) and any(
+                word in text for key, value in table.items() for text in (str(key), str(value))
+                for word in FEEDBACK_WORDS):
+            found.append(str(path.relative_to(app)))
+    return found
+
+
+def feedback_problems(app: Path, configuration: str, address: str) -> tuple[list[str], bool]:
+    """Whether the product holds Send feedback as the build said it would, and
+    whether it holds it. `address` is the build setting FEEDBACK_ADDRESS: the
+    local configuration's receiver in the App Store configuration, empty
+    otherwise, or the example address a test or capture script arranged."""
+    problems = feedback_address_problems(configuration, address)
+    expected = bool(address) and not problems
+    fragments: dict[str, set[bytes]] = {}
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        present = {fragment for fragment in FEEDBACK_FRAGMENTS if fragment in code[0]}
+        if present:
+            fragments[str(binary.relative_to(app))] = present
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            keyed = plistlib.load(handle).get(FEEDBACK_KEY)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        keyed = None
+    words = feedback_strings(app)
+    compiled = bool(fragments) or keyed is not None or bool(words)
+    if not expected:
+        if address:
+            problems.append("Send feedback: the build names a receiver that cannot be used")
+        for name, present in fragments.items():
+            problems.append(
+                f"{name}: carries Send feedback ({', '.join(sorted(item.decode() for item in present))}) "
+                "though the build names no receiver")
+        if keyed is not None:
+            problems.append(f"Info.plist: has {FEEDBACK_KEY} though the build names no receiver")
+        problems.extend(f"{name}: has Send feedback strings though the build names no receiver"
+                        for name in words)
+        return problems, compiled
+    if keyed != address:
+        problems.append(f"Info.plist: {FEEDBACK_KEY} must be the receiver the build names")
+    code = set().union(*fragments.values()) if fragments else set()
+    missing = [item.decode() for item in FEEDBACK_REQUIRED if item not in code]
+    if missing:
+        problems.append(
+            f"the application lacks Send feedback ({', '.join(missing)}) though the build names a receiver")
+    return problems, compiled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("app", type=Path)
     parser.add_argument("--privacy-checker", type=Path, default=CHECKER)
+    parser.add_argument(
+        "--configuration", default="AppStore",
+        help="the build configuration; Send feedback is checked against it")
+    parser.add_argument(
+        "--feedback-address", default="",
+        help="the build setting FEEDBACK_ADDRESS: the receiver the build names, "
+             "empty when it names none")
+    parser.add_argument(
+        "--feedback", action="store_true",
+        help="check Send feedback alone, for a configuration other than AppStore")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--runtime", action="store_true",
@@ -426,6 +552,13 @@ def main() -> int:
     options = parser.parse_args()
 
     app = options.app
+    if options.feedback:
+        found, compiled = feedback_problems(app, options.configuration, options.feedback_address)
+        for line in found:
+            print(line, file=sys.stderr)
+        print(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}"
+              f" ({options.configuration})")
+        return 1 if found else 0
     if options.runtime or options.host_traces:
         found = []
         for binary in executables_of(app):
@@ -468,6 +601,10 @@ def main() -> int:
     problems.extend(
         f"{path}: a test bundle or test framework; build the application "
         "without its tests" for path in test_support(app))
+
+    feedback, compiled = feedback_problems(app, options.configuration, options.feedback_address)
+    problems.extend(feedback)
+    print(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}")
 
     privacy = subprocess.run(
         [sys.executable, "-B", str(options.privacy_checker), str(app)],
