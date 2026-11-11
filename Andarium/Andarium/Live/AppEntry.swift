@@ -261,9 +261,10 @@ struct AppEntry {
         model.inputProbe = probe
         let runtime = LiveRuntime(
             model: model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")),
-            keyboardMouse: KeyboardMouse.probe(probe, supportsMouse: host.supportsPointer) {
-                [weak model] wanted in model?.pointerLockWanted = wanted
-            })
+            keyboardMouse: KeyboardMouse.probe(
+                probe, supportsMouse: host.supportsPointer,
+                guestRegisters: InputProbeLaunch.guestRegisters(in: ProcessInfo.processInfo.environment)
+            ) { [weak model] wanted in model?.pointerLockWanted = wanted })
         model.driver = runtime
         model.phase = .running(.normal)
         runtime.beginInputProbe()

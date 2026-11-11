@@ -527,7 +527,7 @@ struct GuestHardwareInputTests {
 
     @Test func theProbeLogsWhatTheGuestWouldReceive() {
         let probe = InputProbe()
-        let mouse = KeyboardMouse.probe(probe, supportsMouse: true) { _ in }
+        let mouse = KeyboardMouse.probe(probe, supportsMouse: true, guestRegisters: true) { _ in }
         defer { mouse.shutDown() }
         mouse.update(running: true, foreground: true)
         mouse.input.keyDown(usage: 0x04, alphaShift: false)
@@ -535,6 +535,29 @@ struct GuestHardwareInputTests {
         #expect(probe.lines.contains("connect keyboard 1"))
         #expect(probe.lines.suffix(2) == ["key 0x4 down", "key 0x4 up"])
         #expect(probe.text.contains("\n"))
+    }
+
+    @Test func theProbesGuestRegistersADeviceAfterItsPlugAndLosesItWithTheUnplug() async {
+        let runtime = RecordingHardwareInputRuntime()
+        runtime.registers = true
+        var heard: [String] = []
+        runtime.setStatusHandler { status, on in heard.append("\(status) \(on)") }
+        #expect(runtime.setConnected(.keyboard, true))
+        #expect(heard.isEmpty, "the guest answers after the plug, not within it")
+        #expect(runtime.setConnected(.mouse, true))
+        #expect(await eventually { heard.count == 2 })
+        #expect(heard == ["keyboardRegistered true", "pointerRegistered true"])
+        #expect(runtime.setConnected(.mouse, false))
+        #expect(await eventually { heard.count == 3 })
+        #expect(heard.last == "pointerRegistered false")
+
+        // A guest that is not asked to register says nothing.
+        let silent = RecordingHardwareInputRuntime()
+        var silentHeard = 0
+        silent.setStatusHandler { _, _ in silentHeard += 1 }
+        #expect(silent.setConnected(.mouse, true))
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(silentHeard == 0)
     }
 
     @Test func theProbeKeepsTheNewestLinesWithinItsCapacity() {
@@ -550,6 +573,12 @@ struct GuestHardwareInputTests {
         #expect(InputProbeLaunch.requested(in: environment))
         #expect(!InputProbeLaunch.requested(in: [:]))
         #expect(!InputProbeLaunch.requested(in: [InputProbeLaunch.environmentName: "0"]))
+        #expect(InputProbeLaunch.guestRegisters(in: environment))
+        // The guest that never registers its devices, like the accepted kernel.
+        let unregistered = [InputProbeLaunch.environmentName: InputProbeLaunch.unregisteredValue]
+        #expect(InputProbeLaunch.requested(in: unregistered))
+        #expect(!InputProbeLaunch.guestRegisters(in: unregistered))
+        #expect(!AppEntry.isPersonsLaunch(overrides: LaunchOverrides(), environment: unregistered))
         #expect(!AppEntry.isPersonsLaunch(overrides: LaunchOverrides(), environment: environment))
         #expect(AppEntry.isPersonsLaunch(overrides: LaunchOverrides(), environment: [:]))
     }

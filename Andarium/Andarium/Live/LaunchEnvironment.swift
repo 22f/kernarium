@@ -63,12 +63,20 @@ nonisolated enum ThermalOverride {
 /// with no guest behind it, and the guest's keyboard and mouse send to a log
 /// the session shows (`InputProbe`). The UI tests of the hardware keyboard and
 /// mouse drive the real application with it, because the runtime is out of
-/// reach of a test that runs in another process.
+/// reach of a test that runs in another process. The probe's guest registers
+/// each device when it is plugged, as a kernel with the hot-plug topic does;
+/// `unregistered` makes it one that never does, as the accepted kernel is.
 nonisolated enum InputProbeLaunch {
     static let environmentName = "ANDARIUM_INPUT_PROBE"
+    static let unregisteredValue = "unregistered"
 
     static func requested(in environment: [String: String]) -> Bool {
-        environment[environmentName] == "1"
+        environment[environmentName] == "1" || environment[environmentName] == unregisteredValue
+    }
+
+    /// Whether the probe's guest registers the devices it is given.
+    static func guestRegisters(in environment: [String: String]) -> Bool {
+        environment[environmentName] != unregisteredValue
     }
 }
 

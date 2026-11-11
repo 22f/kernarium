@@ -61,6 +61,12 @@ private final class Rig {
     func leaveTheFront() { session.update(running: true, foreground: false) }
     func returnToTheFront() { session.update(running: true, foreground: true) }
     func endTheRun() { session.update(running: false, foreground: false) }
+    /// A sheet or an alert goes over the guest, or goes away.
+    func overlay(_ overlaid: Bool) { session.update(running: true, foreground: true, overlaid: overlaid) }
+
+    /// The guest registers its pointer, as a kernel with the hot-plug topic
+    /// does after the mouse is plugged.
+    func guestRegistersThePointer(_ registered: Bool = true) { runtime.androidSays(.pointerRegistered, registered) }
 
     /// Time passes and the session is asked what the guest should have.
     func advance(_ seconds: Double) {
@@ -78,11 +84,13 @@ private final class Rig {
         input.hover(position, at: point, beginning: beginning)
     }
 
-    /// A mouse iOS reports and the person has moved over the display.
-    func useTheMouse(at position: GuestPointerMapping.Position = Spot.centre) {
+    /// A mouse iOS reports and the person has moved over the display; the
+    /// guest registers its pointer, unless the test says it does not.
+    func useTheMouse(at position: GuestPointerMapping.Position = Spot.centre, registered: Bool = true) {
         presence.report(mouse: true)
         hover(position, at: CGPoint(x: 10, y: 10), beginning: true)
         hover(position, at: CGPoint(x: 11, y: 10))
+        if registered { guestRegistersThePointer() }
     }
 
     func finish() { session.shutDown() }
@@ -212,18 +220,110 @@ struct KeyboardMouseTests {
 
     // MARK: Mouse
 
-    @Test func aMouseIOSReportsIsPluggedWhenUsedAndItsPointerIsTheGuestsPointer() {
+    @Test func aMouseIOSReportsIsPluggedWhenUsedAndItsPointerIsTheGuestsPointerOnceTheGuestHasIt() {
         let rig = Rig()
         defer { rig.finish() }
         rig.start()
         rig.presence.report(mouse: true)
-        #expect(rig.input.routesPointer)
+        #expect(rig.input.watchesPointer)
         // The Simulator reports a mouse that is not there: reporting is not use.
         rig.hover(Rig.Spot.centre, at: CGPoint(x: 10, y: 10), beginning: true)
         #expect(rig.events.isEmpty)
         rig.hover(Rig.Spot.corner, at: CGPoint(x: 20, y: 10))
+        // Moving plugs it; the system pointer is not the guest's until the
+        // guest has registered the mouse, and then the guest first hears where
+        // the pointer is.
+        #expect(rig.events == [.connect(.mouse, true)])
+        #expect(!rig.input.routesPointer)
+        rig.guestRegistersThePointer()
+        #expect(rig.input.routesPointer && !rig.input.watchesPointer)
         #expect(rig.events == [
             .connect(.mouse, true), .pointer(PointerReport(x: 100, y: 200, buttons: 0, inRange: true)),
+        ])
+    }
+
+    // MARK: A guest that registers nothing
+
+    @Test func onAGuestThatNeverRegistersTheMouseThePointerStaysATouchAndStillPlugsIt() {
+        // The accepted kernel plugs nothing: no registration ever comes. The
+        // mouse behaves as it does with no mouse support at all.
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.presence.report(mouse: true)
+        rig.hover(Rig.Spot.centre, at: CGPoint(x: 10, y: 10), beginning: true)
+        rig.hover(Rig.Spot.corner, at: CGPoint(x: 20, y: 10))
+        rig.input.pointerTouchBeganUnrouted()
+        rig.input.pointerTouch(.began, at: Rig.Spot.corner, buttons: HardwareButtons.primary)
+        rig.input.pointerTouch(.ended, at: Rig.Spot.corner, buttons: 0)
+        rig.input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
+        // The use plugged it; nothing else reached the guest, the system
+        // pointer stays visible and its clicks stay the touchscreen's.
+        #expect(rig.events == [.connect(.mouse, true)])
+        #expect(!rig.input.routesPointer)
+        #expect(!rig.input.hidesSystemPointer)
+        #expect(rig.input.watchesPointer)
+        // Time passing does not change it.
+        rig.advance(60)
+        #expect(rig.events == [.connect(.mouse, true)])
+        #expect(!rig.input.routesPointer)
+    }
+
+    @Test func aClickOrAScrollThatComesFirstPlugsTheMouseToo() {
+        for use in [
+            { (rig: Rig) in rig.input.pointerTouchBeganUnrouted() },
+            { (rig: Rig) in rig.input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true) },
+        ] {
+            let rig = Rig()
+            rig.start()
+            rig.presence.report(mouse: true)
+            use(rig)
+            #expect(rig.events == [.connect(.mouse, true)])
+            rig.finish()
+        }
+    }
+
+    @Test func routingStartsAtTheRegistrationAndEndsWhenTheGuestLosesIt() {
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.useTheMouse(registered: false)
+        #expect(!rig.input.routesPointer)
+        rig.guestRegistersThePointer()
+        #expect(rig.input.routesPointer && rig.input.hidesSystemPointer)
+        rig.guestRegistersThePointer(false)
+        #expect(!rig.input.routesPointer && !rig.input.hidesSystemPointer)
+        // The guest took the mouse away and the pointer goes out of range.
+        #expect(rig.events.last == .pointer(PointerReport(x: 16384, y: 16384, buttons: 0, inRange: false)))
+        rig.guestRegistersThePointer()
+        #expect(rig.input.routesPointer)
+        // A restart takes the registration with it, and the runtime says so too.
+        rig.session.guestRestarted()
+        #expect(!rig.input.routesPointer && !rig.input.hidesSystemPointer)
+        rig.guestRegistersThePointer()
+        #expect(rig.input.routesPointer)
+        rig.endTheRun()
+        #expect(!rig.input.routesPointer)
+        // The registration the old run left is not news in the next.
+        rig.guestRegistersThePointer()
+        #expect(!rig.input.routesPointer)
+    }
+
+    @Test func thePositionPrecedesTheFirstButtonAndTheFirstWheel() {
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.useTheMouse(at: Rig.Spot.corner, registered: false)
+        rig.input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
+        #expect(rig.events == [.connect(.mouse, true)])
+        rig.guestRegistersThePointer()
+        rig.input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
+        rig.input.pointerTouch(.began, at: Rig.Spot.corner, buttons: HardwareButtons.primary)
+        #expect(rig.events == [
+            .connect(.mouse, true),
+            .pointer(PointerReport(x: 100, y: 200, buttons: 0, inRange: true)),
+            .mouse(dx: 0, dy: 0, buttons: 0, wheel: 120, horizontalWheel: 0),
+            .pointer(PointerReport(x: 100, y: 200, buttons: HardwareButtons.primary, inRange: true)),
         ])
     }
 
@@ -249,15 +349,6 @@ struct KeyboardMouseTests {
             .mouse(dx: 0, dy: 0, buttons: 0, wheel: -120, horizontalWheel: 0),
             .mouse(dx: 0, dy: 0, buttons: 0, wheel: 120, horizontalWheel: 120),
         ])
-    }
-
-    @Test func aPointerThatScrollsBeforeItMovesPlugsTheMouseToo() {
-        let rig = Rig()
-        defer { rig.finish() }
-        rig.start()
-        rig.presence.report(mouse: true)
-        rig.input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
-        #expect(rig.events == [.connect(.mouse, true), .mouse(dx: 0, dy: 0, buttons: 0, wheel: 120, horizontalWheel: 0)])
     }
 
     @Test func anIPhoneHasNoMouseToGiveTheGuest() {
@@ -383,6 +474,89 @@ struct KeyboardMouseTests {
             #expect(!rig.input.capturing)
             rig.finish()
         }
+    }
+
+    @Test func androidsCaptureDoesNotOutliveAGuestRestart() {
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.useTheMouse()
+        rig.runtime.androidSays(.pointerCapture, true)
+        rig.session.pointerLockChanged(true)
+        rig.rawMouse.emit(.buttons(HardwareButtons.primary))
+        #expect(rig.input.capturing && rig.rawMouse.running)
+        // The application that captured it is gone with the boot; the guest's
+        // mouse is plugged into the next boot as it was.
+        rig.session.guestRestarted()
+        #expect(!rig.input.capturing)
+        #expect(!rig.rawMouse.running)
+        #expect(rig.lockWanted.last == false)
+        #expect(rig.events.last == .mouse(dx: 0, dy: 0, buttons: 0, wheel: 0, horizontalWheel: 0))
+        // The next boot's registration brings the system pointer back, and a
+        // capture of its own is heard again.
+        rig.guestRegistersThePointer()
+        #expect(rig.input.routesPointer)
+        rig.runtime.androidSays(.pointerCapture, true)
+        #expect(rig.input.capturing)
+    }
+
+    @Test func aCaptureTheGuestReportsAfterTheRunEndedIsIgnored() {
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.useTheMouse()
+        rig.endTheRun()
+        rig.runtime.androidSays(.pointerCapture, true)
+        rig.runtime.androidSays(.capsLock, true)
+        rig.guestRegistersThePointer()
+        #expect(!rig.input.capturing)
+        #expect(!rig.rawMouse.running)
+        #expect(rig.lockWanted.last == false)
+        // The next run is not captured by the last one's report.
+        rig.start()
+        rig.useTheMouse()
+        #expect(!rig.input.capturing)
+        #expect(rig.lockWanted.last == false)
+    }
+
+    @Test func aSheetOrAnAlertOverTheGuestEndsTheCaptureUntilItGoes() {
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.useTheMouse()
+        rig.runtime.androidSays(.pointerCapture, true)
+        #expect(rig.lockWanted.last == true)
+        rig.overlay(true)
+        #expect(rig.lockWanted.last == false)
+        #expect(!rig.rawMouse.running)
+        #expect(!rig.input.capturing)
+        rig.overlay(false)
+        #expect(rig.lockWanted.last == true)
+        #expect(rig.rawMouse.running)
+        #expect(rig.input.capturing)
+        // A capture that begins while the sheet is up waits for it.
+        rig.runtime.androidSays(.pointerCapture, false)
+        rig.overlay(true)
+        rig.runtime.androidSays(.pointerCapture, true)
+        #expect(!rig.input.capturing)
+        rig.overlay(false)
+        #expect(rig.input.capturing)
+    }
+
+    // MARK: Keys that nobody lifts
+
+    @Test func aKeyboardThatGoesLiftsTheKeysHeldDownAndFreesTheUnplug() {
+        let rig = Rig()
+        defer { rig.finish() }
+        rig.start()
+        rig.presence.report(keyboard: true)
+        rig.input.keyDown(usage: 0x04, alphaShift: false)
+        rig.input.keyDown(usage: 0xE1, alphaShift: false)
+        rig.presence.report(keyboard: false)
+        // UIKit sent no release; the application lifts them, newest first.
+        #expect(rig.events.suffix(2) == [.key(0xE1, false), .key(0x04, false)])
+        rig.advance(4)
+        #expect(rig.events.last == .connect(.keyboard, false))
     }
 
     @Test func aCaptureWithoutAMouseAsksForNothing() {

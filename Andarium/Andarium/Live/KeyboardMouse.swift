@@ -30,6 +30,10 @@ enum HardwareInputDevice: Equatable, Sendable {
 
 enum HardwareInputStatus: Equatable, Sendable {
     case numLock, capsLock, scrollLock, pointerCapture
+    /// The guest registered its keyboard, or its pointer (the mouse and the
+    /// absolute pointer both), or lost it: the guest has the device only from
+    /// then on, and a kernel without the hot-plug topic never says it.
+    case keyboardRegistered, pointerRegistered
 }
 
 /// The loader's entries, the runtime of the device application.
@@ -60,7 +64,8 @@ final class LoaderHardwareInputRuntime: HardwareInputRuntime {
             kernarium_runtime_loader_set_input_status_handler(nil)
             return
         }
-        // The runtime calls on a thread of its own and must be answered at once.
+        // The loader delivers on the main queue, in the order the runtime
+        // published.
         kernarium_runtime_loader_set_input_status_handler { status, on in
             let known: HardwareInputStatus
             switch Int(status) {
@@ -68,9 +73,11 @@ final class LoaderHardwareInputRuntime: HardwareInputRuntime {
             case KERNARIUM_RUNTIME_INPUT_STATUS_CAPS_LOCK: known = .capsLock
             case KERNARIUM_RUNTIME_INPUT_STATUS_SCROLL_LOCK: known = .scrollLock
             case KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_CAPTURE: known = .pointerCapture
+            case KERNARIUM_RUNTIME_INPUT_STATUS_KEYBOARD_REGISTERED: known = .keyboardRegistered
+            case KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_REGISTERED: known = .pointerRegistered
             default: return
             }
-            Task { @MainActor in handler(known, on) }
+            MainActor.assumeIsolated { handler(known, on) }
         }
     }
 }
@@ -216,7 +223,11 @@ final class KeyboardMouse: GuestHardwareSink {
     /// What the runtime has been asked and took.
     private var keyboardPlugged = false
     private var mousePlugged = false
+    /// What the guest says it has registered: the system pointer is its mouse
+    /// only once it has.
+    private var pointerRegistered = false
     private var running = false
+    private var keyboardWasConnected = false
     private var timer: Task<Void, Never>?
 
     /// `wantsLock` is told whether the pointer lock is wanted whenever that
@@ -262,8 +273,10 @@ final class KeyboardMouse: GuestHardwareSink {
     // MARK: What LiveRuntime says
 
     /// The run has started and its devices exist (`running`), and the guest is
-    /// in front and not held still (`foreground`).
-    func update(running: Bool, foreground: Bool) {
+    /// in front and not held still (`foreground`). A sheet or an alert over
+    /// it (`overlaid`) takes the keys, and the guest's capture of the pointer
+    /// waits until it goes.
+    func update(running: Bool, foreground: Bool, overlaid: Bool = false) {
         let inFront = running && foreground
         if self.running != running {
             self.running = running
@@ -271,29 +284,36 @@ final class KeyboardMouse: GuestHardwareSink {
             if running {
                 presenceChanged()
             } else {
-                // The runtime forgot what it was asked at the run's end.
+                // The runtime forgot what it was asked at the run's end, and
+                // what the guest had registered went with the guest.
                 keyboardPlugged = false
                 mousePlugged = false
+                pointerRegistered = false
                 keysDown.removeAll()
                 capture.reset()
                 stopRawMouse()
                 input.capturing = false
                 input.routesPointer = false
+                input.watchesPointer = false
                 wantsLock(false)
             }
         }
         input.isActive = inFront
-        applyCapture(capture.inFront(inFront))
+        applyCapture(capture.inFront(inFront && !overlaid))
         evaluate()
     }
 
-    /// The guest restarted itself: the keys it was sent are gone with it, and
-    /// its Caps Lock starts off. The runtime plugs the devices into the next
+    /// The guest restarted itself: the keys it was sent are gone with it, its
+    /// Caps Lock starts off, and so do what it registered and what an
+    /// application had captured. The runtime plugs the devices into the next
     /// boot as they were.
     func guestRestarted() {
         input.releaseAll()
         keysDown.removeAll()
         input.keyboardPlugged()
+        pointerRegistered = false
+        applyCapture(capture.androidCaptured(false))
+        evaluate()
     }
 
     /// The person turned "Use the pointer as touch" on or off.
@@ -312,7 +332,12 @@ final class KeyboardMouse: GuestHardwareSink {
 
     private func presenceChanged() {
         let now = clock()
-        policy.keyboardReported(presence.keyboardConnected, at: now)
+        let keyboard = presence.keyboardConnected
+        // A keyboard that goes takes the release of its keys with it: UIKit
+        // sends none.
+        if keyboardWasConnected, !keyboard { input.releaseKeys() }
+        keyboardWasConnected = keyboard
+        policy.keyboardReported(keyboard, at: now)
         policy.mouseReported(presence.mouseConnected, at: now)
         evaluate()
     }
@@ -339,7 +364,6 @@ final class KeyboardMouse: GuestHardwareSink {
 
     private func reconcile() {
         let plan = policy.plan(at: clock())
-        input.routesPointer = plan.routesPointer
         if plan.keyboardPlugged != keyboardPlugged {
             if !plan.keyboardPlugged { input.releaseKeys() }
             if runtime.setConnected(.keyboard, plan.keyboardPlugged) {
@@ -353,6 +377,19 @@ final class KeyboardMouse: GuestHardwareSink {
                 mousePlugged = plan.mousePlugged
                 applyCapture(capture.mousePlugged(mousePlugged))
             }
+        }
+        // The system pointer is the guest's mouse once the guest has
+        // registered it. Until then, and on a kernel that never does, its
+        // clicks are touches as they are with no mouse, and what the person
+        // does with it only plugs the mouse.
+        let routes = plan.routesPointer && mousePlugged && pointerRegistered
+        if routes {
+            // Routing first: the position the watching kept goes to the guest.
+            input.routesPointer = true
+            input.watchesPointer = false
+        } else {
+            input.watchesPointer = plan.routesPointer
+            input.routesPointer = false
         }
         schedule(plan.nextChange)
     }
@@ -406,11 +443,20 @@ final class KeyboardMouse: GuestHardwareSink {
     // MARK: What Android says
 
     private func androidSaid(_ status: HardwareInputStatus, _ on: Bool) {
+        // Nothing the guest says outlives its run.
+        guard running else { return }
         switch status {
         case .capsLock:
             input.androidCapsLock(lit: on)
         case .pointerCapture:
             applyCapture(capture.androidCaptured(on))
+        case .pointerRegistered:
+            pointerRegistered = on
+            evaluate()
+        case .keyboardRegistered:
+            // Keys wait in the runtime until the keyboard is registered, so
+            // there is nothing for the application to hold back.
+            break
         case .numLock, .scrollLock:
             break
         }
@@ -510,11 +556,14 @@ enum HardwareInputEvent: Equatable {
 
 /// A runtime that takes what it is sent and keeps it. It refuses plug requests
 /// while `accepts` is false, as the runtime does between runs, and tells
-/// Android's side what a test makes the guest say.
+/// Android's side what a test makes the guest say. With `registers` set it
+/// plays a guest that registers each device it is plugged and unregisters it
+/// when it is unplugged; without it nothing is registered until a test says so.
 @MainActor
 final class RecordingHardwareInputRuntime: HardwareInputRuntime {
     private(set) var events: [HardwareInputEvent] = []
     var accepts = true
+    var registers = false
     var onEvent: ((HardwareInputEvent) -> Void)?
     private var statusHandler: (@MainActor (HardwareInputStatus, Bool) -> Void)?
 
@@ -530,6 +579,11 @@ final class RecordingHardwareInputRuntime: HardwareInputRuntime {
     func setConnected(_ device: HardwareInputDevice, _ connected: Bool) -> Bool {
         guard accepts else { return false }
         record(.connect(device, connected))
+        if registers {
+            // The guest's driver answers after the plug, not within it.
+            let status: HardwareInputStatus = device == .keyboard ? .keyboardRegistered : .pointerRegistered
+            Task { @MainActor [weak self] in self?.androidSays(status, connected) }
+        }
         return true
     }
 
@@ -558,9 +612,12 @@ final class RecordingHardwareInputRuntime: HardwareInputRuntime {
 extension KeyboardMouse {
     /// The keyboard and mouse of a UI test's launch: iOS's own hardware, the
     /// guest's end a log (`InputProbe`).
-    static func probe(_ probe: InputProbe, supportsMouse: Bool, wantsLock: @escaping (Bool) -> Void) -> KeyboardMouse {
+    static func probe(
+        _ probe: InputProbe, supportsMouse: Bool, guestRegisters: Bool, wantsLock: @escaping (Bool) -> Void
+    ) -> KeyboardMouse {
         let hardware = GameControllerHardware()
         let runtime = RecordingHardwareInputRuntime { probe.record($0.line) }
+        runtime.registers = guestRegisters
         return KeyboardMouse(
             runtime: runtime, presence: hardware, rawMouse: hardware, supportsMouse: supportsMouse,
             wantsLock: wantsLock)
