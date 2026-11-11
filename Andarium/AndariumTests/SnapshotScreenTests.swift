@@ -158,39 +158,37 @@ struct SnapshotWordsTests {
         #expect(SnapshotWords.restoredText(RestoredSnapshotNotice(name: "", created: created))
             == "The guest\u{2019}s data is back to the snapshot from \(date).")
         let failure = SnapshotFailure(POSIXError(.ENOSPC))
-        #expect(SnapshotWords.unfinishedText(item: SnapshotSample.item("x"), failure: failure).contains(failure.description))
+        #expect(SnapshotWords.unfinishedText(.named, item: SnapshotSample.item("x"), failure: failure).contains(failure.description))
     }
 
     @Test func aRestoreThatDidNotFinishSaysOnlyWhatIsKnown() {
-        let created = Date(timeIntervalSince1970: 1_794_000_000)
-        let date = SnapshotWords.taken(created)
         let older = SnapshotSample.item("Before r20", release: "20261108-los24-r18")
         // The snapshot is known and whole: Start finishes it, and nothing says the data is back.
-        let known = SnapshotWords.unfinishedText(item: older, failure: nil)
+        let known = SnapshotWords.unfinishedText(.named, item: older, failure: nil)
         #expect(known == "Andarium could not finish restoring \u{201C}Before r20\u{201D} from \(SnapshotWords.taken(older.created)). "
             + "Start finishes it. The next start updates it to r20.")
         #expect(!known.contains("is back"))
-        #expect(SnapshotWords.unfinishedText(item: SnapshotSample.item(""), failure: nil)
-            == "Andarium could not finish restoring the snapshot from \(SnapshotWords.taken(SnapshotSample.item("").created)). Start finishes it.")
-        _ = date
-        // Which snapshot it was cannot be read, or it is no longer whole: a start drops the restore, so nothing is promised.
-        let unknown = "A snapshot restore did not finish, and Andarium cannot read which one. "
-            + "The guest\u{2019}s data may be from before the restore or from the snapshot."
-        let damaged = SnapshotSample.item("x", restore: .refused(.incomplete))
-        for item in [nil, damaged] {
-            let text = SnapshotWords.unfinishedText(item: item, failure: nil)
-            #expect(text == unknown)
+        let unnamed = SnapshotSample.item("")
+        #expect(SnapshotWords.unfinishedText(.named, item: unnamed, failure: nil)
+            == "Andarium could not finish restoring the snapshot from \(SnapshotWords.taken(unnamed.created)). Start finishes it.")
+        // Which snapshot it was cannot be read, or it names one that is gone or damaged: a start drops the
+        // restore, so nothing is promised, and the two states are told apart.
+        let may = " The guest\u{2019}s data may be from before the restore or from the snapshot."
+        let unreadable = "A snapshot restore did not finish, and Andarium cannot read which one."
+        let lost = "A snapshot restore did not finish, and its snapshot is missing or damaged."
+        for (kind, reason) in [(UnfinishedRestoreKind.unreadable, unreadable), (.lost, lost)] {
+            let text = SnapshotWords.unfinishedText(kind, item: nil, failure: nil)
+            #expect(text == reason + may)
             #expect(!text.contains("Start finishes it") && !text.contains("is back"))
+            // The reasons Take and Restore give, and the refusal, follow.
+            #expect(SnapshotWords.unfinishedReason(kind) == reason)
+            #expect(SnapshotWords.takeReason(.restoreUnfinished, restore: kind) == reason)
+            #expect(SnapshotWords.nowReason(.restoreUnfinished, restore: kind) == reason)
+            #expect(SnapshotWords.refusal(.restoreUnfinished, restore: kind) == reason)
         }
-        // The reasons Take and Restore give, and the refusal, follow.
-        let unknownReason = "A snapshot restore did not finish, and Andarium cannot read which one."
-        #expect(SnapshotWords.unfinishedReason(known: false) == unknownReason)
-        #expect(SnapshotWords.takeReason(.restoreUnfinished, restoreKnown: false) == unknownReason)
-        #expect(SnapshotWords.nowReason(.restoreUnfinished, restoreKnown: false) == unknownReason)
-        #expect(SnapshotWords.refusal(.restoreUnfinished, restoreKnown: false) == unknownReason)
         for text in [
             SnapshotWords.takeReason(.restoreUnfinished), SnapshotWords.nowReason(.restoreUnfinished),
-            SnapshotWords.refusal(.restoreUnfinished),
+            SnapshotWords.refusal(.restoreUnfinished), SnapshotWords.unfinishedReason(.named),
         ] {
             #expect(text == "A restore did not finish. Start finishes it.")
         }
@@ -202,7 +200,7 @@ struct SnapshotWordsTests {
         let bare = SnapshotFailure(POSIXError(.ENOSPC))
         #expect(own.description.hasSuffix(".") && !bare.description.hasSuffix("."))
         for failure in [own, bare] {
-            let text = SnapshotWords.unfinishedText(item: SnapshotSample.item("x"), failure: failure)
+            let text = SnapshotWords.unfinishedText(.named, item: SnapshotSample.item("x"), failure: failure)
             #expect(text.hasSuffix("stopped: \(failure.description.hasSuffix(".") ? failure.description : failure.description + ".")"))
             #expect(!text.contains(".."))
         }
@@ -547,7 +545,7 @@ struct SnapshotsModelTests {
             // The listing names no unfinished restore, so none is promised to finish.
             #expect(
                 s.store.problem?.message == SnapshotWords.refusal(
-                    refusal, snapshot: about, appRevision: "r20", device: "iPhone", restoreKnown: false),
+                    refusal, snapshot: about, appRevision: "r20", device: "iPhone", restore: .unreadable),
                 "\(operation) \(refusal)")
             s.store.problem = nil
         }
@@ -676,25 +674,30 @@ struct SnapshotsModelTests {
         let damaged = SnapshotSample.item("", ago: 3, restore: .refused(.incomplete))
         let s = setup([a, damaged])
         await s.store.reload()
-        let unknown = SnapshotWords.unfinishedReason(known: false)
-        // An intent that cannot be read, then one that names a snapshot that is no longer whole.
-        for unfinished in [SnapshotUnfinishedRestore(), SnapshotUnfinishedRestore(snapshot: damaged.id)] {
+        // The record of the restore cannot be read; it names a snapshot that is damaged; it names one that is gone.
+        for (unfinished, kind) in [
+            (SnapshotUnfinishedRestore(), UnfinishedRestoreKind.unreadable),
+            (SnapshotUnfinishedRestore(snapshot: damaged.id), .lost),
+            (SnapshotUnfinishedRestore(snapshot: SnapshotID()), .lost),
+        ] {
+            let reason = SnapshotWords.unfinishedReason(kind)
             s.driver.unfinishedRestore = unfinished
             await s.store.reload(force: true)
-            #expect(s.store.unfinishedRestoreSnapshot == nil)
-            #expect(s.store.unfinishedRestoreText?.contains("cannot read which one") == true)
-            #expect(s.store.takeReason == unknown)
-            #expect(s.store.restoreNote(of: s.store.item(a.id)!) == unknown)
+            #expect(s.store.unfinishedRestoreKind == kind && s.store.unfinishedRestoreSnapshot == nil)
+            #expect(s.store.unfinishedRestoreText?.hasPrefix(reason) == true)
+            #expect(s.store.unfinishedRestoreText?.contains("Start finishes it") == false)
+            #expect(s.store.takeReason == reason)
+            #expect(s.store.restoreNote(of: s.store.item(a.id)!) == reason)
             // A restore asked for anyway is told the same.
             s.model.sheet = .snapshots
             await s.store.restore(a.id)
-            #expect(s.store.problem?.message == unknown)
+            #expect(s.store.problem?.message == reason)
             s.store.problem = nil
         }
         // One that names a whole snapshot is known, and Start finishes it.
         s.driver.unfinishedRestore = SnapshotUnfinishedRestore(snapshot: a.id)
         await s.store.reload(force: true)
-        #expect(s.store.unfinishedRestoreSnapshot?.id == a.id)
+        #expect(s.store.unfinishedRestoreKind == .named && s.store.unfinishedRestoreSnapshot?.id == a.id)
         #expect(s.store.takeReason == "A restore did not finish. Start finishes it.")
         #expect(s.store.unfinishedRestoreText?.hasPrefix("Andarium could not finish restoring") == true)
     }

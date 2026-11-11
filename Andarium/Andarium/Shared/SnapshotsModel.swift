@@ -130,13 +130,19 @@ final class SnapshotsModel {
 
     var unfinishedRestore: SnapshotUnfinishedRestore? { listing?.unfinishedRestore }
 
-    /// The snapshot an unfinished restore names, when it can be told which
-    /// one and Start can finish it: a snapshot that is whole. nil for an
-    /// intent that cannot be read and for a snapshot that is gone or damaged,
-    /// which a start drops.
+    /// What is known of the snapshot an unfinished restore names: a snapshot
+    /// that is whole, which Start finishes; a record that cannot be read; or a
+    /// snapshot that is gone or damaged, which a start drops. A refusal for a
+    /// restore the listing does not show is worded as unreadable.
+    var unfinishedRestoreKind: UnfinishedRestoreKind {
+        guard let id = unfinishedRestore?.snapshot else { return .unreadable }
+        guard let item = item(id), !item.isDamaged else { return .lost }
+        return .named
+    }
+
+    /// The snapshot an unfinished restore names, where Start can finish it.
     var unfinishedRestoreSnapshot: SnapshotSummary? {
-        guard let id = unfinishedRestore?.snapshot, let item = item(id), !item.isDamaged else { return nil }
-        return item
+        unfinishedRestoreKind == .named ? item(unfinishedRestore?.snapshot) : nil
     }
 
     /// The unfinished restore's own card says the next start updates the
@@ -155,7 +161,7 @@ final class SnapshotsModel {
     /// What Home's card says of a restore that did not finish; nil when none does.
     var unfinishedRestoreText: String? {
         guard let unfinished = unfinishedRestore else { return nil }
-        return SnapshotWords.unfinishedText(item: unfinishedRestoreSnapshot, failure: unfinished.lastFailure)
+        return SnapshotWords.unfinishedText(unfinishedRestoreKind, item: unfinishedRestoreSnapshot, failure: unfinished.lastFailure)
     }
 
     /// A restorable snapshot is a way out of a guest this app version is too
@@ -181,7 +187,7 @@ final class SnapshotsModel {
     }
 
     var takeReason: String? {
-        takeRefusal.flatMap { SnapshotWords.takeReason($0, restoreKnown: unfinishedRestoreSnapshot != nil) }
+        takeRefusal.flatMap { SnapshotWords.takeReason($0, restore: unfinishedRestoreKind) }
     }
 
     /// Why a snapshot cannot be restored now, or nil. What is wrong with the
@@ -210,7 +216,7 @@ final class SnapshotsModel {
             return SnapshotWords.restoreNote(of: item, appRevision: app.system.releaseRevision, endsUpdate: false)
         }
         if let refusal = restoreRefusal(of: item),
-            let reason = SnapshotWords.nowReason(refusal, restoreKnown: unfinishedRestoreSnapshot != nil) {
+            let reason = SnapshotWords.nowReason(refusal, restore: unfinishedRestoreKind) {
             return reason
         }
         return SnapshotWords.restoreNote(of: item, appRevision: app.system.releaseRevision, endsUpdate: endsUpdate)
@@ -500,7 +506,7 @@ final class SnapshotsModel {
             title: SnapshotWords.problemTitle(operation),
             message: SnapshotWords.refusal(
                 refusal, snapshot: snapshot, appRevision: app.system.releaseRevision, device: app.host.name,
-                restoreKnown: unfinishedRestoreSnapshot != nil)))
+                restore: unfinishedRestoreKind)))
     }
 
     private func tell(_ operation: SnapshotOperation, failure error: any Error) {
