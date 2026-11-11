@@ -138,18 +138,23 @@ private final class PhaseWatcher {
 private final class PointerLockWatcher {
     private let model: AppModel
     private weak var controller: UIViewController?
+    /// Read only by `deinit`, which cannot be isolated, after the last use.
+    nonisolated(unsafe) private var lockObserver: NSObjectProtocol?
 
     init(model: AppModel, controller: UIViewController) {
         self.model = model
         self.controller = controller
         observe()
-        // The root controller lives as long as the scene, and so does this.
-        NotificationCenter.default.addObserver(
+        lockObserver = NotificationCenter.default.addObserver(
             forName: UIPointerLockState.didChangeNotification, object: nil, queue: .main
         ) { [weak self] note in
             let scene = note.userInfo?[UIPointerLockState.sceneUserInfoKey] as? UIScene
             MainActor.assumeIsolated { self?.lockStateChanged(scene) }
         }
+    }
+
+    deinit {
+        if let lockObserver { NotificationCenter.default.removeObserver(lockObserver) }
     }
 
     private func observe() {
