@@ -44,9 +44,15 @@
  *                  no fill: the peer writes and closes in order while the
  *                  guest has not read, and the guest gets all of it and a
  *                  FIN, not a reset;
- *   unix-close-full  the same with hup-fill's state: the hang-up passes fill
- *                  the buffer, there is still no reset, and the guest gets
- *                  everything it is owed, then the FIN.
+ *   unix-close-full  the same with hup-fill's state and the guest's data
+ *                  stuck: the hang-up passes fill the buffer, there is still
+ *                  no reset, and the guest gets everything it is owed, then
+ *                  the FIN;
+ *   unix-close-writer  the same, but the guest's window is open when the peer
+ *                  closes. The guest then writes more than any window holds
+ *                  before it reads: every octet is acknowledged and the
+ *                  window stays open, with no reset. It reads everything,
+ *                  gets the FIN, and its next data is reset.
  *
  * A connection the host lost must reach the guest as a reset and release
  * SLiRP's socket. In every scenario the event loop stays quiet afterwards:
@@ -92,14 +98,15 @@ constexpr std::array<std::uint8_t, 4> forward_ip{10, 0, 2, 100};
 constexpr std::uint16_t forward_port = 5000;
 /*
  * SLiRP's buffer for the guest holds 128 KiB rounded up to whole 1460-octet
- * segments. It asks for a read only below half full and trims a read to
- * whole 1440-octet segments, the size a connection has before any segment
- * size applies, so the buffer ends full to its last octet only if the free
- * space at a read is a whole number of segments. The scenarios that need a
- * full buffer get there that way: the host peer sends in two parts, the
- * first leaving the buffer holding what the second needs to fill it, and the
- * probe checks the result. (Full is not the only state that matters:
- * hup-fill needs no such arithmetic.)
+ * segments. A read it asks for, below half full, is trimmed to whole
+ * segments of the connection's size: 1440 octets for a connection the guest
+ * opened to a host address (a forward to a Unix socket has 1460). Such a
+ * read leaves the buffer full to its last octet only if the free space is a
+ * whole number of segments. The scenarios that need an exactly full buffer
+ * of the first kind get there that way: the host peer sends in two parts,
+ * the first leaving the buffer holding what the second needs to fill it, and
+ * the probe checks the result. (A hang-up pass reads whatever is free, so
+ * hup-fill and the Unix scenarios need no such arithmetic.)
  */
 constexpr std::size_t buffer_size = 90 * 1460;
 constexpr std::size_t read_size = 1440;
@@ -111,12 +118,19 @@ constexpr std::size_t flood_bytes = 200000;
 constexpr std::size_t half_plus_bytes = 100000;
 /* What a Unix-domain peer writes before it closes, with room to spare. */
 constexpr std::size_t unix_bytes = 3000;
+/* The window SLiRP offers for the guest's data is 65535 until what it holds
+ * for the host leaves less room than that; the writer scenario uploads until
+ * it is below this, so that the host socket has data to write and hangs up
+ * visibly, and the window is still open. */
+constexpr std::uint16_t upload_window_limit = 60000;
+/* More than a window and more than SLiRP's whole buffer for the host. */
+constexpr std::size_t writer_bytes = 300000;
 constexpr int quiet_passes = 30;
 /* An idle loop finds nothing ready; a spinning one finds something on
  * every pass. */
 constexpr std::uint64_t quiet_ready_limit = 3;
 /* A scenario that has not finished in this long is stalled, and fails by
- * name. The alarm times the number of scenarios (8 x 20 s) stays under the
+ * name. The alarm times the number of scenarios (9 x 20 s) stays under the
  * test's TIMEOUT in SlirpToolingTests.cmake. */
 constexpr unsigned scenario_seconds = 20;
 
@@ -129,6 +143,7 @@ enum class Scenario {
 	hup_fill,
 	unix_close,
 	unix_close_full,
+	unix_close_writer,
 };
 enum class Seen { absent, required };
 
@@ -143,7 +158,7 @@ struct Expectation {
 	bool socket_open;
 };
 
-constexpr std::array<Expectation, 8> expectations{{
+constexpr std::array<Expectation, 9> expectations{{
 	{"reset", Scenario::reset, Seen::required, Seen::absent, 0, false},
 	{"reset-pending", Scenario::reset_pending, Seen::required, Seen::absent,
 	 0, false},
@@ -157,6 +172,10 @@ constexpr std::array<Expectation, 8> expectations{{
 	 unix_bytes, true},
 	{"unix-close-full", Scenario::unix_close_full, Seen::absent,
 	 Seen::required, flood_bytes, true},
+	/* The guest's next data after the FIN is reset, which ends the
+	 * connection. */
+	{"unix-close-writer", Scenario::unix_close_writer, Seen::required,
+	 Seen::required, flood_bytes, false},
 }};
 
 /* Where a scenario is, for the alarm to name. */
@@ -643,7 +662,88 @@ struct Outcome {
 	std::size_t bytes{};
 	bool socket_open{};
 	std::uint64_t ready{};
+	/* What went wrong on the way, where the end state does not say. */
+	std::string problem;
 };
+
+/* The guest sends until SLiRP holds enough of its data for the host that
+ * the host socket is polled for writing, with the window still open. */
+bool partial_upload(Guest &guest)
+{
+	stage("the guest's upload before the peer closes");
+	for (int pass = 0;
+	     pass < 400 && guest.slirp_window > upload_window_limit; ++pass) {
+		const std::uint32_t edge = guest.slirp_ack + guest.slirp_window;
+		const std::int32_t room =
+			static_cast<std::int32_t>(edge - guest.next);
+		if (room > 0)
+			guest.send(room < 1460 ?
+				   static_cast<std::size_t>(room) : 1460);
+		guest.pump(2);
+	}
+	if (guest.slirp_window > upload_window_limit) {
+		fprintf(stderr, "SLiRP's window for the guest's data stayed "
+			"at %u\n", static_cast<unsigned>(guest.slirp_window));
+		return false;
+	}
+	return true;
+}
+
+/* The peer is gone and SLiRP no longer writes what the guest sends, which
+ * must still be acknowledged and not hold the guest on a window that never
+ * opens. The guest writes more than any window before it reads. Then it
+ * reads everything and gets the FIN, and what it sends next is reset. */
+void write_before_reading(Guest &guest, std::size_t wanted, Outcome &outcome)
+{
+	stage("the guest writing after the peer's close");
+	std::size_t sent = 0;
+	std::uint16_t lowest_window = 65535;
+	for (int pass = 0; pass < 3000 && sent < writer_bytes; ++pass) {
+		const std::uint32_t edge = guest.slirp_ack + guest.slirp_window;
+		const std::int32_t room =
+			static_cast<std::int32_t>(edge - guest.next);
+		if (room > 0) {
+			std::size_t size = room < 1460 ?
+				static_cast<std::size_t>(room) : 1460;
+			if (size > writer_bytes - sent)
+				size = writer_bytes - sent;
+			guest.send(size);
+			sent += size;
+		}
+		guest.pump(2);
+		if (guest.slirp_window < lowest_window)
+			lowest_window = guest.slirp_window;
+	}
+	for (int pass = 0; pass < 20; ++pass)
+		guest.pump(5);
+	if (sent < writer_bytes) {
+		outcome.problem = "the guest was held on a closed window after " +
+			std::to_string(sent) + " of " +
+			std::to_string(writer_bytes) + " octets";
+		return;
+	}
+	if (guest.slirp_ack != guest.next) {
+		outcome.problem = "SLiRP left " +
+			std::to_string(guest.next - guest.slirp_ack) +
+			" octets of the guest's data unacknowledged";
+		return;
+	}
+	if (guest.rst) {
+		outcome.problem = "the guest got a RST while it had not read yet";
+		return;
+	}
+	read_everything(guest, wanted, true);
+	if (guest.rst) {
+		outcome.problem = "the guest got a RST before its FIN was read";
+		return;
+	}
+	/* The socket has no user any more: more data from the guest ends the
+	 * connection with a reset. */
+	stage("the guest writing after the FIN");
+	guest.send(100);
+	for (int pass = 0; pass < 50 && !guest.rst; ++pass)
+		guest.pump(20);
+}
 
 bool connection_lost(Scenario scenario)
 {
@@ -661,7 +761,8 @@ bool run_scenario(const Expectation &expected, Outcome &outcome)
 		return false;
 	}
 	const bool unix_forward = scenario == Scenario::unix_close ||
-		scenario == Scenario::unix_close_full;
+		scenario == Scenario::unix_close_full ||
+		scenario == Scenario::unix_close_writer;
 	const bool stuck = scenario == Scenario::reset_pending ||
 		scenario == Scenario::dead || scenario == Scenario::hup_fill ||
 		scenario == Scenario::unix_close_full;
@@ -680,12 +781,15 @@ bool run_scenario(const Expectation &expected, Outcome &outcome)
 		return false;
 	if (scenario != Scenario::unix_close) {
 		const bool filled = scenario == Scenario::hup_fill ||
-			scenario == Scenario::unix_close_full ?
+			scenario == Scenario::unix_close_full ||
+			scenario == Scenario::unix_close_writer ?
 			fill_above_half(guest, host) : fill_buffer(guest, host);
 		if (!filled)
 			return false;
 	}
 	if (stuck && !stick_upload(guest))
+		return false;
+	if (scenario == Scenario::unix_close_writer && !partial_upload(guest))
 		return false;
 
 	stage("failing the host side");
@@ -742,6 +846,7 @@ bool run_scenario(const Expectation &expected, Outcome &outcome)
 		host.close_peer();
 		break;
 	case Scenario::unix_close_full:
+	case Scenario::unix_close_writer:
 		host.close_peer();
 		if (!wait_state("the peer's close has reached SLiRP's socket",
 				[&] { return hung_up(host.slirp); }))
@@ -756,7 +861,9 @@ bool run_scenario(const Expectation &expected, Outcome &outcome)
 	for (int pass = 0; pass < (lost ? 50 : 5) && !guest.rst; ++pass)
 		guest.pump(lost ? 100 : 20);
 	outcome.ready = ready_while_quiet(guest);
-	if (!lost)
+	if (scenario == Scenario::unix_close_writer)
+		write_before_reading(guest, expected.bytes, outcome);
+	else if (!lost)
 		read_everything(guest, expected.bytes, true);
 	outcome.rst = guest.rst;
 	outcome.fin = guest.fin;
@@ -770,6 +877,34 @@ bool run_scenario(const Expectation &expected, Outcome &outcome)
 bool seen_as_expected(Seen expected, bool seen)
 {
 	return (expected == Seen::required) == seen;
+}
+
+/* Compares what the guest was told and what SLiRP kept with the table. */
+bool end_state_as_expected(const Expectation &expected, const Outcome &outcome)
+{
+	bool passed = true;
+	if (!seen_as_expected(expected.rst, outcome.rst)) {
+		fprintf(stderr, "FAIL %s: the guest got %s\n", expected.name,
+			expected.rst == Seen::required ? "no RST" : "a RST");
+		passed = false;
+	}
+	if (!seen_as_expected(expected.fin, outcome.fin)) {
+		fprintf(stderr, "FAIL %s: the guest got %s\n", expected.name,
+			expected.fin == Seen::required ? "no FIN" : "a FIN");
+		passed = false;
+	}
+	if (expected.bytes != 0 && outcome.bytes != expected.bytes) {
+		fprintf(stderr, "FAIL %s: the guest read %zu bytes, expected "
+			"%zu\n", expected.name, outcome.bytes, expected.bytes);
+		passed = false;
+	}
+	if (outcome.socket_open != expected.socket_open) {
+		fprintf(stderr, "FAIL %s: SLiRP's host socket is %s\n",
+			expected.name,
+			outcome.socket_open ? "still open" : "closed");
+		passed = false;
+	}
+	return passed;
 }
 
 /* One scenario in a child process, so that an abort in libslirp is a failure
@@ -799,6 +934,11 @@ bool run_in_child(const Expectation &expected)
 		       outcome.bytes, outcome.socket_open ? 1 : 0,
 		       static_cast<unsigned long long>(outcome.ready));
 		bool passed = true;
+		if (!outcome.problem.empty()) {
+			fprintf(stderr, "FAIL %s: %s\n", expected.name,
+				outcome.problem.c_str());
+			passed = false;
+		}
 		if (outcome.ready > quiet_ready_limit) {
 			fprintf(stderr, "FAIL %s: %llu of %d passes found a "
 				"descriptor ready, the loop is spinning\n",
@@ -807,30 +947,10 @@ bool run_in_child(const Expectation &expected)
 				quiet_passes);
 			passed = false;
 		}
-		if (!seen_as_expected(expected.rst, outcome.rst)) {
-			fprintf(stderr, "FAIL %s: the guest got %s\n",
-				expected.name,
-				expected.rst == Seen::required ? "no RST" : "a RST");
+		/* After a failure on the way the end state says nothing more. */
+		if (outcome.problem.empty() &&
+		    !end_state_as_expected(expected, outcome))
 			passed = false;
-		}
-		if (!seen_as_expected(expected.fin, outcome.fin)) {
-			fprintf(stderr, "FAIL %s: the guest got %s\n",
-				expected.name,
-				expected.fin == Seen::required ? "no FIN" : "a FIN");
-			passed = false;
-		}
-		if (expected.bytes != 0 && outcome.bytes != expected.bytes) {
-			fprintf(stderr, "FAIL %s: the guest read %zu bytes, "
-				"expected %zu\n", expected.name, outcome.bytes,
-				expected.bytes);
-			passed = false;
-		}
-		if (outcome.socket_open != expected.socket_open) {
-			fprintf(stderr, "FAIL %s: SLiRP's host socket is %s\n",
-				expected.name,
-				outcome.socket_open ? "still open" : "closed");
-			passed = false;
-		}
 		fflush(stdout);
 		fflush(stderr);
 		_exit(passed ? 0 : 1);
