@@ -367,15 +367,18 @@ void the_cache_ledger_is_read_after_a_forced_relief()
 	namespace cache = uml::cpu::gadget_cache;
 	constexpr std::size_t kib = 1024;
 	cache::set_budget(64 * kib);
-	cache::Account small {&CacheOwner::notify, nullptr};
-	cache::Account large {&CacheOwner::notify, nullptr};
+	/* Two accounts that last ran together, a window before the relief: both
+	 * are idle, and the larger goes first. */
+	constexpr std::uint64_t opened = 1000;
+	cache::Account small {&CacheOwner::notify, nullptr, opened};
+	cache::Account large {&CacheOwner::notify, nullptr, opened};
 	small.charge(10 * kib);
 	large.charge(70 * kib);
 	const auto before = uml::runtime::run_figures(false);
 	require((before.sources & RunFigures::cache) != 0 &&
 		(before.sources & RunFigures::largest) != 0 &&
 		before.largest_open == 70 * kib, "the largest account is wrong");
-	cache::relieve();
+	cache::relieve_at(opened + cache::window_epochs);
 	const auto after = uml::runtime::run_figures(false);
 	require(after.reliefs == before.reliefs + 1 &&
 		after.shed_accounts == before.shed_accounts + 1 &&
