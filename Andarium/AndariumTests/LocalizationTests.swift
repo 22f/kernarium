@@ -18,6 +18,14 @@ struct LocalizationTests {
             key, table: table, locale: Locale(identifier: language), bundle: .main))
     }
 
+    /// The scheme's Test action pins English, so the tests that read the words
+    /// the application says do not depend on the language of the device. When
+    /// this fails, so will they: the pin is gone or not taken.
+    @Test func theTestsRunInEnglish() {
+        #expect(Bundle.main.preferredLocalizations.first == "en", "\(Bundle.main.preferredLocalizations)")
+        #expect(Locale.preferredLanguages.first?.hasPrefix("en") == true, "\(Locale.preferredLanguages)")
+    }
+
     @Test func theApplicationShipsEveryLanguage() {
         let shipped = Set(Bundle.main.localizations)
         for language in ["en"] + Self.languages {

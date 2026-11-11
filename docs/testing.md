@@ -315,7 +315,10 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests`;
-the scheme without the filter also runs `AndariumUITests`). `SnapshotFileApiTests`
+the scheme without the filter also runs `AndariumUITests`). The scheme's Test
+action pins English, so the tests that read the application's words do not
+depend on the language of the device; `LocalizationTests` names a lost pin and
+looks each language up by name. `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
