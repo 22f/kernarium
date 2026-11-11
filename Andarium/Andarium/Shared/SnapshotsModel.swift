@@ -68,7 +68,10 @@ final class SnapshotsModel {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var inFlight: (revision: Int, task: Task<Void, Never>)?
     @ObservationIgnored private var pendingName: (id: SnapshotID, name: String)?
+    /// The debounce of the name being typed.
     @ObservationIgnored private var renameTask: Task<Void, Never>?
+    /// The last rename handed to the driver; each waits for the one before it.
+    @ObservationIgnored private var renameTail: Task<Void, Never>?
     @ObservationIgnored private var freshTask: Task<Void, Never>?
 
     // MARK: What the listing says
@@ -317,6 +320,7 @@ final class SnapshotsModel {
     /// A snapshot of the guest's data as it is, with the name if given.
     func take(name: String) async {
         guard let app else { return }
+        await settleRenames()
         switch await app.takeSnapshot(named: name) {
         case .done(let made):
             mark(fresh: made.id)
@@ -333,8 +337,9 @@ final class SnapshotsModel {
     /// Puts the snapshot's data back. The sheet closes on Home, which says
     /// what happened and that Start is next.
     func restore(_ id: SnapshotID) async {
-        guard let app, let item = item(id) else { return }
+        guard let app else { return }
         await flushName()
+        guard let item = item(id) else { return }
         var notice = RestoredSnapshotNotice(name: item.name, created: item.created)
         if case .updatesAtNextStart(_, let to) = item.restore { notice.updatesTo = SnapshotWords.revision(of: to) }
         switch await app.restoreSnapshot(id) {
@@ -367,6 +372,14 @@ final class SnapshotsModel {
 
     func delete(_ id: SnapshotID) async {
         guard let app else { return }
+        // What was typed in the page of the snapshot that goes is not saved: it
+        // would be refused as missing. A rename under way, or of another
+        // snapshot, finishes first; the driver refuses a delete beside it.
+        if pendingName?.id == id {
+            pendingName = nil
+            renameTask?.cancel()
+        }
+        await flushName()
         let before = items.map(\.id)
         switch await app.deleteSnapshot(id) {
         case .done:
@@ -385,15 +398,32 @@ final class SnapshotsModel {
         await reload()
     }
 
-    /// Renames at once: the list's Rename… prompt.
+    /// Renames at once: the list's Rename… prompt. A rename waits for the one
+    /// before it, so they reach the driver in the order they were asked.
     func rename(_ id: SnapshotID, to name: String) async {
         guard let app else { return }
-        switch await app.renameSnapshot(id, to: name) {
-        case .done: break
-        case .refused(let refusal): tell(.rename, refusal: refusal)
-        case .failed(let error): tell(.rename, failure: error)
+        let previous = renameTail
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            await previous?.value
+            switch await app.renameSnapshot(id, to: name) {
+            case .done: break
+            case .refused(let refusal): self?.tell(.rename, refusal: refusal)
+            case .failed(let error): self?.tell(.rename, failure: error)
+            }
         }
+        renameTail = task
+        await task.value
+        if renameTail == task { renameTail = nil }
         await reload()
+    }
+
+    /// Waits for every rename handed to the driver: an operation that the
+    /// driver refuses beside a rename starts after it.
+    private func settleRenames() async {
+        while let tail = renameTail {
+            await tail.value
+            if renameTail == tail { renameTail = nil }
+        }
     }
 
     /// The name field of a page: the name is saved a moment after the last
@@ -409,10 +439,12 @@ final class SnapshotsModel {
         }
     }
 
-    /// Saves a name that waits for its moment now.
+    /// Saves a name that waits for its moment now, and waits for the renames
+    /// under way.
     func flushName() async {
         renameTask?.cancel()
         await saveName()
+        await settleRenames()
     }
 
     private func saveName() async {

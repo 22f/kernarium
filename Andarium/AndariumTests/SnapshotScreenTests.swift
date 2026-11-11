@@ -616,6 +616,64 @@ struct SnapshotsModelTests {
         #expect(s.driver.log.count == 2, "nothing waits any more")
     }
 
+    @Test func deletingASnapshotDropsWhatWasTypedInItsPage() async {
+        let gone = SnapshotSample.item("old", ago: 1)
+        let s = setup([gone, SnapshotSample.item("other", ago: 2)])
+        await s.store.reload()
+        s.store.edit(name: "Not wanted", of: gone.id)
+        await s.store.delete(gone.id)
+        #expect(await until { s.store.count == 1 })
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(s.driver.log == ["delete"], "the typed name is not saved afterwards")
+        #expect(s.store.problem == nil, "and nothing says the snapshot is not there any more")
+    }
+
+    @Test(arguments: [SnapshotWork.delete, .restore, .create])
+    func aRenameUnderWayIsWaitedForAndNotAnsweredWithBusy(operation: SnapshotWork) async {
+        let a = SnapshotSample.item("a", ago: 1)
+        let b = SnapshotSample.item("b", ago: 2)
+        let s = setup([a, b])
+        s.model.sheet = .snapshots
+        await s.store.reload()
+        s.driver.holding = .rename
+        // The name typed and saved by the page going away.
+        s.store.edit(name: "Renamed", of: a.id)
+        let saving = Task { await s.store.flushName() }
+        #expect(await until { s.model.snapshotActivity.operation == .rename })
+        // The operation is asked for while the rename is under way.
+        let asked = Task {
+            switch operation {
+            case .delete: await s.store.delete(b.id)
+            case .restore: await s.store.restore(b.id)
+            default: await s.store.take(name: "x")
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(60))
+        #expect(s.driver.log == ["rename Renamed"], "it waits for the rename")
+        s.driver.release()
+        await saving.value
+        await asked.value
+        #expect(s.store.problem == nil, "and is not refused as busy")
+        #expect(s.driver.log.count == 2 && s.driver.log[0] == "rename Renamed")
+    }
+
+    @Test func renamesReachTheDriverInTheOrderTheyWereAsked() async {
+        let item = SnapshotSample.item("old")
+        let s = setup([item])
+        await s.store.reload()
+        s.driver.holding = .rename
+        let first = Task { await s.store.rename(item.id, to: "first") }
+        #expect(await until { s.model.snapshotActivity.operation == .rename })
+        let second = Task { await s.store.rename(item.id, to: "second") }
+        try? await Task.sleep(for: .milliseconds(60))
+        #expect(s.driver.log == ["rename first"])
+        s.driver.release()
+        await first.value
+        await second.value
+        #expect(s.driver.log == ["rename first", "rename second"])
+        #expect(s.store.item(item.id)?.name == "second")
+    }
+
     @Test func renamingFromTheListsPromptStartsFromTheCurrentName() async {
         let item = SnapshotSample.item("old")
         let s = setup([item])
