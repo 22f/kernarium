@@ -18,11 +18,10 @@ nonisolated enum BugReportStaging {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    /// The room the volume has for important data, in bytes.
+    /// The room a write to the volume can use, in bytes: the figure the rest of
+    /// the application uses (`HostStorage`).
     static func availableBytes() -> Int64 {
-        let values = try? FileManager.default.temporaryDirectory
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return values?.volumeAvailableCapacityForImportantUsage ?? 0
+        Int64(clamping: HostStorage.freeBytes(on: FileManager.default.temporaryDirectory))
     }
 
     /// Room kept beyond the report itself, for the system and the share

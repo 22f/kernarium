@@ -627,6 +627,33 @@ struct GuestSpacePauseTests {
     }
 
     @Test
+    func theDevicesOwnSpaceIsTheSpaceAWriteCanUse() throws {
+        // What the watch, the start check and the resume read when the harness
+        // states nothing: `statfs(2)`'s answer, not the larger "important
+        // usage" figure that counts purgeable space. The volume is in use by
+        // others, so the reading is held between two answers of the call.
+        func statfsBytes() -> UInt64 {
+            var volume = statfs()
+            guard statfs(NSHomeDirectory(), &volume) == 0 else { return 0 }
+            return UInt64(volume.f_bavail) * UInt64(volume.f_bsize)
+        }
+        let directory = try harnessDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let slack = 256 * Bytes.mib
+        for harness in [
+            SpaceHarness(enabled: false, directory: directory),
+            SpaceHarness(enabled: true, directory: directory),
+        ] {
+            let before = statfsBytes()
+            let figure = harness.freeSpace()
+            let after = statfsBytes()
+            #expect(before > 0)
+            #expect(figure + slack >= min(before, after))
+            #expect(figure <= max(before, after) + slack)
+        }
+    }
+
+    @Test
     func theHarnessFilesAreParsedStrictly() throws {
         let directory = try harnessDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

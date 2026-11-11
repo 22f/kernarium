@@ -113,8 +113,9 @@ final class LiveRuntime: RuntimeDriver {
     /// The runtime runs a guest, from its start until its run returns.
     private var runActive = false { didSet { publishSnapshotActivity() } }
     private var active = UIApplication.shared.applicationState == .active
-    /// The device's free space, which the run watches. The application's
-    /// own reading unless a test supplies another.
+    /// The space a write can use on the device (`HostStorage`), which the run
+    /// watches and every screen shows. The application's own reading unless a
+    /// test supplies another.
     private let freeSpace: @Sendable () -> UInt64
     private var spaceWatchTask: Task<Void, Never>?
     /// Tells a watch that ended from the one that replaced it.
@@ -1027,8 +1028,8 @@ final class LiveRuntime: RuntimeDriver {
     /// has paused the guest.
     private func watchSpace() async {
         while !Task.isCancelled {
-            let free = await readFreeSpace()
-            guard !Task.isCancelled, wantsSpaceWatch else { return }
+            guard wantsSpaceWatch else { return }
+            let free = freeSpace()
             model?.host.freeStorageBytes = free
             if RunSpace.verdict(freeBytes: free) == .pause {
                 pauseForSpace(freeBytes: free)
@@ -1066,7 +1067,7 @@ final class LiveRuntime: RuntimeDriver {
     /// did not pause. Returns whether there is enough space for it to run on,
     /// which takes the screen away; otherwise the guest is paused again.
     func checkSpaceAfterPauseFailed() async -> Bool {
-        let free = await readFreeSpace()
+        let free = freeSpace()
         model?.host.freeStorageBytes = free
         guard !RunSpace.allowsResume(freeBytes: free) else {
             spaceAlertOpen = false
@@ -1079,15 +1080,8 @@ final class LiveRuntime: RuntimeDriver {
         return false
     }
 
-    /// One reading, off the main thread: the system works the figure out
-    /// from the volume.
-    private func readFreeSpace() async -> UInt64 {
-        let source = freeSpace
-        return await Task.detached(priority: .utility) { source() }.value
-    }
-
     func resumeAfterSpacePause() async -> Bool {
-        let free = await readFreeSpace()
+        let free = freeSpace()
         model?.host.freeStorageBytes = free
         guard RunSpace.allowsResume(freeBytes: free) else { return false }
         await wakeGuest()
