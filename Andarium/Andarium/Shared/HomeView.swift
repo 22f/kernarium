@@ -64,6 +64,7 @@ struct HomeView: View {
                 case .create: NewGuestSheet()
                 case .resize: ResizeSheet()
                 case .system: SystemSheet()
+                case .resolution: ResolutionSheet()
                 case .info: InfoSheet(page: hints.infoPage)
                 case .snapshots: SnapshotsSheet()
                 case .whatsNew:

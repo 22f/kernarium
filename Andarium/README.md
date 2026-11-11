@@ -418,9 +418,23 @@ requires reopening Andarium.
   a key when iOS's state differs from the light Android reports
   (`CapsLockReconciler`). Android hides its on-screen keyboard while it has a
   hardware keyboard.
-- **Retina.** Retina mode applies at the next start and uses the screen's
-  native pixels, whose host allocations count against the same iOS process
-  limit as guest RAM (`DisplayOptions`).
+- **Resolution.** Home's Guest system section has a Resolution row: the pixels
+  the guest's display will have, and the end's name where the choice is an
+  end (Native, Fastest), with Change opening the list of every choice with its
+  pixels and density. The choices (`ResolutionChoices`) are 1.0, every 0.5 step
+  that is at least a quarter below the screen's native scale, then native. The
+  guest's pixels are the display's points times the choice, rounded down, and
+  its density is 160 dpi a point of choice (`GuestDisplayLayout`), so
+  Android's interface keeps its size at every choice. The row states what the
+  next start gives: the display is the window less the session's safe area
+  (`SessionDisplayArea`, read by `DisplayAreaProbe`), and follows a window as it
+  resizes. A choice applies at the next start. Native is stored as the symbol
+  and follows the screen, and a stored number that is no choice of this screen
+  goes to the nearest one. A person who never chose gets native where the
+  system lets the application use more than 4 GiB of memory, else the choice
+  nearest 1.5 (`DisplayOptions`). Native's host allocations count against the
+  same iOS process limit as guest RAM; neither the graphics-memory estimate
+  nor the memory default counts the display's pixels.
 - **JIT.** A development build on a device has a JIT row on Home, off until
   the person turns it on and kept for the install (`JitPreference`). An iOS
   device gives the JIT its executable memory only through a debugger attached to
@@ -496,7 +510,7 @@ requires reopening Andarium.
   with any launch setting is a harness's and starts with them off, so a
   measured run never inherits the overlay; `ANDARIUM_STATS` (`1` or `0`) states
   the value. Such a launch keeps nothing, and neither does one that states
-  Retina mode, so what the person stored stays (`PreferenceKeeper`).
+  the resolution, so what the person stored stays (`PreferenceKeeper`).
 - **Graphics memory.** The runtime counts the graphics allocations the host
   refused the guest ([`docs/graphics.md`](../docs/graphics.md#device-memory-budget)).
   While a normal session runs in the foreground the model reads the count every
@@ -610,6 +624,9 @@ they mean in Kernarium; the automation Android runtime
 (`package-ios-frameworks.sh --runtimes android --android-automation`)
 additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 ([`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+`KERNARIUM_DISPLAY_SCALE` (`native` or a number of guest pixels to a point)
+states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
+one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once

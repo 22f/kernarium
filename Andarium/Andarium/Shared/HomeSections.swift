@@ -104,11 +104,12 @@ struct RowDivider: View {
 
 // MARK: System
 
-/// The guest's system in one section, as three rows of one shape: CPU and
+/// The guest's system in one section, as four rows of one shape: CPU and
 /// memory states the vCPUs and RAM, with Edit opening the sheet that changes
-/// them; Storage states what the guest holds of its capacity under a bar,
-/// with Resize; Snapshots states how many there are and the space they use,
-/// with Manage opening them.
+/// them; Resolution states the guest's display, with Change opening its
+/// choices (`ResolutionRow`); Storage states what the guest holds of its
+/// capacity under a bar, with Resize; Snapshots states how many there are and
+/// the space they use, with Manage opening them.
 struct SystemSection: View {
     @Environment(AppModel.self) private var model
 
@@ -122,6 +123,8 @@ struct SystemSection: View {
                         action: { model.sheet = .system }
                     )
                 )
+                RowDivider()
+                ResolutionRow()
                 RowDivider()
                 StorageRow(guest: guest, stops: model.capacityStopsGiB, resize: { model.sheet = .resize })
                 RowDivider()
@@ -173,6 +176,9 @@ struct SystemRow<Below: View>: View {
     let title: String
     let subtitle: String
     let button: SystemRowButton
+    /// What VoiceOver reads for the title and the line under it, where
+    /// the written line does not read well.
+    var spoken: String?
     @ViewBuilder var below: Below
 
     var body: some View {
@@ -224,6 +230,7 @@ struct SystemRow<Below: View>: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
+        .modifier(SpokenLine(text: spoken))
     }
 
     private var capsule: some View {
@@ -251,8 +258,24 @@ struct SystemRow<Below: View>: View {
 }
 
 extension SystemRow where Below == EmptyView {
-    init(symbol: String, title: String, subtitle: String, button: SystemRowButton) {
-        self.init(symbol: symbol, title: title, subtitle: subtitle, button: button, below: { EmptyView() })
+    init(symbol: String, title: String, subtitle: String, spoken: String? = nil, button: SystemRowButton) {
+        self.init(
+            symbol: symbol, title: title, subtitle: subtitle, button: button, spoken: spoken,
+            below: { EmptyView() })
+    }
+}
+
+/// A row's title and line as one element that VoiceOver reads as `text`;
+/// without `text` the words are read as they are written.
+private struct SpokenLine: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text {
+            content.accessibilityElement(children: .ignore).accessibilityLabel(text)
+        } else {
+            content
+        }
     }
 }
 

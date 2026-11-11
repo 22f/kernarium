@@ -13,7 +13,7 @@ enum StatisticsViewer: Hashable {
 }
 
 enum SheetKind: String, Identifiable, Hashable, CaseIterable {
-    case create, resize, info, system, whatsNew, snapshots
+    case create, resize, info, system, resolution, whatsNew, snapshots
 
     var id: String { rawValue }
 }

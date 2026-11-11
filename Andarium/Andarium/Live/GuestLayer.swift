@@ -13,19 +13,25 @@ struct GuestLayer: View {
     @State private var coversScreen = false
 
     var body: some View {
-        if showsGuest {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                display
-                // In a window, iPadOS draws its window controls over the
-                // top-left corner of the content, which would cover the
-                // guest's status bar; the system knows where they are. A
-                // scene that covers the screen has none.
-                .containerCornerOffset(SceneCoverage.cornerOffsetEdges(coversScreen: coversScreen), sizeToFit: true)
+        ZStack {
+            // Home states the resolution the guest will get, which is this
+            // display's size at the choice, so the display's size is read
+            // whether or not the guest is shown.
+            DisplayAreaProbe(cornerEdges: SceneCoverage.cornerOffsetEdges(coversScreen: coversScreen))
+            if showsGuest {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    display
+                    // In a window, iPadOS draws its window controls over the
+                    // top-left corner of the content, which would cover the
+                    // guest's status bar; the system knows where they are. A
+                    // scene that covers the screen has none.
+                    .containerCornerOffset(SceneCoverage.cornerOffsetEdges(coversScreen: coversScreen), sizeToFit: true)
+                }
             }
-            .background {
-                SceneCoverageReader { coversScreen = $0 }
-            }
+        }
+        .background {
+            SceneCoverageReader { coversScreen = $0 }
         }
     }
 
