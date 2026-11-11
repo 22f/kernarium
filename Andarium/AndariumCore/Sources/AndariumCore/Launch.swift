@@ -10,7 +10,13 @@ import Foundation
 public struct LaunchOverrides: Equatable, Sendable {
     /// The settings a launch can state.
     public enum Setting: CaseIterable, Sendable {
-        case vCPUCount, memoryMiB, diskGiB, retina
+        case vCPUCount, memoryMiB, diskGiB
+        /// "native", or the number of guest pixels to a point.
+        case displayScale
+        /// Retina mode on ("1", native) or off ("0", 1.0): what harnesses
+        /// stated before `displayScale`, which is read where this is stated
+        /// and that is not.
+        case retinaMode
         /// "normal" or "recovery": start at launch.
         case start
         /// Kernarium's boot mode, whose "recovery" also asks for a start.
@@ -27,7 +33,9 @@ public struct LaunchOverrides: Equatable, Sendable {
     public var vCPUCount: Int?
     public var memoryMiB: Int?
     public var capacityGiB: Int?
-    public var retina: Bool?
+    /// The display's resolution this launch states; it is that run's and not
+    /// the person's choice, so it is not kept.
+    public var displayScale: GuestDisplayScale?
     /// Start at launch, creating the guest first when there is none.
     public var start: StartMode?
     /// Erase the guest's data before the start.
@@ -57,7 +65,8 @@ public struct LaunchOverrides: Equatable, Sendable {
         memoryMiB = integer(.memoryMiB, in: Limits.runtimeMemoryRangeMiB)
             .flatMap { MemoryPolicy.runtimeAccepts($0) ? $0 : nil }
         capacityGiB = integer(.diskGiB, in: Limits.capacityRangeGiB)
-        retina = flag(.retina)
+        displayScale = value(.displayScale).flatMap { GuestDisplayScale(text: $0) }
+            ?? flag(.retinaMode).map { $0 ? .native : .points }
         switch value(.start) {
         case "normal"?: start = .normal
         case "recovery"?: start = .recovery
@@ -110,57 +119,69 @@ public struct LaunchOverrides: Equatable, Sendable {
 /// always follows the window, so that is not an option; a value an earlier
 /// version stored for it is ignored.
 ///
-/// Retina mode (the guest draws at the screen's pixel density) follows the
-/// device until the person sets it: it is on where the system lets the
-/// application use more than `retinaDefaultAboveBytes`, off where it does
-/// not. A choice made on Home is kept as made and the default never replaces it.
+/// The resolution (`ResolutionChoices`) follows the device until the person
+/// sets it: native where the system lets the application use more than
+/// `nativeDefaultAboveBytes`, and where it does not the choice nearest 1.5.
+/// A choice made on Home is kept as made and the default never replaces it.
+/// Native is stored as the symbol and not as the screen's number, which
+/// differs between devices and display zooms.
 public struct DisplayOptions: Codable, Equatable, Sendable {
     /// The stored form's key in the defaults database.
     public static let storageKey = "andarium.display"
 
-    /// What the person chose for Retina mode; nil until they choose.
-    public var chosenRetina: Bool?
+    /// What the person chose for the resolution; nil until they choose.
+    public var chosenScale: GuestDisplayScale?
 
-    public init(chosenRetina: Bool? = nil) {
-        self.chosenRetina = chosenRetina
+    public init(chosenScale: GuestDisplayScale? = nil) {
+        self.chosenScale = chosenScale
     }
 
-    /// Retina mode is on by default above this much memory the system lets
-    /// the application use (4 GiB).
-    public static let retinaDefaultAboveBytes: UInt64 = 4 << 30
+    /// The resolution is native by default above this much memory the system
+    /// lets the application use (4 GiB).
+    public static let nativeDefaultAboveBytes: UInt64 = 4 << 30
 
-    /// The default Retina mode for `memoryLimitBytes`, what the system holds
-    /// the application's memory to (`MemoryLimit.bytes`); zero where it sets
-    /// none, a Mac, which has more than the threshold.
-    public static func defaultRetina(memoryLimitBytes: UInt64) -> Bool {
-        memoryLimitBytes == 0 || memoryLimitBytes > retinaDefaultAboveBytes
+    /// The default for `memoryLimitBytes`, what the system holds the
+    /// application's memory to (`MemoryLimit.bytes`; zero where it sets none,
+    /// a Mac, which has more than the threshold): native above it, and the
+    /// choice nearest 1.5 elsewhere.
+    public static func defaultScale(memoryLimitBytes: UInt64, choices: ResolutionChoices) -> GuestDisplayScale {
+        if memoryLimitBytes == 0 || memoryLimitBytes > nativeDefaultAboveBytes { return .native }
+        return choices.scale(at: choices.index(nearest: .factor(ResolutionChoices.preferredMiddle)))
     }
 
-    /// Retina mode as the guest draws: the person's choice, else the default.
-    public func retina(memoryLimitBytes: UInt64) -> Bool {
-        chosenRetina ?? Self.defaultRetina(memoryLimitBytes: memoryLimitBytes)
+    /// The resolution as the guest draws: the person's choice, else the
+    /// default, either as a choice of `choices`.
+    public func scale(memoryLimitBytes: UInt64, choices: ResolutionChoices) -> GuestDisplayScale {
+        choices.resolve(
+            chosenScale ?? Self.defaultScale(memoryLimitBytes: memoryLimitBytes, choices: choices))
     }
 
-    // The stored form keeps `retina` for the value and `chosen` for whether the
-    // person set it. A form from before the default has no `chosen`: its
-    // `true` was a choice, and its `false` may only have been the old default,
-    // so it counts as no choice.
-    private enum CodingKeys: String, CodingKey { case retina, chosen }
+    // The stored form keeps `scale`. An earlier form kept Retina mode as
+    // `retina` and `chosen` (whether the person set it): their choice of on is
+    // native and of off 1.0, and stays their choice. A form from before the
+    // default has no `chosen`: its `true` was a choice, and its `false` may
+    // only have been the old default, so it counts as no choice.
+    private enum CodingKeys: String, CodingKey { case scale, retina, chosen }
 
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        let retina = try values.decodeIfPresent(Bool.self, forKey: .retina) ?? false
-        switch try values.decodeIfPresent(Bool.self, forKey: .chosen) {
-        case true?: chosenRetina = retina
-        case false?: chosenRetina = nil
-        case nil: chosenRetina = retina ? true : nil
+        if values.contains(.scale) {
+            // A value that is no scale is no choice.
+            chosenScale = try? values.decode(GuestDisplayScale.self, forKey: .scale)
+            return
         }
+        let retina = try values.decodeIfPresent(Bool.self, forKey: .retina) ?? false
+        let chosen: Bool
+        switch try values.decodeIfPresent(Bool.self, forKey: .chosen) {
+        case let stated?: chosen = stated
+        case nil: chosen = retina
+        }
+        chosenScale = chosen ? (retina ? .native : .points) : nil
     }
 
     public func encode(to encoder: any Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
-        try values.encode(chosenRetina ?? false, forKey: .retina)
-        try values.encode(chosenRetina != nil, forKey: .chosen)
+        try values.encodeIfPresent(chosenScale, forKey: .scale)
     }
 }
 

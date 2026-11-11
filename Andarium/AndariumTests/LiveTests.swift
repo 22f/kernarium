@@ -94,7 +94,10 @@ struct DisplayOptionsStoreTests {
     @Test func optionsSurviveTheStore() {
         let saved = DisplayOptionsStore.load()
         defer { DisplayOptionsStore.save(saved) }
-        for options in [DisplayOptions(chosenRetina: true), DisplayOptions(chosenRetina: false), DisplayOptions()] {
+        for options in [
+            DisplayOptions(chosenScale: .native), DisplayOptions(chosenScale: .points),
+            DisplayOptions(chosenScale: .factor(1.5)), DisplayOptions(),
+        ] {
             DisplayOptionsStore.save(options)
             #expect(DisplayOptionsStore.load() == options)
         }
@@ -364,7 +367,7 @@ private final class GuestFrameCapture: @unchecked Sendable {
 }
 
 /// Opt-in physical display check. Saves the guest's rendered frame with each
-/// KERNARIUM_RETINA_MODE value so their displayed text size can be compared.
+/// KERNARIUM_DISPLAY_SCALE value so their displayed text size can be compared.
 @MainActor
 struct RecoveryDisplayTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["ANDARIUM_RECOVERY_TESTS"] == "1"), .timeLimit(.minutes(5)))
@@ -397,17 +400,17 @@ struct RecoveryDisplayTests {
             let identity = try AppEntry.fromArguments().adbKeyStore.loadOrCreate()
             let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device")
             let density = try await operations.shell("getprop ro.sf.lcd_density", limit: .seconds(5))
-            let scale = model.retina ? scene.screen.nativeScale : 1
-            #expect(density.text.trimmingCharacters(in: .whitespacesAndNewlines) == String(Int((160 * scale).rounded())))
+            let scale = model.resolution.resolved(nativeScale: Double(scene.screen.nativeScale)) ?? 1
+            #expect(density.text.trimmingCharacters(in: .whitespacesAndNewlines) == String(GuestDisplayLayout.dotsPerInch(factor: scale)))
         } catch {
             Issue.record("Recovery display density could not be read: \(error)")
         }
         do {
-            try await captureGuestFrame(named: model.retina ? "recovery-retina.png" : "recovery-points.png")
+            try await captureGuestFrame(named: model.resolution == .native ? "recovery-native.png" : "recovery-points.png")
         } catch {
             Issue.record("Recovery frame could not be captured: \(error)")
         }
-        print("RECOVERY_DISPLAY: ready retina=\(model.retina); capture the screen within 30 seconds")
+        print("RECOVERY_DISPLAY: ready scale=\(model.resolution.text); capture the screen within 30 seconds")
         try await Task.sleep(for: .seconds(30))
         // End selects Advanced, then End selects Power off. Use Recovery's
         // own menu so the run must report a clean guest power-off.

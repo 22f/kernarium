@@ -68,7 +68,7 @@ struct StatsPreferenceTests {
             let preference = StatsPreference(defaults: defaults)
             preference.keep(true)
             for settings: [LaunchOverrides.Setting: String] in [
-                [.start: "normal"], [.vCPUCount: "2"], [.retina: "1"], [.instance: "legacy-test"], [.erase: "1"],
+                [.start: "normal"], [.vCPUCount: "2"], [.displayScale: "1.5"], [.instance: "legacy-test"], [.erase: "1"],
             ] {
                 let start = preference.launch(for: launch(settings))
                 #expect(!start.showOnScreen && !start.keepsChanges)
@@ -92,7 +92,7 @@ struct StatsPreferenceTests {
             #expect(preference.isOn)
             let stored = try #require(defaults.data(forKey: DisplayOptions.storageKey))
             #expect(stored == old)
-            #expect(try JSONDecoder().decode(DisplayOptions.self, from: stored) == DisplayOptions(chosenRetina: true))
+            #expect(try JSONDecoder().decode(DisplayOptions.self, from: stored) == DisplayOptions(chosenScale: .native))
         }
     }
 
@@ -100,7 +100,7 @@ struct StatsPreferenceTests {
         try withDefaults { defaults in
             let preference = StatsPreference(defaults: defaults)
             preference.keep(true)
-            defaults.set(try JSONEncoder().encode(DisplayOptions(chosenRetina: false)), forKey: DisplayOptions.storageKey)
+            defaults.set(try JSONEncoder().encode(DisplayOptions(chosenScale: .points)), forKey: DisplayOptions.storageKey)
             #expect(preference.isOn)
             #expect(StatsPreference.key != DisplayOptions.storageKey)
         }
