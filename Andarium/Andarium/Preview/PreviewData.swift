@@ -14,7 +14,7 @@ enum PreviewData {
 
     static let system = SystemInfo(
         version: "17", release: systemRelease,
-        securityPatch: "5 October 2026", kernel: "Linux 6.18.54",
+        securityPatch: SystemInfo.patchLevel("2026-10-05"), kernel: "Linux 6.18.54",
         architecture: "arm64, 4 KiB pages", abis: ["arm64-v8a", "armeabi-v7a", "armeabi"],
         appVersion: "1.0 (1)"
     )
