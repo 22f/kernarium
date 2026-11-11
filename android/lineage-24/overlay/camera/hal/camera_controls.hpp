@@ -215,7 +215,11 @@ public:
         if (focus_locked_) locks |= abi::v4l2_value::lock_focus;
 
         // Focus. With FOCUS_AUTO off the host's lens holds, a press of the focus
-        // button runs one scan and a written distance moves it.
+        // button runs one scan and a written distance moves it. The press and the
+        // cancel are the request's last write, so that the scan runs with the
+        // region, locks, white balance and zoom the request states, and no later
+        // write of this request disturbs it.
+        std::optional<ControlWrite> scan;
         if (has_af) {
             value(writes, abi::cid::focus_auto, continuous ? 1 : 0);
             if (!continuous && !scanning_mode && (limits_.flags & abi::feature::manual_focus))
@@ -225,14 +229,14 @@ public:
                     focus_locked_ = true;
                     locks |= abi::v4l2_value::lock_focus;
                 } else if (scanning_mode) {
-                    writes.push_back({abi::cid::auto_focus_start, 1, {}, false});
+                    scan = ControlWrite{abi::cid::auto_focus_start, 1, {}, false};
                     af_engaged_ = true;
                 }
             } else if (request.af_trigger == android_value::af_trigger_cancel) {
                 focus_locked_ = false;
                 locks &= ~abi::v4l2_value::lock_focus;
                 if (scanning_mode) {
-                    writes.push_back({abi::cid::auto_focus_stop, 1, {}, false});
+                    scan = ControlWrite{abi::cid::auto_focus_stop, 1, {}, false};
                     af_engaged_ = false;
                 }
             }
@@ -280,6 +284,7 @@ public:
         value(writes, abi::cid::image_stabilization, request.video_stabilization ? 1 : 0);
         if (limits_.has_jpeg)
             value(writes, abi::cid::jpeg_compression_quality, std::clamp<std::int64_t>(request.jpeg_quality, 1, 100));
+        if (scan) writes.push_back(*scan);
         return writes;
     }
 

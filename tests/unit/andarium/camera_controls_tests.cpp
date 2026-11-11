@@ -182,6 +182,34 @@ void check_focus_and_locks()
             "the manual lens is moved again after a scan");
     require(find(writes, abi::cid::auto_focus_start) == nullptr, "and nothing else is pressed");
 
+    // The press and the cancel are the last write of the request: the scan runs after
+    // the region, the locks, the white balance and the zoom that the same request states.
+    for (const auto trigger : {av::af_trigger_start, av::af_trigger_cancel}) {
+        ControlPlanner ordered(lens_limits());
+        Request full;
+        full.af_mode = av::af_auto;
+        full.af_trigger = trigger;
+        full.af_region = {1000, 750, 3000, 2250, 500};
+        full.ae_region = {500, 500, 1500, 1500, 300};
+        full.ae_lock = true;
+        full.awb_lock = true;
+        full.awb_mode = av::awb_daylight;
+        full.zoom_ratio = 2.0f;
+        full.flash_mode = av::flash_torch;
+        full.video_stabilization = true;
+        writes = ordered.plan(full);
+        const auto scan = trigger == av::af_trigger_start ? abi::cid::auto_focus_start : abi::cid::auto_focus_stop;
+        require(writes.size() > 8 && writes.back().id == scan, "the press or the cancel is written last");
+        for (const auto id : {abi::cid::af_region, abi::cid::lock_3a, abi::cid::auto_n_preset_white_balance,
+                              abi::cid::ae_region, abi::cid::zoom_q16, abi::cid::flash_led_mode,
+                              abi::cid::image_stabilization})
+            require(find(writes, id) != nullptr && find(writes, id) != &writes.back(),
+                    "every other setting of the request is written before it");
+        std::size_t scans = 0;
+        for (const auto& write : writes) scans += write.id == scan ? 1 : 0;
+        require(scans == 1, "and written once");
+    }
+
     // In continuous AF a trigger locks focus until it is cancelled.
     ControlPlanner continuous(lens_limits());
     Request pic;
