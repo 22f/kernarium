@@ -69,6 +69,16 @@ public struct GuestPointerMapping: Equatable, Sendable {
         size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
     }
 
+    /// The display in the view's points: the part of the view the pointer is
+    /// over the guest on. The rest is the letterbox.
+    public var displayFrame: CGRect {
+        let across = boundsSize.width / drawableSize.width
+        let down = boundsSize.height / drawableSize.height
+        return CGRect(
+            x: viewport.minX * across, y: viewport.minY * down,
+            width: viewport.width * across, height: viewport.height * down)
+    }
+
     /// The position of `point`, in the view's points; nil for a point that is
     /// not a number.
     public func position(of point: CGPoint) -> Position? {

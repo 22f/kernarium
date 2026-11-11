@@ -45,6 +45,27 @@ struct GuestPointerMappingTests {
         #expect(mapping.position(of: CGPoint(x: 25, y: 150)) == .init(x: 8192, y: 24576, inside: true))
     }
 
+    @Test func theDisplayFrameIsWhereThePointerIsOverTheGuest() throws {
+        let mapping = try letterboxed()
+        #expect(mapping.displayFrame == CGRect(x: 50, y: 0, width: 100, height: 100))
+        // Retina: the drawable has twice the pixels, the frame is still in points.
+        let retina = try #require(GuestPointerMapping(
+            boundsSize: CGSize(width: 200, height: 100),
+            drawableSize: CGSize(width: 400, height: 200),
+            contentSize: CGSize(width: 100, height: 100)))
+        #expect(retina.displayFrame == CGRect(x: 50, y: 0, width: 100, height: 100))
+        // Every point of the frame is over the display and none beside it is.
+        let frame = mapping.displayFrame
+        #expect(mapping.position(of: CGPoint(x: frame.minX, y: frame.midY))?.inside == true)
+        #expect(mapping.position(of: CGPoint(x: frame.maxX, y: frame.midY))?.inside == true)
+        #expect(mapping.position(of: CGPoint(x: frame.minX - 1, y: frame.midY))?.inside == false)
+        let full = try #require(GuestPointerMapping(
+            boundsSize: CGSize(width: 100, height: 200),
+            drawableSize: CGSize(width: 100, height: 200),
+            contentSize: CGSize(width: 1080, height: 2160)))
+        #expect(full.displayFrame == CGRect(x: 0, y: 0, width: 100, height: 200))
+    }
+
     @Test func aGeometryOrPointThatIsNotUsableMapsNothing() {
         #expect(GuestPointerMapping(
             boundsSize: .zero, drawableSize: CGSize(width: 1, height: 1), contentSize: CGSize(width: 1, height: 1)) == nil)

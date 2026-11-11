@@ -31,6 +31,9 @@ struct GuestDisplayView: UIViewControllerRepresentable {
     /// Whether the display holds the keyboard focus the hardware keys need:
     /// the application says no while a sheet or an alert has the keys.
     var hardwareFocus = false
+    /// Told of each contact sent to the guest's touchscreen: its slot, and
+    /// whether it is down. A test uses it to see which touches the guest got.
+    var contactDidChange: (@MainActor (_ slot: Int, _ pressed: Bool) -> Void)?
     let viewDidLayout: @MainActor (
         GuestMetalView,
         GuestDisplayGeometry
@@ -43,6 +46,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
             : TextGuestMetalView(frame: .zero, device: device)
         view.viewDidLayout = viewDidLayout
         view.touchDidBegin = touchDidBegin
+        view.contactDidChange = contactDidChange
         view.retinaMode = retinaMode
         view.isPaused = true
         view.enableSetNeedsDisplay = true
@@ -58,6 +62,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
     ) {
         let view = controller.metalView
         view.touchDidBegin = touchDidBegin
+        view.contactDidChange = contactDidChange
         view.retinaMode = retinaMode
         view.hardwareInput = hardwareInput
         if let keyboardVisible {
@@ -157,6 +162,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         GuestDisplayGeometry
     ) -> Void)?
     var touchDidBegin: (@MainActor () -> Void)?
+    var contactDidChange: (@MainActor (_ slot: Int, _ pressed: Bool) -> Void)?
     var retinaMode = false
     @objc private(set) var umlGuestResizeInProgress = false
     private var touchContacts = GuestTouchContacts<ObjectIdentifier>()
@@ -165,6 +171,11 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     private var hoverRecognizer: UIHoverGestureRecognizer?
     private var scrollRecognizers: [UIPanGestureRecognizer] = []
     private var pointerInteraction: UIPointerInteraction?
+    /// The touches of the system pointer's buttons that began as the guest's
+    /// mouse: the rest of such a touch is the mouse's whatever the routing
+    /// became meanwhile, and a touch that began as a finger stays one.
+    private var pointerTouchIDs = Set<ObjectIdentifier>()
+    private var windowObserver: NSObjectProtocol?
 
     /// The hardware keyboard and mouse this view hands the system's events
     /// to. Without one the view leaves presses, hover and scroll to UIKit, and
@@ -173,9 +184,16 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     var hardwareInput: GuestHardwareInput? {
         didSet {
             guard hardwareInput !== oldValue else { return }
-            oldValue?.releaseAll()
-            oldValue?.hidesSystemPointerDidChange = nil
+            // A view that has handed the input to another (SwiftUI makes the
+            // new view before it lets go of the old) leaves it as it is.
+            if let oldValue, oldValue.pointerStyleOwner == nil || oldValue.pointerStyleOwner === self {
+                oldValue.releaseAll()
+                oldValue.hidesSystemPointerDidChange = nil
+                oldValue.pointerStyleOwner = nil
+            }
+            pointerTouchIDs.removeAll()
             if let hardwareInput {
+                hardwareInput.pointerStyleOwner = self
                 hardwareInput.hidesSystemPointerDidChange = { [weak self] in self?.pointerStyleDidChange() }
                 installPointerRecognizers()
             } else {
@@ -192,6 +210,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     override func layoutSubviews() {
         super.layoutSubviews()
         reportLayout()
+        pointerStyleDidChange()
     }
 
     func reportLayout() {
@@ -242,6 +261,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     @objc(umlSetGuestDisplayWidth:height:)
     func setGuestDisplay(width: UInt32, height: UInt32) {
         cancelTrackedTouches()
+        defer { pointerStyleDidChange() }
         guard width > 0, height > 0 else {
             guestContentSize = nil
             return
@@ -265,7 +285,10 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
         reclaimHardwareFocus()
-        let (pointerTouches, fingers) = split(touches)
+        let (pointerTouches, fingers) = split(touches, beginning: true)
+        for touch in fingers where touch.type == .indirectPointer {
+            hardwareInput?.pointerTouchBeganUnrouted()
+        }
         for touch in fingers {
             sendTouchEvents(touchContacts.begin(
                 ObjectIdentifier(touch),
@@ -279,7 +302,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
-        let (pointerTouches, fingers) = split(touches)
+        let (pointerTouches, fingers) = split(touches, beginning: false)
         for touch in fingers {
             let coalesced = (event?.coalescedTouches(for: touch) ?? []).map {
                 $0.location(in: self)
@@ -298,7 +321,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesEnded(touches, with: event)
-        let (pointerTouches, fingers) = split(touches)
+        let (pointerTouches, fingers) = split(touches, beginning: false)
         for touch in fingers {
             sendTouchEvents(touchContacts.end(
                 ObjectIdentifier(touch),
@@ -307,6 +330,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
             ))
         }
         forward(pointerTouches, .ended, event)
+        for touch in touches { pointerTouchIDs.remove(ObjectIdentifier(touch)) }
     }
 
     override func touchesCancelled(
@@ -314,24 +338,41 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         with event: UIEvent?
     ) {
         super.touchesCancelled(touches, with: event)
-        let (pointerTouches, fingers) = split(touches)
+        let (pointerTouches, fingers) = split(touches, beginning: false)
         for touch in fingers {
             sendTouchEvents(touchContacts.cancel(ObjectIdentifier(touch)))
         }
         forward(pointerTouches, .cancelled, event)
+        for touch in touches { pointerTouchIDs.remove(ObjectIdentifier(touch)) }
     }
 
     /// The touches of the system pointer's buttons go to the guest's mouse
     /// when the application gives it one; every other touch is a finger of
-    /// the touchscreen, as is a pointer's when there is no mouse.
-    private func split(_ touches: Set<UITouch>) -> (pointer: [UITouch], fingers: [UITouch]) {
-        guard let hardwareInput, hardwareInput.isActive, hardwareInput.routesPointer else {
-            return ([], Array(touches))
-        }
+    /// the touchscreen, as is a pointer's when there is no mouse. A touch is
+    /// the mouse's from the moment it begins to its end, whatever the routing
+    /// does meanwhile, and a finger's likewise.
+    private func split(_ touches: Set<UITouch>, beginning: Bool) -> (pointer: [UITouch], fingers: [UITouch]) {
+        guard let hardwareInput else { return ([], Array(touches)) }
         var pointer: [UITouch] = []
         var fingers: [UITouch] = []
         for touch in touches {
-            if touch.type == .indirectPointer { pointer.append(touch) } else { fingers.append(touch) }
+            let identity = ObjectIdentifier(touch)
+            guard touch.type == .indirectPointer else {
+                fingers.append(touch)
+                continue
+            }
+            if beginning {
+                if hardwareInput.isActive, hardwareInput.routesPointer {
+                    pointerTouchIDs.insert(identity)
+                    pointer.append(touch)
+                } else {
+                    fingers.append(touch)
+                }
+            } else if pointerTouchIDs.contains(identity) {
+                pointer.append(touch)
+            } else {
+                fingers.append(touch)
+            }
         }
         return (pointer, fingers)
     }
@@ -367,6 +408,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         for contact in events {
             if contact.event.cancelled {
                 kernarium_runtime_loader_cancel_touch(contact.slot)
+                contactDidChange?(Int(contact.slot), false)
                 continue
             }
             kernarium_runtime_loader_send_touch(
@@ -375,15 +417,30 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
                 contact.event.y,
                 contact.event.pressed ? 1 : 0
             )
+            contactDidChange?(Int(contact.slot), contact.event.pressed)
         }
     }
 
     func cancelTrackedTouches() {
         sendTouchEvents(touchContacts.cancelAll())
+        pointerTouchIDs.removeAll()
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        if let windowObserver {
+            NotificationCenter.default.removeObserver(windowObserver)
+            self.windowObserver = nil
+        }
+        if let window {
+            // Keys held when the window stops being the key one (another
+            // window or app took the focus) are not released by UIKit.
+            windowObserver = NotificationCenter.default.addObserver(
+                forName: UIWindow.didResignKeyNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.hardwareInput?.releaseKeys() }
+            }
+        }
         if window == nil {
             cancelTrackedTouches()
             hardwareInput?.releaseAll()
@@ -498,6 +555,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
             scroll.maximumNumberOfTouches = 0
             scroll.cancelsTouchesInView = false
             scroll.delaysTouchesBegan = false
+            scroll.delaysTouchesEnded = false
             scroll.delegate = self
             addGestureRecognizer(scroll)
             scrollRecognizers.append(scroll)
@@ -556,6 +614,23 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
     ) -> Bool {
         true
+    }
+
+    /// The pointer is hidden over the guest's display only, not over the bars
+    /// beside it: that is where the system's pointer is still the person's.
+    func pointerInteraction(
+        _ interaction: UIPointerInteraction, regionFor request: UIPointerRegionRequest,
+        defaultRegion: UIPointerRegion
+    ) -> UIPointerRegion? {
+        hiddenPointerRegion(at: request.location).map { UIPointerRegion(rect: $0) }
+    }
+
+    /// The part of the view where the system pointer is hidden, if `location`
+    /// is in it: the guest's display while the mouse is the guest's.
+    func hiddenPointerRegion(at location: CGPoint) -> CGRect? {
+        guard hardwareInput?.hidesSystemPointer == true,
+              let frame = pointerMapping()?.displayFrame, frame.contains(location) else { return nil }
+        return frame
     }
 
     func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {

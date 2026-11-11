@@ -30,6 +30,14 @@ private final class RecordingSink: GuestHardwareSink {
     func hardwarePointerUsed() { events.append(.pointerUsed) }
 }
 
+/// A touch of a given kind at a given point, for the view's touch methods.
+private final class FakeTouch: UITouch {
+    var kind: UITouch.TouchType = .direct
+    var point = CGPoint.zero
+    override var type: UITouch.TouchType { kind }
+    override func location(in view: UIView?) -> CGPoint { point }
+}
+
 /// What the guest view does with hardware keys and the system pointer, before
 /// the application decides what the guest has.
 @MainActor
@@ -95,6 +103,50 @@ struct GuestHardwareInputTests {
         #expect(!input.hidesSystemPointer)
         input.routesPointer = true
         #expect(input.hidesSystemPointer)
+    }
+
+    @Test func aMouseTheGuestHasNotRegisteredIsOnlyWatchedAndItsPositionComesFirstWhenItIs() {
+        let sink = RecordingSink()
+        let input = makeInput(sink, routed: false)
+        input.watchesPointer = true
+        input.hover(inside, at: CGPoint(x: 1, y: 1), beginning: true)
+        #expect(sink.events.isEmpty)
+        input.hover(inside, at: CGPoint(x: 2, y: 1), beginning: false)
+        input.pointerTouchBeganUnrouted()
+        input.pointerTouch(.began, at: inside, buttons: HardwareButtons.primary)
+        input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
+        // Using it, and nothing else; the system's pointer is still the person's.
+        #expect(sink.events == [.pointerUsed, .pointerUsed, .pointerUsed])
+        #expect(!input.hidesSystemPointer)
+        // The guest registers it: it hears where the pointer is, then the rest.
+        input.routesPointer = true
+        input.watchesPointer = false
+        #expect(sink.events.last == .pointer(PointerReport(x: 300, y: 400, buttons: 0, inRange: true)))
+        let before = sink.events.count
+        input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
+        #expect(sink.events[before...] == [.pointerUsed, .mouse(0, 0, 0, 120, 0)])
+    }
+
+    @Test func aPointerThatLeftBeforeTheRegistrationHasNoPositionToSend() {
+        let sink = RecordingSink()
+        let input = makeInput(sink, routed: false)
+        input.watchesPointer = true
+        input.hover(inside, at: CGPoint(x: 1, y: 1), beginning: true)
+        input.hover(nil, at: nil, beginning: false)
+        input.routesPointer = true
+        input.watchesPointer = false
+        #expect(sink.events.isEmpty)
+    }
+
+    @Test func nothingIsWatchedWhileTheInputIsNotActive() {
+        let sink = RecordingSink()
+        let input = makeInput(sink, active: false, routed: false)
+        input.watchesPointer = true
+        input.hover(inside, at: CGPoint(x: 1, y: 1), beginning: true)
+        input.hover(inside, at: CGPoint(x: 2, y: 1), beginning: false)
+        input.pointerTouchBeganUnrouted()
+        input.scroll(translation: CGPoint(x: 0, y: 64), continuous: true, beginning: true)
+        #expect(sink.events.isEmpty)
     }
 
     @Test func aHoverThatStartsWithoutMovingIsNotTheMousesUse() {
@@ -217,6 +269,129 @@ struct GuestHardwareInputTests {
         #expect(style() != nil)
         input.isActive = false
         #expect(style() == nil)
+    }
+
+    /// A view of 200 x 100 points that draws a square display: 100 points wide,
+    /// centred.
+    private func squareDisplayView() -> GuestMetalView {
+        let view = GuestMetalView(frame: CGRect(x: 0, y: 0, width: 200, height: 100), device: nil)
+        view.autoResizeDrawable = false
+        view.drawableSize = CGSize(width: 200, height: 100)
+        view.setGuestDisplay(width: 100, height: 100)
+        return view
+    }
+
+    @Test func aTouchOfThePointerIsTheMousesOrAFingersFromItsBeginningToItsEnd() throws {
+        let sink = RecordingSink()
+        let input = makeInput(sink, routed: false)
+        let view = squareDisplayView()
+        var contacts: [Bool] = []
+        view.contactDidChange = { _, pressed in contacts.append(pressed) }
+        view.hardwareInput = input
+        input.watchesPointer = true
+
+        // It began while the guest had no mouse: a finger until it ends,
+        // whatever the routing does meanwhile.
+        let tap = FakeTouch()
+        tap.kind = .indirectPointer
+        tap.point = CGPoint(x: 100, y: 50)
+        view.touchesBegan([tap], with: nil)
+        #expect(contacts == [true])
+        #expect(sink.events == [.pointerUsed])
+        input.routesPointer = true
+        input.watchesPointer = false
+        view.touchesMoved([tap], with: nil)
+        view.touchesEnded([tap], with: nil)
+        #expect(contacts.first == true && contacts.last == false)
+        #expect(!sink.events.contains { if case .pointer(let report) = $0 { report.buttons != 0 } else { false } })
+
+        // It began as the mouse's: the mouse's, though the guest lost the mouse.
+        contacts.removeAll()
+        let click = FakeTouch()
+        click.kind = .indirectPointer
+        click.point = CGPoint(x: 100, y: 50)
+        view.touchesBegan([click], with: nil)
+        #expect(contacts.isEmpty)
+        input.routesPointer = false
+        let after = sink.events.count
+        view.touchesMoved([click], with: nil)
+        view.touchesEnded([click], with: nil)
+        #expect(contacts.isEmpty)
+        #expect(sink.events.count == after)
+
+        // A finger is a finger whatever the routing is.
+        input.routesPointer = true
+        let finger = FakeTouch()
+        finger.point = CGPoint(x: 100, y: 50)
+        view.touchesBegan([finger], with: nil)
+        view.touchesEnded([finger], with: nil)
+        #expect(contacts.first == true && contacts.last == false)
+    }
+
+    @Test func theScrollRecognizersDoNotHoldBackTheEndOfTouches() {
+        let view = GuestMetalView(frame: CGRect(x: 0, y: 0, width: 200, height: 100), device: nil)
+        view.hardwareInput = GuestHardwareInput()
+        let scrolls = (view.gestureRecognizers ?? []).compactMap { $0 as? UIPanGestureRecognizer }
+        #expect(scrolls.count == 2)
+        #expect(scrolls.allSatisfy { !$0.delaysTouchesBegan && !$0.delaysTouchesEnded && !$0.cancelsTouchesInView })
+    }
+
+    @Test func aViewThatHandsTheInputOverLeavesItsNewOwnerTheCallbackAndTheKeys() {
+        let sink = RecordingSink()
+        let input = makeInput(sink)
+        let first = GuestMetalView(frame: CGRect(x: 0, y: 0, width: 200, height: 100), device: nil)
+        let second = GuestMetalView(frame: CGRect(x: 0, y: 0, width: 200, height: 100), device: nil)
+        first.hardwareInput = input
+        // SwiftUI makes the new view before it lets go of the old one.
+        second.hardwareInput = input
+        input.keyDown(usage: 0x04, alphaShift: false)
+        first.hardwareInput = nil
+        #expect(input.pointerStyleOwner === second)
+        #expect(input.hidesSystemPointerDidChange != nil)
+        #expect(sink.events.last == .key(0x04, true))
+        second.hardwareInput = nil
+        #expect(input.pointerStyleOwner == nil)
+        #expect(input.hidesSystemPointerDidChange == nil)
+        #expect(sink.events.last == .key(0x04, false))
+    }
+
+    @Test func theSystemPointerIsHiddenOverTheDisplayAndNotOverTheBarsBesideIt() {
+        let view = squareDisplayView()
+        let sink = RecordingSink()
+        let input = makeInput(sink)
+        view.hardwareInput = input
+        #expect(view.hiddenPointerRegion(at: CGPoint(x: 100, y: 50)) == CGRect(x: 50, y: 0, width: 100, height: 100))
+        #expect(view.hiddenPointerRegion(at: CGPoint(x: 10, y: 50)) == nil)
+        #expect(view.hiddenPointerRegion(at: CGPoint(x: 190, y: 50)) == nil)
+        // Nothing is hidden where the mouse is not the guest's.
+        input.routesPointer = false
+        #expect(view.hiddenPointerRegion(at: CGPoint(x: 100, y: 50)) == nil)
+    }
+
+    @Test func aWindowThatStopsBeingTheKeyOneLiftsTheKeysHeld() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = UIViewController()
+        lease.window.rootViewController = controller
+        controller.view.layoutIfNeeded()
+        let sink = RecordingSink()
+        let input = makeInput(sink)
+        let view = GuestMetalView(frame: controller.view.bounds, device: nil)
+        view.hardwareInput = input
+        controller.view.addSubview(view)
+        input.keyDown(usage: 0x04, alphaShift: false)
+        input.keyDown(usage: 0xE3, alphaShift: false)
+        // Another window or app takes the focus: UIKit sends no release.
+        NotificationCenter.default.post(name: UIWindow.didResignKeyNotification, object: lease.window)
+        #expect(await eventually { sink.events.suffix(2) == [.key(0xE3, false), .key(0x04, false)] })
+        // Another window's resignation is not this one's.
+        input.keyDown(usage: 0x05, alphaShift: false)
+        NotificationCenter.default.post(name: UIWindow.didResignKeyNotification, object: UIWindow(windowScene: lease.scene))
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(sink.events.last == .key(0x05, true))
+        // A view that has left its window lets go of what is held.
+        view.removeFromSuperview()
+        #expect(sink.events.last == .key(0x05, false))
     }
 
     @Test func aViewWithoutAnInputLeavesEveryTouchToTheTouchscreen() {

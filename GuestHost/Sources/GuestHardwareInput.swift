@@ -71,24 +71,54 @@ final class GuestHardwareInput {
         didSet {
             guard isActive != oldValue else { return }
             hidesSystemPointerDidChange?()
-            if !isActive { releaseAll() }
+            if !isActive {
+                lastPosition = nil
+                releaseAll()
+            }
         }
     }
 
     /// Called when `hidesSystemPointer` may have changed, so the view can ask
     /// UIKit for the pointer's style again.
     var hidesSystemPointerDidChange: (() -> Void)?
+    /// The view that set `hidesSystemPointerDidChange`, so that a view that
+    /// lets go of the input does not clear the one that took it over.
+    weak var pointerStyleOwner: AnyObject?
 
     /// The pointer of a mouse goes to the guest's mouse (the system's pointer
     /// clicks are not touches), and the system's own pointer is hidden over
-    /// the display, since Android draws its cursor.
+    /// the display, since Android draws its cursor. The application sets it
+    /// only once the guest has registered its mouse: until then the pointer's
+    /// clicks are the touchscreen's, as they are with no mouse at all.
     var routesPointer = false {
         didSet {
             guard routesPointer != oldValue else { return }
             hidesSystemPointerDidChange?()
-            if !routesPointer { releasePointer() }
+            if !routesPointer {
+                releasePointer()
+                if !watchesPointer { lastPosition = nil }
+            } else if routesMouse {
+                // The guest sees the pointer where it is before the first
+                // button or wheel step it hears of.
+                send(pointer.hover(lastPosition))
+            }
         }
     }
+
+    /// A mouse is there for the guest, but the guest has not registered it:
+    /// the pointer's events stay the touchscreen's, and what the person does
+    /// with it over the display still counts as using the mouse, which is what
+    /// plugs it. The application turns `routesPointer` on before it turns this
+    /// off, so the position kept here reaches the guest.
+    var watchesPointer = false {
+        didSet {
+            guard watchesPointer != oldValue else { return }
+            if !watchesPointer, !routesPointer { lastPosition = nil }
+        }
+    }
+    /// Where the system pointer last hovered over the view, while a mouse is
+    /// there (nil: it left, or it is not over the display).
+    private var lastPosition: GuestPointerMapping.Position?
 
     /// Android captured the pointer: the pointer, its buttons and the scroll
     /// reach the guest as the mouse's raw motion and buttons from another
@@ -163,7 +193,8 @@ final class GuestHardwareInput {
             hoverInside = position?.inside ?? false
             return
         }
-        guard routesMouse else { return }
+        guard isActive, routesPointer || watchesPointer else { return }
+        lastPosition = position
         if let point {
             // A hover that starts without the pointer having moved, as the
             // Simulator makes at the view's centre, is not the pointer's.
@@ -172,6 +203,7 @@ final class GuestHardwareInput {
         } else {
             lastHover = nil
         }
+        guard routesMouse else { return }
         send(pointer.hover(position))
     }
 
@@ -182,9 +214,22 @@ final class GuestHardwareInput {
         send(pointer.touch(phase, at: position, buttons: buttons))
     }
 
+    /// A touch of the pointer's buttons began that the guest's mouse does not
+    /// take, because the guest has not registered it: it goes to the
+    /// touchscreen as a finger's, and is still the person using the mouse.
+    func pointerTouchBeganUnrouted() {
+        guard isActive, watchesPointer else { return }
+        sink?.hardwarePointerUsed()
+    }
+
     /// A scroll gesture reported `translation` since its last report.
     func scroll(translation: CGPoint, continuous: Bool, beginning: Bool) {
-        guard routesMouse else { return }
+        guard routesMouse else {
+            // Not the guest's yet: scrolling is still the person using the
+            // mouse.
+            if isActive, watchesPointer, translation != .zero { sink?.hardwarePointerUsed() }
+            return
+        }
         if beginning {
             continuousScroll.reset()
             discreteScroll.reset()

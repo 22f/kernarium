@@ -87,8 +87,13 @@ it; Kernarium passes none.
   and keeps UIKit's behaviour and its on-screen text path (`keyboardVisible`).
   A key is its position, the usage on the HID Keyboard/Keypad page, and the
   pointer's position is on the touchscreen's range, so Android's cursor is
-  where a finger would be. Leaving the front, a sheet taking the keys and the
-  pointer leaving lift every key and button the guest was told is down.
+  where a finger would be. The application decides whether the pointer is the
+  guest's mouse (`routesPointer`, set once the guest has registered it) or only
+  watched (`watchesPointer`: its use is reported, its touches stay the
+  touchscreen's). A touch of the pointer is the mouse's or a finger's from its
+  beginning to its end, and the system pointer is hidden over the display
+  alone. Leaving the front, a sheet taking the keys, the window losing key and
+  the pointer leaving lift every key and button the guest was told is down.
 - A file here depends only on the system frameworks, the runtime header, and
   the prebuilt `LibZstd` XCFramework. It names neither application's views,
   settings or product text; an application supplies those.
