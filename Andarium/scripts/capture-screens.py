@@ -135,10 +135,13 @@ def boot_stages(prefix: str, screen: str, names: list[str], what: str, dark_step
 
 SHOTS: list[Shot] = [
     # Home
-    s("home", "Home", "home", "Home with a configured guest: Guest system (two matched rows: CPU and memory with Edit, then Storage with its usage bar and Resize), JIT (in the builds that have it), Display, Capabilities, Backup, Recovery and erase, and the Start bar.", dark=True),
+    s("home", "Home", "home", "Home with a configured guest: Guest system (matched rows: CPU and memory with Edit, Resolution with Change, then Storage with its usage bar and Resize, and Snapshots), JIT (in the builds that have it), Capabilities, Backup, Recovery and erase, and the Start bar.", dark=True),
     s("home-welcome", "Home", "welcome", "Home before any guest exists: the welcome and Set up guest. First screen of the initial setup."),
     s("home-first-start", "Home", "home-new", "A guest just created and not yet started: Home as it is before the first start."),
-    s("home-display", "Home", "home-display", "Home scrolled to Display: the Retina mode toggle.", dark=True),
+    s("home-resolution", "Home", "home-resolution", "Home scrolled to Guest system: the Resolution row between CPU and memory and Storage, with the guest's pixels and, where the choice is an end, its name (Native), and Change.", dark=True),
+    s("home-resolution-fastest", "Home", "home-resolution", "The Resolution row with the fastest choice (one guest pixel to a point): the line says Fastest.", "-displayScale", "1"),
+    s("home-resolution-middle", "Home", "home-resolution", "The Resolution row with a choice between the ends: the pixels alone.", "-displayScale", "1.5"),
+    s("home-resolution-one-choice", "Home", "home-resolution", "The Resolution row on a screen with one choice (native scale 1.0): the resolution without a name, and Change dimmed.", "-displayNative", "1"),
     s("home-capabilities", "Home", "home-capabilities", "Home scrolled to Capabilities: Microphone off, Gyroscope on and, on an iPhone, Haptics on (their defaults), no notes.", dark=True),
     s("home-jit", "Home", "home-jit", "Home scrolled to JIT: the toggle on and a debugger attached, so the note says it is ready for the next start.", dark=True),
     s("home-jit-no-debugger", "Home", "home-jit-no-debugger", "JIT on with no debugger attached: the note says to open Andarium from StikDebug."),
@@ -185,6 +188,10 @@ SHOTS: list[Shot] = [
     s("system-edit-vram-warning", "Sheets", "system-edit", "The System sheet on a device whose default is held below the line where iOS is likely to close Andarium (an iPhone 18 Pro Max mock) with memory between the two: the ticks past the default are orange and beyond the closing size red, the line beneath says games may run out of graphics memory and the VRAM estimate is orange. Home shows no notice at this size.", "-device", "iphone-18-pro-max", "-memoryMiB", "3584", dark=True),
     s("system-edit-ipad-mini", "Sheets", "system-edit", "The System sheet on an iPad mini 6 mock at its default memory (1.5 GiB): the two sizes coincide, so no graphics warning shows and the VRAM estimate is plain.", "-device", "ipad-mini-6"),
     s("system-edit-memory-mac-64", "Sheets", "system-edit", "The System sheet on a Mac mock with 64 GiB and a guest of 24 GiB: the memory ruler has about a thousand positions, so its labels thin out to round numbers of gibibytes that do not touch, and no short ticks are drawn.", "-device", "mac-64-gib", "-memoryMiB", "24576"),
+    s("resolution-sheet", "Sheets", "resolution-sheet", "The Resolution sheet, opened from Change: every choice with its pixels, and under them its density and, at the ends, Native and Fastest; the current choice is ticked.", dark=True),
+    s("resolution-sheet-middle", "Sheets", "resolution-sheet", "The Resolution sheet with a choice between the ends ticked.", "-displayScale", "2"),
+    s("resolution-sheet-native-2-3", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.3: 1.0, 1.5, 2.0 and 2.3.", "-displayNative", "2.3"),
+    s("resolution-sheet-native-2-61", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.61: 2.5 is left out for being near native, so 1.0, 1.5, 2.0 and 2.61.", "-displayNative", "2.61"),
     s("erase-alert", "Alerts", "erase", "Erase guest: the standard destructive confirmation over Home. Confirming returns to the first-launch screen (home-welcome).", dark=True),
     s("info", "Info", "info", "Info: the app and version, System info (Build, Android version, Security patch, Kernel, Architecture, Supported architectures), Project on GitHub and Acknowledgements.", dark=True),
     s("info-acknowledgements", "Info", "info-acknowledgements", "Acknowledgements: projects by group; the names and marks line is at the bottom.", dark=True),

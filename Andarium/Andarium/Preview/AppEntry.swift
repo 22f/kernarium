@@ -41,6 +41,12 @@ struct AppEntry {
     /// "light" or "dark" draws the preview in that appearance whatever the
     /// Simulator's own, so a capture leaves the device's setting alone.
     var colorScheme: String?
+    /// The resolution chosen, "native" or a number, instead of the default.
+    var displayScale: String?
+    /// The screen's native scale and the display's size in points, "402x778",
+    /// instead of the Simulator's own, to show another device's choices.
+    var displayNative: String?
+    var displayPoints: String?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -56,7 +62,10 @@ struct AppEntry {
             statsVramMiB: defaults.string(forKey: "statsVramMiB").flatMap { Int($0) },
             device: defaults.string(forKey: "device"),
             memoryMiB: defaults.string(forKey: "memoryMiB").flatMap { Int($0) },
-            colorScheme: defaults.string(forKey: "colorScheme")
+            colorScheme: defaults.string(forKey: "colorScheme"),
+            displayScale: defaults.string(forKey: "displayScale"),
+            displayNative: defaults.string(forKey: "displayNative"),
+            displayPoints: defaults.string(forKey: "displayPoints")
         )
     }
 
@@ -64,7 +73,7 @@ struct AppEntry {
     private static let scrollTargets: [String: String] = [
         "home-options": "erase", "home-recovery-erase": "erase", "start-recovery": "erase", "erase": "erase",
         "home-new-recovery": "erase",
-        "home-display": "display",
+        "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
         "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
@@ -124,6 +133,7 @@ struct AppEntry {
             guest: guest, host: host, system: PreviewData.system, capabilities: .preview,
             createRequirementBytes: PreviewData.createRequirementBytes
         )
+        applyDisplay(to: model)
         let files = MockGuestFiles()
         let browser = FileBrowserModel(backend: files)
         MockFolderProbe.browser = browser
@@ -417,6 +427,21 @@ struct AppEntry {
         }
     }
 
+    /// The resolution the launch chooses and the screen it states: the preview
+    /// shows a 2.3 screen on any Simulator.
+    @MainActor
+    private func applyDisplay(to model: AppModel) {
+        model.chosenScale = displayScale.flatMap { GuestDisplayScale(text: $0) }
+        if let native = displayNative.flatMap({ Double($0) }) {
+            model.statedNativeScale = native
+            model.screenDidChange(nativeScale: native)
+        }
+        if let displayPoints {
+            let parts = displayPoints.lowercased().split(separator: "x").compactMap { Double($0) }
+            if parts.count == 2 { model.statedDisplayPoints = CGSize(width: parts[0], height: parts[1]) }
+        }
+    }
+
     /// Sheets and dialogs open after the first frame so SwiftUI presents them
     /// the way a tap would.
     @MainActor
@@ -429,6 +454,8 @@ struct AppEntry {
             model.sheet = .resize
         case "system-edit", "system-memory-warning":
             model.sheet = .system
+        case "resolution-sheet":
+            model.sheet = .resolution
         case "home-mic-alert":
             model.setMicrophone(true)
         case "home-location-alert", "home-location-restricted-alert", "home-location-services-off-alert",
