@@ -269,8 +269,8 @@ struct OpenKeys: View {
             .accessibilityAction(named: "Power menu", powerHold)
 
             KeyPair(
-                top: (recovery ? "chevron.up" : "plus", recovery ? "Up" : "Volume up", volumeUp),
-                bottom: (recovery ? "chevron.down" : "minus", recovery ? "Down" : "Volume down", volumeDown)
+                top: (recovery ? "chevron.up" : "plus", recovery ? String(localized: "Up") : String(localized: "Volume up"), volumeUp),
+                bottom: (recovery ? "chevron.down" : "minus", recovery ? String(localized: "Down") : String(localized: "Volume down"), volumeDown)
             )
             .matchedGeometryEffect(id: "rocker", in: space)
         }
@@ -299,8 +299,8 @@ struct GuestKeys: View {
             .accessibilityHint("Install apps, ADB, stats and options")
 
             KeyPair(
-                top: ("arrowtriangle.backward.fill", "Back", back),
-                bottom: ("circle.fill", "Home", home),
+                top: ("arrowtriangle.backward.fill", String(localized: "Back"), back),
+                bottom: ("circle.fill", String(localized: "Home"), home),
                 glyphSize: 16
             )
         }

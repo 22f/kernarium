@@ -175,14 +175,14 @@ struct LicenseView: View {
             }
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle(acknowledgements.project(projectID)?.name ?? "License")
+        .navigationTitle(acknowledgements.project(projectID)?.name ?? String(localized: "License"))
         .navigationBarTitleDisplayMode(.inline)
     }
 
     private func summary(_ project: Acknowledgements.Project) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            field("Copyright", "© \(project.copyright)")
-            field("License", project.license)
+            field(String(localized: "Copyright"), "© \(project.copyright)")
+            field(String(localized: "License"), project.license)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
