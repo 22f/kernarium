@@ -25,8 +25,8 @@ struct NewGuestSheet: View {
                     if !model.canCreate {
                         NoticeCard(
                             symbol: "externaldrive.badge.exclamationmark", color: .orange,
-                            title: "Not enough free space",
-                            text: "Setting up needs \(Formats.size(bytes: model.createRequirementBytes)) free for the guest's setup. This \(model.host.name) has \(Formats.size(bytes: model.host.freeStorageBytes)). Free up space in Settings › General › \(model.host.name) Storage."
+                            title: StartSpaceWords.title,
+                            text: String(localized: "Setting up needs \(Formats.size(bytes: model.createRequirementBytes)) free for the guest's setup. This \(model.host.name) has \(Formats.size(bytes: model.host.freeStorageBytes)). Free up space in Settings › General › \(model.host.name) Storage.")
                         )
                     }
                     StoragePanel(guest: draftBinding, host: model.host, stops: model.capacityStopsGiB)

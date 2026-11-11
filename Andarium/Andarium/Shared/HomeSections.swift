@@ -6,13 +6,26 @@ import SwiftUI
 /// A titled section of Home: rows in one glass panel under a small heading,
 /// and a note beneath.
 struct HomeSection<Content: View, Footer: View>: View {
-    let title: String
-    @ViewBuilder var content: Content
-    @ViewBuilder var footer: Footer
+    private let title: Text
+    private let content: Content
+    private let footer: Footer
+
+    init(title: LocalizedStringKey, @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.title = Text(title)
+        self.content = content()
+        self.footer = footer()
+    }
+
+    /// A title that is not translated: a section only the development builds have.
+    init(verbatim title: String, @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.title = Text(verbatim: title)
+        self.content = content()
+        self.footer = footer()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
+            title
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 18)
@@ -24,7 +37,7 @@ struct HomeSection<Content: View, Footer: View>: View {
 }
 
 extension HomeSection where Footer == EmptyView {
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(title: LocalizedStringKey, @ViewBuilder content: () -> Content) {
         self.init(title: title, content: content, footer: { EmptyView() })
     }
 }
@@ -116,9 +129,10 @@ struct SystemSection: View {
         if let guest = model.guest {
             HomeSection(title: "Guest system") {
                 SystemRow(
-                    symbol: "cpu", title: "CPU and memory", subtitle: Self.summary(of: guest),
+                    symbol: "cpu", title: String(localized: "CPU and memory"), subtitle: Self.summary(of: guest),
                     button: SystemRowButton(
-                        title: "Edit", identifier: "home-system-edit", accessibilityName: "Edit system",
+                        title: SystemRowButton.edit, identifier: "home-system-edit",
+                        accessibilityName: String(localized: "Edit system"),
                         action: { model.sheet = .system }
                     )
                 )
@@ -132,7 +146,7 @@ struct SystemSection: View {
 
     /// "6 vCPUs · 2.5 GiB".
     static func summary(of guest: Guest) -> String {
-        "\(Formats.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB))"
+        "\(CountWords.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB))"
     }
 }
 
@@ -145,9 +159,14 @@ struct SystemRowButton {
     var isEnabled = true
     let action: () -> Void
 
-    /// The longest title: every button is as wide as this word, at any text
-    /// size, so the buttons of the rows share one width and one edge.
-    static let widestTitle = "Manage"
+    static let edit = String(localized: "Edit")
+    static let resize = String(localized: "Resize")
+    static let manage = SnapshotWords.manage
+
+    /// Every title a button of the section has: each button is as wide as the
+    /// widest of them, at any text size, so the buttons of the rows share one
+    /// width and one edge in every language.
+    static let allTitles = [edit, resize, manage]
 }
 
 extension VerticalAlignment {
@@ -229,7 +248,7 @@ struct SystemRow<Below: View>: View {
     private var capsule: some View {
         Button(action: button.action) {
             ZStack {
-                Text(SystemRowButton.widestTitle).hidden()
+                ForEach(SystemRowButton.allTitles, id: \.self) { Text($0).hidden() }
                 Text(button.title)
             }
             .font(.subheadline.weight(.semibold))
@@ -289,7 +308,7 @@ struct DisplaySection: View {
 
     var body: some View {
         HomeSection(title: "Display") {
-            OptionRow(title: "Retina mode", symbol: "rectangle.inset.filled") {
+            OptionRow(title: String(localized: "Retina mode"), symbol: "rectangle.inset.filled") {
                 Toggle("Retina mode", isOn: Binding(
                     get: { model.retina },
                     set: { model.chooseRetina($0) }
@@ -335,13 +354,13 @@ struct CapabilitiesSection: View {
 
     /// Why Gyroscope cannot be turned on; nil when it can, which needs no note.
     static func gyroscopeUnavailable(available: Bool) -> String? {
-        available ? nil : "This device has no gyroscope or accelerometer to share."
+        available ? nil : String(localized: "This device has no gyroscope or accelerometer to share.")
     }
 }
 
 /// The words under Microphone while iOS refuses access.
 enum CapabilityWords {
-    static let microphoneDenied = "Not allowed in Settings"
+    static let microphoneDenied = String(localized: "Not allowed in Settings")
 }
 
 struct MicrophoneRow: View {
@@ -350,7 +369,7 @@ struct MicrophoneRow: View {
     var body: some View {
         let denied = model.microphoneState == .denied
         OptionRow(
-            title: "Microphone", symbol: "mic.fill",
+            title: String(localized: "Microphone"), symbol: "mic.fill",
             detail: denied ? CapabilityWords.microphoneDenied : nil, dimmed: denied
         ) {
             Toggle("Microphone", isOn: Binding(
@@ -359,7 +378,7 @@ struct MicrophoneRow: View {
             ))
             .labelsHidden()
         }
-        .accessibilityHint(denied ? "Andarium is not allowed to use the microphone. Turning this on offers to open Settings." : "")
+        .accessibilityHint(denied ? String(localized: "Andarium is not allowed to use the microphone. Turning this on offers to open Settings.") : "")
     }
 }
 
@@ -367,7 +386,7 @@ struct GyroscopeRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        OptionRow(title: "Gyroscope", symbol: "gyroscope") {
+        OptionRow(title: String(localized: "Gyroscope"), symbol: "gyroscope") {
             Toggle("Gyroscope", isOn: Binding(
                 get: { model.motionSensorsOn },
                 set: { model.setMotionSensors($0) }
@@ -471,12 +490,12 @@ struct JitSection: View {
 
     var body: some View {
         if model.jitAvailable, model.guest != nil {
-            HomeSection(title: "JIT") {
+            HomeSection(verbatim: "JIT") {
                 OptionRow(title: "JIT", symbol: "bolt.fill") {
-                    Toggle("JIT", isOn: Binding(
+                    Toggle(isOn: Binding(
                         get: { model.jitOn },
                         set: { model.setJit($0) }
-                    ))
+                    )) { Text(verbatim: "JIT") }
                     .labelsHidden()
                 }
             } footer: {
@@ -497,7 +516,7 @@ struct BackupOption: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        OptionRow(title: "Back up guest data", symbol: "icloud.fill") {
+        OptionRow(title: String(localized: "Back up guest data"), symbol: "icloud.fill") {
             Toggle("Back up guest data", isOn: $isOn).labelsHidden()
         }
     }

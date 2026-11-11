@@ -63,7 +63,7 @@ struct WhatsNewRibbon: View {
             .buttonStyle(.plain)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("What\u{2019}s New")
-            .accessibilityValue(entries.map(\.title).joined(separator: ", "))
+            .accessibilityValue(entries.map { WhatsNewWords.localized($0.title) }.joined(separator: ", "))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(named: "Close", close)
             .accessibilityIdentifier("whats-new-ribbon")
@@ -114,7 +114,7 @@ struct WhatsNewRibbon: View {
     /// and how many more. At the accessibility sizes the line may wrap, and
     /// names at most three.
     @ViewBuilder private var summary: some View {
-        let titles = entries.map(\.title)
+        let titles = entries.map { WhatsNewWords.localized($0.title) }
         if typeSize.isAccessibilitySize {
             Text(Self.summary(titles, naming: titles.count <= 3 ? titles.count : 2))
                 .lineLimit(3)
@@ -133,10 +133,10 @@ struct WhatsNewRibbon: View {
     /// or "7 new features" when none is named.
     static func summary(_ titles: [String], naming named: Int) -> String {
         guard named > 0 else {
-            return titles.count == 1 ? "1 new feature" : "\(titles.count) new features"
+            return String(localized: "\(titles.count) new features")
         }
         let rest = titles.count - named
-        return (titles.prefix(named) + (rest > 0 ? ["\(rest) more"] : [])).joined(separator: " \u{00B7} ")
+        return (titles.prefix(named) + (rest > 0 ? [String(localized: "\(rest) more")] : [])).joined(separator: " \u{00B7} ")
     }
 
     /// A pull down that follows the finger, against some resistance, and

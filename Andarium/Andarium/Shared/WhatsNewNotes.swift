@@ -132,10 +132,10 @@ struct WhatsNewEntryRow: View {
             IconTile(symbol: entry.symbol)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(entry.title)
+                Text(WhatsNewWords.localized(entry.title))
                     .font(.body.weight(.semibold))
                 if let text = entry.text {
-                    Text(text)
+                    Text(WhatsNewWords.localized(text))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -172,12 +172,21 @@ struct WhatsNewPoints: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\u{2022}")
                         .accessibilityHidden(true)
-                    Text(point)
+                    Text(WhatsNewWords.localized(point))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .font(.subheadline)
         .foregroundStyle(.secondary)
+    }
+}
+
+/// The notes are written in English in `WhatsNew.json` and translated in
+/// `WhatsNew.xcstrings`, which holds each note under its English text; a note
+/// with no entry is shown as written. A new build's notes are added to both.
+enum WhatsNewWords {
+    static func localized(_ note: String) -> String {
+        String(localized: String.LocalizationValue(note), table: "WhatsNew")
     }
 }

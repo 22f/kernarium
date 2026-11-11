@@ -81,11 +81,11 @@ struct HomeView: View {
         } message: {
             Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count))
         }
-        .alert(StartSpace.title, isPresented: $model.startBlocked) {
+        .alert(StartSpaceWords.title, isPresented: $model.startBlocked) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(StartSpace(neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes)
-                .message(device: model.host.name))
+            Text(StartSpaceWords.message(
+                neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes, device: model.host.name))
         }
     }
 
@@ -187,7 +187,7 @@ struct HomeView: View {
         if model.lowSpace {
             NoticeCard(
                 symbol: "externaldrive.badge.exclamationmark", color: .orange,
-                title: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)",
+                title: String(localized: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)"),
                 text: SnapshotWords.lowSpaceText(
                     hasSnapshots: model.snapshots.count > 0, startReserve: Formats.size(bytes: Limits.startReserveBytes),
                     device: model.host.name)
@@ -209,8 +209,8 @@ struct HomeView: View {
             // A restored older snapshot says itself that the next start updates it.
             NoticeCard(
                 symbol: "arrow.down.circle.fill", color: .accentColor,
-                title: "System image updated",
-                text: "Andarium system image is updated to \(ReleaseLabel.revision(of: release)). The next start finishes the update and takes a little longer."
+                title: String(localized: "System image updated"),
+                text: String(localized: "Andarium system image is updated to \(ReleaseLabel.revision(of: release)). The next start finishes the update and takes a little longer.")
             )
         case .unfinishedUpdate(let release, let canRetry, let canRestore):
             UnfinishedUpdateCard(release: release, canRetry: canRetry, canRestore: canRestore)
@@ -228,8 +228,8 @@ struct HomeView: View {
             case .closedInBackground:
                 NoticeCard(
                     symbol: "moon.zzz.fill", color: .secondary,
-                    title: "iOS closed Andarium",
-                    text: "The guest was shut down in the background.",
+                    title: String(localized: "iOS closed Andarium"),
+                    text: String(localized: "The guest was shut down in the background."),
                     onClose: { withAnimation { model.notice = nil } }
                 )
             case .sessionEnded(let ended):
@@ -314,11 +314,11 @@ struct StartButton: View {
     private var blocked: Bool { !model.plan.allowsStart || !model.host.runsGuestGraphics }
 
     private var title: String {
-        guard model.guest != nil, model.plan.allowsStart else { return "Start" }
+        guard model.guest != nil, model.plan.allowsStart else { return String(localized: "Start") }
         switch model.bootKind(.normal) {
-        case .firstStart: return "Start and set up"
-        case .upgrade: return "Update and start"
-        default: return "Start"
+        case .firstStart: return String(localized: "Start and set up")
+        case .upgrade: return String(localized: "Update and start")
+        default: return String(localized: "Start")
         }
     }
 }
@@ -484,13 +484,13 @@ struct UnfinishedUpdateCard: View {
         let revision = ReleaseLabel.revision(of: release)
         return switch (canRetry, canRestore) {
         case (true, true):
-            "The start that updates to \(revision) did not reach its end. Start tries it again, or Restore puts back your data from before the update."
+            String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or Restore puts back your data from before the update.")
         case (true, false):
-            "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the guest to start over."
+            String(localized: "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the guest to start over.")
         case (false, true):
-            "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the guest to start over."
+            String(localized: "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the guest to start over.")
         case (false, false):
-            "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the guest to start over."
+            String(localized: "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the guest to start over.")
         }
     }
 }
