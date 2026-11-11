@@ -2269,6 +2269,8 @@ std::vector<std::uint8_t> VirtioGpuDevice::processInternal(
         releaseBlobScanout();
         scanoutResource_ = scanout->resourceId;
         scanoutRectangle_ = scanout->rectangle;
+        UML_GPU_DISPLAY.setGuestScanoutMode(
+            scanout->rectangle.width, scanout->rectangle.height);
         UML_GPU_DISPLAY.setGuestScanoutActive(true);
         displayActivityLog().record(
             "scanout set kind=%s resource=%u source=%ux%u rect=%ux%u+%u+%u",
@@ -2403,6 +2405,8 @@ std::vector<std::uint8_t> VirtioGpuDevice::processInternal(
         scanoutOffset_ = scanout->offsets[0];
         scanoutTexture_ = texture;
         scanoutVirglBlob_ = readback;
+        UML_GPU_DISPLAY.setGuestScanoutMode(
+            scanout->rectangle.width, scanout->rectangle.height);
         UML_GPU_DISPLAY.setGuestScanoutActive(true);
         return success;
     }

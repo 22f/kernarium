@@ -25,6 +25,12 @@ public:
 
     [[nodiscard]] std::string takeConnectionName();
     void send(std::span<const protocol::InputEvent> events) noexcept;
+    /* The host's side of the device, for what a plain send does not cover:
+     * plugging, the status sink and the registration (EventQueue). */
+    [[nodiscard]] const std::shared_ptr<EventQueue>& events() const noexcept
+    {
+        return events_;
+    }
     void stop() noexcept;
 
 private:

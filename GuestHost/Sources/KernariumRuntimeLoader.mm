@@ -49,6 +49,10 @@ KernariumRestartHandler restartHandler;
 std::mutex locationHandlerMutex;
 std::mutex locationRegistrationMutex;
 KernariumLocationReceiverHandler locationHandler;
+/* And for the input status. */
+std::mutex inputStatusHandlerMutex;
+std::mutex inputStatusRegistrationMutex;
+KernariumInputStatusHandler inputStatusHandler;
 
 void forwardConsoleOutput(
     void*,
@@ -135,6 +139,35 @@ void updateLocationReceiverForwarder(const kernarium_runtime_api* runtime)
     }
     runtime->set_location_receiver_callback(
         wanted ? forwardLocationReceiver : nullptr, nullptr);
+}
+
+/* Runs on a runtime thread, inside the runtime's call, so it only hands the
+ * event to the main queue. */
+void forwardInputStatus(void*, int status, int on)
+{
+    KernariumInputStatusHandler handler;
+    {
+        std::lock_guard lock(inputStatusHandlerMutex);
+        handler = inputStatusHandler;
+    }
+    if (handler == nil)
+        return;
+    const BOOL lit = on != 0;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        handler(status, lit);
+    });
+}
+
+void updateInputStatusForwarder(const kernarium_runtime_api* runtime)
+{
+    std::lock_guard registration(inputStatusRegistrationMutex);
+    bool wanted;
+    {
+        std::lock_guard lock(inputStatusHandlerMutex);
+        wanted = inputStatusHandler != nil;
+    }
+    runtime->set_input_status_callback(
+        wanted ? forwardInputStatus : nullptr, nullptr);
 }
 
 [[noreturn]] void guestTimerMaskFailure() noexcept
@@ -276,7 +309,12 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
         api->read_graphics_memory == nullptr ||
         api->prepare_jit == nullptr ||
         api->set_location_receiver_callback == nullptr ||
-        api->report_location == nullptr) {
+        api->report_location == nullptr ||
+        api->set_input_connected == nullptr ||
+        api->send_keyboard_usage == nullptr ||
+        api->send_pointer == nullptr ||
+        api->send_mouse == nullptr ||
+        api->set_input_status_callback == nullptr) {
         std::fputs("Kernarium: runtime API validation failed\n", stderr);
         return false;
     }
@@ -328,6 +366,7 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
     updateConsoleOutputForwarder(api);
     updateRestartForwarder(api);
     updateLocationReceiverForwarder(api);
+    updateInputStatusForwarder(api);
 #ifndef UML_APP_STORE_APPLICATION
     /* Optional: only a runtime built for automation has it. */
     automationJobAtStart = reinterpret_cast<int (*)(void)>(
@@ -730,6 +769,60 @@ extern "C" void kernarium_runtime_loader_set_location_receiver_handler(
     const kernarium_runtime_api* runtime = api();
     if (runtime != nullptr)
         updateLocationReceiverForwarder(runtime);
+}
+
+extern "C" void kernarium_runtime_loader_set_input_status_handler(
+    KernariumInputStatusHandler handler)
+{
+    {
+        std::lock_guard lock(inputStatusHandlerMutex);
+        inputStatusHandler = [handler copy];
+    }
+    const kernarium_runtime_api* runtime = api();
+    if (runtime != nullptr)
+        updateInputStatusForwarder(runtime);
+}
+
+extern "C" int kernarium_runtime_loader_set_input_connected(
+    int device,
+    BOOL connected)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ?
+        -ENODEV : runtime->set_input_connected(device, connected ? 1 : 0);
+}
+
+extern "C" int kernarium_runtime_loader_send_keyboard_usage(
+    uint32_t usage,
+    BOOL pressed)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ?
+        -ENODEV : runtime->send_keyboard_usage(usage, pressed ? 1 : 0);
+}
+
+extern "C" int kernarium_runtime_loader_send_pointer(
+    uint32_t x,
+    uint32_t y,
+    uint32_t buttons,
+    BOOL inRange)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ?
+        -ENODEV : runtime->send_pointer(x, y, buttons, inRange ? 1 : 0);
+}
+
+extern "C" int kernarium_runtime_loader_send_mouse(
+    int32_t dx,
+    int32_t dy,
+    uint32_t buttons,
+    int32_t wheel,
+    int32_t horizontalWheel)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ?
+        -ENODEV :
+        runtime->send_mouse(dx, dy, buttons, wheel, horizontalWheel);
 }
 
 extern "C" int kernarium_runtime_loader_report_location(

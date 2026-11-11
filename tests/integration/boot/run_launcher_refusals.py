@@ -41,6 +41,8 @@ CONSOLE_COLLISION = COLLISION.format(
     "a host Virtio console or serial socket", "Virtio console"
 )
 CONFIGURE = "Unable to configure host devices: "
+HARDWARE_INPUT_DISPLAY = (
+    "--hardware-input requires --gpu with a VNC or native display")
 
 # (arguments, the stderr line the launcher must print)
 REFUSALS: list[tuple[list[str], str]] = [
@@ -161,6 +163,9 @@ REFUSALS: list[tuple[list[str], str]] = [
      CONFIGURE + "--gpu-auto-resize requires --gpu-display=native"),
     (["--gpu-dpi=96", "--gpu-width=5000"],
      CONFIGURE + "--gpu-dpi requires display dimensions no larger than 4095"),
+    (["--hardware-input"], CONFIGURE + HARDWARE_INPUT_DISPLAY),
+    (["--hardware-input", "--gpu-display=offscreen"],
+     CONFIGURE + HARDWARE_INPUT_DISPLAY),
 ]
 
 # (arguments, the start of the stderr line): the service cannot bind its
@@ -201,6 +206,9 @@ ACCEPTED: list[list[str]] = [
     ["--gnss"],
     ["--location=fixed:35.6895,139.6917,40,8", "--vsock-forward=0-5555"],
     ["--location=approximate:48.85,2.35"],
+    ["--hardware-input", "--gpu"],
+    ["--hardware-input", "--gpu-display=vnc", "--gpu-vnc-port=0"],
+    ["--hardware-input", "--gpu-display=native"],
 ]
 
 

@@ -15,6 +15,7 @@ investigation date.
 | Virtio camera device: live and blocked sessions, frames, stills, metadata, calibration | [`../darwin/device/camera/README.md`](../darwin/device/camera/README.md) |
 | Virtio vsock: the host end of the guest's vsock device, for a service such as adbd | [`../darwin/device/vsock/README.md`](../darwin/device/vsock/README.md) |
 | Virtio GNSS: the guest's `/dev/gnssN`, its wire contract and the NMEA epoch | [`../darwin/device/gnss/README.md`](../darwin/device/gnss/README.md) |
+| Virtio input: the touchscreen, the hardware keyboard, mouse and pointer, their connected state | [`../darwin/device/input/README.md`](../darwin/device/input/README.md) and [`../kernel/common/input/README.md`](../kernel/common/input/README.md) |
 | Guest VA-API backend over the video decoder and encoder | [`../tools/video/va-v4l2/README.md`](../tools/video/va-v4l2/README.md) |
 | Attempted performance work | [`optimization-history.md`](optimization-history.md) |
 | Performance tools, probes, and profilers | [`../tests/perf/README.md`](../tests/perf/README.md) |
