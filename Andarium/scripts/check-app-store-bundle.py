@@ -495,7 +495,11 @@ def feedback_problems(app: Path, configuration: str, address: str) -> tuple[list
         code = host_code(binary)
         if code is None:
             continue
-        present = {fragment for fragment in FEEDBACK_FRAGMENTS if fragment in code[0]}
+        # The linker's debug map names the object and source files of the
+        # build, which hold the feature's file names though it is compiled
+        # out: the check reads what the code and its symbols hold.
+        data = without_debug_map(*code)
+        present = {fragment for fragment in FEEDBACK_FRAGMENTS if fragment in data}
         if present:
             fragments[str(binary.relative_to(app))] = present
     try:

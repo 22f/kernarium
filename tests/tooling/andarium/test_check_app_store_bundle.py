@@ -537,6 +537,13 @@ def main() -> int:
             check(make_app(root, f"feedback-address-{address}".replace("@", "-at-").replace(" ", "-"),
                            feature, app_info(AndariumFeedbackAddress=address)),
                   passes=False, expect="Send feedback: the receiver", args=["--feedback-address", address])
+        # A build that names no receiver still has the feature's file names in the
+        # linker's debug map of its Debug or Release product.
+        mapped_feedback = build_with_debug_map(root, "mapped-feedback", "/Users/NAME/SendFeedbackSheet")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"feedback-{configuration}-debug-map", mapped_feedback, app_info()),
+                  passes=True, expect=f"Send feedback is not compiled in ({configuration})",
+                  args=["--feedback", "--configuration", configuration])
         # The Debug build keeps the application's code in a library beside the
         # stub executable; the check reads it.
         debug = make_app(root, "feedback-debug-library", clean, app_info())
