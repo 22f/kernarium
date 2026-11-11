@@ -42,7 +42,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  drivers/media/virtio/Makefile                 |    4 +-
  drivers/media/virtio/README                   |   10 +-
  drivers/media/virtio/virtio_video.h           |   60 +-
- drivers/media/virtio/virtio_video_camera.c    | 1638 +++++++++++++++++
+ drivers/media/virtio/virtio_video_camera.c    | 1661 +++++++++++++++++
  drivers/media/virtio/virtio_video_camera.h    |  233 +++
  .../media/virtio/virtio_video_camera_cmd.c    |  290 +++
  .../media/virtio/virtio_video_camera_ctrl.c   |  568 ++++++
@@ -52,7 +52,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  drivers/media/virtio/virtio_video_device.c    |   48 +-
  drivers/media/virtio/virtio_video_driver.c    |   68 +-
  drivers/media/virtio/virtio_video_vq.c        |  132 +-
- 14 files changed, 3465 insertions(+), 39 deletions(-)
+ 14 files changed, 3488 insertions(+), 39 deletions(-)
  create mode 100644 drivers/media/virtio/virtio_video_camera.c
  create mode 100644 drivers/media/virtio/virtio_video_camera.h
  create mode 100644 drivers/media/virtio/virtio_video_camera_cmd.c
@@ -232,10 +232,10 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
  void virtio_video_clean_capability(struct virtio_video_device *vvd);
 diff --git a/drivers/media/virtio/virtio_video_camera.c b/drivers/media/virtio/virtio_video_camera.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1adae148f7c2e4ebfd0105cecea951a6a7e1eac9
+index 0000000000000000000000000000000000000000..553992620a4beb24d2e61b45954099efd17f7a38
 --- /dev/null
 +++ b/drivers/media/virtio/virtio_video_camera.c
-@@ -0,0 +1,1638 @@
+@@ -0,0 +1,1661 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * The Virtio camera's V4L2 nodes.
@@ -734,6 +734,14 @@ index 0000000000000000000000000000000000000000..1adae148f7c2e4ebfd0105cecea951a6
 +		return -EINVAL;
 +
 +	/*
++	 * A metadata record is corrected where its answer is taken, with
++	 * interrupts off: map the buffer here, where mapping may sleep.
++	 */
++	if (file->kind == VIRTIO_VIDEO_CAMERA_STREAM_META &&
++	    !vb2_plane_vaddr(vb, 0))
++		return -ENOMEM;
++
++	/*
 +	 * The device forgot the buffer when it was reset, or the stream it was
 +	 * attached to was destroyed: attach it again.
 +	 */
@@ -857,6 +865,21 @@ index 0000000000000000000000000000000000000000..1adae148f7c2e4ebfd0105cecea951a6
 +		if (size > vb2_plane_size(vb, 0)) {
 +			state = VB2_BUF_STATE_ERROR;
 +			size = 0;
++		}
++		/*
++		 * The record names its exposure by the device's sequence, which
++		 * is what the client matches to a frame by: it is carried on
++		 * the same way.
++		 */
++		if (state == VB2_BUF_STATE_DONE &&
++		    file->kind == VIRTIO_VIDEO_CAMERA_STREAM_META) {
++			struct virtio_video_camera_meta *meta =
++				vb2_plane_vaddr(vb, 0);
++			u32 offset = atomic_read(&file->cam->seq_offset);
++
++			if (meta && offset && size >= sizeof(*meta))
++				meta->sequence = cpu_to_le64(
++					le64_to_cpu(meta->sequence) + offset);
 +		}
 +	}
 +	cam_note_sequence(file->cam, buf->vb.sequence);
