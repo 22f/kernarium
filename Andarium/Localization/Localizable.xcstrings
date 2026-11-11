@@ -5348,27 +5348,28 @@
         }
       }
     },
-    "Port %u is already in use on this device." : {
+    "Port %@ is already in use on this device." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このデバイスではポート%uがすでに使用されています。"
+            "value" : "このデバイスではポート%@がすでに使用されています。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备上的端口%u已被占用。"
+            "value" : "此设备上的端口%@已被占用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置上的連接埠%u已被佔用。"
+            "value" : "此裝置上的連接埠%@已被佔用。"
           }
         }
-      }
+      },
+      "comment" : "The ADB over network port, written as plain digits (5555), never grouped."
     },
     "Power" : {
       "localizations" : {

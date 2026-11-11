@@ -79,4 +79,11 @@ struct LocalizationTests {
             #expect(!value.isEmpty && value != english, "\(language) shows \(key) in English")
         }
     }
+
+    /// A number interpolated into a localized string takes the language's
+    /// grouping (5,555), so a port is passed as text and shows its digits.
+    @Test func aPortIsWrittenWithoutGrouping() {
+        let message = AdbNetworkMessages.cannotStart(AdbError.io(EADDRINUSE))
+        #expect(message.contains("5555"), "\(message)")
+    }
 }

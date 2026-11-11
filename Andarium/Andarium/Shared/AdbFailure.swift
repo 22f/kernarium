@@ -102,7 +102,9 @@ nonisolated struct AdbFailure: LocalizedError, Equatable {
 nonisolated enum AdbNetworkMessages {
     static func cannotStart(_ error: Error) -> String {
         if let adb = error as? AdbError, adb == .io(EADDRINUSE) {
-            return String(localized: "Port \(AdbNetworkBridge.defaultPort) is already in use on this device.")
+            return String(
+                localized: "Port \(String(AdbNetworkBridge.defaultPort)) is already in use on this device.",
+                comment: "The ADB over network port, written as plain digits (5555), never grouped.")
         }
         return String(localized: "ADB over network could not start.")
     }
