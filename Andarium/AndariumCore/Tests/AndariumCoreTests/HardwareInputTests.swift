@@ -318,7 +318,7 @@ struct PointerPreferenceTests {
         withDefaults { defaults in
             let preference = PointerPreference(defaults: defaults)
             #expect(!preference.isOn)
-            let start = preference.launch(harness: false)
+            let start = preference.launch(automated: false)
             #expect(!start.isOn)
             #expect(start.keepsChanges)
         }
@@ -329,10 +329,10 @@ struct PointerPreferenceTests {
             let preference = PointerPreference(defaults: defaults)
             preference.keep(true)
             #expect(PointerPreference(defaults: defaults).isOn)
-            let person = preference.launch(harness: false)
+            let person = preference.launch(automated: false)
             #expect(person.isOn && person.keepsChanges)
             // A launch with settings runs with the default and keeps nothing.
-            let harness = preference.launch(harness: true)
+            let harness = preference.launch(automated: true)
             #expect(!harness.isOn && !harness.keepsChanges)
             #expect(preference.isOn)
         }

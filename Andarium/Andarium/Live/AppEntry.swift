@@ -157,7 +157,7 @@ struct AppEntry {
         model.statsDecidedByLaunch = !stats.keepsChanges
         // "Use the pointer as touch" is the person's last choice, unless the
         // launch is a harness's and decides for its run alone.
-        let pointer = PointerPreference().launch(harness: !launch.isEmpty)
+        let pointer = PointerPreference().launch(automated: !launch.isEmpty)
         model.pointerAsTouch = pointer.isOn
         model.pointerAsTouchDecidedByLaunch = !pointer.keepsChanges
         #if !APP_STORE
@@ -255,7 +255,7 @@ struct AppEntry {
             createRequirementBytes: 0
         )
         // The launch decides the setting for its own run.
-        model.pointerAsTouch = PointerPreference().launch(harness: true).isOn
+        model.pointerAsTouch = PointerPreference().launch(automated: true).isOn
         model.pointerAsTouchDecidedByLaunch = true
         let probe = InputProbe()
         model.inputProbe = probe

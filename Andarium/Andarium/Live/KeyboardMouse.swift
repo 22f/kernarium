@@ -226,7 +226,7 @@ final class KeyboardMouse: GuestHardwareSink {
         presence: any HardwarePresence,
         rawMouse: (any RawMouseSource)?,
         supportsMouse: Bool,
-        clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime },
+        clock: @escaping () -> Double = { HardwareInputClock.seconds() },
         wantsLock: @escaping (Bool) -> Void = { _ in }
     ) {
         self.runtime = runtime ?? LoaderHardwareInputRuntime()

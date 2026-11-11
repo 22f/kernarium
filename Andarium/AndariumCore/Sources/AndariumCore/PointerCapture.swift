@@ -117,7 +117,7 @@ public struct PointerPreference {
     /// The start of a launch. A launch that carries any launch setting is a
     /// harness's and starts off; only a launch with none restores the kept
     /// value.
-    public func launch(harness: Bool) -> Launch {
-        harness ? Launch(isOn: false, keepsChanges: false) : Launch(isOn: isOn, keepsChanges: true)
+    public func launch(automated: Bool) -> Launch {
+        automated ? Launch(isOn: false, keepsChanges: false) : Launch(isOn: isOn, keepsChanges: true)
     }
 }

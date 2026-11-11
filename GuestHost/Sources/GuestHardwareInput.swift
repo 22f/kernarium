@@ -4,6 +4,20 @@ import CoreGraphics
 import Foundation
 import GuestHostCore
 
+/// Seconds on a monotonic clock, for the intervals the hardware input
+/// measures (Caps Lock, the plug timers). It is not `ProcessInfo.systemUptime`:
+/// that reads the system boot time, a required-reason API that the application's
+/// privacy manifest would have to declare, and nothing here compares it with an
+/// event's timestamp.
+nonisolated enum HardwareInputClock {
+    private static let origin = ContinuousClock.now
+
+    static func seconds() -> Double {
+        let elapsed = ContinuousClock.now - origin
+        return Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+    }
+}
+
 /// Where the hardware keyboard and mouse of a guest view end up. The hosting
 /// application implements it: it decides whether the guest has the devices
 /// and passes the events to the runtime.
@@ -47,7 +61,7 @@ final class GuestHardwareInput {
     private var discreteScroll = ScrollAccumulator(pointsPerDetent: discretePointsPerDetent)
     private var lastHover: CGPoint?
 
-    init(clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }) {
+    init(clock: @escaping () -> Double = { HardwareInputClock.seconds() }) {
         self.clock = clock
     }
 
