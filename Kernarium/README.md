@@ -314,7 +314,9 @@ decides what the lifecycle edges do and acts only through
 
 A guest's disk grows as the guest writes (the Linux overlay in the temporary
 directory, an Android bundle's `data.img`), and a write the device cannot take
-stops the guest. The thresholds and the pause itself are
+is held, with the virtual machine's other disk I/O, until the device has room
+([kernel contract](../kernel/common/README.md#block-devices-and-filesystems));
+the pause is the guard. The thresholds and the pause itself are
 [GuestHostCore](../GuestHost/README.md), which Andarium shares, as is the
 figure: the space a write can use (`HostStorage`), which leaves out the
 purgeable space iOS Settings counts.
