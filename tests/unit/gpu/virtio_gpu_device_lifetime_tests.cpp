@@ -4,6 +4,7 @@
 #include "deferred_fences.hpp"
 #include "fence_deadline.hpp"
 #include "gpu_test_support.hpp"
+#include "platform/frame_figures.hpp"
 #include "virtio_gpu_device.hpp"
 #include "virtio_gpu_device_testing.hpp"
 
@@ -1765,12 +1766,19 @@ void rendererExecutionFailuresPreserveDeviceState()
     require(dependencies.readResourceCount == 3);
     require(dependencies.displayUpdateCount == 1);
 
+    // The session record's frame count (platform/frame_figures.hpp): a flush
+    // of the scanout is counted once, whichever way it is shown.
+    const auto framesBefore =
+        uml::platform::takeFrameFigures(uml::platform::frameClockTicks()).flushes;
+
     // Once the first readback has sized the packed staging area, a fallback
     // flush allocates only its response. Any second allocation is a regression
     // to per-frame staging or cloning.
     const auto warmedFlush =
         processAllocatingOnlyTheReply(device, requestBytes(flush));
     require(responseType(warmedFlush) == protocol::GpuResponse::okNoData);
+    require(uml::platform::takeFrameFigures(uml::platform::frameClockTicks())
+                .flushes == framesBefore + 1);
     require(dependencies.readResourceCount == 4);
     require(dependencies.displayUpdateCount == 2);
 

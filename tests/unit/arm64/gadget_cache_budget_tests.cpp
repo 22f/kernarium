@@ -216,6 +216,48 @@ void relief_waits_for_the_lock()
 	cache::set_budget(cache::fallback_budget);
 }
 
+/* The largest open account is what the session record's checkpoint writes
+ * beside the relief counters: shedding accounts do not count, and a ledger
+ * whose lock is taken is not waited for. */
+void the_largest_open_account_is_read_without_waiting()
+{
+	cache::set_budget(64 * kib);
+	std::size_t largest = 123;
+	require(cache::largest_open_bytes(largest) && largest == 0,
+		"a ledger without accounts has no largest");
+	Holder small;
+	Holder large;
+	Holder middle;
+	small.account.charge(10 * kib);
+	large.account.charge(50 * kib);
+	middle.account.charge(30 * kib);
+	require(cache::largest_open_bytes(largest) && largest == 50 * kib);
+	const auto reliefs = cache::ledger_state().reliefs;
+	cache::relieve();
+	require(large.account.shedding() &&
+		cache::ledger_state().reliefs == reliefs + 1);
+	require(cache::largest_open_bytes(largest) && largest == 30 * kib,
+		"an account asked to shed was counted as open");
+
+	std::atomic<bool> held{};
+	std::atomic<bool> release{};
+	std::thread holder{[&] {
+		const std::lock_guard guard{cache::ledger().mutex};
+		held.store(true);
+		while (!release.load())
+			std::this_thread::yield();
+	}};
+	while (!held.load())
+		std::this_thread::yield();
+	largest = 777;
+	const bool read = cache::largest_open_bytes(largest);
+	release.store(true);
+	holder.join();
+	require(!read && largest == 777,
+		"a reading waited for the ledger or changed its answer");
+	cache::set_budget(cache::fallback_budget);
+}
+
 /* Within the budget nothing is asked to shed, and an empty account never
  * is, however far over the rest are. */
 void within_the_budget_nothing_sheds()
@@ -290,6 +332,7 @@ int main()
 	relief_sheds_the_largest();
 	a_shed_account_that_shrinks_leaves_the_open_ones_exact();
 	relief_waits_for_the_lock();
+	the_largest_open_account_is_read_without_waiting();
 	within_the_budget_nothing_sheds();
 	concurrent_charges_add_up();
 	return 0;

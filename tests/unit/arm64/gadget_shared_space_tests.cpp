@@ -9,7 +9,9 @@
 #include "allocation_failure.hpp"
 #include "require.hpp"
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <new>
 #include <vector>
 
@@ -153,6 +155,66 @@ void a_body_that_cannot_be_queued_is_never_freed()
 	require(body.frees == 0 && limbo.size() == 0);
 }
 
+/* What the registry asks of an engine's address space, without an engine. */
+struct FakeKey final {
+	unsigned long generation{};
+	std::uint8_t mode{};
+	unsigned options{};
+	const void *owner{};
+};
+
+class FakeSpace final {
+public:
+	FakeSpace(FakeKey key, std::uint64_t) : key_{key} {}
+
+	[[nodiscard]] const FakeKey &key() const noexcept { return key_; }
+	void attach(const cache::ExecutorAnnouncement *) noexcept { ++executors_; }
+	[[nodiscard]] bool detach(const cache::ExecutorAnnouncement *) noexcept
+	{
+		return --executors_ == 0;
+	}
+	[[nodiscard]] bool close() noexcept { return !closed_.exchange(true); }
+	[[nodiscard]] bool closed() const noexcept { return closed_.load(); }
+	[[nodiscard]] bool shedding() const noexcept { return shedding_; }
+	void shed() noexcept { shedding_ = true; }
+	void request_renewal() noexcept { ++renewals_asked; }
+	static void note_closed() noexcept {}
+
+	unsigned renewals_asked{};
+
+private:
+	FakeKey key_;
+	unsigned executors_{};
+	std::atomic<bool> closed_{};
+	bool shedding_{};
+};
+
+/* A shared address space closed for renewal is counted once in the cache
+ * ledger, the figure the session record shows beside the reliefs; one the
+ * budget asked to shed is a shed account instead. */
+void a_renewal_is_counted_when_the_space_is_closed_for_it()
+{
+	using Registry = cache::SpaceRegistry<FakeSpace, FakeKey>;
+	auto &registry = Registry::instance();
+	cache::ExecutorAnnouncement executor;
+	const auto before = cache::ledger().renewals.load();
+	auto *renewed = registry.attach({1, 0, 0, nullptr}, 0, &executor);
+	registry.close(renewed);
+	require(cache::ledger().renewals.load() == before + 1 &&
+		renewed->renewals_asked == 1, "a renewal was not counted");
+	registry.close(renewed);
+	require(cache::ledger().renewals.load() == before + 1,
+		"a space closed twice was counted twice");
+	registry.detach(renewed, &executor);
+
+	auto *shed = registry.attach({2, 0, 0, nullptr}, 0, &executor);
+	shed->shed();
+	registry.close(shed);
+	require(cache::ledger().renewals.load() == before + 1 &&
+		shed->renewals_asked == 1, "a shed space was counted as renewed");
+	registry.detach(shed, &executor);
+}
+
 } // namespace
 
 int main()
@@ -160,5 +222,6 @@ int main()
 	a_failed_snapshot_frees_nothing_early();
 	a_failed_snapshot_keeps_the_next_bodies_waiting();
 	a_body_that_cannot_be_queued_is_never_freed();
+	a_renewal_is_counted_when_the_space_is_closed_for_it();
 	return 0;
 }

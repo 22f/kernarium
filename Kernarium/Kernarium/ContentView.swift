@@ -35,7 +35,7 @@ struct ContentView: View {
 
                 GuestDisplayView(
                     keyboardVisible: $framebufferKeyboardVisible,
-                    retinaMode: EmulatorLauncher.shared.retinaMode
+                    scale: EmulatorLauncher.shared.displayScale
                 ) { view, geometry in
                     EmulatorLauncher.shared.start(view: view, geometry: geometry)
                 }
@@ -884,7 +884,8 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     /// runs; the unit tests' launchers have none.
     private let space: (() -> GuestSpacePause)?
 
-    var retinaMode: Bool { configuration.retinaMode }
+    /// Kernarium's one switch: native, or one guest pixel to a point.
+    var displayScale: GuestDisplayScale { configuration.retinaMode ? .native : .points }
 
     /// The unit tests make launchers of their own, with a job of their own.
     init(
