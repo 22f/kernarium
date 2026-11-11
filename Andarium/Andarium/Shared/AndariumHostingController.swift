@@ -19,6 +19,11 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     /// The run's deferred edges; nil leaves SwiftUI's preference in charge.
     private var deferredEdges: ScreenEdges?
     private var updateScheduled = false
+    /// What the last update found, which a later trigger compares with.
+    private var appliedInputs: SceneUpdateInputs?
+    /// Where the update reads its inputs when a test supplies them instead of
+    /// the scene and the model.
+    var inputsSource: (@MainActor () -> SceneUpdateInputs?)?
     private var phaseWatcher: PhaseWatcher?
     private var pointerLockWatcher: PointerLockWatcher?
 
@@ -73,25 +78,43 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         scheduleUpdate()
     }
 
+    /// What the update reads, or nil while the root is not in a scene.
+    private func currentInputs() -> SceneUpdateInputs? {
+        if let inputsSource { return inputsSource() }
+        guard let scene = view.window?.windowScene else { return nil }
+        let geometry = scene.effectiveGeometry
+        return SceneUpdateInputs(
+            scene: ObjectIdentifier(scene), driver: model.driver.map { ObjectIdentifier($0) },
+            sceneSize: geometry.coordinateSpace.bounds.size, screenSize: scene.screen.bounds.size,
+            interfaceOrientation: geometry.interfaceOrientation.rawValue,
+            interfaceLocked: geometry.isInterfaceOrientationLocked, phase: model.phase)
+    }
+
+    /// Every layout of the root, every geometry change and every phase change
+    /// asks for the update, and SwiftUI lays the root out after each redraw. An
+    /// update that would find every input where the last one did has nothing
+    /// to do, so it is not scheduled: what else the guest follows (the
+    /// foreground, its boot, the overlays, the sensors' switch, the location)
+    /// reaches it by its own trigger, not through the root.
     private func scheduleUpdate() {
         guard !updateScheduled else { return }
+        if let inputs = currentInputs(), inputs == appliedInputs { return }
         updateScheduled = true
         Task { @MainActor [weak self] in
             guard let self else { return }
             updateScheduled = false
-            guard let scene = view.window?.windowScene else { return }
-            let size = scene.effectiveGeometry.coordinateSpace.bounds.size
+            guard let inputs = currentInputs() else { return }
+            appliedInputs = inputs
             let policy = SessionOrientationPolicy(
-                phase: model.phase, isPhone: UIDevice.current.userInterfaceIdiom == .phone,
-                sceneSize: size, screenSize: scene.screen.bounds.size,
-                interfaceLocked: scene.effectiveGeometry.isInterfaceOrientationLocked)
+                phase: inputs.phase, isPhone: UIDevice.current.userInterfaceIdiom == .phone,
+                sceneSize: inputs.sceneSize, screenSize: inputs.screenSize, interfaceLocked: inputs.interfaceLocked)
             if policy.requestInterfaceLock != lockRequested {
                 lockRequested = policy.requestInterfaceLock
                 setNeedsUpdateOfPrefersInterfaceOrientationLocked()
             }
             model.hostDrivesGuestRotation = policy.hostDrivesGuestRotation
             let deferral = SessionGestureDeferral(
-                phase: model.phase, sceneSize: size, screenSize: scene.screen.bounds.size)
+                phase: inputs.phase, sceneSize: inputs.sceneSize, screenSize: inputs.screenSize)
             if deferral.deferredEdges != deferredEdges {
                 deferredEdges = deferral.deferredEdges
                 setNeedsUpdateOfScreenEdgesDeferringSystemGestures()
