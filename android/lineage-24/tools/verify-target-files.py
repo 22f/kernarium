@@ -738,24 +738,27 @@ NET_SETUP_TRANSITION = re.compile(
     rb"^\(typetransition init(?:_[0-9]+)? kernarium_net_setup_exec process kernarium_net_setup\)$",
     re.MULTILINE,
 )
-# After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) the
-# first time only, in a core domain of its own on system_ext
-# (overlay/tools/kernarium_wifi_network.sh, overlay/sepolicy/system_ext/private).
-# Every boot it also saves the network again when Wi-Fi is on, the network is still
-# saved and the station has joined nothing after a settle time, which enables a network an
-# earlier release left disabled for lack of internet. It never turns Wi-Fi on or
-# connects: the user's switch decides whether the saved network is joined, and a
-# network the user forgets stays forgotten.
+# After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) once, in a
+# core domain of its own on system_ext (overlay/tools/kernarium_wifi_network.sh,
+# overlay/sepolicy/system_ext/private).
+# Until the station has joined it once (the marker then reads 2), a boot that finds Wi-Fi on,
+# the network still saved and nothing joined after a settle time saves it again, which enables
+# a network an earlier release left disabled for lack of internet. It never turns Wi-Fi on or
+# connects: the user's switch decides whether the saved network is joined, and a network the
+# user forgets stays forgotten.
 WIFI_NETWORK_SERVICE = ("kernarium_wifi_network", "/system_ext/bin/kernarium_wifi_network.sh")
 WIFI_NETWORK_TRIGGER = "property:sys.boot_completed=1"
 WIFI_NETWORK_MARKER = "persist.sys.kernarium.virtwifi_saved"
 WIFI_NETWORK_MARKER_TYPE = "kernarium_wifi_network_prop"
+# The marker holds 1 (saved) and 2 (joined), so its property type must accept both.
+WIFI_NETWORK_MARKER_VALUES = ("1", "2")
 WIFI_NETWORK_SCRIPT_REQUIRED = (
     "cmd wifi add-network VirtWifi open",
     "cmd wifi list-networks",
     "cmd wifi status",
     WIFI_NETWORK_MARKER,
-    "setprop",
+    'setprop "$marker" 1',
+    'setprop "$marker" 2',
 )
 # The module's overlay raises both no-internet disable thresholds to the largest value: the
 # platform disables a network when its failure count, which is at least one from the first
@@ -3724,6 +3727,25 @@ def check_wifi_network(rc_payload: str, script: bytes) -> None:
             fail(f"{executable} contains '{token}': the user's Wi-Fi switch is not the product's")
 
 
+def property_type_accepts(type_tokens: list[str], value: str) -> bool:
+    """Whether a property_contexts type (`exact enum 1 2`, `exact bool`...) lets init store value."""
+    tokens = type_tokens[1:] if type_tokens[:1] in (["exact"], ["prefix"]) else type_tokens
+    if not tokens:
+        return True
+    kind, arguments = tokens[0], tokens[1:]
+    if kind == "string":
+        return True
+    if kind == "bool":
+        return value in ("true", "false", "1", "0")
+    if kind == "enum":
+        return value in arguments
+    if kind in ("int", "double"):
+        return re.fullmatch(r"-?[0-9]+(\.[0-9]+)?", value) is not None
+    if kind == "uint":
+        return re.fullmatch(r"[0-9]+", value) is not None
+    return False
+
+
 def check_wifi_network_policy(
     system_ext_policy: bytes, system_ext_file_contexts: bytes, system_ext_property_contexts: str
 ) -> None:
@@ -3769,12 +3791,25 @@ def check_wifi_network_policy(
             "binder: cmd waits for the receiver of its result, so without the rule it never "
             "returns and the script never sets its marker"
         )
-    if not any(
-        line.split()[:2] == [WIFI_NETWORK_MARKER, f"u:object_r:{WIFI_NETWORK_MARKER_TYPE}:s0"]
+    entries = [
+        line.split()
         for line in system_ext_property_contexts.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
-    ):
+    ]
+    marker = [
+        tokens
+        for tokens in entries
+        if tokens[:2] == [WIFI_NETWORK_MARKER, f"u:object_r:{WIFI_NETWORK_MARKER_TYPE}:s0"]
+    ]
+    if not marker:
         fail(f"system_ext property contexts do not label {WIFI_NETWORK_MARKER}")
+    for value in WIFI_NETWORK_MARKER_VALUES:
+        if not property_type_accepts(marker[0][2:], value):
+            fail(
+                f"system_ext property contexts type {WIFI_NETWORK_MARKER} as "
+                f"'{' '.join(marker[0][2:])}', which rejects {value}: init refuses the "
+                "setprop, so the script's repair would run at every boot"
+            )
 
 
 def check_reclaim_boot_apps(rc_payload: str, script: bytes) -> None:

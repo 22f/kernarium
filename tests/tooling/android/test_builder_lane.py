@@ -1516,6 +1516,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         + ("" if wifi_network_variant == "no-list" else "cmd wifi list-networks\n")
                         + ("" if wifi_network_variant == "no-status" else "cmd wifi status\n")
                         + ('setprop "$marker" 1\n' if wifi_network_variant != "no-marker" else "")
+                        + (
+                            'setprop "$marker" 2\n'
+                            if wifi_network_variant not in ("no-marker", "no-joined-marker")
+                            else ""
+                        )
                         + {
                             "enables-wifi": "cmd wifi set-wifi-enabled enabled\n",
                             "connects": "cmd wifi connect-network VirtWifi open\n",
@@ -1780,7 +1785,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         ""
                         if wifi_network_variant == "missing-marker-context"
                         else "persist.sys.kernarium.virtwifi_saved    "
-                        "u:object_r:kernarium_wifi_network_prop:s0 exact bool\n"
+                        "u:object_r:kernarium_wifi_network_prop:s0 exact "
+                        + {
+                            "marker-type-bool": "bool",
+                            "marker-type-enum-one": "enum 1",
+                        }.get(wifi_network_variant or "", "enum 1 2")
+                        + "\n"
                     )
                     + (
                         ""
@@ -3235,6 +3245,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-no-list", {"wifi_network_variant": "no-list"}),
             ("wifi-network-no-status", {"wifi_network_variant": "no-status"}),
             ("wifi-network-no-marker", {"wifi_network_variant": "no-marker"}),
+            ("wifi-network-no-joined-marker", {"wifi_network_variant": "no-joined-marker"}),
             ("wifi-network-enables-wifi", {"wifi_network_variant": "enables-wifi"}),
             ("wifi-network-connects", {"wifi_network_variant": "connects"}),
             ("wifi-network-settings-put", {"wifi_network_variant": "settings-put"}),
@@ -3245,6 +3256,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-missing-binder-transfer", {"wifi_network_variant": "missing-binder-transfer"}),
             ("wifi-network-missing-binder-call", {"wifi_network_variant": "missing-binder-call"}),
             ("wifi-network-missing-marker-context", {"wifi_network_variant": "missing-marker-context"}),
+            ("wifi-network-marker-type-bool", {"wifi_network_variant": "marker-type-bool"}),
+            ("wifi-network-marker-type-enum-one", {"wifi_network_variant": "marker-type-enum-one"}),
             ("wifi-network-script", {"missing_wifi_network_script": True}),
             ("wificond-present", {"entries": {"SYSTEM/bin/wificond": synthetic_aarch64_elf()}}),
             ("wifi-dirs-missing", {"wifi_dirs_variant": "missing"}),
@@ -3777,7 +3790,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-no-status-cause", {"wifi_network_variant": "no-status"},
              "does not contain 'cmd wifi status'"),
             ("wifi-network-no-marker-cause", {"wifi_network_variant": "no-marker"},
-             "does not contain 'setprop'"),
+             re.escape("does not contain 'setprop \"$marker\" 1'")),
+            ("wifi-network-no-joined-marker-cause", {"wifi_network_variant": "no-joined-marker"},
+             re.escape("does not contain 'setprop \"$marker\" 2'")),
             ("wifi-network-enables-wifi-cause", {"wifi_network_variant": "enables-wifi"},
              "contains 'set-wifi-enabled'"),
             ("wifi-network-connects-cause", {"wifi_network_variant": "connects"},
@@ -3798,6 +3813,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "does not let system_server call the Wi-Fi network domain's binder"),
             ("wifi-network-missing-marker-context-cause", {"wifi_network_variant": "missing-marker-context"},
              "do not label persist.sys.kernarium.virtwifi_saved"),
+            ("wifi-network-marker-type-bool-cause", {"wifi_network_variant": "marker-type-bool"},
+             "type persist.sys.kernarium.virtwifi_saved as 'exact bool', which rejects 2"),
+            ("wifi-network-marker-type-enum-one-cause", {"wifi_network_variant": "marker-type-enum-one"},
+             "type persist.sys.kernarium.virtwifi_saved as 'exact enum 1', which rejects 2"),
             ("wifi-network-script-cause", {"missing_wifi_network_script": True},
              "SYSTEM_EXT/bin/kernarium_wifi_network.sh"),
             ("wificond-present-cause", {"entries": {"SYSTEM/bin/wificond": synthetic_aarch64_elf()}},
@@ -5622,13 +5641,30 @@ def verify_wifi_network(android_root: Path) -> None:
         element.get("name"): int(element.text)
         for element in ET.parse(module / "res/values/config.xml").getroot().iter("integer")
     }
-    expected = {name: verifier.WIFI_NEVER_DISABLED_THRESHOLD for name in verifier.WIFI_NO_INTERNET_THRESHOLDS}
-    if thresholds != expected:
-        fail(f"the Wi-Fi overlay sets the integers {thresholds}, not {expected}")
-    # The script settles for a bounded time and ends; nothing in it waits for ever.
+    for name in verifier.WIFI_NO_INTERNET_THRESHOLDS:
+        if thresholds.get(name) != verifier.WIFI_NEVER_DISABLED_THRESHOLD:
+            fail(
+                f"the Wi-Fi overlay sets {name} to {thresholds.get(name)}, not "
+                f"{verifier.WIFI_NEVER_DISABLED_THRESHOLD}"
+            )
+    # The marker holds 1 and 2: the verifier's reading of a property type accepts both for an
+    # enum that lists them and rejects 2 for the types that cannot hold it.
+    accepts = verifier.property_type_accepts
+    for tokens, value, expected in (
+        (["exact", "enum", "1", "2"], "2", True),
+        (["exact", "enum", "1"], "2", False),
+        (["exact", "bool"], "2", False),
+        (["exact", "bool"], "1", True),
+        (["exact", "string"], "2", True),
+        (["exact", "int"], "2", True),
+        (["exact", "uint"], "-1", False),
+    ):
+        if accepts(tokens, value) is not expected:
+            fail(f"the verifier reads {' '.join(tokens)} as {'not ' * expected}accepting {value}")
+    # The script settles and rejoins for bounded times and ends; nothing in it waits for ever.
     script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
-    for needle in ("settle=", 'settle" ]'):
+    for needle in ("settle=", "rejoin=", 'wait_joined "$settle"', 'wait_joined "$rejoin"', '"$waited" -ge "$1"'):
         if needle not in code:
             fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
 
