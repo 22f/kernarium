@@ -311,7 +311,8 @@ application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium`). `SnapshotFileApiTests`
+an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests`;
+the scheme without the filter also runs `AndariumUITests`). `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
@@ -341,9 +342,13 @@ and, on an iPad, pointer events (XCUITest has no pointer on an iPhone) reach
 the real session and the guest's end is a log the test reads, so the tests
 cover the hardware keyboard and mouse without a guest. They cover the keys as
 positions, the plug order, no software keyboard, a sheet's text field taking
-the keys while it is open, the pointer's hover, clicks, drag and scroll, and
-"Use the pointer as touch". The Simulator produces no Escape, Delete, Caps Lock,
-F13, lone Shift or Globe key, and no raw mouse motion under the pointer lock.
+the keys while it is open and a sheet without one taking none from the guest,
+the pointer's hover, clicks, drag and scroll, "Use the pointer as touch" (the
+click is a touch of the touchscreen with it on, the mouse's without it), and a
+guest that never registers its mouse, whose pointer stays the touchscreen's. The
+results carry how many attempts each repeated step took. The Simulator produces
+no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
+motion under the pointer lock.
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
@@ -356,8 +361,11 @@ tests (including Android storage and the touch-cancel path), the side keys'
 pass-through of touches to Android, the ADB-over-network hold, the
 background disk locks (which also requires a guest that was allocating
 buffers when the GPU was held to suspend), the resume after a save while
-the application is away and the real `HostLocation` against the Simulator's
-simulated location (the suite's header says how to grant access and set one). The storage test signs its helper
+the application is away, the real `HostLocation` against the Simulator's
+simulated location (the suite's header says how to grant access and set one)
+and the hardware keyboard and mouse against Android's input devices
+(`KeyboardMouseGuestTests`, which needs a kernel that follows configuration
+changes and its Android release). The storage test signs its helper
 APK with the AOSP test key, never a release key. When derived data is on a
 removable volume, macOS prompts once for access and the launch hangs until
 answered; build to the internal disk instead.
