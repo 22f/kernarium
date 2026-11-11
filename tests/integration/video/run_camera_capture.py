@@ -34,7 +34,7 @@ def boot(arguments: argparse.Namespace, mode: str, probe_mode: str, calibration:
         "--emulator", str(arguments.emulator),
         "--rootfs", str(arguments.rootfs),
         "--probe", str(PROBE),
-        "--cxxflags=-Wall -Wextra",
+        "--cxxflags=-Wall -Wextra -Werror",
         f"--guest-argument=--camera={mode}",
         "--guest-argument=--camera-profile=tablet",
         f"--probe-argument={probe_mode}",

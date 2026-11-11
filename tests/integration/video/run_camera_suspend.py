@@ -3,19 +3,20 @@
 """A camera stream carries on across a guest system suspend.
 
 A guest that leaves the foreground, or that Android suspends once its display
-is off, has its virtio-uml disable the rings of every device, and a ring
-disable with a request the device still holds resets that device. A camera
-stream always holds buffers, so the driver stops its streams before the
-suspend, which hands every buffer back and leaves the device with the streams,
-and queues the buffers again after it.
+is off, has its virtio-uml disable the rings of every device. A camera stream
+always holds buffers; the device keeps what it holds across the disable, and
+the driver stops its streams before the suspend, which hands every buffer back
+to the driver, and queues the buffers again after it.
 
 The guest streams the back camera's video next to its metadata, with the zoom
 written, and suspends by each route (the host's, `suspend` and `wake` on the
 management console, and the guest's own, `echo mem` into /sys/power/state,
 ended by a `wake`). After each wake the frames must keep coming within
-RESUME_SECONDS, no buffer may have failed, the metadata must still show the
-zoom, and the driver must not have reset the device. The contract is the
-camera's suspend section of the Virtio video README.
+RESUME_SECONDS, no buffer may have failed, every buffer of both queues must
+have come back to the stream (the driver parked none for good), the sequences
+must have kept rising, the metadata must still show the zoom, and the driver
+must not have reset the device. The contract is the camera's suspend section of
+the Virtio video README; guest-video-camera-reset covers a device that is reset.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import shutil
 import sys
 import tempfile
 import time
+import typing
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
@@ -56,28 +58,50 @@ FAILURE = re.compile(
 )
 # The driver says so when the device had forgotten its streams after a resume.
 RESET = "the device was reset: restoring the streams"
-TICK = re.compile(r"^CAMSUSP tick frames=(\d+) errors=(\d+) zoom=(0x[0-9a-f]+)\s*$", re.M)
+TICK = re.compile(
+    r"^CAMSUSP tick frames=(\d+) errors=(\d+) zoom=(0x[0-9a-f]+) epoch=(\d+) "
+    r"video=(\d+) meta=(\d+) regressions=(\d+)\s*$",
+    re.M,
+)
+# The probe's buffers: it allocates four video and sixteen metadata buffers.
+VIDEO_BUFFERS = 4
+META_BUFFERS = 16
+# Frames the stream must deliver after a wake: enough for every metadata buffer
+# to have come round more than once.
+PROGRESS_FRAMES = 40
+CXXFLAGS = "-std=c++20 -O2 -Wall -Wextra -Werror"
 ARMS = ("host", "self")
 
 
-def last_tick(guest: Guest) -> tuple[int, int, int] | None:
+class Tick(typing.NamedTuple):
+    frames: int
+    errors: int
+    zoom: int
+    epoch: int
+    video: int
+    meta: int
+    regressions: int
+
+
+def last_tick(guest: Guest) -> Tick | None:
     text = guest.run_command(f"cat {LOG}", 30).output
     ticks = TICK.findall(text)
     if not ticks:
         return None
-    frames, errors, zoom = ticks[-1]
-    return int(frames), int(errors), int(zoom, 16)
+    frames, errors, zoom, epoch, video, meta, regressions = ticks[-1]
+    return Tick(int(frames), int(errors), int(zoom, 16), int(epoch), int(video), int(meta), int(regressions))
 
 
-def wait_for_progress(guest: Guest, frames: int, seconds: float, what: str) -> tuple[int, int, int]:
-    """The stream's last report once it counts ``frames`` more frames."""
+def wait_for_progress(guest: Guest, frames: int, seconds: float, what: str, epoch: int = 0) -> Tick:
+    """The stream's last report once it counts ``frames`` more frames, in the
+    ``epoch`` (the n-th run after a suspend) or a later one."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         tick = last_tick(guest)
-        if tick is not None and tick[0] >= frames:
+        if tick is not None and tick.frames >= frames and tick.epoch >= epoch:
             return tick
         drain(guest, 0.5)
-    raise RuntimeError(f"{what}: fewer than {frames} frames in {seconds:g} s")
+    raise RuntimeError(f"{what}: fewer than {frames} frames in the epoch {epoch} in {seconds:g} s (last report {last_tick(guest)})")
 
 
 def suspend_by_host(guest: Guest, console: ManagementConsole) -> None:
@@ -124,7 +148,7 @@ def run(arguments: argparse.Namespace, private: pathlib.Path) -> list[str]:
         guest.boot_to_shell(BOOT_SECONDS)
         console = ManagementConsole(guest, private)
         guest.check_command(
-            f"c++ -std=c++20 -O2 -o {BINARY} {SOURCE}", BUILD_SECONDS
+            f"c++ {CXXFLAGS} -o {BINARY} {SOURCE}", BUILD_SECONDS
         )
         request = len(guest.output())
         guest.check_command("rm -f /tmp/camera-stop", 30)
@@ -136,22 +160,35 @@ def run(arguments: argparse.Namespace, private: pathlib.Path) -> list[str]:
             if time.monotonic() > deadline:
                 raise RuntimeError("the camera stream never started")
             drain(guest, 0.5)
-        frames, errors, _ = wait_for_progress(guest, 15, RESUME_SECONDS, "before any suspend")
+        tick = wait_for_progress(guest, 15, RESUME_SECONDS, "before any suspend")
+        frames = tick.frames
 
-        for arm in arguments.arm or ARMS:
+        for number, arm in enumerate(arguments.arm or ARMS, start=1):
             (suspend_by_host if arm == "host" else suspend_by_guest)(guest, console)
             try:
-                frames, errors, zoom = wait_for_progress(
-                    guest, frames + 15, RESUME_SECONDS, f"{arm} suspend"
+                tick = wait_for_progress(
+                    guest, frames + PROGRESS_FRAMES, RESUME_SECONDS, f"{arm} suspend", number
                 )
             except RuntimeError as error:
                 problems.append(str(error))
                 break
-            if errors:
-                problems.append(f"{arm} suspend: {errors} failed buffers")
-            if zoom != 0x20000:
-                problems.append(f"{arm} suspend: the metadata shows zoom {zoom:#x}")
-            print(f"{arm} suspend: {frames} frames, zoom {zoom:#x}", flush=True)
+            frames = tick.frames
+            if tick.errors:
+                problems.append(f"{arm} suspend: {tick.errors} failed buffers")
+            if tick.zoom != 0x20000:
+                problems.append(f"{arm} suspend: the metadata shows zoom {tick.zoom:#x}")
+            if tick.video != VIDEO_BUFFERS or tick.meta != META_BUFFERS:
+                problems.append(
+                    f"{arm} suspend: {tick.video} of {VIDEO_BUFFERS} video and {tick.meta} of "
+                    f"{META_BUFFERS} metadata buffers came back after the wake"
+                )
+            if tick.regressions:
+                problems.append(f"{arm} suspend: {tick.regressions} frames whose sequence did not rise")
+            print(
+                f"{arm} suspend: {tick.frames} frames, zoom {tick.zoom:#x}, buffers "
+                f"{tick.video}/{tick.meta} back, sequences rising",
+                flush=True,
+            )
 
         guest.check_command("touch /tmp/camera-stop", 30)
         deadline = time.monotonic() + 60

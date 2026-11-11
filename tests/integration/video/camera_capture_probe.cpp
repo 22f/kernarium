@@ -8,16 +8,19 @@
 //
 // Both modes check that the camera nodes sit at /dev/video10 and above, that
 // each camera has a capture node and a metadata node, what QUERYCAP, the
-// formats, the frame sizes and intervals and the controls say, that the
+// formats, the frame sizes and intervals and the controls say (an integer
+// control is clamped to its range, a menu entry the camera skips is refused,
+// and a frame interval beyond the camera's is brought to one it has), that the
 // camera's description control matches its node, and that 40 files can be
 // open on a node with no host stream behind them.
 //
 // `synthetic` then streams NV12 by MMAP, by two files of one node together,
 // and by DMABUF imported from another file's exported buffers, and decodes
 // the synthetic chart's marker in each frame (camera tag and a counter that
-// keeps rising). It reads the metadata node alongside a video stream and
-// matches the records to the frames by sequence, writes the zoom and the
-// exposure controls and sees them in the next records, takes a JPEG and a Bayer
+// keeps rising). It reads the metadata node alongside a video stream, and two
+// metadata files at once, and matches the records to the frames by sequence,
+// reads the volatile focus status, writes the zoom and the exposure controls
+// and sees them in the next records, takes a JPEG and a Bayer
 // still (alone and as one group, which shares the exposure's sequence) with the
 // still's record on the metadata node, and writes the torch with no stream.
 //
@@ -26,8 +29,10 @@
 //
 // `hold` streams video and metadata with a control written, printing a line a
 // second, until /tmp/camera-stop exists; run_camera_suspend.py suspends the
-// guest meanwhile. The frames must keep coming, with no failed buffer and the
-// control still in force in the records.
+// guest meanwhile. The frames must keep coming, with no failed buffer, the
+// sequences rising and the control still in force in the records, and every
+// buffer of both queues must come back after each suspend (a line counts the
+// distinct buffers returned since the last gap in the frames).
 //
 // The exit status is the number of failed checks.
 
@@ -162,6 +167,14 @@ std::uint64_t monotonic_ns()
 {
     timespec now {};
     clock_gettime(CLOCK_MONOTONIC, &now);
+    return std::uint64_t(now.tv_sec) * 1000000000ull + std::uint64_t(now.tv_nsec);
+}
+
+// The clock that keeps counting while the guest is suspended.
+std::uint64_t boottime_ns()
+{
+    timespec now {};
+    clock_gettime(CLOCK_BOOTTIME, &now);
     return std::uint64_t(now.tv_sec) * 1000000000ull + std::uint64_t(now.tv_nsec);
 }
 
@@ -507,6 +520,7 @@ std::vector<Camera> discover()
 
 struct Control {
     std::uint32_t id = 0, type = 0, flags = 0;
+    std::int64_t minimum = 0, maximum = 0;
     std::string name;
 };
 
@@ -520,6 +534,8 @@ std::vector<Control> enumerate_controls(int fd)
         control.id = query.id;
         control.type = query.type;
         control.flags = query.flags;
+        control.minimum = query.minimum;
+        control.maximum = query.maximum;
         control.name = query.name;
         controls.push_back(control);
         query.id |= V4L2_CTRL_FLAG_NEXT_CTRL | V4L2_CTRL_FLAG_NEXT_COMPOUND;
@@ -678,6 +694,24 @@ void test_controls(const Camera& camera)
           static_cast<long long>(value));
     // The privacy control is the device's word: a guest cannot write it.
     CHECK(!set_control(capture.fd, V4L2_CID_PRIVACY, blocked_mode ? 0 : 1), "the guest wrote the privacy control");
+
+    // An integer control keeps its range: a value outside it is clamped to the
+    // nearest end, and what the guest reads back is what the camera holds.
+    const Control* bias = find_control(controls, V4L2_CID_AUTO_EXPOSURE_BIAS);
+    CHECK(bias != nullptr && bias->type == V4L2_CTRL_TYPE_INTEGER && bias->minimum < 0 && bias->maximum > 0,
+          "no exposure bias with a range");
+    if (bias != nullptr && bias->type == V4L2_CTRL_TYPE_INTEGER) {
+        CHECK(set_control(capture.fd, V4L2_CID_AUTO_EXPOSURE_BIAS, bias->maximum + 100000), "a value over the range: %s",
+              std::strerror(errno));
+        CHECK(get_control(capture.fd, V4L2_CID_AUTO_EXPOSURE_BIAS, value) && value == bias->maximum,
+              "a value over the range reads back %lld, not %lld", static_cast<long long>(value), static_cast<long long>(bias->maximum));
+        CHECK(set_control(capture.fd, V4L2_CID_AUTO_EXPOSURE_BIAS, bias->minimum - 100000), "a value under the range: %s",
+              std::strerror(errno));
+        CHECK(get_control(meta.fd, V4L2_CID_AUTO_EXPOSURE_BIAS, value) && value == bias->minimum,
+              "a value under the range reads back %lld on the metadata node, not %lld", static_cast<long long>(value),
+              static_cast<long long>(bias->minimum));
+        CHECK(set_control(capture.fd, V4L2_CID_AUTO_EXPOSURE_BIAS, 0), "the bias back to zero");
+    }
 }
 
 struct SizeList {
@@ -932,6 +966,54 @@ bool start_video(Node& node, std::uint32_t width, std::uint32_t height, unsigned
     return true;
 }
 
+// The fastest rate the camera offers for a size, in frames a second.
+unsigned fastest_rate(int fd, std::uint32_t width, std::uint32_t height)
+{
+    unsigned best = 0;
+    for (std::uint32_t index = 0; index < 64; ++index) {
+        v4l2_frmivalenum interval {};
+        interval.index = index;
+        interval.pixel_format = V4L2_PIX_FMT_NV12;
+        interval.width = width;
+        interval.height = height;
+        if (xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &interval) < 0) break;
+        const v4l2_fract& shortest =
+            interval.type == V4L2_FRMIVAL_TYPE_DISCRETE ? interval.discrete : interval.stepwise.min;
+        if (shortest.numerator > 0) best = std::max(best, shortest.denominator / shortest.numerator);
+        if (interval.type != V4L2_FRMIVAL_TYPE_DISCRETE) break;
+    }
+    return best;
+}
+
+// A file with a stream keeps the frame interval the device answers, not the one
+// it asked for: a rate beyond the camera's, and one far below it, are brought to
+// rates it has, and G_PARM says the same.
+void test_frame_interval(const Camera& camera)
+{
+    Node node(camera.capture_path(), false);
+    if (!start_video(node, 640, 480, 3, V4L2_MEMORY_MMAP)) return;
+    const unsigned best = fastest_rate(node.fd, 640, 480);
+    CHECK(best >= 15, "the camera offers %u frames a second at 640x480", best);
+    const std::uint32_t asked[][2] = {{1, 100000}, {1000, 1}};
+    for (const auto& ask : asked) {
+        v4l2_streamparm parm {};
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        parm.parm.capture.timeperframe.numerator = ask[0];
+        parm.parm.capture.timeperframe.denominator = ask[1];
+        CHECK(xioctl(node.fd, VIDIOC_S_PARM, &parm) == 0, "S_PARM %u/%u: %s", ask[0], ask[1], std::strerror(errno));
+        const v4l2_fract answer = parm.parm.capture.timeperframe;
+        CHECK(answer.numerator == 1 && answer.denominator >= 1 && answer.denominator <= best,
+              "S_PARM %u/%u answered %u/%u (the camera's fastest is %u)", ask[0], ask[1], answer.numerator, answer.denominator,
+              best);
+        v4l2_streamparm got {};
+        got.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        CHECK(xioctl(node.fd, VIDIOC_G_PARM, &got) == 0 && got.parm.capture.timeperframe.numerator == answer.numerator &&
+                  got.parm.capture.timeperframe.denominator == answer.denominator,
+              "G_PARM says %u/%u after S_PARM answered %u/%u", got.parm.capture.timeperframe.numerator,
+              got.parm.capture.timeperframe.denominator, answer.numerator, answer.denominator);
+    }
+}
+
 void test_video_mmap(const Camera& camera, std::uint16_t& tag)
 {
     Node node(camera.capture_path(), false);
@@ -1008,6 +1090,8 @@ void test_dmabuf(const Camera& camera)
 struct MetaStream {
     Node node;
     std::vector<CameraMeta> records;
+    // The indices of the buffers that came back, however they came.
+    std::set<unsigned> returned;
     explicit MetaStream(const Camera& camera) : node(camera.meta_path(), true) {}
 
     bool start()
@@ -1027,6 +1111,7 @@ struct MetaStream {
         Dequeued record;
         int result = node.dequeue(record, timeout_ms);
         while (result > 0) {
+            returned.insert(record.index);
             if (record.flags & V4L2_BUF_FLAG_ERROR) {
                 CHECK(false, "a metadata buffer failed");
             } else if (record.bytesused != sizeof(CameraMeta)) {
@@ -1100,6 +1185,21 @@ void test_meta(const Camera& camera)
     }
     if (blocked_mode) return;
 
+    // A volatile control is read from the camera at each read. A camera that
+    // focuses by itself has one, the status of its focus: once frames flow, it
+    // says the focus has been reached, which a driver that answered with the
+    // control's default (idle) would not.
+    if (find_control(enumerate_controls(video.fd), V4L2_CID_AUTO_FOCUS_STATUS) != nullptr) {
+        std::int64_t status = -1;
+        const bool reached = pump(video, meta, nullptr, seen,
+                                  [&](const CameraMeta&) {
+                                      return get_control(video.fd, V4L2_CID_AUTO_FOCUS_STATUS, status) &&
+                                             status == V4L2_AUTO_FOCUS_STATUS_REACHED;
+                                  },
+                                  30);
+        CHECK(reached, "the focus status reads %lld, not reached", static_cast<long long>(status));
+    }
+
     // A control the guest writes reaches the camera and shows in the records.
     CHECK(set_control(video.fd, kCidZoomQ16, 0x20000), "zoom 2.0: %s", std::strerror(errno));
     std::int64_t zoom = 0;
@@ -1131,6 +1231,40 @@ void test_meta(const Camera& camera)
         CHECK(set_control(video.fd, V4L2_CID_EXPOSURE_AUTO, V4L2_EXPOSURE_AUTO), "automatic exposure again");
     }
     CHECK(video.stream_off() && meta.node.stream_off(), "STREAMOFF");
+}
+
+// Two metadata files of one camera stream at once, beside its video: each gets
+// the records of the exposures in order, and the two see the same exposures.
+void test_two_meta(const Camera& camera)
+{
+    MetaStream first(camera), second(camera);
+    Node video(camera.capture_path(), false);
+    if (!first.start() || !second.start() || !start_video(video, 1280, 720, 4, V4L2_MEMORY_MMAP)) return;
+    CHECK(video.queue_all() && video.stream_on(), "video start: %s", std::strerror(errno));
+    const std::uint64_t deadline = monotonic_ns() + 30ull * 1000000000ull;
+    while (monotonic_ns() < deadline && (first.records.size() < 20 || second.records.size() < 20)) {
+        Dequeued frame;
+        while (video.dequeue(frame, 0) > 0) video.queue(frame.index);
+        first.collect(50);
+        second.collect(50);
+    }
+    CHECK(first.records.size() >= 20 && second.records.size() >= 20, "%zu and %zu records on two metadata streams",
+          first.records.size(), second.records.size());
+    std::set<std::uint64_t> first_sequences;
+    for (const auto* stream : {&first, &second}) {
+        std::uint64_t previous = 0;
+        for (const auto& record : stream->records) {
+            CHECK(record.sequence > previous, "record sequence %llu after %llu on one of two streams",
+                  static_cast<unsigned long long>(record.sequence), static_cast<unsigned long long>(previous));
+            previous = record.sequence;
+            if (stream == &first) first_sequences.insert(record.sequence);
+        }
+    }
+    int shared = 0;
+    for (const auto& record : second.records) shared += first_sequences.count(record.sequence);
+    CHECK(shared >= 10, "only %d of %zu records of the second stream are of an exposure the first one has", shared,
+          second.records.size());
+    CHECK(video.stream_off() && first.node.stream_off() && second.node.stream_off(), "STREAMOFF");
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,8 +1437,22 @@ void test_torch(const Camera& camera)
     CHECK(set_control(node.fd, V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_NONE), "torch off: %s", std::strerror(errno));
     CHECK(get_control(node.fd, V4L2_CID_FLASH_LED_MODE, mode) && mode == V4L2_FLASH_LED_MODE_NONE, "torch reads %lld after off",
           static_cast<long long>(mode));
-    // A value outside the menu is refused.
+    // The menu runs from none to torch, and the camera skips the flash in it: an
+    // entry the menu skips is refused (and does not show in QUERYMENU), though
+    // it lies inside the range; so is one outside the range. Neither moves the
+    // value.
+    for (std::uint32_t entry = V4L2_FLASH_LED_MODE_NONE; entry <= V4L2_FLASH_LED_MODE_TORCH; ++entry) {
+        v4l2_querymenu item {};
+        item.id = V4L2_CID_FLASH_LED_MODE;
+        item.index = entry;
+        const bool listed = xioctl(node.fd, VIDIOC_QUERYMENU, &item) == 0;
+        CHECK(listed == (entry != V4L2_FLASH_LED_MODE_FLASH), "the flash mode menu %s entry %u",
+              listed ? "lists" : "skips", entry);
+    }
+    CHECK(!set_control(node.fd, V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_FLASH), "a flash mode the menu skips was accepted");
     CHECK(!set_control(node.fd, V4L2_CID_FLASH_LED_MODE, 9), "a torch mode outside the menu was accepted");
+    CHECK(get_control(node.fd, V4L2_CID_FLASH_LED_MODE, mode) && mode == V4L2_FLASH_LED_MODE_NONE,
+          "a refused torch mode moved the value to %lld", static_cast<long long>(mode));
 }
 
 // The host learns a camera's colour data from the first Bayer still it takes and
@@ -1358,8 +1506,14 @@ int hold()
 
     std::printf("CAMSUSP ready\n");
     std::fflush(stdout);
-    unsigned frames = 0, errors = 0;
-    std::uint64_t last_report = 0;
+    // A gap in the frames longer than this is a suspend: from there on the
+    // buffers that come back are counted afresh (an epoch), so that a buffer the
+    // driver parked and never queued again shows as one that never returns.
+    constexpr std::uint64_t gap_ns = 2000000000ull;
+    unsigned frames = 0, errors = 0, epoch = 0, regressions = 0;
+    std::uint32_t last_sequence = 0;
+    std::set<unsigned> video_returned;
+    std::uint64_t last_report = 0, last_frame = 0;
     const std::uint64_t deadline = monotonic_ns() + 900ull * 1000000000ull;
     while (access("/tmp/camera-stop", F_OK) != 0 && monotonic_ns() < deadline) {
         Dequeued frame;
@@ -1369,22 +1523,36 @@ int hold()
             break;
         }
         if (result > 0) {
+            const std::uint64_t arrived = boottime_ns();
+            if (last_frame != 0 && arrived - last_frame > gap_ns) {
+                ++epoch;
+                video_returned.clear();
+                meta.returned.clear();
+            }
+            last_frame = arrived;
             ++frames;
             if (frame.flags & V4L2_BUF_FLAG_ERROR) ++errors;
+            // The device counts again from zero when it is reset; the driver
+            // carries the camera's sequence on.
+            if (frames > 1 && frame.sequence <= last_sequence) ++regressions;
+            last_sequence = frame.sequence;
+            video_returned.insert(frame.index);
             video.queue(frame.index);
         }
         meta.collect(0);
         const std::uint64_t now = monotonic_ns();
         if (now - last_report >= 1000000000ull) {
             last_report = now;
-            std::printf("CAMSUSP tick frames=%u errors=%u zoom=%#x\n", frames, errors,
-                        meta.records.empty() ? 0u : meta.records.back().zoom_ratio_q16);
+            std::printf("CAMSUSP tick frames=%u errors=%u zoom=%#x epoch=%u video=%zu meta=%zu regressions=%u\n", frames, errors,
+                        meta.records.empty() ? 0u : meta.records.back().zoom_ratio_q16, epoch, video_returned.size(),
+                        meta.returned.size(), regressions);
             std::fflush(stdout);
             // The records need not pile up here.
             if (meta.records.size() > 64) meta.records.erase(meta.records.begin(), meta.records.end() - 1);
         }
     }
     CHECK(errors == 0, "%u failed buffers", errors);
+    CHECK(regressions == 0, "%u frames whose sequence did not rise", regressions);
     std::int64_t value = 0;
     CHECK(get_control(video.fd, kCidZoomQ16, value) && value == zoom, "zoom reads %#llx", static_cast<long long>(value));
     CHECK(video.stream_off() && meta.node.stream_off(), "STREAMOFF");
@@ -1441,6 +1609,8 @@ int main(int argc, char** argv)
 
     step("torch with no stream");
     test_torch(*back);
+    step("frame interval");
+    for (const auto& camera : cameras) test_frame_interval(camera);
     step("two files on one node");
     test_two_files(*back);
     if (!blocked_mode) {
@@ -1449,6 +1619,8 @@ int main(int argc, char** argv)
     }
     step("metadata");
     test_meta(*back);
+    step("two metadata streams");
+    test_two_meta(*back);
     step("stills");
     test_stills(*back);
 
