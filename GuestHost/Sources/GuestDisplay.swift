@@ -2,6 +2,7 @@
 
 import Combine
 import Foundation
+import GuestHostCore
 import MetalKit
 import SwiftUI
 import UIKit
@@ -12,19 +13,34 @@ struct GuestDisplayGeometry {
 }
 
 struct GuestDisplayView: UIViewControllerRepresentable {
-    @Binding var keyboardVisible: Bool
+    /// Kernarium's on-screen text: the guest's view then takes characters
+    /// (`TextGuestMetalView`) and this says whether the system keyboard shows.
+    /// Without it the view takes no text, so becoming first responder shows
+    /// no keyboard and no shortcut bar, whatever has the focus.
+    var keyboardVisible: Binding<Bool>?
     let retinaMode: Bool
     /// Told each time touches begin on the display, after their contacts have
     /// gone to the guest. An application that draws controls over the display
     /// uses it to put them away when a touch lands on the guest instead.
     var touchDidBegin: (@MainActor () -> Void)?
+    /// The hardware keyboard and mouse. A display with one takes the keys the
+    /// system delivers to it and the system pointer's hover, buttons and
+    /// scroll; a display without leaves them to the system, as Kernarium's
+    /// does.
+    var hardwareInput: GuestHardwareInput?
+    /// Whether the display holds the keyboard focus the hardware keys need:
+    /// the application says no while a sheet or an alert has the keys.
+    var hardwareFocus = false
     let viewDidLayout: @MainActor (
         GuestMetalView,
         GuestDisplayGeometry
     ) -> Void
 
     func makeUIViewController(context: Context) -> GuestDisplayViewController {
-        let view = GuestMetalView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        let device = MTLCreateSystemDefaultDevice()
+        let view: GuestMetalView = keyboardVisible == nil
+            ? GuestMetalView(frame: .zero, device: device)
+            : TextGuestMetalView(frame: .zero, device: device)
         view.viewDidLayout = viewDidLayout
         view.touchDidBegin = touchDidBegin
         view.retinaMode = retinaMode
@@ -32,6 +48,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
         view.enableSetNeedsDisplay = true
         view.autoResizeDrawable = false
         view.isMultipleTouchEnabled = true
+        view.hardwareInput = hardwareInput
         return GuestDisplayViewController(metalView: view)
     }
 
@@ -42,7 +59,12 @@ struct GuestDisplayView: UIViewControllerRepresentable {
         let view = controller.metalView
         view.touchDidBegin = touchDidBegin
         view.retinaMode = retinaMode
-        view.setKeyboardVisible(keyboardVisible)
+        view.hardwareInput = hardwareInput
+        if let keyboardVisible {
+            view.setKeyboardVisible(keyboardVisible.wrappedValue)
+        } else {
+            view.setHardwareFocus(hardwareFocus)
+        }
         view.reportLayout()
     }
 
@@ -52,6 +74,7 @@ struct GuestDisplayView: UIViewControllerRepresentable {
     ) {
         controller.metalView.cancelTrackedTouches()
         controller.metalView.finishHostResize()
+        controller.metalView.hardwareInput = nil
         controller.metalView.resignFirstResponder()
     }
 }
@@ -128,7 +151,7 @@ private extension Notification.Name {
     )
 }
 
-final class GuestMetalView: MTKView, UIKeyInput {
+class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteractionDelegate {
     var viewDidLayout: (@MainActor (
         GuestMetalView,
         GuestDisplayGeometry
@@ -138,18 +161,27 @@ final class GuestMetalView: MTKView, UIKeyInput {
     @objc private(set) var umlGuestResizeInProgress = false
     private var touchContacts = GuestTouchContacts<ObjectIdentifier>()
     private var guestContentSize: CGSize?
+    private var hardwareFocusWanted = false
+    private var hoverRecognizer: UIHoverGestureRecognizer?
+    private var scrollRecognizers: [UIPanGestureRecognizer] = []
+    private var pointerInteraction: UIPointerInteraction?
+
+    /// The hardware keyboard and mouse this view hands the system's events
+    /// to. Without one the view leaves presses, hover and scroll to UIKit, and
+    /// every touch is the touchscreen's. Setting another, or none, lifts
+    /// whatever the old one holds down.
+    var hardwareInput: GuestHardwareInput? {
+        didSet {
+            guard hardwareInput !== oldValue else { return }
+            oldValue?.releaseAll()
+            if hardwareInput == nil { removePointerRecognizers() } else { installPointerRecognizers() }
+        }
+    }
 
     override var canBecomeFirstResponder: Bool { true }
     // While the guest has the keyboard focus, three fingers are the guest's
     // touches, not UIKit's undo, redo, copy and paste gestures.
     override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
-    var hasText: Bool { true }
-    var keyboardType: UIKeyboardType = .asciiCapable
-    var autocorrectionType: UITextAutocorrectionType = .no
-    var autocapitalizationType: UITextAutocapitalizationType = .none
-    var smartDashesType: UITextSmartDashesType = .no
-    var smartQuotesType: UITextSmartQuotesType = .no
-    var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -222,43 +254,27 @@ final class GuestMetalView: MTKView, UIKeyInput {
         }
     }
 
-    func insertText(_ text: String) {
-        for character in text {
-            guard let stroke = LinuxKeyboard.stroke(for: character) else {
-                print("Kernarium: unsupported keyboard character \(character)")
-                continue
-            }
-            if stroke.shifted {
-                sendKey(code: LinuxKeyboard.leftShift, pressed: true)
-            }
-            sendKey(code: stroke.code, pressed: true)
-            sendKey(code: stroke.code, pressed: false)
-            if stroke.shifted {
-                sendKey(code: LinuxKeyboard.leftShift, pressed: false)
-            }
-        }
-    }
-
-    func deleteBackward() {
-        sendKey(code: LinuxKeyboard.backspace, pressed: true)
-        sendKey(code: LinuxKeyboard.backspace, pressed: false)
-    }
+    // MARK: Touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
-        for touch in touches {
+        reclaimHardwareFocus()
+        let (pointerTouches, fingers) = split(touches)
+        for touch in fingers {
             sendTouchEvents(touchContacts.begin(
                 ObjectIdentifier(touch),
                 at: touch.location(in: self),
                 geometry: touchGeometry()
             ))
         }
+        forward(pointerTouches, .began, event)
         touchDidBegin?()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
-        for touch in touches {
+        let (pointerTouches, fingers) = split(touches)
+        for touch in fingers {
             let coalesced = (event?.coalescedTouches(for: touch) ?? []).map {
                 $0.location(in: self)
             }
@@ -271,17 +287,20 @@ final class GuestMetalView: MTKView, UIKeyInput {
                 geometry: touchGeometry()
             ))
         }
+        forward(pointerTouches, .moved, event)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesEnded(touches, with: event)
-        for touch in touches {
+        let (pointerTouches, fingers) = split(touches)
+        for touch in fingers {
             sendTouchEvents(touchContacts.end(
                 ObjectIdentifier(touch),
                 at: touch.location(in: self),
                 geometry: touchGeometry()
             ))
         }
+        forward(pointerTouches, .ended, event)
     }
 
     override func touchesCancelled(
@@ -289,14 +308,49 @@ final class GuestMetalView: MTKView, UIKeyInput {
         with event: UIEvent?
     ) {
         super.touchesCancelled(touches, with: event)
-        for touch in touches {
+        let (pointerTouches, fingers) = split(touches)
+        for touch in fingers {
             sendTouchEvents(touchContacts.cancel(ObjectIdentifier(touch)))
+        }
+        forward(pointerTouches, .cancelled, event)
+    }
+
+    /// The touches of the system pointer's buttons go to the guest's mouse
+    /// when the application gives it one; every other touch is a finger of
+    /// the touchscreen, as is a pointer's when there is no mouse.
+    private func split(_ touches: Set<UITouch>) -> (pointer: [UITouch], fingers: [UITouch]) {
+        guard let hardwareInput, hardwareInput.isActive, hardwareInput.routesPointer else {
+            return ([], Array(touches))
+        }
+        var pointer: [UITouch] = []
+        var fingers: [UITouch] = []
+        for touch in touches {
+            if touch.type == .indirectPointer { pointer.append(touch) } else { fingers.append(touch) }
+        }
+        return (pointer, fingers)
+    }
+
+    private func forward(_ touches: [UITouch], _ phase: GuestPointerTracker.Phase, _ event: UIEvent?) {
+        guard let hardwareInput else { return }
+        let mapping = pointerMapping()
+        for touch in touches {
+            let buttons = HardwareButtons.normalized(uiKitMask: event?.buttonMask.rawValue ?? 0)
+            hardwareInput.pointerTouch(
+                phase, at: mapping?.position(of: touch.location(in: self)), buttons: buttons)
         }
     }
 
     private func touchGeometry() -> GuestTouchGeometry? {
         GuestTouchGeometry(
             coordinateSpace: .touchscreen,
+            boundsSize: bounds.size,
+            drawableSize: drawableSize,
+            contentSize: guestContentSize ?? drawableSize
+        )
+    }
+
+    private func pointerMapping() -> GuestPointerMapping? {
+        GuestPointerMapping(
             boundsSize: bounds.size,
             drawableSize: drawableSize,
             contentSize: guestContentSize ?? drawableSize
@@ -324,11 +378,221 @@ final class GuestMetalView: MTKView, UIKeyInput {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { cancelTrackedTouches() }
+        if window == nil {
+            cancelTrackedTouches()
+            hardwareInput?.releaseAll()
+        } else if hardwareFocusWanted {
+            claimHardwareFocus()
+        }
+    }
+
+    // MARK: Hardware keyboard
+
+    /// Whether the display holds the keyboard focus for the hardware keys.
+    /// Becoming first responder of a view that takes no text shows no
+    /// keyboard, so the display holds it whenever the guest is on screen and
+    /// nothing else (a sheet, an alert) needs the keys.
+    func setHardwareFocus(_ wanted: Bool) {
+        guard hardwareInput != nil || !wanted else { return }
+        hardwareFocusWanted = wanted
+        if wanted {
+            claimHardwareFocus()
+        } else if isFirstResponder {
+            resignFirstResponder()
+        }
+    }
+
+    private func claimHardwareFocus() {
+        guard window != nil, !isFirstResponder else { return }
+        becomeFirstResponder()
+    }
+
+    /// A touch on the display is the person turning to the guest: it takes
+    /// the keys back from anything that had them.
+    private func reclaimHardwareFocus() {
+        if hardwareFocusWanted { claimHardwareFocus() }
+    }
+
+    @discardableResult
+    override func resignFirstResponder() -> Bool {
+        // Keys held when the keys go elsewhere are not released by anyone else.
+        hardwareInput?.releaseKeys()
+        return super.resignFirstResponder()
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard let hardwareInput else {
+            super.pressesBegan(presses, with: event)
+            return
+        }
+        // A press the guest does not take (a remote's button) is the system's.
+        var others = Set<UIPress>()
+        var keys: [UInt32: Bool] = [:]
+        for press in presses {
+            guard let key = press.key else {
+                others.insert(press)
+                continue
+            }
+            keys[UInt32(truncatingIfNeeded: key.keyCode.rawValue)] = key.modifierFlags.contains(.alphaShift)
+        }
+        for usage in HardwareKeyboardState.ordered(Array(keys.keys), pressing: true) {
+            hardwareInput.keyDown(usage: usage, alphaShift: keys[usage] ?? false)
+        }
+        if !others.isEmpty { super.pressesBegan(others, with: event) }
+    }
+
+    override func pressesChanged(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard hardwareInput != nil else {
+            super.pressesChanged(presses, with: event)
+            return
+        }
+        let others = presses.filter { $0.key == nil }
+        if !others.isEmpty { super.pressesChanged(others, with: event) }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard let hardwareInput else {
+            super.pressesEnded(presses, with: event)
+            return
+        }
+        let usages = presses.compactMap { $0.key.map { UInt32(truncatingIfNeeded: $0.keyCode.rawValue) } }
+        for usage in HardwareKeyboardState.ordered(usages, pressing: false) {
+            hardwareInput.keyUp(usage: usage)
+        }
+        let others = presses.filter { $0.key == nil }
+        if !others.isEmpty { super.pressesEnded(others, with: event) }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard let hardwareInput else {
+            super.pressesCancelled(presses, with: event)
+            return
+        }
+        // The system took the keys (Command-H, an alert): none of the ones
+        // held will come up on its own.
+        hardwareInput.releaseKeys()
+        let others = presses.filter { $0.key == nil }
+        if !others.isEmpty { super.pressesCancelled(others, with: event) }
+    }
+
+    // MARK: System pointer
+
+    private func installPointerRecognizers() {
+        guard hoverRecognizer == nil else { return }
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
+        hover.delegate = self
+        addGestureRecognizer(hover)
+        hoverRecognizer = hover
+        // A trackpad's two-finger scroll is continuous and a wheel's step is
+        // discrete; the two differ in how far a step of the guest's wheel is.
+        for mask in [UIScrollTypeMask.continuous, .discrete] {
+            let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrolled(_:)))
+            scroll.allowedScrollTypesMask = mask
+            // Only a scroll event: a finger's drag is a touch of the guest's.
+            scroll.maximumNumberOfTouches = 0
+            scroll.cancelsTouchesInView = false
+            scroll.delaysTouchesBegan = false
+            scroll.delegate = self
+            addGestureRecognizer(scroll)
+            scrollRecognizers.append(scroll)
+        }
+        let interaction = UIPointerInteraction(delegate: self)
+        addInteraction(interaction)
+        pointerInteraction = interaction
+    }
+
+    private func removePointerRecognizers() {
+        if let hoverRecognizer { removeGestureRecognizer(hoverRecognizer) }
+        hoverRecognizer = nil
+        for recognizer in scrollRecognizers { removeGestureRecognizer(recognizer) }
+        scrollRecognizers = []
+        if let pointerInteraction { removeInteraction(pointerInteraction) }
+        pointerInteraction = nil
+    }
+
+    /// Asks UIKit to ask again whether the system pointer is hidden over the
+    /// display, after `GuestHardwareInput.routesPointer` changed.
+    func pointerStyleDidChange() {
+        pointerInteraction?.invalidate()
+    }
+
+    @objc private func hovered(_ recognizer: UIHoverGestureRecognizer) {
+        guard let hardwareInput else { return }
+        switch recognizer.state {
+        case .began, .changed:
+            // A hovering Apple Pencil is not a mouse.
+            guard recognizer.zOffset == 0 else { return }
+            let point = recognizer.location(in: self)
+            hardwareInput.hover(pointerMapping()?.position(of: point), at: point, beginning: recognizer.state == .began)
+        case .ended, .cancelled, .failed:
+            hardwareInput.hover(nil, at: nil, beginning: false)
+        default:
+            break
+        }
+    }
+
+    @objc private func scrolled(_ recognizer: UIPanGestureRecognizer) {
+        guard let hardwareInput else { return }
+        switch recognizer.state {
+        case .began, .changed:
+            let translation = recognizer.translation(in: self)
+            recognizer.setTranslation(.zero, in: self)
+            hardwareInput.scroll(
+                translation: translation, continuous: recognizer.allowedScrollTypesMask == .continuous,
+                beginning: recognizer.state == .began)
+        default:
+            break
+        }
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        hardwareInput?.hidesSystemPointer == true ? .hidden() : nil
+    }
+}
+
+/// Kernarium's guest view, which also takes the characters of the system
+/// keyboard: the on-screen keyboard types into the guest through the Linux
+/// keyboard map, by character. Andarium's view takes no text, and its keys
+/// are positions (`GuestHardwareInput`).
+final class TextGuestMetalView: GuestMetalView, UIKeyInput {
+    var hasText: Bool { true }
+    var keyboardType: UIKeyboardType = .asciiCapable
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var smartDashesType: UITextSmartDashesType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
+
+    func insertText(_ text: String) {
+        for character in text {
+            guard let stroke = LinuxKeyboard.stroke(for: character) else {
+                print("Kernarium: unsupported keyboard character \(character)")
+                continue
+            }
+            if stroke.shifted {
+                sendKey(code: LinuxKeyboard.leftShift, pressed: true)
+            }
+            sendKey(code: stroke.code, pressed: true)
+            sendKey(code: stroke.code, pressed: false)
+            if stroke.shifted {
+                sendKey(code: LinuxKeyboard.leftShift, pressed: false)
+            }
+        }
+    }
+
+    func deleteBackward() {
+        sendKey(code: LinuxKeyboard.backspace, pressed: true)
+        sendKey(code: LinuxKeyboard.backspace, pressed: false)
     }
 
     private func sendKey(code: UInt16, pressed: Bool) {
         kernarium_runtime_loader_send_key(code, pressed ? 1 : 0)
     }
 }
-
