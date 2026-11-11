@@ -219,6 +219,10 @@ control out.
   stays in the release directory; the runtime creates the data disk `data.img`
   at the first start, sized by the guest's capacity, and only grows it after;
   Home disables Start in recovery until then (`StartPlan.offersRecovery`).
+  A larger size chosen in Resize waits on Home and applies as the next start,
+  of any kind, is handed to the runtime (`Lifecycle.start`), which grows the
+  disk then; the guest records the new capacity at that point, so a start that
+  ends early leaves no growth pending beside a disk that already has it.
   The runtime passes both paths to Linux in a kernel argument, so they stay at
   paths free of spaces and the other characters `DiskPath` refuses (which is
   why the guest is not in `Application Support`).
@@ -256,7 +260,7 @@ control out.
   older than the last finished operation (`revision`), can come without its
   figures, and names the release the data is on.
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
-  from build 8 (build 5, the first public release, and builds 6 and 7 have
+  from build 9 (build 5, the first public release, and builds 6 to 8 have
   none).
   The first launch of an update that carries notes shows a ribbon above Start,
   on at most three launches, that opens them; a build shows the notes up to its
@@ -468,7 +472,9 @@ is on. `AndariumCore/Adb` speaks the protocol.
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
-  original until the new file is whole; the guest's media index is then told.
+  original until the new file is whole. The move's own shell command then has
+  the guest's media index complete the file's row (a file the shell user
+  writes has only a pending one, which MediaStore keeps from other apps).
   A transfer stops when the application leaves the foreground, and its files
   say so. Turning USB debugging off restarts adbd, which ends a transfer in
   flight: it fails, and Try Again runs it whole. Android reports its boot done
