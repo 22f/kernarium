@@ -9,6 +9,9 @@
     "development": "en",
     "supported": [
       "Base",
+      "ja",
+      "zh-Hans",
+      "zh-Hant",
     ],
   },
   "packages": [
@@ -36,6 +39,30 @@
         { "path": "Info.plist" },
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
         { "path": "../../GuestHost/Config/Signing.xcconfig" },
+      ],
+    }, {
+      "kind": "group",
+      "path": "Localization",
+      "children": [
+        {
+          "path": "Localizable.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "InfoPlist.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "WhatsNew.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        },
       ],
     }, {
       "kind": "group",
@@ -275,8 +302,8 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
-        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "The Simulator preview asks for the location only when launched with -systemLocation YES, to show the permission flow.",
-        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "The Simulator preview asks for the microphone only when launched with -systemMicrophone YES, to show the permission flow.",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it.",
+        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the guest can use it.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
