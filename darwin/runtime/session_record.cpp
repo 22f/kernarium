@@ -66,6 +66,7 @@ constexpr std::size_t stall_slot_offset = session_memory_slot_bytes;
 std::atomic<bool> checkpoint_thread_started{false};
 
 std::atomic<MemoryTermsReader> terms_reader{nullptr};
+std::atomic<RunFiguresReader> figures_reader{nullptr};
 
 /* The network slot: the counts since the session began, and the notice. The
  * baseline is the reading at the begin, written before the session opens and
@@ -80,6 +81,28 @@ std::atomic<std::uint32_t> notice_times{0};
  * other, whose reading is as new. */
 std::atomic_flag network_slot_busy = ATOMIC_FLAG_INIT;
 
+/* What the run did in the time a row covers, from two readings of the run
+ * figures: counts and times are the differences, so a row of the older history
+ * adds the rows it stands for (`add`). `known` holds the sources that gave a
+ * difference (RunFigures bits); `valid` is false where there was no reading
+ * before. */
+struct Interval final {
+	bool valid{};
+	std::uint32_t known{};
+	std::uint64_t span_ms{};
+	std::uint64_t frames{};
+	/* The longest gap between two flushes; the longest of the rows added. */
+	std::uint64_t gap_ns{};
+	std::uint64_t reliefs{};
+	std::uint64_t shed_accounts{};
+	std::uint64_t renewals{};
+	std::uint64_t cpu_ns{};
+	std::uint64_t carrier_ns{};
+	std::uint64_t performance_ns{};
+	std::uint64_t cycles{};
+	std::uint64_t energy_nj{};
+};
+
 /* One checkpoint's figures in MiB, as the history keeps them. */
 struct HistoryEntry final {
 	std::int64_t seconds;
@@ -92,6 +115,18 @@ struct HistoryEntry final {
 	std::uint64_t heaps;
 	std::uint64_t malloc;
 	std::uint64_t other;
+	/* The states at the checkpoint: RunFigures sources, the host's thermal
+	 * state and memory pressure, and MiB. */
+	std::uint32_t sources;
+	std::uint8_t thermal;
+	std::uint8_t pressure;
+	std::uint64_t compressed;
+	std::uint64_t internal;
+	std::uint64_t largest;
+	/* The time since the checkpoint before, and, for a checkpoint the older
+	 * history may keep, the time since the one kept before it. */
+	Interval interval;
+	Interval window;
 };
 
 /* Under history_lock: the checkpoints of the session that began last. The
@@ -102,6 +137,13 @@ HistoryEntry recent[memory_history_recent];
 HistoryEntry older[memory_history_older];
 std::uint64_t checkpoints_taken{};
 std::size_t older_kept{};
+/* The reading the next row is measured from (previous_valid), when it was
+ * taken on the steady clock, and what the checkpoints since the last one the
+ * older history may keep have added up to. */
+RunFigures previous_figures{};
+std::int64_t previous_figures_ms{};
+bool previous_valid{};
+Interval stride_total{};
 /* The highest footprint a checkpoint read, and the terms beside it. */
 std::uint64_t peak_footprint{};
 std::int64_t peak_at{};
@@ -153,9 +195,27 @@ constexpr std::uint64_t mebibytes(std::uint64_t bytes) noexcept
 	return bytes >> 20;
 }
 
-Text &history_line(Text &text, const HistoryEntry &entry) noexcept
+/* A row's figure: its number, at most six digits, or "-" where its source had
+ * nothing to say. */
+Text &figure(Text &text, bool known, std::uint64_t value) noexcept
 {
-	return text.text("h ").number(entry.seconds)
+	constexpr std::uint64_t most = 999999;
+	text.text(" ");
+	if (!known)
+		return text.text("-");
+	return text.number(static_cast<std::int64_t>(std::min(value, most)));
+}
+
+constexpr std::uint64_t nanoseconds_per_millisecond = 1'000'000;
+
+/* "h SECONDS ... OTHER SPAN FRAMES GAP THERMAL PRESSURE COMPRESSED INTERNAL
+ * RELIEFS SHED RENEWALS LARGEST CPU VCPU PERF MHZ ENERGY": the figures in MiB,
+ * milliseconds and counts; the CPU times in milliseconds; PERF the percent of
+ * the CPU time spent on performance cores; MHZ the cycles per CPU second;
+ * ENERGY in millijoules. The row of the older history sums its window. */
+Text &history_line(Text &text, const HistoryEntry &entry, bool older) noexcept
+{
+	text.text("h ").number(entry.seconds)
 		.text(" ").number(static_cast<std::int64_t>(entry.footprint))
 		.text(" ").number(static_cast<std::int64_t>(entry.available))
 		.text(" ").number(static_cast<std::int64_t>(entry.guest))
@@ -164,8 +224,36 @@ Text &history_line(Text &text, const HistoryEntry &entry) noexcept
 		.text(" ").number(static_cast<std::int64_t>(entry.cache))
 		.text(" ").number(static_cast<std::int64_t>(entry.heaps))
 		.text(" ").number(static_cast<std::int64_t>(entry.malloc))
-		.text(" ").number(static_cast<std::int64_t>(entry.other))
-		.text("\n");
+		.text(" ").number(static_cast<std::int64_t>(entry.other));
+	const Interval &run = older ? entry.window : entry.interval;
+	const auto has = [&](std::uint32_t source) {
+		return run.valid && (run.known & source) != 0;
+	};
+	const bool host = (entry.sources & RunFigures::host) != 0;
+	figure(text, run.valid, run.span_ms);
+	figure(text, has(RunFigures::frames), run.frames);
+	figure(text, has(RunFigures::frames),
+		run.gap_ns / nanoseconds_per_millisecond);
+	figure(text, host, entry.thermal);
+	figure(text, host, entry.pressure);
+	figure(text, true, entry.compressed);
+	figure(text, true, entry.internal);
+	figure(text, has(RunFigures::cache), run.reliefs);
+	figure(text, has(RunFigures::cache), run.shed_accounts);
+	figure(text, has(RunFigures::cache), run.renewals);
+	figure(text, (entry.sources & RunFigures::largest) != 0, entry.largest);
+	figure(text, has(RunFigures::cpu),
+		run.cpu_ns / nanoseconds_per_millisecond);
+	figure(text, has(RunFigures::carriers),
+		run.carrier_ns / nanoseconds_per_millisecond);
+	const bool used = has(RunFigures::usage) && has(RunFigures::cpu) &&
+		run.cpu_ns != 0;
+	figure(text, used, run.performance_ns * 100 / std::max<std::uint64_t>(
+		run.cpu_ns, 1));
+	figure(text, used && run.cycles != 0, run.cycles * 1000 /
+		std::max<std::uint64_t>(run.cpu_ns, 1));
+	figure(text, has(RunFigures::usage), run.energy_nj / 1'000'000);
+	return text.text("\n");
 }
 
 Text &mib(Text &text, std::string_view name, std::uint64_t bytes) noexcept
@@ -230,20 +318,134 @@ void forget_history() noexcept
 	malloc_read_peak = 0;
 	malloc_allocated = 0;
 	malloc_in_use = 0;
+	previous_valid = false;
+	stride_total = {};
 	os_unfair_lock_unlock(&history_lock);
+}
+
+constexpr std::uint64_t delta(std::uint64_t now, std::uint64_t before) noexcept
+{
+	return now > before ? now - before : 0;
+}
+
+/* What happened between two readings of the run figures, `span_ms` apart. A
+ * counter that fell belongs to something that ended in between, such as a
+ * carrier, and the interval counts nothing for it. */
+Interval interval_between(const RunFigures &now, const RunFigures &before,
+	std::uint64_t span_ms) noexcept
+{
+	Interval interval;
+	interval.valid = true;
+	interval.span_ms = span_ms;
+	const auto both = [&](std::uint32_t source) {
+		return (now.sources & before.sources & source) != 0;
+	};
+	if (both(RunFigures::frames)) {
+		interval.known |= RunFigures::frames;
+		interval.frames = delta(now.flushes, before.flushes);
+		interval.gap_ns = now.longest_gap_ns;
+	}
+	if (both(RunFigures::cache)) {
+		interval.known |= RunFigures::cache;
+		interval.reliefs = delta(now.reliefs, before.reliefs);
+		interval.shed_accounts =
+			delta(now.shed_accounts, before.shed_accounts);
+		interval.renewals = delta(now.renewals, before.renewals);
+	}
+	if (both(RunFigures::cpu)) {
+		interval.known |= RunFigures::cpu;
+		interval.cpu_ns = delta(now.cpu_ns, before.cpu_ns);
+	}
+	if (both(RunFigures::carriers)) {
+		interval.known |= RunFigures::carriers;
+		interval.carrier_ns = delta(now.carrier_ns, before.carrier_ns);
+	}
+	if (both(RunFigures::usage)) {
+		interval.known |= RunFigures::usage;
+		interval.performance_ns =
+			delta(now.performance_ns, before.performance_ns);
+		interval.cycles = delta(now.cycles, before.cycles);
+		interval.energy_nj = delta(now.energy_nj, before.energy_nj);
+	}
+	return interval;
+}
+
+void add(Interval &total, const Interval &part) noexcept
+{
+	if (!part.valid)
+		return;
+	total.valid = true;
+	total.known |= part.known;
+	total.span_ms += part.span_ms;
+	total.frames += part.frames;
+	total.gap_ns = std::max(total.gap_ns, part.gap_ns);
+	total.reliefs += part.reliefs;
+	total.shed_accounts += part.shed_accounts;
+	total.renewals += part.renewals;
+	total.cpu_ns += part.cpu_ns;
+	total.carrier_ns += part.carrier_ns;
+	total.performance_ns += part.performance_ns;
+	total.cycles += part.cycles;
+	total.energy_nj += part.energy_nj;
+}
+
+/* A row of the history and which kind it is. */
+struct Row final {
+	const HistoryEntry *entry;
+	bool older;
+};
+
+/* The rows of the history, oldest first. */
+constexpr std::size_t history_rows = memory_history_older + memory_history_recent;
+
+std::size_t collect_rows(Row (&rows)[history_rows]) noexcept
+{
+	std::size_t count = 0;
+	const std::size_t olders = std::min<std::size_t>(older_kept,
+		memory_history_older);
+	for (std::size_t n = 0; n < olders; ++n)
+		rows[count++] = {&older[(older_kept - olders + n) %
+			memory_history_older], true};
+	const std::uint64_t recents = std::min<std::uint64_t>(
+		checkpoints_taken, memory_history_recent);
+	for (std::uint64_t n = 0; n < recents; ++n)
+		rows[count++] = {&recent[(checkpoints_taken - recents + n) %
+			memory_history_recent], false};
+	return count;
+}
+
+/* The first of the `count` rows that fits, with all the rows after it, in
+ * `room` bytes: a history that is too long loses its oldest rows, never its
+ * newest. */
+std::size_t first_row_that_fits(const Row (&rows)[history_rows],
+	std::size_t count, std::size_t room) noexcept
+{
+	std::size_t first = count;
+	std::size_t used = 0;
+	while (first > 0) {
+		char line[512];
+		Text text{line, sizeof(line)};
+		history_line(text, *rows[first - 1].entry, rows[first - 1].older);
+		if (text.size() > room - used)
+			break;
+		used += text.size();
+		--first;
+	}
+	return first;
 }
 
 /* The memory slot: the format line, then the process's footprint, its peak
  * and what its limit leaves, in bytes; with a terms reader, the terms now and
- * at the highest checkpoint and the history, in MiB; padded to the slot's
- * size. */
-void write_memory_slot(int descriptor) noexcept
+ * at the highest checkpoint and the history, in MiB and the figures of the run
+ * (session_record.hpp); padded to the slot's size. `beginning` is the
+ * session's first, which the history's intervals are measured from. */
+void write_memory_slot(int descriptor, bool beginning) noexcept
 {
 	static char slot[memory_slot_size];
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 5\nmemory at ").number(at);
+	text.text("uml-session 6\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -279,7 +481,19 @@ void write_memory_slot(int descriptor) noexcept
 			terms.malloc_in_use = malloc_in_use;
 		}
 		const std::int64_t malloc_age = clock - malloc_read_ms;
-		const HistoryEntry entry{
+		RunFigures figures{};
+		if (const auto read_figures =
+			    figures_reader.load(std::memory_order_acquire))
+			figures = read_figures(beginning);
+		Interval interval;
+		if (previous_valid)
+			interval = interval_between(figures, previous_figures,
+				static_cast<std::uint64_t>(std::max<std::int64_t>(
+					clock - previous_figures_ms, 0)));
+		previous_figures = figures;
+		previous_figures_ms = clock;
+		previous_valid = true;
+		HistoryEntry entry{
 			.seconds = at - session_started.load(std::memory_order_relaxed),
 			.footprint = mebibytes(footprint),
 			.available = mebibytes(available),
@@ -290,10 +504,24 @@ void write_memory_slot(int descriptor) noexcept
 			.heaps = mebibytes(terms.heaps),
 			.malloc = mebibytes(terms.malloc_allocated),
 			.other = mebibytes(other_bytes(footprint, terms)),
+			.sources = figures.sources,
+			.thermal = figures.thermal,
+			.pressure = figures.pressure,
+			.compressed = mebibytes(terms.compressed),
+			.internal = mebibytes(terms.internal),
+			.largest = mebibytes(figures.largest_open),
+			.interval = interval,
+			.window = {},
 		};
 		/* A recent entry about to be overwritten moves to the older
-		 * history when its turn in the stride comes. */
+		 * history when its turn in the stride comes. The entries that may
+		 * move carry the sum of the intervals since the one before. */
 		const std::uint64_t index = checkpoints_taken++;
+		add(stride_total, interval);
+		if (index % memory_history_older_stride == 0) {
+			entry.window = stride_total;
+			stride_total = {};
+		}
 		if (index >= memory_history_recent) {
 			const std::uint64_t leaving = index - memory_history_recent;
 			if (leaving % memory_history_older_stride == 0)
@@ -314,17 +542,15 @@ void write_memory_slot(int descriptor) noexcept
 		terms_words(text, peak_terms, peak_malloc_age_ms, peak_footprint)
 			.text("\n");
 		text.text("history seconds footprint available guest gpu graphics "
-			"cache heaps malloc other\n");
-		const std::size_t olders = std::min<std::size_t>(older_kept,
-			memory_history_older);
-		for (std::size_t n = 0; n < olders; ++n)
-			history_line(text, older[(older_kept - olders + n) %
-				memory_history_older]);
-		const std::uint64_t recents = std::min<std::uint64_t>(
-			checkpoints_taken, memory_history_recent);
-		for (std::uint64_t n = 0; n < recents; ++n)
-			history_line(text, recent[(checkpoints_taken - recents + n) %
-				memory_history_recent]);
+			"cache heaps malloc other span frames gap thermal pressure "
+			"compressed internal reliefs shed renewals largest cpu vcpu "
+			"perf mhz energy\n");
+		Row rows[history_rows];
+		const std::size_t count = collect_rows(rows);
+		for (std::size_t n = first_row_that_fits(rows, count,
+			     sizeof(slot) - 1 - text.size());
+		     n < count; ++n)
+			history_line(text, *rows[n].entry, rows[n].older);
 	}
 	const std::size_t used = text.size();
 	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
@@ -712,7 +938,7 @@ bool begin_session_record(std::string_view path,
 		notice_now.load(std::memory_order_relaxed) != NetworkNotice::none ?
 			1 : 0,
 		std::memory_order_relaxed);
-	write_memory_slot(descriptor);
+	write_memory_slot(descriptor, true);
 	write_blank_stall_slot(descriptor);
 	write_network_slot(descriptor);
 	session_open.store(true, std::memory_order_release);
@@ -751,9 +977,14 @@ void checkpoint_session_memory() noexcept
 {
 	const int descriptor = record_descriptor.load(std::memory_order_acquire);
 	if (descriptor >= 0) {
-		write_memory_slot(descriptor);
+		write_memory_slot(descriptor, false);
 		write_network_slot(descriptor);
 	}
+}
+
+void set_run_figures_reader(RunFiguresReader reader) noexcept
+{
+	figures_reader.store(reader, std::memory_order_release);
 }
 
 void set_network_counts_reader(SessionNetworkReader reader) noexcept

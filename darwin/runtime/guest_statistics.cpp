@@ -5,15 +5,28 @@
 #include "cpu/gadget_cache_budget.hpp"
 #include "memory/domain_heap.hpp"
 #include "memory/guest_ram_commitment.hpp"
+#include "platform/frame_figures.hpp"
 #include "platform/gpu_memory_figures.hpp"
+#include "platform/host_state_figures.hpp"
 #include "vcpu_carrier_name.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <malloc/malloc.h>
 #include <mutex>
+#include <sys/resource.h>
+#include <unistd.h>
+
+#if __has_include(<libproc.h>)
+#include <libproc.h>
+#else
+/* The iOS SDK exports the call from libSystem and declares the flavors and
+ * the structure in <sys/resource.h>, but ships no libproc.h. */
+extern "C" int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer);
+#endif
 
 namespace uml::runtime {
 
@@ -83,6 +96,84 @@ GuestRamRetirementScope::GuestRamRetirementScope() noexcept
 GuestRamRetirementScope::~GuestRamRetirementScope()
 {
 	ram_retirement_mutex.unlock();
+}
+
+namespace {
+
+/* The process's usage as the system keeps it, with its times in nanoseconds.
+ * False when the system does not answer. */
+struct ProcessUsage final {
+	std::uint64_t cpu_ns{};
+	std::uint64_t performance_ns{};
+	std::uint64_t cycles{};
+	std::uint64_t energy_nj{};
+};
+
+bool process_usage(ProcessUsage &usage) noexcept
+{
+	rusage_info_v6 info{};
+	if (proc_pid_rusage(getpid(), RUSAGE_INFO_V6,
+		    reinterpret_cast<rusage_info_t *>(&info)) != 0)
+		return false;
+	static const mach_timebase_info_data_t base = [] {
+		mach_timebase_info_data_t value{};
+		(void)mach_timebase_info(&value);
+		if (value.numer == 0 || value.denom == 0)
+			value = {1, 1};
+		return value;
+	}();
+	const auto nanoseconds = [](std::uint64_t ticks) {
+		return ticks * base.numer / base.denom;
+	};
+	usage.cpu_ns = nanoseconds(info.ri_user_time + info.ri_system_time);
+	usage.performance_ns =
+		nanoseconds(info.ri_user_ptime + info.ri_system_ptime);
+	usage.cycles = info.ri_cycles;
+	usage.energy_nj = info.ri_energy_nj;
+	return true;
+}
+
+} // namespace
+
+RunFigures run_figures(bool session_begins) noexcept
+{
+	RunFigures figures;
+	if (session_begins)
+		::uml::platform::forgetFrameGaps();
+	const auto frames = ::uml::platform::takeFrameFigures(
+		::uml::platform::frameClockTicks());
+	figures.sources |= RunFigures::frames;
+	figures.flushes = frames.flushes;
+	figures.longest_gap_ns = frames.longestGapNs;
+	if (const auto host = ::uml::platform::publishedHostState()) {
+		figures.sources |= RunFigures::host;
+		figures.thermal = static_cast<std::uint8_t>(host->thermal.level);
+		figures.pressure = host->memoryPressure;
+	}
+	const auto &book = ::uml::cpu::gadget_cache::ledger();
+	figures.sources |= RunFigures::cache;
+	figures.reliefs = book.reliefs.load(std::memory_order_relaxed);
+	figures.shed_accounts =
+		book.shed_accounts.load(std::memory_order_relaxed);
+	figures.renewals = book.renewals.load(std::memory_order_relaxed);
+	std::size_t largest = 0;
+	if (::uml::cpu::gadget_cache::largest_open_bytes(largest)) {
+		figures.sources |= RunFigures::largest;
+		figures.largest_open = largest;
+	}
+	const GuestCpuTime carriers = guest_cpu_time();
+	if (carriers.listed) {
+		figures.sources |= RunFigures::carriers;
+		figures.carrier_ns = carriers.nanoseconds;
+	}
+	if (ProcessUsage usage; process_usage(usage)) {
+		figures.sources |= RunFigures::cpu | RunFigures::usage;
+		figures.cpu_ns = usage.cpu_ns;
+		figures.performance_ns = usage.performance_ns;
+		figures.cycles = usage.cycles;
+		figures.energy_nj = usage.energy_nj;
+	}
+	return figures;
 }
 
 MemoryTerms memory_terms(bool read_malloc) noexcept

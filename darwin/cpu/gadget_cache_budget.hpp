@@ -47,6 +47,7 @@ class Account;
 struct LedgerState;
 inline void relieve() noexcept;
 [[nodiscard]] inline LedgerState ledger_state();
+[[nodiscard]] inline bool largest_open_bytes(std::size_t &bytes) noexcept;
 
 namespace detail {
 
@@ -62,6 +63,8 @@ struct Ledger final {
 	std::atomic<std::size_t> shedding{};
 	std::atomic<std::uint64_t> reliefs{};
 	std::atomic<std::uint64_t> shed_accounts{};
+	/* Shared address spaces closed for renewal, not asked to shed. */
+	std::atomic<std::uint64_t> renewals{};
 	std::atomic<std::size_t> peak_open{};
 };
 
@@ -206,6 +209,7 @@ public:
 private:
 	friend void relieve() noexcept;
 	friend LedgerState ledger_state();
+	friend bool largest_open_bytes(std::size_t &bytes) noexcept;
 
 	static constexpr std::uint64_t shedding_flag = std::uint64_t{1} << 63;
 	static constexpr std::uint64_t bytes_mask = shedding_flag - 1;
@@ -326,6 +330,24 @@ struct LedgerState final {
 		++state.accounts;
 	}
 	return state;
+}
+
+/* The bytes of the largest open account, for the session record's checkpoint.
+ * It never waits: false, with `bytes` unchanged, when the ledger's lock is
+ * taken. */
+[[nodiscard]] inline bool largest_open_bytes(std::size_t &bytes) noexcept
+{
+	auto &book = ledger();
+	const std::unique_lock guard{book.mutex, std::try_to_lock};
+	if (!guard.owns_lock())
+		return false;
+	std::size_t largest = 0;
+	for (auto *account = book.first; account != nullptr;
+	     account = account->next_)
+		if (!account->shedding())
+			largest = std::max(largest, account->bytes());
+	bytes = largest;
+	return true;
 }
 
 /* Charge the change in a holder's bytes across a scope to `account`, null for

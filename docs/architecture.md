@@ -637,16 +637,25 @@ ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
 was ended from outside without running, as a memory-limit end is. The file is
-text of a fixed layout (`uml-session 5`) that never passes 13824 bytes
-(`session_record_max_bytes`): a 4 KiB memory slot, a 4 KiB stall slot, a 512-byte
+text of a fixed layout (`uml-session 6`) that never passes 17920 bytes
+(`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
 network slot and the state with the kernel output it quotes, at most 5 KiB. Each
 part is rewritten in place by its own writer, so nothing grows with the session;
-layouts 1 to 4, which lack the network slot or the stall slot, still parse. The
-first 4 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
+layouts 1 to 5, which lack the figures of the run or the network slot or the
+stall slot, still parse. The
+first 8 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest
 RAM, the host GPU's use against its budget, graphics, the gadget cache, the
 domain heaps and malloc) now and at the peak, and a bounded history of them.
+Each history row also says how the run went in the time it covers: the
+scanout flushes (the device counts each) and the longest gap between two, the
+host's thermal state and memory pressure as the stall watch observed them, the
+gadget cache's reliefs, shed accounts, renewals and largest open account, the
+CPU time of the process and of the vCPU carriers, and the performance-core
+share, cycles and energy from `proc_pid_rusage`; a row of the older history
+sums the checkpoints it stands for, and the checkpoint reads them all without a
+lock, a thread or a timer of its own (`RunFigures`).
 Reading malloc's term stalls every thread that allocates, so it is read only at
 the first checkpoint and when the footprint climbs 64 MiB past the highest
 reading's (`memory_malloc_reading_due`); every checkpoint also writes the
