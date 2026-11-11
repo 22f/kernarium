@@ -93,9 +93,9 @@ struct SendFeedbackSheet: View {
         .animation(.easeInOut(duration: 0.2), value: model.sent)
         // Once something is typed or attached, a stray swipe loses nothing.
         .interactiveDismissDisabled(state.hasContent || state.makingBugReport)
-        .confirmationDialog(
-            "Discard this feedback?", isPresented: $model.confirmingDiscard, titleVisibility: .visible
-        ) {
+        // An alert, not a dialog: on an iPad a dialog is a popover that leaves out
+        // its cancel button, and both choices must show.
+        .alert("Discard this feedback?", isPresented: $model.confirmingDiscard) {
             Button("Discard", role: .destructive) { dismiss() }
             Button("Keep editing", role: .cancel) {}
         }
@@ -436,8 +436,8 @@ struct SendFeedbackSheet: View {
                     .minimumScaleFactor(0.8)
             }
             .foregroundStyle(enabled && state.mailAvailable ? Color.accentColor : Color(.tertiaryLabel))
-            .padding(.horizontal, 4)
-            .frame(minWidth: 58, minHeight: 48)
+            .padding(.horizontal, 3)
+            .frame(minWidth: 54, minHeight: 48)
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)
@@ -454,15 +454,15 @@ struct SendFeedbackSheet: View {
         Button(action: model.send) {
             Group {
                 switch style {
-                case .words: Label("Send feedback", systemImage: "arrow.up")
-                case .short: Label("Send", systemImage: "arrow.up")
+                case .words: HStack(spacing: 5) { Image(systemName: "arrow.up"); Text("Send feedback") }
+                case .short: HStack(spacing: 5) { Image(systemName: "arrow.up"); Text("Send") }
                 case .icon: Image(systemName: "arrow.up")
                 }
             }
             .font(.subheadline.weight(.bold))
             .foregroundStyle(.white)
             .lineLimit(1)
-            .padding(.horizontal, style == .icon ? 0 : 16)
+            .padding(.horizontal, style == .icon ? 0 : 14)
             .frame(minWidth: 48, minHeight: 48)
             .background(Capsule().fill(state.canSend ? Color.accentColor : Color(.systemGray3)))
             .contentShape(.capsule)
