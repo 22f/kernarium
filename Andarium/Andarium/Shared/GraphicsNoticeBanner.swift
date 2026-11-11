@@ -40,14 +40,23 @@ struct GraphicsNoticeBanner: View {
 }
 
 /// The banners over the top of the session when the model has a notice to
-/// show: Android's graphics memory and the lowered frame rate, one below the
-/// other, below the statistics capsule when that is up.
+/// show: iOS denying Andarium the network, Android's graphics memory and the
+/// lowered frame rate, one below the other, below the statistics capsule when
+/// that is up.
 struct SessionNoticesOverlay: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let showing = model.graphicsNotice.isShowing || model.thermalNotice.isShowing
+        let denial = model.networkDenialShowing
+        let showing = denial != nil || model.graphicsNotice.isShowing || model.thermalNotice.isShowing
         VStack(spacing: StatsPlacement.noticeGap) {
+            if let denial {
+                NetworkNoticeBanner(
+                    denial: denial, openSettings: { model.openSettings() },
+                    dismiss: { model.dismissNetworkNotice() }
+                )
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
             if model.graphicsNotice.isShowing {
                 GraphicsNoticeBanner { model.dismissGraphicsNotice() }
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -58,6 +67,7 @@ struct SessionNoticesOverlay: View {
             }
         }
         .padding(.top, showing ? StatsPlacement.noticeTop(statsShowing: model.session.showStats) : 0)
+        .animation(.easeInOut(duration: 0.2), value: denial)
         .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)
         .animation(.easeInOut(duration: 0.2), value: model.thermalNotice.isShowing)
     }

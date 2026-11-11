@@ -29,6 +29,15 @@
 namespace uml::network {
 namespace {
 
+/* An IPv4 address as the number the frame parser reads (network order bytes
+ * read big endian). */
+constexpr std::uint32_t ipv4_value(const dns::Ipv4Address &address) noexcept
+{
+	return (static_cast<std::uint32_t>(address[0]) << 24) |
+		(static_cast<std::uint32_t>(address[1]) << 16) |
+		(static_cast<std::uint32_t>(address[2]) << 8) | address[3];
+}
+
 using uml::platform::UniqueDescriptor;
 
 constexpr std::array<unsigned char, 6> default_mac{
@@ -135,6 +144,8 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		 * provider answers the name server itself (answer_locally and
 		 * HostResolver), so SLiRP never addresses that server. */
 		config.disable_dns = true;
+		/* The attempts of a link that ended wait for no answer. */
+		observer_.reset();
 		(void)inet_pton(AF_INET, network_address, &config.vnetwork);
 		(void)inet_pton(AF_INET, network_mask, &config.vnetmask);
 		(void)inet_pton(AF_INET, host_alias_address, &config.vhost);
@@ -180,6 +191,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 #else
 			const auto stream_paths = dns_stream_paths();
 #endif
+			resolver_.set_counters(&counters_);
 			if (resolver_.start(
 				    [this](std::span<const std::uint8_t> frame) {
 					    try {
@@ -217,6 +229,11 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 							"over TCP at %s\n", server);
 				}
 			}
+			/* A SYN to a name server whose forward carries DNS is
+			 * answered by SLiRP itself: no connection attempt. */
+			observer_.serve_dns_streams(
+				name_server_stream_ ? ipv4_value(nameserver_ipv4) : 0,
+				gateway_stream_ ? ipv4_value(host_alias_ipv4) : 0);
 			worker_ = std::jthread{[this](std::stop_token stop_token) {
 				event_loop(stop_token);
 			}};
@@ -609,6 +626,29 @@ extern "C" int uml_slirp_net_add_forward(
 	} catch (...) {
 		return -EIO;
 	}
+}
+
+extern "C" int uml_slirp_net_read_counters(
+	void *context, uml_slirp_net_counters *counters)
+{
+	if (context == nullptr || counters == nullptr)
+		return -EINVAL;
+	const auto counts =
+		static_cast<uml::network::SlirpProvider *>(context)->counters();
+	*counters = {
+		.dns_answered = counts.dns_answered,
+		.dns_policy_denied = counts.dns_policy_denied,
+		.dns_timed_out = counts.dns_timed_out,
+		.dns_failed = counts.dns_failed,
+		.dhcp_discovers = counts.dhcp_discovers,
+		.dhcp_requests = counts.dhcp_requests,
+		.dhcp_acks = counts.dhcp_acks,
+		.tcp_attempts = counts.tcp_attempts,
+		.tcp_established = counts.tcp_established,
+		.tcp_unreachable = counts.tcp_unreachable,
+		.tcp_reset = counts.tcp_reset,
+	};
+	return 0;
 }
 
 extern "C" void uml_slirp_net_stop(void *context)

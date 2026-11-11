@@ -178,6 +178,10 @@ final class LiveRuntime: RuntimeDriver {
             // itself; a guest records silence while access is out of reach.
             _ = kernarium_runtime_loader_set_microphone($0 ? 1 : 0)
         }
+        // iOS's denial of the network, from the system's path while a watch is
+        // wanted (the model decides when); the path monitor calls back for a
+        // change of the path alone.
+        model.networkWatcher = NetworkAccessWatcher(source: SystemNetworkPathSource())
         hostLocation.deliver = { [weak self] fix in self?.location.deliver(fix) }
         model.location = LocationController(model: model, source: hostLocation.access) { [weak self] in
             self?.updateLocation()
@@ -189,6 +193,7 @@ final class LiveRuntime: RuntimeDriver {
             MainActor.assumeIsolated { self?.location.receiverPower(powered) }
         }
         model.motionSensorsAvailable = motion.available
+        model.hapticsAvailable = hapticsAvailable
         motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
@@ -387,6 +392,9 @@ final class LiveRuntime: RuntimeDriver {
             end(startFailure: "the runtime could not be loaded")
             return
         }
+        // A denial of the network the notice is up for began before this run
+        // loaded the runtime; its record notes it from the start.
+        model?.reportNetworkDenial()
         // The runtime boots a guest that restarts itself again inside the
         // run, and says when. The loader delivers each event on the main
         // queue.
@@ -717,6 +725,21 @@ final class LiveRuntime: RuntimeDriver {
         updateKeyboardMouse()
     }
 
+    func setNetworkNotice(_ denial: NetworkDenial?) {
+        // The runtime has the value only once a run has loaded it; the run
+        // says it again then (`launch`).
+        _ = kernarium_runtime_loader_set_network_notice(Self.networkNoticeCause(denial))
+    }
+
+    /// The runtime's word for the denial in force (KernariumRuntime.h).
+    static func networkNoticeCause(_ denial: NetworkDenial?) -> Int32 {
+        switch denial {
+        case nil: Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_NONE)
+        case .cellular?: Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_CELLULAR_DENIED)
+        case .wifi?: Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_WIFI_DENIED)
+        }
+    }
+
     func setMotionSensors(_ on: Bool) {
         model?.motionSensorsProblem = nil
         updateMotionSensors()
@@ -782,12 +805,19 @@ final class LiveRuntime: RuntimeDriver {
 
     /// The guest's vibrator plays while a normal run is in front and holds
     /// the guest running; the connection is made from the run's start, because
-    /// the guest's HAL starts early. The screens have no part in it: Android's
-    /// own settings decide what it asks for.
+    /// the guest's HAL starts early. Android's own settings decide what it
+    /// asks for, and the Haptics switch whether the device plays it: the guest
+    /// keeps its vibrator either way, and while the switch is off the session
+    /// holds no connection and the player no engine for the device. A game
+    /// controller's rumble is not governed by the switch.
     private func updateHaptics() {
         haptics.update(
-            available: hapticsAvailable, running: normalRun, booted: reachedBootCompleted,
-            foreground: active && !holdsGuestStill)
+            available: hapticsAvailable, enabled: model?.hapticsOn ?? true, running: normalRun,
+            booted: reachedBootCompleted, foreground: active && !holdsGuestStill)
+    }
+
+    func setHaptics(_ on: Bool) {
+        updateHaptics()
     }
 
     // MARK: Game controllers

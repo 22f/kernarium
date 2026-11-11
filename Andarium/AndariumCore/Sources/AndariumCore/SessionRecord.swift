@@ -48,12 +48,19 @@ public struct SessionRecord: Equatable, Sendable {
     /// in an earlier layout or when the slot is of a version this reader does
     /// not know.
     public var stalls: StallRecord?
+    /// What the guest's user network counted and whether Andarium's notice that
+    /// iOS denies it the network was shown, from layout 5 on; nil in an earlier
+    /// layout or when the slot is of a version this reader does not know.
+    public var network: NetworkRecord?
 
     /// The layouts this reader knows: 1 to 3 keep the session's state right
-    /// after the memory slot, 4 puts the stall slot between them.
-    static let layouts = ["uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4"]
+    /// after the memory slot, 4 puts the stall slot between them and 5 the
+    /// network slot after the stall slot.
+    static let layouts = [
+        "uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4", "uml-session 5",
+    ]
 
-    /// The most a record file ever holds is 13312 bytes
+    /// The most a record file ever holds is 13824 bytes
     /// (`session_record_max_bytes`); a file longer than this is not one the
     /// runtime wrote, and is neither read nor copied beyond it.
     public static let maximumBytes = 16 << 10
@@ -82,7 +89,9 @@ public struct SessionRecord: Equatable, Sendable {
         memory = fields["memory"].flatMap(Self.memory(from:))
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
-        stalls = format == "uml-session 4" ? StallRecord(text: parts[0]) : nil
+        let hasStalls = format == "uml-session 4" || format == "uml-session 5"
+        stalls = hasStalls ? StallRecord(text: parts[0]) : nil
+        network = format == "uml-session 5" ? NetworkRecord(text: parts[0]) : nil
     }
 
     /// "at T footprint F peak P [available A]".

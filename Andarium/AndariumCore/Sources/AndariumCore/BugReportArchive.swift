@@ -165,10 +165,11 @@ public enum BugReportArchive {
     }
 }
 
-/// What Andarium adds to a bug report: the session records, the stalls they
-/// hold in words and the system's exit and diagnostic reports MetricKit
-/// delivered, from `diagnostics`, with the application's container paths taken
-/// out; and what the guest's own counters say, when the caller read them.
+/// What Andarium adds to a bug report: the session records, the stalls and the
+/// network counts they hold in words and the system's exit and diagnostic
+/// reports MetricKit delivered, from `diagnostics`, with the application's
+/// container paths taken out; and what the guest's own counters say, when the
+/// caller read them.
 ///
 /// Every part is bounded: a session record to `SessionRecord.maximumBytes`, a
 /// report of the stalls to a few dozen events per session, a MetricKit report
@@ -179,6 +180,7 @@ public enum BugReportAttachments {
     public static let previousSessionRecord = "previous-session.txt"
     public static let metricKitDirectory = "metrickit"
     public static let stallReport = "andarium/stalls.txt"
+    public static let networkReport = "andarium/network.txt"
     /// The most of one MetricKit report that is kept, copied or read.
     public static let maximumMetricKitBytes = 1 << 20
 
@@ -198,6 +200,9 @@ public enum BugReportAttachments {
         }
         if let report = stalls(previous: records[0], current: records[1]) {
             entries.append(.init(name: stallReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
+        }
+        if let report = network(previous: records[0], current: records[1]) {
+            entries.append(.init(name: networkReport, data: Data(DiagnosticRedaction.redact(report, containers: containers).utf8)))
         }
         entries.append(contentsOf: guest)
         let metrics = diagnostics.appendingPathComponent(metricKitDirectory)
@@ -226,7 +231,7 @@ public enum BugReportAttachments {
         guard let data = BoundedFile.read(url, limit: SessionRecord.maximumBytes) else { return (nil, nil) }
         guard data.count <= SessionRecord.maximumBytes else {
             let note = "\(name) was not copied: \(url.lastPathComponent) is longer than \(SessionRecord.maximumBytes) "
-                + "bytes, and the runtime writes a record of at most 13312.\n"
+                + "bytes, and the runtime writes a record of at most 13824.\n"
             return (.init(name: name, data: Data(note.utf8)), nil)
         }
         let text = String(decoding: data, as: UTF8.self)
@@ -255,6 +260,35 @@ public enum BugReportAttachments {
                 lines.append(stalls.report().trimmingCharacters(in: .newlines))
             } else {
                 lines.append(record == nil ? "There is no record." : "The record has no stall slot.")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// What the guest's user network counted in the two sessions the records
+    /// describe, in words; nil when neither record has a network slot (a
+    /// runtime before layout 5). The counts are numbers only.
+    public static func network(previous: SessionRecord?, current: SessionRecord?) -> String? {
+        guard previous?.network != nil || current?.network != nil else { return nil }
+        var lines = [
+            "What the guest's user network counted during a session, and how often iOS denied Andarium the network",
+            "(each denial raises the notice). Numbers only: no address, port, host name or queried name is recorded.",
+            "",
+            "A DNS query the system refuses (policy denied) is iOS denying the application its network. A TCP",
+            "connection is classed by what the guest was told: unreachable (connect() failed at once, but not with",
+            "a refusal), reset (refused, timed out on the host after 75 seconds, or failed after it started) or no",
+            "answer (under way, given up by the guest, or pushed out of the table of waiting attempts). A refusal by",
+            "the system and a path with no route are not told apart. DNS over TCP to the name server or the gateway",
+            "is answered by the user network itself and is not counted as a connection.",
+            "andarium/session-previous.txt and andarium/session-current.txt hold the raw records.",
+        ]
+        for (title, record) in [("The previous session", previous), ("The current session", current)] {
+            lines.append("")
+            lines.append("== \(title)\(record.map { " (process \($0.processID))" } ?? "") ==")
+            if let network = record?.network {
+                lines.append(network.report())
+            } else {
+                lines.append(record == nil ? "There is no record." : "The record has no network slot.")
             }
         }
         return lines.joined(separator: "\n") + "\n"
