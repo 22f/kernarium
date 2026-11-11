@@ -312,12 +312,13 @@ requires reopening Andarium.
   reaches the guest only while Andarium is in front, and leaving the front
   lets every button go. Home, Menu, Options and Share are taken from iOS's
   gestures while a controller is held and reach Android as buttons (iOS's own
-  Home setting decides whether Andarium may have Home). A button going down wakes a guest that
-  suspended itself (`wake_for_input`, runtime API 33). Rumble, the light and the
-  player number follow the guest's drivers onto the controller, and
-  `Config/Info.plist` declares the extended gamepad profile. There is no
-  switch. An image without the relay is given up on quietly after boot; the
-  [Android README](../android/lineage-24/README.md) owns the relay.
+  Home setting decides whether Andarium may have Home). A button going down
+  wakes a guest that suspended itself (`wake_for_input`, runtime API 34).
+  Rumble, the light and the player number follow the guest's drivers onto
+  the controller, and `Config/Info.plist` declares the extended gamepad
+  profile. There is no switch. An image without the relay is given up on
+  quietly after boot; the [Android README](../android/lineage-24/README.md)
+  owns the relay.
 - **Location.** Location is a per-guest switch under Capabilities on Home,
   off for a new guest and for one stored before. iOS is asked, for
   when-in-use access, only when the person turns it on; Andarium has no

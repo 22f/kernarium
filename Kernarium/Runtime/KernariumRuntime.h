@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 33U
+#define KERNARIUM_RUNTIME_API_VERSION 34U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -722,6 +722,7 @@ typedef void (*kernarium_runtime_input_status_callback)(
 typedef void (*kernarium_runtime_set_input_status_callback_function)(
     kernarium_runtime_input_status_callback callback,
     void* context);
+
 /* A button of a game controller went down: wakes a guest that suspended
  * itself, as a key down does through send_key, and does nothing to one that is
  * running. It shares the keyboard's limit of one wake a second, never wakes
