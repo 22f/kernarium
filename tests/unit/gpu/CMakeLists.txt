@@ -147,6 +147,16 @@ if(TARGET uml_third_party_kosmickrisp)
         LIBRARIES UML::ThirdPartyKosmicKrisp
         VULKAN TIMEOUT 120)
 
+    # A transfer that names an image or buffer with no Metal object, because it
+    # was never bound or its bind was refused, is refused by the command, not
+    # passed to Metal as nil, which ends the process; a refused bind logs the
+    # reason once.
+    uml_add_gpu_unit_test(gpu-kosmickrisp-unbound-transfers
+        uml_gpu_kosmickrisp_unbound_transfer_tests
+        kosmickrisp_unbound_transfer_tests.cpp
+        LIBRARIES UML::ThirdPartyKosmicKrisp
+        VULKAN TIMEOUT 120)
+
     add_library(uml_gpu_vulkan_draw_test_support STATIC
         vulkan_draw_test.cpp)
     target_link_libraries(uml_gpu_vulkan_draw_test_support PUBLIC
@@ -246,6 +256,16 @@ if(TARGET uml_gpu_service)
     uml_add_gpu_unit_test(gpu-venus-render-pass-lifetime
         uml_gpu_venus_render_pass_lifetime_tests
         venus_render_pass_lifetime_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        VULKAN UNIT_DIRECTORY TIMEOUT 120)
+
+    # A bind the host driver refused is invisible to the guest, whose binds are
+    # asynchronous. The guest's context must end there, and a copy that names
+    # an image the driver never bound must be refused, not crash the host in
+    # Metal's copy encoder.
+    uml_add_gpu_unit_test(gpu-venus-bind-failure
+        uml_gpu_venus_bind_failure_tests
+        venus_bind_failure_tests.cpp
         LIBRARIES ${_uml_host_gl_libraries}
         VULKAN UNIT_DIRECTORY TIMEOUT 120)
 

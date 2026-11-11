@@ -230,7 +230,13 @@ begun on a framebuffer whose attachment view, or the view's image, the guest
 has destroyed marks the context lost before the command reaches the driver
 (`gpu-venus-render-pass-lifetime`). Nor can it make the host call a driver
 entry point that is not there: a command the device's version and enabled
-extensions do not expose marks the context lost (same test).
+extensions do not expose marks the context lost (same test). The guest binds
+image and buffer memory without waiting for the answer, so a bind the driver
+refused marks the context lost before the next command runs
+(`gpu-venus-bind-failure`), and a transfer that names an image or buffer the
+driver never bound is refused by the driver
+([contracts](#kosmickrisp-driver-contracts)): Apple's GPU drivers dereference
+the Metal texture or buffer they are handed without a check.
 
 ### Host-visible memory is bounded by the blob aperture
 
@@ -483,6 +489,13 @@ project's Mesa series patches it; the series and its regression suites are in
   2D or 2D-array texture the image is. A 2D view of a 3D image renders through
   the image's own texture and is sampled through a 2D-array alias; a level too
   deep for the alias is made for rendering alone.
+- The driver never hands Metal an image plane's texture or a buffer that does
+  not exist, because Apple's GPU drivers dereference it unchecked. A bind that
+  Metal refuses fails with `VK_ERROR_OUT_OF_DEVICE_MEMORY`, reported in
+  `VkBindMemoryStatus` and logged as one line that names the path that refused
+  it; a copy or clear that names an image or buffer without storage
+  records `VK_ERROR_VALIDATION_FAILED_EXT` on its command buffer and
+  records nothing (`gpu-kosmickrisp-unbound-transfers`).
 - A point is clipped against user clip and cull distances and the depth planes,
   never the view-volume side planes (`VK_POINT_CLIPPING_BEHAVIOR_USER_CLIP_PLANES_ONLY`).
 - Unsatisfied timeline waits are gated on the CPU before native Metal
