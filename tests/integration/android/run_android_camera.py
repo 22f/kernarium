@@ -218,9 +218,11 @@ class StaticInfo:
     af_modes: frozenset[str]
 
 
-# The dump prints each camera's static metadata sorted by tag, as `name (tag): type[count]` and the
-# values on the lines under it in brackets (enum values by name), so a tag that does not rise starts the
-# next camera.
+# The dump prints each camera under a `== Camera HAL device <id> (v..) static information: ==` header,
+# as `name (tag): type[count]` and the values on the lines under it in brackets (enum values by name).
+# The entries follow the order the HAL's metadata was built in, not the tag order, so only the header
+# starts the next camera; the next `== ` header of another kind ends the camera.
+STATIC_INFO_HEADER = re.compile(r"^\s*== Camera HAL device .* static information: ==\s*$")
 STATIC_INFO_ENTRY = re.compile(r"^\s*(android\.[A-Za-z0-9_.]+) \(([0-9a-f]+)\): ")
 STATIC_INFO_VALUES = re.compile(r"^\s*\[([^\]]*)\]\s*$")
 
@@ -228,16 +230,18 @@ STATIC_INFO_VALUES = re.compile(r"^\s*\[([^\]]*)\]\s*$")
 def parse_static_info(text: str) -> list[StaticInfo]:
     """`dumpsys media.camera`: the characteristics of each camera it dumps, in the order it dumps them."""
     cameras: list[dict[str, list[str]]] = []
-    last_tag = -1
+    current: dict[str, list[str]] | None = None
     entry: list[str] | None = None
     for line in text.splitlines():
+        if line.lstrip().startswith("== "):
+            current = {} if STATIC_INFO_HEADER.match(line) else None
+            if current is not None:
+                cameras.append(current)
+            entry = None
+            continue
         header = STATIC_INFO_ENTRY.match(line)
-        if header:
-            tag = int(header[2], 16)
-            if not cameras or tag <= last_tag:
-                cameras.append({})
-            last_tag = tag
-            entry = cameras[-1].setdefault(header[1], [])
+        if header and current is not None:
+            entry = current.setdefault(header[1], [])
             continue
         values = STATIC_INFO_VALUES.match(line)
         if values and entry is not None:

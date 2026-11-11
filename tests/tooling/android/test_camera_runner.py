@@ -82,20 +82,30 @@ MEDIA_CAMERA_OTHER_ACTIVE = MEDIA_CAMERA.replace("[]", ACTIVE_CLIENTS.replace(
     "org.lineageos.aperture", "org.example.other"))
 
 
-def static_info(facing: str, capabilities: str, flash: str, af_modes: str) -> str:
-    """One camera's static metadata as `dumpsys media.camera` prints it: sorted by tag, the values of an
-    entry in brackets under its header, and entries of other sections between those that are read."""
+def static_info(device: str, facing: str, capabilities: str, flash: str, af_modes: str) -> str:
+    """One camera's static metadata as `dumpsys media.camera` prints it: under its header, the entries in
+    the order of their names (the HAL's metadata is built from a JSON file), so the tags fall where the
+    names of the sections do not follow the tags (android.info after android.flash, before android.lens),
+    and the values of an entry in brackets under it."""
     return f"""\
-Camera {facing} information:
-  Device static metadata:
-    android.colorCorrection.availableAberrationModes (00000): byte[3]
+== Camera HAL device device@1.1/internal/{device} (v3.7) static information: ==
+  Resource cost: 100
+  Conflicting devices: none
+  API1 info:
+    Has a flash unit: {flash.lower()}
+    Facing: {facing}
+    Orientation: 90
+  CameraCharacteristics:
+    android.colorCorrection.availableAberrationModes (00004): byte[3]
         [OFF FAST HIGH_QUALITY ]
     android.control.aeAvailableModes (1000e): byte[2]
         [OFF ON ]
     android.control.afAvailableModes (10012): byte[{len(af_modes.split())}]
         [{af_modes} ]
-    android.flash.info.available (50000): byte[1]
+    android.flash.info.available (60000): byte[1]
         [{flash} ]
+    android.info.supportedHardwareLevel (150000): byte[1]
+        [LIMITED ]
     android.lens.facing (80005): byte[1]
         [{facing} ]
     android.request.availableCapabilities (c0012): byte[{len(capabilities.split())}]
@@ -108,10 +118,12 @@ Camera {facing} information:
 
 
 PHONE_STATIC_INFO = (
-    static_info("BACK", "BACKWARD_COMPATIBLE MANUAL_SENSOR RAW READ_SENSOR_SETTINGS",
-                "TRUE", "OFF AUTO MACRO CONTINUOUS_PICTURE CONTINUOUS_VIDEO")
-    + static_info("FRONT", "BACKWARD_COMPATIBLE MANUAL_SENSOR RAW", "FALSE", "OFF AUTO CONTINUOUS_PICTURE")
-    + "Dumping the request that is in flight:\n  android.control.mode (10001): byte[1]\n        [AUTO ]\n")
+    "== Camera Provider HAL internal/0 (v2.7, remote) static info: 2 devices: ==\n"
+    + static_info("0", "BACK", "BACKWARD_COMPATIBLE MANUAL_SENSOR RAW READ_SENSOR_SETTINGS",
+                  "TRUE", "OFF AUTO MACRO CONTINUOUS_PICTURE CONTINUOUS_VIDEO")
+    + static_info("1", "FRONT", "BACKWARD_COMPATIBLE MANUAL_SENSOR RAW", "FALSE", "OFF AUTO CONTINUOUS_PICTURE")
+    + "== Camera device dump: ==\nDumping the request that is in flight:\n"
+      "  android.control.mode (10001): byte[1]\n        [AUTO ]\n")
 
 
 def png(width: int, height: int, color: int, pixels: list[bytes], filters: list[int]) -> bytes:
@@ -293,6 +305,17 @@ class GuestReaderTests(unittest.TestCase):
         self.assertEqual((infos[0].flash, infos[1].flash), (True, False))
         self.assertEqual(infos[0].af_modes, {"OFF", "AUTO", "MACRO", "CONTINUOUS_PICTURE", "CONTINUOUS_VIDEO"})
         self.assertEqual(runner.parse_static_info("Number of camera devices: 0\n"), [])
+        # Entries under a header of another kind belong to no camera.
+        self.assertEqual(runner.parse_static_info(
+            "== Camera device dump: ==\n  android.lens.facing (80005): byte[1]\n        [BACK ]\n"), [])
+
+    def test_a_camera_starts_at_its_header_not_at_a_falling_tag(self) -> None:
+        # In the fixture the tags fall inside a camera (android.info is dumped before android.lens).
+        tags = [int(m[1], 16) for m in re.finditer(r"\((\w+)\): ", static_info("0", "BACK", "RAW", "TRUE", "OFF"))]
+        self.assertTrue(any(later < earlier for earlier, later in zip(tags, tags[1:])))
+        infos = runner.parse_static_info(static_info("0", "BACK", "RAW", "TRUE", "OFF AUTO"))
+        self.assertEqual(len(infos), 1)
+        self.assertEqual((infos[0].flash, infos[0].af_modes), (True, {"OFF", "AUTO"}))
 
     def test_the_features_the_characteristics_earn(self) -> None:
         infos = runner.parse_static_info(PHONE_STATIC_INFO)
@@ -305,11 +328,11 @@ class GuestReaderTests(unittest.TestCase):
         stated = set(layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]].features)
         self.assertEqual(stated - earned, {runner.CONCURRENT_FEATURE})
         # A back camera without flash or RAW, and a layout that says it has them, differ.
-        plain = runner.parse_static_info(static_info("BACK", "BACKWARD_COMPATIBLE", "FALSE", "OFF AUTO"))
+        plain = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "OFF AUTO"))
         self.assertEqual(runner.features_of(plain), {"android.hardware.camera", "android.hardware.camera.any",
                                                      "android.hardware.camera.autofocus"})
         # The flash and the autofocus of a front camera earn nothing: only the back camera's count.
-        front = runner.parse_static_info(static_info("FRONT", "BACKWARD_COMPATIBLE MANUAL_SENSOR", "TRUE", "OFF AUTO"))
+        front = runner.parse_static_info(static_info("1", "FRONT", "BACKWARD_COMPATIBLE MANUAL_SENSOR", "TRUE", "OFF AUTO"))
         self.assertEqual(runner.features_of(front), {"android.hardware.camera.any", "android.hardware.camera.front",
                                                      "android.hardware.camera.capability.manual_sensor"})
         self.assertEqual(runner.features_of([]), set())
