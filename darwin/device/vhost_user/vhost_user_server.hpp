@@ -49,6 +49,15 @@ public:
      * not run. Call before runConnected(). */
     void setRequestGate(std::shared_ptr<RequestGate> gate);
 
+    /* Declares that whoever sets the stop flag that runConnected() is given
+     * also shuts down the connection's socket, which wakes a poll of the main
+     * socket. An idle loop then blocks until a message, a kick, an event of
+     * the device (a device signals eventDescriptor() for work that no message
+     * starts; see vhost_user_device.hpp), the request gate or the stop.
+     * Otherwise it also wakes every UML_GPU_STOP_POLL_TIMEOUT_MILLISECONDS to
+     * look at the flag. Call before runConnected(). */
+    void setStopShutsDownConnection() noexcept;
+
 private:
     struct Mapping {
         std::uint64_t guestAddress {};
@@ -140,6 +149,10 @@ private:
     void dispatchSharedMemoryActions();
     void drainQueueCompletions();
     void signalPendingConfigChange();
+    /* How long the main poll of serveConnection() may wait: until a stop
+     * when nothing can need the loop but an event, and otherwise for the
+     * time a stop check or a retry takes. */
+    [[nodiscard]] int mainPollTimeout(bool activePolling) const noexcept;
     void completeRequest(
         const PendingRequest& request,
         std::span<const std::uint8_t> response);
@@ -186,6 +199,11 @@ private:
     std::uint64_t negotiatedFeatures_ {};
     std::uint64_t negotiatedProtocolFeatures_ {};
     bool featuresConfigured_ {};
+    bool stopShutsDownConnection_ {};
+    /* The device has a config change pending that it would not claim at the
+     * last attempt (the GPU's display is mid-resize), and signals no edge
+     * when it will. The loop asks again until it does. */
+    bool configChangeWithheld_ {};
     const std::atomic_bool* connectionStopRequested_ {};
     /* The connection's main socket, while one is being served. */
     int frontendDescriptor_ {-1};

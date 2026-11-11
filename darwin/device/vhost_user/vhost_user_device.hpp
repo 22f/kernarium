@@ -197,6 +197,11 @@ public:
     // A device with asynchronous device-to-driver data can expose one
     // readiness descriptor. The transport drains it on its worker and then
     // retries queues which may previously have had no device data available.
+    // An in-process transport blocks while it is idle, so a device must make
+    // this descriptor readable whenever it has work that no message from the
+    // guest starts: data for a buffer the guest queued, a completion for
+    // takeQueueCompletion(), a config change for configChangePending(), or a
+    // timer. A device with no such work returns -1.
     [[nodiscard]] virtual int eventDescriptor() const noexcept { return -1; }
     virtual void drainEventSource() {}
     [[nodiscard]] virtual bool takeQueueCompletion(
@@ -210,6 +215,9 @@ public:
     {
         return false;
     }
+    /* Whether the change is announced now. A claim that fails while the change
+     * stays pending is made again every 100 ms, for a device whose wait ends
+     * without an event on its descriptor. */
     [[nodiscard]] virtual bool claimConfigChange() noexcept
     {
         return configChangePending();

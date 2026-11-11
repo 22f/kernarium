@@ -481,6 +481,14 @@ follows a teardown's disables included) resets such a device first. A
 ring is handled as that ring's buffers are, and a kick that asks for no
 acknowledgement gets none.
 
+**Idle transport.** An in-process transport blocks while it is idle: its thread
+wakes for a message from the guest, for its device's event descriptor, for the
+request gate and for `stop()`, which shuts the connection down, and for nothing
+else. A device must signal its event descriptor whenever it produces work that
+no guest message starts: a completion, a config change, an event for a buffer
+the guest queued, a timer. A config change that `claimConfigChange()` withholds
+is asked for again every 100 ms until it is claimed.
+
 **Request gate.** A service can be given a request gate, which another thread
 closes to hold the device's requests back: a closed gate lets no request reach
 the device, waits a bounded time for the one the device is running, and leaves
