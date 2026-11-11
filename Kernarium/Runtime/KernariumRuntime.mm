@@ -41,6 +41,7 @@
 #include "gpu/in_process_service.hpp"
 #include "gpu/protocol.hpp"
 #include "input/virtio/hardware_input.hpp"
+#include "input/virtio/hardware_input_run.hpp"
 #include "input/virtio/in_process_service.hpp"
 #include "input/virtio/touchscreen.hpp"
 #include "block/android_boot.hpp"
@@ -181,10 +182,10 @@ std::mutex locationCallbackMutex;
 kernarium_runtime_location_receiver_callback locationCallback;
 void* locationContext;
 /* The way into the running Android guest's hardware keyboard, mouse and
- * pointer, if its flavour has them, and the one receiver of their status. The
- * callback is called with its mutex held, as the location receiver's is. */
-std::mutex activeHardwareInputMutex;
-std::shared_ptr<uml::input::virtio::HardwareInput> activeHardwareInput;
+ * pointer, if its flavour has them, with what the application asked of them
+ * across the run's boots, and the one receiver of their status. The callback
+ * is called with its mutex held, as the location receiver's is. */
+uml::input::virtio::HardwareInputRun hardwareInputRun;
 std::mutex inputStatusCallbackMutex;
 kernarium_runtime_input_status_callback inputStatusCallback;
 void* inputStatusContext;
@@ -747,25 +748,30 @@ public:
     ActiveGnssRegistration& operator=(const ActiveGnssRegistration&) = delete;
 };
 
+/* The Android run's hardware input requests, from its first boot to its end
+ * and across the restarts between. */
+class ActiveHardwareInputRun final {
+public:
+    ActiveHardwareInputRun() { hardwareInputRun.begin(); }
+    ~ActiveHardwareInputRun() { hardwareInputRun.end(); }
+
+    ActiveHardwareInputRun(const ActiveHardwareInputRun&) = delete;
+    ActiveHardwareInputRun& operator=(const ActiveHardwareInputRun&) = delete;
+};
+
+/* One boot's hardware input, plugged as the application last asked. */
 class ActiveHardwareInputRegistration final {
 public:
     explicit ActiveHardwareInputRegistration(
         std::shared_ptr<uml::input::virtio::HardwareInput> input)
     {
         input->setStatusCallback(publishInputStatus);
-        std::lock_guard lock(activeHardwareInputMutex);
-        activeHardwareInput = std::move(input);
+        hardwareInputRun.attach(std::move(input));
     }
 
     ~ActiveHardwareInputRegistration()
     {
-        std::shared_ptr<uml::input::virtio::HardwareInput> input;
-        {
-            std::lock_guard lock(activeHardwareInputMutex);
-            input = std::move(activeHardwareInput);
-            activeHardwareInput.reset();
-        }
-        if (input != nullptr)
+        if (const auto input = hardwareInputRun.detach())
             input->setStatusCallback({});
     }
 
@@ -2175,6 +2181,9 @@ int runtimeRun(
                  * next guest's GPU, and a stop reaches the loop. */
                 ActiveEmulatorRegistration registration {emulator.get()};
                 ActiveGpuRegistration gpuRegistration {gpuService};
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+                const ActiveHardwareInputRun hardwareInputRequests;
+#endif
 #ifndef UML_APP_STORE_RUNTIME
                 const FootprintReporter footprintReporter;
 #endif
@@ -2323,6 +2332,17 @@ static_assert(
 static_assert(
     KERNARIUM_RUNTIME_TOUCH_CONTACTS ==
     uml::input::virtio::protocol::touchscreenContactCount);
+
+static_assert(
+    KERNARIUM_RUNTIME_BUTTON_PRIMARY == uml::input::virtio::buttonPrimary &&
+    KERNARIUM_RUNTIME_BUTTON_SECONDARY == uml::input::virtio::buttonSecondary &&
+    KERNARIUM_RUNTIME_BUTTON_MIDDLE == uml::input::virtio::buttonMiddle &&
+    KERNARIUM_RUNTIME_BUTTON_BACK == uml::input::virtio::buttonBack &&
+    KERNARIUM_RUNTIME_BUTTON_FORWARD == uml::input::virtio::buttonForward);
+
+static_assert(
+    KERNARIUM_RUNTIME_WHEEL_DETENT ==
+    uml::input::virtio::protocol::wheelDetent);
 
 void runtimeSendTouch(
     uint32_t slot,
@@ -2693,8 +2713,7 @@ int runtimeReportLocation(const kernarium_runtime_location_fix* fix)
 [[nodiscard]] std::shared_ptr<uml::input::virtio::HardwareInput>
 currentHardwareInput()
 {
-    std::lock_guard lock(activeHardwareInputMutex);
-    return activeHardwareInput;
+    return hardwareInputRun.current();
 }
 
 void runtimeSetInputStatusCallback(
@@ -2708,16 +2727,14 @@ void runtimeSetInputStatusCallback(
 
 int runtimeSetInputConnected(int device, int connected)
 {
-    const auto input = currentHardwareInput();
-    if (input == nullptr)
-        return -ENODEV;
+    using Device = uml::input::virtio::HardwareInputRun::Device;
     switch (device) {
     case KERNARIUM_RUNTIME_INPUT_KEYBOARD:
-        input->setKeyboardConnected(connected != 0);
-        return 0;
+        return hardwareInputRun.request(Device::keyboard, connected != 0) ?
+            0 : -ENODEV;
     case KERNARIUM_RUNTIME_INPUT_MOUSE:
-        input->setMouseConnected(connected != 0);
-        return 0;
+        return hardwareInputRun.request(Device::mouse, connected != 0) ?
+            0 : -ENODEV;
     default:
         return -EINVAL;
     }

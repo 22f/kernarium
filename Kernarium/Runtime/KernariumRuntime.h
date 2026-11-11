@@ -620,12 +620,17 @@ typedef int (*kernarium_runtime_report_location_function)(
  * (darwin/device/input/README.md). The guest has the three devices from boot,
  * unplugged: it sees no keyboard, mouse or cursor until the application plugs
  * them, and unplugging takes them away again with every key and button
- * released. An Android guest whose kernel lacks the hot-plug topic never
- * plugs them, and input sent to them is dropped. The Linux runtime keeps the
- * entries and answers -ENODEV, as does a runtime with no guest running.
+ * released. What the application last asked of each device holds for the run:
+ * a guest that restarts itself has the devices plugged as the application left
+ * them, and a plug asked for between two boots is kept for the next. A plug
+ * that is asked for before the guest's driver has probed takes effect when it
+ * has. An Android guest whose kernel lacks the hot-plug topic never plugs
+ * them, and input sent to them is dropped. The Linux runtime keeps the entries
+ * and answers -ENODEV, as does a runtime with no guest running.
  *
  * Input for a device that is not plugged, or a key the keyboard has no code
- * for, is dropped and returns 0; every call may come from any thread. */
+ * for, is dropped and returns 0, and input sent between two boots returns
+ * -ENODEV; every call may come from any thread. */
 enum {
     /* The keyboard. */
     KERNARIUM_RUNTIME_INPUT_KEYBOARD = 1,
@@ -651,7 +656,8 @@ enum {
 
 /* Plugs (`connected` nonzero) or unplugs one of the KERNARIUM_RUNTIME_INPUT_
  * devices; plugging a plugged device or unplugging an unplugged one changes
- * nothing. Returns 0, -EINVAL for another device, or -ENODEV. */
+ * nothing. Returns 0, -EINVAL for another device, or -ENODEV when no guest
+ * run is in progress. */
 typedef int (*kernarium_runtime_set_input_connected_function)(
     int device,
     int connected);
@@ -668,11 +674,13 @@ typedef int (*kernarium_runtime_send_keyboard_usage_function)(
 
 /* The pointer at (x, y), in the touchscreen's range 0 through
  * KERNARIUM_RUNTIME_TOUCH_MAXIMUM on both axes (see send_touch) over the guest's
- * display, with the buttons that are down; `in_range` zero takes the cursor
- * away and releases the buttons. A position in range before the guest has a
- * display is dropped. A button going down wakes a guest that suspended itself;
- * a pointer that only moves does not. Returns 0, -EINVAL for a coordinate out
- * of range, or -ENODEV. */
+ * display, with the buttons that are down, which are the
+ * KERNARIUM_RUNTIME_BUTTON_ bits (any other bit is ignored). `in_range` zero
+ * releases the buttons and ends the pointer's contact, and Android's cursor
+ * stays where it was. A position in range before the guest has a display is
+ * dropped. A button going down wakes a guest that suspended itself; a pointer
+ * that only moves does not. Returns 0, -EINVAL for a coordinate out of range,
+ * or -ENODEV. */
 typedef int (*kernarium_runtime_send_pointer_function)(
     uint32_t x,
     uint32_t y,
@@ -680,9 +688,11 @@ typedef int (*kernarium_runtime_send_pointer_function)(
     int in_range);
 
 /* The mouse's relative motion in guest pixels (what an application that
- * captured the pointer reads), the buttons that are down, and the vertical and
- * horizontal wheels in 1/120 of a detent, positive up and to the right. Return
- * values as send_pointer's. A wheel step wakes a guest that suspended itself. */
+ * captured the pointer reads), the buttons that are down (the
+ * KERNARIUM_RUNTIME_BUTTON_ bits, any other ignored), and the vertical and
+ * horizontal wheels in 1/120 of a detent, positive up and to the right. A
+ * button going down or a wheel taking a whole step wakes a guest that
+ * suspended itself; motion does not. Returns 0 or -ENODEV. */
 typedef int (*kernarium_runtime_send_mouse_function)(
     int32_t dx,
     int32_t dy,

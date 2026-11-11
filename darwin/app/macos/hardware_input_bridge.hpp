@@ -209,7 +209,8 @@ public:
 
 private:
 	/* The raw units of one wheel detent: a scroll step of the display. */
-	static constexpr std::int32_t wheel_detent = 120;
+	static constexpr std::int32_t wheel_detent =
+		uml::input::virtio::protocol::wheelDetent;
 
 	/* The bit of a mouse button in the buttons the device library takes, or
 	 * zero for a key. */

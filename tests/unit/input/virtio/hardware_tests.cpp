@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "hardware_input_run.hpp"
 #include "hardware_test_support.hpp"
 #include "hid_keyboard.hpp"
 
@@ -656,6 +657,84 @@ void theUnregistrationThatAnswersAnUnplugReachesTheCallback()
     require(rig.statuses.empty() && !rig.keyboardQueue->registered());
 }
 
+// One boot's three devices and the input over them, as the runtime builds them:
+// unplugged, with the guest's drivers yet to probe.
+struct BootRig final {
+    std::shared_ptr<EventQueue> keyboardQueue {
+        std::make_shared<EventQueue>(EventQueue::Attachment::pluggable)};
+    std::shared_ptr<EventQueue> mouseQueue {
+        std::make_shared<EventQueue>(EventQueue::Attachment::pluggable)};
+    std::shared_ptr<EventQueue> pointerQueue {
+        std::make_shared<EventQueue>(EventQueue::Attachment::pluggable)};
+    VirtioInputDevice keyboardDevice {
+        DeviceKind::hardwareKeyboard, keyboardQueue};
+    VirtioInputDevice mouseDevice {DeviceKind::mouse, mouseQueue};
+    VirtioInputDevice pointerDevice {DeviceKind::pointer, pointerQueue};
+    std::shared_ptr<HardwareInput> input {
+        std::make_shared<HardwareInput>(
+            keyboardQueue, mouseQueue, pointerQueue)};
+};
+
+// What the application asked for outlives the boot it was asked of: a guest
+// that restarts itself starts with the devices plugged as it was left.
+void aRunKeepsWhatTheApplicationAskedForAcrossBoots()
+{
+    using Device = HardwareInputRun::Device;
+    HardwareInputRun run;
+    // Outside a run there is no guest to ask.
+    require(!run.request(Device::keyboard, true));
+    require(run.current() == nullptr);
+
+    run.begin();
+    // Between boots, a request is accepted and kept.
+    require(run.request(Device::mouse, true));
+    require(run.current() == nullptr);
+
+    BootRig first;
+    run.attach(first.input);
+    require(run.current() == first.input);
+    require(first.input->mouseConnected() && !first.input->keyboardConnected());
+    // Nothing the guest has seen changed: its drivers have not probed, and the
+    // first buffer of each tells it.
+    require(!first.mouseDevice.configChangePending());
+    Rig::probes(first.mouseDevice);
+    require(first.mouseDevice.configChangePending());
+
+    // While a boot has its input, a request reaches it at once.
+    require(run.request(Device::keyboard, true));
+    require(first.input->keyboardConnected());
+    require(run.request(Device::mouse, false));
+    require(!first.input->mouseConnected());
+    require(run.request(Device::mouse, true));
+
+    // The guest restarts: the boot's input is gone, a request in between is
+    // kept, and the next boot's devices start as the application left them.
+    require(run.detach() == first.input);
+    require(run.current() == nullptr);
+    require(run.request(Device::keyboard, false));
+    BootRig second;
+    run.attach(second.input);
+    require(!second.input->keyboardConnected());
+    require(second.input->mouseConnected());
+    require(!second.mouseDevice.configChangePending());
+    Rig::probes(second.mouseDevice);
+    require(second.mouseDevice.configChangePending());
+    // The devices the application did not plug stay unplugged and raise nothing.
+    Rig::probes(second.keyboardDevice);
+    require(!second.keyboardDevice.configChangePending());
+
+    // The run's end forgets the requests, and the next run starts unplugged.
+    require(run.detach() == second.input);
+    run.end();
+    require(!run.request(Device::mouse, false));
+    run.begin();
+    BootRig third;
+    run.attach(third.input);
+    require(!third.input->mouseConnected() && !third.input->keyboardConnected());
+    (void)run.detach();
+    run.end();
+}
+
 } // namespace
 
 int main()
@@ -681,5 +760,6 @@ int main()
     aClickAfterALongWaitForTheGuestIsDelivered();
     aPlugBeforeTheGuestProbesIsToldWhenItDoes();
     theUnregistrationThatAnswersAnUnplugReachesTheCallback();
+    aRunKeepsWhatTheApplicationAskedForAcrossBoots();
     return EXIT_SUCCESS;
 }

@@ -2,6 +2,7 @@
 
 add_library(uml_virtio_input STATIC
     hardware_input.cpp
+    hardware_input_run.cpp
     hardware_reports.cpp
     hid_keyboard.cpp
     in_process_service.cpp
