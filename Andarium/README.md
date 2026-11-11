@@ -285,8 +285,8 @@ requires reopening Andarium.
   during a normal run, and nothing is scanned for or paired. Their input
   reaches the guest only while Andarium is in front, and leaving the front
   lets every button go. Home, Menu, Options and Share are taken from iOS's
-  gestures and reach Android as buttons (iOS's own Home setting decides
-  whether Andarium may have Home). A button going down wakes a guest that
+  gestures while a controller is held and reach Android as buttons (iOS's own
+  Home setting decides whether Andarium may have Home). A button going down wakes a guest that
   suspended itself (`wake_for_input`, runtime API 33). Rumble, the light and the
   player number follow the guest's drivers onto the controller, and
   `Config/Info.plist` declares the extended gamepad profile. There is no
