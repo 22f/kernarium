@@ -251,20 +251,26 @@ control out.
   fail the operation. A restore that took effect and did not finish completes
   at the next start or launch (`TwoDiskStorage.recoverSnapshots` runs before
   the guest is read); until then Create and Restore are refused and every
-  snapshot but that one can be deleted. The update's copy is not a snapshot.
+  snapshot but that one can be deleted, and the start plan is the one that
+  start finds, from the snapshot's own record. The update's copy is not a
+  snapshot.
   The store's file calls are injected (`SnapshotFileOperations`).
   `SnapshotDriver` is what the screens call, and a refusal is a
   `SnapshotRefusal`. The driver reports what it does as `SnapshotActivity`,
   which the model keeps (`AppModel.snapshotGate`, observable); no start begins
-  and the update's Restore waits while an operation runs. A listing is never
-  older than the last finished operation (`revision`), can come without its
-  figures, and names the release the data is on.
+  and the update's Restore waits while an operation runs; a rename waits for
+  nothing and is waited for. A listing is never older than the last finished
+  operation (`revision`), can come without its figures, and names the release
+  the data is on; a cancelled one stops measuring.
   Home's Guest system section has a Snapshots row (how many, the space they
   use, Manage) that opens the Snapshots sheet: the list newest first, a page
   per snapshot (Restore, its name, Delete) and a page on the space they use,
   with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds
-  what Home and the sheet show (names first, the figures when measured, the
-  last figure kept while a row is measured again) and runs each operation;
+  what Home and the sheet show (names first, then the figures; they give way
+  to the measuring state when an operation finishes or a run begins or ends,
+  and are measured when nothing was read, after an operation and when a run
+  ends, never because a view appeared or while the guest starts) and runs
+  each operation;
   `SnapshotWords` says every refusal, plan and figure in one place. A restore
   closes the sheet and Home says what happened, Start being next. The preview
   plays the same screens on mock snapshots (`-screen snapshots-…`).
