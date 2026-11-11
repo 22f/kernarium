@@ -174,11 +174,19 @@
         "compile-sources",
         "frameworks",
         "resources",
+        {
+          "kind": "copy",
+          "name": "Embed Test Support",
+          "bundle-base-path": "frameworks-directory",
+        },
       ],
       "package-product-members": [
         {
           "product-name": "AndariumCore",
           "build-phase": { "build-phase": "frameworks" },
+        }, {
+          "product-name": "AndariumCoreTestSupport",
+          "build-phase": { "build-phase": "copy/Embed Test Support", "code-sign-on-copy": true },
         }, {
           "product-name": "AndariumCoreTestSupport",
           "build-phase": { "build-phase": "frameworks" },
