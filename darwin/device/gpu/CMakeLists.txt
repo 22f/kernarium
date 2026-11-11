@@ -177,6 +177,7 @@ target_link_libraries(uml_gpu_protocol_device PUBLIC
     uml_gpu_renderer
     uml_gpu_display
     UML::GpuMemoryPressure)
+target_link_libraries(uml_gpu_protocol_device PRIVATE UML::PublishedFigures)
 
 # The Virtio-GPU device on the vhost-user transport, with its display.
 add_library(uml_gpu_vhost_user_device STATIC
@@ -236,6 +237,8 @@ if(UML_BUILD_UNIT_TESTS)
         UML::GpuContextMemoryLedger
         UML::GpuMemoryPressure
         UML::GpuReclaimWait)
+    target_link_libraries(uml_gpu_protocol_device_test_variant PRIVATE
+        UML::PublishedFigures)
 endif()
 
 add_library(uml_gpu_device INTERFACE)

@@ -43,9 +43,10 @@ namespace uml::runtime {
  * libdispatch (the thermal state, Low Power Mode and the core count, the
  * memory pressure level, the main queue's answer) is observed on a serial
  * queue that the system's worker threads run and the fence never holds, and
- * the watch reads it from atomics. The main queue is asked only while an event
- * is open or a stall is being confirmed. The first tick after a hold starts
- * the measurement over.
+ * the watch reads it from atomics, which are published process-wide
+ * (platform/host_state_figures.hpp) for the session record's checkpoint to read
+ * too. The main queue is asked only while an event is open or a stall is being
+ * confirmed. The first tick after a hold starts the measurement over.
   */
 class StallWatch final {
 public:

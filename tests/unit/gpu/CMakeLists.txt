@@ -719,6 +719,7 @@ if(TARGET uml_gpu_service)
         LIBRARIES
             uml_gpu_protocol_device_test_variant
             uml_test_allocation_failure
+            UML::PublishedFigures
         INCLUDES ${_uml_gpu_device_directory} ${CMAKE_CURRENT_SOURCE_DIR}
         UNIT_DIRECTORY)
 endif()

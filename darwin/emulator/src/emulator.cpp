@@ -539,6 +539,8 @@ public:
 			if (!prepared.informational) {
 				::uml::runtime::set_memory_terms_reader(
 					&::uml::runtime::memory_terms);
+				::uml::runtime::set_run_figures_reader(
+					&::uml::runtime::run_figures);
 				(void)::uml::runtime::begin_session_record(
 					prepared.session_record_path, arguments);
 				run_end_recorder.emplace(*this);
@@ -555,6 +557,8 @@ public:
 		if (!prepared.informational) {
 			::uml::runtime::set_memory_terms_reader(
 				&::uml::runtime::memory_terms);
+			::uml::runtime::set_run_figures_reader(
+				&::uml::runtime::run_figures);
 			(void)::uml::runtime::begin_session_record(
 				prepared.session_record_path, arguments);
 			run_end_recorder.emplace(*this);
