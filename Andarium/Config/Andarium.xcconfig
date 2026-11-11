@@ -11,7 +11,9 @@
 // condition and puts the address in Info.plist. The tests and the screen
 // captures state `FEEDBACK_ADDRESS=feedback@example.com` on the xcodebuild
 // command line to build the views into a Debug build; the bundle check
-// refuses any other address outside AppStore.
+// refuses any other address outside AppStore, and the arranged one outside
+// Debug. AndariumPreview sets FEEDBACK_ADDRESS empty itself, so it takes that
+// arrangement alone and never the local file's receiver.
 
 #include "../../GuestHost/Config/Signing.xcconfig"
 
