@@ -71,7 +71,7 @@ struct AdbOverVsockTests {
         while ContinuousClock.now < deadline {
             do {
                 if let identity = try store.existingIdentity() {
-                    let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device")
+                    let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device", run: GuestRunMark.random())
                     let booted = try await operations.shell("getprop sys.boot_completed")
                     if booted.text.hasPrefix("1") { return operations }
                     lastError = "boot_completed reads \(booted.text.debugDescription)"

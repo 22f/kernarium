@@ -126,6 +126,10 @@ enum GuestDirectory {
         var result: [String: String] = [:]
         let manager = FileManager.default
         for path in (try? manager.subpathsOfDirectory(atPath: directory.path)) ?? [] {
+            // The record of the walk the guest owes is not the guest's data: a
+            // restore that fails after it was written leaves the walk owed, the
+            // safe answer, and `PartialSweepLedgerTests` says when it changes.
+            if path == PartialSweepLedger.fileName { continue }
             let url = directory.appendingPathComponent(path)
             var isDirectory: ObjCBool = false
             guard manager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }

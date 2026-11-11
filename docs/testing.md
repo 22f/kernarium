@@ -365,18 +365,19 @@ sets, its CPU time standing still), the graphics-memory notice (a real refusal
 in Chrome's WebGL under the host's GPU budget, on a guest with Chrome
 installed), the graphics-memory reading and the process list the reclaim
 parses (any guest), the session record's network slot (a real guest's DHCP
-lease, `NetworkRecordGuestTests`), Retina memory, the ADB-over-vsock guest
-tests (including Android storage and the touch-cancel path), the side keys'
-pass-through of touches to Android, the ADB-over-network hold, the
-background disk locks (which also requires a guest that was allocating
-buffers when the GPU was held to suspend), the resume after a save while
-the application is away, the real `HostLocation` against the Simulator's
-simulated location (the suite's header says how to grant access and set one)
-and the hardware keyboard and mouse against Android's input devices
-(`KeyboardMouseGuestTests`, which needs a kernel that follows configuration
-changes and its Android release). The storage test signs its helper
-APK with the AOSP test key, never a release key. When derived data is on a
-removable volume, macOS prompts once for access and the launch hangs until
+lease, `NetworkRecordGuestTests`), Retina memory, the resolution a real guest
+gets (`ResolutionGuestTests`: the size and density Android reports at a
+scale), the ADB-over-vsock guest tests (including Android storage and the
+touch-cancel path), the side keys' pass-through of touches to Android, the
+ADB-over-network hold, the background disk locks (which also requires a guest
+that was allocating buffers when the GPU was held to suspend), the resume
+after a save while the application is away, the real `HostLocation` against
+the Simulator's simulated location (the suite's header says how to grant
+access and set one) and the hardware keyboard and mouse against Android's input
+devices (`KeyboardMouseGuestTests`, which needs a kernel that follows
+configuration changes and its Android release). The storage test signs its
+helper APK with the AOSP test key, never a release key. When derived data is on
+a removable volume, macOS prompts once for access and the launch hangs until
 answered; build to the internal disk instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`

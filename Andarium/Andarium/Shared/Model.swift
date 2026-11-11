@@ -13,7 +13,7 @@ enum StatisticsViewer: Hashable {
 }
 
 enum SheetKind: String, Identifiable, Hashable, CaseIterable {
-    case create, resize, info, system, whatsNew, snapshots
+    case create, resize, info, system, resolution, whatsNew, snapshots
 
     var id: String { rawValue }
 }
@@ -25,8 +25,8 @@ struct SessionPreset: Equatable {
     var settings = false
     /// Settings opens at full height instead of half.
     var settingsLarge = false
-    /// Settings scrolls to the section with this identifier ("stats",
-    /// "display" or "capabilities").
+    /// Settings scrolls to the section with this identifier ("stats" or
+    /// "capabilities").
     var settingsScroll: String?
     var powerMenu = false
     var leftEdge = false
@@ -125,28 +125,71 @@ final class AppModel {
     /// The preview's plan after Restore; a device reads it from the files.
     var planAfterRestore: StartPlan?
 
-    // App-wide display option, set on the home screen: the guest draws at the
-    // screen's pixel density. The guest's display always follows the window.
-    var retina = false
-    /// Whether the person has set Retina mode themselves. Until they do, it
-    /// follows the device (`DisplayOptions.defaultRetina`); once they have,
-    /// the default never replaces their choice.
-    var retinaChosen = false
-    /// The person's choice of Retina mode on Home.
-    func chooseRetina(_ on: Bool) {
-        retina = on
-        retinaChosen = true
+    // App-wide display option, set on the home screen: how densely the guest
+    // draws, from one guest pixel to a point to one to each pixel of the
+    // screen. The guest's display always follows the window.
+    /// What the person chose for the resolution; nil until they do. Until
+    /// then it follows the device (`DisplayOptions.defaultScale`), and once
+    /// they have the default never replaces it.
+    var chosenScale: GuestDisplayScale?
+    /// The resolution the launch states (automation): that run's alone, so it
+    /// is not kept and what the person chose stays stored.
+    var launchScale: GuestDisplayScale?
+    /// What the system holds this application's memory to (`MemoryLimit`),
+    /// which the default resolution follows; zero where it sets none.
+    var memoryLimitBytes: UInt64 = 0
+    /// The native scale of the screen the window is on, as last read.
+    var screenNativeScale = 1.0
+    /// The size of the display the next start gives the guest, in points: the
+    /// window less the session's safe area (`SessionDisplayArea`). Nil until
+    /// Home has laid out and read it.
+    var displayPoints: CGSize?
+    /// What this screen offers.
+    var resolutionChoices: ResolutionChoices { ResolutionChoices(nativeScale: screenNativeScale) }
+    /// The resolution the guest draws at: the launch's, else the person's
+    /// choice, else the default, as a choice of this screen (a number that is
+    /// none goes to the nearest).
+    var resolution: GuestDisplayScale {
+        let choices = resolutionChoices
+        return launchScale.map(choices.resolve)
+            ?? displayOptions.scale(memoryLimitBytes: memoryLimitBytes, choices: choices)
+    }
+    /// The guest's display as the next start lays it out at the choice at
+    /// `index` of `resolutionChoices`; nil until the display's size is known.
+    func resolutionLayout(at index: Int) -> GuestDisplayLayout? {
+        let choices = resolutionChoices
+        return displayPoints.flatMap {
+            GuestDisplayLayout(scale: choices.scale(at: index), points: $0, nativeScale: screenNativeScale)
+        }
+    }
+    /// The index of `resolution` among the choices.
+    var resolutionIndex: Int { resolutionChoices.index(nearest: resolution) }
+    /// The guest's display as the next start lays it out.
+    var resolutionLayout: GuestDisplayLayout? { resolutionLayout(at: resolutionIndex) }
+    /// A screen and a display the Simulator preview states to show other
+    /// devices; nothing in the application does.
+    var statedNativeScale: Double?
+    var statedDisplayPoints: CGSize?
+    /// What the scene reads of the screen the window is on.
+    func screenDidChange(nativeScale: Double) {
+        let scale = statedNativeScale ?? nativeScale
+        if screenNativeScale != scale { screenNativeScale = scale }
+    }
+    /// What Home reads of the window: the display's size as the guest will
+    /// get it.
+    func displayPointsDidChange(_ points: CGSize) {
+        let points = statedDisplayPoints ?? points
+        if displayPoints != points { displayPoints = points }
+    }
+    /// The person's choice of resolution on Home.
+    func chooseResolution(_ scale: GuestDisplayScale) {
+        chosenScale = scale
     }
     /// What is kept of the display options across launches.
-    var displayOptions: DisplayOptions {
-        DisplayOptions(chosenRetina: retinaChosen ? retina : nil)
-    }
-    /// The launch stated Retina mode (automation): the value belongs to that
-    /// run and is not kept.
-    var retinaStatedByLaunch = false
-    /// The display options to keep; nil where the launch stated Retina mode,
-    /// so what the person chose stays stored.
-    var displayOptionsToKeep: DisplayOptions? { retinaStatedByLaunch ? nil : displayOptions }
+    var displayOptions: DisplayOptions { DisplayOptions(chosenScale: chosenScale) }
+    /// The display options to keep; nil where the launch stated the
+    /// resolution, so what the person chose stays stored.
+    var displayOptionsToKeep: DisplayOptions? { launchScale != nil ? nil : displayOptions }
     /// The host window owns display rotation until iPadOS grants the
     /// full-screen session's orientation lock. Never a saved guest setting.
     var hostDrivesGuestRotation = false
