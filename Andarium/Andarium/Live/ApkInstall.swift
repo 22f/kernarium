@@ -26,10 +26,15 @@ nonisolated enum ApkInstallOperation {
     static let sendIdleLimit = Duration.seconds(60)
     static let commitLimit = Duration.seconds(15 * 60)
 
+    /// Android's `INSTALL_REASON_USER`: an install the person started.
+    static let userInstallReason = 4
+
     /// `-r` replaces an installed app, as the person expects of an APK for
-    /// one already there; `-t` admits test-only builds; `-S` gives the size.
+    /// one already there; `-t` admits test-only builds; `--install-reason`
+    /// marks the install as the person's, because the launcher adds a
+    /// home-screen icon only for such an install; `-S` gives the size.
     static func service(size: Int) -> String {
-        "abb_exec:package\0install\0-r\0-t\0-S\0\(size)"
+        "abb_exec:package\0install\0-r\0-t\0--install-reason\0\(userInstallReason)\0-S\0\(size)"
     }
 
     static func run(
