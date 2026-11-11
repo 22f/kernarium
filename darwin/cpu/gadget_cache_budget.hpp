@@ -28,21 +28,19 @@ namespace uml::cpu::gadget_cache {
  *
  * The budget caps the accounts that are open. A store that finds them above it
  * calls relieve(), which asks open accounts to shed until they hold at most
- * seven eighths of the budget, those the guest is least likely to run again at
- * once first. An executor that enters translated code in an address space, or
- * switches to it, tells its account (Account::ran()), which keeps one bit for
- * each of the last 64 epochs (about 2.7 ms each, 175 ms in all) in which that
- * happened: its activity. An account no executor entered in the window is
- * idle, whatever it holds, and is asked first, the one idle longest first.
- * The others follow by activity band, a quarter of the window each, the least
- * active band first and the smallest account first within a band, so the
- * address space the guest is running is asked last, and only when all the
- * rest, shed, would still hold more than the target. Activity, not the epoch
- * of the last entry, orders the running accounts: a stamp trails a run by a
- * guest tick and a host preemption (up to 27 ms in a census of a 6-vCPU
- * Android guest at host load 50 to 120), more than the few milliseconds
- * between running accounts, and an order by it asked a running 88 MiB account
- * to shed.
+ * seven eighths of the budget (the target). An executor that enters translated
+ * code in an address space, or switches to it, tells its account
+ * (Account::ran()), which keeps one bit for each of the last 64 epochs (about
+ * 2.7 ms each, 175 ms in all) in which that happened: its activity. Relief asks
+ * first any account that holds more than the target by itself, which no other
+ * account's shedding could spare. Then it asks the accounts the guest is least
+ * likely to run again at once, only while the open ones are above the target:
+ * those no executor entered in the window, the one idle longest first, then
+ * the others by activity band, a quarter of the window each, the least active
+ * band first and the smallest account first within a band, so the address space
+ * the guest is running most is asked last. Activity, not the epoch of the last
+ * entry, orders the running accounts: a stamp trails a run by more than the gap
+ * between running accounts.
  *
  * An account asked to shed tells its engine (Notify), and every executor
  * holding that address space lets go of it at its next entry into translated
@@ -371,13 +369,17 @@ struct Candidate final {
 } // namespace detail
 
 /* Ask open accounts to shed until the open ones hold at most seven eighths of
- * the budget, when they hold more than all of it, as epoch `now` sees them:
- * in the order of detail::shed_before(), which puts the accounts the guest is
- * running last, so that the one it runs most is asked only when all the others
- * together would not bring the rest down to the target. An account holding
- * nothing is never asked, and a budget smaller than one address space still
- * holds. Of accounts equal in every respect, the one opened last is asked
- * first.
+ * the budget (the target), when they hold more than all of it, as epoch `now`
+ * sees them.
+ *
+ * What cannot be avoided comes first: an account holding more than the target
+ * by itself stays above it however many others shed, so it is asked, the
+ * largest first, before any account that might have been enough instead. Then
+ * the others are asked in the order of detail::shed_before(), which puts the
+ * accounts the guest is running last, only while the open ones are above the
+ * target. An account holding nothing is never asked, and a budget smaller than
+ * one address space still holds. Of accounts equal in every respect, the one
+ * opened last is asked first.
  *
  * Every caller takes its turn, however the lock is held: one that went on
  * storing while another held it, for an account opening or going, a census or
@@ -406,18 +408,27 @@ inline void relieve_at(std::uint64_t now) noexcept
 	bool relieved = false;
 	while (open > target) {
 		detail::Candidate chosen;
+		/* The largest account over the target by itself, if any. Each
+		 * pass scans the ledger again: reliefs are rare, and nothing is
+		 * allocated under the lock. */
+		detail::Candidate unavoidable;
 		for (auto *account = book.first; account != nullptr;
 		     account = account->next_) {
-			if (account->shedding() || account->bytes() == 0)
+			const auto bytes = account->bytes();
+			if (account->shedding() || bytes == 0)
 				continue;
 			const detail::Candidate candidate{account,
 				(account->activity(now) + band_epochs - 1) /
 					band_epochs,
-				account->last_run(), account->bytes()};
+				account->last_run(), bytes};
+			if (bytes > target && bytes > unavoidable.bytes)
+				unavoidable = candidate;
 			if (chosen.account == nullptr ||
 			    detail::shed_before(candidate, chosen))
 				chosen = candidate;
 		}
+		if (unavoidable.account != nullptr)
+			chosen = unavoidable;
 		if (chosen.account == nullptr)
 			break;
 		const auto shed = chosen.account->start_shedding();

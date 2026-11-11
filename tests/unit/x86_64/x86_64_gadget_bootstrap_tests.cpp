@@ -1599,23 +1599,19 @@ void a_shed_address_space_is_asked_for_again_after_a_failed_allocation()
 	TestMemory memory{0, blocks * stride + 4096};
 	fill_add_blocks(memory, blocks, stride);
 	const auto base = budget::ledger_state();
-	/* Address spaces held before this executor existed are asked to shed
-	 * too, the idle ones first, and nothing here lets go of them: what is
-	 * shed beyond their bytes is this executor's. */
-	const auto others = base.total;
 	budget::set_budget(small);
 	bool failed = false;
 	bool asked_again = true;
 	{
 		gadgets::Executor executor;
 		for (std::size_t index = 0; index < blocks && asked_again; ++index) {
-			if (budget::ledger_state().shedding > others) {
+			if (budget::ledger_state().shedding != 0) {
 				uml::testing::fail_next_allocation();
 				executor.leave_gone_generations(0, &mmu_says);
 				failed = !uml::testing::cancel_pending_allocation_failure() ||
 					failed;
 				executor.leave_gone_generations(0, &mmu_says);
-				asked_again = budget::ledger_state().shedding <= others;
+				asked_again = budget::ledger_state().shedding == 0;
 			}
 			executor.prepare(memory, 7, 1, 1);
 			const auto selected = executor.select_program(

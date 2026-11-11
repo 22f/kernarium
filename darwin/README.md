@@ -99,14 +99,15 @@ share:
 - **Bounded growth.** A shared space is renewed once its arena is mostly freed,
   a private cache sweeps link state nothing names, an address space the kernel
   destroyed is let go of at the executor's next entry, and a process-wide byte
-  budget (`cpu/gadget_cache_budget.hpp`) caps the whole. Past it, address
-  spaces no executor entered for the last 175 ms are asked to shed first, then
-  the less active by band and the smaller first, so the address space the
-  guest runs most goes last and only when the rest would not bring the cache
-  down to seven eighths of the budget. The emulator sets the budget before the
-  first executor, from guest memory and the process memory limit or
-  `--gadget-cache-budget=`; it is also the gadget-cache term of the host GPU's
-  budget ([architecture](../docs/architecture.md#memory-and-executable-code)).
+  budget (`cpu/gadget_cache_budget.hpp`) caps the whole. Past it, an address
+  space that alone holds more than seven eighths of the budget is asked to
+  shed, and then, only while the cache is above that, the others: those no
+  executor entered for the last 175 ms first, then the less active by band and
+  the smaller first, so the address space the guest runs most goes last. The
+  emulator sets the budget before the first executor, from guest memory and the
+  process memory limit or `--gadget-cache-budget=`; it is also the
+  gadget-cache term of the host GPU's budget
+  ([architecture](../docs/architecture.md#memory-and-executable-code)).
 - **Code writes.** In both arm64 engines, code another vCPU changed and
   synchronized takes effect at this vCPU's next context synchronization point.
   A kernel write into a guest-code page reaches arm64 code only through the

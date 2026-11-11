@@ -255,7 +255,8 @@ void a_shed_account_that_shrinks_leaves_the_open_ones_exact()
 /* The accounts that have not been entered for a window are idle and go first,
  * the one idle longest first; the one that is running is not asked while they
  * hold enough to bring the open ones down to the target, however large it is
- * and however many of them there are. */
+ * (short of holding more than the target by itself) and however many of them
+ * there are. */
 void idle_accounts_go_before_the_one_running()
 {
 	const auto now = t0 + 4 * window;
@@ -301,21 +302,122 @@ void idle_accounts_go_before_the_one_running()
 	cache::set_budget(cache::fallback_budget);
 }
 
-/* The one that is running is asked when it alone holds more than the target,
- * after the idle ones: nothing else could bring the open accounts down to it. */
-void the_account_running_is_asked_when_it_alone_exceeds_the_target()
+/* An account is entered in `count` of the 64 epochs ending at `now`, spread
+ * over them, the last of the epochs being now. */
+void run_in(Holder &holder, std::uint64_t now, unsigned count)
+{
+	for (unsigned index = 0; index < count; ++index)
+		holder.account.ran(count == 1 ? now :
+			now - (window - 1) + index * (window - 1) / (count - 1));
+	require(holder.account.activity(now) == count);
+}
+
+/* An account that holds more than the target by itself stays above it however
+ * many others shed, so it is asked first and the others are left alone when
+ * that brings the open ones down: the neighbours of a program that must be shed
+ * anyway keep their translations, whether they are idle or running, in any
+ * activity band. */
+void an_account_over_the_target_is_asked_alone()
 {
 	const auto now = t0 + 4 * window;
 	cache::set_budget(100 * kib);
+	/* The game holds 95 of the 100, and is running; the others are idle. */
 	{
 		Holder game;
 		game.account.charge(95 * kib);
 		game.ran(t0 + 1, now);
 		Holder idle;
+		Holder idler;
+		Holder idlest;
 		idle.account.charge(10 * kib);
+		idler.account.charge(5 * kib);
+		idlest.account.charge(3 * kib);
 		idle.ran(t0 + 1, t0 + 3);
+		idler.ran(t0 + 1, t0 + 2);
+		idlest.ran(t0 + 1, t0 + 1);
+		const auto base = cache::ledger_state();
 		cache::relieve_at(now);
-		require(idle.asked() && game.asked());
+		require(game.asked() && !idle.asked() && !idler.asked() &&
+			!idlest.asked());
+		const auto state = cache::ledger_state();
+		require(state.reliefs == base.reliefs + 1 &&
+			state.shed_accounts == base.shed_accounts + 1);
+		require(state.shedding == 95 * kib && figures_agree() &&
+			!cache::over_budget());
+	}
+	/* The same beside accounts that run, one in each activity band. */
+	{
+		Holder game;
+		game.account.charge(96 * kib);
+		game.ran(t0 + 1, now);
+		Holder band1;
+		Holder band2;
+		Holder band3;
+		Holder band4;
+		band1.account.charge(1 * kib);
+		band2.account.charge(2 * kib);
+		band3.account.charge(1 * kib);
+		band4.account.charge(1 * kib);
+		run_in(band1, now, 8);
+		run_in(band2, now, 24);
+		run_in(band3, now, 40);
+		run_in(band4, now, 60);
+		const auto base = cache::ledger_state();
+		cache::relieve_at(now);
+		require(game.asked() && !band1.asked() && !band2.asked() &&
+			!band3.asked() && !band4.asked());
+		require(cache::ledger_state().shed_accounts ==
+			base.shed_accounts + 1);
+		require(figures_agree() && !cache::over_budget());
+	}
+	/* It need not be the one the order puts last: a less active program that
+	 * holds the budget is shed beside a small one that is more active, and
+	 * not beside the idle and the less active ones before it. */
+	{
+		Holder big;
+		big.account.charge(95 * kib);
+		run_in(big, now, 40);
+		Holder small;
+		small.account.charge(2 * kib);
+		small.ran(t0 + 1, now);
+		Holder idle;
+		idle.account.charge(4 * kib);
+		Holder less;
+		less.account.charge(1 * kib);
+		run_in(less, now, 10);
+		cache::relieve_at(now);
+		require(big.asked() && !small.asked() && !idle.asked() &&
+			!less.asked());
+		require(figures_agree() && !cache::over_budget());
+	}
+	/* Two that cannot be spared are both asked, and the neighbours are not. */
+	{
+		Holder first;
+		Holder second;
+		first.account.charge(90 * kib);
+		second.account.charge(92 * kib);
+		first.ran(t0 + 1, now);
+		second.ran(t0 + 1, now);
+		Holder idle;
+		idle.account.charge(10 * kib);
+		cache::relieve_at(now);
+		require(first.asked() && second.asked() && !idle.asked());
+		require(figures_agree() && !cache::over_budget());
+	}
+	/* What it leaves above the target is brought down in the order: the game
+	 * goes, and then the idle account before the running one. */
+	{
+		Holder game;
+		game.account.charge(90 * kib);
+		game.ran(t0 + 1, now);
+		Holder idle;
+		idle.account.charge(40 * kib);
+		idle.ran(t0 + 1, t0 + 3);
+		Holder running;
+		running.account.charge(50 * kib);
+		running.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(game.asked() && idle.asked() && !running.asked());
 		require(figures_agree() && !cache::over_budget());
 	}
 	/* Not before the budget is passed. */
@@ -371,11 +473,8 @@ void running_accounts_go_by_activity_band_then_size()
 		cache::relieve_at(now);
 		require(all.asked() && !missed.asked());
 	}
-	/* The accounts of a census of a 6-vCPU Android guest at a 192 MiB
-	 * budget: twelve idle ones of 1 MiB that freed too little, and running
-	 * ones of 17 and 88 MiB whose last entries were a few epochs before
-	 * (the 22 ms by which an order by last entry shed the 88 MiB one, which
-	 * was running). */
+	/* Twelve idle accounts of 1 MiB that free too little, and running ones of
+	 * 17, 77 and 88 MiB whose last entries differ by a few epochs. */
 	cache::set_budget(192 * mib);
 	{
 		Holder system_server;
@@ -606,7 +705,7 @@ int main()
 	relief_accounting();
 	a_shed_account_that_shrinks_leaves_the_open_ones_exact();
 	idle_accounts_go_before_the_one_running();
-	the_account_running_is_asked_when_it_alone_exceeds_the_target();
+	an_account_over_the_target_is_asked_alone();
 	running_accounts_go_by_activity_band_then_size();
 	ties_and_empty_accounts();
 	relief_waits_for_the_lock();
