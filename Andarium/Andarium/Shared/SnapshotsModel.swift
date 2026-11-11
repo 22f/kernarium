@@ -291,6 +291,14 @@ final class SnapshotsModel {
         fresh = nil
         pendingName = nil
         renameTask?.cancel()
+        // What the screens held belongs to the guest that is gone.
+        problem = nil
+        taking = false
+        takeName = ""
+        renaming = nil
+        renameText = ""
+        restoreTarget = nil
+        deleteTarget = nil
     }
 
     /// The driver finished one more operation, or a run began or ended: the
@@ -457,15 +465,27 @@ final class SnapshotsModel {
 
     private func tell(_ operation: SnapshotOperation, refusal: SnapshotRefusal, snapshot: SnapshotSummary? = nil) {
         guard let app else { return }
-        problem = AppAlert(
+        show(AppAlert(
             title: SnapshotWords.problemTitle(operation),
             message: SnapshotWords.refusal(
                 refusal, snapshot: snapshot, appRevision: app.system.releaseRevision, device: app.host.name,
-                restoreKnown: unfinishedRestoreSnapshot != nil))
+                restoreKnown: unfinishedRestoreSnapshot != nil)))
     }
 
     private func tell(_ operation: SnapshotOperation, failure error: any Error) {
-        problem = AppAlert(title: SnapshotWords.problemTitle(operation), message: error.localizedDescription)
+        show(AppAlert(title: SnapshotWords.problemTitle(operation), message: error.localizedDescription))
+    }
+
+    /// The sheet says a problem where it is open. An operation that ended
+    /// after it closed (the name saved as the page went) is told by the app's
+    /// own alert, which does not wait for the sheet to open again.
+    private func show(_ alert: AppAlert) {
+        guard let app else { return }
+        if app.sheet == .snapshots {
+            problem = alert
+        } else {
+            app.alert = alert
+        }
     }
 
     private func mark(fresh id: SnapshotID) {

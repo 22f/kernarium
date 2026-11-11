@@ -224,6 +224,8 @@ struct SnapshotsModelTests {
             guest: Guest.fresh(on: host), host: host, system: system, capabilities: .device, createRequirementBytes: 1 << 30)
         let driver = FakeSnapshotDriver(items: items)
         model.snapshotDriver = driver
+        // The sheet is open, as it is for what the screens do.
+        model.sheet = .snapshots
         model.snapshots.renameDelay = .milliseconds(30)
         model.snapshots.freshDuration = .milliseconds(200)
         return Setup(model: model, driver: driver)
@@ -460,6 +462,43 @@ struct SnapshotsModelTests {
                 "\(operation) \(refusal)")
             s.store.problem = nil
         }
+    }
+
+    @Test func aFailureThatArrivesAfterTheSheetClosedGoesToTheAppsAlert() async {
+        let item = SnapshotSample.item("old")
+        let s = setup([item])
+        await s.store.reload()
+        // The name typed last is saved as the page goes, and the driver fails.
+        s.store.edit(name: "New", of: item.id)
+        s.model.sheet = nil
+        s.driver.nextFailure = POSIXError(.EIO)
+        await s.store.flushName()
+        #expect(s.store.problem == nil, "nothing waits for the sheet to open again")
+        #expect(s.model.alert?.title == "The snapshot could not be renamed")
+        #expect(s.model.alert?.message == POSIXError(.EIO).localizedDescription)
+        // With the sheet open the sheet says it.
+        s.model.alert = nil
+        s.model.sheet = .snapshots
+        s.driver.nextRefusal = .missing
+        await s.store.rename(item.id, to: "x")
+        #expect(s.store.problem?.message == SnapshotWords.refusal(.missing) && s.model.alert == nil)
+    }
+
+    @Test func aGuestMadeAnewForgetsTheProblemAndThePromptsOfTheOneBefore() async {
+        let item = SnapshotSample.item("old")
+        let s = setup([item])
+        await s.store.reload()
+        s.driver.nextRefusal = .missing
+        await s.store.delete(item.id)
+        s.store.requestTake()
+        s.store.takeName = "half typed"
+        s.store.requestRename(item.id)
+        s.store.restoreTarget = item.id
+        s.store.deleteTarget = item.id
+        #expect(s.store.problem != nil)
+        s.model.forgetSnapshots()
+        #expect(s.store.problem == nil && !s.store.taking && s.store.takeName.isEmpty)
+        #expect(s.store.renaming == nil && s.store.restoreTarget == nil && s.store.deleteTarget == nil)
     }
 
     @Test func anIOErrorIsToldInTheSystemsWords() async {

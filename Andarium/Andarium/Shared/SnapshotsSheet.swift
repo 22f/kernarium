@@ -53,6 +53,7 @@ struct SnapshotsSheet: View {
         .onDisappear {
             Task { await store.flushName() }
             store.route = []
+            store.problem = nil
         }
     }
 
