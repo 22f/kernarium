@@ -50,15 +50,18 @@ Sources/MetalShaderCache.swift         the bound on Metal's per-application shad
 Sources/MesaShaderCache.swift          the place and size limit of Mesa's disk shader cache
 Sources/GuestProcessorLimit.swift      the vCPU count the applications default to and offer
                                        at most, as the loader answers it
-Config/Signing.xcconfig                the signing settings both Xcode projects use as
-                                       their base configuration
+Config/Signing.xcconfig                the signing settings Kernarium's Xcode project
+                                       uses as its base configuration and Andarium's
+                                       `Config/Andarium.xcconfig` includes
 ```
 
 ## Signing
 
-Both projects take their signing from `Config/Signing.xcconfig`, which names no
-team. The signer's own Apple Developer team goes in `Config/Signing.local.xcconfig`,
-which the base file includes when it exists and Git ignores:
+Both projects take their signing from `Config/Signing.xcconfig` (Kernarium as its
+base configuration, Andarium through its own `Config/Andarium.xcconfig`, which
+includes it), and it names no team. The signer's own Apple Developer team goes in
+`Config/Signing.local.xcconfig`, which that file includes when it exists and Git
+ignores:
 
 ```sh
 cp GuestHost/Config/Signing.local.xcconfig.example GuestHost/Config/Signing.local.xcconfig

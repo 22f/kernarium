@@ -315,16 +315,18 @@ application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests`;
-the scheme without the filter also runs `AndariumUITests`). `SnapshotFileApiTests`
+an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
+FEEDBACK_ADDRESS=feedback@example.com`; the scheme without the filter also runs
+`AndariumUITests`). `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
 exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line ([Send feedback](../Andarium/README.md#send-feedback)), where the
-Mail composer, the picker and the guest's display are stand-ins. The hosted tests
+command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
+a run without it does not build them. The Mail composer, the picker and the
+guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class

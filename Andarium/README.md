@@ -30,8 +30,10 @@ Andarium.xcodeproj/   JSON project (project.xcproj) and its shared schemes
 The project file is the JSON format Xcode 27 reads, kept in the canonical form
 `xcrun xcprojformatter --update Andarium/Andarium.xcodeproj` produces: format
 after every hand edit. Every configuration takes its base settings from
-`../GuestHost/Config/Signing.xcconfig`; the signer's team is only in the
-ignored `Signing.local.xcconfig` beside it
+`Config/Andarium.xcconfig`, which includes
+`../GuestHost/Config/Signing.xcconfig` and sets what decides
+[Send feedback](#send-feedback); the signer's team is only in the ignored
+`Signing.local.xcconfig` beside the signing file
 ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the project names
 no team.
 
@@ -196,10 +198,19 @@ developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
 compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
 ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
 names the receiver, so a fork, a sideload or a Debug or Release build holds none
-of it, and every configuration's bundle check says whether it does. Tests and
-captures turn it on for a build with `FEEDBACK_ADDRESS=feedback@example.com`
-on the `xcodebuild` line; its logic (`Shared/Feedback/Logic`) is also built, and
+of it, and every configuration's bundle check says whether it does: it also
+fails on the local receiver's bytes in any file of a bundle that does not name
+it (never printing it), and on an `Info.plist` whose values differ from
+`Config/Info.plist` (the preprocessing changes the feedback key alone).
+Tests and captures turn it on in a Debug build with
+`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
+bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
+only, never the local receiver, and its hooks into the sheet are not in the
+AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
 tested, by AndariumCore's tests through a symlinked target no product links.
+The feature's words are looked up in the `Feedback` string table; the mail's
+subject prefix and its information block are English whatever the interface
+language, and the bug report's overlay text is the app's own.
 
 ## Model and storage
 
