@@ -19,10 +19,11 @@ application that must:
     application or of a framework: the frame mirror, console input, the
     guest sampler, the footprint log, the virtual Jetsam, the activity logs,
     the census and histogram, the automation entries, the synthetic camera, the
-    UI tests' input probe and the harness's leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
-    keep the runtime API's layout, runtimeSetFrameSink,
-    runtimeSendConsoleInput and runtimePrepareJit, are allowed), and contain
-    no test bundle and no XCTest or Testing framework;
+    simulated controllers, the UI tests' input probe and the harness's
+    leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
+    keep the runtime API's layout, runtimeSetFrameSink, runtimeSendConsoleInput
+    and runtimePrepareJit, are allowed), and contain no test bundle and no
+    XCTest or Testing framework;
   - carry no JIT: no arm64 JIT engine, no executable-memory owner, none of the
     runtime's or the application's JIT entries or text, and no instruction
     word of the debugger request (`brk #0xf00d`, JIT_DEBUGGER_REQUEST) in the
@@ -323,6 +324,11 @@ DEBUG_SYMBOLS = (
     ("synthetic camera", (b"15SyntheticCamera", b"19SyntheticCameraImpl",
                           b"19makeSyntheticCamera", b"19encodeSyntheticJpeg",
                           b"17decodeChartMarker")),
+    # Simulated game controllers: the scripted input and the guest end of the
+    # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
+    # tool link) and the host reader that moved there.
+    ("synthetic controllers", (b"13GamepadScript", b"22GamepadHostFrameReader",
+                               b"23AndariumCoreTestSupport")),
     # The arm64 JIT engine, the owner of executable memory and the debugger
     # route of the runtime and of the loader. namespace uml::cpu::jit_memory
     # and uml::cpu::arm64::jit, the engine's classes and entry names.

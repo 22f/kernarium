@@ -68,7 +68,16 @@ final class LiveRuntime: RuntimeDriver {
     /// The device's haptics for the guest's vibrator. A device without a Taptic
     /// Engine never runs it: the guest finds no vibrator.
     private let hapticsAvailable = DeviceHaptics.isAvailable
-    private lazy var haptics = HapticsSession(opener: HapticsConnector(), player: CoreHapticsPlayer())
+    /// One player for the device's own actuator and every game controller's,
+    /// each target with the engine its own source makes.
+    private let controllerEngines = GameControllerEngines()
+    private lazy var hapticPlayer = CoreHapticsPlayer(
+        source: HapticEngineSources(device: DeviceHapticEngines(), controllers: controllerEngines))
+    private lazy var haptics = HapticsSession(opener: HapticsConnector(), player: hapticPlayer)
+    /// The game controllers iOS has connected, as HID devices in the guest.
+    /// Their rumble plays on `hapticPlayer`, which a controller has whether or
+    /// not the device has a Taptic Engine.
+    private lazy var gameControllers = GameControllers(player: hapticPlayer, engines: controllerEngines)
     /// Tells the guest's thermal HAL how hot the device is; Android lowers
     /// its frame rate for it, and the session says so once.
     private lazy var thermal = ThermalSession(opener: ThermalConnector()) { [weak self] in
@@ -414,6 +423,7 @@ final class LiveRuntime: RuntimeDriver {
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
         updateHaptics()
+        updateGameControllers()
         updateLocation()
         inputRunReady = false
         updateKeyboardMouse()
@@ -592,6 +602,7 @@ final class LiveRuntime: RuntimeDriver {
         spaceAlertOpen = false
         motion.stop()
         haptics.restart()
+        gameControllers.restart()
         thermal.restart()
         location.guestRestarted()
         keyboardMouse.guestRestarted()
@@ -700,6 +711,7 @@ final class LiveRuntime: RuntimeDriver {
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
         updateHaptics()
+        updateGameControllers()
         updateLocation()
         updateKeyboardMouse()
     }
@@ -758,6 +770,16 @@ final class LiveRuntime: RuntimeDriver {
         haptics.update(
             available: hapticsAvailable, running: normalRun, booted: reachedBootCompleted,
             foreground: active && !holdsGuestStill)
+    }
+
+    // MARK: Game controllers
+
+    /// The game controllers are the guest's while a normal run is in front and
+    /// holds the guest running, and are looked for from the run's start to its
+    /// end. The guest's relay starts early, so the connection is made at once.
+    private func updateGameControllers() {
+        gameControllers.update(
+            running: normalRun, booted: reachedBootCompleted, foreground: active && !holdsGuestStill)
     }
 
     // MARK: Location

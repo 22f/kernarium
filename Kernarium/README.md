@@ -95,8 +95,9 @@ directory itself, which can flatten the bundle or destroy other guests.
 Launch does not compare kernel, runtime, or rootfs release identities; missing
 or malformed inputs fail at their ordinary file or image boundary. The
 application chooses the Android data disk's capacity and passes it with the
-boot request; the runtime creates the disk or grows it to that capacity, never
-shrinks it, and attaches exactly the system disk and the data disk (the
+boot request; the runtime creates the disk or grows it to that capacity, keeps
+a disk that is already larger, and attaches exactly the system disk and the
+data disk (the
 [static disk contract](../android/lineage-24/README.md#static-disk-and-boot-contract)
 owns the layout). Compressed delivery is an application concern: `ZstdUtil`
 publishes its destination only after a complete decode.
@@ -256,7 +257,8 @@ owns the device side.
 
 Kernarium asks the guest to write back when the application loses focus,
 quiesces it before the application is backgrounded or terminated, and resumes
-it on foregrounding. A key press also wakes a guest that suspended itself, as a
+it on foregrounding. A key press, and a game controller's button through
+`wake_for_input` (runtime API 34), also wake a guest that suspended itself, as a
 phone wakes to its keyboard; a touch does not. The runtime side of sync,
 quiesce, resume, and wake is in
 [`../docs/architecture.md`](../docs/architecture.md#guest-lifecycle).

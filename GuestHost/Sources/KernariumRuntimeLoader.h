@@ -281,6 +281,11 @@ int kernarium_runtime_loader_send_mouse(
  * handler. It may be set before a runtime is selected. */
 void kernarium_runtime_loader_set_input_status_handler(
     KernariumInputStatusHandler _Nullable handler);
+/* A button of a game controller went down: wakes a guest that suspended
+ * itself, as a key down does; see kernarium_runtime_wake_for_input_function.
+ * It does nothing when no runtime is loaded or the runtime has no such entry.
+ * It may be called from any thread. */
+void kernarium_runtime_loader_wake_for_input(void);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

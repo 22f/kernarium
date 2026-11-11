@@ -125,7 +125,7 @@
         "ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME": "AccentColor",
         "CODE_SIGN_ENTITLEMENTS": "Config/Andarium.entitlements",
         "CODE_SIGN_STYLE": "Automatic",
-        "CURRENT_PROJECT_VERSION": "8",
+        "CURRENT_PROJECT_VERSION": "9",
         "ENABLE_PREVIEWS": "YES",
         "ENABLE_USER_SCRIPT_SANDBOXING": "NO",
         "FRAMEWORK_SEARCH_PATHS": [
@@ -176,10 +176,21 @@
         "compile-sources",
         "frameworks",
         "resources",
+        {
+          "kind": "copy",
+          "name": "Embed Test Support",
+          "bundle-base-path": "frameworks-directory",
+        },
       ],
       "package-product-members": [
         {
           "product-name": "AndariumCore",
+          "build-phase": { "build-phase": "frameworks" },
+        }, {
+          "product-name": "AndariumCoreTestSupport",
+          "build-phase": { "build-phase": "copy/Embed Test Support", "code-sign-on-copy": true },
+        }, {
+          "product-name": "AndariumCoreTestSupport",
           "build-phase": { "build-phase": "frameworks" },
         }, {
           "product-name": "GuestHostCore",

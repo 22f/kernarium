@@ -832,6 +832,15 @@ extern "C" int kernarium_runtime_loader_report_location(
     return runtime == nullptr ? -ENODEV : runtime->report_location(fix);
 }
 
+extern "C" void kernarium_runtime_loader_wake_for_input(void)
+{
+    /* Optional: the wake is a convenience, and a table without the entry still
+     * runs the guest. */
+    const kernarium_runtime_api* runtime = api();
+    if (runtime != nullptr && runtime->wake_for_input != nullptr)
+        runtime->wake_for_input();
+}
+
 extern "C" int kernarium_runtime_loader_connect_vsock(
     uint32_t port,
     uint32_t timeoutMilliseconds)
