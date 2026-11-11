@@ -539,6 +539,8 @@
         WITHOUT_HARNESS)
     uml_add_arm64_unit_test(gadget_prologue_head
         NAME arm64-gadget-prologue-heads WITHOUT_HARNESS)
+    uml_add_arm64_unit_test(gadget_move_head
+        NAME arm64-gadget-move-heads WITHOUT_HARNESS)
 
     add_executable(uml_gadget_record_table_tests
 		${PROJECT_SOURCE_DIR}/tests/unit/arm64/gadget_record_table_tests.cpp)

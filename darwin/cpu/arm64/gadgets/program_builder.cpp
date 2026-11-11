@@ -664,6 +664,161 @@ bool place(ProgramWords &words, InlineSuffixes &suffixes,
 
 } // namespace prologue
 
+/* A row of register moves that one head replaces (engine/run_heads.inc has
+ * what the head does and its operand word). */
+namespace moves {
+
+/* Destinations a head writes. */
+inline constexpr std::size_t maximum_moves = 4;
+/* The fewest instructions a head replaces. */
+inline constexpr std::size_t minimum_instructions = 2;
+/* The most a head replaces, which keeps the builder's look ahead short. */
+inline constexpr std::size_t maximum_instructions = 16;
+
+/* MOV Xd, Xm or MOV Wd, Wm: ORR (shifted register) of XZR and Xm, unshifted,
+ * to a register other than XZR. */
+[[nodiscard]] constexpr bool is_move(std::uint32_t word) noexcept
+{
+	return (word & 0x7fe0'ffe0U) == 0x2a00'03e0U && (word & 31U) != 31U;
+}
+
+/* By the width of each move, bit n set for a 64-bit move n, and the ordinary
+ * form or the one that takes the first source from x0. */
+using Head = std::array<void (*)(), 2>;
+#define UML_RUN_MOVES(widths) \
+	Head{uml_arm64_gadget_run_moves_##widths, \
+		uml_arm64_gadget_run_moves_##widths##_forward}
+constexpr std::array<Head, 4> two{{
+	UML_RUN_MOVES(ww), UML_RUN_MOVES(xw),
+	UML_RUN_MOVES(wx), UML_RUN_MOVES(xx),
+}};
+constexpr std::array<Head, 8> three{{
+	UML_RUN_MOVES(www), UML_RUN_MOVES(xww),
+	UML_RUN_MOVES(wxw), UML_RUN_MOVES(xxw),
+	UML_RUN_MOVES(wwx), UML_RUN_MOVES(xwx),
+	UML_RUN_MOVES(wxx), UML_RUN_MOVES(xxx),
+}};
+constexpr std::array<Head, 16> four{{
+	UML_RUN_MOVES(wwww), UML_RUN_MOVES(xwww),
+	UML_RUN_MOVES(wxww), UML_RUN_MOVES(xxww),
+	UML_RUN_MOVES(wwxw), UML_RUN_MOVES(xwxw),
+	UML_RUN_MOVES(wxxw), UML_RUN_MOVES(xxxw),
+	UML_RUN_MOVES(wwwx), UML_RUN_MOVES(xwwx),
+	UML_RUN_MOVES(wxwx), UML_RUN_MOVES(xxwx),
+	UML_RUN_MOVES(wwxx), UML_RUN_MOVES(xwxx),
+	UML_RUN_MOVES(wxxx), UML_RUN_MOVES(xxxx),
+}};
+#undef UML_RUN_MOVES
+
+/* One move of the parallel copy: the CpuState byte offset it reads as it was
+ * before the row, and the index of the register it writes. */
+struct Move final {
+	std::uintptr_t source{};
+	unsigned destination{};
+	bool wide{};
+};
+
+struct Plan final {
+	std::size_t instructions{};
+	std::size_t moves{};
+	std::array<Move, maximum_moves> move{};
+};
+
+/* The row of moves at `start`, as a parallel copy with the same result: each
+ * destination once, in the order the row last writes it, with the source it
+ * had before the row and the narrowest width it passed through. The row ends
+ * before the first instruction that is not a move or that would make a fifth
+ * destination. */
+[[nodiscard]] Plan resolve(std::span<const std::uint32_t> window,
+	std::size_t start) noexcept
+{
+	Plan plan{};
+	for (std::size_t index = start; index < window.size() &&
+	     plan.instructions < maximum_instructions; ++index) {
+		const auto word = window[index];
+		if (!is_move(word))
+			break;
+		const unsigned source = (word >> 16) & 31U;
+		Move move{arithmetic_register_offset(source), word & 31U,
+			(word >> 31) != 0};
+		std::size_t written = plan.moves;
+		for (std::size_t other = 0; other < plan.moves; ++other) {
+			const auto &earlier = plan.move[other];
+			if (source != 31U && earlier.destination == source) {
+				move.source = earlier.source;
+				move.wide = move.wide && earlier.wide;
+			}
+			if (earlier.destination == move.destination)
+				written = other;
+		}
+		if (written == plan.moves && plan.moves == maximum_moves)
+			break;
+		if (written != plan.moves) {
+			std::copy(plan.move.begin() +
+					static_cast<std::ptrdiff_t>(written) + 1,
+				plan.move.begin() +
+					static_cast<std::ptrdiff_t>(plan.moves),
+				plan.move.begin() +
+					static_cast<std::ptrdiff_t>(written));
+			--plan.moves;
+		}
+		plan.move[plan.moves++] = move;
+		++plan.instructions;
+	}
+	return plan;
+}
+
+/* A head, its operand word, the instructions it replaces and the register
+ * it forwards. */
+struct Placed final {
+	void (*gadget)(){};
+	std::uintptr_t operand{};
+	std::size_t instructions{};
+	std::uint16_t destination{scalar_no_register};
+};
+
+/* The head for the row at `start`, or none when the row is shorter than the
+ * minimum or copies a single register. `previous` is the register the group
+ * in front forwards; the head takes it from x0 for the first of its moves
+ * that reads it, unless that move is the last, and forwards the last move's
+ * destination. */
+[[nodiscard]] Placed encode(std::span<const std::uint32_t> window,
+	std::size_t start, std::uint16_t previous, bool forwarding) noexcept
+{
+	auto plan = resolve(window, start);
+	if (plan.instructions < minimum_instructions || plan.moves < 2)
+		return {};
+	const auto moves = plan.moves;
+	std::size_t forwarded = moves;
+	if (forwarding && previous != scalar_no_register)
+		for (std::size_t index = 0; index + 1 < moves; ++index)
+			if (plan.move[index].source == previous) {
+				forwarded = index;
+				break;
+			}
+	if (forwarded != moves) {
+		const auto first = plan.move.begin() +
+			static_cast<std::ptrdiff_t>(forwarded);
+		std::rotate(plan.move.begin(), first, first + 1);
+	}
+	std::uintptr_t operand = 0;
+	unsigned widths = 0;
+	for (std::size_t index = 0; index < moves; ++index) {
+		const auto &move = plan.move[index];
+		operand |= (move.source |
+			(static_cast<std::uintptr_t>(move.destination) << 10)) <<
+			(15 * index);
+		widths |= static_cast<unsigned>(move.wide) << index;
+	}
+	const auto form = static_cast<std::size_t>(forwarded != moves);
+	const auto gadget = moves == 2 ? two[widths][form] :
+		moves == 3 ? three[widths][form] : four[widths][form];
+	return {gadget, operand, plan.instructions, static_cast<std::uint16_t>(
+		plan.move[moves - 1].destination * sizeof(std::uint64_t))};
+}
+
+} // namespace moves
+
 } // namespace
 
 BuildResult Builder::build(
@@ -710,12 +865,13 @@ BuildResult Builder::build(
 #if UML_GADGET_EXECUTION_HISTOGRAM
 	epilogue::Predecessors group_predecessors{};
 #endif
-	/* Prologue heads go where epilogue heads do: not in a streaming program
-	 * and not in one built without indirect sites, as a single step is. */
-	const bool prologue_heads = !streaming &&
+	/* Prologue and move heads go where epilogue heads do: not in a
+	 * streaming program and not in one built without indirect sites, as a
+	 * single step is. */
+	const bool run_heads = !streaming &&
 		static_cast<bool>(resolve_indirect_link);
 	const auto place_prologue = [&] {
-		return prologue_heads && compiled != 0 &&
+		return run_heads && compiled != 0 &&
 			prologue::is_element(window[compiled - 1]) &&
 			prologue::place(words, suffixes, window, compiled,
 				group_starts
@@ -750,6 +906,39 @@ BuildResult Builder::build(
 		emit(words, std::uintptr_t{sizeof(std::uint64_t)});
 		emit(words, std::uintptr_t{1});
 #endif
+		/* A row of moves is one group, its head's, which forwards the
+		 * register the row writes last. */
+		if (run_heads && moves::is_move(instruction)) {
+			const auto head = moves::encode(window, compiled,
+				previous_scalar, options.scalar_forwarding);
+			if (head.gadget != nullptr) {
+				emit(words, head.gadget);
+				emit(words, head.operand);
+				for (std::size_t index = 1; index < head.instructions;
+				     ++index) {
+					const auto at = (compiled + index) % epilogue::ring;
+					group_starts[at] =
+						group_starts[compiled % epilogue::ring];
+#if UML_GADGET_EXECUTION_HISTOGRAM
+					group_predecessors[at] = previous_gadget;
+#endif
+				}
+#if UML_GADGET_EXECUTION_HISTOGRAM
+				words[counter_word + 1] =
+					diagnostics::execution_histogram_slot(
+						previous_gadget,
+						reinterpret_cast<const void *>(
+							head.gadget));
+				words[counter_word + 2] = head.instructions;
+				previous_gadget =
+					reinterpret_cast<const void *>(head.gadget);
+#endif
+				previous_scalar = head.destination;
+				previous_vector = scalar_no_register;
+				compiled += head.instructions;
+				continue;
+			}
+		}
 		if ((instruction & 0xffff'0000U) == 0) {
 			emit(words, uml_arm64_gadget_illegal);
 			emit(words, address);
