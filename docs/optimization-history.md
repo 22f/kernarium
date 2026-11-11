@@ -545,6 +545,7 @@ often a fast path is taken before assuming its cost is the thing to reduce.
 | Attempt | Disposition and lesson |
 | --- | --- |
 | Enable high-resolution timers on the mainline kernels | Accepted; Android already had them. One-millisecond sleeps became twice as accurate with host CPU neutral; the 100 Hz tick policy, not timer resolution, bounds host wakeups. |
+| Skip the idle exit's IPI pipe drain when the wait found the pipe empty | Accepted, in a narrower form. Nearly every idle wait ends by the clock deadline with nothing in the pipe, so the drain was a `poll()` that found nothing, and the wait's own result says whether the pipe was readable. Skipping both drains of the exit, not only that one, cost idle cycles: a vector landing between the wait and the exit's pending-mask exchange left its byte behind, and that byte ended the next wait at once, which cost more than the poll saved. The drain that the pending-mask poll makes when a vector is pending stays. |
 
 ## Kernel frame pointers
 
