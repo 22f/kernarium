@@ -738,16 +738,38 @@ NET_SETUP_TRANSITION = re.compile(
     rb"^\(typetransition init(?:_[0-9]+)? kernarium_net_setup_exec process kernarium_net_setup\)$",
     re.MULTILINE,
 )
-# After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) the
-# first time only, in a core domain of its own on system_ext
-# (overlay/tools/kernarium_wifi_network.sh, overlay/sepolicy/system_ext/private).
-# It never turns Wi-Fi on or connects: the user's switch decides whether the saved
-# network is joined, and a network the user forgets stays forgotten.
+# After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) once, in a
+# core domain of its own on system_ext (overlay/tools/kernarium_wifi_network.sh,
+# overlay/sepolicy/system_ext/private).
+# Until the station has joined it once (the marker then reads 2), a boot that finds Wi-Fi on,
+# the network still saved and nothing joined after a settle time saves it again, which enables
+# a network an earlier release left disabled for lack of internet. It never turns Wi-Fi on or
+# connects: the user's switch decides whether the saved network is joined, and a network the
+# user forgets stays forgotten.
 WIFI_NETWORK_SERVICE = ("kernarium_wifi_network", "/system_ext/bin/kernarium_wifi_network.sh")
 WIFI_NETWORK_TRIGGER = "property:sys.boot_completed=1"
 WIFI_NETWORK_MARKER = "persist.sys.kernarium.virtwifi_saved"
 WIFI_NETWORK_MARKER_TYPE = "kernarium_wifi_network_prop"
-WIFI_NETWORK_SCRIPT_REQUIRED = ("cmd wifi add-network VirtWifi open", WIFI_NETWORK_MARKER, "setprop")
+# The marker holds 1 (saved) and 2 (joined), so its property type must accept both.
+WIFI_NETWORK_MARKER_VALUES = ("1", "2")
+WIFI_NETWORK_SCRIPT_REQUIRED = (
+    "cmd wifi add-network VirtWifi open",
+    "cmd wifi list-networks",
+    "cmd wifi status",
+    WIFI_NETWORK_MARKER,
+    'setprop "$marker" 1',
+    'setprop "$marker" 2',
+)
+# The module's overlay raises both no-internet disable thresholds to the largest value: the
+# platform disables a network when its failure count, which is at least one from the first
+# failure, reaches the threshold, so 0 and 1 disable at once and only a value the count never
+# reaches keeps the guest's one network enabled. A disabled network is never joined again.
+WIFI_OVERLAY = "VENDOR/overlay/KernariumWifiOverlay.apk"
+WIFI_NO_INTERNET_THRESHOLDS = (
+    "config_wifiDisableReasonNoInternetPermanentThreshold",
+    "config_wifiDisableReasonNoInternetTemporaryThreshold",
+)
+WIFI_NEVER_DISABLED_THRESHOLD = (1 << 31) - 1
 WIFI_NETWORK_SCRIPT_FORBIDDEN = (
     "set-wifi-enabled",
     "connect-network",
@@ -2113,6 +2135,23 @@ def resource_booleans(table: bytes) -> dict[str, list[bool]]:
     return booleans
 
 
+def resource_integers(table: bytes) -> dict[str, list[int]]:
+    """Every integer resource of a compiled resource table, by name: its signed value in each
+    definition."""
+    integers: dict[str, list[int]] = {}
+    for name, entry, flags in resource_entries(table, "integer"):
+        if flags & 0x08:  # compact: the value type is the flags' high byte, the data follows
+            data_type, data = flags >> 8, struct.unpack_from("<I", table, entry + 4)[0]
+        elif flags & 0x01:
+            continue
+        else:
+            size = struct.unpack_from("<H", table, entry)[0]
+            _, _, data_type, data = struct.unpack_from("<HBBI", table, entry + size)
+        if data_type in (0x10, 0x11):  # TYPE_INT_DEC, TYPE_INT_HEX
+            integers.setdefault(name, []).append(data - (1 << 32) if data >> 31 else data)
+    return integers
+
+
 def check_network_time(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The platform queries no NTP server and takes no time from the network."""
     info = infos.get(FRAMEWORK_OVERLAY)
@@ -2170,6 +2209,31 @@ def check_flip_to_screen_off(archive: zipfile.ZipFile, infos: dict[str, zipfile.
             f"{FLIP_TO_SCREEN_OFF} is true in {FRAMEWORK_OVERLAY}: the power manager's "
             "FaceDownDetector would hold an accelerometer connection while the screen is on"
         )
+
+
+def check_wifi_overlay(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The Wi-Fi module's overlay never lets a failed internet check disable the one network."""
+    info = infos.get(WIFI_OVERLAY)
+    if info is None:
+        fail(f"{WIFI_OVERLAY} is missing")
+    try:
+        payload = read_small(archive, info, FRAMEWORK_OVERLAY_LIMIT)
+        with zipfile.ZipFile(io.BytesIO(payload)) as overlay:
+            integers = resource_integers(overlay.read("resources.arsc"))
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{WIFI_OVERLAY} has no readable resource table: {error}")
+    for name in WIFI_NO_INTERNET_THRESHOLDS:
+        if name not in integers:
+            fail(
+                f"{WIFI_OVERLAY} does not set {name}: the platform would disable the guest's one "
+                "network at its first failed internet check, and never join it again"
+            )
+        if any(value != WIFI_NEVER_DISABLED_THRESHOLD for value in integers[name]):
+            fail(
+                f"{name} is not {WIFI_NEVER_DISABLED_THRESHOLD} in {WIFI_OVERLAY}: a lower "
+                "threshold is reached by the first failed internet check and disables the guest's "
+                "one network"
+            )
 
 
 # PinnerService's pin sizes are framework resources that the platform does not declare
@@ -3663,6 +3727,25 @@ def check_wifi_network(rc_payload: str, script: bytes) -> None:
             fail(f"{executable} contains '{token}': the user's Wi-Fi switch is not the product's")
 
 
+def property_type_accepts(type_tokens: list[str], value: str) -> bool:
+    """Whether a property_contexts type (`exact enum 1 2`, `exact bool`...) lets init store value."""
+    tokens = type_tokens[1:] if type_tokens[:1] in (["exact"], ["prefix"]) else type_tokens
+    if not tokens:
+        return True
+    kind, arguments = tokens[0], tokens[1:]
+    if kind == "string":
+        return True
+    if kind == "bool":
+        return value in ("true", "false", "1", "0")
+    if kind == "enum":
+        return value in arguments
+    if kind in ("int", "double"):
+        return re.fullmatch(r"-?[0-9]+(\.[0-9]+)?", value) is not None
+    if kind == "uint":
+        return re.fullmatch(r"[0-9]+", value) is not None
+    return False
+
+
 def check_wifi_network_policy(
     system_ext_policy: bytes, system_ext_file_contexts: bytes, system_ext_property_contexts: str
 ) -> None:
@@ -3708,12 +3791,25 @@ def check_wifi_network_policy(
             "binder: cmd waits for the receiver of its result, so without the rule it never "
             "returns and the script never sets its marker"
         )
-    if not any(
-        line.split()[:2] == [WIFI_NETWORK_MARKER, f"u:object_r:{WIFI_NETWORK_MARKER_TYPE}:s0"]
+    entries = [
+        line.split()
         for line in system_ext_property_contexts.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
-    ):
+    ]
+    marker = [
+        tokens
+        for tokens in entries
+        if tokens[:2] == [WIFI_NETWORK_MARKER, f"u:object_r:{WIFI_NETWORK_MARKER_TYPE}:s0"]
+    ]
+    if not marker:
         fail(f"system_ext property contexts do not label {WIFI_NETWORK_MARKER}")
+    for value in WIFI_NETWORK_MARKER_VALUES:
+        if not property_type_accepts(marker[0][2:], value):
+            fail(
+                f"system_ext property contexts type {WIFI_NETWORK_MARKER} as "
+                f"'{' '.join(marker[0][2:])}', which rejects {value}: init refuses the "
+                "setprop, so the script's repair would run at every boot"
+            )
 
 
 def check_reclaim_boot_apps(rc_payload: str, script: bytes) -> None:
@@ -5123,6 +5219,7 @@ def main() -> None:
         check_launcher_workspace(archive, infos)
         check_network_time(archive, infos)
         check_flip_to_screen_off(archive, infos)
+        check_wifi_overlay(archive, infos)
         check_input_device_configuration(archive, infos)
         check_pinner_overlay(archive, infos)
         check_application_manifests(archive, infos, build_variant)

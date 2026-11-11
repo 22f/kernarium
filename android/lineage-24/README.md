@@ -349,8 +349,14 @@ airplane mode off takes apps offline while adb keeps working. The platform
 validates a Wi-Fi network without probes (route `p0029`): NetworkMonitor sends
 none and reports the network validated once private DNS passes, so a blocked
 validation server never leaves a no-internet state or a sign-in notification. A
-VPN, a test network, DNS and the private DNS settings keep the stock rules. There
-is no SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped.
+VPN, a test network, DNS and the private DNS settings keep the stock rules. The
+product's one network, VirtWifi, is saved once and is never disabled for lack of
+internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
+disabled network again. Until the station has joined it once, a boot that finds
+Wi-Fi on and VirtWifi saved but not joined saves it again, which enables it
+(`overlay/tools/kernarium_wifi_network.sh`). Wi-Fi that is off stays off and a
+forgotten network stays forgotten. There is no SoftAP, Wi-Fi Direct, Aware or RTT,
+and `wificond` is not shipped.
 
 ### Audio, settings and lock screen defaults
 
@@ -459,6 +465,11 @@ outcomes are known and not defects of the image:
 
 - LineageOS's restricted networking default is kept; a CTS run sets
   `restricted_networking_mode` to 0 when the guest starts.
+- `HostsideVpnTests#testAutomaticOnOffKeepaliveModeClose`, `...NoClose` and
+  `#testDownloadWithDownloadManagerDisallowed` fail on LineageOS's netd, which
+  does not let traffic explicitly bound to a VPN network fall through to the
+  underlying network as AOSP does: a socket bound to a split-tunnel VPN cannot
+  reach the internet, and the DownloadManager's address lookup returns no data.
 - Tests that reboot the device cannot pass where reboots are disabled, as they
   must be when the emulator exits on reboot.
 - `JobSchedulingTest#testAnr_*` and `SurfaceSyncGroupTests#testProcessCrash`

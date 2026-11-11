@@ -204,6 +204,10 @@ CONFIG_IPV6_ROUTE_INFO=y
 CONFIG_CRYPTO_NULL=y
 CONFIG_CRYPTO_SHA512=y
 CONFIG_CRYPTO_XCBC=y
+# AES-CMAC integrity for IPsec (IpSecAlgorithm.AUTH_AES_CMAC), which an IKEv2
+# VPN server may negotiate. The base list names it, and without it the kernel
+# has no cmac(aes) for the transform.
+CONFIG_CRYPTO_CMAC=y
 CONFIG_NET_SCH_INGRESS=y
 CONFIG_NET_SCH_TBF=y
 CONFIG_NET_CLS_ACT=y
