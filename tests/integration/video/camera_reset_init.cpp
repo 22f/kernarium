@@ -10,9 +10,8 @@
 //   - no buffer comes back flagged as an error;
 //   - the sequences of the frames, and of the metadata records, keep rising
 //     across the suspend, whatever the device did meanwhile;
-//   - after the suspend the metadata still shows the zoom (the device's
-//     stand-in records for the first frames of a re-created stream aside),
-//     and the records match the frames by sequence;
+//   - after the suspend the metadata still shows the zoom (the first record
+//     aside: see took_record), and the records match the frames by sequence;
 //   - a buffer the client has got back after STREAMOFF is never written again.
 //
 // What the host did to the camera device meanwhile is the test's case: it
@@ -204,13 +203,11 @@ constexpr u32 vidioc_s_ext_ctrls = ioc(3, 72, sizeof(ExtControls));
 /* The camera's private controls and metadata record
  * (kernel/common/video/virtio_video.h). */
 constexpr u32 cid_zoom_q16 = 0x00981c00 + 5;
+constexpr u32 zoom_one = 0x10000;
 constexpr u32 zoom_two = 0x20000;
 constexpr u32 meta_size = 168;
 constexpr unsigned meta_zoom_offset = 68;
 constexpr unsigned meta_flags_offset = 28;
-/* VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK and _RESUMING: the device's stand-ins for
- * the frames of a stream whose capture has not delivered yet. */
-constexpr u32 meta_placeholder_flags = (1u << 0) | (1u << 3);
 
 /* ---------------------------------------------------------------------- */
 /* Console                                                                 */
@@ -486,11 +483,9 @@ struct Tally {
 	bool resumed = false;
 	unsigned after_frames = 0;
 	unsigned after_records = 0;
-	/* The device makes a stand-in record for a frame of a re-created stream
-	 * until its capture delivers, which can be before the driver has written
-	 * the zoom again; it shows the default zoom. Only a record of a real
-	 * exposure with the wrong zoom is wrong. */
-	unsigned placeholder_zoom = 0;
+	/* The first record after the resume that shows the default zoom: see
+	 * took_record. */
+	unsigned first_default_zoom = 0;
 	unsigned after_wrong_zoom = 0;
 	u32 first_after_frame = 0;
 	u32 after_frame[kept] = {};
@@ -563,9 +558,16 @@ void took_record(const Dequeued &record)
 	tally.last_record = sequence;
 	tally.last_zoom = zoom;
 	if (tally.resumed) {
+		/*
+		 * The device of a stream starts its capture at the stream's first
+		 * queued buffer, and the platform makes its first exposure then,
+		 * which can be before the zoom it was told of reaches it: that
+		 * record shows the default zoom, truthfully. The one record after
+		 * a resume may; any other record, or another value, is wrong.
+		 */
 		if (zoom != zoom_two) {
-			if ((flags & meta_placeholder_flags) != 0)
-				tally.placeholder_zoom++;
+			if (zoom == zoom_one && tally.after_records == 0)
+				tally.first_default_zoom++;
 			else if (tally.after_wrong_zoom++ == 0)
 				Line().text("CAMRESET wrong zoom ").number(static_cast<long>(zoom))
 					.text(" in record ").number(static_cast<long>(sequence))
@@ -788,7 +790,7 @@ extern "C" [[noreturn]] void _start()
 		.text(" errors=").number(tally.frame_errors)
 		.text(" firstframe=").number(tally.first_after_frame)
 		.text(" matched=").number(found)
-		.text(" placeholderzoom=").number(tally.placeholder_zoom)
+		.text(" firstdefaultzoom=").number(tally.first_default_zoom)
 		.text(" wrongzoom=").number(tally.after_wrong_zoom)
 		.text(" frameregressions=").number(tally.frame_regressions)
 		.text(" recordregressions=").number(tally.record_regressions)
