@@ -82,12 +82,55 @@ void copyString(protocol::InputConfig& config, const char* string)
     config.size = static_cast<std::uint8_t>(length);
 }
 
+bool endsReport(const protocol::InputEvent& event) noexcept
+{
+    return event.type == protocol::eventSynchronize &&
+        event.code == protocol::synchronizeReport;
+}
+
+enum class Motion : std::uint8_t {
+    none,
+    absolute,
+    relative,
+};
+
+/* Whether a report only moves the absolute pointer, or only a relative mouse,
+ * and does nothing else. */
+template<typename Iterator>
+Motion motionOf(Iterator first, Iterator last) noexcept
+{
+    bool absolute = false;
+    bool relative = false;
+    for (; first != last; ++first) {
+        const protocol::InputEvent& event = *first;
+        if (endsReport(event))
+            continue;
+        if (event.type == protocol::eventAbsolute &&
+            (event.code == protocol::absoluteMtSlot ||
+             event.code == protocol::absoluteMtPositionX ||
+             event.code == protocol::absoluteMtPositionY)) {
+            absolute = true;
+        } else if (
+            event.type == protocol::eventRelative &&
+            (event.code == protocol::relativeX ||
+             event.code == protocol::relativeY)) {
+            relative = true;
+        } else {
+            return Motion::none;
+        }
+    }
+    if (absolute == relative)
+        return Motion::none;
+    return absolute ? Motion::absolute : Motion::relative;
+}
+
 } // namespace
 
 EventQueue::EventQueue(Attachment attachment)
     : wake_("virtio-input event")
     , pluggable_(attachment == Attachment::pluggable)
     , connected_(!pluggable_)
+    , probed_(!pluggable_)
     , registered_(!pluggable_)
 {
 }
@@ -108,42 +151,67 @@ void EventQueue::queueLocked(
     events_.insert(events_.end(), events.begin(), events.end());
 }
 
-void EventQueue::holdLocked(
+bool EventQueue::holdLocked(
     std::span<const protocol::InputEvent> events) noexcept
 {
     if (heldLost_)
-        return;
-    if (events.size() > heldEventLimit - held_.size()) {
-        /* A prefix of the stream would leave a key or a contact down that the
-         * rest of it releases, so all of it goes. */
-        held_.clear();
-        heldLost_ = true;
-        if (!reportedHoldOverflow_) {
-            std::fputs(
-                "Kernarium: dropping input because the guest has not "
-                "registered the plugged-in virtio device\n",
-                stderr);
-            reportedHoldOverflow_ = true;
+        return true;
+    while (!events.empty()) {
+        std::size_t length = 0;
+        while (length < events.size() && !endsReport(events[length]))
+            ++length;
+        if (length < events.size())
+            ++length;
+        const auto report = events.first(length);
+        events = events.subspan(length);
+
+        const auto motion = endsReport(report.back()) ?
+            motionOf(report.begin(), report.end()) : Motion::none;
+        if (motion == Motion::relative) {
+            /* A relative mouse has no position to keep. */
+            continue;
         }
-        return;
+        if (motion == Motion::absolute && !held_.empty() &&
+            endsReport(held_.back())) {
+            /* The pointer's latest position replaces the one that was held
+             * last. */
+            auto first = held_.end() - 1;
+            while (first != held_.begin() && !endsReport(*(first - 1)))
+                --first;
+            if (motionOf(first, held_.end()) == Motion::absolute)
+                held_.erase(first, held_.end());
+        }
+        if (report.size() > heldEventLimit - held_.size()) {
+            /* A prefix of the stream would leave a key or a contact down that
+             * the rest of it releases, so all of it goes. */
+            held_.clear();
+            heldLost_ = true;
+            if (!reportedHoldOverflow_) {
+                std::fputs(
+                    "Kernarium: dropping input because the guest has not "
+                    "registered the plugged-in virtio device\n",
+                    stderr);
+                reportedHoldOverflow_ = true;
+            }
+            return true;
+        }
+        held_.insert(held_.end(), report.begin(), report.end());
     }
-    held_.insert(held_.end(), events.begin(), events.end());
+    return false;
 }
 
-void EventQueue::enqueue(
+bool EventQueue::enqueue(
     std::span<const protocol::InputEvent> events) noexcept
 {
     if (events.empty())
-        return;
+        return false;
     bool wasEmpty = false;
     {
         std::lock_guard lock(mutex_);
         if (!connected_)
-            return;
-        if (!registered_) {
-            holdLocked(events);
-            return;
-        }
+            return false;
+        if (!registered_)
+            return holdLocked(events);
         if (events.size() > maximumQueuedEvents - events_.size()) {
             if (!reportedOverflow_) {
                 std::fputs(
@@ -151,19 +219,26 @@ void EventQueue::enqueue(
                     stderr);
                 reportedOverflow_ = true;
             }
-            return;
+            return false;
         }
         wasEmpty = events_.empty();
         queueLocked(events);
     }
     if (wasEmpty)
         wake();
+    return false;
 }
 
 bool EventQueue::connected() const noexcept
 {
     std::lock_guard lock(mutex_);
     return connected_;
+}
+
+bool EventQueue::advertised() const noexcept
+{
+    std::lock_guard lock(mutex_);
+    return connected_ && probed_;
 }
 
 bool EventQueue::registered() const noexcept
@@ -181,7 +256,10 @@ bool EventQueue::setConnectedLocked(bool connected) noexcept
     held_.clear();
     heldLost_ = false;
     reportedHoldOverflow_ = false;
-    ++configGeneration_;
+    /* A driver that has not probed has nothing to be told: it reads the
+     * state when it does, and the first buffer it posts finds it. */
+    if (probed_)
+        ++configGeneration_;
     return true;
 }
 
@@ -250,6 +328,20 @@ void EventQueue::drain()
         std::string(std::strerror(errno)));
 }
 
+void EventQueue::eventBufferPosted() noexcept
+{
+    {
+        std::lock_guard lock(mutex_);
+        if (probed_)
+            return;
+        probed_ = true;
+        if (!connected_)
+            return;
+        ++configGeneration_;
+    }
+    wake();
+}
+
 void EventQueue::guestStatus(const protocol::InputEvent& event) noexcept
 {
     StatusEvent status;
@@ -261,27 +353,31 @@ void EventQueue::guestStatus(const protocol::InputEvent& event) noexcept
             .on = event.value != 0,
         };
     } else if (event.type == protocol::statusNotice &&
-               event.code == protocol::noticeRegistration) {
-        std::lock_guard lock(mutex_);
-        /* A fixed device has nothing to register, and a notice for a device
-         * the host has unplugged answers a plug it has withdrawn. */
-        if (!pluggable_ || !connected_)
-            return;
+               event.code == protocol::noticeRegistration &&
+               (event.value == 0 || event.value == 1)) {
         const bool on = event.value == 1;
+        std::lock_guard lock(mutex_);
+        if (!pluggable_)
+            return;
+        if (connected_) {
+            registered_ = on;
+            if (on) {
+                flushed = !held_.empty();
+                heldLost_ = false;
+                if (flushed) {
+                    events_.insert(events_.end(), held_.begin(), held_.end());
+                    held_.clear();
+                }
+            }
+        } else if (on) {
+            /* A registration that answers a plug the host has withdrawn. An
+             * unregistration is the answer to an unplug and is reported. */
+            return;
+        }
         status = {
             .kind = StatusEvent::Kind::registration,
             .on = on,
         };
-        registered_ = on;
-        if (on) {
-            status.lostEvents = heldLost_;
-            heldLost_ = false;
-            flushed = !held_.empty();
-            if (flushed) {
-                events_.insert(events_.end(), held_.begin(), held_.end());
-                held_.clear();
-            }
-        }
     } else {
         return;
     }
@@ -318,6 +414,7 @@ void EventQueue::reset() noexcept
     held_.clear();
     heldLost_ = false;
     reportedHoldOverflow_ = false;
+    probed_ = !pluggable_;
     registered_ = !pluggable_;
 }
 
@@ -386,6 +483,7 @@ uml::virtio::VhostUserQueueResult VirtioInputDevice::processQueue(
     if (index == protocol::eventQueue) {
         if (!request.empty())
             throw std::runtime_error("virtio-input event buffer is readable");
+        events_->eventBufferPosted();
         protocol::InputEvent event {};
         if (!events_->take(event))
             return {};
@@ -560,10 +658,11 @@ protocol::InputConfig VirtioInputDevice::selectedConfiguration() const
     config.select = select_;
     config.subselect = subselect_;
     const auto info = kindInfo(kind_);
-    /* An unplugged device keeps its identity and reports nothing it can do:
-     * a guest without hot-plug support reads an input device that has no
+    /* An unplugged device keeps its identity and reports nothing it can do,
+     * and so does a plugged one until its driver has probed (EventQueue): a
+     * guest without hot-plug support reads an input device that has no
      * events, and a guest with it registers none. */
-    const bool plugged = events_->connected();
+    const bool plugged = events_->advertised();
 
     switch (select_) {
     case protocol::configIdName:

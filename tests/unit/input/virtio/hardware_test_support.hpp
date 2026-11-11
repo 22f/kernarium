@@ -88,11 +88,24 @@ struct Rig final {
     HardwareInput input {keyboardQueue, mouseQueue, pointerQueue};
     std::vector<std::pair<HardwareStatus, bool>> statuses;
 
-    Rig()
+    /* `probed`: the guest's drivers have probed and posted their first event
+     * buffer, as they have long before an application plugs a device. */
+    explicit Rig(bool probed = true)
     {
         input.setStatusCallback([this](HardwareStatus kind, bool on) {
             statuses.emplace_back(kind, on);
         });
+        if (probed) {
+            probes(keyboardDevice);
+            probes(mouseDevice);
+            probes(pointerDevice);
+        }
+    }
+
+    /* The driver's first event buffer: the device is advertised from here. */
+    static void probes(VirtioInputDevice& device)
+    {
+        (void)device.processQueue(protocol::eventQueue, 3, {}, 8);
     }
 
     static void status(VirtioInputDevice& device, Event sent)

@@ -4,9 +4,11 @@
 #include "hid_keyboard.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <initializer_list>
 #include <memory>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -498,15 +500,15 @@ void theGuestsLedWritesReachTheCallback()
     require(rig.statuses.size() == 5);
 }
 
-void aRegistrationThatFollowsDroppedInputMakesTheHostForgetWhatItHolds()
+void inputTheGuestHasNotRegisteredForIsForgottenAsItIsDropped()
 {
     Rig rig;
     rig.input.setMouseConnected(true);
-    // The pointer enters, and the guest is slow: more reports than the buffer
-    // holds are dropped, the enter among them.
-    (void)rig.input.pointer(1, 1, 0, true, 1000, 1000);
+    // The pointer enters and presses, and the guest is slow: more reports than
+    // the hold takes are dropped, the enter among them.
+    (void)rig.input.pointer(1, 1, 1, true, 1000, 1000);
     for (std::uint32_t step = 0; step < 200; ++step)
-        (void)rig.input.pointer(2 + step, 1, 0, true, 1000, 1000);
+        (void)rig.input.pointer(2 + step, 1, step % 2U, true, 1000, 1000);
     Rig::registers(rig.pointerDevice);
     require(Rig::received(rig.pointerDevice).empty());
     // The host knows the guest saw none of it, so the next report is an entry
@@ -516,7 +518,9 @@ void aRegistrationThatFollowsDroppedInputMakesTheHostForgetWhatItHolds()
     require(next.size() == 7);
     require(next[0].code == protocol::buttonToolMouse && next[0].value == 1);
 
-    // The keyboard: a key held through the loss is not left down.
+    // The keyboard: a key held through the loss is not left down. Its release
+    // is nothing, since the guest never saw it go down, and it can go down
+    // again.
     rig.input.setKeyboardConnected(true);
     (void)rig.input.key(30, true);
     for (int round = 0; round < 200; ++round) {
@@ -525,8 +529,130 @@ void aRegistrationThatFollowsDroppedInputMakesTheHostForgetWhatItHolds()
     }
     Rig::registers(rig.keyboardDevice);
     require(Rig::received(rig.keyboardDevice).empty());
-    require(rig.input.key(30, true)); // pressed afresh: it was forgotten
+    require(!rig.input.key(30, false));
+    require(Rig::received(rig.keyboardDevice).empty());
+    require(rig.input.key(30, true));
     require(Rig::received(rig.keyboardDevice).size() == 2);
+}
+
+// Whether the guest ends with the key down: the last event for it.
+bool keyLeftDown(const Events& stream, std::uint16_t code)
+{
+    std::int32_t last = 0;
+    for (const auto& one : stream) {
+        if (one.type == protocol::eventKey && one.code == code)
+            last = one.value;
+    }
+    return last != 0;
+}
+
+// The guest registers its keyboard as the host presses and releases a key,
+// after the hold overflowed. Whichever comes first, the guest ends with the
+// key up: the press was lost and its release is nothing, or both arrive. A
+// reset that came after the registration, on the transport's thread, made the
+// host forget a press that had already been delivered, and its release was
+// never sent. The interleaving is the stress's own, so it runs many rounds.
+void aKeyPressedAsTheGuestRegistersIsNeverLeftDown()
+{
+    Rig rig;
+    unsigned stuck = 0;
+    for (unsigned round = 0; round < 20000; ++round) {
+        rig.input.setKeyboardConnected(true);
+        for (int index = 0; index < 200; ++index) {
+            (void)rig.input.key(48, true);
+            (void)rig.input.key(48, false);
+        }
+        std::atomic_bool go {false};
+        std::thread transport([&] {
+            while (!go.load(std::memory_order_acquire)) {
+            }
+            Rig::registers(rig.keyboardDevice);
+        });
+        go.store(true, std::memory_order_release);
+        (void)rig.input.key(30, true);
+        transport.join();
+        (void)rig.input.key(30, false);
+        if (keyLeftDown(Rig::received(rig.keyboardDevice), 30))
+            ++stuck;
+        rig.input.setKeyboardConnected(false);
+        (void)Rig::received(rig.keyboardDevice);
+    }
+    require(stuck == 0);
+}
+
+// The first click after the guest suspended: the mouse is plugged while the
+// guest sleeps, the user moves it for a long while and then clicks. The motion
+// does not wake the guest and must not push the click out of the hold.
+void aClickAfterALongWaitForTheGuestIsDelivered()
+{
+    Rig rig;
+    rig.input.setMouseConnected(true);
+    for (std::uint32_t index = 0; index < 5000; ++index) {
+        (void)rig.input.mouse(1, 1, 0, 0, 0);
+        require(!rig.input.pointer(index % 1000U, 5, 0, true, 1000, 1000));
+    }
+    require(rig.input.pointer(10, 10, 1, true, 1000, 1000));
+    require(rig.input.mouse(0, 0, 1, 0, 0));
+    Rig::registers(rig.pointerDevice);
+    Rig::registers(rig.mouseDevice);
+    const auto mouse = Rig::received(rig.mouseDevice);
+    require(sameEvents(mouse, {event(key, protocol::buttonLeft, 1), syncEvent()}));
+    const auto pointer = Rig::received(rig.pointerDevice);
+    // The entry, the latest position it moved to, and the press.
+    require(pointer.size() == 7 + 4 + 5);
+    require(pointer[0].code == protocol::buttonToolMouse);
+    require(pointer[pointer.size() - 2].code == protocol::buttonLeft &&
+        pointer[pointer.size() - 2].value == 1);
+    // And the host still holds the press: letting go reaches the guest.
+    require(!rig.input.mouse(0, 0, 0, 0, 0));
+    require(sameEvents(Rig::received(rig.mouseDevice), {
+        event(key, protocol::buttonLeft, 0), syncEvent()}));
+}
+
+// An application plugs the devices before the guest's kernel has probed them,
+// as it can at the start of a run or after a restart.
+void aPlugBeforeTheGuestProbesIsToldWhenItDoes()
+{
+    Rig rig(false);
+    rig.input.setKeyboardConnected(true);
+    rig.input.setMouseConnected(true);
+    require(rig.input.keyboardConnected() && rig.input.mouseConnected());
+    for (auto* device : {&rig.keyboardDevice, &rig.mouseDevice,
+                         &rig.pointerDevice}) {
+        require(!device->configChangePending());
+        Rig::probes(*device);
+        require(device->configChangePending());
+    }
+    // A kernel with the topic registers after it; what was sent meanwhile is
+    // delivered.
+    require(rig.input.key(30, true));
+    Rig::registers(rig.keyboardDevice);
+    require(Rig::received(rig.keyboardDevice).size() == 2);
+}
+
+void theUnregistrationThatAnswersAnUnplugReachesTheCallback()
+{
+    Rig rig;
+    rig.plugEverything();
+    rig.statuses.clear();
+    const auto unregisters = event(
+        protocol::statusNotice, protocol::noticeRegistration, 0);
+    rig.input.setKeyboardConnected(false);
+    Rig::status(rig.keyboardDevice, unregisters);
+    require((rig.statuses == std::vector<std::pair<HardwareStatus, bool>> {
+        {HardwareStatus::keyboardRegistered, false}}));
+    rig.input.setMouseConnected(false);
+    Rig::status(rig.mouseDevice, unregisters);
+    Rig::status(rig.pointerDevice, unregisters);
+    require((rig.statuses == std::vector<std::pair<HardwareStatus, bool>> {
+        {HardwareStatus::keyboardRegistered, false},
+        {HardwareStatus::mouseRegistered, false},
+        {HardwareStatus::pointerRegistered, false}}));
+    // The registration that answered the plug before arrives late: it is not
+    // news, and the unplugged device stays unregistered.
+    rig.statuses.clear();
+    Rig::registers(rig.keyboardDevice);
+    require(rig.statuses.empty() && !rig.keyboardQueue->registered());
 }
 
 } // namespace
@@ -549,6 +675,10 @@ int main()
     anUnplugReleasesEverythingTheHostHolds();
     theGuestsRegistrationsReachTheCallback();
     theGuestsLedWritesReachTheCallback();
-    aRegistrationThatFollowsDroppedInputMakesTheHostForgetWhatItHolds();
+    inputTheGuestHasNotRegisteredForIsForgottenAsItIsDropped();
+    aKeyPressedAsTheGuestRegistersIsNeverLeftDown();
+    aClickAfterALongWaitForTheGuestIsDelivered();
+    aPlugBeforeTheGuestProbesIsToldWhenItDoes();
+    theUnregistrationThatAnswersAnUnplugReachesTheCallback();
     return EXIT_SUCCESS;
 }

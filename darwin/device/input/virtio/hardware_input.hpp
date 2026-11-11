@@ -36,9 +36,10 @@ enum class HardwareStatus : std::uint8_t {
  *
  * Input for a device that is unplugged is dropped. Before an unplug the host
  * releases every key and button it holds and ends the pointer's contact, in
- * the events the guest still receives. A guest that registers its input device
- * after events were dropped waiting for it is told nothing, but the host
- * forgets what it holds, since none of it reached the guest.
+ * the events the guest still receives. Input that a plugged device drops
+ * because the guest has not registered it (EventQueue::enqueue) makes the
+ * host forget what it holds of that device, since none of it reached the
+ * guest.
  *
  * Every method may be called from any thread. Each input returns whether it
  * wakes a guest that suspended itself (HardwareReport::wakes), which only the

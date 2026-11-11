@@ -39,16 +39,13 @@ struct StatusEvent final {
          * like), lit when `on`. */
         led,
         /* The guest's driver registered (`on`) or unregistered its input
-         * device (kernel/common/input/virtio_input_uml.h). `lostEvents`:
-         * events that waited for the registration were dropped, so the
-         * host's idea of what it sent is out of date. */
+         * device (kernel/common/input/virtio_input_uml.h). */
         registration,
     };
 
     Kind kind {Kind::led};
     std::uint16_t led {};
     bool on {};
-    bool lostEvents {};
 };
 
 /* The host's side of one device: the events it sends the guest, whether the
@@ -59,13 +56,19 @@ struct StatusEvent final {
  * guest. A pluggable device starts unplugged:
  *  - unplugged, the device reports no events and the queue drops what it is
  *    sent;
- *  - plugged, a configuration change is pending (once per plug or unplug) and
- *    the events wait, at most `heldEventLimit` of them, until the guest's
- *    driver has registered its input device (the registration notice, see
- *    StatusEvent) and then go to it in order. A guest that never registers,
- *    as one without the kernel's hot-plug support, gets nothing: when the
- *    wait outgrows the limit everything held is dropped, and so is what comes
- *    after, until the registration, which then reports `lostEvents`. */
+ *  - plugged, it reports its events once its driver has probed, which is
+ *    when the driver has posted its first event buffer (`eventBufferPosted`),
+ *    and until then it reports none, so a driver that probes before that
+ *    registers an input device with no events and never a live one it cannot
+ *    be told to withdraw. A configuration change is raised for each plug and
+ *    each unplug, and when the driver's first buffer finds the device
+ *    plugged;
+ *  - plugged, the events wait, at most `heldEventLimit` of them, until the
+ *    guest's driver has registered its input device (the registration notice,
+ *    see StatusEvent) and then go to it in order. A guest that never
+ *    registers, as one without the kernel's hot-plug support, gets nothing:
+ *    when the wait outgrows the limit everything held is dropped, and so is
+ *    what comes after, until the registration. */
 class EventQueue final {
 public:
     enum class Attachment : std::uint8_t {
@@ -81,9 +84,19 @@ public:
     EventQueue(const EventQueue&) = delete;
     EventQueue& operator=(const EventQueue&) = delete;
 
-    /* Host side. */
-    void enqueue(std::span<const protocol::InputEvent> events) noexcept;
+    /* Host side. Sends `events`, which are whole reports (each ended by a
+     * SYN_REPORT). Returns true when they were lost to a device that is
+     * waiting for its registration: the hold is full, so all of it was
+     * dropped with them, and what the host believes it has sent the guest
+     * (a key down, a contact) is out of date. While it waits, the hold keeps
+     * the latest position of the absolute pointer and no relative motion, so
+     * motion never pushes a button out. */
+    bool enqueue(std::span<const protocol::InputEvent> events) noexcept;
+    /* Whether the host has plugged the device in. */
     [[nodiscard]] bool connected() const noexcept;
+    /* Whether the guest is shown the device's events: plugged, and its driver
+     * has probed. */
+    [[nodiscard]] bool advertised() const noexcept;
     /* Whether the guest has told the host its input device exists. A fixed
      * device is always registered. */
     [[nodiscard]] bool registered() const noexcept;
@@ -105,6 +118,10 @@ public:
     [[nodiscard]] bool take(protocol::InputEvent& event) noexcept;
     [[nodiscard]] int descriptor() const noexcept;
     void drain();
+    /* The driver posted an event buffer, which it does after it has read the
+     * configuration it probes by: from here a plugged device is advertised,
+     * and a configuration change is raised if it is plugged. */
+    void eventBufferPosted() noexcept;
     /* A status event from the guest. */
     void guestStatus(const protocol::InputEvent& event) noexcept;
     /* A configuration change is waiting to be sent, is taken for sending and
@@ -112,15 +129,16 @@ public:
     [[nodiscard]] bool configChangePending() const noexcept;
     [[nodiscard]] bool claimConfigChange() noexcept;
     void clearConfigChange() noexcept;
-    /* The guest reset the device: it has no events queued and has registered
-     * nothing. */
+    /* The guest reset the device: it has no events queued, has registered
+     * nothing and has not probed. */
     void reset() noexcept;
     void clear() noexcept;
 
 private:
     void wake() noexcept;
     void queueLocked(std::span<const protocol::InputEvent> events) noexcept;
-    void holdLocked(std::span<const protocol::InputEvent> events) noexcept;
+    [[nodiscard]] bool holdLocked(
+        std::span<const protocol::InputEvent> events) noexcept;
     bool setConnectedLocked(bool connected) noexcept;
 
     uml::platform::WakeSocket wake_;
@@ -131,6 +149,7 @@ private:
     bool reportedHoldOverflow_ {};
     const bool pluggable_;
     bool connected_;
+    bool probed_;
     bool registered_;
     bool heldLost_ {};
     std::uint64_t configGeneration_ {};

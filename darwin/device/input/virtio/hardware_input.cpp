@@ -86,20 +86,6 @@ void HardwareInput::registered(DeviceKind kind, const StatusEvent& event)
     default:
         return;
     }
-    if (event.on && event.lostEvents) {
-        std::lock_guard lock(mutex_);
-        switch (kind) {
-        case DeviceKind::hardwareKeyboard:
-            keyboard_.reset();
-            break;
-        case DeviceKind::mouse:
-            mouse_.reset();
-            break;
-        default:
-            pointer_.reset();
-            break;
-        }
-    }
     guestStatus(status, event);
 }
 
@@ -147,7 +133,8 @@ bool HardwareInput::key(std::uint16_t code, bool pressed)
     if (!keyboardQueue_->connected())
         return false;
     const auto report = keyboard_.key(code, pressed);
-    keyboardQueue_->enqueue(report.span());
+    if (keyboardQueue_->enqueue(report.span()))
+        keyboard_.reset();
     return report.wakes;
 }
 
@@ -177,7 +164,8 @@ bool HardwareInput::pointer(
             return false;
         report = pointer_.update(position->x, position->y, buttons, true);
     }
-    pointerQueue_->enqueue(report.span());
+    if (pointerQueue_->enqueue(report.span()))
+        pointer_.reset();
     return report.wakes;
 }
 
@@ -192,7 +180,8 @@ bool HardwareInput::mouse(
     if (!mouseQueue_->connected())
         return false;
     const auto report = mouse_.update(dx, dy, buttons, wheel, horizontalWheel);
-    mouseQueue_->enqueue(report.span());
+    if (mouseQueue_->enqueue(report.span()))
+        mouse_.reset();
     return report.wakes;
 }
 
