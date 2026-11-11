@@ -141,9 +141,10 @@ patches provide the behaviors the `slirp-network-*` tests check.
 - A forward queues up to the host's `SOMAXCONN` pending connections; the
   advertised receive window never exceeds the free buffer; a connection whose
   guest end stops answering is closed; a host connection that dies in both
-  directions is reset toward the guest; a connect the host stack refuses is
-  answered with ICMP net-unreachable (port 0 excepted); ICMP echo is forwarded
-  as a router would.
+  directions is reset toward the guest, also while the guest is not reading
+  what SLiRP holds for it, and never aborts; a connect the host stack refuses
+  is answered with ICMP net-unreachable (port 0 excepted); ICMP echo is
+  forwarded as a router would.
 - The provider answers the guest's name server itself, through the host's system
   resolver, and SLiRP's own DNS proxy is off: the proxy would send queries from
   the application to a local-network router, which needs the Local Network
