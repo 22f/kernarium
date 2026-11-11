@@ -38,8 +38,6 @@ guest Mesa -> Virtio-GPU/Virgl -> vhost-user -> virglrenderer
   that binds a cached fragment shader reading the framebuffer (advanced blend
   is lowered to it) makes its own descriptor layout ready at the bind, not at
   the creation that another context did (`gpu-host-gl-fbfetch-shader-cache`).
-  That read sees only what earlier render passes stored: a clear or draw of
-  the same pass is not visible to it.
 
 Presentation:
 
@@ -239,10 +237,9 @@ entry point that is not there: a command the device's version and enabled
 extensions do not expose marks the context lost (same test). The guest binds
 image and buffer memory without waiting for the answer, so a bind the driver
 refused marks the context lost before the next command runs
-(`gpu-venus-bind-failure`), and a transfer that names an image or buffer the
+(`gpu-venus-bind-failure`), and a copy that names an image or buffer the
 driver never bound is refused by the driver
-([contracts](#kosmickrisp-driver-contracts)): Apple's GPU drivers dereference
-the Metal texture or buffer they are handed without a check.
+([contracts](#kosmickrisp-driver-contracts)).
 
 ### Host-visible memory is bounded by the blob aperture
 
@@ -495,13 +492,21 @@ project's Mesa series patches it; the series and its regression suites are in
   2D or 2D-array texture the image is. A 2D view of a 3D image renders through
   the image's own texture and is sampled through a 2D-array alias; a level too
   deep for the alias is made for rendering alone.
-- The driver never hands Metal an image plane's texture or a buffer that does
-  not exist, because Apple's GPU drivers dereference it unchecked. A bind that
-  Metal refuses fails with `VK_ERROR_OUT_OF_DEVICE_MEMORY`, reported in
-  `VkBindMemoryStatus` and logged as one line that names the path that refused
-  it; a copy or clear that names an image or buffer without storage
-  records `VK_ERROR_VALIDATION_FAILED_EXT` on its command buffer and
-  records nothing (`gpu-kosmickrisp-unbound-transfers`).
+- A buffer or image copy that names a buffer or image plane with no Metal
+  object (never bound, or its bind refused) records
+  `VK_ERROR_VALIDATION_FAILED_EXT` on its command buffer, and an image clear
+  of an image without storage records its view's
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY`; neither hands Metal the missing object,
+  which Apple's GPU drivers dereference unchecked. A copy of several regions
+  may have recorded the regions before the first one without storage. Fills,
+  updates and query-result copies reach the GPU by the buffer's address and
+  are not guarded. A bind that Metal refuses fails with
+  `VK_ERROR_OUT_OF_DEVICE_MEMORY`, reported in `VkBindMemoryStatus` and logged
+  as one line that names the path that refused it
+  (`gpu-kosmickrisp-unbound-transfers`).
+- An input-attachment load, which Zink's framebuffer fetch (and so advanced
+  blend) uses, reads the attachment's stored texture: what a clear or draw of
+  the same render pass wrote is not visible to it.
 - A point is clipped against user clip and cull distances and the depth planes,
   never the view-volume side planes (`VK_POINT_CLIPPING_BEHAVIOR_USER_CLIP_PLANES_ONLY`).
 - Unsatisfied timeline waits are gated on the CPU before native Metal

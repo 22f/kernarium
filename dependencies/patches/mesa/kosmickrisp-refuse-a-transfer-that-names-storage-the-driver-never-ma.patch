@@ -12,13 +12,18 @@ that nil to Metal, which Apple's GPU drivers dereference without a
 check: the host ended in copyFromBuffer:toTexture:, in the field on A14
 iPhones, and every other device has the same unchecked load.
 
-Every command that hands Metal a buffer or an image plane checks it
-first and, when there is none, records VK_ERROR_VALIDATION_FAILED_EXT on
-the command buffer and records nothing: the buffer copies, the copies
-between buffers and images in both directions and through device
-addresses, and the image copy. vkCmdClear*Image made its meta view with
-the result only asserted, so an image with no texture left the view
-unset and the clear used it; it records the error and returns instead.
+The copy commands check the buffer or image plane they hand Metal first
+and, when there is none, record VK_ERROR_VALIDATION_FAILED_EXT on the
+command buffer and hand Metal nothing for it: the buffer copy, the
+copies between buffers and images in both directions and through device
+addresses, and the image copy. A command of several regions may have
+recorded the regions before the first one without storage. The image
+clears made their meta view with the result only asserted, so an image
+with no texture left the view unset and the clear used it; they record
+the view's error, VK_ERROR_OUT_OF_DEVICE_MEMORY, and return instead.
+Fills, updates and query-result copies do not hand Metal the buffer;
+they reach the GPU by its address, and an unbound buffer is not guarded
+there.
 
 A buffer bind that Metal refuses answered VK_SUCCESS with no handle.
 kk_bind_buffer_memory now fails with VK_ERROR_OUT_OF_DEVICE_MEMORY then,
