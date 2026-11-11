@@ -1,29 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AndariumCoreTestSupport
 import Testing
 
 @testable import AndariumCore
-
-/// A path source that delivers what a test sends, and counts its starts and
-/// stops; nothing waits on a clock.
-@MainActor
-final class FakeNetworkPathSource: NetworkPathSource {
-    private(set) var starts = 0
-    private(set) var stops = 0
-    private(set) var deliver: (@MainActor (NetworkPathReport) -> Void)?
-
-    func start(_ deliver: @escaping @MainActor (NetworkPathReport) -> Void) {
-        starts += 1
-        self.deliver = deliver
-    }
-
-    func stop() {
-        stops += 1
-        deliver = nil
-    }
-
-    func send(_ report: NetworkPathReport) { deliver?(report) }
-}
 
 struct NetworkAccessMappingTests {
     @Test func aSatisfiedPathIsAllowed() {
@@ -110,7 +90,7 @@ struct NetworkNoticeTests {
 @MainActor
 struct NetworkAccessWatcherTests {
     @Test func theSourceRunsOnlyWhileAWatchIsWanted() {
-        let source = FakeNetworkPathSource()
+        let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)
         #expect(!watcher.isWatching && source.starts == 0)
         watcher.setWanted(true)
@@ -124,14 +104,14 @@ struct NetworkAccessWatcherTests {
     }
 
     @Test func aWatcherNeverWantedNeverTouchesTheSource() {
-        let source = FakeNetworkPathSource()
+        let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)
         watcher.setWanted(false)
         #expect(source.starts == 0 && source.stops == 0)
     }
 
     @Test func reportsMakeAndTakeTheNotice() {
-        let source = FakeNetworkPathSource()
+        let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)
         var changes = 0
         watcher.changed = { changes += 1 }
@@ -149,7 +129,7 @@ struct NetworkAccessWatcherTests {
     }
 
     @Test func dismissingTellsTheScreensOnce() {
-        let source = FakeNetworkPathSource()
+        let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)
         var changes = 0
         watcher.changed = { changes += 1 }
@@ -163,7 +143,7 @@ struct NetworkAccessWatcherTests {
     }
 
     @Test func aReportAfterTheStopIsDropped() throws {
-        let source = FakeNetworkPathSource()
+        let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)
         watcher.setWanted(true)
         let late = try #require(source.deliver)
@@ -173,7 +153,7 @@ struct NetworkAccessWatcherTests {
     }
 
     @Test func aDenialSurvivesAStopAndStartUntilTheNextReport() {
-        let source = FakeNetworkPathSource()
+        let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)
         watcher.setWanted(true)
         source.send(.init(status: .unsatisfied, reason: .wifiDenied))
