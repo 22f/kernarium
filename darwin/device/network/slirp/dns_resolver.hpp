@@ -111,6 +111,53 @@ public:
 		interface_index_ = index;
 	}
 	[[nodiscard]] std::uint64_t resolved_for_testing() const noexcept;
+	/* Wiring checks, which need what the system resolver does not give on
+	 * request (a refusal by policy, a dead daemon, an answer that never
+	 * comes). Each is consumed by the next query, or lasts, as said, and zero
+	 * turns it off: the start of the next query fails with `error`, as
+	 * DNSServiceQueryRecord would report it; the next query that starts is
+	 * answered with `error`, as the daemon's callback would; and every query
+	 * gets `deadline` in place of dns_query_deadline. */
+	void inject_submit_error_for_testing(std::int32_t error) noexcept
+	{
+		submit_error_for_testing_.store(error, std::memory_order_relaxed);
+	}
+	void inject_reply_error_for_testing(std::int32_t error) noexcept
+	{
+		reply_error_for_testing_.store(error, std::memory_order_relaxed);
+	}
+	void set_deadline_for_testing(std::chrono::milliseconds deadline) noexcept
+	{
+		deadline_for_testing_.store(deadline.count(),
+					    std::memory_order_relaxed);
+	}
+	/* While held, the system resolver's answers are dropped, so a query
+	 * stays pending until its deadline, a dropped connection or a stop. The
+	 * count of answers dropped says a query has reached the resolver. */
+	void hold_answers_for_testing(bool held) noexcept
+	{
+		answers_held_for_testing_.store(held, std::memory_order_relaxed);
+	}
+	[[nodiscard]] bool answers_held_for_testing() const noexcept
+	{
+		return answers_held_for_testing_.load(std::memory_order_relaxed);
+	}
+	[[nodiscard]] std::uint64_t answers_dropped_for_testing() const noexcept
+	{
+		return answers_dropped_for_testing_.load(
+			std::memory_order_relaxed);
+	}
+	void count_dropped_answer_for_testing() noexcept
+	{
+		answers_dropped_for_testing_.fetch_add(
+			1, std::memory_order_relaxed);
+	}
+	/* Queries in flight at once, in place of dns_pending_limit; zero for
+	 * the limit. */
+	void set_pending_limit_for_testing(std::size_t limit) noexcept
+	{
+		pending_limit_for_testing_.store(limit, std::memory_order_relaxed);
+	}
 #endif
 
 	/* Public for the dns_sd callback; not part of the interface. */
@@ -150,6 +197,10 @@ private:
 	void finish(Pending &pending) noexcept;
 	void complete_ready() noexcept;
 	void expire(Clock::time_point now) noexcept;
+	/* How long a query waits for the system resolver, and how many are in
+	 * flight at once. */
+	[[nodiscard]] std::chrono::milliseconds query_deadline() const noexcept;
+	[[nodiscard]] std::size_t pending_limit() const noexcept;
 	void drop_connection() noexcept;
 	bool ensure_connection() noexcept;
 	void accept_streams() noexcept;
@@ -180,6 +231,12 @@ private:
 	std::uint32_t interface_index_{};
 #if UML_SLIRP_TESTING
 	std::atomic_uint64_t resolved_for_testing_{};
+	std::atomic<std::int32_t> submit_error_for_testing_{};
+	std::atomic<std::int32_t> reply_error_for_testing_{};
+	std::atomic<std::chrono::milliseconds::rep> deadline_for_testing_{};
+	std::atomic<bool> answers_held_for_testing_{};
+	std::atomic_uint64_t answers_dropped_for_testing_{};
+	std::atomic<std::size_t> pending_limit_for_testing_{};
 #endif
 };
 

@@ -14,6 +14,12 @@
  * is answered by the guest forward and is no attempt at all. The classes
  * SLiRP's ICMP errors fall in (unreachable) come from SLiRP itself, in the
  * second part, which feeds the observer the frames of an unmodified SLiRP.
+ *
+ * The third part checks how the resolver's failures reach the counts. The
+ * system resolver does not refuse by policy, die or stay silent on request, so
+ * test-build hooks of the resolver inject what the daemon would do (a
+ * refusal, a failed start, an answer that never comes, a dead connection, a
+ * full table), and the guest must still get SERVFAIL for each.
  */
 #include "network_counters.hpp"
 #include "provider.hpp"
@@ -437,6 +443,224 @@ void check_provider()
 	provider.stop();
 }
 
+/* A provider on the local-only resolver, ready for a query. */
+struct Rig final {
+	uml::network::SlirpProvider provider;
+	Guest guest{provider};
+	bool opened{};
+
+	Rig()
+	{
+		std::array<unsigned char, 6> mac{};
+		unsigned int mtu = 0;
+		provider.set_dns_interface_for_testing(
+			kDNSServiceInterfaceIndexLocalOnly);
+		opened = provider.open(mac, mtu) == 0;
+		if (!opened)
+			fail("open", "the provider did not open");
+	}
+
+	~Rig()
+	{
+		if (opened)
+			provider.stop();
+	}
+
+	void ask(std::uint16_t port, const char *name)
+	{
+		(void)guest.send(udp_frame(guest_ip, name_server, port, 53,
+					   query_message(port, name)));
+	}
+
+	/* The answer to the query sent from `port`: its response code, or none
+	 * when no answer comes in time. */
+	std::optional<std::uint8_t> answer(std::uint16_t port,
+					   int timeout_ms = 3000)
+	{
+		const auto reply = guest.receive([&](const Bytes &frame) {
+			return frame.size() > 46 && frame[23] == IPPROTO_UDP &&
+				get16(frame, 34) == 53 && get16(frame, 36) == port;
+		}, timeout_ms);
+		if (!reply)
+			return std::nullopt;
+		return static_cast<std::uint8_t>((*reply)[45] & 0x0f);
+	}
+
+	/* Waits for the resolver to have dropped `count` of the answers the
+	 * system resolver gave while they were held: the queries have started. */
+	bool dropped(std::uint64_t count, int timeout_ms = 3000)
+	{
+		const auto deadline =
+			Clock::now() + std::chrono::milliseconds{timeout_ms};
+		while (provider.dns_answers_dropped_for_testing() < count) {
+			if (Clock::now() >= deadline)
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds{2});
+		}
+		return true;
+	}
+};
+
+constexpr std::uint8_t rcode_noerror = 0;
+constexpr std::uint8_t rcode_servfail = 2;
+
+void expect_answer(const char *label, const std::optional<std::uint8_t> &rcode,
+		   std::uint8_t wanted, const NetworkCounts &counts)
+{
+	if (!rcode)
+		fail(label, "no answer reached the guest: " + describe(counts));
+	else if (*rcode != wanted)
+		fail(label, "the guest was answered with rcode " +
+				    std::to_string(*rcode) + ", not " +
+				    std::to_string(wanted));
+}
+
+/* How the resolver's failures reach the counts, through test-build hooks (see
+ * the head of this file). Each counts once, in its class, and the guest is
+ * told SERVFAIL as it always was. */
+void check_resolver_wiring()
+{
+	/* The system resolver refuses the application's query by policy. */
+	{
+		Rig rig;
+		if (!rig.opened)
+			return;
+		rig.provider.inject_dns_reply_error_for_testing(
+			kDNSServiceErr_PolicyDenied);
+		rig.ask(43100, "localhost");
+		const auto rcode = rig.answer(43100);
+		const auto counts = rig.provider.counters();
+		expect_answer("a query refused by policy", rcode, rcode_servfail,
+			      counts);
+		expect("a query refused by policy",
+		       counts.dns_policy_denied == 1 && counts.dns_answered == 0 &&
+			       counts.dns_timed_out == 0 && counts.dns_failed == 0,
+		       counts);
+	}
+
+	/* The query cannot be started: by policy, or for any other reason. */
+	{
+		Rig rig;
+		if (!rig.opened)
+			return;
+		rig.provider.inject_dns_submit_error_for_testing(
+			kDNSServiceErr_NotPermitted);
+		rig.ask(43101, "localhost");
+		auto rcode = rig.answer(43101);
+		auto counts = rig.provider.counters();
+		expect_answer("a query that cannot start by policy", rcode,
+			      rcode_servfail, counts);
+		expect("a query that cannot start by policy",
+		       counts.dns_policy_denied == 1 && counts.dns_failed == 0 &&
+			       counts.dns_answered == 0,
+		       counts);
+		rig.provider.inject_dns_submit_error_for_testing(
+			kDNSServiceErr_NoMemory);
+		rig.ask(43102, "localhost");
+		rcode = rig.answer(43102);
+		counts = rig.provider.counters();
+		expect_answer("a query that cannot start", rcode, rcode_servfail,
+			      counts);
+		expect("a query that cannot start",
+		       counts.dns_policy_denied == 1 && counts.dns_failed == 1 &&
+			       counts.dns_answered == 0 && counts.dns_timed_out == 0,
+		       counts);
+		/* And the next query is answered as before. */
+		rig.ask(43103, "localhost");
+		rcode = rig.answer(43103);
+		counts = rig.provider.counters();
+		expect_answer("a query after a failed start", rcode, rcode_noerror,
+			      counts);
+		expect("a query after a failed start", counts.dns_answered == 1,
+		       counts);
+	}
+
+	/* The system resolver never answers: the query's deadline passes. */
+	{
+		Rig rig;
+		if (!rig.opened)
+			return;
+		rig.provider.hold_dns_answers_for_testing(true);
+		rig.provider.set_dns_deadline_for_testing(
+			std::chrono::milliseconds{150});
+		rig.ask(43104, "localhost");
+		const auto rcode = rig.answer(43104);
+		const auto counts = rig.provider.counters();
+		expect_answer("a query nobody answers", rcode, rcode_servfail,
+			      counts);
+		expect("a query nobody answers",
+		       counts.dns_timed_out == 1 && counts.dns_answered == 0 &&
+			       counts.dns_policy_denied == 0 && counts.dns_failed == 0,
+		       counts);
+		rig.provider.hold_dns_answers_for_testing(false);
+		rig.provider.set_dns_deadline_for_testing(
+			std::chrono::milliseconds{0});
+		rig.ask(43105, "localhost");
+		const auto after = rig.answer(43105);
+		const auto last = rig.provider.counters();
+		expect_answer("a query after an expiry", after, rcode_noerror,
+			      last);
+		expect("a query after an expiry",
+		       last.dns_answered == 1 && last.dns_timed_out == 1, last);
+	}
+
+	/* The daemon goes away with a query in flight: that query is lost and
+	 * failed with the one that found the connection dead. */
+	{
+		Rig rig;
+		if (!rig.opened)
+			return;
+		rig.provider.hold_dns_answers_for_testing(true);
+		rig.ask(43106, "localhost");
+		if (!rig.dropped(1)) {
+			fail("a lost connection", "the first query did not start");
+			return;
+		}
+		rig.provider.inject_dns_submit_error_for_testing(
+			kDNSServiceErr_ServiceNotRunning);
+		rig.ask(43107, "localhost");
+		const auto second = rig.answer(43107);
+		const auto first = rig.answer(43106);
+		const auto counts = rig.provider.counters();
+		expect_answer("a lost connection (the query that found it)", second,
+			      rcode_servfail, counts);
+		expect_answer("a lost connection (the query it held)", first,
+			      rcode_servfail, counts);
+		expect("a lost connection",
+		       counts.dns_failed == 2 && counts.dns_timed_out == 0 &&
+			       counts.dns_policy_denied == 0 && counts.dns_answered == 0,
+		       counts);
+		/* The resolver connects again for the next query. */
+		rig.provider.hold_dns_answers_for_testing(false);
+		rig.ask(43108, "localhost");
+		const auto after = rig.answer(43108);
+		const auto last = rig.provider.counters();
+		expect_answer("a query after a lost connection", after,
+			      rcode_noerror, last);
+		expect("a query after a lost connection",
+		       last.dns_answered == 1 && last.dns_failed == 2, last);
+	}
+
+	/* More queries than the resolver carries at once. */
+	{
+		Rig rig;
+		if (!rig.opened)
+			return;
+		rig.provider.set_dns_pending_limit_for_testing(1);
+		rig.provider.hold_dns_answers_for_testing(true);
+		rig.ask(43109, "localhost");
+		rig.ask(43110, "localhost");
+		const auto rcode = rig.answer(43110);
+		const auto counts = rig.provider.counters();
+		expect_answer("a full table", rcode, rcode_servfail, counts);
+		expect("a full table",
+		       counts.dns_failed == 1 && counts.dns_answered == 0 &&
+			       counts.dns_timed_out == 0 &&
+			       counts.dns_policy_denied == 0,
+		       counts);
+	}
+}
+
 /* The frames of an unmodified SLiRP, through the observer: a destination the
  * host cannot route to is answered with ICMP net unreachable, which the guest
  * reads as unreachable. */
@@ -500,6 +724,7 @@ int main(void)
 {
 	check_provider();
 	check_slirp_errors();
+	check_resolver_wiring();
 	if (failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", failures);
 		return 1;

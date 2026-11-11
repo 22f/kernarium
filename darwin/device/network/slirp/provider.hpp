@@ -164,6 +164,32 @@ public:
 	{
 		dns_interface_for_testing_ = index;
 	}
+	/* The resolver's wiring checks (dns_resolver.hpp). */
+	void inject_dns_submit_error_for_testing(std::int32_t error) noexcept
+	{
+		resolver_.inject_submit_error_for_testing(error);
+	}
+	void inject_dns_reply_error_for_testing(std::int32_t error) noexcept
+	{
+		resolver_.inject_reply_error_for_testing(error);
+	}
+	void set_dns_deadline_for_testing(
+		std::chrono::milliseconds deadline) noexcept
+	{
+		resolver_.set_deadline_for_testing(deadline);
+	}
+	void hold_dns_answers_for_testing(bool held) noexcept
+	{
+		resolver_.hold_answers_for_testing(held);
+	}
+	[[nodiscard]] std::uint64_t dns_answers_dropped_for_testing() const noexcept
+	{
+		return resolver_.answers_dropped_for_testing();
+	}
+	void set_dns_pending_limit_for_testing(std::size_t limit) noexcept
+	{
+		resolver_.set_pending_limit_for_testing(limit);
+	}
 	/* The next open() finds no socket path for DNS over TCP. */
 	void set_dns_streams_unavailable_for_testing(bool unavailable) noexcept
 	{

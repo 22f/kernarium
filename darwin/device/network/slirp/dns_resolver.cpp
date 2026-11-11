@@ -64,6 +64,12 @@ void DNSSD_API query_reply(DNSServiceRef, DNSServiceFlags flags,
 			   void *context) noexcept
 {
 	auto *pending = static_cast<HostResolver::Pending *>(context);
+#if UML_SLIRP_TESTING
+	if (pending->owner->answers_held_for_testing()) {
+		pending->owner->count_dropped_answer_for_testing();
+		return;
+	}
+#endif
 	pending->owner->record(
 		*pending, flags, error, fullname, type, klass,
 		{static_cast<const std::uint8_t *>(data),
@@ -411,7 +417,7 @@ void HostResolver::handle(std::optional<dns::Endpoints> datagram,
 		if (duplicate)
 			return;
 	}
-	if (pending_.size() >= dns_pending_limit || !ensure_connection()) {
+	if (pending_.size() >= pending_limit() || !ensure_connection()) {
 		if (counters_ != nullptr)
 			counters_->dns(DnsOutcome::failed);
 		respond(datagram, stream,
@@ -425,18 +431,23 @@ void HostResolver::handle(std::optional<dns::Endpoints> datagram,
 	pending->stream = stream;
 	pending->query = std::move(parsed.query);
 	pending->tail = pending->query.name;
-	pending->deadline = Clock::now() + dns_query_deadline;
+	pending->deadline = Clock::now() + query_deadline();
 	const auto name = dns::presentation_name(pending->query.name);
 	/* Listed before the query starts: once it has, its callback may name
 	 * this entry, so nothing after that point may fail to keep it. */
 	auto &entry = *pending_.emplace_back(std::move(pending));
 	entry.reference = connection_;
-	const auto error = DNSServiceQueryRecord(
-		&entry.reference,
-		kDNSServiceFlagsShareConnection |
-			kDNSServiceFlagsReturnIntermediates,
-		interface_index_, name.c_str(), entry.query.type,
-		entry.query.klass, query_reply, &entry);
+	DNSServiceErrorType error = kDNSServiceErr_NoError;
+#if UML_SLIRP_TESTING
+	error = submit_error_for_testing_.exchange(0, std::memory_order_relaxed);
+#endif
+	if (error == kDNSServiceErr_NoError)
+		error = DNSServiceQueryRecord(
+			&entry.reference,
+			kDNSServiceFlagsShareConnection |
+				kDNSServiceFlagsReturnIntermediates,
+			interface_index_, name.c_str(), entry.query.type,
+			entry.query.klass, query_reply, &entry);
 	if (error != kDNSServiceErr_NoError) {
 		entry.reference = nullptr;
 		if (counters_ != nullptr)
@@ -452,6 +463,35 @@ void HostResolver::handle(std::optional<dns::Endpoints> datagram,
 	}
 	if (auto *owner = find_stream(stream); owner != nullptr)
 		++owner->pending;
+#if UML_SLIRP_TESTING
+	if (const auto injected =
+		    reply_error_for_testing_.exchange(0, std::memory_order_relaxed);
+	    injected != 0) {
+		record(entry, 0, injected, nullptr, 0, 0, {}, 0);
+		complete_ready();
+	}
+#endif
+}
+
+std::chrono::milliseconds HostResolver::query_deadline() const noexcept
+{
+#if UML_SLIRP_TESTING
+	if (const auto test = deadline_for_testing_.load(std::memory_order_relaxed);
+	    test > 0)
+		return std::chrono::milliseconds{test};
+#endif
+	return dns_query_deadline;
+}
+
+std::size_t HostResolver::pending_limit() const noexcept
+{
+#if UML_SLIRP_TESTING
+	if (const auto test =
+		    pending_limit_for_testing_.load(std::memory_order_relaxed);
+	    test > 0)
+		return test;
+#endif
+	return dns_pending_limit;
 }
 
 void HostResolver::record(Pending &pending, std::uint32_t flags,
