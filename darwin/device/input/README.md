@@ -72,7 +72,11 @@ are one mouse to Android and are plugged together.
 - `HardwareInput::setStatusCallback` receives Android's LED writes as Num, Caps
   and Scroll Lock and as pointer capture on or off, and each registration and
   unregistration the driver announces, the latter also for an unplugged
-  device.
+  device. `RegistrationSummary` turns the three devices' registrations into the
+  application's two (the keyboard, and the pointer while the mouse and the
+  absolute pointer both are registered) and takes both away when a boot ends;
+  the runtime publishes them as `KERNARIUM_RUNTIME_INPUT_STATUS_KEYBOARD_REGISTERED`
+  and `_POINTER_REGISTERED`.
 
 A kernel without the driver's change never registers a plugged device: it sees
 an input device with no events, which Android drops, and the host drops what it
