@@ -141,6 +141,15 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The Wi-Fi network runner's reading of the guest's status, listing, dumps and
+# overlay list, and of the boot script's settle time.
+uml_add_tooling_test(
+    NAME android17-wifi-network-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_wifi_network_runner.py
+    LABELS android
+    TIMEOUT 60)
+
 # The gamepad runner without a guest: the host's end of the wire against the
 # golden frames and the C++ header, the controller families against the
 # drivers' own report structures, the parsers of what the guest prints, the
