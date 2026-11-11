@@ -211,6 +211,7 @@ struct HomeView: View {
                 action: NoticeAction(
                     label: NetworkWords.settingsLabel, hint: NetworkWords.settingsHint,
                     identifier: "network-notice-settings", perform: { model.openSettings() }),
+                closeLabel: NetworkWords.dismissLabel,
                 onClose: { withAnimation { model.dismissNetworkNotice() } }
             )
             .accessibilityElement(children: .contain)
@@ -434,6 +435,8 @@ struct NoticeCard: View {
     let title: String
     let text: String
     var action: NoticeAction?
+    /// What VoiceOver says for the close button.
+    var closeLabel = "Dismiss"
     var onClose: (() -> Void)?
 
     var body: some View {
@@ -466,7 +469,7 @@ struct NoticeCard: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Dismiss")
+                .accessibilityLabel(closeLabel)
             }
         }
         .padding(14)

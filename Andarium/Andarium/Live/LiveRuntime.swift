@@ -727,12 +727,16 @@ final class LiveRuntime: RuntimeDriver {
     func setNetworkNotice(_ denial: NetworkDenial?) {
         // The runtime has the value only once a run has loaded it; the run
         // says it again then (`launch`).
-        let notice: Int32 = switch denial {
-        case nil: 0
-        case .cellular?: 1
-        case .wifi?: 2
+        _ = kernarium_runtime_loader_set_network_notice(Self.networkNoticeCause(denial))
+    }
+
+    /// The runtime's word for the denial in force (KernariumRuntime.h).
+    static func networkNoticeCause(_ denial: NetworkDenial?) -> Int32 {
+        switch denial {
+        case nil: Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_NONE)
+        case .cellular?: Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_CELLULAR_DENIED)
+        case .wifi?: Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_WIFI_DENIED)
         }
-        _ = kernarium_runtime_loader_set_network_notice(notice)
     }
 
     func setMotionSensors(_ on: Bool) {

@@ -198,8 +198,8 @@ struct NetworkNoticeFlowTests {
     /// path reported. SwiftUI publishes its accessibility elements only while
     /// application accessibility is on (the Simulator preference
     /// `ApplicationAccessibilityEnabled`, as `Kernarium/scripts/
-    /// run-ios-simulator-tests.sh` sets it), so a run without it finds none
-    /// and ends the test early.
+    /// run-ios-simulator-tests.sh` sets it); a run without it finds none and
+    /// the test fails, for it checks nothing then.
     @Test func theBannerOffersSettingsAndDismissAndTheyReachTheModel() async throws {
         let source = ScriptedNetworkPathSource()
         let model = model(source: source)
@@ -220,11 +220,56 @@ struct NetworkNoticeFlowTests {
             dismiss = button(labelled: NetworkWords.dismissLabel, in: controller.view)
             if settings == nil || dismiss == nil { try await Task.sleep(for: .milliseconds(50)) }
         }
-        guard let settings, let dismiss else { return }
+        guard let settings, let dismiss else {
+            Issue.record("The banner's buttons were not found: is application accessibility on in this Simulator?")
+            return
+        }
         #expect(settings.accessibilityActivate())
         #expect(opened == 1)
         #expect(model.networkDenialShowing == .cellular, "opening Settings is not a dismissal")
         #expect(dismiss.accessibilityActivate())
         #expect(model.networkDenialShowing == nil)
+    }
+
+    /// The Home card is the same words as the banner: its close button says
+    /// what `NetworkWords` says, and runs the card's close action.
+    @Test func theHomeCardTakesItsCloseLabelFromTheWords() async throws {
+        let source = ScriptedNetworkPathSource()
+        let model = model(source: source)
+        source.send(denied)
+        let denial = try #require(model.networkDenialShowing)
+        var closed = 0
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let card = NoticeCard(
+            symbol: NetworkWords.symbol(for: denial), color: .orange,
+            title: NetworkWords.title(for: denial), text: NetworkWords.text(for: denial),
+            closeLabel: NetworkWords.dismissLabel, onClose: { closed += 1 })
+        let controller = UIHostingController(rootView: card)
+        lease.window.rootViewController = controller
+        controller.view.layoutIfNeeded()
+        var close: NSObject?
+        let deadline = ContinuousClock.now + .seconds(5)
+        while close == nil, ContinuousClock.now < deadline {
+            close = button(labelled: NetworkWords.dismissLabel, in: controller.view)
+            if close == nil { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        guard let close else {
+            Issue.record("The card's close button was not found: is application accessibility on in this Simulator?")
+            return
+        }
+        #expect(close.accessibilityActivate())
+        #expect(closed == 1)
+    }
+
+    // MARK: The runtime's word for a denial
+
+    @Test func theRuntimeIsToldTheConstantsOfItsHeader() {
+        #expect(LiveRuntime.networkNoticeCause(nil) == Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_NONE))
+        #expect(
+            LiveRuntime.networkNoticeCause(.cellular) == Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_CELLULAR_DENIED))
+        #expect(LiveRuntime.networkNoticeCause(.wifi) == Int32(KERNARIUM_RUNTIME_NETWORK_NOTICE_WIFI_DENIED))
+        let causes = [nil, NetworkDenial.cellular, .wifi].map { LiveRuntime.networkNoticeCause($0) }
+        #expect(Set(causes).count == 3, "three states, three words")
     }
 }
