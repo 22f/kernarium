@@ -140,7 +140,10 @@ streams, and a metadata node, for its meta streams.
   camera, flash and white-balance controls (`virtio_video_v4l2_ids.h`, which
   `sync-protocol.py` checks); the rest are the `VIRTIO_VIDEO_CAMERA_CID_*` of
   `virtio_video.h`. Controls belong to the camera: a set or get through any of
-  its streams reaches the same values.
+  its streams reaches the same values. Focus follows V4L2: with `FOCUS_AUTO` on
+  the camera focuses by itself (`3A_LOCK` holds it); with it off the lens holds
+  where it is, a press of `AUTO_FOCUS_START` runs one scan, and `FOCUS_ABSOLUTE`
+  moves the lens only once the guest has written it.
 - **Blocked and interrupted.** A session the host starts blocked reports
   `VIRTIO_VIDEO_CAMERA_SESSION_F_BLOCKED` and delivers black frames flagged
   `VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLACK | _BLOCKED` at the stream's rate, and

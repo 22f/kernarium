@@ -554,6 +554,22 @@ anywhere is a blocker. The candidate must show:
   default devices and again with the option and a connected client; a result
   that differs from the accepted release's is explained
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
+- **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
+  `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
+  the synthetic profiles compose, live and blocked; the VTS camera provider
+  test (`VtsAidlHalCameraProvider_TargetTest`) passes against the lazy
+  provider; and these CTS modules pass sharded, with the failures rerun alone
+  and a result that differs from the accepted release's explained:
+  `CtsCameraTestCases` (about 6 to 15 hours, as detached shards),
+  `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
+  `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
+  `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
+  provider process exists only while a camera is open, no denial of
+  `hal_camera_default` appears in the log, and the verifier's check that
+  `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
+  vacuous: it runs on the candidate's built library (a source tree has none)
+  and is shown to fail on the stock one
+  ([Camera](../android/lineage-24/README.md#camera)).
 
 `android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
 each register only when `UML_ANDROID_OOBE_RELEASE`,
@@ -592,6 +608,15 @@ Android sees (devices, keys, axes), what comes back (rumble, lights, the
 drivers' feature requests), hot plug, the relay's recovery, and reports the
 guest's cost per report and the relay's memory. `android17-gamepad-runner`
 (tooling) runs its wire, controllers and parsers without a guest.
+`android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
+names the release: the runner boots it with the launcher's synthetic camera
+(`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
+SKU, and checks what Android lists (features, media profiles, camera IDs),
+one preview frame and one still of the camera application, and, in a blocked
+session, that the same cameras give black frames and no still.
+`android17-camera-runner` (tooling) runs its parsers and the expectations of
+every layout without a guest, and `android17-camera-layouts` (tooling) the
+layout set, its fallback order and the generated files.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

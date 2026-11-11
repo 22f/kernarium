@@ -536,6 +536,7 @@ def adjust_archive(path: Path, entries: dict[str, bytes | None]) -> None:
 def verify_target_files_fixtures(verifier: Path) -> None:
     sys.path.insert(0, str(verifier.parent))
     from release_common import BUILD_VARIANTS, configured_build_variant
+    import camera_layouts
 
     tool = load_tool(verifier)
     pinner_overlay_entry = tool.PINNER_OVERLAY
@@ -579,6 +580,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         entry for entry in tool.REQUIRED_ENTRIES
         if entry.endswith(".apk") and entry not in tool.REQUIRED_PREOPT_APKS
         and entry != pinner_overlay_entry
+        and entry != tool.CAMERA_APP  # written with its own resources
     )
     arm_preopt_apks = sorted(tool.REQUIRED_ARM_PREOPT_APKS)
     uml_fstab = tracked_fstab(verifier.parents[1])
@@ -668,6 +670,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.thermal-service\\.andarium"
             "  u:object_r:hal_thermal_default_exec:s0\n"
         )
+        good_camera_label = (
+            "/vendor/bin/hw/android\\.hardware\\.camera\\.provider@2\\.7-service-google-lazy"
+            " u:object_r:hal_camera_default_exec:s0\n"
+        )
         good_gamepad_label = (
             "/vendor/bin/kernarium_gamepad  u:object_r:kernarium_gamepad_exec:s0\n"
         )
@@ -679,6 +685,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             + good_vibrator_label
             + good_gnss_label
             + good_thermal_label
+            + good_camera_label
             + good_gamepad_label
         )
         # The GNSS HAL: declared on every device by one vendor fragment, and started at boot with its
@@ -695,6 +702,37 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         )
         gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
         gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
+        # The host's cameras: the lazy provider (a service that init starts when a client asks), its one
+        # declaration, the HWL library that holds the V4L2 source (the names only route p0030 puts in
+        # it), the characteristics template, and the layouts' files (the generator's own).
+        camera_provider = "android.hardware.camera.provider@2.7-service-google-lazy"
+        camera_provider_path = f"VENDOR/bin/hw/{camera_provider}"
+        camera_rc_path = f"VENDOR/etc/init/{camera_provider}.rc"
+        camera_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.camera.provider@2.7-service-google.xml"
+        camera_library_path = "VENDOR/lib64/libgooglecamerahwl_impl.so"
+        camera_template_path = "VENDOR/etc/config/emu_camera_v4l2.json"
+        camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
+        good_camera_rc = (
+            f"service vendor.camera-provider-2-7-google /vendor/bin/hw/{camera_provider}\n"
+            "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n"
+            "    oneshot\n    disabled\n    class hal\n    user system\n    group system\n"
+            "    capabilities SYS_NICE\n"
+        )
+        good_camera_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.camera.provider</name><version>4</version>"
+            "<interface><name>ICameraProvider</name><instance>internal/0</instance></interface>"
+            "</hal></manifest>"
+        )
+
+        def camera_library(*markers: bytes) -> bytes:
+            return synthetic_aarch64_elf() + b"".join(marker + b"\x00" for marker in markers)
+
+        camera_layout_files = camera_layouts.installed()
+        camera_front_path = "VENDOR/etc/permissions/sku_front/kernarium_camera.xml"
+        camera_init_path = "VENDOR/etc/init/init.kernarium_camera.rc"
+        good_camera_markers = tuple(tool.CAMERA_HWL_MARKERS)
+        good_camera_template = json.dumps({"android.lens.facing": [1], "android.sensor.orientation": [90]})
         # The thermal HAL: declared on every device by one vendor fragment, started at boot with its
         # class. The default display configuration holds the one point that holds the render rate to
         # 30 Hz from the SEVERE status on.
@@ -943,6 +981,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           arm_flags: int = 0x05000200,
                           arm_edit: tuple[str, int, int] | None = None,
                           missing_arm_gallium_dependency: bool = False,
+                          camera_variant: str | None = None,
                           entries: dict[str, bytes | None] | None = None,
                           init_variant: str | None = None,
                           extra_entry: str | None = None,
@@ -1098,6 +1137,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     }.get(lmkd_variant, "ro.lmk.gpu_reclaim=true\n")
                     + ("ro.boot.vendor.overlay.theme=com.android.internal.systemui.navbar.gestural\n"
                        if navigation_variant == "overlay-theme-property" else "")
+                    + {
+                        "lazy-property-missing": "",
+                        "lazy-property-off": "ro.camera.enableLazyHal=false\n",
+                    }.get(camera_variant, "ro.camera.enableLazyHal=true\n")
                     + {
                         None: "apexd.config.use_fiemap=false\n",
                         "missing": "",
@@ -2335,9 +2378,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         flip_values = [False, True]
                     elif flip_variant == "missing":
                         flip_values = []
+                    toggle_values = {
+                        "toggle-off": [False],
+                        "toggle-missing": [],
+                        "toggle-qualified": [True, False],
+                    }.get(camera_variant, [True])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
-                        booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values],
+                        booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
+                        + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
                     )
                     framework_apk = io.BytesIO()
@@ -2373,6 +2422,35 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr("VENDOR/bin/hw/android.hardware.gnss-service.andarium", synthetic_aarch64_elf())
                 archive.writestr(gnss_rc_path, good_gnss_rc)
                 archive.writestr(gnss_fragment_path, good_gnss_manifest)
+                for camera_entry, camera_payload in camera_layouts.installed().items():
+                    archive.writestr(camera_entry, camera_payload)
+                archive.writestr(camera_provider_path, synthetic_aarch64_elf())
+                archive.writestr(camera_rc_path, good_camera_rc)
+                archive.writestr(camera_fragment_path, good_camera_manifest)
+                archive.writestr(camera_library_path, camera_library(*good_camera_markers))
+                archive.writestr(camera_template_path, good_camera_template)
+                # Aperture's resources as the build leaves them with the product's static overlay: each
+                # lens of the host is its own camera device, and the wide lens is the zoom camera's 1x.
+                aux_booleans = {
+                    None: [("config_enableAuxCameras", True)],
+                    "aux-off": [("config_enableAuxCameras", False)],
+                    "aux-missing": [],
+                    "aux-qualified": [("config_enableAuxCameras", True), ("config_enableAuxCameras", False)],
+                }[camera_variant if camera_variant in {"aux-off", "aux-missing", "aux-qualified"} else None]
+                ignored_ids = {
+                    "ignored-extra": [["2", "3"]],
+                    "ignored-none": [[]],
+                    "ignored-missing": [],
+                }.get(camera_variant, [["2"]])
+                aperture_table = synthetic_resource_table(
+                    [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
+                    booleans=aux_booleans, compact=camera_variant == "compact",
+                )
+                aperture_apk = io.BytesIO()
+                with zipfile.ZipFile(aperture_apk, "w") as apk:
+                    apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
+                    apk.writestr("resources.arsc", aperture_table)
+                archive.writestr(camera_app_path, aperture_apk.getvalue())
                 archive.writestr("VENDOR/bin/hw/android.hardware.thermal-service.andarium", synthetic_aarch64_elf())
                 archive.writestr(thermal_rc_path, good_thermal_rc)
                 archive.writestr(thermal_fragment_path, good_thermal_manifest)
@@ -2545,6 +2623,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "missing": "",
                     }[board_variant]
                     + "#ro.soc.manufacturer=Google\n#ro.soc.model=vsoc_arm64_pgagnostic\n"
+                    + {
+                        "config-property-missing": "",
+                        "config-property-stock": "ro.vendor.camera.config=back\n",
+                        "extensions-property": "ro.vendor.camera.config=v4l2\nro.camerax.extensions.enabled=true\n",
+                    }.get(camera_variant, "ro.vendor.camera.config=v4l2\n")
                     + {
                         "vendor-manufacturer": "ro.soc.manufacturer=Google\n",
                         "vendor-model": "ro.soc.model=vsoc_arm64_pgagnostic\n",
@@ -2793,7 +2876,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         run_tool(verifier, "--target-files", good, *kernel_options, check=True)
         # A recent aapt2 writes a resource that holds one value as a compact entry.
         compact_good = root / "compact-good.zip"
-        write_fixture(compact_good, flip_variant="compact")
+        write_fixture(compact_good, flip_variant="compact", camera_variant="compact")
         run_tool(verifier, "--target-files", compact_good, *kernel_options, check=True)
         # Signed target files are checked with --signed: the release certificate alone is trusted,
         # and only a user build is signed. The unsigned fixtures above hold the test certificate's
@@ -4362,7 +4445,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-midi-feature-cause", {"missing_midi_feature": True},
              "feature is not declared: android.software.midi"),
             ("camera-feature-cause", {"unsupported_feature": True},
-             "absent hardware feature is advertised.*android.hardware.camera"),
+             "a camera feature is declared outside the camera layouts.*android.hardware.camera"),
             ("missing-mic-policy-cause", {"missing_mic_policy": True},
              "ordinary mixer input"),
             ("extra-input-device-cause", {"extra_input_device": True},
@@ -4918,6 +5001,154 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("pointer-with-a-character-map", {"entries": {
                 "VENDOR/usr/keychars/Vendor_1af4_Product_0005.kcm": b"type FULL\n"}},
              "a key layout or character map of its own"),
+            # The host's cameras. The layouts' files are the generator's, byte for byte, and nothing
+            # else uses the vendor SKU axis.
+            ("camera-feature-in-a-permission-file", {"entries": {
+                "VENDOR/etc/permissions/android.hardware.camera.xml":
+                    b'<permissions><feature name="android.hardware.camera"/></permissions>'}},
+             "a camera feature is declared outside the camera layouts.*android.hardware.camera"),
+            ("camera-feature-in-a-layout-of-another-name", {"entries": {
+                "VENDOR/etc/permissions/kernarium_camera.xml":
+                    camera_layouts.permissions_file(camera_layouts.by_name()["front"])}},
+             "a camera feature is declared outside the camera layouts"),
+            ("stock-camera-feature-file", {"entries": {
+                "VENDOR/etc/permissions/android.hardware.camera.front.xml": b"<permissions/>"}},
+             "absent hardware feature declaration is forbidden"),
+            ("missing-camera-layout", {"entries": {camera_front_path: None}},
+             "sku_front/kernarium_camera.xml is missing"),
+            ("camera-layout-with-more-features", {"entries": {camera_front_path: camera_layout_files[
+                "VENDOR/etc/permissions/sku_bf-small/kernarium_camera.xml"]}},
+             "differs from what tools/camera_layouts.py generates"),
+            ("camera-layout-edited", {"entries": {camera_front_path: camera_layout_files[camera_front_path].replace(
+                b"android.hardware.camera.any", b"android.hardware.camera.level.full")}},
+             "differs from what tools/camera_layouts.py generates"),
+            ("camera-sku-directory-of-another-name", {"entries": {
+                "VENDOR/etc/permissions/sku_extra/kernarium_camera.xml": b"<permissions/>"}},
+             "is not a file of a camera layout"),
+            ("camera-sku-directory-with-another-file", {"entries": {
+                "VENDOR/etc/permissions/sku_front/other.xml": b"<permissions/>"}},
+             "is not a file of a camera layout"),
+            ("camera-sku-sysconfig", {"entries": {"VENDOR/etc/sysconfig/sku_front/other.xml": b"<config/>"}},
+             "SKU configuration beside the camera layouts"),
+            ("missing-camera-media-profiles", {"entries": {"VENDOR/etc/media_profiles_camsmall.xml": None}},
+             "media_profiles_camsmall.xml is missing"),
+            ("camera-media-profiles-edited", {"entries": {
+                "VENDOR/etc/media_profiles_camlarge.xml": b"<MediaSettings/>"}},
+             "media_profiles_camlarge.xml differs from what tools/camera_layouts.py generates"),
+            ("camera-media-profiles-of-no-layout", {"entries": {
+                "VENDOR/etc/media_profiles_camhuge.xml": b"<MediaSettings/>"}},
+             "media profiles variant that no camera layout selects"),
+            ("missing-camera-init", {"entries": {camera_init_path: None}},
+             "init.kernarium_camera.rc is missing"),
+            ("camera-init-edited", {"entries": {camera_init_path: camera_layout_files[camera_init_path].replace(
+                b"_camsmall", b"_camlarge")}},
+             "init.kernarium_camera.rc differs from what tools/camera_layouts.py generates"),
+            ("camera-layout-manifest", {"entries": {"VENDOR/etc/vintf/manifest_bf-small.xml": b"<manifest/>"}},
+             "VINTF manifest of a camera layout"),
+            # The lazy provider and the HWL library of route p0030.
+            ("missing-camera-provider", {"entries": {camera_provider_path: None}},
+             "required entries are missing"),
+            ("missing-camera-provider-rc", {"entries": {camera_rc_path: None}},
+             "required entries are missing"),
+            ("missing-camera-library", {"entries": {camera_library_path: None}},
+             "required entries are missing"),
+            ("missing-camera-template", {"entries": {camera_template_path: None}},
+             "required entries are missing"),
+            ("eager-camera-provider", {"entries": {
+                "VENDOR/bin/hw/android.hardware.camera.provider@2.7-service-google": b"x"}},
+             "only the lazy camera provider runs"),
+            ("eager-camera-provider-rc", {"entries": {
+                "VENDOR/etc/init/android.hardware.camera.provider@2.7-service-google.rc": b"# x\n"}},
+             "only the lazy camera provider runs"),
+            ("camera-provider-not-an-elf", {"entries": {camera_provider_path: b"not an ELF file"}},
+             "is not an ELF file"),
+            ("camera-library-not-an-elf", {"entries": {camera_library_path: b"not an ELF file"}},
+             "is not an ELF file"),
+            *((f"camera-library-without-{index}", {"entries": {camera_library_path: camera_library(
+                *(other for other in good_camera_markers if other != marker))}},
+              f"lacks {marker.decode()!r}") for index, marker in enumerate(good_camera_markers)),
+            ("camera-provider-enabled", {"entries": {
+                camera_rc_path: good_camera_rc.replace("    disabled\n", "").encode()}},
+             "must carry 'disabled'"),
+            ("camera-provider-not-oneshot", {"entries": {
+                camera_rc_path: good_camera_rc.replace("    oneshot\n", "").encode()}},
+             "must carry 'oneshot'"),
+            ("camera-provider-without-interface", {"entries": {
+                camera_rc_path: good_camera_rc.replace(
+                    "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n", "").encode()}},
+             "must carry 'interface aidl android.hardware.camera.provider.ICameraProvider/internal/0'"),
+            ("camera-provider-wrong-user", {"entries": {
+                camera_rc_path: good_camera_rc.replace("user system", "user root").encode()}},
+             "must carry 'user system'"),
+            ("camera-provider-wrong-binary", {"entries": {
+                camera_rc_path: good_camera_rc.replace(camera_provider, "android.hardware.camera.provider@2.7-service-google").encode()}},
+             "must define one service that runs the lazy provider"),
+            ("camera-provider-triggered", {"entries": {
+                camera_rc_path: (good_camera_rc + "\non boot\n    start vendor.camera-provider-2-7-google\n").encode()}},
+             "may have no trigger"),
+            ("camera-provider-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_camera_default_exec", "vendor_file").encode()}},
+             "hal_camera_default_exec label"),
+            ("missing-camera-declaration", {"entries": {camera_fragment_path: None}},
+             "must be declared exactly once"),
+            ("camera-declared-twice", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_camera_manifest.encode()}},
+             "must be declared exactly once"),
+            ("camera-declared-in-the-odm", {"entries": {
+                camera_fragment_path: None, "ODM/etc/vintf/manifest.xml": good_camera_manifest.encode()}},
+             "in the vendor"),
+            ("camera-declared-for-another-instance", {"entries": {
+                camera_fragment_path: good_camera_manifest.replace("internal/0", "external/0").encode()}},
+             "must declare the AIDL ICameraProvider/internal/0"),
+            ("camera-declared-as-hidl", {"entries": {
+                camera_fragment_path: good_camera_manifest.replace('format="aidl"', 'format="hidl"').encode()}},
+             "must declare the AIDL ICameraProvider/internal/0"),
+            # The characteristics template, the properties and the vendor camera extensions.
+            ("camera-template-not-json", {"entries": {camera_template_path: b"{"}},
+             "cannot parse VENDOR/etc/config/emu_camera_v4l2.json"),
+            ("camera-template-without-characteristics", {"entries": {camera_template_path: b"{}"}},
+             "not a camera characteristics template"),
+            ("stock-emulated-camera", {"entries": {"VENDOR/etc/config/emu_camera_back.json": b"{}"}},
+             "a camera of the stock emulated HAL"),
+            ("camera-extensions-declaration", {"entries": {
+                "SYSTEM_EXT/etc/permissions/sample_camera_extensions.xml": b"<permissions/>"}},
+             "is a vendor camera extension"),
+            ("camera-extensions-library", {"entries": {
+                "SYSTEM_EXT/framework/androidx.camera.extensions.impl.jar": b"jar"}},
+             "is a vendor camera extension"),
+            ("lazy-camera-property-missing", {"camera_variant": "lazy-property-missing"},
+             "lacks ro.camera.enableLazyHal=true"),
+            ("lazy-camera-property-off", {"camera_variant": "lazy-property-off"},
+             "lacks ro.camera.enableLazyHal=true"),
+            ("camera-config-property-missing", {"camera_variant": "config-property-missing"},
+             "lacks ro.vendor.camera.config=v4l2"),
+            ("camera-config-property-stock", {"camera_variant": "config-property-stock"},
+             "lacks ro.vendor.camera.config=v4l2"),
+            ("camera-extensions-property", {"camera_variant": "extensions-property"},
+             "sets ro.camerax.extensions.enabled"),
+            # The camera application and the camera switch.
+            ("missing-camera-application", {"entries": {camera_app_path: None}},
+             "required entries are missing"),
+            ("camera-lens-launcher", {"entries": {
+                "PRODUCT/app/ApertureLensLauncher/ApertureLensLauncher.apk": synthetic_apk()}},
+             "unneeded built-in application payload is forbidden"),
+            ("stock-camera-application", {"entries": {"PRODUCT/app/Camera2/Camera2.apk": synthetic_apk()}},
+             "unneeded built-in application payload is forbidden"),
+            ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
+            ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
+             "must set config_enableAuxCameras to true"),
+            ("camera-aux-cameras-qualified", {"camera_variant": "aux-qualified"},
+             "must set config_enableAuxCameras to true"),
+            ("camera-ignored-ids-extra", {"camera_variant": "ignored-extra"},
+             "must list the camera IDs"),
+            ("camera-ignored-ids-empty", {"camera_variant": "ignored-none"}, "must list the camera IDs"),
+            ("camera-ignored-ids-missing", {"camera_variant": "ignored-missing"}, "must list the camera IDs"),
+            ("camera-toggle-off", {"camera_variant": "toggle-off"},
+             "must set config_supportsHardwareCamToggle to true"),
+            ("camera-toggle-missing", {"camera_variant": "toggle-missing"},
+             "must set config_supportsHardwareCamToggle to true"),
+            ("camera-toggle-qualified", {"camera_variant": "toggle-qualified"},
+             "must set config_supportsHardwareCamToggle to true"),
         ):
             reject(label, options, reason)
 
