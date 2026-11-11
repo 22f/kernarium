@@ -168,7 +168,9 @@ probe states in its header what it checks. A contract's owning README, such as
 that check it.
 A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
-by itself.
+by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
+checks the transport's rules for a device that holds requests across a ring
+disable.
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
