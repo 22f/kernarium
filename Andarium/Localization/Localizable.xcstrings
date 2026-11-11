@@ -90,6 +90,29 @@
         }
       }
     },
+    "%@ is off for Andarium" : {
+      "comment" : "Title of the notice shown when iOS blocks Andarium's Wi-Fi. The argument is the name Wi-Fi, written with a non-breaking hyphen.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumの%@がオフです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已为Andarium关闭%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已關閉Andarium的%@"
+          }
+        }
+      }
+    },
     "%@ is paused" : {
       "localizations" : {
         "ja" : {
@@ -1437,6 +1460,52 @@
         }
       }
     },
+    "Android can’t reach the internet over %@. Allow wireless data for Andarium in Settings." : {
+      "comment" : "Text of the notice shown when iOS blocks Andarium's Wi-Fi. The argument is the name Wi-Fi. Wireless Data is the name of the setting under Andarium in the iOS Settings app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidは%@でインターネットに接続できません。“設定”でAndariumのワイヤレスデータを許可してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法通过%@访问互联网。请在“设置”中允许Andarium使用无线数据。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法透過%@連線到網際網路。請在「設定」中允許Andarium使用無線數據。"
+          }
+        }
+      }
+    },
+    "Android can’t reach the internet over cellular data. Turn on Cellular Data for Andarium in Settings." : {
+      "comment" : "Text of the notice shown when iOS blocks Andarium's cellular data. Cellular Data is the name of the switch under Andarium in the iOS Settings app.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはモバイルデータ通信でインターネットに接続できません。“設定”でAndariumの“モバイルデータ通信”をオンにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法通过蜂窝数据访问互联网。请在“设置”中为Andarium打开“蜂窝数据”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法透過行動數據連線到網際網路。請在「設定」中為Andarium開啟「行動數據」。"
+          }
+        }
+      }
+    },
     "Android could not be shut down" : {
       "localizations" : {
         "ja" : {
@@ -2101,6 +2170,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "裝置功能"
+          }
+        }
+      }
+    },
+    "Cellular data is off for Andarium" : {
+      "comment" : "Title of the notice shown when iOS blocks Andarium's cellular data. Cellular Data is iOS's own name of the setting.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumのモバイルデータ通信がオフです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已为Andarium关闭蜂窝数据"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已關閉Andarium的「行動數據」"
           }
         }
       }
@@ -2900,6 +2992,7 @@
       }
     },
     "Dismiss" : {
+      "comment" : "A button that closes a notice; VoiceOver reads it too.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -3629,6 +3722,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "陀螺儀"
+          }
+        }
+      }
+    },
+    "Haptics" : {
+      "comment" : "A switch under Capabilities: the virtual machine's vibration and haptic feedback play on this device's Taptic Engine. Haptics is iOS's own name (Sounds & Haptics).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "触覚"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "触感反馈"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "觸覺回饋"
           }
         }
       }
@@ -5052,6 +5168,7 @@
       }
     },
     "Open Settings" : {
+      "comment" : "A button that opens Andarium's page in the iOS Settings app.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -5069,6 +5186,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "打開「設定」"
+          }
+        }
+      }
+    },
+    "Opens Andarium’s page in Settings." : {
+      "comment" : "VoiceOver hint of the network notice's Open Settings button.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“設定”でAndariumのページを開きます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在“设置”中打开Andarium的页面。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在「設定」中開啟Andarium的頁面。"
           }
         }
       }
