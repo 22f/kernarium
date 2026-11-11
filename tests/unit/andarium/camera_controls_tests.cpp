@@ -45,12 +45,21 @@ const ControlWrite* find(const std::vector<ControlWrite>& writes, std::uint32_t 
     return nullptr;
 }
 
+// The camera accepted every write.
+std::vector<ControlWrite> accepted(ControlPlanner& planner, std::vector<ControlWrite> writes)
+{
+    for (const auto& write : writes) planner.commit(write);
+    return writes;
+}
+
 void check_automatic()
 {
     ControlPlanner planner(lens_limits());
     Request request;
     auto writes = planner.plan(request);
-    require(find(writes, abi::cid::exposure_auto)->value == abi::v4l2_value::exposure_aperture_priority, "AE on is automatic");
+    require(find(writes, abi::cid::exposure_auto)->value == abi::v4l2_value::exposure_auto &&
+                abi::v4l2_value::exposure_auto == 0,
+            "AE on is V4L2's automatic exposure, which the host offers");
     require(find(writes, abi::cid::iso_sensitivity_auto)->value == abi::v4l2_value::iso_automatic, "ISO automatic");
     require(find(writes, abi::cid::focus_auto)->value == 1, "continuous picture is continuous AF");
     require(find(writes, abi::cid::auto_white_balance)->value == 1, "AWB auto");
@@ -61,8 +70,17 @@ void check_automatic()
     require(find(writes, abi::cid::still_flash)->value == 0, "still flash off");
     require(find(writes, abi::cid::test_pattern)->value == 0, "no test pattern");
 
-    // The same request writes nothing again.
+    // A write the camera has not accepted is planned again; one it accepted is not.
+    require(planner.plan(request).size() == writes.size(), "nothing is remembered before it is committed");
+    accepted(planner, writes);
     require(planner.plan(request).empty(), "an unchanged request writes nothing");
+    // A refused value does not retire the control: a later request writes it again.
+    planner.reset();
+    writes = planner.plan(request);
+    for (const auto& write : writes)
+        if (write.id != abi::cid::exposure_auto) planner.commit(write);
+    require(planner.plan(request).size() == 1 && planner.plan(request)[0].id == abi::cid::exposure_auto,
+            "only the refused write is planned again");
     // A reset forgets.
     planner.reset();
     require(!planner.plan(request).empty(), "after a reset everything is written");
@@ -109,8 +127,19 @@ void check_manual()
     ControlPlanner automatic(zoom);
     request.ae_mode = av::ae_off;
     writes = automatic.plan(request);
-    require(find(writes, abi::cid::exposure_auto)->value == abi::v4l2_value::exposure_aperture_priority, "no manual exposure");
+    require(find(writes, abi::cid::exposure_auto)->value == abi::v4l2_value::exposure_auto, "no manual exposure");
     require(find(writes, abi::cid::exposure_ns) == nullptr, "no exposure write");
+
+    // The host's minimum is one: a description that says zero clamps to one, and a
+    // maximum below the minimum does not invert the range.
+    auto loose = lens_limits();
+    loose.iso_min = 0;
+    loose.exposure_min_ns = 0;
+    ControlPlanner clamps(loose);
+    require(clamps.clamp_iso(0) == 1 && clamps.clamp_exposure(0) == 1, "the minimum is one");
+    loose.iso_min = 200;
+    loose.iso_max = 100;
+    require(ControlPlanner(loose).clamp_iso(5000) == 200, "an inverted range holds the minimum");
 }
 
 void check_focus_and_locks()
@@ -123,22 +152,45 @@ void check_focus_and_locks()
     require(find(writes, abi::cid::focus_auto)->value == 0, "single AF is not continuous");
     require(find(writes, abi::cid::auto_focus_start) != nullptr, "the trigger starts a scan");
 
+    require(planner.af_engaged(), "the trigger engages the scan");
     request.af_trigger = av::af_trigger_idle;
     writes = planner.plan(request);
     require(find(writes, abi::cid::auto_focus_start) == nullptr, "an idle trigger starts nothing");
+    require(planner.af_engaged(), "the scan stays engaged");
 
     request.af_trigger = av::af_trigger_cancel;
     writes = planner.plan(request);
     require(find(writes, abi::cid::auto_focus_stop) != nullptr, "cancel stops it");
+    require(!planner.af_engaged(), "and ends it");
+
+    // A new mode starts over, and a manual lens is told where to be though a scan
+    // may have moved it since the request last said so.
+    request.af_mode = av::af_off;
+    request.af_trigger = av::af_trigger_idle;
+    request.focus_distance = 2.0f;
+    accepted(planner, planner.plan(request));
+    request.af_mode = av::af_auto;
+    accepted(planner, planner.plan(request));
+    request.af_trigger = av::af_trigger_start;
+    accepted(planner, planner.plan(request));
+    require(planner.af_engaged(), "engaged again");
+    request.af_mode = av::af_off;
+    request.af_trigger = av::af_trigger_idle;
+    writes = planner.plan(request);
+    require(!planner.af_engaged(), "a change of mode ends the scan");
+    require(find(writes, abi::cid::focus_absolute) != nullptr && find(writes, abi::cid::focus_absolute)->value == 2000,
+            "the manual lens is moved again after a scan");
+    require(find(writes, abi::cid::auto_focus_start) == nullptr, "and nothing else is pressed");
 
     // In continuous AF a trigger locks focus until it is cancelled.
     ControlPlanner continuous(lens_limits());
     Request pic;
     pic.af_trigger = av::af_trigger_start;
-    writes = continuous.plan(pic);
+    writes = accepted(continuous, continuous.plan(pic));
     require(find(writes, abi::cid::lock_3a)->value == abi::v4l2_value::lock_focus, "focus locked by the trigger");
+    require(!continuous.af_engaged(), "the scanning flag is for the scanning modes");
     pic.af_trigger = av::af_trigger_idle;
-    writes = continuous.plan(pic);
+    writes = accepted(continuous, continuous.plan(pic));
     require(find(writes, abi::cid::lock_3a) == nullptr, "the lock holds");
     pic.af_trigger = av::af_trigger_cancel;
     writes = continuous.plan(pic);
@@ -194,13 +246,24 @@ void check_other_controls()
     planner.reset();
     require(find(planner.plan(request), abi::cid::still_flash)->value == 2, "a single flash");
 
-    for (const auto mode : {av::awb_incandescent, av::awb_fluorescent, av::awb_warm_fluorescent, av::awb_twilight, av::awb_daylight,
-                            av::awb_cloudy_daylight, av::awb_shade})
-        require(awb_preset(mode).has_value(), "presets");
+    // The presets the host offers (2, 3, 6, 8, 9); it skips the warm fluorescent and
+    // the twilight ones.
+    require(awb_preset(av::awb_incandescent) == 2 && awb_preset(av::awb_fluorescent) == 3 && awb_preset(av::awb_daylight) == 6 &&
+                awb_preset(av::awb_cloudy_daylight) == 8 && awb_preset(av::awb_shade) == 9,
+            "presets");
+    require(!awb_preset(av::awb_warm_fluorescent) && !awb_preset(av::awb_twilight), "no preset the host skips");
     require(!awb_preset(av::awb_auto) && !awb_preset(av::awb_off), "auto and off are not presets");
     require(rotate_value(av::rotate_none) == 0 && rotate_value(av::rotate_90) == 1 && rotate_value(av::rotate_180) == 2 &&
                 rotate_value(av::rotate_270) == 3,
             "rotation values");
+
+    // A camera without manual white balance has no presets: the preset is automatic.
+    auto zoom_camera = lens_limits();
+    zoom_camera.flags &= ~abi::feature::manual_white_balance;
+    ControlPlanner zoom_planner(zoom_camera);
+    writes = zoom_planner.plan(request);
+    require(find(writes, abi::cid::auto_white_balance)->value == 1 && find(writes, abi::cid::auto_n_preset_white_balance) == nullptr,
+            "no presets without manual white balance");
 
     // A camera without a torch or flash writes no flash controls.
     auto plain = lens_limits();
@@ -223,7 +286,9 @@ void check_regions()
     require(region->region[0] == to_q16(0.25) && region->region[1] == to_q16(0.25), "origin");
     require(region->region[2] == to_q16(0.5) && region->region[3] == to_q16(0.5), "size");
     require(region->region[4] == 500, "weight");
-    require(planner.plan(request).empty() || find(planner.plan(request), abi::cid::ae_region) == nullptr, "unchanged");
+    require(find(planner.plan(request), abi::cid::ae_region) != nullptr, "a region the camera has not accepted is written again");
+    accepted(planner, writes);
+    require(find(planner.plan(request), abi::cid::ae_region) == nullptr, "unchanged");
 
     request.ae_region.weight = 0;
     region = find(planner.plan(request), abi::cid::ae_region);
@@ -254,7 +319,7 @@ void check_results()
     meta.flash_state = 0;
 
     Request request;
-    auto result = result_of(meta, request, true);
+    auto result = result_of(meta, request, true, false);
     require(result.ae_state == av::ae_state_converged && result.af_state == av::af_state_focused_locked &&
                 result.awb_state == av::awb_state_converged,
             "the host's states");
@@ -265,18 +330,40 @@ void check_results()
     require(result.flash_state == av::flash_state_ready, "a flash that has no state is ready");
 
     request.ae_precapture_trigger = av::ae_trigger_start;
-    require(result_of(meta, request, true).ae_state == av::ae_state_precapture, "a precapture trigger reports PRECAPTURE");
+    require(result_of(meta, request, true, false).ae_state == av::ae_state_precapture, "a precapture trigger reports PRECAPTURE");
     request.ae_precapture_trigger = av::ae_trigger_idle;
     request.ae_mode = av::ae_off;
     request.af_mode = av::af_off;
     request.awb_mode = av::awb_off;
-    result = result_of(meta, request, false);
+    result = result_of(meta, request, false, false);
     require(result.ae_state == av::ae_state_inactive && result.af_state == av::af_state_inactive &&
                 result.awb_state == av::awb_state_inactive,
             "manual modes are inactive");
     require(result.flash_state == av::flash_state_unavailable, "no flash");
     meta.zoom_ratio_q16 = 0;
-    require(result_of(meta, request, false).zoom_ratio == 1.0f, "a record without zoom says 1.0");
+    require(result_of(meta, request, false, false).zoom_ratio == 1.0f, "a record without zoom says 1.0");
+
+    // AF in the scanning modes: inactive until a trigger, ACTIVE_SCAN for the request
+    // that triggers, the host's state while the scan is engaged, inactive again
+    // after a cancel (not engaged); the continuous modes are the host's state.
+    request = Request{};
+    request.af_mode = av::af_auto;
+    meta.af_state = av::af_state_focused_locked; // the host locks at once with FOCUS_AUTO off
+    require(result_of(meta, request, true, false).af_state == av::af_state_inactive, "inactive before the first trigger");
+    request.af_trigger = av::af_trigger_start;
+    require(result_of(meta, request, true, true).af_state == av::af_state_active_scan, "the triggering request is scanning");
+    request.af_trigger = av::af_trigger_idle;
+    require(result_of(meta, request, true, true).af_state == av::af_state_focused_locked, "then the host's state");
+    meta.af_state = av::af_state_not_focused_locked;
+    require(result_of(meta, request, true, true).af_state == av::af_state_not_focused_locked, "including a failed scan");
+    request.af_trigger = av::af_trigger_cancel;
+    require(result_of(meta, request, true, false).af_state == av::af_state_inactive, "inactive after a cancel");
+    request.af_mode = av::af_macro;
+    request.af_trigger = av::af_trigger_idle;
+    require(result_of(meta, request, true, false).af_state == av::af_state_inactive, "macro scans like auto");
+    request.af_mode = av::af_continuous_picture;
+    meta.af_state = av::af_state_passive_focused;
+    require(result_of(meta, request, true, false).af_state == av::af_state_passive_focused, "continuous focus is the host's state");
 }
 
 void check_exif()

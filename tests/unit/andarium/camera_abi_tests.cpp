@@ -8,6 +8,8 @@
 #include <cstring>
 
 #include "camera_abi.hpp"
+#include "camera_controls.hpp"
+#include "jpeg_gap.hpp"
 #include "require.hpp"
 #include "virtio_video.h"
 #include "virtio_video_v4l2_ids.h"
@@ -162,6 +164,68 @@ void check_controls()
     require(abi::v4l2_value::rotate_automatic == VIRTIO_VIDEO_CAMERA_ROTATE_AUTOMATIC, "automatic rotation");
 }
 
+// The menu items and bits the HAL writes, and the numbers it reads back.
+void check_menu_values()
+{
+    require(abi::v4l2_value::exposure_auto == UML_V4L2_EXPOSURE_AUTO && abi::v4l2_value::exposure_auto == 0, "EXPOSURE_AUTO automatic");
+    require(abi::v4l2_value::exposure_manual == UML_V4L2_EXPOSURE_MANUAL, "EXPOSURE_AUTO manual");
+    require(abi::v4l2_value::iso_manual == UML_V4L2_ISO_SENSITIVITY_MANUAL, "ISO manual");
+    require(abi::v4l2_value::iso_automatic == UML_V4L2_ISO_SENSITIVITY_AUTO, "ISO automatic");
+    require(abi::v4l2_value::lock_exposure == UML_V4L2_LOCK_EXPOSURE, "lock exposure");
+    require(abi::v4l2_value::lock_white_balance == UML_V4L2_LOCK_WHITE_BALANCE, "lock white balance");
+    require(abi::v4l2_value::lock_focus == UML_V4L2_LOCK_FOCUS, "lock focus");
+    require(abi::v4l2_value::flash_led_off == UML_V4L2_FLASH_LED_MODE_NONE, "LED off");
+    require(abi::v4l2_value::flash_led_torch == UML_V4L2_FLASH_LED_MODE_TORCH, "LED torch");
+    require(abi::v4l2_value::focus_status_busy == UML_V4L2_AUTO_FOCUS_STATUS_BUSY, "AF busy");
+    require(abi::v4l2_value::focus_status_reached == UML_V4L2_AUTO_FOCUS_STATUS_REACHED, "AF reached");
+    require(abi::v4l2_value::focus_status_failed == UML_V4L2_AUTO_FOCUS_STATUS_FAILED, "AF failed");
+    require(abi::v4l2_value::white_balance_incandescent == UML_V4L2_WHITE_BALANCE_INCANDESCENT, "incandescent");
+    require(abi::v4l2_value::white_balance_fluorescent == UML_V4L2_WHITE_BALANCE_FLUORESCENT, "fluorescent");
+    require(abi::v4l2_value::white_balance_daylight == UML_V4L2_WHITE_BALANCE_DAYLIGHT, "daylight");
+    require(abi::v4l2_value::white_balance_cloudy == UML_V4L2_WHITE_BALANCE_CLOUDY, "cloudy");
+    require(abi::v4l2_value::white_balance_shade == UML_V4L2_WHITE_BALANCE_SHADE, "shade");
+
+    // The presets the planner writes are the ones the host does not skip (its menu
+    // skips 4, 5 and 7), and a planned preset is a menu item V4L2 knows.
+    using andarium::camera::awb_preset;
+    namespace av = andarium::camera::android_value;
+    for (const auto mode : {av::awb_incandescent, av::awb_fluorescent, av::awb_daylight, av::awb_cloudy_daylight, av::awb_shade}) {
+        const auto preset = awb_preset(mode);
+        require(preset && *preset != 4 && *preset != 5 && *preset != 7, "a preset the host offers");
+    }
+}
+
+// The buffers' flags on the wire, the region records and the Android enumerations
+// that the wire names by reference.
+void check_wire_details()
+{
+    require(abi::buffer_flag::group_more == VIRTIO_VIDEO_CAMERA_QUEUE_F_GROUP_MORE, "GROUP_MORE");
+    require(abi::buffer_flag::dequeue_error == VIRTIO_VIDEO_DEQUEUE_FLAG_ERR, "the error dequeue flag");
+    require(abi::buffer_flag::dequeue_black == VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLACK, "black");
+    require(abi::buffer_flag::dequeue_interrupted == VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED, "interrupted");
+    require(abi::buffer_flag::dequeue_blocked == VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_BLOCKED, "blocked");
+    require(abi::buffer_flag::dequeue_resuming == VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_RESUMING, "resuming");
+
+    // A region is five u32 (x, y, width, height, weight): the header says so, and
+    // the host's records are 20 bytes (regionPayloadSize in the host's controls).
+    require(abi::region_words == 5 && abi::region_words * sizeof(std::uint32_t) == 20, "a region record");
+    require(abi::exif_gap_length == uml::camera::exifGapLength, "the Exif gap the host reserves");
+
+    // The 3A and flash state numbers are Android's own (CONTROL_AE_STATE_*,
+    // CONTROL_AF_STATE_*, CONTROL_AWB_STATE_*, FLASH_STATE_*), as the header says.
+    namespace av = andarium::camera::android_value;
+    require(av::ae_state_inactive == 0 && av::ae_state_searching == 1 && av::ae_state_converged == 2 && av::ae_state_locked == 3 &&
+                av::ae_state_flash_required == 4 && av::ae_state_precapture == 5,
+            "AE states");
+    require(av::af_state_inactive == 0 && av::af_state_passive_scan == 1 && av::af_state_passive_focused == 2 &&
+                av::af_state_active_scan == 3 && av::af_state_focused_locked == 4 && av::af_state_not_focused_locked == 5 &&
+                av::af_state_passive_unfocused == 6,
+            "AF states");
+    require(av::awb_state_inactive == 0 && av::awb_state_searching == 1 && av::awb_state_converged == 2 && av::awb_state_locked == 3,
+            "AWB states");
+    require(av::flash_state_unavailable == 0 && av::flash_state_ready == 2, "flash states");
+}
+
 } // namespace
 
 int main()
@@ -170,5 +234,7 @@ int main()
     check_meta();
     check_values();
     check_controls();
+    check_menu_values();
+    check_wire_details();
     return 0;
 }

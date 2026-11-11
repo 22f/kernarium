@@ -167,6 +167,8 @@ constexpr std::uint32_t flash_led_mode = 0x009c0901;
 constexpr std::uint32_t test_pattern = 0x009f0903;
 constexpr std::uint32_t jpeg_compression_quality = 0x009d0903;
 
+// The camera's description is a read-only compound control at private_base + 16
+// (V4l2Utils.h); its canonical definition follows with the driver.
 constexpr std::uint32_t private_base = 0x00981c00;
 constexpr std::uint32_t exposure_ns = private_base + 0;
 constexpr std::uint32_t iso = private_base + 1;
@@ -182,8 +184,10 @@ constexpr std::uint32_t rotate_and_crop = private_base + 9;
 
 // V4L2 menu values and bits the HAL writes to those controls.
 namespace v4l2_value {
+// EXPOSURE_AUTO is a menu of which the host offers the automatic (0) and manual (1)
+// items only.
+constexpr std::int64_t exposure_auto = 0;
 constexpr std::int64_t exposure_manual = 1;
-constexpr std::int64_t exposure_aperture_priority = 3;
 constexpr std::int64_t iso_manual = 0;    // V4L2_ISO_SENSITIVITY_MANUAL
 constexpr std::int64_t iso_automatic = 1; // V4L2_ISO_SENSITIVITY_AUTO
 constexpr std::int64_t lock_exposure = 1;
@@ -195,7 +199,26 @@ constexpr std::int64_t focus_status_busy = 1;
 constexpr std::int64_t focus_status_reached = 2;
 constexpr std::int64_t focus_status_failed = 4;
 constexpr std::int64_t rotate_automatic = 4;
+// AUTO_N_PRESET_WHITE_BALANCE: the presets the host offers (it skips the others).
+constexpr std::int64_t white_balance_incandescent = 2;
+constexpr std::int64_t white_balance_fluorescent = 3;
+constexpr std::int64_t white_balance_daylight = 6;
+constexpr std::int64_t white_balance_cloudy = 8;
+constexpr std::int64_t white_balance_shade = 9;
 } // namespace v4l2_value
+
+// The flags of the camera's buffers on the wire. The driver maps them for the HAL:
+// V4L2_BUF_FLAG_LAST on the last buffer of a group of stills (not GROUP_MORE) and
+// V4L2_BUF_FLAG_ERROR for a failed capture (DEQUEUE_FLAG_ERR); the other dequeue
+// flags ride in the metadata as frame_flag.
+namespace buffer_flag {
+constexpr std::uint32_t group_more = 1u << 0;
+constexpr std::uint32_t dequeue_error = 1u << 0;
+constexpr std::uint32_t dequeue_black = 1u << 8;
+constexpr std::uint32_t dequeue_interrupted = 1u << 9;
+constexpr std::uint32_t dequeue_blocked = 1u << 10;
+constexpr std::uint32_t dequeue_resuming = 1u << 11;
+} // namespace buffer_flag
 
 // The region controls carry five u32: x, y, width, height (Q16 fractions of the
 // frame) and a weight from 0 to 1000; weight 0 clears the region.

@@ -72,6 +72,7 @@ uml_add_unit_test(NAME andarium-gamepad-protocol
 add_executable(uml_andarium_camera_abi_tests camera_abi_tests.cpp)
 target_include_directories(uml_andarium_camera_abi_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal
+    ${PROJECT_SOURCE_DIR}/darwin/device/camera
     ${PROJECT_SOURCE_DIR}/kernel/common/video)
 uml_add_unit_test(NAME andarium-camera-abi
     COMMAND uml_andarium_camera_abi_tests LABELS andarium)

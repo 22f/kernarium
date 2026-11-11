@@ -126,17 +126,16 @@ struct ControlWrite {
 };
 
 // The V4L2 white-balance preset (V4L2_WHITE_BALANCE_*) of an Android AWB mode, or
-// nothing for a mode that is not a preset.
+// nothing for a mode that is not a preset the host offers (it has no warm
+// fluorescent and no twilight).
 inline std::optional<std::int64_t> awb_preset(std::uint8_t mode) noexcept
 {
     switch (mode) {
-    case android_value::awb_incandescent: return 2;
-    case android_value::awb_fluorescent: return 3;
-    case android_value::awb_warm_fluorescent: return 4;
-    case android_value::awb_twilight: return 5; // horizon
-    case android_value::awb_daylight: return 6;
-    case android_value::awb_cloudy_daylight: return 8;
-    case android_value::awb_shade: return 9;
+    case android_value::awb_incandescent: return abi::v4l2_value::white_balance_incandescent;
+    case android_value::awb_fluorescent: return abi::v4l2_value::white_balance_fluorescent;
+    case android_value::awb_daylight: return abi::v4l2_value::white_balance_daylight;
+    case android_value::awb_cloudy_daylight: return abi::v4l2_value::white_balance_cloudy;
+    case android_value::awb_shade: return abi::v4l2_value::white_balance_shade;
     default: return std::nullopt;
     }
 }
@@ -177,15 +176,17 @@ class ControlPlanner {
 public:
     explicit ControlPlanner(const Limits& limits, float ev_step = 1.0f / 3.0f) : limits_(limits), ev_step_(ev_step) {}
 
-    // The writes this request needs, given what was written before it. A
-    // trigger writes at every request that carries it.
+    // The writes this request needs, given what was written before it (what the
+    // caller has committed). A trigger writes at every request that carries it.
+    // The planner remembers nothing about a write until commit(): a write the
+    // camera refused or never received is planned again.
     std::vector<ControlWrite> plan(const Request& request)
     {
         std::vector<ControlWrite> writes;
         const bool manual_exposure = request.ae_mode == android_value::ae_off && limits_.manual_sensor;
 
         value(writes, abi::cid::exposure_auto,
-              manual_exposure ? abi::v4l2_value::exposure_manual : abi::v4l2_value::exposure_aperture_priority);
+              manual_exposure ? abi::v4l2_value::exposure_manual : abi::v4l2_value::exposure_auto);
         value(writes, abi::cid::iso_sensitivity_auto,
               manual_exposure ? abi::v4l2_value::iso_manual : abi::v4l2_value::iso_automatic);
         if (manual_exposure) {
@@ -195,34 +196,47 @@ public:
             value(writes, abi::cid::auto_exposure_bias, bias_of(request.ae_compensation_steps));
         }
 
+        const bool has_af = (limits_.flags & abi::feature::autofocus) != 0;
+        const bool continuous = request.af_mode == android_value::af_continuous_picture ||
+            request.af_mode == android_value::af_continuous_video;
+        const bool scanning_mode = request.af_mode == android_value::af_auto || request.af_mode == android_value::af_macro;
+        if (has_af && (!last_af_mode_ || *last_af_mode_ != request.af_mode)) {
+            // A new mode starts over: the lock and the scan of the old one end, and a
+            // manual lens goes where the request says, though a scan may have moved it.
+            focus_locked_ = false;
+            af_engaged_ = false;
+            if (!continuous && !scanning_mode) forget(abi::cid::focus_absolute);
+            last_af_mode_ = request.af_mode;
+        }
+
         std::int64_t locks = 0;
         if (request.ae_lock) locks |= abi::v4l2_value::lock_exposure;
         if (request.awb_lock) locks |= abi::v4l2_value::lock_white_balance;
-        const bool focus_locked_by_trigger = focus_locked_;
-        if (focus_locked_by_trigger) locks |= abi::v4l2_value::lock_focus;
+        if (focus_locked_) locks |= abi::v4l2_value::lock_focus;
 
-        // Focus.
-        if (limits_.flags & abi::feature::autofocus) {
-            const bool continuous = request.af_mode == android_value::af_continuous_picture ||
-                request.af_mode == android_value::af_continuous_video;
-            const bool automatic = continuous || request.af_mode == android_value::af_auto ||
-                request.af_mode == android_value::af_macro;
+        // Focus. With FOCUS_AUTO off the host's lens holds, a press of the focus
+        // button runs one scan and a written distance moves it.
+        if (has_af) {
             value(writes, abi::cid::focus_auto, continuous ? 1 : 0);
-            if (!automatic && (limits_.flags & abi::feature::manual_focus))
+            if (!continuous && !scanning_mode && (limits_.flags & abi::feature::manual_focus))
                 value(writes, abi::cid::focus_absolute, focus_of(request.focus_distance));
             if (request.af_trigger == android_value::af_trigger_start) {
                 if (continuous) {
                     focus_locked_ = true;
                     locks |= abi::v4l2_value::lock_focus;
-                } else if (automatic) {
+                } else if (scanning_mode) {
                     writes.push_back({abi::cid::auto_focus_start, 1, {}, false});
+                    af_engaged_ = true;
                 }
             } else if (request.af_trigger == android_value::af_trigger_cancel) {
                 focus_locked_ = false;
                 locks &= ~abi::v4l2_value::lock_focus;
-                if (!continuous && automatic) writes.push_back({abi::cid::auto_focus_stop, 1, {}, false});
+                if (scanning_mode) {
+                    writes.push_back({abi::cid::auto_focus_stop, 1, {}, false});
+                    af_engaged_ = false;
+                }
             }
-            region(writes, abi::cid::af_region, request.af_region, last_af_region_);
+            region(writes, abi::cid::af_region, request.af_region, last_af_words_);
         }
         value(writes, abi::cid::lock_3a, locks);
 
@@ -234,14 +248,15 @@ public:
             value(writes, abi::cid::wb_gain_red, gain_of(request.wb_gains[0]));
             value(writes, abi::cid::wb_gain_green, gain_of(0.5f * (request.wb_gains[1] + request.wb_gains[2])));
             value(writes, abi::cid::wb_gain_blue, gain_of(request.wb_gains[3]));
-        } else if (const auto preset = awb_preset(request.awb_mode)) {
+        } else if (const auto preset = awb_preset(request.awb_mode);
+                   preset && (limits_.flags & abi::feature::manual_white_balance)) {
             value(writes, abi::cid::auto_white_balance, 0);
             value(writes, abi::cid::auto_n_preset_white_balance, *preset);
         } else {
             value(writes, abi::cid::auto_white_balance, 1);
         }
 
-        region(writes, abi::cid::ae_region, request.ae_region, last_ae_region_);
+        region(writes, abi::cid::ae_region, request.ae_region, last_ae_words_);
 
         if (limits_.flags & abi::feature::zoom) value(writes, abi::cid::zoom_q16, zoom_of(request.zoom_ratio));
 
@@ -268,22 +283,49 @@ public:
         return writes;
     }
 
+    // Records that the camera accepted a write, so that the next plan leaves it
+    // out until the request changes it.
+    void commit(const ControlWrite& write)
+    {
+        if (write.is_region) {
+            if (write.id == abi::cid::ae_region) last_ae_words_ = write.region;
+            else if (write.id == abi::cid::af_region) last_af_words_ = write.region;
+            return;
+        }
+        for (auto& entry : last_)
+            if (entry.first == write.id) {
+                entry.second = write.value;
+                return;
+            }
+        last_.emplace_back(write.id, write.value);
+    }
+
     // Forgets what was written (the camera was closed or its stream restarted).
     void reset()
     {
         last_.clear();
-        last_ae_region_ = last_af_region_ = {};
+        last_ae_words_ = last_af_words_ = {};
         focus_locked_ = false;
+        af_engaged_ = false;
+        last_af_mode_.reset();
     }
 
+    // A scan the request asked for (AF mode auto or macro, a trigger) is under way
+    // or done, and no cancel or mode change has ended it.
+    [[nodiscard]] bool af_engaged() const noexcept { return af_engaged_; }
+
+    // The host takes exposure times and sensitivities from 1 up (its ranges, not
+    // below the description's minimum), and the HAL's range may be wider.
     [[nodiscard]] std::int64_t clamp_exposure(std::int64_t ns) const noexcept
     {
-        if (limits_.exposure_max_ns == 0) return std::max<std::int64_t>(ns, 1);
-        return std::clamp<std::int64_t>(ns, std::int64_t(limits_.exposure_min_ns), std::int64_t(limits_.exposure_max_ns));
+        const std::int64_t low = std::max<std::int64_t>(std::int64_t(limits_.exposure_min_ns), 1);
+        if (limits_.exposure_max_ns == 0) return std::max(ns, low);
+        return std::clamp<std::int64_t>(ns, low, std::max(low, std::int64_t(limits_.exposure_max_ns)));
     }
     [[nodiscard]] std::int64_t clamp_iso(std::int32_t iso) const noexcept
     {
-        return std::clamp<std::int64_t>(iso, std::int64_t(limits_.iso_min), std::int64_t(limits_.iso_max));
+        const std::int64_t low = std::max<std::int64_t>(std::int64_t(limits_.iso_min), 1);
+        return std::clamp<std::int64_t>(iso, low, std::max(low, std::int64_t(limits_.iso_max)));
     }
 
 private:
@@ -312,34 +354,36 @@ private:
         return std::int64_t(to_q16(std::clamp(double(ratio), low, std::max(low, high))));
     }
 
-    void value(std::vector<ControlWrite>& writes, std::uint32_t id, std::int64_t v)
+    void value(std::vector<ControlWrite>& writes, std::uint32_t id, std::int64_t v) const
     {
-        for (auto& entry : last_)
-            if (entry.first == id) {
-                if (entry.second == v) return;
-                entry.second = v;
-                writes.push_back({id, v, {}, false});
-                return;
-            }
-        last_.emplace_back(id, v);
+        for (const auto& entry : last_)
+            if (entry.first == id && entry.second == v) return;
         writes.push_back({id, v, {}, false});
     }
-    void region(std::vector<ControlWrite>& writes, std::uint32_t id, const Region& wanted, Region& last)
+    void region(std::vector<ControlWrite>& writes, std::uint32_t id, const Region& wanted,
+                const std::array<std::uint32_t, abi::region_words>& last) const
     {
-        if (wanted == last) return;
-        last = wanted;
+        const auto words = region_words(wanted, limits_);
+        if (words == last) return;
         ControlWrite write;
         write.id = id;
         write.is_region = true;
-        write.region = region_words(wanted, limits_);
+        write.region = words;
         writes.push_back(write);
+    }
+    void forget(std::uint32_t id)
+    {
+        last_.erase(std::remove_if(last_.begin(), last_.end(), [id](const auto& entry) { return entry.first == id; }),
+                    last_.end());
     }
 
     Limits limits_;
     float ev_step_;
-    std::vector<std::pair<std::uint32_t, std::int64_t>> last_;
-    Region last_ae_region_, last_af_region_;
+    std::vector<std::pair<std::uint32_t, std::int64_t>> last_; // what the camera accepted
+    std::array<std::uint32_t, abi::region_words> last_ae_words_{}, last_af_words_{};
+    std::optional<std::uint8_t> last_af_mode_;
     bool focus_locked_ = false;
+    bool af_engaged_ = false;
 };
 
 // What the result of a request says, from the exposure's metadata record.
@@ -360,16 +404,28 @@ struct ResultValues {
 
 // The request's AE precapture trigger reports PRECAPTURE for the exposure it
 // arrives with, and the host's own state after it (iOS meters while it takes a
-// photo, so there is no separate precapture sequence to wait for); AF reports
-// inactive when focus is off, and the host's state otherwise.
-inline ResultValues result_of(const abi::Meta& meta, const Request& request, bool flash_available) noexcept
+// photo, so there is no separate precapture sequence to wait for). AF reports
+// inactive when focus is off; in the scanning modes (auto, macro) it is inactive
+// until a trigger and after a cancel or a change of mode (`af_engaged`), ACTIVE_SCAN
+// for the request that triggers, and the host's state after that; in the continuous
+// modes it is the host's state.
+inline ResultValues result_of(const abi::Meta& meta, const Request& request, bool flash_available,
+                              bool af_engaged) noexcept
 {
     ResultValues result;
     result.ae_state = request.ae_precapture_trigger == android_value::ae_trigger_start
         ? android_value::ae_state_precapture
         : meta.ae_state;
     if (request.ae_mode == android_value::ae_off) result.ae_state = android_value::ae_state_inactive;
-    result.af_state = request.af_mode == android_value::af_off ? android_value::af_state_inactive : meta.af_state;
+    result.af_state = meta.af_state;
+    if (request.af_mode == android_value::af_off) {
+        result.af_state = android_value::af_state_inactive;
+    } else if (request.af_mode == android_value::af_auto || request.af_mode == android_value::af_macro) {
+        if (request.af_trigger == android_value::af_trigger_start)
+            result.af_state = android_value::af_state_active_scan;
+        else if (!af_engaged)
+            result.af_state = android_value::af_state_inactive;
+    }
     result.awb_state = request.awb_mode == android_value::awb_off ? android_value::awb_state_inactive : meta.awb_state;
     result.exposure_ns = std::int64_t(meta.exposure_ns);
     result.frame_duration_ns = std::int64_t(meta.frame_duration_ns);
