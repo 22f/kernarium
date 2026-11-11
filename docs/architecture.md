@@ -287,9 +287,10 @@ fatal internal error. Each engine's internals are in its README
 for both by `darwin/cpu/arm64/detail/floating_exception.hpp`.
 
 The arm64 gadget code is one region in `darwin/cpu/arm64/gadgets/engine.S`: the
-bank, the sections its gadgets push variants and cold paths into, and an island
-of veneers. Every image that carries it links `UML::GadgetRegionLayout`, which
-orders it first in `__TEXT,__text`, so the region starts on a 16 KiB page, each
+bank, the sections its gadgets push variants and cold paths into, an island of
+veneers, and last the run heads, which branch only into the bank. Every image
+that carries it links `UML::GadgetRegionLayout`, which orders it first in
+`__TEXT,__text`, so the region starts on a 16 KiB page, each
 part starts on its boundary plus the phase `engine.S` defines, and its bytes
 depend on `engine.S` alone. Private labels take the Mach-O assembler-temporary
 prefix `L`, and a branch to one in another part encodes its distance past the
