@@ -134,6 +134,12 @@ final class SnapshotsModel {
         return item
     }
 
+    /// What Home's card says of a guest this app version cannot start: the
+    /// way out through an older snapshot is named where there is one.
+    func blockedText(_ reason: StartBlock) -> String {
+        SnapshotWords.blockedText(reason, hasOlderSnapshot: hasRestorableSnapshot)
+    }
+
     /// What Home's card says of a restore that did not finish; nil when none does.
     var unfinishedRestoreText: String? {
         guard let unfinished = unfinishedRestore else { return nil }

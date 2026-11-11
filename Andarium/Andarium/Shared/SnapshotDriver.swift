@@ -144,6 +144,10 @@ extension AppModel {
         return await snapshotDriver.renameSnapshot(id, to: name)
     }
 
+    /// Home's "System image updated" card gives way to a restored older
+    /// snapshot's own note that the next start updates it.
+    var updateNoticeIsShown: Bool { restoredSnapshot?.updatesTo == nil }
+
     /// The guest was erased or made anew: nothing read about its snapshots holds.
     func forgetSnapshots() {
         snapshots.reset()

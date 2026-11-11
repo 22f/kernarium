@@ -24,6 +24,9 @@ final class FakeSnapshotDriver: SnapshotDriver {
     var holding: SnapshotWork?
     /// The measured reading waits until `releaseMeasuring()`.
     var holdMeasuring = false
+    /// What a restore does to the files besides its data, as a test plays it
+    /// (the files now say what a start would be).
+    var onRestore: (@MainActor () -> Void)?
 
     private(set) var log: [String] = []
     private(set) var measuredReads = 0
@@ -124,6 +127,7 @@ final class FakeSnapshotDriver: SnapshotDriver {
             }
             var restored = guest
             restored.usedBytes = item.kept.bytes
+            self.onRestore?()
             return .done(restored)
         }
     }

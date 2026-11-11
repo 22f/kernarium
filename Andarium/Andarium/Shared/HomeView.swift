@@ -205,7 +205,7 @@ struct HomeView: View {
             )
         }
         switch model.plan {
-        case .update(_, let release) where model.restoredSnapshot?.updatesTo == nil:
+        case .update(_, let release) where model.updateNoticeIsShown:
             // A restored older snapshot says itself that the next start updates it.
             NoticeCard(
                 symbol: "arrow.down.circle.fill", color: .accentColor,
@@ -218,7 +218,7 @@ struct HomeView: View {
             NoticeCard(
                 symbol: "exclamationmark.triangle.fill", color: .orange,
                 title: reason.title,
-                text: SnapshotWords.blockedText(reason, hasOlderSnapshot: model.snapshots.hasRestorableSnapshot)
+                text: model.snapshots.blockedText(reason)
             )
         case .firstStart, .normal, .update:
             EmptyView()

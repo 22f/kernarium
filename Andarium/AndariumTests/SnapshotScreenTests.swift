@@ -383,12 +383,57 @@ struct SnapshotsModelTests {
         #expect(await until { s.store.count == 2 && s.store.isMeasured })
     }
 
-    @Test func erasingTheGuestForgetsWhatWasRead() async {
-        let s = setup([SnapshotSample.item("a")])
+    /// A runtime driver that plays the guest's files, with the guest set up.
+    private func withRuntime(_ s: Setup, plan: StartPlan = .normal) -> StubDriver {
+        let stub = StubDriver(plan: plan)
+        s.model.driver = stub
+        s.model.refreshPlan()
+        return stub
+    }
+
+    /// Everything the screens hold about the snapshots of a guest: read, shown, asked.
+    private func holdsSomething(_ s: Setup) -> Bool {
+        s.store.listing != nil || s.model.restoredSnapshot != nil || s.store.problem != nil || s.store.taking
+            || s.store.restoreTarget != nil || s.store.deleteTarget != nil || s.store.renaming != nil || !s.store.route.isEmpty
+    }
+
+    private func readAndAskSomething(_ s: Setup) async {
         await s.store.reload()
         s.model.restoredSnapshot = RestoredSnapshotNotice(name: "", created: Date())
-        s.model.forgetSnapshots()
-        #expect(s.store.listing == nil && s.store.count == 0 && s.model.restoredSnapshot == nil)
+        s.store.route = [.snapshot(s.store.items[0].id)]
+        s.store.requestTake()
+        s.store.restoreTarget = s.store.items[0].id
+        s.store.deleteTarget = s.store.items[0].id
+        s.driver.nextRefusal = .missing
+        await s.store.rename(s.store.items[0].id, to: "x")
+        #expect(holdsSomething(s) && s.store.problem != nil)
+    }
+
+    @Test func erasingTheGuestForgetsWhatWasRead() async {
+        let s = setup([SnapshotSample.item("a")])
+        _ = withRuntime(s)
+        await readAndAskSomething(s)
+        s.model.erase()
+        #expect(await until { s.model.busy == nil && s.model.guest == nil })
+        #expect(!holdsSomething(s) && s.store.count == 0)
+    }
+
+    @Test func settingUpAnotherGuestForgetsWhatWasRead() async {
+        let s = setup([SnapshotSample.item("a")])
+        _ = withRuntime(s)
+        await readAndAskSomething(s)
+        s.model.create(Guest.fresh(on: s.model.host))
+        #expect(await until { s.model.busy == nil })
+        #expect(!holdsSomething(s) && s.store.count == 0)
+    }
+
+    @Test func aModelWithNoRuntimeForgetsToo() async {
+        for action in 0..<2 {
+            let s = setup([SnapshotSample.item("a")])
+            await readAndAskSomething(s)
+            if action == 0 { s.model.erase() } else { s.model.create(Guest.fresh(on: s.model.host)) }
+            #expect(!holdsSomething(s) && s.store.count == 0, "\(action)")
+        }
     }
 
     // MARK: Take
@@ -516,8 +561,10 @@ struct SnapshotsModelTests {
     @Test func restoringAskedForConfirmationClosesTheSheetAndHomeSaysWhatHappened() async {
         let older = SnapshotSample.item("Before r20", release: "20261108-los24-r18", kept: 3 << 30)
         let s = setup([SnapshotSample.item("now"), older])
+        // The files say what a start is: after the restore of an older snapshot, an update.
+        let files = withRuntime(s)
+        s.driver.onRestore = { files.plan = .update(from: "20261108-los24-r18", to: "20261109-los24-r20") }
         s.model.sheet = .snapshots
-        s.model.planAfterRestore = .update(from: "20261108-los24-r18", to: "20261109-los24-r20")
         await s.store.reload()
         s.store.route = [.snapshot(older.id)]
         // The alert holds the target until the person confirms.
@@ -529,11 +576,13 @@ struct SnapshotsModelTests {
         #expect(s.model.sheet == nil && s.store.route.isEmpty)
         #expect(s.model.restoredSnapshot == RestoredSnapshotNotice(name: "Before r20", created: older.created, updatesTo: "r20"))
         #expect(s.model.guest?.usedBytes == 3 << 30)
-        #expect(s.model.plan == .update(from: "20261108-los24-r18", to: "20261109-los24-r20"))
+        #expect(s.model.plan == .update(from: "20261108-los24-r18", to: "20261109-los24-r20"), "read again from the files")
         #expect(s.store.problem == nil)
-        // Start is next, and putting the notice away or starting clears it.
+        // Home shows the notice, not the update card; Start is next, and starting clears it.
+        #expect(!s.model.updateNoticeIsShown)
         s.model.start(.normal)
-        #expect(s.model.restoredSnapshot == nil)
+        #expect(s.model.restoredSnapshot == nil && s.model.updateNoticeIsShown)
+        #expect(files.begun.count == 1)
     }
 
     @Test func aSnapshotThisAppCannotRestoreStaysAndSaysWhy() async {
@@ -604,6 +653,64 @@ struct SnapshotsModelTests {
         #expect(s.store.unfinishedRestoreSnapshot?.id == a.id)
         #expect(s.store.takeReason == "A restore did not finish. Start finishes it.")
         #expect(s.store.unfinishedRestoreText?.hasPrefix("Andarium could not finish restoring") == true)
+    }
+
+    @Test func aRestoreOrDeleteConfirmedAfterTheGuestStartedIsRefusedAndChangesNothing() async {
+        let a = SnapshotSample.item("a", ago: 1)
+        let b = SnapshotSample.item("b", ago: 2)
+        let s = setup([a, b])
+        await s.store.reload()
+        // Both alerts are up, and the guest starts before the person answers.
+        s.store.restoreTarget = a.id
+        s.store.deleteTarget = b.id
+        s.model.phase = .running(.normal)
+        s.driver.gate = .guestNotStopped
+        s.driver.setRuntimeActive(true)
+        #expect(s.model.snapshotGate == .guestNotStopped)
+        await s.store.restore(a.id)
+        #expect(s.store.problem?.title == "The snapshot could not be restored")
+        #expect(s.store.problem?.message == SnapshotWords.refusal(.guestNotStopped))
+        #expect(s.model.restoredSnapshot == nil && s.model.sheet == .snapshots, "the sheet stays")
+        s.store.problem = nil
+        await s.store.delete(b.id)
+        #expect(s.store.problem?.title == "The snapshot could not be deleted")
+        #expect(s.store.problem?.message == SnapshotWords.refusal(.guestNotStopped))
+        #expect(s.driver.items.count == 2 && s.driver.log.isEmpty, "nothing was done")
+    }
+
+    @Test func homeSaysTheWayOutThroughASnapshotOnlyWhereThereIsOne() async {
+        let s = setup([SnapshotSample.item("later", release: "20261110-los24-r22", restore: .refused(.newerAndroid))])
+        await s.store.reload()
+        // A snapshot this app cannot restore is no way out.
+        #expect(s.store.blockedText(.olderAndroid) == StartBlock.olderAndroid.explanation)
+        s.driver.items.append(SnapshotSample.item("then", release: "20261108-los24-r18"))
+        s.driver.finishedElsewhere()
+        #expect(await until { s.store.hasRestorableSnapshot })
+        #expect(s.store.blockedText(.olderAndroid).contains("restore an older snapshot"))
+        #expect(s.store.blockedText(.mismatch) == StartBlock.mismatch.explanation, "erasing is the only way out of the rest")
+    }
+
+    @Test func homeShowsTheUpdateCardUnlessARestoredSnapshotSaysTheSame() {
+        let s = setup()
+        #expect(s.model.updateNoticeIsShown)
+        s.model.restoredSnapshot = RestoredSnapshotNotice(name: "a", created: Date())
+        #expect(s.model.updateNoticeIsShown, "a snapshot that updates nothing leaves the card")
+        s.model.restoredSnapshot = RestoredSnapshotNotice(name: "a", created: Date(), updatesTo: "r20")
+        #expect(!s.model.updateNoticeIsShown)
+    }
+
+    @Test func homeShowsTheUnfinishedRestoreCardWhileTheListingSaysOneStands() async {
+        let a = SnapshotSample.item("a")
+        let s = setup([a])
+        await s.store.reload()
+        #expect(s.store.unfinishedRestoreText == nil)
+        s.driver.unfinishedRestore = SnapshotUnfinishedRestore(snapshot: a.id, lastFailure: SnapshotFailure(POSIXError(.ENOSPC)))
+        await s.store.reload(force: true)
+        #expect(s.store.unfinishedRestoreText?.hasPrefix("Andarium could not finish restoring") == true)
+        #expect(s.store.unfinishedRestoreText?.hasSuffix("No space left on device.") == true)
+        s.driver.unfinishedRestore = nil
+        await s.store.reload(force: true)
+        #expect(s.store.unfinishedRestoreText == nil)
     }
 
     @Test func aRestoreEndsTheUpdateThatDidNotFinish() async {
