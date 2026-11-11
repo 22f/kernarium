@@ -13,8 +13,19 @@ struct HapticsStreamTests {
         private let lock = NSLock()
         private var peers: [Int32] = []
         var connections: Int { lock.withLock { peers.count } }
-        var latest: Int32? { lock.withLock { peers.last } }
-        deinit { for peer in peers { close(peer) } }
+        var latest: Int32? { lock.withLock { peers.last.flatMap { $0 >= 0 ? $0 : nil } } }
+        deinit { for peer in peers where peer >= 0 { close(peer) } }
+
+        /// The guest's end of the latest connection goes away: closed here and
+        /// forgotten, so that it is closed once. A second close would be of a
+        /// number that another test may be using for a file by then.
+        func dropLatest() {
+            lock.withLock {
+                guard let peer = peers.last, peer >= 0 else { return }
+                peers[peers.count - 1] = -1
+                close(peer)
+            }
+        }
 
         func openStream() throws -> Int32 {
             try lock.withLock {
@@ -44,15 +55,12 @@ struct HapticsStreamTests {
         while !events.connected, Date() < deadline { usleep(2000) }
         #expect(events.connected)
         let acknowledgement = HapticsAcknowledgement(sequence: 1, microseconds: 5, result: .played)
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        let finished = returnsWithoutWaiting {
             // An acknowledgement is 17 bytes and the socket holds some hundred: more than it takes.
             for _ in 0..<2_000 { stream.send(acknowledgement) }
-            done.signal()
         }
-        // The peer is closed first if a regression left the sender blocked.
-        let finished = done.wait(timeout: .now() + 5) == .success
-        if !finished, let peer = guest.latest { close(peer) }
+        // The peer is closed if a regression left the sender blocked, which frees it.
+        if !finished { guest.dropLatest() }
         #expect(finished, "a send waited for a guest that reads nothing")
         // What cannot be written is dropped (the guest never waits for it); the connection stays.
         #expect(events.lost == 0)

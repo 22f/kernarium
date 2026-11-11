@@ -98,14 +98,11 @@ struct ThermalStreamTests {
         let stream = stream(guest, events)
         stream.start()
         #expect(thermalEventually { events.connected == 1 })
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        let finished = returnsWithoutWaiting {
             // A record is a few bytes and the socket holds some thousand: more changes than it takes.
             for round in 0..<1_500 { stream.send(round % 2 == 0 ? .light : .severe) }
             stream.send(.critical)
-            done.signal()
         }
-        let finished = done.wait(timeout: .now() + 5) == .success
         #expect(finished, "a send waited for a guest that reads nothing")
         guard finished else {
             // Frees a send that a regression left blocked.
