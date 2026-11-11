@@ -722,6 +722,10 @@ void write_before_reading(Guest &guest, std::size_t wanted, Outcome &outcome)
 			std::to_string(writer_bytes) + " octets";
 		return;
 	}
+	if (lowest_window == 0) {
+		outcome.problem = "the window fell to 0 while the guest wrote";
+		return;
+	}
 	if (guest.slirp_ack != guest.next) {
 		outcome.problem = "SLiRP left " +
 			std::to_string(guest.next - guest.slirp_ack) +
