@@ -122,6 +122,11 @@ private:
 	 * another executor closed, and of those whose generation the MMU has
 	 * destroyed (`retirements` is its count of destroyed generations). */
 	void leave_gone_spaces(std::uint64_t retirements) noexcept;
+	/* Tell the address space `generation` is bound to, in each cache that
+	 * holds it, that an executor entered it, for the gadget-cache budget to
+	 * find the spaces the guest runs least (gadget_cache_budget.hpp). Once
+	 * per entry. */
+	void note_run(unsigned long generation) noexcept;
 	void select_cpu(CpuState &cpu) noexcept;
 	[[nodiscard]] std::optional<BuildResult> find(
 		std::uint64_t pc, std::uint64_t changes,
@@ -202,6 +207,8 @@ private:
 	/* The MMU's count of destroyed generations when this executor last
 	 * looked for address spaces to let go of. */
 	std::uint64_t retirements_seen_{};
+	/* Whether any SVCR mode cache was made, which note_run() then visits. */
+	bool sme_caches_made_{};
 };
 
 #if defined(UML_GADGET_SWEEP_STRESS) && UML_GADGET_SWEEP_STRESS
