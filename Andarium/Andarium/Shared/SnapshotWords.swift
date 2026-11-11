@@ -24,32 +24,33 @@ enum UnfinishedRestoreKind: Equatable {
 /// here (`Andarium/README.md#model-and-storage`). Nothing in this file reads
 /// a view or a model.
 enum SnapshotWords {
-    static let title = "Snapshots"
-    static let manage = "Manage"
-    static let manageAccessibility = "Manage snapshots"
-    static let take = "Take snapshot"
-    static let none = "None yet"
-    static let spaceLink = "How snapshots use space"
-    static let needsNewerApp = "Needs a newer Andarium"
-    static let cannotBeRestored = "Can\u{2019}t be restored"
-    static let damaged = "Damaged"
+    static let title = String(localized: "Snapshots")
+    static let manage = String(localized: "Manage")
+    static let manageAccessibility = String(localized: "Manage snapshots")
+    static let take = String(localized: "Take snapshot")
+    static let none = String(localized: "None yet")
+    static let spaceLink = String(localized: "How snapshots use space")
+    static let needsNewerApp = String(localized: "Needs a newer Andarium")
+    static let cannotBeRestored = String(localized: "Can\u{2019}t be restored")
+    static let damaged = String(localized: "Damaged")
 
     // MARK: Figures and dates
 
     /// "3 snapshots".
-    static func count(_ count: Int) -> String { count == 1 ? "1 snapshot" : "\(count) snapshots" }
+    static func count(_ count: Int) -> String { String(localized: "\(count) snapshots") }
 
     /// "1.2 GiB", and "At least 1.2 GiB" where only a lower bound is known.
     static func size(_ figure: SnapshotFigure, capitalized: Bool = true) -> String {
         let text = Formats.size(bytes: figure.bytes)
         guard figure.isLowerBound else { return text }
-        return capitalized ? "At least \(text)" : "at least \(text)"
+        return capitalized ? String(localized: "At least \(text)") : String(localized: "at least \(text)")
     }
 
     /// What VoiceOver says of a row's figure.
     static func freesAccessibility(_ figure: SnapshotFigure) -> String {
         let text = Formats.size(bytes: figure.bytes)
-        return figure.isLowerBound ? "Frees at least \(text) if deleted" : "Frees \(text) if deleted"
+        return figure.isLowerBound
+            ? String(localized: "Frees at least \(text) if deleted") : String(localized: "Frees \(text) if deleted")
     }
 
     /// "Nov 11, 2026 at 7:45 AM", in the person's own format.
@@ -66,12 +67,12 @@ enum SnapshotWords {
     static func homeSubtitle(count: Int, total: SnapshotFigure?) -> String {
         guard count > 0 else { return none }
         guard let total else { return Self.count(count) }
-        return "\(Self.count(count)) \u{00B7} \(size(total, capitalized: false))"
+        return String(localized: "\(Self.count(count)) \u{00B7} \(size(total, capitalized: false))")
     }
 
     /// The sheet's subtitle: "4.6 GiB on this iPhone", "At least 4.6 GiB on this iPhone".
     static func sheetSubtitle(total: SnapshotFigure, device: String) -> String {
-        "\(size(total)) on this \(device)"
+        String(localized: "\(size(total)) on this \(device)")
     }
 
     // MARK: Rows and pages
@@ -85,7 +86,7 @@ enum SnapshotWords {
     /// "r20" under a date.
     static func rowDetail(of item: SnapshotSummary) -> String {
         let release = revision(of: item.releaseID)
-        return item.name.isEmpty ? release : "\(taken(item.created)) \u{00B7} \(release)"
+        return item.name.isEmpty ? release : String(localized: "\(taken(item.created)) \u{00B7} \(release)")
     }
 
     /// The orange line under a snapshot that cannot be restored by this app version.
@@ -102,79 +103,106 @@ enum SnapshotWords {
     /// `appRevision` is the Android this app carries; `endsUpdate` is set
     /// while the guest has an update that did not finish, which a restore ends.
     static func restoreNote(of item: SnapshotSummary, appRevision: String, endsUpdate: Bool) -> String {
-        let ending = endsUpdate ? " Andarium\u{2019}s unfinished update ends." : ""
         switch item.restore {
         case .asIs:
-            return "Replaces the guest\u{2019}s current data with this snapshot." + ending
+            return Sentences.join(
+                [String(localized: "Replaces the guest\u{2019}s current data with this snapshot.")]
+                    + endingUpdate(endsUpdate))
         case .updatesAtNextStart(let from, let to):
-            return "Replaces the guest\u{2019}s current data with this snapshot, which is from \(revision(of: from)). "
-                + "The next start updates it to \(revision(of: to))." + ending
+            return Sentences.join(
+                [String(localized: "Replaces the guest\u{2019}s current data with this snapshot, which is from \(revision(of: from)).")]
+                    + [updatesAtNextStart(to: revision(of: to))] + endingUpdate(endsUpdate))
         case .refused(let reason):
             return refusal(reason, snapshot: item, appRevision: appRevision)
         }
     }
 
+    /// "The next start updates it to r20."
+    private static func updatesAtNextStart(to revision: String) -> String {
+        String(localized: "The next start updates it to \(revision).")
+    }
+
+    /// The sentence that says a restore ends the unfinished update, when it does.
+    private static func endingUpdate(_ endsUpdate: Bool) -> [String] {
+        endsUpdate ? [String(localized: "Andarium\u{2019}s unfinished update ends.")] : []
+    }
+
+    private static let cannotBeUndone = String(localized: "This can\u{2019}t be undone.")
+
     // MARK: Prompts
 
     static func restoreTitle(of item: SnapshotSummary) -> String {
-        item.name.isEmpty ? "Restore this snapshot?" : "Restore \u{201C}\(item.name)\u{201D}?"
+        item.name.isEmpty
+            ? String(localized: "Restore this snapshot?") : String(localized: "Restore \u{201C}\(item.name)\u{201D}?")
     }
 
     static func restoreMessage(of item: SnapshotSummary, endsUpdate: Bool) -> String {
-        var text = "The guest\u{2019}s current data is replaced by this snapshot from \(taken(item.created)), "
-            + "and anything not in it is deleted. Some apps may ask you to sign in again."
-        if case .updatesAtNextStart(_, let to) = item.restore { text += " The next start updates it to \(revision(of: to))." }
-        if endsUpdate { text += " Andarium\u{2019}s unfinished update ends." }
-        return text + " This can\u{2019}t be undone."
+        var sentences = [
+            String(localized: "The guest\u{2019}s current data is replaced by this snapshot from \(taken(item.created)), and anything not in it is deleted. Some apps may ask you to sign in again.")
+        ]
+        if case .updatesAtNextStart(_, let to) = item.restore { sentences.append(updatesAtNextStart(to: revision(of: to))) }
+        sentences += endingUpdate(endsUpdate)
+        sentences.append(cannotBeUndone)
+        return Sentences.join(sentences)
     }
 
     static func deleteTitle(of item: SnapshotSummary) -> String {
-        item.name.isEmpty ? "Delete the snapshot from \(taken(item.created))?" : "Delete \u{201C}\(item.name)\u{201D}?"
+        item.name.isEmpty
+            ? String(localized: "Delete the snapshot from \(taken(item.created))?")
+            : String(localized: "Delete \u{201C}\(item.name)\u{201D}?")
     }
 
     /// What deleting frees, when the figure is measured; otherwise only that
     /// it can't be undone.
     static func deleteMessage(frees: SnapshotFigure?) -> String {
-        guard let frees else { return "This can\u{2019}t be undone." }
-        return "Deleting it frees \(size(frees, capitalized: false)). This can\u{2019}t be undone."
+        guard let frees else { return cannotBeUndone }
+        let text = Formats.size(bytes: frees.bytes)
+        return Sentences.join(
+            frees.isLowerBound ? String(localized: "Deleting it frees at least \(text).") : String(localized: "Deleting it frees \(text)."),
+            cannotBeUndone)
     }
 
-    static let takeAlertMessage = "A new snapshot takes no space. It grows as the guest changes after it."
+    static let takeAlertMessage = String(localized: "A new snapshot takes no space. It grows as the guest changes after it.")
 
     // MARK: Home
 
     /// The notice after a restore: its title and text.
-    static let restoredTitle = "Snapshot restored"
+    static let restoredTitle = String(localized: "Snapshot restored")
 
     static func restoredText(_ notice: RestoredSnapshotNotice) -> String {
-        var text = "The guest\u{2019}s data is back to \(describing(name: notice.name, created: notice.created))."
-        if let updatesTo = notice.updatesTo { text += " The next start updates it to \(updatesTo)." }
-        return text
-    }
-
-    /// "\u{201C}Before r20\u{201D} from Nov 9, 2026 at 8:55 AM", or "the snapshot from ..." where it has no name.
-    private static func describing(name: String, created: Date) -> String {
-        name.isEmpty ? "the snapshot from \(taken(created))" : "\u{201C}\(name)\u{201D} from \(taken(created))"
+        var sentences = [
+            notice.name.isEmpty
+                ? String(localized: "The guest\u{2019}s data is back to the snapshot from \(taken(notice.created)).")
+                : String(localized: "The guest\u{2019}s data is back to \u{201C}\(notice.name)\u{201D} from \(taken(notice.created)).")
+        ]
+        if let updatesTo = notice.updatesTo { sentences.append(updatesAtNextStart(to: updatesTo)) }
+        return Sentences.join(sentences)
     }
 
     /// While a restore stands unfinished, from this attempt or an earlier session.
-    static let unfinishedTitle = "Snapshot restore not finished"
+    static let unfinishedTitle = String(localized: "Snapshot restore not finished")
 
     /// `item` is the snapshot being restored, for a restore of a snapshot that
     /// is `.named`. Otherwise (the record cannot be read, or the snapshot is
     /// gone or damaged) only what is known is said: the files may hold either
     /// state, and a start drops the restore.
     static func unfinishedText(_ kind: UnfinishedRestoreKind, item: SnapshotSummary?, failure: SnapshotFailure?) -> String {
-        var text: String
+        var sentences: [String]
         if kind == .named, let item {
-            text = "Andarium could not finish restoring \(describing(name: item.name, created: item.created)). Start finishes it."
-            if case .updatesAtNextStart(_, let to) = item.restore { text += " The next start updates it to \(revision(of: to))." }
+            sentences = [
+                item.name.isEmpty
+                    ? String(localized: "Andarium could not finish restoring the snapshot from \(taken(item.created)). Start finishes it.")
+                    : String(localized: "Andarium could not finish restoring \u{201C}\(item.name)\u{201D} from \(taken(item.created)). Start finishes it.")
+            ]
+            if case .updatesAtNextStart(_, let to) = item.restore { sentences.append(updatesAtNextStart(to: revision(of: to))) }
         } else {
-            text = unfinishedReason(kind == .lost ? .lost : .unreadable)
-                + " The guest\u{2019}s data may be from before the restore or from the snapshot."
+            sentences = [
+                unfinishedReason(kind == .lost ? .lost : .unreadable),
+                String(localized: "The guest\u{2019}s data may be from before the restore or from the snapshot."),
+            ]
         }
-        if let failure { text += " The last attempt stopped: \(sentence(failure.description))" }
-        return text
+        if let failure { sentences.append(String(localized: "The last attempt stopped: \(sentence(failure.description))")) }
+        return Sentences.join(sentences)
     }
 
     /// `text` ended by one full stop: some descriptions of the system's errors
@@ -187,32 +215,35 @@ enum SnapshotWords {
 
     /// Erase guest's alert says what goes with the guest.
     static func eraseMessage(snapshots: Int) -> String {
-        let with = switch snapshots {
-        case 0: ""
-        case 1: ", and its snapshot with it"
-        default: ", and its \(snapshots) snapshots with it"
+        switch snapshots {
+        case 0:
+            String(localized: "Everything the guest has stored is deleted. This can\u{2019}t be undone.")
+        case 1:
+            String(localized: "Everything the guest has stored is deleted, and its snapshot with it. This can\u{2019}t be undone.")
+        default:
+            String(localized: "Everything the guest has stored is deleted, and its \(snapshots) snapshots with it. This can\u{2019}t be undone.")
         }
-        return "Everything the guest has stored is deleted\(with). This can\u{2019}t be undone."
     }
 
     /// Low space says snapshots are a way out, when there are some.
     static func lowSpaceText(hasSnapshots: Bool, startReserve: String, device: String) -> String {
-        "The guest needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage"
-            + (hasSnapshots ? ", or delete snapshots." : ".")
+        hasSnapshots
+            ? String(localized: "The guest needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage, or delete snapshots.")
+            : String(localized: "The guest needs \(startReserve) free to start. Free up space in Settings \u{203A} General \u{203A} \(device) Storage.")
     }
 
     /// The card for an app too old for the guest's data says an older snapshot
     /// is a way back, when there is one.
     static func blockedText(_ reason: StartBlock, hasOlderSnapshot: Bool) -> String {
         guard reason == .olderAndroid, hasOlderSnapshot else { return reason.explanation }
-        return "This app version is older than the one the guest last started with, and its data does not go back. "
-            + "Install a newer version of Andarium, restore an older snapshot, or erase the guest to start again with this one."
+        return String(localized: "This app version is older than the one the guest last started with, and its data does not go back. Install a newer version of Andarium, restore an older snapshot, or erase the guest to start again with this one.")
     }
 
     /// Backup's note says snapshots are not in a backup, when there are some.
     static func backupNote(device: String, hasSnapshots: Bool) -> String {
-        "Puts the guest's apps and files in iCloud and computer backups of this \(device)."
-            + (hasSnapshots ? " Snapshots are not included." : "")
+        Sentences.join(
+            [String(localized: "Puts the guest's apps and files in iCloud and computer backups of this \(device).")]
+                + (hasSnapshots ? [String(localized: "Snapshots are not included.")] : []))
     }
 
     // MARK: What is unavailable
@@ -224,15 +255,15 @@ enum SnapshotWords {
     static func takeReason(_ refusal: SnapshotRefusal, restore: UnfinishedRestoreKind = .named) -> String? {
         switch refusal {
         case .busy: nil
-        case .guestNotStopped: "Not while the guest is starting or running."
-        case .noData: "Start the guest once first. Until then there is no data to keep."
-        case .unreadableRecord: "The guest\u{2019}s records cannot be read, so its data cannot be snapshotted."
+        case .guestNotStopped: String(localized: "Not while the guest is starting or running.")
+        case .noData: String(localized: "Start the guest once first. Until then there is no data to keep.")
+        case .unreadableRecord: String(localized: "The guest\u{2019}s records cannot be read, so its data cannot be snapshotted.")
         case .notShutDown:
-            "Android wasn\u{2019}t shut down when the guest last ran. Start the guest and shut it down from Android, then take a snapshot."
+            String(localized: "Android wasn\u{2019}t shut down when the guest last ran. Start the guest and shut it down from Android, then take a snapshot.")
         case .unfinishedUpdate:
-            "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home."
-        case .mismatch: "Not while the guest\u{2019}s files do not match this app version."
-        case .volumeCannotClone: "The guest\u{2019}s data cannot be snapshotted (it needs an APFS volume)."
+            String(localized: "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home.")
+        case .mismatch: String(localized: "Not while the guest\u{2019}s files do not match this app version.")
+        case .volumeCannotClone: String(localized: "The guest\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
         case .restoreUnfinished: unfinishedReason(restore)
         default: nil
         }
@@ -244,9 +275,9 @@ enum SnapshotWords {
     /// next start, which finishes nothing.
     static func unfinishedReason(_ kind: UnfinishedRestoreKind) -> String {
         switch kind {
-        case .named: "A restore did not finish. Start finishes it."
-        case .unreadable: "A snapshot restore did not finish, and Andarium cannot read which one."
-        case .lost: "A snapshot restore did not finish, and its snapshot is missing or damaged."
+        case .named: String(localized: "A restore did not finish. Start finishes it.")
+        case .unreadable: String(localized: "A snapshot restore did not finish, and Andarium cannot read which one.")
+        case .lost: String(localized: "A snapshot restore did not finish, and its snapshot is missing or damaged.")
         }
     }
 
@@ -254,8 +285,8 @@ enum SnapshotWords {
     /// what Restore does; nil for a refusal that is about the snapshot itself.
     static func nowReason(_ refusal: SnapshotRefusal, restore: UnfinishedRestoreKind = .named) -> String? {
         switch refusal {
-        case .guestNotStopped: "Not while the guest is starting or running."
-        case .busy: "Another snapshot operation is under way."
+        case .guestNotStopped: String(localized: "Not while the guest is starting or running.")
+        case .busy: String(localized: "Another snapshot operation is under way.")
         case .restoreUnfinished: unfinishedReason(restore)
         default: nil
         }
@@ -266,10 +297,10 @@ enum SnapshotWords {
     /// The title of the alert for an operation that did not go ahead.
     static func problemTitle(_ operation: SnapshotOperation) -> String {
         switch operation {
-        case .take: "The snapshot could not be taken"
-        case .restore: "The snapshot could not be restored"
-        case .delete: "The snapshot could not be deleted"
-        case .rename: "The snapshot could not be renamed"
+        case .take: String(localized: "The snapshot could not be taken")
+        case .restore: String(localized: "The snapshot could not be restored")
+        case .delete: String(localized: "The snapshot could not be deleted")
+        case .rename: String(localized: "The snapshot could not be renamed")
         }
     }
 
@@ -281,55 +312,55 @@ enum SnapshotWords {
     ) -> String {
         switch refusal {
         case .guestNotStopped:
-            return "The guest is starting or running. Snapshots can be taken, restored and deleted only while it is stopped."
+            return String(localized: "The guest is starting or running. Snapshots can be taken, restored and deleted only while it is stopped.")
         case .busy:
-            return "Another snapshot operation is under way. Try again in a moment."
+            return String(localized: "Another snapshot operation is under way. Try again in a moment.")
         case .noData, .unreadableRecord, .notShutDown, .unfinishedUpdate, .mismatch, .volumeCannotClone:
             return takeReason(refusal, restore: restore) ?? ""
         case .notEnoughSpace:
-            return "There is not enough free space on this \(device). Free up space in Settings \u{203A} General \u{203A} \(device) Storage and try again."
+            return String(localized: "There is not enough free space on this \(device). Free up space in Settings \u{203A} General \u{203A} \(device) Storage and try again.")
         case .newerAndroid:
-            let theirs = snapshot.map { revision(of: $0.releaseID) } ?? "a newer release"
-            return "This snapshot is from \(theirs), newer than this app\u{2019}s \(appRevision). Update Andarium to restore it."
+            if let snapshot {
+                return String(localized: "This snapshot is from \(revision(of: snapshot.releaseID)), newer than this app\u{2019}s \(appRevision). Update Andarium to restore it.")
+            }
+            return String(localized: "This snapshot is from a newer release, newer than this app\u{2019}s \(appRevision). Update Andarium to restore it.")
         case .olderDataLayout:
-            return "This snapshot\u{2019}s data uses a newer layout than this app version can open. Update Andarium to restore it."
+            return String(localized: "This snapshot\u{2019}s data uses a newer layout than this app version can open. Update Andarium to restore it.")
         case .differentSystem:
-            return "This snapshot was taken with a different system image of the same release, so this app version can\u{2019}t restore it."
+            return String(localized: "This snapshot was taken with a different system image of the same release, so this app version can\u{2019}t restore it.")
         case .diskSizeNotAccepted(let gib):
-            return "This snapshot\u{2019}s disk is \(gib) GiB, a size this app version does not accept. It can only be deleted."
+            return String(localized: "This snapshot\u{2019}s disk is \(gib) GiB, a size this app version does not accept. It can only be deleted.")
         case .incomplete:
-            return "Some of this snapshot\u{2019}s files are missing, so it can\u{2019}t be restored. It can only be deleted."
+            return String(localized: "Some of this snapshot\u{2019}s files are missing, so it can\u{2019}t be restored. It can only be deleted.")
         case .missing:
-            return "This snapshot is not there any more."
+            return String(localized: "This snapshot is not there any more.")
         case .restoreUnfinished:
             return unfinishedReason(restore)
         case .invalidName:
-            return "A name has at most \(SnapshotRules.maximumNameLength) characters, and no line breaks, tabs or other control characters."
+            return String(localized: "A name has at most \(SnapshotRules.maximumNameLength) characters, and no line breaks, tabs or other control characters.")
         }
     }
 
     // MARK: The space page
 
-    static let spacePageTitle = "Snapshot space"
+    static let spacePageTitle = String(localized: "Snapshot space")
 
     /// The explanation, one short paragraph each. The ones about the lower bound
     /// and the unfinished update apply only when they do.
     static func spaceParagraphs(device: String, lowerBound: Bool, hasUpdateCopy: Bool) -> [String] {
         var paragraphs = [
-            "A new snapshot takes no space. When Android later changes or deletes data, the snapshot keeps the old version, "
-                + "so it grows as the guest is used, and by a lot after an update of Android.",
-            "The size beside a snapshot is what deleting it frees. Snapshots can share old data that none of them frees alone, "
-                + "so together they use more than their sizes add up to.",
+            String(localized: "A new snapshot takes no space. When Android later changes or deletes data, the snapshot keeps the old version, so it grows as the guest is used, and by a lot after an update of Android."),
+            String(localized: "The size beside a snapshot is what deleting it frees. Snapshots can share old data that none of them frees alone, so together they use more than their sizes add up to."),
         ]
         if lowerBound {
-            paragraphs.append("This \(device) measures only part of what snapshots share, so they use at least the size shown.")
+            paragraphs.append(String(localized: "This \(device) measures only part of what snapshots share, so they use at least the size shown."))
         }
         if hasUpdateCopy {
-            paragraphs.append("Andarium\u{2019}s unfinished update keeps its own copy until it ends. Restoring a snapshot ends it.")
+            paragraphs.append(String(localized: "Andarium\u{2019}s unfinished update keeps its own copy until it ends. Restoring a snapshot ends it."))
         }
         paragraphs += [
-            "Deleting files in Android frees nothing a snapshot still keeps. Deleting or restoring a snapshot gives space back.",
-            "Snapshots stay on this \(device). They are not in backups, and Erase guest deletes them.",
+            String(localized: "Deleting files in Android frees nothing a snapshot still keeps. Deleting or restoring a snapshot gives space back."),
+            String(localized: "Snapshots stay on this \(device). They are not in backups, and Erase guest deletes them."),
         ]
         return paragraphs
     }
