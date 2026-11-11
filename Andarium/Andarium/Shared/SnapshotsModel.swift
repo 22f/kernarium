@@ -120,6 +120,21 @@ final class SnapshotsModel {
 
     var unfinishedRestore: SnapshotUnfinishedRestore? { listing?.unfinishedRestore }
 
+    /// The snapshot an unfinished restore names, when it can be told which
+    /// one and Start can finish it: a snapshot that is whole. nil for an
+    /// intent that cannot be read and for a snapshot that is gone or damaged,
+    /// which a start drops.
+    var unfinishedRestoreSnapshot: SnapshotSummary? {
+        guard let id = unfinishedRestore?.snapshot, let item = item(id), !item.isDamaged else { return nil }
+        return item
+    }
+
+    /// What Home's card says of a restore that did not finish; nil when none does.
+    var unfinishedRestoreText: String? {
+        guard let unfinished = unfinishedRestore else { return nil }
+        return SnapshotWords.unfinishedText(item: unfinishedRestoreSnapshot, failure: unfinished.lastFailure)
+    }
+
     /// A restorable snapshot is a way out of a guest this app version is too
     /// old for: one this app can restore, as the guest is on a newer Android.
     var hasRestorableSnapshot: Bool {
@@ -142,7 +157,9 @@ final class SnapshotsModel {
         return listing.createRefusal
     }
 
-    var takeReason: String? { takeRefusal.flatMap(SnapshotWords.takeReason) }
+    var takeReason: String? {
+        takeRefusal.flatMap { SnapshotWords.takeReason($0, restoreKnown: unfinishedRestoreSnapshot != nil) }
+    }
 
     /// Why a snapshot cannot be restored now, or nil. What is wrong with the
     /// snapshot itself comes first, as it does not pass with time.
@@ -169,7 +186,10 @@ final class SnapshotsModel {
         if case .refused = item.restore {
             return SnapshotWords.restoreNote(of: item, appRevision: app.system.releaseRevision, endsUpdate: false)
         }
-        if let refusal = restoreRefusal(of: item), let reason = SnapshotWords.nowReason(refusal) { return reason }
+        if let refusal = restoreRefusal(of: item),
+            let reason = SnapshotWords.nowReason(refusal, restoreKnown: unfinishedRestoreSnapshot != nil) {
+            return reason
+        }
         return SnapshotWords.restoreNote(of: item, appRevision: app.system.releaseRevision, endsUpdate: endsUpdate)
     }
 
@@ -408,7 +428,8 @@ final class SnapshotsModel {
         problem = AppAlert(
             title: SnapshotWords.problemTitle(operation),
             message: SnapshotWords.refusal(
-                refusal, snapshot: snapshot, appRevision: app.system.releaseRevision, device: app.host.name))
+                refusal, snapshot: snapshot, appRevision: app.system.releaseRevision, device: app.host.name,
+                restoreKnown: unfinishedRestoreSnapshot != nil))
     }
 
     private func tell(_ operation: SnapshotOperation, failure error: any Error) {

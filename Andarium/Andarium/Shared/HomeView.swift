@@ -178,12 +178,10 @@ struct HomeView: View {
                 onClose: { withAnimation { model.restoredSnapshot = nil } }
             )
         }
-        if let unfinished = model.snapshots.unfinishedRestore {
+        if let text = model.snapshots.unfinishedRestoreText {
             NoticeCard(
                 symbol: "exclamationmark.arrow.triangle.2.circlepath", color: .orange,
-                title: SnapshotWords.unfinishedTitle,
-                text: SnapshotWords.unfinishedText(
-                    item: model.snapshots.item(unfinished.snapshot), failure: unfinished.lastFailure)
+                title: SnapshotWords.unfinishedTitle, text: text
             )
         }
         if model.lowSpace {

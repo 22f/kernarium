@@ -150,15 +150,18 @@ enum SnapshotWords {
     /// While a restore stands unfinished, from this attempt or an earlier session.
     static let unfinishedTitle = "Snapshot restore not finished"
 
-    /// `item` is the snapshot being restored, when it can be named.
+    /// `item` is the snapshot being restored, when it can be named and Start
+    /// can finish its restore. Without it (an intent that cannot be read, or a
+    /// snapshot that is no longer whole) only what is known is said: the files
+    /// may hold either state, and a start drops the restore.
     static func unfinishedText(item: SnapshotSummary?, failure: SnapshotFailure?) -> String {
         var text: String
-        if let item {
-            text = "The guest\u{2019}s data is back to \(describing(name: item.name, created: item.created)), "
-                + "but Andarium could not finish the restore. Start finishes it."
+        if let item, !item.isDamaged {
+            text = "Andarium could not finish restoring \(describing(name: item.name, created: item.created)). Start finishes it."
             if case .updatesAtNextStart(_, let to) = item.restore { text += " The next start updates it to \(revision(of: to))." }
         } else {
-            text = "Andarium put a snapshot\u{2019}s data in place and could not finish the restore. Start finishes it."
+            text = unfinishedReason(known: false)
+                + " The guest\u{2019}s data may be from before the restore or from the snapshot."
         }
         if let failure { text += " The last attempt stopped: \(sentence(failure.description))" }
         return text
@@ -206,7 +209,9 @@ enum SnapshotWords {
 
     /// Above the dimmed Take snapshot; nil when nothing needs saying (it is
     /// available, or an operation is under way and shows itself).
-    static func takeReason(_ refusal: SnapshotRefusal) -> String? {
+    /// `restoreKnown` is set where the snapshot a restore that did not finish
+    /// names can be told (`unfinishedReason`).
+    static func takeReason(_ refusal: SnapshotRefusal, restoreKnown: Bool = true) -> String? {
         switch refusal {
         case .busy: nil
         case .guestNotStopped: "Not while the guest is starting or running."
@@ -218,18 +223,27 @@ enum SnapshotWords {
             "Not while Andarium\u{2019}s update is unfinished. Start tries it again, or use Restore on Home."
         case .mismatch: "Not while the guest\u{2019}s files do not match this app version."
         case .volumeCannotClone: "The guest\u{2019}s data cannot be snapshotted (it needs an APFS volume)."
-        case .restoreUnfinished: "A restore did not finish. Start finishes it."
+        case .restoreUnfinished: unfinishedReason(known: restoreKnown)
         default: nil
         }
     }
 
+    /// Why nothing new is done while a restore stands unfinished. Start
+    /// finishes it only where the snapshot is known: a restore whose intent
+    /// cannot be read is dropped at the next start, which finishes nothing.
+    static func unfinishedReason(known: Bool) -> String {
+        known
+            ? "A restore did not finish. Start finishes it."
+            : "A snapshot restore did not finish, and Andarium cannot read which one."
+    }
+
     /// Why a snapshot cannot be restored or deleted for now, shown in place of
     /// what Restore does; nil for a refusal that is about the snapshot itself.
-    static func nowReason(_ refusal: SnapshotRefusal) -> String? {
+    static func nowReason(_ refusal: SnapshotRefusal, restoreKnown: Bool = true) -> String? {
         switch refusal {
         case .guestNotStopped: "Not while the guest is starting or running."
         case .busy: "Another snapshot operation is under way."
-        case .restoreUnfinished: "A restore did not finish. Start finishes it."
+        case .restoreUnfinished: unfinishedReason(known: restoreKnown)
         default: nil
         }
     }
@@ -249,7 +263,8 @@ enum SnapshotWords {
     /// Every refusal in words. `snapshot` is the one the refusal is about, if
     /// any; `appRevision` the Android this app carries.
     static func refusal(
-        _ refusal: SnapshotRefusal, snapshot: SnapshotSummary? = nil, appRevision: String = "", device: String = "device"
+        _ refusal: SnapshotRefusal, snapshot: SnapshotSummary? = nil, appRevision: String = "", device: String = "device",
+        restoreKnown: Bool = true
     ) -> String {
         switch refusal {
         case .guestNotStopped:
@@ -257,7 +272,7 @@ enum SnapshotWords {
         case .busy:
             return "Another snapshot operation is under way. Try again in a moment."
         case .noData, .unreadableRecord, .notShutDown, .unfinishedUpdate, .mismatch, .volumeCannotClone:
-            return takeReason(refusal) ?? ""
+            return takeReason(refusal, restoreKnown: restoreKnown) ?? ""
         case .notEnoughSpace:
             return "There is not enough free space on this \(device). Free up space in Settings \u{203A} General \u{203A} \(device) Storage and try again."
         case .newerAndroid:
@@ -274,7 +289,7 @@ enum SnapshotWords {
         case .missing:
             return "This snapshot is not there any more."
         case .restoreUnfinished:
-            return "A restore did not finish. Start finishes it."
+            return unfinishedReason(known: restoreKnown)
         case .invalidName:
             return "A name has at most \(SnapshotRules.maximumNameLength) characters and no line breaks."
         }
