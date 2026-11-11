@@ -126,3 +126,4 @@ patch	um-end-an-mconsole-console-command-with-a-status-reply.patch
 patch	gnss-add-the-Kernarium-host-receiver.patch
 patch	um-let-another-CPU-dispatch-Darwin-host-events-when-CPU0-is-late.patch
 patch	um-free-an-IRQ-entry-after-a-grace-period.patch
+patch	virt_wifi-give-the-device-its-own-lockdep-classes.patch

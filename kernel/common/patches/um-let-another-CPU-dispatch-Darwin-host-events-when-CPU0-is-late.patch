@@ -47,6 +47,18 @@ its idle exit; no signal is sent, so nothing interrupts a CPU in guest
 code. It asks again every 20 ms until a dispatch begins, sooner while no
 secondary is idle.
 
+While CPU0 is not in its wait, the thread does not read every edge:
+after one it parks on a second kqueue, which holds the stop event and a
+user event that CPU0's next idle entry triggers, and waits there for as
+long as the 20 ms allows. The edges that arrive meanwhile coalesce
+unread, so a busy guest costs the thread a wake-up per interval and not
+one per edge. Parking is a third flag in the same store-then-load
+order, so a thread that parks is woken by CPU0's next entry, and an edge
+for a CPU0 that idles is never left to the 20 ms. An edge read after a
+park counts its 20 ms from the later of the previous read and the start
+of the last dispatch, and only a dispatch that begins after the read
+serves it.
+
 Secondaries can take the token from the platform's prepare step of a
 system suspend until they go offline, and throughout s2idle, where they
 stay online. A dispatch does nothing then, because the IRQs are
@@ -55,14 +67,14 @@ within a tick, so nothing is taken over.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- arch/um/drivers/virtio_uml.c |  19 +--
+ arch/um/drivers/virtio_uml.c |  19 +-
  arch/um/os-Darwin/internal.h |   2 +
- arch/um/os-Darwin/irq.c      | 275 +++++++++++++++++++++++++++++------
+ arch/um/os-Darwin/irq.c      | 484 ++++++++++++++++++++++++++++++-----
  arch/um/os-Darwin/irq.h      |  16 +-
  arch/um/os-Darwin/signal.c   |   4 +-
- arch/um/os-Darwin/smp.c      |  33 +++++
- arch/um/os-Darwin/time.c     |  43 +++---
- 7 files changed, 316 insertions(+), 76 deletions(-)
+ arch/um/os-Darwin/smp.c      |  33 +++
+ arch/um/os-Darwin/time.c     |  43 ++--
+ 7 files changed, 497 insertions(+), 104 deletions(-)
 
 diff --git a/arch/um/drivers/virtio_uml.c b/arch/um/drivers/virtio_uml.c
 index 30390dbaac62913abbebc2f849ff2a279d77c45c..d2eaa488d5f0d1cffab4619e448f3ed7a1f074c9 100644
@@ -115,10 +127,10 @@ index 340e3e3f3341eb845b4554d1479be36e816c4d33..a3b76d3f4ff53f28df3dc65e0600e465
  	const unsigned int **sequence)
  {
 diff --git a/arch/um/os-Darwin/irq.c b/arch/um/os-Darwin/irq.c
-index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7de4d67dc 100644
+index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b86f8056bf 100644
 --- a/arch/um/os-Darwin/irq.c
 +++ b/arch/um/os-Darwin/irq.c
-@@ -9,6 +9,7 @@
+@@ -9,11 +9,13 @@
  #include <unistd.h>
  #include <irq_user.h>
  #include <os.h>
@@ -126,9 +138,20 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
  #include "irq.h"
  
  #define DARWIN_MAX_EVENTS 64
-@@ -32,23 +33,152 @@ static int watched_count;
+ #define DARWIN_NOTIFICATION_BATCH 16
+ #define DARWIN_NOTIFICATION_STOP_IDENT 1
++#define DARWIN_NOTIFICATION_PARK_IDENT 2
+ #define DARWIN_EVENT_READ 1
+ #define DARWIN_EVENT_WRITE 2
+ 
+@@ -31,24 +33,180 @@ static int watched_count;
+ /* Orders the registry against callers that hold no kernel IRQ lock. */
  static pthread_mutex_t watched_lock = PTHREAD_MUTEX_INITIALIZER;
  static int notification_kqueue = -1;
++/* Holds the stop event and the one that CPU0's idle entry triggers; see
++ * darwin_irq_idle_begin().
++ */
++static int park_kqueue = -1;
  static int dispatch_kqueue = -1;
 -static pthread_mutex_t idle_waiter_lock = PTHREAD_MUTEX_INITIALIZER;
 -static pthread_cond_t idle_waiter_ready = PTHREAD_COND_INITIALIZER;
@@ -146,6 +169,8 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 + */
 +static int idle_waiter_valid;
 +static int idle_wake_pending;
++/* The notification thread waits on park_kqueue for CPU0's next idle entry. */
++static int notification_parked;
 +
 +/*
 + * The dispatch token.  triggered[] and the IRQ core's per-IRQ active and
@@ -270,7 +295,24 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 + *   is busy needs no wake: its own tick takes over.
 + *
 + * The thread never waits for CPU0, so it reads the next edge while CPU0 is
-+ * held.
++ * held.  While CPU0 is not idle it stops reading edges, though, because a
++ * busy CPU0 collects them at its tick and each further edge would only wake
++ * the thread to do nothing.  It leaves idle_wake_pending set and waits on
++ * park_kqueue, which holds the stop event and the event that CPU0's next idle
++ * entry triggers, for as long as the takeover deadline allows.  The edges
++ * that arrive meanwhile coalesce in notification_kqueue; see
++ * darwin_irq_idle_begin() for why none of them waits for the deadline when
++ * CPU0 is idle.
++ *
++ * On leaving such a wait the thread polls once.  An edge that poll returns
++ * has been in the queue since some time after the previous read.  One that
++ * arrived before the last dispatch began was collected by it, so the earliest
++ * the edge can have gone unserved is the later of the previous read and that
++ * dispatch, and its deadline is counted from there, not from this read, which
++ * could keep an edge of a late CPU0 waiting for a second period.  Only a
++ * dispatch that begins after the read counts as serving it, and a dispatch
++ * that began after the oldest unserved edge was read is cleared before a
++ * later edge is counted, because it may have preceded that edge.
 + */
  static void *notification_thread(void *unused)
  {
@@ -278,12 +320,16 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
  	sigset_t blocked;
 +	unsigned long long seen = 0;
 +	unsigned long long late_at = 0;
++	unsigned long long read_at = 0;
 +	unsigned long long retry = DARWIN_IRQ_TAKEOVER_CHECK_NS;
 +	int unserved = 0;
++	int parked = 0;
++	int waited;
++	int delayed = 0;
  
  	(void)unused;
  	os_set_thread_name("uml-irq-notify");
-@@ -60,13 +190,19 @@ static void *notification_thread(void *unused)
+@@ -60,13 +218,25 @@ static void *notification_thread(void *unused)
  	sigaddset(&blocked, SIGALRM);
  	(void)pthread_sigmask(SIG_BLOCK, &blocked, NULL);
  	for (;;) {
@@ -295,18 +341,25 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
  		int count;
  		int index;
  
-+		if (unserved) {
+-		count = kevent(notification_kqueue, NULL, 0, events,
+-			       DARWIN_NOTIFICATION_BATCH, NULL);
++		if (delayed) {
++			/* Just unparked: collect what arrived meanwhile. */
++			wait.tv_sec = 0;
++			wait.tv_nsec = 0;
++			timeout = &wait;
++		} else if (unserved) {
 +			wait = relative_time(late_at,
 +					     (unsigned long long)os_nsecs());
 +			timeout = &wait;
 +		}
- 		count = kevent(notification_kqueue, NULL, 0, events,
--			       DARWIN_NOTIFICATION_BATCH, NULL);
-+			       DARWIN_NOTIFICATION_BATCH, timeout);
++		count = kevent(parked ? park_kqueue : notification_kqueue,
++			       NULL, 0, events, DARWIN_NOTIFICATION_BATCH,
++			       timeout);
  		if (count < 0) {
  			if (errno == EINTR)
  				continue;
-@@ -76,21 +212,46 @@ static void *notification_thread(void *unused)
+@@ -76,21 +246,105 @@ static void *notification_thread(void *unused)
  			if (events[index].filter == EVFILT_USER &&
  			    events[index].ident == DARWIN_NOTIFICATION_STOP_IDENT)
  				return NULL;
@@ -314,8 +367,55 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 -		/* Keep the wake until an idle carrier can dispatch it.  Dispatch has
 -		 * its own kqueue, so this helper never consumes the guest IRQ edge.
 +		now = (unsigned long long)os_nsecs();
++		waited = parked;
++		if (parked) {
++			/* An event is CPU0's idle entry, which has cleared
++			 * notification_parked; none is the deadline.
++			 */
++			if (count > 0) {
++				parked = 0;
++				delayed = 1;
++			}
++			count = 0;
++		}
++		/* A dispatch that began after the oldest edge was read may
++		 * have preceded an edge read now, so this one is counted from
++		 * here: the dispatch is cleared first.
+ 		 */
+-		while (!idle_waiter_valid && !notification_stopping)
+-			pthread_cond_wait(&idle_waiter_ready, &idle_waiter_lock);
+-		if (notification_stopping) {
+-			pthread_mutex_unlock(&idle_waiter_lock);
+-			return NULL;
 +		if (unserved && dispatched_since(seen))
 +			unserved = 0;
++		/* The oldest edge no dispatch has begun after sets the
++		 * deadline; later ones share its dispatch.
++		 */
++		if (count > 0 && !unserved) {
++			unsigned long long since = now;
++
++			if (delayed) {
++				since = read_at;
++				if ((long long)(__atomic_load_n(
++					&last_dispatch_ns,
++					__ATOMIC_RELAXED) - since) > 0)
++					since = __atomic_load_n(
++						&last_dispatch_ns,
++						__ATOMIC_RELAXED);
++			}
++			unserved = 1;
++			seen = now;
++			late_at = since + DARWIN_IRQ_TAKEOVER_NS;
++			retry = DARWIN_IRQ_TAKEOVER_CHECK_NS;
++			/* One that has begun since is after the read. */
++			if (dispatched_since(seen))
++				unserved = 0;
++		}
++		if (!waited) {
++			delayed = 0;
++			read_at = now;
++		}
 +		if (unserved && now >= late_at) {
 +			int woke = darwin_wake_idle_secondary();
 +
@@ -334,39 +434,51 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 +					retry * 2 : DARWIN_IRQ_TAKEOVER_NS;
 +			}
 +		}
++		if (parked) {
++			if (unserved)
++				continue;
++			/* Everything read so far has been served: read edges
++			 * again.  If CPU0 has cleared the flag meanwhile its
++			 * event is on the way, and ends the next park at once,
++			 * which costs one wake.
++			 */
++			parked = 0;
++			delayed = 1;
++			(void)__atomic_exchange_n(&notification_parked, 0,
++						  __ATOMIC_SEQ_CST);
++			continue;
++		}
 +		if (count == 0)
 +			continue;
-+		/* The oldest edge no dispatch has begun after sets the
-+		 * deadline; later ones share its dispatch.
- 		 */
--		while (!idle_waiter_valid && !notification_stopping)
--			pthread_cond_wait(&idle_waiter_ready, &idle_waiter_lock);
--		if (notification_stopping) {
--			pthread_mutex_unlock(&idle_waiter_lock);
--			return NULL;
-+		if (!unserved) {
-+			unserved = 1;
-+			seen = now;
-+			late_at = now + DARWIN_IRQ_TAKEOVER_NS;
-+			retry = DARWIN_IRQ_TAKEOVER_CHECK_NS;
++		/* Dispatch has its own kqueue, so this helper never consumes the
++		 * guest IRQ edge.  Make an idle CPU0 come and collect it; see
++		 * darwin_irq_idle_begin() for why this loses no wake.
++		 */
++		__atomic_store_n(&idle_wake_pending, 1, __ATOMIC_SEQ_CST);
++		if (__atomic_load_n(&idle_waiter_valid, __ATOMIC_SEQ_CST)) {
++			if (__atomic_exchange_n(&idle_wake_pending, 0,
++						__ATOMIC_SEQ_CST))
++				(void)pthread_kill(idle_waiter, SIGUSR2);
++		} else if (unserved) {
++			/* CPU0 is not idle: park until it is. */
++			__atomic_store_n(&notification_parked, 1,
++					 __ATOMIC_SEQ_CST);
++			if (__atomic_load_n(&idle_waiter_valid,
++					    __ATOMIC_SEQ_CST))
++				(void)__atomic_exchange_n(&notification_parked,
++							  0, __ATOMIC_SEQ_CST);
++			else
++				parked = 1;
  		}
 -		have_target = idle_waiter_valid;
 -		target = idle_waiter;
 -		if (have_target)
 -			(void)pthread_kill(target, SIGUSR2);
 -		pthread_mutex_unlock(&idle_waiter_lock);
-+		/* Dispatch has its own kqueue, so this helper never consumes the
-+		 * guest IRQ edge.  Make an idle CPU0 come and collect it; see
-+		 * darwin_irq_idle_begin() for why this loses no wake.
-+		 */
-+		__atomic_store_n(&idle_wake_pending, 1, __ATOMIC_SEQ_CST);
-+		if (__atomic_load_n(&idle_waiter_valid, __ATOMIC_SEQ_CST) &&
-+		    __atomic_exchange_n(&idle_wake_pending, 0, __ATOMIC_SEQ_CST))
-+			(void)pthread_kill(idle_waiter, SIGUSR2);
  	}
  }
  
-@@ -117,8 +278,8 @@ static int update_filter(int queue, int fd, short filter, int add, void *data)
+@@ -117,8 +371,8 @@ static int update_filter(int queue, int fd, short filter, int add, void *data)
  }
  
  /* The dispatch queue keeps every registered edge, so nothing that arrives
@@ -377,7 +489,7 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
   */
  static int update_registration(int fd, int events, void *data, int notify)
  {
-@@ -212,28 +373,56 @@ int os_irq_wake_pending(void)
+@@ -212,28 +466,96 @@ int os_irq_wake_pending(void)
  	return pending;
  }
  
@@ -408,31 +520,76 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 + * this carrier from its first idle entry on, except inside the idle
 + * pselect()'s mask, so it can never interrupt guest code (nor a carrier that
 + * is not allowed asynchronous signals, see carriers_block_async_signals()),
-+ * and ends the next idle wait early at the worst.  The mask changes with
-+ * pthread_sigmask(), as sigprocmask() rewrites every thread's mask on Darwin.
-+ * `idle_waiter' is stored before the first (a), so a thread that saw valid set
-+ * sees it.
++ * and ends the next idle wait early at the worst.  The thread signals only
++ * after it saw `idle_waiter_valid' set, which is after the first entry, so
++ * the signal is blocked by then.  The mask changes with pthread_sigmask(), as
++ * sigprocmask() rewrites every thread's mask on Darwin.  `idle_waiter' is
++ * stored before the first (a), so a thread that saw valid set sees it.
++ *
++ * Parking.  A thread that read an edge while CPU0 is not idle waits on
++ * park_kqueue instead of reading further edges (see notification_thread()),
++ * and CPU0's idle entry ends that wait.  They meet through
++ * `notification_parked', again a store and then a load on each side:
++ *
++ *	thread: (p1) store notification_parked = 1
++ *	        (p2) load idle_waiter_valid; if set, do not park
++ *	CPU0:   (a) store idle_waiter_valid = 1, as above
++ *	        (c) exchange notification_parked for 0, and if that was 1,
++ *	            trigger the user event of park_kqueue
++ *
++ * A thread that parks saw valid clear at (p2), so the next entry of CPU0 has
++ * its (a), and so its (c), after (p1).  That (c) finds the flag set, unless
++ * an earlier (c) cleared it and has its event on the way, and triggers the
++ * event, which stays pending until a wait on park_kqueue returns it.  So
++ * whenever the thread is parked the flag is set or an event is on the way,
++ * and CPU0's next entry wakes it.  For an edge that arrives while CPU0 is
++ * in its wait, the thread therefore either is reading edges or is woken by
++ * that entry to read them, and signals CPU0 after a wake-up latency; it is
++ * never left to the takeover deadline, which is only the timeout of a wait
++ * that CPU0's entry ends.  The edge that parked the thread is not lost
++ * either: (1) precedes (p1), so the pending flag is set, and (b) of the
++ * entry that wakes the thread takes it.  When the thread leaves the park for
++ * its deadline it clears the flag itself; if CPU0 cleared it first, that
++ * event ends the thread's next park early, which costs one wake.
 + */
 +int darwin_irq_idle_begin(void)
  {
- 	sigset_t block;
- 
- 	sigemptyset(&block);
- 	sigaddset(&block, SIGUSR2);
+-	sigset_t block;
+-
+-	sigemptyset(&block);
+-	sigaddset(&block, SIGUSR2);
 -	if (pthread_sigmask(SIG_BLOCK, &block, previous_mask) != 0)
-+	if (pthread_sigmask(SIG_BLOCK, &block, NULL) != 0)
- 		panic("Darwin: unable to block the IRQ wake signal");
+-		panic("Darwin: unable to block the IRQ wake signal");
 -	pthread_mutex_lock(&idle_waiter_lock);
 -	idle_waiter = pthread_self();
 -	idle_waiter_valid = 1;
 -	pthread_cond_signal(&idle_waiter_ready);
 -	pthread_mutex_unlock(&idle_waiter_lock);
++	int edge;
++
 +	if (!idle_waiter_set) {
++		sigset_t block;
++
++		sigemptyset(&block);
++		sigaddset(&block, SIGUSR2);
++		if (pthread_sigmask(SIG_BLOCK, &block, NULL) != 0)
++			panic("Darwin: unable to block the IRQ wake signal");
 +		idle_waiter = pthread_self();
 +		idle_waiter_set = 1;
 +	}
 +	__atomic_store_n(&idle_waiter_valid, 1, __ATOMIC_SEQ_CST);
-+	return __atomic_exchange_n(&idle_wake_pending, 0, __ATOMIC_SEQ_CST);
++	edge = __atomic_exchange_n(&idle_wake_pending, 0, __ATOMIC_SEQ_CST);
++	if (__atomic_exchange_n(&notification_parked, 0, __ATOMIC_SEQ_CST)) {
++		struct kevent trigger;
++
++		EV_SET(&trigger, DARWIN_NOTIFICATION_PARK_IDENT, EVFILT_USER,
++		       0, NOTE_TRIGGER, 0, NULL);
++		while (kevent(park_kqueue, &trigger, 1, NULL, 0, NULL) < 0)
++			if (errno != EINTR)
++				panic("Darwin: unable to wake the IRQ notification thread: %d",
++				      errno);
++	}
++	return edge;
  }
  
 -void darwin_irq_idle_end(const sigset_t *previous_mask)
@@ -447,7 +604,33 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
  }
  
  void *os_epoll_get_data_pointer(int index)
-@@ -260,6 +449,15 @@ int os_setup_epoll(void)
+@@ -251,15 +573,42 @@ int os_event_mask(enum um_irq_type type)
+ 	return type == IRQ_READ ? DARWIN_EVENT_READ : DARWIN_EVENT_WRITE;
+ }
+ 
++static void close_kqueues(void)
++{
++	if (park_kqueue >= 0) {
++		close(park_kqueue);
++		park_kqueue = -1;
++	}
++	if (dispatch_kqueue >= 0) {
++		close(dispatch_kqueue);
++		dispatch_kqueue = -1;
++	}
++	if (notification_kqueue >= 0) {
++		close(notification_kqueue);
++		notification_kqueue = -1;
++	}
++}
++
+ int os_setup_epoll(void)
+ {
+ 	struct sigaction action = { };
+ 	struct kevent stop_event;
++	struct kevent park_events[2];
+ 	int index;
+ 	int error;
  
  	if (notification_kqueue >= 0)
  		return 0;
@@ -459,11 +642,54 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 +	__atomic_store_n(&last_dispatch_ns, 0, __ATOMIC_RELAXED);
 +	__atomic_store_n(&idle_waiter_valid, 0, __ATOMIC_SEQ_CST);
 +	__atomic_store_n(&idle_wake_pending, 0, __ATOMIC_SEQ_CST);
++	__atomic_store_n(&notification_parked, 0, __ATOMIC_SEQ_CST);
 +	idle_waiter_set = 0;
  	action.sa_handler = wake_signal_handler;
  	sigemptyset(&action.sa_mask);
  	/* SIGUSR2 is a wake edge for the idle pselect(), not work to run from a
-@@ -303,9 +501,6 @@ int os_setup_epoll(void)
+@@ -276,15 +625,28 @@ int os_setup_epoll(void)
+ 	       EV_ADD | EV_CLEAR, 0, 0, NULL);
+ 	if (kevent(notification_kqueue, &stop_event, 1, NULL, 0, NULL) < 0) {
+ 		error = -errno;
+-		close(notification_kqueue);
+-		notification_kqueue = -1;
++		close_kqueues();
++		return error;
++	}
++	park_kqueue = kqueue();
++	if (park_kqueue < 0) {
++		error = -errno;
++		close_kqueues();
++		return error;
++	}
++	EV_SET(&park_events[0], DARWIN_NOTIFICATION_STOP_IDENT, EVFILT_USER,
++	       EV_ADD | EV_CLEAR, 0, 0, NULL);
++	EV_SET(&park_events[1], DARWIN_NOTIFICATION_PARK_IDENT, EVFILT_USER,
++	       EV_ADD | EV_CLEAR, 0, 0, NULL);
++	if (kevent(park_kqueue, park_events, 2, NULL, 0, NULL) < 0) {
++		error = -errno;
++		close_kqueues();
+ 		return error;
+ 	}
+ 	dispatch_kqueue = kqueue();
+ 	if (dispatch_kqueue < 0) {
+ 		error = -errno;
+-		close(notification_kqueue);
+-		notification_kqueue = -1;
++		close_kqueues();
+ 		return error;
+ 	}
+ 	/* Preserve registrations made before the common IRQ layer starts. */
+@@ -295,24 +657,15 @@ int os_setup_epoll(void)
+ 					    watched[index].notify);
+ 		if (error < 0) {
+ 			pthread_mutex_unlock(&watched_lock);
+-			close(dispatch_kqueue);
+-			dispatch_kqueue = -1;
+-			close(notification_kqueue);
+-			notification_kqueue = -1;
++			close_kqueues();
+ 			return error;
  		}
  	}
  	pthread_mutex_unlock(&watched_lock);
@@ -473,7 +699,15 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
  	error = pthread_create(&notification_worker, NULL,
  			       notification_thread, NULL);
  	if (error != 0) {
-@@ -427,10 +622,6 @@ void os_close_epoll_fd(void)
+-		close(dispatch_kqueue);
+-		dispatch_kqueue = -1;
+-		close(notification_kqueue);
+-		notification_kqueue = -1;
++		close_kqueues();
+ 		return -error;
+ 	}
+ 	notification_worker_joinable = 1;
+@@ -427,14 +780,12 @@ void os_close_epoll_fd(void)
  	watched_count = 0;
  	pthread_mutex_unlock(&watched_lock);
  	if (notification_worker_joinable) {
@@ -481,9 +715,31 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..d233c931dcd2c84c7e21d5325993fbb7
 -		notification_stopping = 1;
 -		pthread_cond_broadcast(&idle_waiter_ready);
 -		pthread_mutex_unlock(&idle_waiter_lock);
++		/* The thread waits on one of the two queues. */
  		EV_SET(&stop_event, DARWIN_NOTIFICATION_STOP_IDENT, EVFILT_USER,
  		       0, NOTE_TRIGGER, 0, NULL);
- 		if (notification_kqueue < 0 ||
+-		if (notification_kqueue < 0 ||
+-		    kevent(notification_kqueue, &stop_event, 1, NULL, 0, NULL) < 0)
++		if (notification_kqueue < 0 || park_kqueue < 0 ||
++		    kevent(notification_kqueue, &stop_event, 1, NULL, 0, NULL) < 0 ||
++		    kevent(park_kqueue, &stop_event, 1, NULL, 0, NULL) < 0)
+ 			panic("Darwin: unable to stop IRQ notification thread: %d",
+ 			      errno);
+ 		error = pthread_join(notification_worker, NULL);
+@@ -443,12 +794,5 @@ void os_close_epoll_fd(void)
+ 			      error);
+ 		notification_worker_joinable = 0;
+ 	}
+-	if (dispatch_kqueue >= 0) {
+-		close(dispatch_kqueue);
+-		dispatch_kqueue = -1;
+-	}
+-	if (notification_kqueue >= 0) {
+-		close(notification_kqueue);
+-		notification_kqueue = -1;
+-	}
++	close_kqueues();
+ }
 diff --git a/arch/um/os-Darwin/irq.h b/arch/um/os-Darwin/irq.h
 index 026078d0e86bbcf9502a50d924511f90dfda07e0..dfa75a438de4ef8cab92e617dd0fdc5c3f66ab7a 100644
 --- a/arch/um/os-Darwin/irq.h

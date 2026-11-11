@@ -253,7 +253,9 @@ it. The bridge fields used below are defined by the comments in
   busy CPU0 collects at its tick only. The `uml-irq-notify` thread takes no
   lock a CPU holds, so a stopped CPU0 cannot hold it up. It signals a CPU0
   that idles, and for an event no dispatch has followed within 20 ms it also
-  wakes an idle secondary through the pipe its idle wait reads. Handlers and
+  wakes an idle secondary through the pipe its idle wait reads. While CPU0 is
+  not idle it parks after one event until CPU0's next idle entry or its 20 ms
+  deadline, so a busy guest does not wake it per event. Handlers and
   their softirqs therefore run on any online CPU. Still waiting for CPU0 are
   the wake-ups the guest places on CPU0 (an RT worker kept on its previous CPU,
   CFS preferring a previous CPU that looks idle, NAPI and timers already

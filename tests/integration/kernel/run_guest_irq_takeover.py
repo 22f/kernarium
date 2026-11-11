@@ -26,7 +26,9 @@ judged. A hold that lands inside CPU0's dispatch leaves the events to it, so a
 few holds per phase may fail, as many as that phase's duty cycle of CPU0 inside
 its dispatch makes likely (HOLDS_ALLOWED_TO_FAIL). A hold in which no echo began
 is not judged either, and is reported; a phase with fewer than
-HOLDS_JUDGED_MINIMUM judged holds fails the run.
+HOLDS_JUDGED_MINIMUM judged holds fails the run. The timing verdict is not
+taken on a lockdep kernel: its checks slow the guest, and that run is read for
+what the console reports.
 """
 
 from __future__ import annotations

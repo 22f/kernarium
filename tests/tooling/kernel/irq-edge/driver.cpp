@@ -17,8 +17,15 @@ int darwin_irq_set_notification(int,int); int os_irq_wake_pending();
 int darwin_irq_idle_begin(void); void darwin_irq_idle_end(void);
 int darwin_irq_dispatch(int,unsigned long long,void*);
 void panic(const char*,...) { std::abort(); }
-void os_set_thread_name(const char*) {}
+}
+// The notification thread names itself first; every pass of its loop reads the
+// clock, so the reads count its wake-ups.
+static thread_local bool notify_thread=false;
+static std::atomic<long> thread_loops{0};
+extern "C" {
+void os_set_thread_name(const char*) { notify_thread=true; }
 long long os_nsecs(void) {
+ if (notify_thread) thread_loops++;
  timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec*1000000000LL+t.tv_nsec;
 }
 }
@@ -61,6 +68,20 @@ static bool wait_for_signal() {
  assert(pthread_sigmask(SIG_UNBLOCK,&only,&previous)==0);
  assert(pthread_sigmask(SIG_BLOCK,&only,nullptr)==0);
  return !signal_pending();
+}
+// Dispatch as a running CPU0 does at its tick until the notification thread has
+// nothing unserved, which it shows by taking no wake in a quiet spell.
+static void settle() {
+ for (int round=0;round<40;round++) {
+  for (int tick=0;tick<20;tick++) {
+   assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
+   sleep_ms(5);
+  }
+  int before=wakes;
+  sleep_ms(80);
+  if (wakes==before) return;
+ }
+ assert(!"the notification thread settles");
 }
 int main() {
  int fds[2]; assert(pipe(fds)==0); int token=1, next=2;
@@ -107,20 +128,30 @@ int main() {
  shot=0; shot_result=-1; assert(darwin_irq_dispatch(1,t0+80*ms,nullptr)==1 && shot_result==0 && dispatches==6);
  assert(darwin_irq_dispatch(0,t0+81*ms,nullptr)==1 && dispatches==7);
  // An edge nobody dispatches after is handed to an idle secondary after 20 ms,
- // again after each interval, and no more once a dispatch has begun.
- int edge[2]; assert(pipe(edge)==0 && wakes==0);
- assert(os_add_epoll_fd(1,edge[0],&token)==0);
+ // again after each interval, and no more once the dispatches go on, as a
+ // running CPU0's do at its tick.
+ settle();
+ int edge[2]; assert(pipe(edge)==0 && os_add_epoll_fd(1,edge[0],&token)==0);
+ int base=wakes;
  assert(write(edge[1],"c",1)==1);
- assert(wait_for_wake(1) && wait_for_wake(2));
- assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
- sleep_ms(60); int settled=wakes;
- sleep_ms(100); assert(wakes==settled);
+ assert(wait_for_wake(base+1) && wait_for_wake(base+2));
+ for (int tick=0;tick<20;tick++) {
+  assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
+  sleep_ms(5);
+ }
+ int settled=wakes;
+ for (int tick=0;tick<20;tick++) {
+  assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
+  sleep_ms(5);
+ }
+ assert(wakes==settled);
  // CPU0's idle wait, in both orders of an edge and the wait. The wait ends on
  // SIGUSR2, which stays blocked on the carrier outside the wait.
  char drained[64];
  // Pending before the wait: the edge is there when CPU0 enters it, which then
  // must not sleep. The 20 ms takeover wake shows the thread has seen the edge.
  int idle[2]; assert(pipe(idle)==0 && os_add_epoll_fd(1,idle[0],&next)==0);
+ settle();
  int before=wakes; assert(write(idle[1],"d",1)==1 && wait_for_wake(before+1));
  assert(signal_pending()==0);
  assert(darwin_irq_idle_begin()==1 && signal_pending()==0);
@@ -138,6 +169,43 @@ int main() {
  assert(darwin_irq_idle_begin()==1);
  darwin_irq_idle_end();
  assert(read(idle[0],drained,sizeof drained)==3);
+ // While CPU0 is not idle the thread does not wake for every edge: it parks
+ // after the first and the rest coalesce until its deadline, which a CPU0 that
+ // dispatches at its tick meets. A thread that woke for each edge would loop
+ // twice per edge, 200 times here.
+ darwin_irq_idle_end(); settle();
+ {
+  long loops=thread_loops;
+  for (int edge_count=0;edge_count<100;edge_count++) {
+   assert(write(idle[1],"h",1)==1);
+   if (edge_count%4==0) assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
+   sleep_ms(1);
+  }
+  assert(thread_loops-loops<100);
+  assert(read(idle[0],drained,sizeof drained)>=1);
+ }
+ // CPU0 enters its idle wait while the thread is parked on an edge: the entry
+ // ends the park, so the next edge signals at once and not at the takeover
+ // deadline, which would have woken an idle secondary first. Host scheduling
+ // may delay the thread, so a tenth of the rounds may be late.
+ {
+  const int rounds=100; int late=0;
+  for (int r=0;r<rounds;r++) {
+   darwin_irq_idle_end();
+   while (signal_pending()) wait_for_signal();
+   assert(darwin_irq_dispatch(0,(unsigned long long)os_nsecs(),nullptr)==1);
+   assert(write(idle[1],"i",1)==1);
+   sleep_ms(2);
+   if (darwin_irq_idle_begin()!=1) assert(wait_for_signal());
+   while (signal_pending()) wait_for_signal();
+   int before_edge=wakes;
+   assert(write(idle[1],"j",1)==1 && wait_for_signal());
+   if (wakes!=before_edge) late++;
+   darwin_irq_idle_end();
+   assert(read(idle[0],drained,sizeof drained)>=2);
+  }
+  assert(late<=rounds/10);
+ }
  // Whatever the order, the wake is not lost: each round starts an edge and a
  // wait at about the same time, and one of the two must see the other.
  {
@@ -169,6 +237,16 @@ int main() {
   producer.join();
   darwin_irq_idle_end();
  }
+ // Stopping the thread while it is parked, and starting it again.
+ darwin_irq_idle_end(); settle();
+ assert(write(idle[1],"k",1)==1);
+ sleep_ms(5);
+ os_close_epoll_fd();
+ assert(os_setup_epoll()==0);
+ assert(os_add_epoll_fd(1,idle[0],&next)==0);
+ assert(read(idle[0],drained,sizeof drained)>=1);
+ assert(write(idle[1],"l",1)==1);
+ sleep_ms(30);
  assert(os_del_epoll_fd(idle[0])==0);
  // The token handshake: a CPU0 that finds another CPU's dispatch under way, and
  // an edge that arrives after that holder collected, must not strand the edge.
@@ -195,5 +273,5 @@ int main() {
   }
   holder.join(); stress=false;
  }
- os_close_epoll_fd(); puts("PASS IRQ reentry, MOD rearm, wake source, drain/refill, EOF, early registration, dispatch token, takeover wake, idle wait wake, token handshake, shutdown");
+ os_close_epoll_fd(); puts("PASS IRQ reentry, MOD rearm, wake source, drain/refill, EOF, early registration, dispatch token, takeover wake, idle wait wake, parked thread, token handshake, shutdown");
 }
