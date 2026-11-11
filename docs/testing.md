@@ -294,9 +294,12 @@ automation host.
 ### Andarium
 
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
-free-space thresholds, suspension check and pause both applications share, and
+free-space thresholds, suspension check and pause both applications share and
+the logic of the hardware keyboard and pointer (held keys, Caps Lock,
+positions, buttons, scroll), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
-with `swift test` (it includes the snapshot store on APFS clones of sparse
+with `swift test` (it includes the hardware input's plug policy and pointer
+capture, the snapshot store on APFS clones of sparse
 files in a temporary directory, with a crash between every two file calls of
 each operation and a real error at each call in turn, the haptics session on
 fake guests and players, the haptics wire against the golden frames in
@@ -321,11 +324,13 @@ application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium`). `SnapshotFileApiTests`
+an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests`;
+the scheme without the filter also runs `AndariumUITests`). `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
-fail on it. The hosted tests
+fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
+screens' flows, refusals and words on a fake driver. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -342,6 +347,23 @@ and `AndariumTests` link, and the test bundle carries in its own Frameworks
 folder, so a device can load it; the application never does (the App Store
 bundle check refuses a build that does).
 
+`AndariumUITests` is the UI-test target of the same scheme
+(`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
+`-parallel-testing-enabled NO`), run on an iPad Simulator and an iPhone
+Simulator. Its launch asks for the input probe
+([automation](../Andarium/README.md#automation)): XCUITest's synthetic keys
+and, on an iPad, pointer events (XCUITest has no pointer on an iPhone) reach
+the real session and the guest's end is a log the test reads, so the tests
+cover the hardware keyboard and mouse without a guest. They cover the keys as
+positions, the plug order, no software keyboard, a sheet's text field taking
+the keys while it is open and a sheet without one taking none from the guest,
+the pointer's hover, clicks, drag and scroll, "Use the pointer as touch" (the
+click is a touch of the touchscreen with it on, the mouse's without it), and a
+guest that never registers its mouse, whose pointer stays the touchscreen's. The
+results carry how many attempts each repeated step took. The Simulator produces
+no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
+motion under the pointer lock.
+
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
 shutdown flow, low-space pause (a real guest paused through a free-space number the test
@@ -353,8 +375,11 @@ tests (including Android storage and the touch-cancel path), the side keys'
 pass-through of touches to Android, the ADB-over-network hold, the
 background disk locks (which also requires a guest that was allocating
 buffers when the GPU was held to suspend), the resume after a save while
-the application is away and the real `HostLocation` against the Simulator's
-simulated location (the suite's header says how to grant access and set one). The storage test signs its helper
+the application is away, the real `HostLocation` against the Simulator's
+simulated location (the suite's header says how to grant access and set one)
+and the hardware keyboard and mouse against Android's input devices
+(`KeyboardMouseGuestTests`, which needs a kernel that follows configuration
+changes and its Android release). The storage test signs its helper
 APK with the AOSP test key, never a release key. When derived data is on a
 removable volume, macOS prompts once for access and the launch hangs until
 answered; build to the internal disk instead.

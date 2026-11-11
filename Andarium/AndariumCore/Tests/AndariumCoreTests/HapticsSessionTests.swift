@@ -19,6 +19,7 @@ struct HapticsSessionTests {
         private var attemptCount = 0
         private var peerList: [Int32] = []
         private var acceptingNow = true
+        private var refusalsLeft = 0
 
         var accepting: Bool {
             get { lock.withLock { acceptingNow } }
@@ -27,6 +28,11 @@ struct HapticsSessionTests {
         var attempts: Int { lock.withLock { attemptCount } }
         var connections: Int { lock.withLock { peerList.count } }
         var latest: Int32? { lock.withLock { peerList.last.flatMap { $0 >= 0 ? $0 : nil } } }
+
+        /// Refuses the next `count` attempts and then accepts again. A count,
+        /// not a switch that the test throws: how soon the session tries again
+        /// decides nothing about which attempts are refused.
+        func refuse(next count: Int) { lock.withLock { refusalsLeft = count } }
 
         deinit { for peer in peerList where peer >= 0 { close(peer) } }
 
@@ -43,6 +49,10 @@ struct HapticsSessionTests {
         func openStream() throws -> Int32 {
             try lock.withLock {
                 attemptCount += 1
+                if refusalsLeft > 0 {
+                    refusalsLeft -= 1
+                    throw POSIXError(.ECONNREFUSED)
+                }
                 guard acceptingNow else { throw POSIXError(.ECONNREFUSED) }
                 var sockets: [Int32] = [-1, -1]
                 guard socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else { throw POSIXError(.EIO) }
@@ -445,12 +455,14 @@ struct HapticsSessionTests {
         let rig = rig()
         rig.session.update(available: true, running: true, booted: true, foreground: true)
         #expect(eventually { rig.session.isConnected })
-        // The HAL goes away and comes back after four failures.
-        rig.guest.accepting = false
-        rig.guest.dropLatest()
-        #expect(eventually { rig.guest.attempts >= 5 })
-        rig.guest.accepting = true
-        #expect(eventually { rig.session.isConnected && rig.guest.connections == 2 })
-        #expect(!rig.session.hasGivenUp)
+        // The HAL goes away and comes back after four failures, twice: eight
+        // in all, more than the five that end the attempts, so the first
+        // success started the count over.
+        for connections in 2...3 {
+            rig.guest.refuse(next: HapticsSession.attemptsAfterBoot - 1)
+            rig.guest.dropLatest()
+            #expect(eventually { rig.session.isConnected && rig.guest.connections == connections })
+            #expect(!rig.session.hasGivenUp)
+        }
     }
 }

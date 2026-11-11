@@ -17,6 +17,7 @@ Andarium/Live/        the runtime, storage and session of the device app
 AndariumCore/         Swift package: the model and the adb client, no UIKit; it
                       re-exports GuestHostCore (../GuestHost/Core)
 AndariumTests/        hosted tests of the device app
+AndariumUITests/      UI tests of the device app in the Simulator
 Config/               entitlements, Info.plist, privacy manifest, bridging header
 scripts/              system staging, the App Store bundle check,
                       acknowledgements, screen capture
@@ -43,6 +44,10 @@ and one guest per process, and needs the increased memory limit and extended
 virtual addressing entitlements (`Config/Andarium.entitlements`). The model
 and the runtime belong to the process (`AndariumProcess`), so a scene that
 connects again shows the same ones.
+
+`AndariumUITests` is the UI-test target of `Andarium`, in the scheme's test
+action. It is never part of the application: an App Store build contains no
+test bundle ([configurations](#configurations)).
 
 `AndariumPreview` is a Simulator-only target built from `Shared` and `Preview`
 with mock data. It embeds no runtime and boots nothing. Its launch arguments
@@ -251,14 +256,30 @@ control out.
   fail the operation. A restore that took effect and did not finish completes
   at the next start or launch (`TwoDiskStorage.recoverSnapshots` runs before
   the guest is read); until then Create and Restore are refused and every
-  snapshot but that one can be deleted. The update's copy is not a snapshot.
+  snapshot but that one can be deleted, and the start plan is the one that
+  start finds, from the snapshot's own record. The update's copy is not a
+  snapshot.
   The store's file calls are injected (`SnapshotFileOperations`).
   `SnapshotDriver` is what the screens call, and a refusal is a
   `SnapshotRefusal`. The driver reports what it does as `SnapshotActivity`,
   which the model keeps (`AppModel.snapshotGate`, observable); no start begins
-  and the update's Restore waits while an operation runs. A listing is never
-  older than the last finished operation (`revision`), can come without its
-  figures, and names the release the data is on.
+  and the update's Restore waits while an operation runs; a rename waits for
+  nothing and is waited for. A listing is never older than the last finished
+  operation (`revision`), can come without its figures, and names the release
+  the data is on; a cancelled one stops measuring.
+  Home's Guest system section has a Snapshots row (how many, the space they
+  use, Manage) that opens the Snapshots sheet: the list newest first, a page
+  per snapshot (Restore, its name, Delete) and a page on the space they use,
+  with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds
+  what Home and the sheet show (names first, then the figures; they give way
+  to the measuring state when an operation other than a rename finishes or a
+  run begins or ends, and are measured when nothing was read, after an
+  operation and when a run ends, never because a view appeared or while the
+  guest starts) and runs
+  each operation;
+  `SnapshotWords` says every refusal, plan and figure in one place. A restore
+  closes the sheet and Home says what happened, Start being next. The preview
+  plays the same screens on mock snapshots (`-screen snapshots-…`).
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
   from build 9 (build 5, the first public release, and builds 6 to 8 have
   none).
@@ -337,7 +358,8 @@ requires reopening Andarium.
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
-  ten fingers onto the guest's display. A touch the system takes over reaches
+  ten fingers onto the guest's display; the hardware keyboard and mouse are
+  the next item. A touch the system takes over reaches
   Android as a cancelled touch, not a lift, so no tap follows. Only the side
   keys take touches: while they are open, a touch that begins anywhere else
   reaches Android from its first event and closes the keys
@@ -345,6 +367,47 @@ requires reopening Andarium.
   Beside the closed keys their tip, while it shows, takes touches on its card
   alone (on a Mac, where an iPad app's popover keeps its dimming view, every
   touch), and it goes with the closed keys when they open or the session ends.
+- **Keyboard and mouse.** The guest has a hardware keyboard and a mouse
+  (virtio-input devices, plugged and unplugged at run time) while iOS has the
+  hardware. Every key goes to Android as its position (the usage on the HID
+  Keyboard/Keypad page), Android owns the layout and the repeat, and Andarium
+  keeps no key command or reserved combination: what iOS keeps for itself
+  (Command-Tab, Command-H, the Globe key) never reaches the app. The display
+  holds the keyboard focus, which shows no software keyboard, and gives it up to
+  a sheet, an alert or the bug report's share sheet while one is open, so
+  Andarium's own text fields take the keys then and a sheet without a field
+  takes them from the guest all the same. The keyboard is plugged while iOS
+  reports one and by the first key that goes down, and unplugged 3 s after the
+  last report or key and once no key is held (`HardwareInputPolicy`). The system
+  pointer is the guest's mouse on an iPad: Android draws its cursor and the
+  system pointer is hidden over the display. The mouse is plugged once iOS
+  reports one and the person has moved it over the display, clicked or scrolled,
+  so a mouse the Simulator reports without one being there plugs nothing; the
+  pointer's position uses the touchscreen's range and its buttons and scroll are
+  the mouse's, once the guest has registered the pointer (runtime API 35 reports
+  the registration of the keyboard and of the pointer and publishes both off
+  when a boot ends); until then, and for good on a kernel that never registers
+  it, the system pointer's clicks are touches and its use only plugs the mouse.
+  The devices need a kernel that follows configuration changes (the hot-plug
+  topic of the virtio-input devices); on the accepted kernel they plug and
+  nothing sees them, and input sent is dropped. A touch of the pointer is the
+  mouse's or a finger's from its beginning to its end. An iPhone has no pointer
+  to give the guest, and Settings' "Use the pointer as touch" (off for a fresh
+  install, kept as `PointerPreference`, absent on an iPhone) leaves the guest
+  without a mouse so that the pointer's clicks are touches. An Android
+  application that captures the pointer lights an LED on its mouse; the
+  application then asks the scene for the pointer lock and sends the mouse's raw
+  motion, buttons and scroll from Game Controller, and where iOS refuses the
+  lock (a window that is not full screen) the raw motion goes on while the
+  pointer is over the display (`PointerCapture`); the capture waits while a
+  sheet or an alert is up and ends with the guest's boot. Leaving the front, the
+  end of a run, a sheet, a keyboard that goes and the window losing key release
+  every key and button and end the pointer's contact; the devices exist only
+  while a run goes on, and plug once the guest's console has answered
+  (`KeyboardMouse`). Caps Lock is Android's: the application taps it once before
+  a key when iOS's state differs from the light Android reports
+  (`CapsLockReconciler`). Android hides its on-screen keyboard while it has a
+  hardware keyboard.
 - **Retina.** Retina mode applies at the next start and uses the screen's
   native pixels, whose host allocations count against the same iOS process
   limit as guest RAM (`DisplayOptions`).
@@ -520,6 +583,14 @@ additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 ([`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
+`ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
+with no guest behind it, and what the guest's keyboard and mouse would receive,
+and the touches that reach its touchscreen, go to one accessibility element
+(`inputProbeLog`) instead of the runtime; Settings carries a text field
+(`inputProbeField`) that takes the keys a sheet keeps. The probe's guest
+registers each device it is plugged; `unregistered` makes it one that never
+does. The launch states "Use the pointer as touch" off, hides the tips and keeps
+nothing.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`

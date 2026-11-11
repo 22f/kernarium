@@ -255,13 +255,11 @@ struct MotionTests {
         defer { close(sockets[1]) }
         #expect(opener.entered.wait(timeout: .now() + 2) == .success)
         let sample = MotionSample(sensor: .gyroscope, x: 1, y: 2, z: 3)
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        let finished = returnsWithoutWaiting {
             // A record is 20 bytes and the socket holds a few hundred: far more than it takes.
             for _ in 0..<2_000 { stream.submit(sample, epoch: epoch) }
-            done.signal()
         }
-        #expect(done.wait(timeout: .now() + 5) == .success, "a submit waited for a guest that reads nothing")
+        #expect(finished, "a submit waited for a guest that reads nothing")
         // The record that did not fit closed the connection, as the stream says.
         #expect(changes.all.contains(false))
     }

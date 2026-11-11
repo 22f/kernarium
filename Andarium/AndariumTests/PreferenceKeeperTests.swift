@@ -121,6 +121,38 @@ struct PreferenceKeeperTests {
         }
     }
 
+    @Test func thePointerChoiceIsWrittenWhenMade() async throws {
+        try await withDefaults { defaults in
+            let model = model()
+            #expect(model.pointerAsTouchToKeep == false)
+            let keeper = PreferenceKeeper(model: model, defaults: defaults)
+            keeper.start()
+
+            model.setPointerAsTouch(true)
+            try await written(by: keeper)
+            #expect(PointerPreference(defaults: defaults).isOn)
+            model.setPointerAsTouch(false)
+            try await written(by: keeper)
+            #expect(!PointerPreference(defaults: defaults).isOn)
+        }
+    }
+
+    @Test func aLaunchThatDecidedThePointerLeavesTheStoredChoice() async {
+        await withDefaults { defaults in
+            PointerPreference(defaults: defaults).keep(true)
+            let model = model()
+            model.pointerAsTouchDecidedByLaunch = true
+            let keeper = PreferenceKeeper(model: model, defaults: defaults)
+            keeper.start()
+
+            model.setPointerAsTouch(false)
+            model.session.showStats = true
+            await keeper.pending?.value
+            keeper.keep()
+            #expect(PointerPreference(defaults: defaults).isOn)
+        }
+    }
+
     @Test func theJitChoiceIsWrittenWhenMade() async throws {
         try await withDefaults { defaults in
             let model = model()

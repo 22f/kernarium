@@ -65,6 +65,7 @@ struct HomeView: View {
                 case .resize: ResizeSheet()
                 case .system: SystemSheet()
                 case .info: InfoSheet(page: hints.infoPage)
+                case .snapshots: SnapshotsSheet()
                 case .whatsNew:
                     WhatsNewSheet(releases: model.whatsNew.pending)
                         .modifier(ZoomFrom(id: Self.ribbonID, namespace: whatsNewZoom, enabled: !reduceMotion))
@@ -78,7 +79,7 @@ struct HomeView: View {
             Button("Erase guest", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Everything the guest has stored is deleted. This can\u{2019}t be undone.")
+            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count))
         }
         .alert(StartSpace.title, isPresented: $model.startBlocked) {
             Button("OK", role: .cancel) {}
@@ -170,11 +171,26 @@ struct HomeView: View {
                 text: DeviceRequirement.explanation(deviceName: model.host.name)
             )
         }
+        if let restored = model.restoredSnapshot {
+            NoticeCard(
+                symbol: "clock.arrow.circlepath", color: .accentColor,
+                title: SnapshotWords.restoredTitle, text: SnapshotWords.restoredText(restored),
+                onClose: { withAnimation { model.restoredSnapshot = nil } }
+            )
+        }
+        if let text = model.snapshots.unfinishedRestoreText {
+            NoticeCard(
+                symbol: "exclamationmark.arrow.triangle.2.circlepath", color: .orange,
+                title: SnapshotWords.unfinishedTitle, text: text
+            )
+        }
         if model.lowSpace {
             NoticeCard(
                 symbol: "externaldrive.badge.exclamationmark", color: .orange,
                 title: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)",
-                text: "The guest needs \(Formats.size(bytes: Limits.startReserveBytes)) free to start. Free up space in Settings › General › \(model.host.name) Storage."
+                text: SnapshotWords.lowSpaceText(
+                    hasSnapshots: model.snapshots.count > 0, startReserve: Formats.size(bytes: Limits.startReserveBytes),
+                    device: model.host.name)
             )
         }
         if let guest = model.guest, model.host.memory.isAboveSafe(guest.memoryMiB, vCPUs: guest.cores) {
@@ -189,7 +205,8 @@ struct HomeView: View {
             )
         }
         switch model.plan {
-        case .update(_, let release):
+        case .update(_, let release) where model.updateNoticeIsShown:
+            // A restored older snapshot says itself that the next start updates it.
             NoticeCard(
                 symbol: "arrow.down.circle.fill", color: .accentColor,
                 title: "System image updated",
@@ -200,9 +217,10 @@ struct HomeView: View {
         case .blocked(let reason):
             NoticeCard(
                 symbol: "exclamationmark.triangle.fill", color: .orange,
-                title: reason.title, text: reason.explanation
+                title: reason.title,
+                text: model.snapshots.blockedText(reason)
             )
-        case .firstStart, .normal:
+        case .firstStart, .normal, .update:
             EmptyView()
         }
         if let notice = model.notice {

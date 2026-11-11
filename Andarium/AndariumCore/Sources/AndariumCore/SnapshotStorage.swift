@@ -16,7 +16,8 @@ extension TwoDiskStorage {
     /// takes a fraction of a second for a large guest: call it off the main
     /// actor. `measured: false` reads only the small files, so it returns at
     /// once: every figure is then zero as a lower bound and `isMeasured` is
-    /// false.
+    /// false. A task that is cancelled while it measures stops between two
+    /// measures and answers the same, unmeasured.
     public func snapshotListing(measured: Bool = true) -> SnapshotListing {
         let store = snapshotStore
         let entries = store.entries()
@@ -29,25 +30,33 @@ extension TwoDiskStorage {
         var listing = SnapshotListing(
             createRefusal: store.createRefusal(), unfinishedRestore: store.unfinishedRestore(), dataRelease: dataRelease(),
             isMeasured: measured)
-        guard measured else {
+        func unmeasured() -> SnapshotListing {
             let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)
+            listing.isMeasured = false
             listing.items = entries.map { summary(of: $0, frees: unknown, kept: unknown) }
             listing.space = SnapshotSpace(snapshotsUse: unknown, updateCopy: copies.isEmpty ? nil : unknown)
             return listing
         }
-        listing.items = entries.map { entry in
+        guard measured, !Task.isCancelled else { return unmeasured() }
+        var items: [SnapshotSummary] = []
+        for entry in entries {
+            if Task.isCancelled { return unmeasured() }
             let (frees, kept) = figures(
                 of: entry, store: store, calls: calls,
                 keeping: live + copies + wholeSnapshots.filter { $0 != store.dataURL(entry.id) })
-            return summary(of: entry, frees: frees, kept: kept)
+            items.append(summary(of: entry, frees: frees, kept: kept))
         }
         // What deleting them all frees: what they hold together that neither
         // the live disk nor an update's copy holds.
+        if Task.isCancelled { return unmeasured() }
         var use = SnapshotMeasure.freed(by: wholeSnapshots, keeping: live + copies, using: calls)
         use.bytes += entries.reduce(0) { total, entry in
             total + store.smallFiles(entry.id).reduce(0) { $0 + SnapshotMeasure.allocatedBytes(of: $1) }
         }
+        if Task.isCancelled { return unmeasured() }
         let copyFigure = copies.isEmpty ? nil : SnapshotMeasure.freed(by: copies, keeping: live + wholeSnapshots, using: calls)
+        if Task.isCancelled { return unmeasured() }
+        listing.items = items
         listing.space = SnapshotSpace(snapshotsUse: use, updateCopy: copyFigure)
         return listing
     }
