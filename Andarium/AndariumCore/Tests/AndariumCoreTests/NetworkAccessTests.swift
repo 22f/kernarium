@@ -152,6 +152,23 @@ struct NetworkAccessWatcherTests {
         #expect(!watcher.notice.isShowing)
     }
 
+    @Test func aReportOfAnEarlierStartIsDroppedAfterTheNextStart() throws {
+        let source = ScriptedNetworkPathSource()
+        let watcher = NetworkAccessWatcher(source: source)
+        watcher.setWanted(true)
+        // A report the first monitor queued, still on its way as the source
+        // is stopped and started again (the system's callback queue is not
+        // the main actor's).
+        let late = try #require(source.deliver)
+        watcher.setWanted(false)
+        watcher.setWanted(true)
+        late(.init(status: .unsatisfied, reason: .cellularDenied))
+        #expect(!watcher.notice.isShowing, "an earlier monitor's report counted for the new watch")
+        // The new monitor's own reports are heard.
+        source.send(.init(status: .unsatisfied, reason: .cellularDenied))
+        #expect(watcher.notice.showing == .cellular)
+    }
+
     @Test func aDenialSurvivesAStopAndStartUntilTheNextReport() {
         let source = ScriptedNetworkPathSource()
         let watcher = NetworkAccessWatcher(source: source)

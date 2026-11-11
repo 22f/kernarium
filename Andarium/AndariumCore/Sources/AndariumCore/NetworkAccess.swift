@@ -177,13 +177,17 @@ public final class SystemNetworkPathSource: NetworkPathSource {
 /// Watches the path while it is wanted and keeps the notice. The model says
 /// when a watch is wanted (the application is active and has a guest on Home
 /// or in a session) and the watcher starts or stops its source to match; a
-/// report that arrives after a stop is dropped.
+/// report that arrives after a stop is dropped, and so is one from an earlier
+/// start of the source that is still on its way when the next start has
+/// begun.
 @MainActor
 public final class NetworkAccessWatcher {
     private let source: any NetworkPathSource
     public private(set) var notice = NetworkNotice()
     /// The source is started.
     public private(set) var isWatching = false
+    /// Which start of the source a report belongs to.
+    private var generation = 0
     /// Runs after every change of the notice.
     public var changed: (@MainActor () -> Void)?
 
@@ -198,14 +202,16 @@ public final class NetworkAccessWatcher {
         guard wanted != isWatching else { return }
         isWatching = wanted
         if wanted {
-            source.start { [weak self] report in self?.receive(report) }
+            generation &+= 1
+            let started = generation
+            source.start { [weak self] report in self?.receive(report, from: started) }
         } else {
             source.stop()
         }
     }
 
-    func receive(_ report: NetworkPathReport) {
-        guard isWatching else { return }
+    func receive(_ report: NetworkPathReport, from started: Int) {
+        guard isWatching, started == generation else { return }
         let before = notice
         notice.apply(report.access)
         if notice != before { changed?() }
