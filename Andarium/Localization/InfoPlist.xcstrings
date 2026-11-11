@@ -1,7 +1,90 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-
+    "NSLocalNetworkUsageDescription" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apps running in Andarium use this to connect to devices on your local network, such as printers, media servers and computers, and ADB over network uses it to let a computer on your network connect to Andarium. Internet access doesn't need it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium内で動作するアプリが、プリンタ、メディアサーバ、コンピュータなど、ローカルネットワーク上のデバイスに接続するために使用します。また、「ネットワーク経由のADB」でネットワーク上のコンピュータをAndariumに接続させるためにも使用します。インターネットへのアクセスには必要ありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Andarium 中运行的应用会使用此权限连接本地网络上的设备（例如打印机、媒体服务器和电脑），“通过网络使用 ADB”也会使用此权限，让您网络上的电脑连接到 Andarium。访问互联网不需要此权限。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 Andarium 中執行的應用程式會使用此權限連線到本地網路上的裝置（例如印表機、媒體伺服器和電腦），「透過網路使用 ADB」也會使用此權限，讓您網路上的電腦連線到 Andarium。存取網際網路不需要此權限。"
+          }
+        }
+      }
+    },
+    "NSLocationWhenInUseUsageDescription" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは、「位置情報」をオンにしたときだけこのデバイスの位置情報を共有し、ゲスト内のアプリが使えるようにします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在您开启“位置”时，Andarium 才会共享此设备的位置，以供客户机中的应用使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在您開啟「位置」時，Andarium 才會分享此裝置的位置，以供客體中的應用程式使用。"
+          }
+        }
+      }
+    },
+    "NSMicrophoneUsageDescription" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium records from the microphone only when you turn on Microphone, so that apps in the guest can use it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは、「マイク」をオンにしたときだけマイクから録音し、ゲスト内のアプリが使えるようにします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在您开启“麦克风”时，Andarium 才会使用麦克风录音，以供客户机中的应用使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在您開啟「麥克風」時，Andarium 才會使用麥克風錄音，以供客體中的應用程式使用。"
+          }
+        }
+      }
+    }
   },
   "version" : "1.0"
 }

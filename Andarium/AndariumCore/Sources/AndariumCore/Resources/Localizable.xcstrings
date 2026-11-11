@@ -1,7 +1,466 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-
+    "%@ %@" : {
+      "comment" : "Joins two whole sentences. English puts a space between them; Chinese and Japanese put none.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@%2$@"
+          }
+        }
+      }
+    },
+    "%lld vCPUs" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld vCPU"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld vCPUs"
+                }
+              }
+            }
+          }
+        },
+        "ja" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld vCPU"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 个 vCPU"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hant" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 個 vCPU"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Above %@, games may run out of graphics memory." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を超えると、ゲームでグラフィックスメモリが不足する可能性があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "超过 %@ 时，游戏可能会耗尽图形内存。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "超過 %@ 時，遊戲可能會耗盡圖形記憶體。"
+          }
+        }
+      }
+    },
+    "Andarium draws the guest with Metal 4, which this %@ does not have, so the guest cannot start here." : {
+      "comment" : "%@ is the device name: iPhone, iPad or Mac.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AndariumはMetal 4でゲストを描画しますが、この%@はMetal 4に対応していないため、ここではゲストを起動できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium 使用 Metal 4 绘制客户机，而此 %@ 不支持 Metal 4，因此客户机无法在此启动。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium 使用 Metal 4 繪製客體，而此 %@ 不支援 Metal 4，因此客體無法在此啟動。"
+          }
+        }
+      }
+    },
+    "Android ran out of graphics memory" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのグラフィックスメモリが不足しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android 的图形内存不足"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android 的圖形記憶體不足"
+          }
+        }
+      }
+    },
+    "Dismiss" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "閉じる"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉"
+          }
+        }
+      }
+    },
+    "Frame rate lowered while this device is hot" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバイスが高温の間、フレームレートを下げています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备发热期间已降低帧率"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "裝置發熱期間已降低影格速率"
+          }
+        }
+      }
+    },
+    "Guest memory is high" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストのメモリが多めです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机内存偏高"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體記憶體偏高"
+          }
+        }
+      }
+    },
+    "If an app looks broken, swipe it away in Recents and open it again." : {
+      "comment" : "Recents is Android's list of recent apps inside the guest; use the guest's own name for it.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリの表示がおかしい場合は、「最近使用したアプリ」でそのアプリを上にスワイプして終了し、もう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "如果某个应用看起来出现异常，请在“最近任务”中将其划掉，然后重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "如果某個應用程式看起來異常，請在「最近使用」中將其滑掉，然後重新開啟。"
+          }
+        }
+      }
+    },
+    "In Settings while the guest runs" : {
+      "comment" : "Where a feature is found: in the Settings sheet that opens while the guest runs.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲスト実行中の設定画面で"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在客户机运行时的“设置”中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在客體執行時的「設定」中"
+          }
+        }
+      }
+    },
+    "iOS is likely to close Andarium above %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を超えると、iOSによってAndariumが終了される可能性が高くなります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "超过 %@ 时，iOS 很可能会关闭 Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "超過 %@ 時，iOS 很可能會關閉 Andarium。"
+          }
+        }
+      }
+    },
+    "iOS is likely to close Andarium with %@ of guest memory on this %@. %@ or less is safer. Lower it with Edit under Guest system." : {
+      "comment" : "Arguments: guest memory, device name, the safer size. Edit and Guest system are labels on Home.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この%2$@でゲストのメモリが%1$@の場合、iOSによってAndariumが終了される可能性が高くなります。%3$@以下にすると安全です。「ゲストシステム」の「編集」で下げてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 %2$@ 上的客户机内存为 %1$@ 时，iOS 很可能会关闭 Andarium。%3$@ 或更低更为安全。请使用“客户机系统”下的“编辑”降低内存。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 %2$@ 上的客體記憶體為 %1$@ 時，iOS 很可能會關閉 Andarium。%3$@ 或更低更為安全。請使用「客體系統」下的「編輯」降低記憶體。"
+          }
+        }
+      }
+    },
+    "Needs an A14 chip or later" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A14チップ以降が必要です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要 A14 或更新的芯片"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要 A14 或更新的晶片"
+          }
+        }
+      }
+    },
+    "The guest's data uses a newer layout than this app version can open. Erase the guest to start again with this one." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストのデータは、このAppのバージョンで開けるものより新しいレイアウトを使っています。ゲストを消去して、このバージョンで最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机的数据使用的布局比此 App 版本能打开的更新。请抹掉客户机以使用此版本重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體的資料使用的配置比此 App 版本能開啟的更新。請清除客體以使用此版本重新開始。"
+          }
+        }
+      }
+    },
+    "The guest's files do not match this app version. Erase the guest to start again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストのファイルがこのAppのバージョンと一致しません。ゲストを消去して最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客户机的文件与此 App 版本不匹配。请抹掉客户机以重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "客體的檔案與此 App 版本不相符。請清除客體以重新開始。"
+          }
+        }
+      }
+    },
+    "This app version is older than the one the guest last started with, and its data does not go back. Install a newer version of Andarium, or erase the guest to start again with this one." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このAppのバージョンは、ゲストが前回起動したバージョンより古く、そのデータは元に戻せません。新しいバージョンのAndariumをインストールするか、ゲストを消去してこのバージョンで最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 App 版本比客户机上次启动时使用的版本更旧，而其数据无法回退。请安装更新版本的 Andarium，或抹掉客户机以使用此版本重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 App 版本比客體上次啟動時使用的版本更舊，而其資料無法退回。請安裝較新版本的 Andarium，或清除客體以使用此版本重新開始。"
+          }
+        }
+      }
+    },
+    "This guest cannot start" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このゲストは起動できません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此客户机无法启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此客體無法啟動"
+          }
+        }
+      }
+    },
+    "VRAM" : {
+      "comment" : "Graphics memory of the guest (video RAM).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRAM"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRAM"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRAM"
+          }
+        }
+      }
+    },
+    "VRAM is graphics memory, separate from the guest’s RAM." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRAMはグラフィックスメモリで、ゲストのRAMとは別です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRAM 是图形内存，与客户机的 RAM 相互独立。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VRAM 是圖形記憶體，與客體的 RAM 各自獨立。"
+          }
+        }
+      }
+    }
   },
   "version" : "1.0"
 }

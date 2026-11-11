@@ -1,7 +1,259 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-
+    "Browse the guest’s internal storage, and import or export files and folders." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ゲストの内部ストレージを閲覧し、ファイルやフォルダを読み込んだり書き出したりできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "浏览客户机的内部存储空间，并导入或导出文件和文件夹。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "瀏覽客體的內部儲存空間，並匯入或匯出檔案和檔案夾。"
+          }
+        }
+      }
+    },
+    "File browser" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルブラウザ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件浏览器"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "檔案瀏覽器"
+          }
+        }
+      }
+    },
+    "Fixed a crash when returning to Andarium from the background" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バックグラウンドからAndariumに戻るときにクラッシュする問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了从后台返回 Andarium 时崩溃的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正了從背景返回 Andarium 時當機的問題"
+          }
+        }
+      }
+    },
+    "Fixed a crash when using the gyroscope" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ジャイロスコープの使用時にクラッシュする問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了使用陀螺仪时崩溃的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正了使用陀螺儀時當機的問題"
+          }
+        }
+      }
+    },
+    "Fixed crashes in some 3D games and apps" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一部の3Dゲームやアプリでクラッシュする問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了某些 3D 游戏和应用崩溃的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正了某些 3D 遊戲和應用程式當機的問題"
+          }
+        }
+      }
+    },
+    "Fixed high CPU use and heat after a network connection drops" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ネットワーク接続が切れたあとにCPU使用率が高くなり発熱する問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了网络连接中断后 CPU 占用高和发热的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正了網路連線中斷後 CPU 使用率偏高和發熱的問題"
+          }
+        }
+      }
+    },
+    "Fixed the guest crashing on many iPhones" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "多くのiPhoneでゲストがクラッシュする問題を修正しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修复了客户机在许多 iPhone 上崩溃的问题"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修正了客體在許多 iPhone 上當機的問題"
+          }
+        }
+      }
+    },
+    "More memory" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリの増量"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更多内存"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更多記憶體"
+          }
+        }
+      }
+    },
+    "On devices that allow it, the guest’s RAM can now go above 4 GiB." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "対応するデバイスでは、ゲストのRAMを4 GiBより大きくできるようになりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在支持的设备上，客户机的 RAM 现在可以超过 4 GiB。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在支援的裝置上，客體的 RAM 現在可以超過 4 GiB。"
+          }
+        }
+      }
+    },
+    "Reduced stutters and sound dropouts under load" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "負荷が高いときのカクつきや音切れを減らしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "减少了高负载下的卡顿和声音中断"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "減少了高負載下的卡頓和聲音中斷"
+          }
+        }
+      }
+    },
+    "Stability fixes" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安定性の修正"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "稳定性修复"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "穩定性修正"
+          }
+        }
+      }
+    }
   },
   "version" : "1.0"
 }
