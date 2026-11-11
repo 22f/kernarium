@@ -124,6 +124,35 @@ if(UML_ANDROID_KEYMOUSE_RELEASE AND UML_ANDROID_KEYMOUSE_PROBE_APK AND TARGET um
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The host's cameras (routes p0030 and p0031 and the camera layouts): the runner
+# boots the release with the launcher's synthetic camera and a camera layout on the
+# vendor SKU, and checks the layout's features and media profiles, the cameras
+# Android lists, one preview frame and one still of the camera application, and,
+# in a blocked session, the same cameras with black frames and no still. It boots
+# Android with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_CAMERA_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-camera tests boot")
+if(UML_ANDROID_CAMERA_RELEASE AND TARGET uml-darwin-android17)
+    foreach(mode live blocked)
+        if(mode STREQUAL "live")
+            set(camera_test_name android-camera)
+        else()
+            set(camera_test_name android-camera-blocked)
+        endif()
+        uml_add_integration_test(
+            NAME ${camera_test_name}
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_android_camera.py
+                --release ${UML_ANDROID_CAMERA_RELEASE}
+                --emulator $<TARGET_FILE:uml-darwin-android17>
+                --mode ${mode}
+            LABELS guest;boot;android
+            TIMEOUT 3600
+            PROCESSORS 4
+            RESOURCE_GROUPS cpus:4)
+    endforeach()
+endif()
+
 # The thermal HAL and the 30 fps cap (route p0007's display topic): the runner
 # plays the host application over a vsock forward to the HAL's port and checks
 # the thermal manager, the display manager's vote, SurfaceFlinger's render rate

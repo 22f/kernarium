@@ -212,11 +212,33 @@ void controls()
     settings = {};
     settings.focusMode = CameraFocusMode::manual;
     settings.focusDistanceDioptres = 5.0f;
+    settings.focusDistanceSerial = 1;
     session->apply(0, settings);
     camera->pump(0, 1);
     require(recorder.frames.back().second.exposure.af == CameraControlState::locked);
     require(recorder.frames.back().second.exposure.lensPositionDioptres == 5.0f);
     require(sharpness(recorder.frames.back().second) < crisp * 0.8);
+
+    // The lens holds while the distance is not written anew, even if the value says
+    // otherwise; a locked lens holds too.
+    settings.focusDistanceDioptres = 2.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.exposure.lensPositionDioptres == 5.0f);
+    settings.focusMode = CameraFocusMode::locked;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.exposure.af == CameraControlState::locked &&
+            recorder.frames.back().second.exposure.lensPositionDioptres == 5.0f);
+
+    // A scan in a manual mode puts the lens on the chart, and it holds there.
+    settings.focusMode = CameraFocusMode::manual;
+    settings.focusTriggerSerial = 1;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    require(recorder.frames[recorder.frames.size() - 2].second.exposure.af == CameraControlState::searching);
+    require(recorder.frames.back().second.exposure.af == CameraControlState::locked);
+    require(recorder.frames.back().second.exposure.lensPositionDioptres == 1.0f);
 
     // White balance moves the chroma.
     settings = {};
