@@ -81,6 +81,12 @@ the window's interface orientation (`MotionMount`). Returning to a locked
 scene restores the guest's previous rotation preferences
 (`SessionOrientationPolicy`).
 
+While the guest's display is shown (the boot and the run) everything behind it
+is black, in the light appearance too: the scene's root view and its window
+carry it, so the area outside the safe area stays black through a rotation or
+a window resize. Home and sheets follow the system appearance
+(`AndariumHostingController`).
+
 ## Build
 
 Packaging the Android runtime alone, and staging the system from the accepted
@@ -310,9 +316,13 @@ requires reopening Andarium.
   front and holds the guest running, and lets everything go the moment it is
   not. The HAL sends the effect or primitive and its duration, and
   `HapticShapes` decides what fills it, so the feel is tuned in an app update.
-  There is no switch: Android's own vibration settings decide what the guest
-  asks for, and an iPad, a Mac or the Simulator, which have no Taptic Engine,
-  give the guest no vibrator. The wire is `HapticsProtocol`, whose golden frames
+  Android's own vibration settings decide what the guest asks for. Haptics
+  under Capabilities, a per-guest switch that is on until the person turns it
+  off, decides whether this device plays it: off, the application holds no
+  connection and no engine for the Taptic Engine and the guest keeps its
+  vibrator. A game controller's rumble is not governed by it. An iPad, a Mac or
+  the Simulator, which have no Taptic Engine, give the guest no vibrator and
+  Capabilities no Haptics row. The wire is `HapticsProtocol`, whose golden frames
   the HAL's test shares (`tests/unit/andarium/fixtures`); the
   [Android README](../android/lineage-24/README.md) owns the HAL.
 - **Heat.** The application tells the guest's thermal HAL how hot the device is

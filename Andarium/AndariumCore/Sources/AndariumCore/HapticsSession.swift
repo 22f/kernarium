@@ -15,6 +15,17 @@ import Foundation
 /// to say. A connection that was made and is lost is tried again the same way.
 /// A device without haptics never connects.
 ///
+/// **The switch.** The person's Haptics switch (`enabled`) governs what the
+/// guest plays on the device's own actuator. While it is off the session holds
+/// no stream and the player no engine for the device: turning it off ends the
+/// connection, stops what the guest played and drops the device's engine
+/// (`HapticPlayer.forget`), and turning it on connects again at once. The HAL
+/// sees no host then, as it does before the application connects, drops its
+/// frames and completes its callbacks on time, so the guest keeps its vibrator
+/// and nothing in Android shifts. The player is shared with the game
+/// controllers' rumble, which the switch does not govern: the device is the
+/// only target it lets go of.
+///
 /// **In front.** Only while the application is in front does anything play.
 /// A frame that arrives otherwise is dropped, and answered as such. Leaving the
 /// front and ending the run stop every target and the engine; losing the
@@ -39,6 +50,7 @@ public final class HapticsSession: @unchecked Sendable {
 
     // Touched only on `queue`.
     private var available = false
+    private var enabled = true
     private var running = false
     private var booted = false
     private var foreground = false
@@ -64,22 +76,24 @@ public final class HapticsSession: @unchecked Sendable {
     deinit { stream?.stop() }
 
     /// What is wanted now. `available` is whether the device has haptics;
-    /// `running` a normal run of the guest; `booted` that Android has reported
-    /// boot completed in it; `foreground` that the application is in front and
-    /// holds the guest running.
-    public func update(available: Bool, running: Bool, booted: Bool, foreground: Bool) {
+    /// `enabled` the person's Haptics switch; `running` a normal run of the
+    /// guest; `booted` that Android has reported boot completed in it;
+    /// `foreground` that the application is in front and holds the guest
+    /// running.
+    public func update(available: Bool, enabled: Bool = true, running: Bool, booted: Bool, foreground: Bool) {
         queue.async { [self] in
             let bootedNow = booted && !self.booted
             self.available = available
+            self.enabled = enabled
             self.running = running
             self.booted = booted
             if bootedNow { failedAttempts = 0 }
             let frontChanged = foreground != self.foreground
             self.foreground = foreground
-            if available && running {
+            if available && enabled && running {
                 if stream == nil && !gaveUp { beginRun() }
             } else {
-                if stream != nil { endRun() }
+                if stream != nil { endRun(switchedOff: available && !enabled && running) }
                 gaveUp = false
             }
             guard frontChanged else { return }
@@ -128,12 +142,22 @@ public final class HapticsSession: @unchecked Sendable {
         stream.start()
     }
 
-    private func endRun() {
+    /// Ends the connection. The person's switch lets go of the device's
+    /// actuator alone (`releaseDevice`); whatever else ends a run lets go of
+    /// every target.
+    private func endRun(switchedOff: Bool = false) {
         run &+= 1
         stream?.stop()
         stream = nil
         connected = false
-        letGo()
+        if switchedOff { releaseDevice() } else { letGo() }
+    }
+
+    /// Stops what the guest played and drops the device's engine, so nothing
+    /// is held while Haptics is off. The controllers' targets are not touched.
+    private func releaseDevice() {
+        letGoOfTheGuestsTargets()
+        player.forget(.device)
     }
 
     /// Stops every target and the engine, and forgets what played.

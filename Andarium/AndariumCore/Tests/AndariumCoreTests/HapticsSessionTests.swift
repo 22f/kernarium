@@ -107,6 +107,7 @@ struct HapticsSessionTests {
             case stop(HapticTarget)
             case stopAll
             case prepare
+            case forget(HapticTarget)
         }
 
         private let lock = NSLock()
@@ -139,6 +140,7 @@ struct HapticsSessionTests {
         func stop(_ target: HapticTarget) { record(.stop(target)) }
         func stopAll() { record(.stopAll) }
         func prepare() { record(.prepare) }
+        func forget(_ target: HapticTarget) { record(.forget(target)) }
     }
 
     private struct Rig {
@@ -380,6 +382,163 @@ struct HapticsSessionTests {
         #expect(acknowledgement(rig).count == 17)
         let intensities = rig.player.calls.filter { if case .intensity = $0 { true } else { false } }
         #expect(intensities.count == 1)
+    }
+
+    // MARK: The person's switch
+
+    /// A player that keeps what each target plays, as the application's does:
+    /// a stop ends the target, `stopAll` every target, and `forget` the target
+    /// and the engine it had. A game controller's rumble plays on it too.
+    private final class ActuatorPlayer: HapticPlayer, @unchecked Sendable {
+        private let lock = NSLock()
+        private var activeTargets: Set<HapticTarget> = []
+        private var engineTargets: Set<HapticTarget> = []
+        private var log: [String] = []
+
+        /// What plays now.
+        var active: Set<HapticTarget> { lock.withLock { activeTargets } }
+        /// The targets that have an engine.
+        var engines: Set<HapticTarget> { lock.withLock { engineTargets } }
+        var calls: [String] { lock.withLock { log } }
+
+        func play(_ score: HapticScore) -> HapticPlayResult {
+            lock.withLock {
+                log.append("play \(score.target.rawValue)")
+                engineTargets.insert(score.target)
+                activeTargets.insert(score.target)
+            }
+            return .played
+        }
+        func setToneIntensity(_ intensity: Float, on target: HapticTarget) -> Bool { lock.withLock { activeTargets.contains(target) } }
+        func stop(_ target: HapticTarget) {
+            lock.withLock {
+                log.append("stop \(target.rawValue)")
+                activeTargets.remove(target)
+            }
+        }
+        func stopAll() {
+            lock.withLock {
+                log.append("stopAll")
+                activeTargets.removeAll()
+            }
+        }
+        func prepare() {
+            lock.withLock {
+                log.append("prepare")
+                engineTargets.insert(.device)
+            }
+        }
+        func forget(_ target: HapticTarget) {
+            lock.withLock {
+                log.append("forget \(target.rawValue)")
+                activeTargets.remove(target)
+                engineTargets.remove(target)
+            }
+        }
+    }
+
+    private func switchRig() -> (session: HapticsSession, guest: FakeGuest, player: ActuatorPlayer, clock: TestClock) {
+        let guest = FakeGuest()
+        let clock = TestClock()
+        let player = ActuatorPlayer()
+        let session = HapticsSession(opener: guest, player: player, retryDelay: .milliseconds(10)) { clock.read() }
+        return (session, guest, player, clock)
+    }
+
+    @Test func turningHapticsOffEndsTheConnectionAndLetsGoOfTheDeviceAndNothingElse() throws {
+        let rig = switchRig()
+        let controller = HapticTarget.controller(slot: 0, locality: .standard)
+        rig.session.update(available: true, running: true, booted: true, foreground: true)
+        #expect(eventually { rig.session.isConnected })
+        #expect(eventually { rig.player.engines == [.device] })
+        // The guest plays a tone on the device, and a game controller rumbles on the same player.
+        rig.guest.send(try frame("play-tone"))
+        #expect(rig.guest.read(count: 17).count == 17)
+        _ = rig.player.play(HapticScore(target: controller, sequence: 1, events: [.primitive(.click, durationMilliseconds: 12)]))
+        #expect(rig.player.active == [.device, controller])
+
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: true)
+        rig.session.settle()
+        #expect(rig.guest.closedByHost())
+        #expect(!rig.session.isConnected)
+        // The device plays nothing and keeps no engine; the controller plays on, with its engine.
+        #expect(rig.player.active == [controller])
+        #expect(rig.player.engines == [controller])
+        #expect(!rig.player.calls.contains("stopAll"))
+        #expect(rig.player.calls.contains("forget 0"))
+        // Nothing was asked of the controller's target.
+        #expect(!rig.player.calls.contains { $0 == "stop \(controller.rawValue)" || $0 == "forget \(controller.rawValue)" })
+    }
+
+    @Test func whileHapticsIsOffNothingConnectsAndNoEngineIsMade() throws {
+        let rig = switchRig()
+        rig.session.update(available: true, enabled: false, running: true, booted: false, foreground: true)
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: true)
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: false)
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: true)
+        rig.session.settle()
+        usleep(100_000)
+        #expect(rig.guest.attempts == 0)
+        #expect(!rig.session.isConnected && !rig.session.hasGivenUp)
+        #expect(rig.player.engines.isEmpty && rig.player.active.isEmpty)
+        #expect(!rig.player.calls.contains("prepare"))
+    }
+
+    @Test func aFrameThatComesAfterTheSwitchTurnedOffPlaysNothing() throws {
+        let rig = switchRig()
+        rig.session.update(available: true, running: true, booted: true, foreground: true)
+        #expect(eventually { rig.session.isConnected })
+        let peer = try #require(rig.guest.latest)
+        // The host may have closed its end by the time the frame goes: no signal for that.
+        var noSignal: Int32 = 1
+        setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+        // The guest's frame comes after the person turned Haptics off: whether it reaches
+        // the host or not, the device plays nothing and holds no engine afterwards.
+        let bytes = try frame("play-primitive-click")
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: true)
+        _ = bytes.withUnsafeBytes { Darwin.send(peer, $0.baseAddress, $0.count, 0) }
+        rig.session.settle()
+        usleep(100_000)
+        #expect(!rig.player.calls.contains("play 0"))
+        #expect(rig.player.engines.isEmpty && rig.player.active.isEmpty)
+    }
+
+    @Test func turningHapticsOnAgainConnectsAtOnceAndPlays() throws {
+        let rig = switchRig()
+        rig.session.update(available: true, running: true, booted: true, foreground: true)
+        #expect(eventually { rig.session.isConnected })
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: true)
+        rig.session.settle()
+        #expect(rig.guest.closedByHost())
+        rig.session.update(available: true, enabled: true, running: true, booted: true, foreground: true)
+        #expect(eventually { rig.guest.connections == 2 && rig.session.isConnected })
+        // The engine is made ready for it, and the guest's score plays.
+        #expect(eventually { rig.player.engines == [.device] })
+        rig.guest.send(try frame("play-primitive-click"))
+        #expect(rig.guest.read(count: 17).count == 17)
+        #expect(rig.player.active == [.device])
+    }
+
+    @Test func theSwitchDoesNotCountAsAFailedAttemptAndTheNextBootBeginsAgain() throws {
+        let rig = switchRig()
+        rig.session.update(available: true, running: true, booted: true, foreground: true)
+        #expect(eventually { rig.session.isConnected })
+        rig.session.update(available: true, enabled: false, running: true, booted: true, foreground: true)
+        rig.session.settle()
+        #expect(!rig.session.hasGivenUp)
+        // A run that ends while it is off leaves nothing to end, and the next run connects.
+        rig.session.update(available: true, enabled: false, running: false, booted: false, foreground: true)
+        rig.session.update(available: true, enabled: true, running: true, booted: false, foreground: true)
+        #expect(eventually { rig.session.isConnected })
+    }
+
+    @Test func aRunThatEndsWhileHapticsIsOnStillLetsGoOfEveryTarget() throws {
+        let rig = switchRig()
+        rig.session.update(available: true, running: true, booted: true, foreground: true)
+        #expect(eventually { rig.session.isConnected })
+        rig.session.update(available: true, enabled: true, running: false, booted: true, foreground: true)
+        rig.session.settle()
+        #expect(rig.player.calls.last == "stopAll")
     }
 
     // MARK: Controllers are not the guest's

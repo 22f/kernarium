@@ -115,6 +115,9 @@ protocol RuntimeDriver: AnyObject {
     func setNetworkNotice(_ denial: NetworkDenial?)
     /// Enables or stops sharing motion with the guest.
     func setMotionSensors(_ on: Bool)
+    /// Lets the guest play its haptics on the device, or not: the Haptics
+    /// switch, which applies at once.
+    func setHaptics(_ on: Bool)
     /// Settings' "Use the pointer as touch" changed: the guest has no mouse
     /// while it is on.
     func setPointerAsTouch(_ on: Bool)

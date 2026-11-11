@@ -2,6 +2,7 @@
 import AndariumCore
 import Foundation
 import Testing
+import UIKit
 @testable import Andarium
 
 /// iOS's microphone permission as a test plays it: the access the system
@@ -225,10 +226,19 @@ struct CapabilitiesFlowTests {
 
     // MARK: The order of the rows
 
-    /// Location sits above Microphone and Gyroscope, as the person asked; the
-    /// section draws its rows in this order, which VoiceOver reads.
-    @Test func capabilitiesAreListedLocationMicrophoneGyroscope() {
-        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .gyroscope])
+    /// Location sits above Microphone and Gyroscope, as the person asked, and
+    /// Haptics comes last; the section draws its rows in this order, which
+    /// VoiceOver reads.
+    @Test func capabilitiesAreListedLocationMicrophoneGyroscopeHaptics() {
+        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .gyroscope, .haptics])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .gyroscope, .haptics])
+    }
+
+    /// An iPad, a Mac and the Simulator have no Taptic Engine: nothing to
+    /// switch, so no row (and no disabled one).
+    @Test func hapticsHasNoRowWithoutADeviceThatHasThem() {
+        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .gyroscope])
+        #expect(!setup().model.hapticsAvailable)
     }
 
     // MARK: The preview and Gyroscope
@@ -255,6 +265,51 @@ struct CapabilitiesFlowTests {
         #expect(s.model.guest?.motionChoice == true)
         #expect(s.driver.motionSensors)
         #expect(s.system.asked == 0)
+    }
+
+    @Test func hapticsAreOnByDefaultAndAskForNothing() {
+        let s = setup()
+        s.model.hapticsAvailable = true
+        #expect(s.model.guest?.haptics == true)
+        #expect(s.model.hapticsOn)
+        #expect(s.model.permissionPrompt == nil)
+        #expect(s.system.asked == 0)
+        s.model.setHaptics(false)
+        #expect(s.model.guest?.haptics == false)
+        #expect(!s.model.hapticsOn)
+        // Kept as chosen, and the driver is told at once.
+        #expect(s.driver.savedGuest?.haptics == false)
+        #expect(!s.driver.haptics)
+        s.model.setHaptics(true)
+        #expect(s.model.hapticsOn)
+        #expect(s.driver.savedGuest?.haptics == true)
+        #expect(s.driver.haptics)
+        #expect(s.system.asked == 0)
+        // The other switches were never touched.
+        #expect(s.model.guest?.motionChoice == nil && s.model.guest?.location == false && s.model.guest?.microphone == false)
+    }
+
+    @Test func aGuestStoredBeforeTheSwitchReadsAsOn() throws {
+        let old = Data(#"{"cores":2,"memoryMiB":1024,"capacityGiB":8,"microphone":false,"includeInBackups":false}"#.utf8)
+        let guest = try JSONDecoder().decode(Guest.self, from: old)
+        let model = AppModel(
+            guest: guest, host: host,
+            system: SystemInfo(version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1"),
+            capabilities: .device, createRequirementBytes: 1)
+        #expect(model.hapticsOn)
+    }
+
+    @Test func theHapticsSwitchNeedsNoDeviceToBeKept() {
+        // The model keeps the choice whatever the device has; the row is what is absent there.
+        let s = setup()
+        #expect(!s.model.hapticsAvailable)
+        s.model.setHaptics(false)
+        #expect(s.model.guest?.haptics == false)
+        #expect(s.driver.savedGuest?.haptics == false)
+    }
+
+    @Test func hapticsSymbolExistsOnTheOSFloor() {
+        #expect(UIImage(systemName: HapticsRow.symbol) != nil)
     }
 
     @Test func gyroscopeShowsOffOnADeviceWithNoSensors() {
