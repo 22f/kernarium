@@ -58,6 +58,12 @@ final class LiveRuntime: RuntimeDriver {
     private let sessionRecord: URL?
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
+    /// What this run puts in the names of its imports' partial files, new at
+    /// every start (`GuestRunMark`).
+    private(set) var runMark = GuestRunMark.random()
+    /// The sweep of the partial files earlier runs left in the guest, which a
+    /// normal run makes once, after Android has booted.
+    private(set) var partialSweep: PartialFileSweep?
     private let motion = MotionSensors()
     /// The guest's hardware keyboard and mouse: plugged while iOS has the
     /// hardware, and fed by the display's view (`GuestLayer`).
@@ -428,6 +434,7 @@ final class LiveRuntime: RuntimeDriver {
         let dataGiB = storage.dataGiB(for: run.guest)
         reachedBootCompleted = false
         normalRun = run.mode == .normal
+        beginPartialSweep()
         updateThermal()
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
@@ -530,7 +537,23 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What adb does for the screens, with the key this boot carries.
     private var operations: AdbGuestOperations {
-        AdbGuestOperations(identity: adbIdentity, clock: clock, device: model?.host.name ?? "device")
+        AdbGuestOperations(identity: adbIdentity, clock: clock, device: model?.host.name ?? "device", run: runMark)
+    }
+
+    /// A new run has its own mark, and a normal one sweeps the partial files
+    /// that earlier runs left once Android is up (`PartialFileSweep`). A
+    /// recovery boot starts no Android to ask, and a guest that booted without
+    /// the application's adb key cannot be asked either.
+    private func beginPartialSweep() {
+        partialSweep?.runEnded()
+        runMark = GuestRunMark.random()
+        let guest = operations
+        guard normalRun, guest.identity != nil else {
+            partialSweep = nil
+            return
+        }
+        partialSweep = PartialFileSweep(
+            storageReady: { await guest.storageReady() }, sweep: { try await guest.sweepPartialFiles() })
     }
 
     /// The file browser's backend: it reads the operations for each call, as
@@ -590,6 +613,7 @@ final class LiveRuntime: RuntimeDriver {
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
         if bootCompleted {
             reachedBootCompleted = true
+            partialSweep?.guestBooted()
             updateThermal()
             updateGuestRotation()
             updateSpaceWatch()
@@ -608,6 +632,7 @@ final class LiveRuntime: RuntimeDriver {
         // The boot that follows is another one: it ends an update only by
         // reaching sys.boot_completed itself.
         reachedBootCompleted = false
+        partialSweep?.guestRestarting()
         spaceAlertOpen = false
         motion.stop()
         haptics.restart()
@@ -628,6 +653,8 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     private func finished(result: Int32) {
+        partialSweep?.runEnded()
+        partialSweep = nil
         normalRun = false
         runActive = false
         inputRunReady = false

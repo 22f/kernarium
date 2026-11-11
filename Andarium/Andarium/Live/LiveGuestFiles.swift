@@ -256,17 +256,17 @@ extension AdbGuestOperations {
         return GuestFiles.parseFreeSpace(result.text)
     }
 
-    /// Removes what a stopped import left in `folder` and checks the room an
-    /// import of `bytes` needs in the guest and on this device (`hostFree`).
+    /// Checks the room an import of `bytes` needs in the guest and on this
+    /// device (`hostFree`). A partial file an earlier run left is not this
+    /// import's business: the run's own sweep removes it (`sweepPartialFiles`).
     func prepareImport(bytes: UInt64, into folder: String, hostFree: UInt64) async throws {
         guard GuestFilePath.isInsideRoot(folder) else { throw GuestFilesFailure.presented(GuestFilesError.badPath, device: device) }
         guard TransferRoom.deviceHasRoom(for: bytes, free: hostFree) else {
             throw GuestFilesFailure.presented(GuestFilesError.deviceFull(needed: bytes, free: hostFree), device: device)
         }
-        let command = "\(GuestFiles.removeStaleCommand(in: folder)); \(GuestFiles.freeSpaceCommand(for: folder))"
         let result: ShellResult
         do {
-            result = try await shell(command, limit: .seconds(30))
+            result = try await shell(GuestFiles.freeSpaceCommand(for: folder), limit: .seconds(30))
         } catch {
             throw GuestFilesFailure.presented(error, device: device)
         }
@@ -275,6 +275,27 @@ extension AdbGuestOperations {
         if let free = GuestFiles.parseFreeSpace(result.text), !GuestFiles.guestHasRoom(for: bytes, free: free) {
             throw GuestFilesFailure.presented(GuestFilesError.guestFull(needed: bytes, free: free), device: device)
         }
+    }
+
+    /// How long the sweep may run, in the guest's running time.
+    static let sweepLimit = Duration.seconds(10 * 60)
+
+    /// Removes every partial file below internal storage that an earlier run
+    /// left, and returns how many it removed. The files of this run's own
+    /// imports carry its mark and stay (`GuestFiles.sweepCommand`).
+    func sweepPartialFiles() async throws -> Int {
+        guard let identity else { throw AdbFailure(.keyRejected, activity: .files) }
+        let command = GuestFiles.sweepCommand(excluding: run)
+        let result = try await AdbOperationRunner.run(identity: identity, clock: clock, connector: connector) { session in
+            try session.run { connection in
+                session.watchdog.arm(idle: Self.sweepLimit, overall: Self.sweepLimit)
+                return try connection.runShell(command, limit: 4 << 20)
+            }
+        }
+        guard let removed = GuestFiles.parseSweep(result) else {
+            throw AdbError.remote("the search ended with status \(result.exitCode.map(String.init) ?? "none")")
+        }
+        return removed
     }
 
     func measureTree(_ file: GuestFile) async throws -> UInt64 {
@@ -288,7 +309,7 @@ extension AdbGuestOperations {
         progress: @escaping @Sendable (UInt64, UInt64) -> Void
     ) async throws {
         let temporary = GuestFiles.temporaryPath(
-            in: GuestFilePath.parent(of: path), token: String(UUID().uuidString.prefix(8)).lowercased())
+            in: GuestFilePath.parent(of: path), run: run, token: String(UUID().uuidString.prefix(8)).lowercased())
         let coordinator = FileCoordinatorBox()
         let throttle = ProgressThrottle(deliver: progress)
         do {

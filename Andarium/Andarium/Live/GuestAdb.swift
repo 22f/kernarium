@@ -195,6 +195,10 @@ nonisolated struct AdbGuestOperations: Sendable {
     /// "iPad", "iPhone" or "Mac", for the words of a failure.
     var device: String
     var connector: any AdbConnector = VsockConnector()
+    /// The guest run these operations belong to. Its mark is in the name of
+    /// every partial file an import of this run writes, which is how the sweep
+    /// of the guest's storage leaves them alone (`sweepPartialFiles`).
+    var run = GuestRunMark.random()
 
     /// Asks Android for a bug report and stages it for the share sheet.
     /// Cancelling the task stops the dump in the guest and removes what it
