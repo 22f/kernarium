@@ -246,8 +246,11 @@ struct ThermalNoticeFlowTests {
             center: NotificationCenter(), read: { ThermalOverride.stated(in: environment) ?? .nominal },
             deliver: { session.observe($0) })
         session.update(running: true, booted: true)
-        monitor.start()
+        // A connection starts with the severity of the moment it is made, so the
+        // monitor's reading (severe) is delivered after the first record is
+        // read: none, then severe, however soon the connection is made.
         #expect(hal.record() == frame(.none))
+        monitor.start()
         #expect(hal.record() == frame(.severe))
         #expect(await until { model.thermalNotice.isShowing })
         monitor.stop()
