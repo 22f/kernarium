@@ -291,7 +291,7 @@ enum SnapshotWords {
         case .restoreUnfinished:
             return unfinishedReason(known: restoreKnown)
         case .invalidName:
-            return "A name has at most \(SnapshotRules.maximumNameLength) characters and no line breaks."
+            return "A name has at most \(SnapshotRules.maximumNameLength) characters, and no line breaks, tabs or other control characters."
         }
     }
 

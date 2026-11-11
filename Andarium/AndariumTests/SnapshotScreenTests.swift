@@ -31,6 +31,18 @@ struct SnapshotWordsTests {
         }
     }
 
+    @Test func theWordsForARefusedNameAreTheRuleItself() {
+        let words = SnapshotWords.refusal(.invalidName)
+        #expect(words == "A name has at most 100 characters, and no line breaks, tabs or other control characters.")
+        #expect(words.contains("\(SnapshotRules.maximumNameLength) characters"))
+        // What the rule refuses: a line break, a tab (a pasted one too), any other control character, too long.
+        for name in ["a\nb", "a\tb", "a\u{7}b", String(repeating: "x", count: SnapshotRules.maximumNameLength + 1)] {
+            #expect(SnapshotRules.normalizedName(name) == nil, "\(name.debugDescription)")
+        }
+        // What it accepts: spaces and the edges are trimmed.
+        #expect(SnapshotRules.normalizedName("  Before r20\t\n") == "Before r20")
+    }
+
     @Test func whatTakeSnapshotSaysWhenItIsUnavailable() {
         #expect(SnapshotWords.takeReason(.volumeCannotClone) == "The guest\u{2019}s data cannot be snapshotted (it needs an APFS volume).")
         #expect(SnapshotWords.takeReason(.noData) == "Start the guest once first. Until then there is no data to keep.")
