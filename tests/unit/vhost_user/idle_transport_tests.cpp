@@ -75,8 +75,13 @@ public:
         std::size_t) override
     {
         const std::lock_guard lock {mutex_};
-        held_.push_back({requestId, request.empty() ? std::uint8_t {} : request[0]});
         ++runs_;
+        const std::uint8_t tag = request.empty() ? std::uint8_t {} : request[0];
+        if (notReady_)
+            return {VhostUserQueueAction::retry, {}};
+        if (answerAtOnce_)
+            return {VhostUserQueueAction::complete, {tag, static_cast<std::uint8_t>(tag + 1U)}};
+        held_.push_back({requestId, tag});
         return {VhostUserQueueAction::defer, {}};
     }
     [[nodiscard]] bool takeQueueCompletion(VhostUserQueueCompletion& completion) override
@@ -153,6 +158,25 @@ public:
         }
         wake();
     }
+    /* Makes the device answer every request it is offered with a retry, as the
+     * video decoder's event queue does while it has no event, and then with
+     * its answer on the spot. The test's thread calls it before the guest
+     * queues a buffer. */
+    void holdBack()
+    {
+        const std::lock_guard lock {mutex_};
+        notReady_ = true;
+        answerAtOnce_ = true;
+    }
+    /* Ends the retries, and signals the loop: a device thread's event. */
+    void becomeReady()
+    {
+        {
+            const std::lock_guard lock {mutex_};
+            notReady_ = false;
+        }
+        wake();
+    }
     /* Raises a config change, and signals the loop. */
     void raiseConfigChange(bool withheld = false)
     {
@@ -217,6 +241,8 @@ private:
     unsigned runs_ {};
     unsigned claims_ {};
     unsigned announced_ {};
+    bool notReady_ {};
+    bool answerAtOnce_ {};
     bool configPending_ {};
     bool withheld_ {};
     bool partial_ {};
@@ -268,19 +294,15 @@ public:
      * names no kick pipe; the device holds it once the loop has run it. */
     void postRequest(std::uint8_t tag)
     {
-        ring_.memory()[requestOffset] = tag;
-        const auto chain = requestChain(
-            requestOffset, 1, responseOffset, responseCapacity);
-        constexpr std::array<std::uint16_t, 1> heads {0};
-        ring_.publish(chain, heads);
-        const protocol::VringState kick {.index = 0, .value = 0};
-        sendRequest(
-            socket_.get(),
-            protocol::VhostRequest::vringKick,
-            bytesOf(kick),
-            {},
-            false);
+        post(tag);
         awaitCondition([&] { return device_->runs() == 1; });
+    }
+    /* The same, for a device that may be offered the request again: it waits
+     * for the first offer only. */
+    void offerBuffer(std::uint8_t tag)
+    {
+        post(tag);
+        awaitCondition([&] { return device_->runs() >= 1; });
     }
 
     /* Whether the transport answers a message: it is out of whatever it did. */
@@ -296,6 +318,22 @@ public:
     }
 
 private:
+    void post(std::uint8_t tag)
+    {
+        ring_.memory()[requestOffset] = tag;
+        const auto chain = requestChain(
+            requestOffset, 1, responseOffset, responseCapacity);
+        constexpr std::array<std::uint16_t, 1> heads {0};
+        ring_.publish(chain, heads);
+        const protocol::VringState kick {.index = 0, .value = 0};
+        sendRequest(
+            socket_.get(),
+            protocol::VhostRequest::vringKick,
+            bytesOf(kick),
+            {},
+            false);
+    }
+
     SplitRing ring_;
     PostingDevice* device_ {};
     std::unique_ptr<InProcessVhostUserService> service_;
@@ -366,6 +404,32 @@ void configChangeFromAnotherThreadReachesTheGuest()
     device.join();
     replyToBackend(session.backend(), request);
     awaitCondition([&] { return session.device().announced() == 1; });
+}
+
+/* A buffer the device cannot use yet stays in the ring, and the device's
+ * thread makes it usable by signalling: the video decoder's event queue holds
+ * the guest's buffers until the decoder raises an event, and the decoder
+ * raises it on its own thread, with no kick and no message from the guest.
+ * The transport offers the buffer again for that signal alone. */
+void retriedBufferIsOfferedAgainWhenTheDeviceSignals()
+{
+    Session session;
+    session.device().holdBack();
+    session.offerBuffer(9);
+    session.roundTrip();
+    std::this_thread::sleep_for(300ms);
+    require(session.ring().usedIndex() == 0, "a buffer the device retried was completed");
+
+    std::thread device {[&] { session.device().becomeReady(); }};
+    device.join();
+    pollfd called {.fd = session.callRead(), .events = POLLIN};
+    require(
+        ::poll(&called, 1, 2000) == 1,
+        "the buffer the device retried was never offered to it again");
+    awaitCall(session.callRead());
+    require(session.ring().usedIndex() == 1, "the retried buffer was not completed");
+    const auto* response = session.ring().memory().data() + responseOffset;
+    require(response[0] == 9 && response[1] == 10, "the response is not the device's");
 }
 
 /* A change the device will not yet claim is asked for again, though what the
@@ -441,6 +505,7 @@ int main(int argc, char** argv)
         {"idle", idleTransportMakesNoPasses},
         {"stop", stopWakesABlockedTransport},
         {"completion", completionFromAnotherThreadReachesTheGuest},
+        {"retried-buffer", retriedBufferIsOfferedAgainWhenTheDeviceSignals},
         {"config-change", configChangeFromAnotherThreadReachesTheGuest},
         {"withheld-config-change", withheldConfigChangeIsAskedForAgain},
         {"partial-config-change", partlyClaimedConfigChangeIsAskedForAgain},
