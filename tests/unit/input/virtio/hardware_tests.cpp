@@ -39,7 +39,8 @@ void aKeyGoesDownOnceAndUpOnce()
 void aKeyTheTableCannotProduceIsDropped()
 {
     HardwareKeyboard keyboard;
-    for (const std::uint16_t code : {0, 240, 195, 255, 256, 0x110, 0xffff}) {
+    for (const std::uint16_t code : std::initializer_list<std::uint16_t> {
+             0, 240, 195, 255, 256, 0x110, 0xffff}) {
         require(keyboard.key(code, true).empty());
         require(!keyboard.holds());
     }

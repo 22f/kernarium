@@ -847,7 +847,8 @@ void hardwareKeyboardAdvertisesExactlyTheTablesKeys()
     select(device, protocol::configEventBits, protocol::eventLed);
     require(holdsExactly(configuration(device), {0, 1, 2}));
     // No auto-repeat, no relative or absolute axes, no properties.
-    for (const std::uint8_t type : {0x02, 0x03, 0x14, 0x04, 0x05}) {
+    for (const std::uint8_t type :
+         std::initializer_list<std::uint8_t> {0x02, 0x03, 0x14, 0x04, 0x05}) {
         select(device, protocol::configEventBits, type);
         require(configuration(device).size == 0);
     }
@@ -869,7 +870,8 @@ void mouseAdvertisesRelativeAxesWheelsButtonsAndTheCaptureLed()
         configuration(device), {0x110, 0x111, 0x112, 0x113, 0x114}));
     select(device, protocol::configEventBits, protocol::eventLed);
     require(holdsExactly(configuration(device), {8})); // LED_MISC
-    for (const std::uint8_t type : {0x03, 0x14, 0x04}) {
+    for (const std::uint8_t type :
+         std::initializer_list<std::uint8_t> {0x03, 0x14, 0x04}) {
         select(device, protocol::configEventBits, type);
         require(configuration(device).size == 0);
     }
@@ -893,7 +895,8 @@ void pointerAdvertisesAnAbsoluteMouseAndNoInputProperty()
     // MT_SLOT, MT_POSITION_X, MT_POSITION_Y, MT_TRACKING_ID: no tool type,
     // which an absolute mouse in the slot protocol does not take.
     require(holdsExactly(configuration(device), {0x2f, 0x35, 0x36, 0x39}));
-    for (const std::uint8_t type : {0x02, 0x11, 0x14, 0x04}) {
+    for (const std::uint8_t type :
+         std::initializer_list<std::uint8_t> {0x02, 0x11, 0x14, 0x04}) {
         select(device, protocol::configEventBits, type);
         require(configuration(device).size == 0);
     }

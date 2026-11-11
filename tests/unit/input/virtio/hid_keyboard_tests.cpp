@@ -6,6 +6,7 @@
 #include <array>
 #include <bitset>
 #include <cstdlib>
+#include <initializer_list>
 
 namespace {
 
@@ -138,7 +139,8 @@ void theKeyImageIsExactlyWhatTheTableCanProduce()
     require(!hid::producesKey(0));
     // KEY_UNKNOWN, the keys above the table's highest, and codes beyond the
     // image are not produced.
-    for (const std::uint16_t code : {240, 195, 255, 256, 0x110, 0xffff})
+    for (const std::uint16_t code : std::initializer_list<std::uint16_t> {
+             240, 195, 255, 256, 0x110, 0xffff})
         require(!hid::producesKey(code));
     // Every key the usage rows produce is in the image.
     for (const auto& row : rows)
