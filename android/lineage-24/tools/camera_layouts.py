@@ -42,6 +42,8 @@ PERMISSIONS_DIRECTORY = "$(TARGET_COPY_OUT_VENDOR)/etc/permissions"
 MEDIA_DIRECTORY = "$(TARGET_COPY_OUT_VENDOR)/etc"
 INIT_DIRECTORY = "$(TARGET_COPY_OUT_VENDOR)/etc/init"
 SKU_PROPERTY = "ro.boot.product.vendor.sku"
+# The kernel argument that Android init imports as that property.
+SKU_BOOT_ARGUMENT = "androidboot.product.vendor.sku="
 MEDIA_PROPERTY = "ro.media.xml_variant.profiles"
 INIT_FILE = "init.kernarium_camera.rc"
 MAKEFILE = "camera_layouts.mk"
