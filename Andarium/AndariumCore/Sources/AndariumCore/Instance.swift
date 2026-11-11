@@ -358,6 +358,20 @@ public enum InstanceRules {
     }
 }
 
+/// `clonefile(2)`, the one call every APFS clone of a guest's disk goes
+/// through.
+enum CloneFile {
+    struct Failure: Error, Equatable {
+        /// The `errno` of the refused call.
+        let code: Int32
+    }
+
+    /// Clones `source` to the absent `destination`.
+    static func clone(_ source: URL, to destination: URL) throws {
+        guard clonefile(source.path, destination.path, 0) == 0 else { throw Failure(code: errno) }
+    }
+}
+
 /// An instance's files: `data.img`, `instance.json` and the snapshot of an
 /// update, in one directory.
 public struct InstanceFiles: Sendable {
@@ -373,6 +387,9 @@ public struct InstanceFiles: Sendable {
 
     public var data: URL { directory.appendingPathComponent(Self.dataDisk) }
     public var state: URL { directory.appendingPathComponent(Self.stateFile) }
+    /// The user's snapshots of the data (`SnapshotStore`), which an erase
+    /// deletes with the rest.
+    public var snapshots: URL { directory.appendingPathComponent(SnapshotStore.directoryName, isDirectory: true) }
 
     public func snapshot(for releaseID: String) -> URL {
         directory.appendingPathComponent(Self.snapshotPrefix + releaseID)
@@ -408,12 +425,16 @@ public struct InstanceFiles: Sendable {
         )
     }
 
-    /// An APFS clone: instant, and it costs only the blocks that diverge.
-    private func clone(_ source: URL, to destination: URL) throws {
+    /// An APFS clone renamed over `destination`: instant, it costs only the
+    /// blocks that diverge, and a failure leaves `destination` as it was. The
+    /// update's snapshot and the user's snapshots (`SnapshotStore`) share it.
+    static func clone(_ source: URL, to destination: URL) throws {
         let temporary = destination.appendingPathExtension("tmp")
         try? FileManager.default.removeItem(at: temporary)
-        guard clonefile(source.path, temporary.path, 0) == 0 else {
-            throw InstanceError.cannotClone(String(cString: strerror(errno)))
+        do {
+            try CloneFile.clone(source, to: temporary)
+        } catch let failure as CloneFile.Failure {
+            throw InstanceError.cannotClone(String(cString: strerror(failure.code)))
         }
         guard rename(temporary.path, destination.path) == 0 else {
             let message = String(cString: strerror(errno))
@@ -429,8 +450,9 @@ public struct InstanceFiles: Sendable {
         return formatter.string(from: date)
     }
 
-    /// Deletes the data disk, the record and every snapshot, trying each of
-    /// them; the first failure is thrown once the rest are done.
+    /// Deletes the data disk, the record, the copies an update left and the
+    /// user's snapshots, trying each of them; the first failure is thrown once
+    /// the rest are done.
     public func removeAll() throws {
         let manager = FileManager.default
         var doomed = [data, state]
@@ -438,6 +460,7 @@ public struct InstanceFiles: Sendable {
         where entry.hasPrefix(Self.snapshotPrefix) {
             doomed.append(directory.appendingPathComponent(entry))
         }
+        doomed.append(snapshots)
         var failure: Error?
         for url in doomed where manager.fileExists(atPath: url.path) {
             do { try manager.removeItem(at: url) } catch { failure = failure ?? error }
@@ -463,7 +486,7 @@ public struct InstanceFiles: Sendable {
                 throw InstanceError.refused("No update is pending.")
             }
             let snapshot = directory.appendingPathComponent(pending.snapshot)
-            try clone(snapshot, to: data)
+            try Self.clone(snapshot, to: data)
             var restored = InstanceState(
                 dataLayout: pending.from.dataLayout, releaseID: pending.from.releaseID,
                 buildFingerprint: pending.from.buildFingerprint, buildIncremental: pending.from.buildIncremental,
@@ -501,7 +524,7 @@ public struct InstanceFiles: Sendable {
             throw InstanceError.refused("This system needs a newer data layout than Andarium can migrate to; erase the guest.")
         }
         let name = Self.snapshotPrefix + release.releaseID
-        try clone(data, to: directory.appendingPathComponent(name))
+        try Self.clone(data, to: directory.appendingPathComponent(name))
         let pending = InstanceState.Pending(
             toReleaseID: release.releaseID, snapshot: name,
             from: InstanceState.Origin(

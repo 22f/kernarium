@@ -467,6 +467,8 @@ fi
 	fail "the script that reclaims the cached boot-started apps is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_time_zone_script "* ]] ||
 	fail "the script that applies the host's time zone is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_keyboard_default_script "* ]] ||
+	fail "the script that moves an older guest to the on-screen keyboard default is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||

@@ -283,8 +283,10 @@ automation host.
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
 free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
-with `swift test` (it includes the haptics session on fake guests and
-players, the haptics wire against the golden frames in
+with `swift test` (it includes the snapshot store on APFS clones of sparse
+files in a temporary directory, with a crash between every two file calls of
+each operation and a real error at each call in turn, the haptics session on
+fake guests and players, the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator, thermal and gamepad
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
@@ -306,7 +308,11 @@ application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium`). The hosted tests
+an Apple silicon Mac (`xcodebuild test -scheme Andarium`). `SnapshotFileApiTests`
+checks the file calls the guest's snapshots use (clone, private size, extent
+map, backup attribute) on a small sparse file and prints their answers on a
+`SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
+fail on it. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -540,6 +546,12 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
+  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
+  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
+  default devices and again with the option and a connected client; a result
+  that differs from the accepted release's is explained
+  ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 
 `android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
 each register only when `UML_ANDROID_OOBE_RELEASE`,
@@ -556,6 +568,14 @@ opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of
 [`microg/build-apks.sh`](../tests/integration/android/microg/README.md), and
 checks that only microG's own packages present Google's certificate.
+`android-keymouse` (integration) registers when `UML_ANDROID_KEYMOUSE_RELEASE`
+names the release and `UML_ANDROID_KEYMOUSE_PROBE_APK` the
+[probe application](../tests/integration/android/keymouse/README.md)'s APK: the
+runner is a VNC client of the launcher's `--hardware-input` display and checks,
+through Android's input dump and the probe's log, that the host's devices
+plug, are configured as the image says, deliver keys, the cursor, buttons and
+wheel, pass pointer capture both ways and unplug; `--instance` names the
+previous release's data disk to check the one-time on-screen keyboard change.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's

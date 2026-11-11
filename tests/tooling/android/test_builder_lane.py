@@ -717,6 +717,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         gamepad_rc_path = "VENDOR/etc/init/kernarium_gamepad.rc"
         thermal_rc_path = "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc"
         thermal_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml"
+        # The device configuration of the host's keyboard and mouse (overlay/input), and where each lands.
+        input_device_files = {
+            "Vendor_1af4_Product_0002.kl": "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
+            "Vendor_1af4_Product_0003.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
+            "Vendor_1af4_Product_0004.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
+            "Vendor_1af4_Product_0005.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc",
+        }
+        side_key_layout = (verifier.parents[1] / "overlay/input/Vendor_1af4_Product_0002.kl").read_text()
         display_config_path = "VENDOR/etc/displayconfig/default.xml"
         good_display_config = (
             '<?xml version="1.0" encoding="utf-8"?>\n<!-- comment -->\n<displayConfiguration>\n'
@@ -908,10 +916,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           flip_variant: str | None = None,
                           reclaim_variant: str | None = None,
                           time_zone_variant: str | None = None,
+                          keyboard_default_variant: str | None = None,
                           wallpaper_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
                           services_jar_variant: str | None = None,
+                          input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
                           ota_certificates: str | None = None,
                           signed: bool = False,
@@ -1327,7 +1337,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "    start adbd\n"
                     + rcu_restore + blocker_rules + net_rules
                     + ("" if init_variant == "no-adbd-keep-alive"
-                       else "on property:init.svc.adbd=stopped\n    start adbd\n"),
+                       else "on property:init.svc.adbd=stopped\n    start adbd\n")
+                    # Cuttlefish's bugreport service, which the product keeps without its keychord.
+                    + "service bugreport /system/bin/dumpstate -d -p -z\n    class main\n    user root\n"
+                      "    disabled\n    oneshot\n"
+                    + ("    keycodes 30 48\n" if init_variant == "bugreport-keychord" else ""),
                 )
                 if extra_entry is not None:
                     archive.writestr(extra_entry, "on early-init\n")
@@ -1538,6 +1552,53 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         time_zone_rc = time_zone_rc.replace(old, new)
                 if time_zone_variant != "missing-rc":
                     archive.writestr("SYSTEM_EXT/etc/init/kernarium_time_zone.rc", time_zone_rc)
+                # The script that moves an older guest to the on-screen keyboard default, with its init
+                # file: the tracked ones, and the ways each can go wrong.
+                keyboard_script = (
+                    verifier.parents[1] / "overlay/tools/kernarium_keyboard_default.sh"
+                ).read_text()
+                keyboard_rc = (
+                    verifier.parents[1] / "overlay/tools/kernarium_keyboard_default.rc"
+                ).read_text()
+                for variant, (old, new) in {
+                    "no-read": ("cmd settings get secure show_ime_with_hard_keyboard", "true"),
+                    "no-put": ("cmd settings put secure show_ime_with_hard_keyboard 0", "true"),
+                    "no-marker": ('setprop "$marker" 1', "true"),
+                    "turns-it-on": ("tag=kernarium_keyboard_default\n",
+                                    "tag=kernarium_keyboard_default\n"
+                                    "cmd settings put secure show_ime_with_hard_keyboard 1\n"),
+                    "writes-another-setting": ("tag=kernarium_keyboard_default\n",
+                                               "tag=kernarium_keyboard_default\n"
+                                               "cmd settings put system screen_off_timeout 1000\n"),
+                    "deletes-the-setting": ("tag=kernarium_keyboard_default\n",
+                                            "tag=kernarium_keyboard_default\n"
+                                            "cmd settings delete secure show_ime_with_hard_keyboard\n"),
+                    "other-user": ("tag=kernarium_keyboard_default\n",
+                                   "tag=kernarium_keyboard_default\n"
+                                   "cmd settings --user 10 get secure show_ime_with_hard_keyboard\n"),
+                }.items():
+                    if keyboard_default_variant == variant:
+                        if old not in keyboard_script:
+                            fail(f"the keyboard default script lacks '{old}' for the {variant} variant")
+                        keyboard_script = keyboard_script.replace(old, new)
+                if keyboard_default_variant != "missing-script":
+                    archive.writestr("SYSTEM_EXT/bin/kernarium_keyboard_default.sh", keyboard_script)
+                for variant, (old, new) in {
+                    "missing-service": ("service kernarium_keyboard_default ", "service other_service "),
+                    "not-oneshot": ("    oneshot\n", ""),
+                    "not-disabled": ("    disabled\n", ""),
+                    "started-at-boot": ("on property:sys.boot_completed=1", "on boot"),
+                    "no-start": ("    start kernarium_keyboard_default\n", ""),
+                }.items():
+                    if keyboard_default_variant == variant:
+                        if old not in keyboard_rc:
+                            fail(f"the keyboard default init file lacks '{old}' for the {variant} variant")
+                        keyboard_rc = keyboard_rc.replace(old, new)
+                if keyboard_default_variant != "missing-rc":
+                    archive.writestr("SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc", keyboard_rc)
+                # The device configuration of the host's keyboard and mouse: the tracked files.
+                for name, destination in input_device_files.items():
+                    archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_file_contexts",
                     "/(system_ext|system/system_ext)/bin/other\\.sh  u:object_r:system_file:s0\n"
@@ -1558,6 +1619,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if time_zone_variant == "missing-label"
                         else "/(system_ext|system/system_ext)/bin/kernarium_time_zone\\.sh  "
                         "u:object_r:kernarium_time_zone_exec:s0\n"
+                    )
+                    + (
+                        ""
+                        if keyboard_default_variant == "missing-label"
+                        else "/(system_ext|system/system_ext)/bin/kernarium_keyboard_default\\.sh  "
+                        "u:object_r:kernarium_keyboard_default_exec:s0\n"
                     ),
                 )
                 # Platform, vendor and system_ext policy as the builder emits them: the
@@ -1646,6 +1713,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if time_zone_variant == "missing-marker-context"
                         else "persist.sys.kernarium.timezone_applied    "
                         "u:object_r:kernarium_time_zone_prop:s0 exact string\n"
+                    )
+                    + (
+                        ""
+                        if keyboard_default_variant == "missing-marker-context"
+                        else "persist.sys.kernarium.keyboard_default    "
+                        "u:object_r:kernarium_keyboard_default_prop:s0 exact bool\n"
                     ),
                 )
                 archive.writestr(
@@ -1698,6 +1771,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                        else "kernarium_wifi_network_prop ")
                     + ("" if time_zone_variant == "marker-not-system"
                        else "kernarium_time_zone_prop ")
+                    + ("" if keyboard_default_variant == "marker-not-system"
+                       else "kernarium_keyboard_default_prop ")
                     + "))\n"
                     + (
                         ""
@@ -1775,6 +1850,38 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     + (
                         "(allow kernarium_time_zone timezone_prop (property_service (set)))\n"
                         if time_zone_variant == "sets-zone-property"
+                        else ""
+                    )
+                    + "".join(
+                        rule
+                        for variant, rule in (
+                            ("missing-transition",
+                             "(typetransition init kernarium_keyboard_default_exec process "
+                             "kernarium_keyboard_default)\n"),
+                            ("missing-settings-find",
+                             "(allow kernarium_keyboard_default settings_service "
+                             "(service_manager (find)))\n"),
+                            ("missing-transfer",
+                             "(allow kernarium_keyboard_default system_server (binder (transfer)))\n"),
+                            ("missing-call",
+                             "(allow system_server kernarium_keyboard_default (binder (call)))\n"),
+                            ("missing-fd",
+                             "(allow system_server kernarium_keyboard_default (fd (use)))\n"),
+                            ("missing-fifo",
+                             "(allow system_server kernarium_keyboard_default "
+                             "(fifo_file (read write getattr)))\n"),
+                        )
+                        if keyboard_default_variant != variant
+                    )
+                    + (
+                        ""
+                        if keyboard_default_variant == "missing-marker-rule"
+                        else "(allow kernarium_keyboard_default kernarium_keyboard_default_prop "
+                        "(property_service (set)))\n"
+                    )
+                    + (
+                        "(allow kernarium_keyboard_default timezone_prop (property_service (set)))\n"
+                        if keyboard_default_variant == "sets-another-property"
                         else ""
                     )
                     + (
@@ -2566,6 +2673,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                else b"RefreshRateThrottling: using the map of the default configuration\x00"),
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
+                # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
+                if input_flinger_variant != "missing":
+                    archive.writestr(
+                        "SYSTEM/lib64/libinputflinger.so",
+                        b"\x00" * 8
+                        + (b"" if input_flinger_variant == "no-marker"
+                           else b"      PointerCaptureLed: %s\n\x00"),
+                    )
                 # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
                 # validation log line is in the bytes.
                 if network_stack_variant != "missing":
@@ -3127,6 +3242,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-adb-root-service", {"adbd_variant": "no-root-service"}),
             ("services-jar-without-the-adb-topics", {"services_jar_variant": "no-marker"}),
             ("services-jar-without-the-display-topic", {"services_jar_variant": "no-display-marker"}),
+            ("input-flinger-without-the-pointer-capture-led", {"input_flinger_variant": "no-marker"}),
+            ("missing-input-flinger", {"input_flinger_variant": "missing"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
@@ -3838,6 +3955,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "of route p0007"),
             ("missing-services-jar-cause", {"services_jar_variant": "missing"},
              "SYSTEM/framework/services.jar is missing"),
+            ("input-flinger-without-the-pointer-capture-led-cause", {"input_flinger_variant": "no-marker"},
+             "lacks the pointer capture LED topic of route p0022"),
+            ("missing-input-flinger-cause", {"input_flinger_variant": "missing"},
+             "SYSTEM/lib64/libinputflinger.so is missing"),
             ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
              "lacks the NetworkMonitor topic of route p0029"),
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},
@@ -4683,6 +4804,120 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("location-probe-left-in-the-image", {"entries": {
                 "SYSTEM/app/AndariumLocationProbe/AndariumLocationProbe.apk": synthetic_apk(debuggable=False)}},
              "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumLocationProbe"),
+            ("keymouse-probe-left-in-the-image", {"entries": {
+                "SYSTEM/app/AndariumKeyMouseProbe/AndariumKeyMouseProbe.apk": synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumKeyMouseProbe"),
+            ("bugreport-keychord", {"init_variant": "bugreport-keychord"},
+             "starts bugreport on a keychord \\('keycodes 30 48'\\)"),
+            ("keyboard-default-missing-script", {"keyboard_default_variant": "missing-script"},
+             "required entries are missing: .*SYSTEM_EXT/bin/kernarium_keyboard_default.sh"),
+            ("keyboard-default-missing-rc", {"keyboard_default_variant": "missing-rc"},
+             "required entries are missing: .*SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc"),
+            ("keyboard-default-missing-service", {"keyboard_default_variant": "missing-service"},
+             "does not declare the kernarium_keyboard_default service"),
+            ("keyboard-default-not-oneshot", {"keyboard_default_variant": "not-oneshot"},
+             "does not declare kernarium_keyboard_default as oneshot"),
+            ("keyboard-default-not-disabled", {"keyboard_default_variant": "not-disabled"},
+             "does not declare kernarium_keyboard_default as disabled"),
+            ("keyboard-default-started-at-boot", {"keyboard_default_variant": "started-at-boot"},
+             "starts kernarium_keyboard_default under 'boot'"),
+            ("keyboard-default-no-start", {"keyboard_default_variant": "no-start"},
+             "does not start kernarium_keyboard_default when boot completes"),
+            ("keyboard-default-no-read", {"keyboard_default_variant": "no-read"},
+             "does not contain 'cmd settings get secure show_ime_with_hard_keyboard'"),
+            ("keyboard-default-no-put", {"keyboard_default_variant": "no-put"},
+             "does not contain 'cmd settings put secure show_ime_with_hard_keyboard 0'"),
+            ("keyboard-default-no-marker", {"keyboard_default_variant": "no-marker"},
+             "does not contain 'setprop \"\\$marker\" 1'"),
+            ("keyboard-default-turns-it-on", {"keyboard_default_variant": "turns-it-on"},
+             "contains 'settings put secure show_ime_with_hard_keyboard 1'"),
+            ("keyboard-default-writes-another-setting", {"keyboard_default_variant": "writes-another-setting"},
+             "contains 'settings put system'"),
+            ("keyboard-default-deletes-the-setting", {"keyboard_default_variant": "deletes-the-setting"},
+             "contains 'settings delete'"),
+            ("keyboard-default-other-user", {"keyboard_default_variant": "other-user"},
+             "contains '--user'"),
+            ("keyboard-default-missing-label", {"keyboard_default_variant": "missing-label"},
+             "do not label /system_ext/bin/kernarium_keyboard_default.sh"),
+            ("keyboard-default-missing-transition", {"keyboard_default_variant": "missing-transition"},
+             "does not move init into the keyboard default domain"),
+            ("keyboard-default-missing-settings-find", {"keyboard_default_variant": "missing-settings-find"},
+             "does not allow kernarium_keyboard_default settings_service service_manager find"),
+            ("keyboard-default-missing-transfer", {"keyboard_default_variant": "missing-transfer"},
+             "does not allow kernarium_keyboard_default system_server binder transfer"),
+            ("keyboard-default-missing-call", {"keyboard_default_variant": "missing-call"},
+             "does not allow system_server kernarium_keyboard_default binder call"),
+            ("keyboard-default-missing-fd", {"keyboard_default_variant": "missing-fd"},
+             "does not allow system_server kernarium_keyboard_default fd use"),
+            ("keyboard-default-missing-fifo", {"keyboard_default_variant": "missing-fifo"},
+             "does not allow system_server kernarium_keyboard_default fifo_file write"),
+            ("keyboard-default-marker-not-system", {"keyboard_default_variant": "marker-not-system"},
+             "does not define the system-owned kernarium_keyboard_default_prop"),
+            ("keyboard-default-missing-marker-rule", {"keyboard_default_variant": "missing-marker-rule"},
+             "does not let the keyboard default domain set persist.sys.kernarium.keyboard_default"),
+            ("keyboard-default-sets-another-property", {"keyboard_default_variant": "sets-another-property"},
+             "lets the keyboard default domain set"),
+            ("keyboard-default-missing-marker-context", {"keyboard_default_variant": "missing-marker-context"},
+             "do not label persist.sys.kernarium.keyboard_default"),
+            ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
+             "required entries are missing"),
+            ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},
+             "required entries are missing"),
+            ("missing-mouse-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0004.idc"]: None}},
+             "required entries are missing"),
+            ("missing-pointer-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0005.idc"]: None}},
+             "required entries are missing"),
+            ("side-key-layout-with-a-sixth-key", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "key 30   A\n").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-without-home", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 172   HOME\n", "").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-with-another-label", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 172   HOME", "key 172   MOVE_HOME").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-with-a-flag", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 116   POWER", "key 116   POWER   WAKE").encode()}},
+             "must be a 'key <scan code> <label>' line"),
+            ("side-key-layout-with-an-axis", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "axis 0x00 X\n").encode()}},
+             "must be a 'key <scan code> <label>' line"),
+            ("side-key-layout-maps-a-key-twice", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "key 116   SLEEP\n").encode()}},
+             "maps scan code 116 twice"),
+            ("keyboard-configuration-internal", {"entries": {
+                input_device_files["Vendor_1af4_Product_0003.idc"]: b"device.internal = 1\n"}},
+             "must set \\{'device.internal': '0'\\} and nothing else"),
+            ("keyboard-configuration-with-a-layout", {"entries": {
+                input_device_files["Vendor_1af4_Product_0003.idc"]: b"device.internal = 0\nkeyboard.layout = Generic\n"}},
+             "must set .* and nothing else"),
+            ("mouse-configuration-empty", {"entries": {input_device_files["Vendor_1af4_Product_0004.idc"]: b"# none\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-without-wake", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware = 1\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-orientation-unaware", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware = 0\ntouch.wake = 1\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-malformed", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware 1\n"}},
+             "must be a 'name = value' line"),
+            ("pointer-configuration-sets-a-property-twice", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: (
+                    b"touch.orientationAware = 1\ntouch.wake = 1\ntouch.wake = 0\n")}},
+             "sets touch.wake twice"),
+            ("keyboard-with-a-key-layout-of-its-own", {"entries": {
+                "VENDOR/usr/keylayout/Vendor_1af4_Product_0003.kl": b"key 30   A\n"}},
+             "a key layout or character map of its own"),
+            ("mouse-with-a-versioned-key-layout", {"entries": {
+                "VENDOR/usr/keylayout/Vendor_1af4_Product_0004_Version_0001.kl": b"key 30   A\n"}},
+             "a key layout or character map of its own"),
+            ("pointer-with-a-character-map", {"entries": {
+                "VENDOR/usr/keychars/Vendor_1af4_Product_0005.kcm": b"type FULL\n"}},
+             "a key layout or character map of its own"),
         ):
             reject(label, options, reason)
 
@@ -6321,9 +6556,178 @@ def verify_package_assertions(android_root: Path) -> None:
         "kernarium_wifi_network_script",
         "kernarium_reclaim_boot_apps_script",
         "kernarium_time_zone_script",
+        "kernarium_keyboard_default_script",
     ):
         if package not in present:
             fail(f"build-aosp.sh does not assert that {package} is present")
+
+
+def verify_keyboard_default(android_root: Path) -> None:
+    """A new guest hides Android's on-screen keyboard while a hardware keyboard is attached, and a guest
+    that an older release created with it on is moved once.
+
+    The script runs with stub tools: getprop and setprop read and write a table of properties, `cmd
+    settings get` prints the stored setting (nothing while the service is not up) and `cmd settings put`
+    stores a value or, for the refusal case, does not, and log and sleep record what the script says."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    tools = android_root / "overlay/tools"
+    script = tools / "kernarium_keyboard_default.sh"
+    defaults = ET.fromstring(
+        (android_root / "overlay/overlay/frameworks/base/packages/SettingsProvider/"
+         "res/values/defaults.xml").read_text()
+    )
+    values = [
+        element.text for element in defaults.findall("bool")
+        if element.get("name") == "def_show_ime_with_hard_keyboard"
+    ]
+    if values != ["false"]:
+        fail(f"the SettingsProvider overlay must default the on-screen keyboard with a hardware keyboard off: {values}")
+    if not os.access(script, os.X_OK) or not script.read_text().startswith("#!/system/bin/sh\n"):
+        fail("kernarium_keyboard_default.sh must be an executable /system/bin/sh script, as its siblings are")
+    # The sepolicy sources hold what the built-policy check looks for.
+    policy = (android_root / "overlay/sepolicy/system_ext/private/kernarium_keyboard_default.te").read_text()
+    for needle in (
+        "init_daemon_domain(kernarium_keyboard_default)",
+        "allow kernarium_keyboard_default settings_service:service_manager find;",
+        "allow kernarium_keyboard_default system_server:binder transfer;",
+        "allow system_server kernarium_keyboard_default:binder call;",
+        "allow system_server kernarium_keyboard_default:fd use;",
+        "allow system_server kernarium_keyboard_default:fifo_file { getattr read write };",
+        "allow kernarium_keyboard_default system_file:file execute_no_trans;",
+        "system_internal_prop(kernarium_keyboard_default_prop)",
+        "set_prop(kernarium_keyboard_default, kernarium_keyboard_default_prop)",
+    ):
+        if needle not in policy:
+            fail(f"the keyboard default domain lacks '{needle}'")
+    if len(re.findall(r"^set_prop\(", policy, re.M)) != 1:
+        fail("the keyboard default domain sets a property besides its marker")
+    contexts = (android_root / "overlay/sepolicy/system_ext/private/file_contexts").read_text()
+    if (
+        r"/(system_ext|system/system_ext)/bin/kernarium_keyboard_default\.sh  "
+        "u:object_r:kernarium_keyboard_default_exec:s0"
+    ) not in contexts:
+        fail("the system_ext file contexts do not label the keyboard default script")
+    properties = (android_root / "overlay/sepolicy/system_ext/private/property_contexts").read_text()
+    if (
+        "persist.sys.kernarium.keyboard_default    u:object_r:kernarium_keyboard_default_prop:s0 exact bool"
+    ) not in properties:
+        fail("the system_ext property contexts do not label the keyboard default marker")
+    blueprint = (tools / "Android.bp").read_text()
+    for needle in (
+        'name: "kernarium_keyboard_default_script"',
+        'src: "kernarium_keyboard_default.sh"',
+        'init_rc: ["kernarium_keyboard_default.rc"]',
+    ):
+        if needle not in blueprint:
+            fail(f"overlay/tools/Android.bp lacks {needle}")
+    product = (android_root / "overlay/lineage_andarium.mk").read_text()
+    if len(re.findall(r"^PRODUCT_PACKAGES \+= kernarium_keyboard_default_script$", product, re.M)) != 1:
+        fail("lineage_andarium.mk does not add the keyboard default script to PRODUCT_PACKAGES exactly once")
+    verifier.check_keyboard_default((tools / "kernarium_keyboard_default.rc").read_text(), script.read_bytes())
+
+    marker = "persist.sys.kernarium.keyboard_default"
+
+    def run(stored: str | None, applied: str = "", *, refuse: bool = False, silent_reads: int = 0,
+            runs: int = 1) -> tuple[subprocess.CompletedProcess, list[str], str | None, str]:
+        """Runs the script `runs` times on one guest; returns the last process, every recorded call, the
+        stored setting (None when there is none) and the marker."""
+        with tempfile.TemporaryDirectory(prefix="keyboard-default-script-") as temporary:
+            stubs = Path(temporary)
+            calls = stubs / "calls"
+            state = stubs / "state"
+            state.mkdir()
+            properties = state / "properties"
+            properties.mkdir()
+            (properties / marker).write_text(applied + "\n")
+            if stored is not None:
+                (state / "setting").write_text(stored + "\n")
+            (state / "silent").write_text(f"{silent_reads}\n")
+            for name, body in {
+                "getprop": f'cat {properties}/"$1" 2>/dev/null || echo\n',
+                "setprop": f'echo "setprop $*" >> {calls}\necho "$2" > {properties}/"$1"\n',
+                "cmd": (
+                    f'echo "cmd $*" >> {calls}\n'
+                    'if [ "$1 $2 $3 $4" = "settings get secure show_ime_with_hard_keyboard" ]; then\n'
+                    f'    silent=$(cat {state}/silent)\n'
+                    '    if [ "$silent" -gt 0 ]; then\n'
+                    f'        echo $((silent - 1)) > {state}/silent\n'
+                    "        exit 1\n"
+                    "    fi\n"
+                    f'    if [ -f {state}/setting ]; then cat {state}/setting; else echo null; fi\n'
+                    'elif [ "$1 $2 $3 $4 $5" = "settings put secure show_ime_with_hard_keyboard $5" ]; then\n'
+                    + ("    :\n" if refuse else f'    echo "$5" > {state}/setting\n')
+                    + "else\n    exit 2\nfi\n"
+                ),
+                "log": f'echo "log $*" >> {calls}\n',
+                "sleep": f'echo "sleep $*" >> {calls}\n',
+            }.items():
+                (stubs / name).write_text("#!/bin/sh\n" + body)
+                (stubs / name).chmod(0o755)
+            env = {"PATH": f"{stubs}:/usr/bin:/bin"}
+            result = None
+            for _ in range(runs):
+                result = subprocess.run(["/bin/sh", str(script)], env=env, capture_output=True, text=True)
+            assert result is not None
+            recorded = calls.read_text().splitlines() if calls.exists() else []
+            return (
+                result,
+                recorded,
+                (state / "setting").read_text().strip() if (state / "setting").exists() else None,
+                (properties / marker).read_text().strip(),
+            )
+
+    def puts(recorded: list[str]) -> list[str]:
+        return [line for line in recorded if line.startswith("cmd settings put")]
+
+    def notes(recorded: list[str]) -> list[str]:
+        return [line for line in recorded if line.startswith("log ")]
+
+    # A guest that an older release created holds 1: it becomes 0, once, and the marker records it.
+    result, recorded, final, marked = run("1")
+    if (
+        result.returncode != 0
+        or final != "0"
+        or marked != "1"
+        or puts(recorded) != ["cmd settings put secure show_ime_with_hard_keyboard 0"]
+        or len(notes(recorded)) != 1
+    ):
+        fail(f"the keyboard default script did not turn a stored 1 off: {recorded} {final} {marked}")
+    # A guest that already has the default (0, or no row) is not written, and the marker is set.
+    for stored in ("0", None):
+        result, recorded, final, marked = run(stored)
+        if result.returncode != 0 or puts(recorded) or final != stored or marked != "1" or len(notes(recorded)) != 1:
+            fail(f"the keyboard default script touched a guest at the default ({stored!r}): "
+                 f"{recorded} {final} {marked}")
+    # It acts once: a person who turned the setting on afterwards keeps it, and a second run reads and
+    # writes nothing.
+    result, recorded, final, marked = run("1", "1")
+    if result.returncode != 0 or recorded or final != "1" or marked != "1":
+        fail(f"the keyboard default script acted again after its marker: {recorded} {final}")
+    result, recorded, final, marked = run("1", runs=2)
+    if result.returncode != 0 or len(puts(recorded)) != 1 or final != "0" or marked != "1":
+        fail(f"the keyboard default script is not idempotent: {recorded} {final}")
+    # It writes only the one setting, and never anything but 0.
+    for line in recorded:
+        if line.startswith("cmd settings put") and line != "cmd settings put secure show_ime_with_hard_keyboard 0":
+            fail(f"the keyboard default script wrote something else: {line}")
+    # A service that is not up yet is waited for: the script retries, then acts.
+    result, recorded, final, marked = run("1", silent_reads=5)
+    if (
+        result.returncode != 0
+        or final != "0"
+        or marked != "1"
+        or len([line for line in recorded if line.startswith("sleep")]) != 5
+    ):
+        fail(f"the keyboard default script did not wait for the settings service: {recorded} {final} {marked}")
+    # A setting that cannot be read at all leaves everything alone, sets no marker and fails the
+    # script (not the boot), so the next boot tries again.
+    result, recorded, final, marked = run("1", silent_reads=1000)
+    if result.returncode == 0 or puts(recorded) or final != "1" or marked != "":
+        fail(f"the keyboard default script acted on an unreadable setting: {recorded} {final} {marked}")
+    # A write the platform refuses leaves the 1 and no marker, and the next boot tries again.
+    result, recorded, final, marked = run("1", refuse=True)
+    if result.returncode == 0 or len(puts(recorded)) != 1 or final != "1" or marked != "":
+        fail(f"the keyboard default script claimed a write the platform refused: {recorded} {final} {marked}")
 
 
 def verify_debugging_defaults(android_root: Path) -> None:
@@ -7499,6 +7903,7 @@ def main() -> None:
     verify_secure_element_topic(android_root)
     verify_reclaim_boot_apps(android_root)
     verify_time_zone(android_root)
+    verify_keyboard_default(android_root)
     verify_default_wallpaper(android_root)
     verify_setup_wizard_flow(android_root)
     verify_launcher_layouts(android_root)
