@@ -59,6 +59,19 @@ nonisolated enum ThermalOverride {
     }
 }
 
+/// A UI test's launch (`ANDARIUM_INPUT_PROBE=1`): the session opens at once
+/// with no guest behind it, and the guest's keyboard and mouse send to a log
+/// the session shows (`InputProbe`). The UI tests of the hardware keyboard and
+/// mouse drive the real application with it, because the runtime is out of
+/// reach of a test that runs in another process.
+nonisolated enum InputProbeLaunch {
+    static let environmentName = "ANDARIUM_INPUT_PROBE"
+
+    static func requested(in environment: [String: String]) -> Bool {
+        environment[environmentName] == "1"
+    }
+}
+
 extension AppEntry {
     /// Whether the launch is the person's own, which announces the release
     /// notes (`announceWhatsNew`). A launch that states any setting, the JIT
@@ -66,6 +79,7 @@ extension AppEntry {
     static func isPersonsLaunch(overrides: LaunchOverrides, environment: [String: String]) -> Bool {
         overrides.isEmpty && JitPreference.stated(in: environment) == nil
             && ThermalOverride.stated(in: environment) == nil
+            && !InputProbeLaunch.requested(in: environment)
             && environment["XCTestConfigurationFilePath"] == nil
     }
 

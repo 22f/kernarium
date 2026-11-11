@@ -38,6 +38,11 @@ final class StubDriver: RuntimeDriver {
     var motionSensors = false
     var savedGuest: Guest?
     func setMotionSensors(_ on: Bool) { motionSensors = on }
+    /// What "Use the pointer as touch" and the pointer lock told the driver.
+    var pointerAsTouch = false
+    var pointerLocked = false
+    func setPointerAsTouch(_ on: Bool) { pointerAsTouch = on }
+    func pointerLockDidChange(_ locked: Bool) { pointerLocked = locked }
     private(set) var geometryChanges = 0
     func sceneGeometryDidChange() { geometryChanges += 1 }
 

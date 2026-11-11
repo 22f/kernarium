@@ -9,7 +9,6 @@ import SwiftUI
 struct SessionView: View {
     @Environment(AppModel.self) private var model
     let mode: StartMode
-    @State private var settings = false
 
     var body: some View {
         @Bindable var model = model
@@ -32,12 +31,19 @@ struct SessionView: View {
             // The system honours the bottom edge's deferral only while the
             // home indicator is visible: with it hidden, one swipe goes Home.
             .persistentSystemOverlays(.visible)
-            .sessionSettings(isPresented: $settings, large: false, model: model)
+            // The model knows Settings is open, because the guest gives the
+            // sheet the keys meanwhile (`GuestLayer`).
+            .sessionSettings(isPresented: $model.sessionSettingsOpen, large: false, model: model)
             // The screen over the session says why the guest is paused, and a
             // sheet would cover it.
             .onChange(of: model.spacePause != nil) { _, paused in
-                if paused { settings = false }
+                if paused { model.sessionSettingsOpen = false }
             }
+            #if !APP_STORE
+            .overlay(alignment: .bottomLeading) {
+                if let probe = model.inputProbe { InputProbeReadout(probe: probe) }
+            }
+            #endif
     }
 
     private var runtime: LiveRuntime? { model.driver as? LiveRuntime }
@@ -50,7 +56,31 @@ struct SessionView: View {
             volumeDown: { runtime?.press(.volumeDown) },
             back: { runtime?.press(.back) },
             home: { runtime?.press(.home) },
-            settings: { settings = true }
+            settings: { model.sessionSettingsOpen = true }
         )
     }
 }
+
+#if !APP_STORE
+
+/// What the guest's keyboard and mouse received, for a UI test to read: one
+/// accessibility element whose label is the log. It is small and takes no
+/// touch.
+private struct InputProbeReadout: View {
+    let probe: InputProbe
+
+    var body: some View {
+        Text(probe.text)
+            .font(.system(size: 6, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.6))
+            .lineLimit(1)
+            .frame(width: 60, height: 8, alignment: .leading)
+            .clipped()
+            .accessibilityElement()
+            .accessibilityLabel(probe.text)
+            .accessibilityIdentifier("inputProbeLog")
+            .allowsHitTesting(false)
+    }
+}
+
+#endif

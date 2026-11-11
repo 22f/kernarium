@@ -20,11 +20,13 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     private var deferredEdges: ScreenEdges?
     private var updateScheduled = false
     private var phaseWatcher: PhaseWatcher?
+    private var pointerLockWatcher: PointerLockWatcher?
 
     init(rootView: Content, model: AppModel) {
         self.model = model
         super.init(rootView: rootView)
         phaseWatcher = PhaseWatcher(model: model, target: self)
+        pointerLockWatcher = PointerLockWatcher(model: model, controller: self)
     }
 
     @available(*, unavailable)
@@ -35,6 +37,11 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     }
 
     override var prefersInterfaceOrientationLocked: Bool { lockRequested }
+
+    /// An Android application captured the pointer: iOS keeps the system's
+    /// pointer where it is and delivers the mouse's raw motion only, which the
+    /// guest takes. The system may refuse (a window that is not full screen).
+    override var prefersPointerLocked: Bool { model.pointerLockWanted }
 
     // The scene policy belongs to this root, including when SwiftUI embeds
     // a UIKit display controller whose default lock preference is false.
@@ -120,5 +127,46 @@ private final class PhaseWatcher {
                 self?.target?.sceneGeometryDidChange()
             }
         }
+    }
+}
+
+/// Asks iOS to lock or release the pointer when the guest's wish changes, and
+/// tells the driver when iOS has done it. Observation reports a change on
+/// whichever thread made it, so the hop to the main actor does not carry the
+/// root's generic type, as for the phase.
+@MainActor
+private final class PointerLockWatcher {
+    private let model: AppModel
+    private weak var controller: UIViewController?
+
+    init(model: AppModel, controller: UIViewController) {
+        self.model = model
+        self.controller = controller
+        observe()
+        // The root controller lives as long as the scene, and so does this.
+        NotificationCenter.default.addObserver(
+            forName: UIPointerLockState.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let scene = note.userInfo?[UIPointerLockState.sceneUserInfoKey] as? UIScene
+            MainActor.assumeIsolated { self?.lockStateChanged(scene) }
+        }
+    }
+
+    private func observe() {
+        withObservationTracking {
+            _ = model.pointerLockWanted
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.observe()
+                self?.controller?.setNeedsUpdateOfPrefersPointerLocked()
+            }
+        }
+    }
+
+    private func lockStateChanged(_ scene: UIScene?) {
+        // Only the scene of this controller's window counts.
+        guard let controller, scene == nil || scene === controller.view.window?.windowScene else { return }
+        let locked = controller.view.window?.windowScene?.pointerLockState?.isLocked ?? false
+        model.driver?.pointerLockDidChange(locked)
     }
 }

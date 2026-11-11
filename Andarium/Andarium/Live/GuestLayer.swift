@@ -17,10 +17,15 @@ struct GuestLayer: View {
             ZStack {
                 Color.black.ignoresSafeArea()
                 GuestDisplayView(
-                    keyboardVisible: .constant(false), retinaMode: model.retina,
+                    retinaMode: model.retina,
                     // A touch beside the side keys reaches the guest, and
                     // puts the keys away.
-                    touchDidBegin: { model.session.closeSideKeys() }
+                    touchDidBegin: { model.session.closeSideKeys() },
+                    // The hardware keyboard and mouse: the display takes the
+                    // keys and the system pointer, except while a sheet or an
+                    // alert needs them.
+                    hardwareInput: (model.driver as? LiveRuntime)?.keyboardMouse.input,
+                    hardwareFocus: hasKeys
                 ) { view, geometry in
                     (model.driver as? LiveRuntime)?.viewDidLayout(view, geometry)
                 }
@@ -34,6 +39,12 @@ struct GuestLayer: View {
                 SceneCoverageReader { coversScreen = $0 }
             }
         }
+    }
+
+    /// The guest has the hardware keys unless a sheet or an alert is over it:
+    /// those take the keys, and the guest takes them back when they go.
+    private var hasKeys: Bool {
+        !model.sessionSettingsOpen && model.sheet == nil && model.alert == nil
     }
 
     private var showsGuest: Bool {

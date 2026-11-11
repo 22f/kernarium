@@ -111,6 +111,11 @@ protocol RuntimeDriver: AnyObject {
     func shutDownAfterSpacePause() async throws
     /// Enables or stops sharing motion with the guest.
     func setMotionSensors(_ on: Bool)
+    /// Settings' "Use the pointer as touch" changed: the guest has no mouse
+    /// while it is on.
+    func setPointerAsTouch(_ on: Bool)
+    /// The scene's pointer lock was granted or released.
+    func pointerLockDidChange(_ locked: Bool)
     /// The scene's geometry changed, which may include its interface
     /// orientation.
     func sceneGeometryDidChange()
