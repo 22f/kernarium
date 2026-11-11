@@ -53,10 +53,5 @@ struct GuestLayer: View {
         return display
     }
 
-    private var showsGuest: Bool {
-        switch model.phase {
-        case .booting, .running: true
-        case .home, .failed: false
-        }
-    }
+    private var showsGuest: Bool { model.phase.showsGuestDisplay }
 }
