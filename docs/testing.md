@@ -281,9 +281,12 @@ automation host.
 ### Andarium
 
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
-free-space thresholds, suspension check and pause both applications share, and
+free-space thresholds, suspension check and pause both applications share and
+the logic of the hardware keyboard and pointer (held keys, Caps Lock,
+positions, buttons, scroll), and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
-with `swift test` (it includes the snapshot store on APFS clones of sparse
+with `swift test` (it includes the hardware input's plug policy and pointer
+capture, the snapshot store on APFS clones of sparse
 files in a temporary directory, with a crash between every two file calls of
 each operation and a real error at each call in turn, the haptics session on
 fake guests and players, the haptics wire against the golden frames in
@@ -316,6 +319,19 @@ opens the system's Settings or another app. The bundle's principal class
 (`AndariumTestBundle`) shows the side keys' tip in every session of the run,
 whatever the device's tip store says, except in an `ANDARIUM_HOLD_SECONDS`
 harness launch, which hides it.
+
+`AndariumUITests` is the UI-test target of the same scheme
+(`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
+`-parallel-testing-enabled NO`), run on an iPad Simulator and an iPhone
+Simulator. Its launch asks for the input probe
+([automation](../Andarium/README.md#automation)): XCUITest's synthetic keys
+and, on an iPad, pointer events (XCUITest has no pointer on an iPhone) reach
+the real session and the guest's end is a log the test reads, so the tests
+cover the hardware keyboard and mouse without a guest. They cover the keys as
+positions, the plug order, no software keyboard, a sheet's text field taking
+the keys while it is open, the pointer's hover, clicks, drag and scroll, and
+"Use the pointer as touch". The Simulator produces no Escape, Delete, Caps Lock,
+F13, lone Shift or Globe key, and no raw mouse motion under the pointer lock.
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
