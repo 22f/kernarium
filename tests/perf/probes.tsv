@@ -1,6 +1,12 @@
 source	category	required_feature	runner	retention
 guest_add_immediate_loop.S	integer	base	run_guest_link_bench.py	Matched control for ADD-immediate lowering and gadget layout changes, sharing its body with the ideal gadget ceiling bench.
 guest_atomic_add_loop.S	atomic	lse	run_guest_link_bench.py	Private-counter control for direct atomic lowering and multicore scaling.
+guest_call_deep_chain_control_loop.S	control-flow	base	run_guest_link_bench.py	Matched control for guest_call_deep_chain_loop.S: the same 128 functions, calls and returns as eight chains of sixteen.
+guest_call_deep_chain_loop.S	control-flow	base	run_guest_link_bench.py	Calls a chain of 128 framed functions, each calling the next from its own site, deeper than a host return-address stack holds. Every return runs an epilogue head.
+guest_call_leaf_walk_control_loop.S	control-flow	base	run_guest_link_bench.py	Matched control for guest_call_leaf_walk_loop.S: the same call sites called in index order, so every call and return is predictable.
+guest_call_leaf_walk_loop.S	control-flow	base	run_guest_link_bench.py	Calls eight framed leaves from sixty-four sites in a pseudo-random order, so both the callee and the return's successor are unpredictable and every return runs an epilogue head, as compiled code calling small functions does.
+guest_call_site_control_loop.S	control-flow	base	run_guest_link_bench.py	Matched control for guest_call_site_loop.S: the same loop and leaf with the call and the return replaced by direct branches.
+guest_call_site_loop.S	control-flow	base	run_guest_link_bench.py	Calls one leaf from one site in a loop, so the host predicts the callee and the return's successor. A change to calls and returns must not slow it.
 guest_compare_branch_pair_loop.S	control-flow	base	run_guest_link_bench.py	Guest CMP-immediate followed by B.cond, the shape a translated block ends on. The loop counters in the other probes are subs with a real destination and so never take the fused path.
 guest_compare_register_branch_loop.S	control-flow	base	run_guest_link_bench.py	Guest CMP of two registers followed by B.cond. G116 ranks this pair fourth and ninth over a full Geekbench run while the immediate form does not reach the table, so the two shapes get separate probes.
 guest_compare_retry_loop.S	atomic	base	run_guest_link_bench.py	Private compare-and-retry control for exclusive sequence quality.
