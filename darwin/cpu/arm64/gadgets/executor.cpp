@@ -728,6 +728,13 @@ public:
 		return account_.bytes();
 	}
 
+	/* An executor entered or switched to this address space in `epoch`:
+	 * the budget asks the spaces that ran least to shed first. */
+	void ran(std::uint64_t epoch) noexcept
+	{
+		account_.ran(epoch);
+	}
+
 #if UML_GADGET_SWEEP_STRESS
 	[[nodiscard]] std::size_t stress_arena_bytes() const noexcept
 	{
@@ -1717,11 +1724,21 @@ public:
 		window_.current = nullptr;
 		auto &state = current();
 		touch(generation);
+		/* A switch to the address space is a run in it. */
+		state.space->ran(gadget_cache::epoch());
 		if (state.changes == changes)
 			return;
 		state.space->observe(changes);
 		state.changes = changes;
 		advance_epoch(state);
+	}
+
+	/* An executor enters translated code in the address space last bound,
+	 * in `epoch`. Nothing is bound after the space was let go of. */
+	void note_run(std::uint64_t epoch) noexcept
+	{
+		if (window_.current != nullptr)
+			window_.current->space->ran(epoch);
 	}
 
 	[[nodiscard]] std::optional<BuildResult> find(
@@ -2016,8 +2033,8 @@ public:
 		if (state.space->sweep_due())
 			sweep(state, diagnostics);
 		renew_if_due(*state.space);
-		/* Past the budget, the largest spaces are asked to shed; their
-		 * executors let go of them at their next entry. */
+		/* Past the budget, the spaces the guest runs least are asked to
+		 * shed; their executors let go of them at their next entry. */
 		if (gadget_cache::over_budget())
 			gadget_cache::relieve();
 		return slot.body()->result();
@@ -2960,9 +2977,26 @@ bool GadgetExecutor::begin_execution(unsigned long generation,
 		return false;
 	if (announcement_ != nullptr)
 		announce_entry(*announcement_);
+	note_run(generation);
 	if (sampling_ != nullptr)
 		diagnostics::guest_sampling_enter(*sampling_);
 	return true;
+}
+
+/* An entry is a run in the address space this executor last prepared, when
+ * that is the one entered; a switch to another is stamped when the run
+ * prepares (ProgramCache::prepare). The stamp is one read of the host's
+ * counter and a load of the account's in each cache that holds the address
+ * space. */
+void GadgetExecutor::note_run(unsigned long generation) noexcept
+{
+	const auto epoch = gadget_cache::epoch();
+	if (cache_generation_ == generation)
+		programs_->note_run(epoch);
+	if (sme_caches_made_) [[unlikely]]
+		for (auto &mode : sme_caches_)
+			if (mode.programs && mode.generation == generation)
+				mode.programs->note_run(epoch);
 }
 
 void GadgetExecutor::end_execution() noexcept
@@ -3266,9 +3300,11 @@ GadgetExecutor::finish_block(ProgramCache &programs, const BuildResult &built,
 	if (streaming && !build_options_.host_capabilities.sme_hardware)
 		return ::uml::cpu::EngineEvent::fatal;
 	auto &state = sme_caches_[mode - 1U];
-	if (!state.programs)
+	if (!state.programs) {
 		state.programs = std::make_unique<ProgramCache>(build_options_,
 			mode, announcement_, share_translations_);
+		sme_caches_made_ = true;
+	}
 	auto &programs = *state.programs;
 	if (state.generation != generation) {
 		cpu.gadget_return_stack = {};
