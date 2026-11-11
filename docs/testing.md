@@ -148,6 +148,17 @@ condition on a per-frame or per-bind path reports once.
 each of 64 hand-backs nothing the test kernel left behind may remain, and the
 process must be as it was before the first run.
 
+`guest-irq-takeover` models a host that does not run a vCPU: its runner inserts
+a library into the launcher (`DYLD_INSERT_LIBRARIES`, as `runtime-restart-*` does
+its process audit) which suspends CPU0's carrier thread for a while every second,
+and the test requires a vsock echo that begins in a hold to return soon after the
+slowest echo without one, with every CPU busy, with only CPU0 busy and with
+every CPU idle. An echo already under way when a hold begins is not judged, and
+a hold that lands inside CPU0's dispatch stays with CPU0, so a few holds per
+phase may fail. A phase with too few judged holds, and a host so busy that an
+echo without a hold is already slow, fail the run. The library is test support
+and nothing in the product loads it.
+
 ## Integration prerequisites and workflows
 
 Integration needs four local inputs: the accepted kernel bundle below

@@ -673,6 +673,29 @@ uml_add_guest_integration_test(
     TIMEOUT 300
     CPUS 2)
 
+# Test support only: a library the runner inserts into the launcher
+# (DYLD_INSERT_LIBRARIES), which suspends one vCPU's carrier thread for a while
+# again and again, as a loaded host does.
+add_library(uml_cpu_hold SHARED kernel/cpu_hold.cpp)
+set_target_properties(uml_cpu_hold PROPERTIES
+    PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_options(uml_cpu_hold PRIVATE -Wall -Wextra -Werror)
+target_compile_features(uml_cpu_hold PRIVATE cxx_std_20)
+add_dependencies(integration-test-binaries uml_cpu_hold)
+
+# A host that does not run CPU0's carrier for 300 ms every second delays no
+# host event by more than a few ticks: the IRQ dispatch passes to a CPU whose
+# clock ticks, or that the IRQ notification thread wakes, with every CPU busy,
+# CPU0 only busy, and every CPU idle. A vsock echo every 20 ms is the load.
+uml_add_guest_integration_test(
+    NAME guest-irq-takeover
+    SCRIPT kernel/run_guest_irq_takeover.py
+    ARGS --hold-library $<TARGET_FILE:uml_cpu_hold>
+    LABELS guest;kernel;smoke
+    TIMEOUT 300
+    CPUS 2)
+
 # A Virtio sound stream starts afresh after a system suspend the guest enters
 # by itself: the position of a stream suspended while playing, a prepare after
 # a half-filled period, and a stream paused across a suspend, which recovers
