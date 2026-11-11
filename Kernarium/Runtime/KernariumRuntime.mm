@@ -51,6 +51,7 @@
 #include "gpu_budget_plan.hpp"
 #include "options.hpp"
 #include "runtime/execution_engine.hpp"
+#include "runtime/session_record.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
 
@@ -438,8 +439,66 @@ public:
         }
     }
 
+    [[nodiscard]] void* context() const noexcept { return context_; }
+
 private:
     void* context_ {};
+};
+
+/* The user network whose counts the session record writes: the run's, from
+ * when it exists to when it is destroyed. The record reads from its own
+ * thread and from the end of a session, a signal handler included, so a
+ * reader that is inside the provider holds the destruction back. */
+struct PublishedNetwork final {
+    std::atomic<void*> context {nullptr};
+    std::atomic<int> readers {0};
+};
+PublishedNetwork publishedNetwork;
+
+bool readPublishedNetwork(uml::runtime::SessionNetworkCounts& counts) noexcept
+{
+    publishedNetwork.readers.fetch_add(1, std::memory_order_acquire);
+    uml_slirp_net_counters read {};
+    void* context = publishedNetwork.context.load(std::memory_order_acquire);
+    const bool ok = context != nullptr &&
+        uml_slirp_net_read_counters(context, &read) == 0;
+    publishedNetwork.readers.fetch_sub(1, std::memory_order_release);
+    if (!ok)
+        return false;
+    counts = {
+        .dns_answered = read.dns_answered,
+        .dns_policy_denied = read.dns_policy_denied,
+        .dns_timed_out = read.dns_timed_out,
+        .dns_failed = read.dns_failed,
+        .dhcp_discovers = read.dhcp_discovers,
+        .dhcp_requests = read.dhcp_requests,
+        .dhcp_acks = read.dhcp_acks,
+        .tcp_attempts = read.tcp_attempts,
+        .tcp_established = read.tcp_established,
+        .tcp_unreachable = read.tcp_unreachable,
+        .tcp_refused = read.tcp_refused,
+    };
+    return true;
+}
+
+class PublishNetworkCounts final {
+public:
+    explicit PublishNetworkCounts(const AppNetwork& network) noexcept
+    {
+        uml::runtime::set_network_counts_reader(&readPublishedNetwork);
+        publishedNetwork.context.store(
+            network.context(), std::memory_order_release);
+    }
+
+    ~PublishNetworkCounts()
+    {
+        publishedNetwork.context.store(nullptr, std::memory_order_release);
+        while (publishedNetwork.readers.load(std::memory_order_acquire) != 0)
+            std::this_thread::yield();
+    }
+
+    PublishNetworkCounts(const PublishNetworkCounts&) = delete;
+    PublishNetworkCounts& operator=(const PublishNetworkCounts&) = delete;
 };
 
 
@@ -2099,6 +2158,7 @@ int runtimeRun(
             guestProcessorCount);
 
         AppNetwork network;
+        const PublishNetworkCounts publishedCounts {network};
         auto networkCallbacks = network.callbacks();
         const auto destroy = &uml_emulator_destroy;
         std::unique_ptr<uml_emulator, decltype(destroy)> emulator {nullptr, destroy};
@@ -2460,6 +2520,24 @@ void runtimeWakeForInput(void)
             std::chrono::steady_clock::now()))
         return;
     wakeGuestAsync();
+}
+
+int runtimeSetNetworkNotice(int notice)
+{
+    using uml::runtime::NetworkNotice;
+    switch (notice) {
+    case KERNARIUM_RUNTIME_NETWORK_NOTICE_NONE:
+        uml::runtime::set_network_notice(NetworkNotice::none);
+        return 0;
+    case KERNARIUM_RUNTIME_NETWORK_NOTICE_CELLULAR_DENIED:
+        uml::runtime::set_network_notice(NetworkNotice::cellular_denied);
+        return 0;
+    case KERNARIUM_RUNTIME_NETWORK_NOTICE_WIFI_DENIED:
+        uml::runtime::set_network_notice(NetworkNotice::wifi_denied);
+        return 0;
+    default:
+        return -EINVAL;
+    }
 }
 
 int runtimeSetGpuHold(int held)
@@ -2932,6 +3010,7 @@ const kernarium_runtime_api runtimeApi {
     .send_mouse = runtimeSendMouse,
     .set_input_status_callback = runtimeSetInputStatusCallback,
     .wake_for_input = runtimeWakeForInput,
+    .set_network_notice = runtimeSetNetworkNotice,
 };
 
 } // namespace
