@@ -69,12 +69,12 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  arch/um/drivers/virtio_uml.c |  19 +-
  arch/um/os-Darwin/internal.h |   2 +
- arch/um/os-Darwin/irq.c      | 484 ++++++++++++++++++++++++++++++-----
+ arch/um/os-Darwin/irq.c      | 490 ++++++++++++++++++++++++++++++-----
  arch/um/os-Darwin/irq.h      |  16 +-
  arch/um/os-Darwin/signal.c   |   4 +-
  arch/um/os-Darwin/smp.c      |  33 +++
- arch/um/os-Darwin/time.c     |  43 ++--
- 7 files changed, 497 insertions(+), 104 deletions(-)
+ arch/um/os-Darwin/time.c     |  43 +--
+ 7 files changed, 503 insertions(+), 104 deletions(-)
 
 diff --git a/arch/um/drivers/virtio_uml.c b/arch/um/drivers/virtio_uml.c
 index 30390dbaac62913abbebc2f849ff2a279d77c45c..d2eaa488d5f0d1cffab4619e448f3ed7a1f074c9 100644
@@ -127,7 +127,7 @@ index 340e3e3f3341eb845b4554d1479be36e816c4d33..a3b76d3f4ff53f28df3dc65e0600e465
  	const unsigned int **sequence)
  {
 diff --git a/arch/um/os-Darwin/irq.c b/arch/um/os-Darwin/irq.c
-index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b86f8056bf 100644
+index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..59be405bd11441ef261e43c60ce2763e6a62bd3d 100644
 --- a/arch/um/os-Darwin/irq.c
 +++ b/arch/um/os-Darwin/irq.c
 @@ -9,11 +9,13 @@
@@ -489,7 +489,7 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
   */
  static int update_registration(int fd, int events, void *data, int notify)
  {
-@@ -212,28 +466,96 @@ int os_irq_wake_pending(void)
+@@ -212,28 +466,100 @@ int os_irq_wake_pending(void)
  	return pending;
  }
  
@@ -584,10 +584,14 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
 +
 +		EV_SET(&trigger, DARWIN_NOTIFICATION_PARK_IDENT, EVFILT_USER,
 +		       0, NOTE_TRIGGER, 0, NULL);
-+		while (kevent(park_kqueue, &trigger, 1, NULL, 0, NULL) < 0)
++		while (kevent(park_kqueue, &trigger, 1, NULL, 0, NULL) < 0) {
++			/* The queue is closed once the thread is stopped. */
++			if (errno == EBADF)
++				break;
 +			if (errno != EINTR)
 +				panic("Darwin: unable to wake the IRQ notification thread: %d",
 +				      errno);
++		}
 +	}
 +	return edge;
  }
@@ -604,7 +608,7 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
  }
  
  void *os_epoll_get_data_pointer(int index)
-@@ -251,15 +573,42 @@ int os_event_mask(enum um_irq_type type)
+@@ -251,15 +577,42 @@ int os_event_mask(enum um_irq_type type)
  	return type == IRQ_READ ? DARWIN_EVENT_READ : DARWIN_EVENT_WRITE;
  }
  
@@ -647,7 +651,7 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
  	action.sa_handler = wake_signal_handler;
  	sigemptyset(&action.sa_mask);
  	/* SIGUSR2 is a wake edge for the idle pselect(), not work to run from a
-@@ -276,15 +625,28 @@ int os_setup_epoll(void)
+@@ -276,15 +629,28 @@ int os_setup_epoll(void)
  	       EV_ADD | EV_CLEAR, 0, 0, NULL);
  	if (kevent(notification_kqueue, &stop_event, 1, NULL, 0, NULL) < 0) {
  		error = -errno;
@@ -680,7 +684,7 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
  		return error;
  	}
  	/* Preserve registrations made before the common IRQ layer starts. */
-@@ -295,24 +657,15 @@ int os_setup_epoll(void)
+@@ -295,24 +661,15 @@ int os_setup_epoll(void)
  					    watched[index].notify);
  		if (error < 0) {
  			pthread_mutex_unlock(&watched_lock);
@@ -707,7 +711,7 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
  		return -error;
  	}
  	notification_worker_joinable = 1;
-@@ -427,14 +780,12 @@ void os_close_epoll_fd(void)
+@@ -427,14 +784,12 @@ void os_close_epoll_fd(void)
  	watched_count = 0;
  	pthread_mutex_unlock(&watched_lock);
  	if (notification_worker_joinable) {
@@ -726,9 +730,12 @@ index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..a74d0607ca15369d1b0353d8eabb36b8
  			panic("Darwin: unable to stop IRQ notification thread: %d",
  			      errno);
  		error = pthread_join(notification_worker, NULL);
-@@ -443,12 +794,5 @@ void os_close_epoll_fd(void)
+@@ -442,13 +797,8 @@ void os_close_epoll_fd(void)
+ 			panic("Darwin: unable to join IRQ notification thread: %d",
  			      error);
  		notification_worker_joinable = 0;
++		/* It may have been stopped while parked. */
++		__atomic_store_n(&notification_parked, 0, __ATOMIC_SEQ_CST);
  	}
 -	if (dispatch_kqueue >= 0) {
 -		close(dispatch_kqueue);

@@ -242,6 +242,8 @@ int main() {
  assert(write(idle[1],"k",1)==1);
  sleep_ms(5);
  os_close_epoll_fd();
+ // CPU0 may still idle once after the thread stopped; the queue is gone.
+ (void)darwin_irq_idle_begin(); darwin_irq_idle_end();
  assert(os_setup_epoll()==0);
  assert(os_add_epoll_fd(1,idle[0],&next)==0);
  assert(read(idle[0],drained,sizeof drained)>=1);
