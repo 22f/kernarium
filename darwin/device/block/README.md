@@ -39,8 +39,9 @@ disk; `validateDataDisk` checks it.
   whose tables are exactly the template's for that size. Only the tables are
   written, so any capacity costs the same, and the guest formats `metadata` and
   `userdata` itself and grows its filesystem at the next boot.
-- A full host volume holds the guest's I/O to a disk until it has room; it does
-  not fail it ([kernel contract](../../../kernel/common/README.md#block-devices-and-filesystems)).
+- While the guest runs, a full host volume holds the guest's I/O to a disk
+  until it has room instead of failing it
+  ([kernel contract](../../../kernel/common/README.md#block-devices-and-filesystems)).
 - A disk is created beside its path and linked into place, so it never replaces
   a file and a failure leaves nothing behind. A disk only grows, on an APFS
   clone renamed over the disk (a failure leaves the old disk); a volume without

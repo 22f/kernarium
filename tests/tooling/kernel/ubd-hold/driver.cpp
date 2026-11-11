@@ -62,8 +62,10 @@ void attempt(const char *what, struct io_thread_req *request,
 
 struct Fixture {
 	struct request request;
+	struct request_queue queue;
 	struct io_thread_req io;
 	struct gendisk disk;
+	struct gendisk unassigned;  // what dev->disk names while a disk is added
 	struct ubd dev;
 
 	Fixture(enum req_op op, bool direct = true, u64 offset = 4096 * 7)
@@ -77,9 +79,14 @@ struct Fixture {
 		jiffies = 1000;
 		test_set_stopped(false);
 		request.op = op;
+		request.q = &queue;
+		queue.disk = &disk;
 		io = {&request, direct, offset, BLK_STS_OK};
 		std::strcpy(disk.disk_name, "ubdb");
-		dev = {&disk};
+		// The driver may run a request before it assigns dev->disk, so the
+		// lines must name the disk through the request's queue.
+		std::strcpy(unassigned.disk_name, "not the request's disk");
+		dev = {&unassigned};
 	}
 	void run(unsigned long length = 4096, unsigned long byte_offset = 4096 * 7)
 	{

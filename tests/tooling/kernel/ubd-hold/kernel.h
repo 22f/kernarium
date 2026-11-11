@@ -28,8 +28,11 @@ enum req_op {
 	REQ_OP_WRITE_ZEROES,
 };
 
+struct request_queue;
+
 struct request {
 	enum req_op op;
+	struct request_queue *q;
 };
 #define req_op(request) ((request)->op)
 
@@ -45,6 +48,10 @@ struct io_thread_req {
 
 struct gendisk {
 	char disk_name[32];
+};
+
+struct request_queue {
+	struct gendisk *disk;
 };
 
 struct ubd {

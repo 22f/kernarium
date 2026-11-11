@@ -12,14 +12,17 @@ superblock write made jbd2 abort the journal, and ext4 with errors=panic
 stopped the guest at the following handle start. A physical disk never
 fails a write for want of space.
 
-Hold the unit that failed with ENOSPC and redo it, after a back-off that
-doubles from 10 ms to 1 s, until it succeeds or the exitcall begins. The
+While the guest runs, hold the unit that failed with ENOSPC and redo it,
+after a back-off that doubles from 10 ms to 1 s, until it succeeds or
+the exitcall begins. The file system does not see the failure. The
 driver prints one line when the hold begins and one when it ends, and
 nothing for a retry. The ordered workqueue keeps every later request
 behind the held one, on every disk, so the guest waits for space as it
-would for a slow disk. The waiting task is idle, not uninterruptible,
-and the driver has no timeout handler, so nothing in the kernel reports
-a held request.
+would for a slow disk, and whatever needs a held write waits with it: a
+guest's own power-off or restart ends only when the host has room again.
+The worker sleeps as TASK_IDLE, an uninterruptible sleep that neither
+the load average nor the hung-task check counts, and the driver has no
+timeout handler, so nothing in the kernel reports a held request.
 
 A redo is idempotent: it writes the same bytes at the same place, or
 syncs again. It restarts at the segment that failed and restores the
@@ -28,24 +31,25 @@ discard is a hint that no file system needs and that frees space, so it
 fails as before rather than wait for space it would give back. A COW
 disk redoes its bitmap word from a bitmap the first attempt already
 updated, so a redo would not write the word; Apple launchers build no
-COW pair. And once the exitcall has begun, the request fails as before,
-so that a power-off or a restart never waits for the host. The exitcall
-wakes a held request at once.
+COW pair. And once the exitcall has begun, a held request is woken and
+fails as it did before the hold existed, with the journal abort that
+follows: the machine is going down and the host may never have room. A
+host stop ends the run without waiting for the request.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- arch/um/drivers/ubd_kern.c | 84 ++++++++++++++++++++++++++++++++++----
- 1 file changed, 77 insertions(+), 7 deletions(-)
+ arch/um/drivers/ubd_kern.c | 93 +++++++++++++++++++++++++++++++++++---
+ 1 file changed, 86 insertions(+), 7 deletions(-)
 
 diff --git a/arch/um/drivers/ubd_kern.c b/arch/um/drivers/ubd_kern.c
-index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..b3dc1cded3faa1a022f8049b42f9ee247e0f6e03 100644
+index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..014713811def177352661c62d89dd1c5b0d00639 100644
 --- a/arch/um/drivers/ubd_kern.c
 +++ b/arch/um/drivers/ubd_kern.c
 @@ -497,6 +497,8 @@ static struct os_helper_thread *io_td;
  static struct workqueue_struct *darwin_ubd_wq;
  /* Set under ubd_lock once the exitcall has quiesced every disk. */
  static bool darwin_ubd_stopped;
-+/* Where a request held for want of host storage waits; see darwin_ubd_hold(). */
++/* Where a request held for want of host storage waits (darwin_ubd_hold()). */
 +static DECLARE_WAIT_QUEUE_HEAD(darwin_ubd_hold_wq);
  
  /*
@@ -69,7 +73,7 @@ index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..b3dc1cded3faa1a022f8049b42f9ee24
  	for (i = 0; i < MAX_DEV; i++)
  		if (ubd_devs[i].disk)
  			blk_mq_quiesce_queue(ubd_devs[i].disk->queue);
-@@ -1306,6 +1310,72 @@ static void darwin_ubd_do_segment(struct ubd *dev, struct io_thread_req *io_req,
+@@ -1306,6 +1310,81 @@ static void darwin_ubd_do_segment(struct ubd *dev, struct io_thread_req *io_req,
  	do_io(io_req, &desc);
  }
  
@@ -78,10 +82,13 @@ index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..b3dc1cded3faa1a022f8049b42f9ee24
 + * or a flush can fail for want of host space while the guest's file system
 + * still has room.  A physical disk never fails a write for that, and the
 + * journal of a file system that sees one aborts: ext4 with errors=panic then
-+ * stops the guest.  Hold the unit that failed with ENOSPC (28 on the host, as
-+ * in Linux) and redo it until the host has room, as a thin-provisioned array
-+ * queues its writes while its pool is full.  The ordered workqueue keeps every
-+ * later request, on every disk, behind the held one.
++ * stops the guest.  While the guest runs, hold the unit that failed with
++ * ENOSPC (28 on the host, as in Linux) and redo it until the host has room, as
++ * a thin-provisioned array queues its writes while its pool is full.  The file
++ * system does not see the failure.  The ordered workqueue keeps every later
++ * request, on every disk, behind the held one, and whatever needs a held write
++ * waits with it: a guest's own power-off or restart ends only when the host
++ * has room again.
 + *
 + * A redo writes the same bytes at the same place, or syncs again, and the host
 + * keeps what a write did not refuse.  Three cases are not held.  A discard is a
@@ -89,10 +96,16 @@ index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..b3dc1cded3faa1a022f8049b42f9ee24
 + * always did instead of waiting for the space it would give back.  A COW
 + * disk's bitmap word is rebuilt from a bitmap the first attempt already
 + * updated, so a redo would skip the write of the word.  And once the exitcall
-+ * has begun the request fails as before, so that a power-off or a restart
-+ * does not wait for the host.
++ * has begun, a held request is woken and fails as it did before the hold
++ * existed, with the journal abort that follows: the machine is going down and
++ * the host may never have room.  A host stop ends the run without waiting for
++ * the request.
++ *
++ * The worker sleeps as TASK_IDLE, an uninterruptible sleep that neither the
++ * load average nor the hung-task check counts, and the driver has no timeout
++ * handler, so nothing in the kernel reports a held request.
 + */
-+static bool darwin_ubd_hold(struct ubd *dev, struct io_thread_req *io_req,
++static bool darwin_ubd_hold(struct io_thread_req *io_req,
 +			    unsigned int *delay_ms, unsigned long *since)
 +{
 +	if (io_req->error != BLK_STS_NOSPC || !io_req->direct ||
@@ -101,7 +114,7 @@ index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..b3dc1cded3faa1a022f8049b42f9ee24
 +		return false;
 +	if (!*delay_ms) {
 +		pr_warn("%s: host storage is full; holding I/O until it has room\n",
-+			dev->disk->disk_name);
++			io_req->req->q->disk->disk_name);
 +		*since = jiffies;
 +		*delay_ms = 10;
 +	} else {
@@ -131,18 +144,18 @@ index 5d75377ba0d3d3e0164702c1c06ffcc24132a257..b3dc1cded3faa1a022f8049b42f9ee24
 +		else
 +			darwin_ubd_do_segment(dev, io_req, buffer, length,
 +					      byte_offset);
-+	} while (darwin_ubd_hold(dev, io_req, &delay_ms, &since));
++	} while (darwin_ubd_hold(io_req, &delay_ms, &since));
 +
 +	if (delay_ms && io_req->error == BLK_STS_OK)
 +		pr_info("%s: host storage has room again after %u ms; I/O resumed\n",
-+			dev->disk->disk_name,
++			io_req->req->q->disk->disk_name,
 +			jiffies_to_msecs(jiffies - since));
 +}
 +
  static void darwin_ubd_work(struct work_struct *work)
  {
  	struct io_thread_req *io_req =
-@@ -1318,17 +1388,17 @@ static void darwin_ubd_work(struct work_struct *work)
+@@ -1318,17 +1397,17 @@ static void darwin_ubd_work(struct work_struct *work)
  
  	switch (req_op(req)) {
  	case REQ_OP_FLUSH:

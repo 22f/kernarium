@@ -261,15 +261,18 @@ it. The bridge fields used below are defined by the comments in
   writeback under pressure (`guest-ubd-request-memory`). The project adds no
   behavior to upstream UML's COW implementation, and Apple launchers never
   construct a COW image pair.
-- A full host volume holds a direct UBD disk's I/O; it does not fail it. A
-  write, a flush or a write of zeroes that the host refuses with `ENOSPC` is
-  redone, after a back-off that doubles from 10 ms to 1 s, until the host has
-  room, so ext4's `errors=panic` never sees the failure that aborts its journal.
-  The driver prints one line when a hold begins and one when it ends, and the
-  requests behind the held one wait, on every disk. A discard and a COW disk
-  fail as before, and the exitcall ends a hold and fails the request, so a
-  power-off or restart never waits for the host. `kernel-darwin-ubd-hold`
-  checks the decisions.
+- While the guest runs, a full host volume holds a direct UBD disk's I/O and
+  the file system does not see a failure. A write, a flush or a write of zeroes
+  that the host refuses with `ENOSPC` is redone, after a back-off that doubles
+  from 10 ms to 1 s, until the host has room. The driver prints one line when a
+  hold begins and one when it ends. The requests behind the held one wait, on
+  every disk, and so does whatever needs a held write: a guest's own power-off
+  or restart ends only when the host has room again. The worker sleeps as
+  `TASK_IDLE` and the driver has no timeout handler, so no watchdog reports it.
+  A discard and a COW disk are not held and fail as before. Once the kernel's
+  exitcall begins, a held request fails (the journal aborts); a host stop ends
+  the run without waiting for it. `kernel-darwin-ubd-hold` checks the
+  decisions.
 
 ## Shutdown and device removal
 
