@@ -539,12 +539,18 @@ public:
             if (settings.aeRegion && settings.aeRegion->weight > 0 && device.exposurePointOfInterestSupported)
                 device.exposurePointOfInterest = CGPointMake(settings.aeRegion->x + settings.aeRegion->width / 2,
                                                              settings.aeRegion->y + settings.aeRegion->height / 2);
-            // Focus. A new trigger runs one scan in any mode (the device locks where
-            // it ends). Otherwise a manual lens goes to the distance only when the
-            // guest has written it anew, and holds from then on, as does a locked
-            // one; the continuous mode is the rest. A format change reverts the
-            // focus, so `force` puts a written distance back.
+            // Focus. The point of interest comes first: the device takes it up when the
+            // focus mode is set. A new trigger runs one scan in any mode (the device
+            // locks where it ends). Otherwise a manual lens goes to the distance only
+            // when the guest has written it anew, and holds from then on, as does a
+            // locked one (only a continuous focus is locked, so that a later apply
+            // does not abort a scan under way); the continuous mode is the rest. A
+            // format change reverts the focus, so `force` puts a written distance
+            // back.
             if (info.autofocus) {
+                if (settings.afRegion && settings.afRegion->weight > 0 && device.focusPointOfInterestSupported)
+                    device.focusPointOfInterest = CGPointMake(settings.afRegion->x + settings.afRegion->width / 2,
+                                                              settings.afRegion->y + settings.afRegion->height / 2);
                 const bool scan = settings.focusTriggerSerial != running.focusSerial;
                 const bool move = settings.focusDistanceSerial != running.focusDistanceSerial ||
                     (force && settings.focusDistanceSerial != 0);
@@ -560,13 +566,12 @@ public:
                         device.focusMode = AVCaptureFocusModeLocked;
                     }
                 } else if (settings.focusMode != CameraFocusMode::continuousAuto) {
-                    if ([device isFocusModeSupported:AVCaptureFocusModeLocked]) device.focusMode = AVCaptureFocusModeLocked;
+                    if (device.focusMode == AVCaptureFocusModeContinuousAutoFocus &&
+                        [device isFocusModeSupported:AVCaptureFocusModeLocked])
+                        device.focusMode = AVCaptureFocusModeLocked;
                 } else if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
                     device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
                 }
-                if (settings.afRegion && settings.afRegion->weight > 0 && device.focusPointOfInterestSupported)
-                    device.focusPointOfInterest = CGPointMake(settings.afRegion->x + settings.afRegion->width / 2,
-                                                              settings.afRegion->y + settings.afRegion->height / 2);
             }
             // White balance.
             if (settings.whiteBalanceMode == CameraWhiteBalanceMode::manual && info.manualWhiteBalance) {
