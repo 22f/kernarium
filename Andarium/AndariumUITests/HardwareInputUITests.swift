@@ -123,8 +123,14 @@ final class HardwareInputUITests: XCTestCase {
     }
 
     private func closeSettings() {
-        app.buttons["Done"].tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForNonExistence(timeout: 30), "Settings did not close")
+        // A tap can be lost while the host is loaded: tap Done again if the
+        // sheet is still there.
+        let bar = app.navigationBars["Settings"]
+        for _ in 0..<3 where bar.exists {
+            app.buttons["Done"].tap()
+            if bar.waitForNonExistence(timeout: 10) { break }
+        }
+        XCTAssertTrue(bar.waitForNonExistence(timeout: 20), "Settings did not close")
         sleep(1)
     }
 
@@ -248,10 +254,16 @@ final class HardwareInputUITests: XCTestCase {
         let drag = pointerReports.dropFirst(reportsBeforeDrag).filter { $0.buttons == 1 }
         XCTAssertGreaterThanOrEqual(Set(drag.map { $0.x }).count, 2, "a drag moves: \(drag)")
 
-        b.scroll(byDeltaX: 0, deltaY: 60)
-        XCTAssertTrue(waitForLine { $0.hasPrefix("mouse 0 0 b0 w") && !$0.hasPrefix("mouse 0 0 b0 w0 ") }, "scroll: \(lines)")
-        b.scroll(byDeltaX: 40, deltaY: 0)
-        XCTAssertTrue(waitForLine { $0.hasPrefix("mouse 0 0 b0 w0 h") && !$0.hasSuffix(" h0") }, "scroll: \(lines)")
+        XCTAssertTrue(
+            perform(
+                { b.scroll(byDeltaX: 0, deltaY: 60) },
+                until: { $0.hasPrefix("mouse 0 0 b0 w") && !$0.hasPrefix("mouse 0 0 b0 w0 ") }),
+            "scroll: \(lines)")
+        XCTAssertTrue(
+            perform(
+                { b.scroll(byDeltaX: 40, deltaY: 0) },
+                until: { $0.hasPrefix("mouse 0 0 b0 w0 h") && !$0.hasSuffix(" h0") }),
+            "scroll: \(lines)")
 
         // The wheel goes on the guest's mouse with no buttons of its own, and
         // the system pointer is never also a touch of the touchscreen.
