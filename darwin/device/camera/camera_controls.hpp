@@ -23,6 +23,9 @@ namespace uml::camera {
 struct ControlValues {
     std::map<std::uint32_t, std::int64_t> scalars;
     std::map<std::uint32_t, std::vector<std::uint8_t>> payloads;
+    /* How many times the guest has written FOCUS_ABSOLUTE: the lens moves to
+     * the written distance only after a write, and holds otherwise. */
+    std::uint32_t focusDistanceWrites {};
 };
 
 enum class ControlCheck : std::uint8_t {
@@ -53,8 +56,10 @@ public:
     [[nodiscard]] ControlCheck check(std::uint32_t id, std::int64_t scalar, std::size_t payloadSize) const noexcept;
     /* Sets a control and keeps its aliases in step: the exposure time in 100
      * microseconds and in nanoseconds, the two ISO controls, the two zoom
-     * controls, and white balance by switch, preset, temperature and gains. A
-     * button counts a press. Call it only for a value `check` accepted. */
+     * controls, and white balance by switch, preset, temperature and gains. The
+     * focus button counts a press while FOCUS_AUTO is off, as V4L2 says a driver
+     * ignores it otherwise, and a write of FOCUS_ABSOLUTE is counted. Call it
+     * only for a value `check` accepted. */
     void store(ControlValues& values, std::uint32_t id, std::int64_t scalar,
                std::vector<std::uint8_t> payload = {}) const;
     /* The value a get returns: the stored one, or for a volatile control what

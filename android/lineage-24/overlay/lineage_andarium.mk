@@ -17,7 +17,7 @@
 
 # Select the UML-safe branches in the inherited Cuttlefish product before it
 # is evaluated. The Darwin machine has no nested Trusty VM, modem, NFC,
-# Bluetooth, biometric, secure-element, or camera transport, and its Wi-Fi is
+# Bluetooth, biometric, or secure-element transport, and its Wi-Fi is
 # the kernel's virtual one (kernarium_net_setup). Its GNSS is the host's
 # position, behind the kernel's /dev/gnss0 (overlay/gnss).
 TRUSTY_SYSTEM_VM := disabled
@@ -83,12 +83,13 @@ TARGET_DEDICATED_RECOVERY := true
 TARGET_NO_RECOVERY := false
 
 # LineageOS switches, read while its configuration is inherited below. The
-# machine has no camera, no charger or fastboot transport, and no hardware to
-# apply effects to, so the matching defaults of the LineageOS product chain stay
-# out. Its microphone is the Virtio sound capture stream (config/
-# primary_audio_policy_configuration.xml, config/kernarium_core_hardware.xml). Debug builds carry `su` for the
+# machine has no charger or fastboot transport, and no hardware to apply
+# effects to, so the matching defaults of the LineageOS product chain stay out.
+# Its cameras are the host's, shared through the camera device (the camera
+# block below), so the camera application of that chain stays in. Its microphone
+# is the Virtio sound capture stream (config/primary_audio_policy_configuration.xml,
+# config/kernarium_core_hardware.xml). Debug builds carry `su` for the
 # development tooling; a user build never does.
-PRODUCT_NO_CAMERA := true
 TARGET_EXCLUDES_AUDIOFX := true
 # The Android UML ELF is built and published independently; the board stages it
 # from the kernel artifact, so LineageOS's own kernel build stays off.
@@ -324,6 +325,9 @@ KERNARIUM_REMOVED_PACKAGES := \
     com.android.vndk.v34 \
     com.google.emulated.camera.provider.hal \
     com.google.emulated.camera.provider.hal.v4l2 \
+    emu_camera_back.json \
+    emu_camera_depth.json \
+    emu_camera_front.json \
     com.google.cf.confirmationui \
     com.google.cf.health \
     com.google.cf.bt \
@@ -378,6 +382,8 @@ endif
 
 # Replace the handheld feature declaration and remove optional feature files
 # for absent hardware. This keeps PackageManager truthful for sideloaded apps.
+# The camera features are among them: the host's cameras decide them, and a
+# permission directory of the camera layout (overlay/camera) declares them.
 # The guest declares android.hardware.wifi, which virt_wifi provides, and not
 # android.hardware.ethernet: eth0 is the management NIC, and the framework would
 # otherwise start Ethernet management on it. virt_wifi is a station without
@@ -605,6 +611,32 @@ PRODUCT_VENDOR_PROPERTIES += \
     ro.vendor.v4l2_codec2.video_decode_pixel_rate=456192000
 
 PRODUCT_PACKAGE_OVERLAYS += device/kernarium/andarium/overlay
+
+# The host's cameras. The camera device (Virtio ID 65533) gives each camera a V4L2
+# capture node and a metadata node; the emulated camera HAL of hardware/google/camera
+# (route p0030) takes the cameras, frames, stills, RAW and metadata from them and sends
+# the controls back. Its provider is the lazy service, so the process exists only while
+# an application holds a camera or the torch, and cameraserver is told to wait for it
+# (ro.camera.enableLazyHal). The stock emulated provider of the inherited product is an
+# APEX that this product removes, its JSON characteristics with it; the HAL reads one
+# template (emu_camera_v4l2.json) and the camera descriptions of the nodes, which is what
+# ro.vendor.camera.config selects. No vendor extensions exist, so the inherited property
+# that enables the CameraX extensions is dropped. The host composes a camera layout from
+# its cameras and passes it as androidboot.product.vendor.sku: the permission directory
+# of that layout declares the camera features and an init trigger selects its media
+# profiles (camera_layouts.mk, generated). The libraries are installed in /vendor, where
+# the provider finds its HWL by name.
+PRODUCT_SOONG_NAMESPACES += hardware/google/camera
+PRODUCT_PACKAGES += \
+    android.hardware.camera.provider@2.7-service-google-lazy \
+    emu_camera_v4l2.json \
+    libgooglecamerahwl_impl
+PRODUCT_PRODUCT_PROPERTIES += \
+    ro.camera.enableLazyHal=true
+PRODUCT_VENDOR_PROPERTIES += \
+    ro.vendor.camera.config=v4l2
+PRODUCT_VENDOR_PROPERTY_BLACKLIST += ro.camerax.extensions.enabled
+include device/kernarium/andarium/camera/generated/camera_layouts.mk
 
 # The virtio-gpu device paces the display with a vblank timer, so a present
 # fence signals when the frame is shown. The inherited Cuttlefish graphics

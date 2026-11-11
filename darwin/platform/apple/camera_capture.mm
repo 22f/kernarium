@@ -313,6 +313,7 @@ struct RunningCamera {
     std::uint32_t height {};
     std::uint32_t frameRate {};
     std::uint32_t focusSerial {};
+    std::uint32_t focusDistanceSerial {};
     // Settings have been applied to the device at least once, so that a format
     // change (which reverts some of them) can put them back.
     bool applied {};
@@ -538,23 +539,39 @@ public:
             if (settings.aeRegion && settings.aeRegion->weight > 0 && device.exposurePointOfInterestSupported)
                 device.exposurePointOfInterest = CGPointMake(settings.aeRegion->x + settings.aeRegion->width / 2,
                                                              settings.aeRegion->y + settings.aeRegion->height / 2);
-            // Focus.
+            // Focus. The point of interest comes first: the device takes it up when the
+            // focus mode is set. A new trigger runs one scan in any mode (the device
+            // locks where it ends). Otherwise a manual lens goes to the distance only
+            // when the guest has written it anew, and holds from then on, as does a
+            // locked one (only a continuous focus is locked, so that a later apply
+            // does not abort a scan under way); the continuous mode is the rest. A
+            // format change reverts the focus, so `force` puts a written distance
+            // back.
             if (info.autofocus) {
-                if (settings.focusMode == CameraFocusMode::manual && info.manualFocus) {
-                    [device setFocusModeLockedWithLensPosition:lensPositionOf(settings.focusDistanceDioptres,
-                                                                              info.minimumFocusDistanceMillimetres)
-                                             completionHandler:nil];
-                } else if (settings.focusMode == CameraFocusMode::locked) {
-                    if ([device isFocusModeSupported:AVCaptureFocusModeLocked]) device.focusMode = AVCaptureFocusModeLocked;
-                } else if (settings.focusTriggerSerial != running.focusSerial &&
-                           [device isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
-                    device.focusMode = AVCaptureFocusModeAutoFocus;
-                } else if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
-                    device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
-                }
                 if (settings.afRegion && settings.afRegion->weight > 0 && device.focusPointOfInterestSupported)
                     device.focusPointOfInterest = CGPointMake(settings.afRegion->x + settings.afRegion->width / 2,
                                                               settings.afRegion->y + settings.afRegion->height / 2);
+                const bool scan = settings.focusTriggerSerial != running.focusSerial;
+                const bool move = settings.focusDistanceSerial != running.focusDistanceSerial ||
+                    (force && settings.focusDistanceSerial != 0);
+                if (scan && [device isFocusModeSupported:AVCaptureFocusModeAutoFocus]) {
+                    device.focusMode = AVCaptureFocusModeAutoFocus;
+                } else if (settings.focusMode == CameraFocusMode::manual && info.manualFocus) {
+                    if (move) {
+                        [device setFocusModeLockedWithLensPosition:lensPositionOf(settings.focusDistanceDioptres,
+                                                                                  info.minimumFocusDistanceMillimetres)
+                                                 completionHandler:nil];
+                    } else if (device.focusMode == AVCaptureFocusModeContinuousAutoFocus &&
+                               [device isFocusModeSupported:AVCaptureFocusModeLocked]) {
+                        device.focusMode = AVCaptureFocusModeLocked;
+                    }
+                } else if (settings.focusMode != CameraFocusMode::continuousAuto) {
+                    if (device.focusMode == AVCaptureFocusModeContinuousAutoFocus &&
+                        [device isFocusModeSupported:AVCaptureFocusModeLocked])
+                        device.focusMode = AVCaptureFocusModeLocked;
+                } else if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
+                    device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
+                }
             }
             // White balance.
             if (settings.whiteBalanceMode == CameraWhiteBalanceMode::manual && info.manualWhiteBalance) {
@@ -596,6 +613,7 @@ public:
         [device unlockForConfiguration];
         running.settings = settings;
         running.focusSerial = settings.focusTriggerSerial;
+        running.focusDistanceSerial = settings.focusDistanceSerial;
         running.applied = true;
     }
 

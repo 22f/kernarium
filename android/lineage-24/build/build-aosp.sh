@@ -424,11 +424,9 @@ for package in \
 		fail "required UML product package is absent: $package"
 done
 # The curated LineageOS application set leaves out the updater and the apps
-# for hardware this machine lacks. LineageOS's switches (no camera, no AudioFX,
-# no charger, no fastbootd) keep most out of the package set; the rest are
-# excluded by name.
+# for hardware this machine lacks. LineageOS's switches (no AudioFX, no charger,
+# no fastbootd) keep most out of the package set; the rest are excluded by name.
 for package in \
-	Aperture \
 	AudioFX \
 	Canvas \
 	F-Droid \
@@ -479,6 +477,14 @@ fi
 	fail "the overlay that releases the home app's memory pin is absent"
 [[ "$PRODUCT_PACKAGES" == *" SecureElement "* ]] ||
 	fail "the OMAPI service that SEService clients bind on demand is absent"
+for package in \
+	Aperture \
+	android.hardware.camera.provider@2.7-service-google-lazy \
+	emu_camera_v4l2.json \
+	libgooglecamerahwl_impl; do
+	[[ "$PRODUCT_PACKAGES" == *" $package "* ]] ||
+		fail "the camera application or the lazy camera provider and its HAL are absent: $package"
+done
 [[ "$PRODUCT_PACKAGES" == *" EasterEgg "* ]] ||
 	fail "the easter egg that the platform logo screen opens is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.cas "* ]] ||
@@ -491,12 +497,15 @@ for package in \
 	BluetoothMidiService \
 	Calendar \
 	Camera2 \
+	CameraExtensionsProxy \
 	Contacts \
 	CuttlefishService \
 	DeskClock \
+	DeviceAsWebcam \
 	DeviceDiagnostics \
 	Dialer \
 	DynamicSystemInstallationService \
+	EyesFreeVidService \
 	Gallery2 \
 	QuickSearchBox \
 	TeleService \
@@ -527,6 +536,11 @@ for package in \
 	com.google.cf.identity \
 	com.google.cf.ir \
 	com.google.cf.wifi \
+	com.google.emulated.camera.provider.hal \
+	com.google.emulated.camera.provider.hal.v4l2 \
+	emu_camera_back.json \
+	emu_camera_depth.json \
+	emu_camera_front.json \
 	CuttlefishTetheringOverlay \
 	CuttlefishWifiOverlay \
 	gsi_tool \
@@ -552,6 +566,10 @@ done
 [[ -z "$(get_build_var PRODUCT_EXTRA_VNDK_VERSIONS)" ]] ||
 	fail "PRODUCT_EXTRA_VNDK_VERSIONS must be empty for the fixed vendor image"
 PRODUCT_VENDOR_PROPERTIES=" $(get_build_var PRODUCT_VENDOR_PROPERTIES) "
+[[ "$PRODUCT_VENDOR_PROPERTIES" == *" ro.vendor.camera.config=v4l2 "* ]] ||
+	fail "the camera HAL is not told to take its cameras from the camera device: ro.vendor.camera.config=v4l2"
+[[ "$PRODUCT_VENDOR_PROPERTIES" != *" ro.camerax.extensions.enabled="* ]] ||
+	fail "the inherited CameraX extensions switch remains: the image has no vendor extensions"
 [[ "$PRODUCT_VENDOR_PROPERTIES" != *" ro.rebootescrow.device="* ]] ||
 	fail "the unsupported reboot-escrow backing property remains present"
 for property in \
@@ -570,6 +588,8 @@ for property in \
 done
 [[ "$PRODUCT_PRODUCT_PROPERTIES" == *" ro.lmk.gpu_reclaim=true "* ]] ||
 	fail "required lmkd property is absent: ro.lmk.gpu_reclaim=true"
+[[ "$PRODUCT_PRODUCT_PROPERTIES" == *" ro.camera.enableLazyHal=true "* ]] ||
+	fail "cameraserver is not told to wait for the lazy camera provider: ro.camera.enableLazyHal=true"
 [[ "$(get_build_var LOCAL_USE_VENDOR_AUDIO_CONFIGURATION)" == true ]] ||
 	fail "the UML product must own its minimal primary audio policy"
 for package in \
