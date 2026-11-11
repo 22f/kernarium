@@ -442,6 +442,11 @@ void VhostUserServer::setRequestGate(std::shared_ptr<RequestGate> gate)
     requestGate_ = std::move(gate);
 }
 
+void VhostUserServer::setStopShutsDownConnection() noexcept
+{
+    stopShutsDownConnection_ = true;
+}
+
 void VhostUserServer::resetConnection() noexcept
 {
     resetDeviceState();
@@ -453,6 +458,7 @@ void VhostUserServer::resetConnection() noexcept
     negotiatedFeatures_ = 0;
     negotiatedProtocolFeatures_ = 0;
     featuresConfigured_ = false;
+    configChangeWithheld_ = false;
 }
 
 void VhostUserServer::resetDeviceState() noexcept
@@ -837,18 +843,25 @@ void VhostUserServer::signalQueue(std::uint32_t index)
 
 void VhostUserServer::signalPendingConfigChange()
 {
+    configChangeWithheld_ = false;
     if (!device_->configChangePending())
         return;
     constexpr std::uint64_t requiredFeatures =
         protocol::protocolFeatureReplyAck |
         protocol::protocolFeatureSlaveRequest |
         protocol::protocolFeatureConfig;
+    /* Only a message from the front-end changes what this waits for, and
+     * every message ends in another attempt at the top of the loop. */
     if ((negotiatedProtocolFeatures_ & requiredFeatures) != requiredFeatures ||
         slaveRequestDescriptor_.get() < 0) {
         return;
     }
-    if (!device_->claimConfigChange())
+    if (!device_->claimConfigChange()) {
+        /* The device is not ready to announce it, and what it waits for may
+         * end without an event on its descriptor. */
+        configChangeWithheld_ = true;
         return;
+    }
 
     const protocol::VhostHeader header {
         .request = static_cast<std::uint32_t>(
@@ -873,6 +886,19 @@ void VhostUserServer::signalPendingConfigChange()
 
     awaitBackendAcknowledgement(header, "config-change");
     device_->clearConfigChange();
+    /* A claim may announce one part of the change while the device holds
+     * another back; that part is withheld too. */
+    configChangeWithheld_ = device_->configChangePending();
+}
+
+int VhostUserServer::mainPollTimeout(bool activePolling) const noexcept
+{
+    // A queue in polling mode has no kick to wait for.
+    if (activePolling)
+        return 1;
+    if (stopShutsDownConnection_ && !configChangeWithheld_)
+        return -1;
+    return socketPollTimeoutMilliseconds;
 }
 
 void VhostUserServer::awaitBackendAcknowledgement(
@@ -2053,7 +2079,7 @@ void VhostUserServer::serveConnection(
             const int peerPoll = ::poll(
                 descriptors.data(),
                 static_cast<nfds_t>(descriptors.size()),
-                activePolling ? 1 : socketPollTimeoutMilliseconds);
+                mainPollTimeout(activePolling));
             if (peerPoll < 0) {
                 if (errno == EINTR)
                     continue;
@@ -2264,6 +2290,9 @@ void InProcessVhostUserService::run() noexcept
             server->setSharedMemoryRegions(sharedMemoryRegions_);
         if (requestGate_)
             server->setRequestGate(requestGate_);
+        // stop() shuts the connection down, which wakes the server wherever
+        // it polls the main socket.
+        server->setStopShutsDownConnection();
         server->runConnected(
             descriptors_[0].release(), stopRequested_, [this] {
                 {
