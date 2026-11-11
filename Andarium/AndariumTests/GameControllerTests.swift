@@ -463,6 +463,8 @@ struct GameControllersTests {
         #expect(await eventually { relay.connections == 1 })
         relay.send(.hello(version: 1, slotCount: 8))
         _ = await relay.next()
+        // The relay answers a CREATE before it asks anything of the device.
+        relay.send(.created(slot: 0, result: 0))
         relay.send(.getReport(slot: 0, reportType: GamepadReportType.feature, number: 0x09, id: 4))
         // A plain HID gamepad has no feature report to give.
         #expect(await relay.next() == .getReportReply(slot: 0, id: 4, error: GamepadErrno.invalid, data: []))
