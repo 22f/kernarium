@@ -276,19 +276,27 @@ struct DisplaySection: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the microphone and the location,
+/// What the guest may use of this device: the location and the microphone,
 /// which iOS asks about when they are turned on, and the gyroscope.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
+    /// The rows, top to bottom; VoiceOver reads them in this order.
+    enum Row: CaseIterable {
+        case location, microphone, gyroscope
+    }
+
     var body: some View {
         if model.guest != nil {
             HomeSection(title: "Capabilities") {
-                MicrophoneRow()
-                RowDivider()
-                GyroscopeRow()
-                RowDivider()
-                LocationRow()
+                ForEach(Array(Row.allCases.enumerated()), id: \.element) { index, row in
+                    if index > 0 { RowDivider() }
+                    switch row {
+                    case .location: LocationRow()
+                    case .microphone: MicrophoneRow()
+                    case .gyroscope: GyroscopeRow()
+                    }
+                }
             } footer: {
                 if let reason = model.motionSensorsProblem ?? Self.gyroscopeUnavailable(available: model.motionSensorsAvailable) {
                     SectionNote(reason)
