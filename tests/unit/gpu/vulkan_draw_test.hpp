@@ -201,6 +201,55 @@ struct SubmitStormResult {
     uint32_t submissions = 0;
 };
 
+// A GPU particle simulation: a chain of passes that each load and store one
+// colour attachment, take the output the pass before captured as their vertex
+// input, capture the next step's output with the rasterizer discarded, and
+// draw nothing. A barrier separates the passes. The last pass does the same
+// and then rasterizes one point per vertex over the attachment, so what the
+// discard passes did to the attachment (nothing) and what the rasterizing
+// draw did are both in the result. An occlusion query spans the whole chain.
+struct FeedbackChainConfig {
+    std::span<const uint32_t> step_vertex_shader;
+    std::span<const uint32_t> raster_vertex_shader;
+    std::span<const uint32_t> raster_fragment_shader;
+    // Passes of discard draws before the rasterizing one.
+    uint32_t steps = 64;
+    // Vertices per draw, at most the width of the 16 by 16 attachment.
+    uint32_t points = 8;
+    // The attachment's sample count. More than one is resolved after the chain.
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    // A pass in the middle of the chain that has no draw.
+    bool empty_pass = false;
+    // A vkCmdClearAttachments before the first draw of the middle pass; it
+    // paints the whole attachment blue.
+    bool clear_in_pass = false;
+    // A timestamp written in the middle pass before its first draw.
+    bool timestamp_in_pass = false;
+    // One pipeline-statistics query over the whole chain, counting input
+    // assembly vertices and vertex shader invocations.
+    bool statistics_query = false;
+    // Called just before the chain's command buffer begins recording, and
+    // after the host has waited for everything it submitted. The resources the
+    // chain needs are created and cleared before the first, so the span
+    // between them holds the chain and nothing else.
+    std::function<void()> recording_begins;
+    std::function<void()> recording_complete;
+};
+
+struct FeedbackChainResult {
+    // The words the last discard draw captured: `points` uvec4.
+    std::vector<uint32_t> captured;
+    // The 16 by 16 attachment (resolved when it is multisampled).
+    std::vector<std::array<uint8_t, 4>> pixels;
+    uint64_t occlusion_samples = 0;
+    // Input assembly vertices, vertex shader invocations; empty without the
+    // statistics query.
+    std::vector<uint64_t> statistics;
+    // The timestamps before the chain and in the middle pass; empty without
+    // timestamp_in_pass.
+    std::vector<uint64_t> timestamps;
+};
+
 struct DrawResult {
     std::vector<std::array<uint8_t, 4>> pixels;
     std::vector<uint32_t> counters;
@@ -233,6 +282,7 @@ public:
     DrawResult draw(const DrawConfig &config,
                     std::span<const uint8_t> pipeline_cache = {});
     SubmitStormResult submit_storm(const SubmitStormConfig &config);
+    FeedbackChainResult feedback_chain(const FeedbackChainConfig &config);
     const DrawCapabilities &capabilities() const;
 
 private:

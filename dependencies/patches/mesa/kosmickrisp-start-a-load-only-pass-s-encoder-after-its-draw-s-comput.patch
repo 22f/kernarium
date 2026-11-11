@@ -1,0 +1,362 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 23:56:34 +0900
+Subject: [PATCH] kosmickrisp: start a load-only pass's encoder after its
+ draw's compute
+
+Zink ends its render pass for every barrier and begins another, and a
+GPU particle simulation, which steps its particles by transform feedback
+with the rasterizer discarded, has a pass for every step. A transform
+feedback draw runs compute (the vertex stage, the counter kernel) and
+then a render draw that makes the capture. The compute was recorded once
+the pass's render encoder had started, so it took a command buffer of
+its own that had to run before the render encoder, and the pass was
+split to put it there: each step opened a main command buffer, with the
+first render encoder of a command buffer taking about 2.5 MiB of
+allocator storage, and a compute command buffer. Sling Shot's first
+frames record as many as 523 such passes in one recording, 1.3 GiB of
+command storage.
+
+A pass whose attachments are all loaded (a load and a store of an
+attachment nothing was drawn into leave it as it was; no clear, resolve,
+layer, view mask, fragment shading rate attachment or flag other than
+local read access control) now starts its render encoder at its first
+draw, or at the first command that touches an attachment, a clear or a
+render-stage timestamp. A transform feedback draw in such a pass flushes
+its state to no encoder, records its compute in the main command buffer
+in order, then starts the encoder and flushes the state again before the
+render draw, as it would have been drawn. The counter copies around a
+capture stop the encoder of such a pass and run in the main command
+buffer too, and the pass's next draw starts another that loads what the
+first stored. A pass that ends without an encoder leaves its compute
+encoder open, so the barrier between two passes is the intra-encoder
+barrier it already is. The passes of a recording then share one main
+command buffer, where each further encoder takes about 0.3 MiB.
+
+Nothing rendered or captured changes. A pass that clears, resolves, has
+layers or no attachments starts its encoder when it begins, as before.
+The sample count an encoder started late has comes from the pass's
+attachments. A failed recording that has no encoder behaves as it does.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c |  55 +++++++++++-
+ src/kosmickrisp/vulkan/kk_cmd_buffer.h |  16 ++++
+ src/kosmickrisp/vulkan/kk_cmd_draw.c   | 119 +++++++++++++++++++++++--
+ src/kosmickrisp/vulkan/kk_query_pool.c |   6 ++
+ 4 files changed, 187 insertions(+), 9 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index bbe6df540b4edc5ace683dd9b078dd9b06fbf437..dad25321f7322a0d1baf618d188d91218d1cd92a 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -457,10 +457,18 @@ cs_get_render(struct kk_cmd_buffer *cmd)
+ {
+    struct kk_graphics_state *gfx = &cmd->state.gfx;
+ 
+-   if (gfx->need_to_start_render_pass) {
+-      gfx->render.samples = gfx->pipeline_sample_count;
+-      mtl_render_pass_descriptor_set_default_raster_sample_count(
+-         cmd->state.gfx.render_pass_descriptor, gfx->render.samples);
++   /* A draw that launches compute first leaves the pass unstarted until the
++    * compute is recorded, and its state goes to no encoder; see kk_draw. */
++   if (gfx->need_to_start_render_pass && !gfx->launch_before_encoder) {
++      /* A pass with attachments gives its descriptor the sample count they
++       * have, which holds for every encoder it starts. A pipeline's count
++       * stands for a pass that has no attachment to say. */
++      if (!gfx->render.load_only) {
++         gfx->render.samples = gfx->pipeline_sample_count;
++         mtl_render_pass_descriptor_set_default_raster_sample_count(
++            cmd->state.gfx.render_pass_descriptor, gfx->render.samples);
++      }
++      gfx->render.deferred_start = false;
+       gfx->need_to_start_render_pass = false;
+       cs_start_render(cmd);
+    }
+@@ -634,6 +642,45 @@ cs_end(struct kk_cmd_buffer *cmd)
+    }
+ }
+ 
++/* Ends a render pass's encoders. A pass that has no render encoder at its end
++ * ends without closing the compute encoder it recorded into the main command
++ * buffer, so that the passes of a transform feedback chain, which Zink ends
++ * for every barrier between them, share one main command buffer and one
++ * compute encoder between render encoders: a barrier there is an
++ * intra-encoder barrier, and the next render encoder to start closes it.
++ * Resolves and publications the encoder owes close with it, as at the end of
++ * any pass. */
++void
++cs_end_render_pass(struct kk_cmd_buffer *cmd)
++{
++   if (cmd->state.gfx.render.deferred_start && cmd->gfx.encoder == NULL &&
++       cmd->post_gfx->encoder == NULL &&
++       util_dynarray_num_elements(&cmd->pre_gfx->ts_resolves,
++                                  struct kk_ts_resolve) == 0)
++      return;
++
++   cs_end(cmd);
++}
++
++/* Stops the render encoder of a pass that only loads its attachments, so that
++ * the compute recorded next runs in order in the main command buffer rather
++ * than in a command buffer of its own that precedes the encoder and splits
++ * the pass. The pass's next draw starts an encoder that loads what this one
++ * stored. */
++void
++cs_pause_render(struct kk_cmd_buffer *cmd)
++{
++   struct kk_graphics_state *gfx = &cmd->state.gfx;
++
++   if (!gfx->render.load_only || cmd->gfx.encoder == NULL ||
++       cmd->pre_gfx->encoder != NULL || cmd->post_gfx->encoder != NULL)
++      return;
++
++   kk_stop_encoder(cmd, &cmd->gfx);
++   gfx->render.deferred_start = true;
++   gfx->need_to_start_render_pass = true;
++}
++
+ /* Closes every encoder and command buffer, in submission order. */
+ void
+ cs_flush(struct kk_cmd_buffer *cmd)
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.h b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+index af62d43c89cfbd9ca95503ec6dae7ad435a3b223..d042c3018464fc6b07ac898ebae0871bde2ffde9 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -186,6 +186,15 @@ struct kk_rendering_state {
+    struct kk_attachment stencil_att;
+    struct kk_attachment fsr_att;
+ 
++   /* The pass has attachments and began with every one of them loaded and
++    * nothing else to do (see kk_rendering_defers_encoder), so its Metal
++    * render encoder can start late and stop early: nothing is lost when it
++    * does not exist, and the next one picks the pass up where it was. */
++   bool load_only;
++   /* A load-only pass has no render encoder now: it starts at the next draw
++    * or the next command that touches an attachment. */
++   bool deferred_start;
++
+    uint32_t bresenham_samples;
+    bool sample_locations_enable;
+    uint32_t sample_locations_count;
+@@ -214,6 +223,11 @@ struct kk_graphics_state {
+    bool is_cull_front_and_back;
+    bool need_to_start_render_pass;
+ 
++   /* The draw being recorded runs compute before its render draw and its
++    * pass has no render encoder yet: the encoder starts after that compute,
++    * so flushing the draw's state until then must not start one. */
++   bool launch_before_encoder;
++
+    /* Set while a draw records the work that follows flushing its state into
+     * the render encoder. A render pass split then flushes that state into
+     * the encoder that resumes the pass. */
+@@ -482,6 +496,8 @@ void kk_cmd_buffer_set_vertex_amplification(struct kk_cmd_buffer *cmd,
+                                             uint32_t count);
+ mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
+ void cs_end(struct kk_cmd_buffer *cmd);
++void cs_end_render_pass(struct kk_cmd_buffer *cmd);
++void cs_pause_render(struct kk_cmd_buffer *cmd);
+ void cs_flush(struct kk_cmd_buffer *cmd);
+ /* Re-emits the graphics state of the draw being recorded into a render
+  * encoder that restarted after the draw flushed it. */
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+index c0284405ae285c65f5dacfb5ed42cfa6983e5413..b33a606e8e4ed9798248bc0c37acc3a91a35dcca 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
+@@ -347,6 +347,61 @@ kk_pipeline_attachment_mask(const struct kk_shader *vs)
+    return mask;
+ }
+ 
++/* Whether an attachment is left as it is: nothing in it is cleared, and
++ * nothing is resolved out of it. */
++static bool
++kk_attachment_is_loaded_only(const VkRenderingAttachmentInfo *info)
++{
++   return info == NULL || info->imageView == VK_NULL_HANDLE ||
++          (info->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD &&
++           info->resolveMode == VK_RESOLVE_MODE_NONE);
++}
++
++/* Whether a pass may start its Metal render encoder at its first draw instead
++ * of when it begins, and stop it for compute that follows a draw.
++ *
++ * A pass that only loads its attachments does nothing to them until a draw
++ * is recorded: the load and the store of an attachment that nothing was
++ * drawn into leave it as it was, so an encoder that holds no draw is not
++ * needed, and one that stops loads again what it stored when the next
++ * starts. Zink ends the pass of every transform feedback draw for its
++ * barriers and begins another, and a draw of that kind runs compute before
++ * its render draw. The compute is recorded in the main command buffer, in
++ * order, only while the pass has no encoder; once one has started, compute
++ * takes a command buffer of its own (see cs_get_compute), and a render
++ * encoder that starts a command buffer costs it megabytes of allocator
++ * storage (see cs_start_render).
++ *
++ * Every other pass starts its encoder at once. A clear, a resolve, layers, a
++ * view mask or a flag that suspends, resumes or resolves in a custom way
++ * acts on the attachments or on how the encoder begins, and a fragment
++ * shading rate attachment is bound to it. The only flag a plain pass may
++ * carry is local read access control, which only restricts the order of a
++ * draw's accesses. */
++static bool
++kk_rendering_defers_encoder(const VkRenderingInfo *info)
++{
++   if ((info->flags &
++        ~(VkRenderingFlags)
++           VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR) != 0u ||
++       info->viewMask != 0u || info->layerCount != 1u)
++      return false;
++
++   const VkRenderingFragmentShadingRateAttachmentInfoKHR *fsr =
++      vk_find_struct_const(info->pNext,
++                           RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR);
++   if (fsr != NULL && fsr->imageView != VK_NULL_HANDLE)
++      return false;
++
++   for (uint32_t i = 0; i < info->colorAttachmentCount; i++) {
++      if (!kk_attachment_is_loaded_only(&info->pColorAttachments[i]))
++         return false;
++   }
++
++   return kk_attachment_is_loaded_only(info->pDepthAttachment) &&
++          kk_attachment_is_loaded_only(info->pStencilAttachment);
++}
++
+ VKAPI_ATTR void VKAPI_CALL
+ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+                      const VkRenderingInfo *pRenderingInfo)
+@@ -489,9 +544,13 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+    // it
+ 
+    /* Rendering with no attachments requires pushing the start of the render
+-    * pass to first pipeline binding to know sample count. */
++    * pass to first pipeline binding to know sample count. A pass that only
++    * loads its attachments starts at the first draw that rasterizes; its
++    * descriptor, which loads every attachment, is complete now. */
++   const bool deferred =
++      !no_framebuffer && kk_rendering_defers_encoder(pRenderingInfo);
+    cmd->state.gfx.render_pass_descriptor = pass_descriptor;
+-   if (!no_framebuffer)
++   if (!no_framebuffer && !deferred)
+       cs_start_render(cmd);
+ 
+    /* Metal consumes the initial load actions when the encoder starts. Keep a
+@@ -500,7 +559,9 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+                             render->bound_attachments, true);
+    kk_set_depth_stencil_attachments(pass_descriptor, render,
+                                     render->bound_attachments, true);
+-   cmd->state.gfx.need_to_start_render_pass = no_framebuffer;
++   cmd->state.gfx.need_to_start_render_pass = no_framebuffer || deferred;
++   render->load_only = deferred;
++   render->deferred_start = deferred;
+ 
+    kk_cmd_buffer_dirty_all_gfx(cmd);
+ 
+@@ -639,7 +700,7 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
+    };
+ 
+    /* Clean up previous encoder */
+-   cs_end(cmd);
++   cs_end_render_pass(cmd);
+    mtl_release(cmd->state.gfx.render_pass_descriptor);
+    cmd->state.gfx.render_pass_descriptor = NULL;
+ 
+@@ -4003,10 +4064,48 @@ kk_draw_flushed(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+           is_polygon_primitive(raster_prim))
+          draw_data.primitive_type = MTL_PRIMITIVE_TYPE_POINT;
+ 
++      /* The compute is recorded: the pass's encoder starts after it, and
++       * receives the draw's state flushed again. */
++      if (cmd->state.gfx.launch_before_encoder) {
++         cmd->state.gfx.launch_before_encoder = false;
++         cs_get_render(cmd);
++         kk_flush_gfx_state(cmd);
++      }
++
+       kk_dispatch_draw(cmd, draw_data);
+    }
+ }
+ 
++/* Whether the draw about to be recorded runs compute before its render draw,
++ * and its pass has no render encoder.
++ *
++ * A draw whose vertex stage the driver runs as compute to capture transform
++ * feedback records its capture in the render draw that follows, and the
++ * compute is recorded in the main command buffer, in order, when no render
++ * encoder is open. The pass's encoder therefore starts after the compute, so
++ * that the passes of a recording share one main command buffer instead of
++ * each ending one for the compute that followed its encoder's start.
++ *
++ * The emulated stages that follow vertex capture are left out: tessellation,
++ * the geometry shader, and the line and polygon-point rasterizers each
++ * produce compute of their own around the render draw. */
++static bool
++kk_draw_launches_before_encoder(struct kk_cmd_buffer *cmd)
++{
++   const struct kk_graphics_state *gfx = &cmd->state.gfx;
++   const struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
++
++   if (!gfx->render.deferred_start || !gfx->need_to_start_render_pass ||
++       cmd->gfx.encoder != NULL)
++      return false;
++
++   return vs != NULL && vs->info.vs.transform_feedback_emulation &&
++          !vs->info.vs.geometry_shader_emulation &&
++          !vs->info.vs.line_raster_emulation &&
++          !vs->info.vs.polygon_point_emulation &&
++          cmd->state.shaders[MESA_SHADER_TESS_EVAL] == NULL;
++}
++
+ static void
+ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ {
+@@ -4020,11 +4119,17 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+ 
+    kk_cmd_select_line_raster_variant(cmd);
+    data->upload_mask = build_per_draw_upload_mask(cmd);
++
++   /* The state of such a draw is flushed to no encoder for the compute to
++    * read: the encoder that starts after it marks all of it dirty and
++    * receives it again before the render draw. */
++   cmd->state.gfx.launch_before_encoder = kk_draw_launches_before_encoder(cmd);
+    kk_flush_gfx_state(cmd);
+ 
+    cmd->state.gfx.draw_state_flushed = true;
+    kk_draw_flushed(cmd, data);
+    cmd->state.gfx.draw_state_flushed = false;
++   cmd->state.gfx.launch_before_encoder = false;
+ }
+ 
+ VKAPI_ATTR void VKAPI_CALL
+@@ -4388,8 +4493,12 @@ kk_begin_end_transform_feedback(
+    gfx->xfb.enabled = begin;
+    if (copies) {
+       struct kk_ptr copy_gpu = kk_pool_upload(cmd, &copy, sizeof(copy), 8);
+-      if (copy_gpu.gpu)
++      if (copy_gpu.gpu) {
++         /* The copy reads what compute before the draw counted, so it may run
++          * between the pass's encoders, in order. */
++         cs_pause_render(cmd);
+          libkk_copy_xfb_counters(cmd, kk_grid_1d(copies), true, copy_gpu.gpu);
++      }
+    }
+ }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_query_pool.c b/src/kosmickrisp/vulkan/kk_query_pool.c
+index b8abb9fefcbd59ac4e0d183a304f5b798561fe62..5b1d04b182facdbed46ea0c6f747c80a66e986b1 100644
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -375,6 +375,12 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+       .availability_count = count,
+    };
+ 
++   /* The sample of a render stage belongs to the pass's render encoder. A
++    * pass that has not started one starts it for the sample, as the encoder
++    * it would have begun with. */
++   if (mtl_stage && cmd->state.gfx.render.deferred_start)
++      cs_get_render(cmd);
++
+    /* non-gfx or not found*/
+    if (cmd->gfx.encoder && mtl_stage) {
+       /* Metal permits a single timestamp sample for each render stage in an

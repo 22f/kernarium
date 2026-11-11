@@ -375,6 +375,432 @@ SubmitStormResult DrawContext::submit_storm(const SubmitStormConfig &config)
     return result;
 }
 
+FeedbackChainResult DrawContext::feedback_chain(const FeedbackChainConfig &config)
+{
+    auto &api = *impl_;
+    constexpr uint32_t extent = 16;
+    constexpr VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+    require(api.xfb.transformFeedback, "transform feedback unavailable");
+    require(!config.step_vertex_shader.empty() && !config.raster_vertex_shader.empty() &&
+                !config.raster_fragment_shader.empty() && config.steps != 0 &&
+                config.points != 0 && config.points <= extent,
+            "a feedback chain needs its shaders, a step and 1 to 16 points");
+    require(api.features.features.occlusionQueryPrecise, "precise occlusion queries unavailable");
+    require(!config.statistics_query || api.features.features.pipelineStatisticsQuery,
+            "pipeline statistics unavailable");
+    require(!config.timestamp_in_pass || api.timestamp_bits, "graphics timestamps unavailable");
+    const bool multisampled = config.samples != VK_SAMPLE_COUNT_1_BIT;
+    const uint32_t middle = config.steps / 2;
+    const VkDeviceSize chain_bytes = VkDeviceSize(config.points) * 4 * sizeof(uint32_t);
+
+    Cleanup cleanup;
+    const auto allocation = [&](VkMemoryRequirements requirements, VkMemoryPropertyFlags flags) {
+        VkMemoryAllocateInfo info = structure<VkMemoryAllocateInfo>(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
+        info.allocationSize = requirements.size;
+        info.memoryTypeIndex = api.memory_type(requirements.memoryTypeBits, flags);
+        VkDeviceMemory result;
+        VK_CHECK(AllocateMemory, api.device, &info, nullptr, &result);
+        cleanup.actions.emplace_back([&, result] { VK_CALL(FreeMemory, api.device, result, nullptr); });
+        return result;
+    };
+    const auto buffer = [&](VkDeviceSize size, VkBufferUsageFlags usage, const void *initial) {
+        Buffer result{};
+        result.size = size;
+        VkBufferCreateInfo info = structure<VkBufferCreateInfo>(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
+        info.size = size;
+        info.usage = usage;
+        VK_CHECK(CreateBuffer, api.device, &info, nullptr, &result.buffer);
+        cleanup.actions.emplace_back([&, handle = result.buffer] {
+            VK_CALL(DestroyBuffer, api.device, handle, nullptr);
+        });
+        VkMemoryRequirements requirements;
+        VK_CALL(GetBufferMemoryRequirements, api.device, result.buffer, &requirements);
+        result.memory = allocation(requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        VK_CHECK(BindBufferMemory, api.device, result.buffer, result.memory, 0);
+        void *mapping;
+        VK_CHECK(MapMemory, api.device, result.memory, 0, VK_WHOLE_SIZE, 0, &mapping);
+        if (initial)
+            std::memcpy(mapping, initial, size_t(size));
+        else
+            std::memset(mapping, 0, size_t(size));
+        VkMappedMemoryRange range = structure<VkMappedMemoryRange>(VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE);
+        range.memory = result.memory;
+        range.size = VK_WHOLE_SIZE;
+        VK_CHECK(FlushMappedMemoryRanges, api.device, 1, &range);
+        VK_CALL(UnmapMemory, api.device, result.memory);
+        return result;
+    };
+    const auto read = [&](const Buffer &source, void *destination) {
+        void *mapping;
+        VK_CHECK(MapMemory, api.device, source.memory, 0, VK_WHOLE_SIZE, 0, &mapping);
+        VkMappedMemoryRange range = structure<VkMappedMemoryRange>(VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE);
+        range.memory = source.memory;
+        range.size = VK_WHOLE_SIZE;
+        VK_CHECK(InvalidateMappedMemoryRanges, api.device, 1, &range);
+        std::memcpy(destination, mapping, size_t(source.size));
+        VK_CALL(UnmapMemory, api.device, source.memory);
+    };
+
+    /* Two buffers that hand a step's capture to the next step, the first
+     * seeded and the second holding a value no step produces. */
+    std::vector<uint32_t> seed(size_t(config.points) * 4);
+    for (size_t word = 0; word < seed.size(); ++word)
+        seed[word] = uint32_t(word) + 1u;
+    const std::vector<uint32_t> poison(seed.size(), 0xdeadbeefu);
+    constexpr VkBufferUsageFlags chain_usage =
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT;
+    const std::array<Buffer, 2> chain{buffer(chain_bytes, chain_usage, seed.data()),
+                                      buffer(chain_bytes, chain_usage, poison.data())};
+    const Buffer pixels = buffer(VkDeviceSize(extent) * extent * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 nullptr);
+    /* Each step saves its byte count, as a GL stack that may resume the
+     * capture later does; no step resumes from it. */
+    const Buffer counter = buffer(sizeof(uint32_t),
+                                  VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT, nullptr);
+
+    VkImageCreateInfo image_info = structure<VkImageCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO);
+    image_info.imageType = VK_IMAGE_TYPE_2D;
+    image_info.format = format;
+    image_info.extent = {extent, extent, 1};
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.samples = config.samples;
+    image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    image_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const auto make_image = [&](const VkImageCreateInfo &info) {
+        VkImage result;
+        VK_CHECK(CreateImage, api.device, &info, nullptr, &result);
+        cleanup.actions.emplace_back([&, result] { VK_CALL(DestroyImage, api.device, result, nullptr); });
+        VkMemoryRequirements requirements;
+        VK_CALL(GetImageMemoryRequirements, api.device, result, &requirements);
+        VkDeviceMemory memory = allocation(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VK_CHECK(BindImageMemory, api.device, result, memory, 0);
+        return result;
+    };
+    const VkImage target = make_image(image_info);
+    VkImageViewCreateInfo view_info = structure<VkImageViewCreateInfo>(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
+    view_info.image = target;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView target_view;
+    VK_CHECK(CreateImageView, api.device, &view_info, nullptr, &target_view);
+    cleanup.actions.emplace_back([&, target_view] { VK_CALL(DestroyImageView, api.device, target_view, nullptr); });
+    VkImage resolved = VK_NULL_HANDLE;
+    if (multisampled) {
+        VkImageCreateInfo resolve_info = image_info;
+        resolve_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        resolve_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        resolved = make_image(resolve_info);
+    }
+
+    const auto query_pool = [&](VkQueryType type, uint32_t count,
+                                VkQueryPipelineStatisticFlags statistics = 0) {
+        VkQueryPoolCreateInfo info = structure<VkQueryPoolCreateInfo>(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
+        info.queryType = type;
+        info.queryCount = count;
+        info.pipelineStatistics = statistics;
+        VkQueryPool result;
+        VK_CHECK(CreateQueryPool, api.device, &info, nullptr, &result);
+        cleanup.actions.emplace_back([&, result] { VK_CALL(DestroyQueryPool, api.device, result, nullptr); });
+        return result;
+    };
+    constexpr VkQueryPipelineStatisticFlags statistics_flags =
+        VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+        VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT;
+    const VkQueryPool occlusion = query_pool(VK_QUERY_TYPE_OCCLUSION, 1);
+    const VkQueryPool statistics = config.statistics_query
+        ? query_pool(VK_QUERY_TYPE_PIPELINE_STATISTICS, 1, statistics_flags) : VK_NULL_HANDLE;
+    const VkQueryPool timestamps = config.timestamp_in_pass
+        ? query_pool(VK_QUERY_TYPE_TIMESTAMP, 2) : VK_NULL_HANDLE;
+
+    VkPipelineLayoutCreateInfo layout_info = structure<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+    VkPipelineLayout layout;
+    VK_CHECK(CreatePipelineLayout, api.device, &layout_info, nullptr, &layout);
+    cleanup.actions.emplace_back([&, layout] { VK_CALL(DestroyPipelineLayout, api.device, layout, nullptr); });
+    const auto shader = [&](std::span<const uint32_t> words, VkShaderStageFlagBits stage) {
+        VkShaderModuleCreateInfo info = structure<VkShaderModuleCreateInfo>(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
+        info.codeSize = words.size_bytes();
+        info.pCode = words.data();
+        VkShaderModule module;
+        VK_CHECK(CreateShaderModule, api.device, &info, nullptr, &module);
+        cleanup.actions.emplace_back([&, module] { VK_CALL(DestroyShaderModule, api.device, module, nullptr); });
+        VkPipelineShaderStageCreateInfo entry = structure<VkPipelineShaderStageCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
+        entry.stage = stage;
+        entry.module = module;
+        entry.pName = "main";
+        return entry;
+    };
+    const VkPipelineShaderStageCreateInfo step_stages[] = {
+        shader(config.step_vertex_shader, VK_SHADER_STAGE_VERTEX_BIT)};
+    const VkPipelineShaderStageCreateInfo raster_stages[] = {
+        shader(config.raster_vertex_shader, VK_SHADER_STAGE_VERTEX_BIT),
+        shader(config.raster_fragment_shader, VK_SHADER_STAGE_FRAGMENT_BIT)};
+
+    const VkVertexInputBindingDescription input_binding{0, uint32_t(chain_bytes / config.points),
+                                                        VK_VERTEX_INPUT_RATE_VERTEX};
+    const VkVertexInputAttributeDescription input_attribute{0, 0, VK_FORMAT_R32G32B32A32_UINT, 0};
+    VkPipelineVertexInputStateCreateInfo input = structure<VkPipelineVertexInputStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
+    input.vertexBindingDescriptionCount = 1;
+    input.pVertexBindingDescriptions = &input_binding;
+    input.vertexAttributeDescriptionCount = 1;
+    input.pVertexAttributeDescriptions = &input_attribute;
+    VkPipelineInputAssemblyStateCreateInfo assembly = structure<VkPipelineInputAssemblyStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO);
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    const VkViewport viewport{0, 0, float(extent), float(extent), 0, 1};
+    const VkRect2D scissor{{0, 0}, {extent, extent}};
+    VkPipelineViewportStateCreateInfo viewport_info = structure<VkPipelineViewportStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO);
+    viewport_info.viewportCount = 1;
+    viewport_info.pViewports = &viewport;
+    viewport_info.scissorCount = 1;
+    viewport_info.pScissors = &scissor;
+    VkPipelineMultisampleStateCreateInfo multisample = structure<VkPipelineMultisampleStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO);
+    multisample.rasterizationSamples = config.samples;
+    VkPipelineColorBlendAttachmentState blend_attachment{};
+    blend_attachment.colorWriteMask = 0xf;
+    VkPipelineColorBlendStateCreateInfo blend = structure<VkPipelineColorBlendStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO);
+    blend.attachmentCount = 1;
+    blend.pAttachments = &blend_attachment;
+    VkPipelineRenderingCreateInfo rendering_formats = structure<VkPipelineRenderingCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO);
+    rendering_formats.colorAttachmentCount = 1;
+    rendering_formats.pColorAttachmentFormats = &format;
+    const auto pipeline = [&](std::span<const VkPipelineShaderStageCreateInfo> stages, bool discard) {
+        VkPipelineRasterizationStateCreateInfo raster = structure<VkPipelineRasterizationStateCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
+        raster.lineWidth = 1.0f;
+        raster.rasterizerDiscardEnable = discard;
+        VkGraphicsPipelineCreateInfo info = structure<VkGraphicsPipelineCreateInfo>(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
+        info.pNext = &rendering_formats;
+        info.stageCount = uint32_t(stages.size());
+        info.pStages = stages.data();
+        info.pVertexInputState = &input;
+        info.pInputAssemblyState = &assembly;
+        info.pViewportState = &viewport_info;
+        info.pRasterizationState = &raster;
+        info.pMultisampleState = &multisample;
+        info.pColorBlendState = &blend;
+        info.layout = layout;
+        VkPipeline result;
+        VK_CHECK(CreateGraphicsPipelines, api.device, VK_NULL_HANDLE, 1, &info, nullptr, &result);
+        cleanup.actions.emplace_back([&, result] { VK_CALL(DestroyPipeline, api.device, result, nullptr); });
+        return result;
+    };
+    const VkPipeline step_pipeline = pipeline(step_stages, true);
+    const VkPipeline raster_pipeline = pipeline(raster_stages, false);
+
+    VkCommandPoolCreateInfo pool_info = structure<VkCommandPoolCreateInfo>(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO);
+    pool_info.queueFamilyIndex = api.queue_family;
+    VkCommandPool pool;
+    VK_CHECK(CreateCommandPool, api.device, &pool_info, nullptr, &pool);
+    cleanup.actions.emplace_back([&, pool] { VK_CALL(DestroyCommandPool, api.device, pool, nullptr); });
+    VkCommandBufferAllocateInfo command_info = structure<VkCommandBufferAllocateInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
+    command_info.commandPool = pool;
+    command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_info.commandBufferCount = 2;
+    VkCommandBuffer commands[2];
+    VK_CHECK(AllocateCommandBuffers, api.device, &command_info, commands);
+    VkFenceCreateInfo fence_info = structure<VkFenceCreateInfo>(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO);
+    VkFence fence;
+    VK_CHECK(CreateFence, api.device, &fence_info, nullptr, &fence);
+    cleanup.actions.emplace_back([&, fence] { VK_CALL(DestroyFence, api.device, fence, nullptr); });
+
+    const auto submit_and_wait = [&](VkCommandBuffer command) {
+        VkSubmitInfo submit = structure<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &command;
+        VK_CHECK(QueueSubmit, api.queue, 1, &submit, fence);
+        VK_CHECK(WaitForFences, api.device, 1, &fence, VK_TRUE, 30'000'000'000ull);
+        VK_CHECK(ResetFences, api.device, 1, &fence);
+    };
+    const auto begin_command = [&](VkCommandBuffer command) {
+        VkCommandBufferBeginInfo begin = structure<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VK_CHECK(BeginCommandBuffer, command, &begin);
+    };
+    const auto image_barrier = [&](VkCommandBuffer command, VkImage image, VkImageLayout from,
+                                   VkImageLayout to, VkPipelineStageFlags2 source_stage,
+                                   VkAccessFlags2 source_access, VkPipelineStageFlags2 destination_stage,
+                                   VkAccessFlags2 destination_access) {
+        VkImageMemoryBarrier2 barrier = structure<VkImageMemoryBarrier2>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2);
+        barrier.srcStageMask = source_stage;
+        barrier.srcAccessMask = source_access;
+        barrier.dstStageMask = destination_stage;
+        barrier.dstAccessMask = destination_access;
+        barrier.oldLayout = from;
+        barrier.newLayout = to;
+        barrier.image = image;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkDependencyInfo dependency = structure<VkDependencyInfo>(VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &barrier;
+        VK_CALL(CmdPipelineBarrier2, command, &dependency);
+    };
+
+    VkRenderingAttachmentInfo attachment = structure<VkRenderingAttachmentInfo>(VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
+    attachment.imageView = target_view;
+    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo rendering = structure<VkRenderingInfo>(VK_STRUCTURE_TYPE_RENDERING_INFO);
+    rendering.renderArea = {{0, 0}, {extent, extent}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachments = &attachment;
+
+    /* Setup, outside the span the caller measures: reset the queries, give
+     * the attachment its first layout and contents. */
+    {
+        const VkCommandBuffer setup = commands[0];
+        begin_command(setup);
+        VK_CALL(CmdResetQueryPool, setup, occlusion, 0, 1);
+        if (statistics)
+            VK_CALL(CmdResetQueryPool, setup, statistics, 0, 1);
+        if (timestamps)
+            VK_CALL(CmdResetQueryPool, setup, timestamps, 0, 2);
+        image_barrier(setup, target, VK_IMAGE_LAYOUT_UNDEFINED,
+                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+                      VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        if (resolved)
+            image_barrier(setup, resolved, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+                          VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_RESOLVE_BIT,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        VkRenderingAttachmentInfo clear = attachment;
+        clear.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        clear.clearValue.color.float32[3] = 1.0f;
+        VkRenderingInfo clear_rendering = rendering;
+        clear_rendering.pColorAttachments = &clear;
+        VK_CALL(CmdBeginRendering, setup, &clear_rendering);
+        VK_CALL(CmdEndRendering, setup);
+        VK_CHECK(EndCommandBuffer, setup);
+        submit_and_wait(setup);
+    }
+
+    /* Every step reads one buffer and captures into the other. */
+    const auto step_draw = [&](VkCommandBuffer command, uint32_t step) {
+        const VkDeviceSize zero = 0;
+        VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, step_pipeline);
+        VK_CALL(CmdBindVertexBuffers, command, 0, 1, &chain[step % 2].buffer, &zero);
+        VK_CALL(CmdBindTransformFeedbackBuffersEXT, command, 0, 1, &chain[(step + 1) % 2].buffer,
+                &zero, &chain_bytes);
+        VK_CALL(CmdBeginTransformFeedbackEXT, command, 0, 0, nullptr, nullptr);
+        VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
+        VK_CALL(CmdEndTransformFeedbackEXT, command, 0, 1, &counter.buffer, &zero);
+    };
+    VkMemoryBarrier2 handoff = structure<VkMemoryBarrier2>(VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
+    handoff.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |
+                           VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT;
+    handoff.srcAccessMask = VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
+    handoff.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+                           VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT;
+    handoff.dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
+                            VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT;
+    VkDependencyInfo handoff_dependency = structure<VkDependencyInfo>(VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
+    handoff_dependency.memoryBarrierCount = 1;
+    handoff_dependency.pMemoryBarriers = &handoff;
+
+    if (config.recording_begins)
+        config.recording_begins();
+    {
+        const VkCommandBuffer command = commands[1];
+        begin_command(command);
+        if (timestamps)
+            VK_CALL(CmdWriteTimestamp2, command, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, timestamps, 0);
+        VK_CALL(CmdBeginQuery, command, occlusion, 0, VK_QUERY_CONTROL_PRECISE_BIT);
+        if (statistics)
+            VK_CALL(CmdBeginQuery, command, statistics, 0, 0);
+        for (uint32_t step = 0; step <= config.steps; ++step) {
+            const bool last = step == config.steps;
+            if (step == middle && config.empty_pass) {
+                VK_CALL(CmdBeginRendering, command, &rendering);
+                VK_CALL(CmdEndRendering, command);
+                VK_CALL(CmdPipelineBarrier2, command, &handoff_dependency);
+            }
+            VK_CALL(CmdBeginRendering, command, &rendering);
+            if (step == middle && config.clear_in_pass) {
+                VkClearAttachment clear{};
+                clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                clear.clearValue.color.float32[2] = 1.0f;
+                clear.clearValue.color.float32[3] = 1.0f;
+                const VkClearRect area{{{0, 0}, {extent, extent}}, 0, 1};
+                VK_CALL(CmdClearAttachments, command, 1, &clear, 1, &area);
+            }
+            if (step == middle && timestamps)
+                VK_CALL(CmdWriteTimestamp2, command, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                        timestamps, 1);
+            step_draw(command, step);
+            if (last) {
+                VK_CALL(CmdBindPipeline, command, VK_PIPELINE_BIND_POINT_GRAPHICS, raster_pipeline);
+                VK_CALL(CmdDraw, command, config.points, 1, 0, 0);
+            }
+            VK_CALL(CmdEndRendering, command);
+            if (!last)
+                VK_CALL(CmdPipelineBarrier2, command, &handoff_dependency);
+        }
+        VK_CALL(CmdEndQuery, command, occlusion, 0);
+        if (statistics)
+            VK_CALL(CmdEndQuery, command, statistics, 0);
+        image_barrier(command, target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_PIPELINE_STAGE_2_RESOLVE_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                      VK_ACCESS_2_TRANSFER_READ_BIT);
+        VkImage readable = target;
+        if (resolved) {
+            VkImageResolve region{};
+            region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.extent = {extent, extent, 1};
+            VK_CALL(CmdResolveImage, command, target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    resolved, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            image_barrier(command, resolved, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_RESOLVE_BIT,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                          VK_ACCESS_2_TRANSFER_READ_BIT);
+            readable = resolved;
+        }
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {extent, extent, 1};
+        VK_CALL(CmdCopyImageToBuffer, command, readable, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                pixels.buffer, 1, &copy);
+        VkMemoryBarrier2 host = structure<VkMemoryBarrier2>(VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
+        host.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        host.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        host.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+        host.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo host_dependency = structure<VkDependencyInfo>(VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
+        host_dependency.memoryBarrierCount = 1;
+        host_dependency.pMemoryBarriers = &host;
+        VK_CALL(CmdPipelineBarrier2, command, &host_dependency);
+        VK_CHECK(EndCommandBuffer, command);
+        submit_and_wait(command);
+    }
+    if (config.recording_complete)
+        config.recording_complete();
+
+    FeedbackChainResult result;
+    result.captured.resize(seed.size());
+    read(chain[(config.steps + 1) % 2], result.captured.data());
+    result.pixels.resize(size_t(extent) * extent);
+    read(pixels, result.pixels.data());
+    const auto query_results = [&](VkQueryPool queries, uint32_t first, uint32_t count,
+                                   uint32_t words) {
+        std::vector<uint64_t> values(size_t(count) * words);
+        VK_CHECK(GetQueryPoolResults, api.device, queries, first, count, values.size() * sizeof(uint64_t),
+                 values.data(), words * sizeof(uint64_t),
+                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        return values;
+    };
+    result.occlusion_samples = query_results(occlusion, 0, 1, 1).front();
+    if (statistics)
+        result.statistics = query_results(statistics, 0, 1, 2);
+    if (timestamps)
+        result.timestamps = query_results(timestamps, 0, 2, 1);
+    return result;
+}
+
 DrawResult DrawContext::draw(const DrawConfig &config,
                               std::span<const uint8_t> initial_cache)
 {
