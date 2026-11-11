@@ -47,7 +47,7 @@ struct SnapshotsSheet: View {
             }
         }
         .modifier(SnapshotPrompts())
-        .presentationSizing(FixedSheetSizing(width: 780, height: 720))
+        .presentationSizing(FixedSheetSizing(width: 780, height: 820))
         .task { await store.reload() }
         // The sheet opens at its list again next time.
         .onDisappear {
@@ -182,6 +182,35 @@ struct SnapshotList: View {
     }
 }
 
+/// Facts of a row that never break apart: each choice is a set of lines that
+/// do not wrap, and the first that fits the column is the one shown, so the
+/// release never stands alone after a dangling dot and a time of day (which
+/// Chinese writes as "晚上7:20") never splits in two. `wrapped` is the
+/// last resort, for a column narrower than every choice.
+private struct Facts: View {
+    let one: [String]
+    var two: [String]?
+    var three: [String]?
+    let wrapped: String
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            lines(one)
+            lines(two ?? one)
+            lines(three ?? two ?? one)
+            Text(wrapped)
+        }
+    }
+
+    private func lines(_ texts: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
+                Text(text).lineLimit(1)
+            }
+        }
+    }
+}
+
 /// One snapshot in the list: its name (or when it was taken), when and from
 /// which system image, and what deleting it frees.
 struct SnapshotRow: View {
@@ -209,19 +238,36 @@ struct SnapshotRow: View {
 
     private var words: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(SnapshotWords.title(of: item))
+            if item.name.isEmpty {
+                // The date is the title; the release is the line under it.
+                Facts(
+                    one: [SnapshotWords.taken(item.created)],
+                    two: [SnapshotWords.takenDate(item.created), SnapshotWords.takenTime(item.created)],
+                    wrapped: SnapshotWords.taken(item.created)
+                )
                 .fontWeight(.medium)
-            if typeSize.isAccessibilitySize {
-                // One fact a line: the date and the release do not share a
-                // line that wraps between them.
-                if !item.name.isEmpty {
-                    Text(SnapshotWords.taken(item.created)).font(.subheadline).foregroundStyle(.secondary)
-                }
                 Text(SnapshotWords.revision(of: item.releaseID)).font(.subheadline).foregroundStyle(.secondary)
             } else {
-                Text(SnapshotWords.rowDetail(of: item))
+                Text(SnapshotWords.title(of: item))
+                    .fontWeight(.medium)
+                if typeSize.isAccessibilitySize {
+                    // One fact a line: the date and the release do not share a
+                    // line that wraps between them.
+                    Text(SnapshotWords.taken(item.created)).font(.subheadline).foregroundStyle(.secondary)
+                    Text(SnapshotWords.revision(of: item.releaseID)).font(.subheadline).foregroundStyle(.secondary)
+                } else {
+                    Facts(
+                        one: [SnapshotWords.rowDetail(of: item)],
+                        two: [SnapshotWords.taken(item.created), SnapshotWords.revision(of: item.releaseID)],
+                        three: [
+                            SnapshotWords.takenDate(item.created), SnapshotWords.takenTime(item.created),
+                            SnapshotWords.revision(of: item.releaseID),
+                        ],
+                        wrapped: SnapshotWords.rowDetail(of: item)
+                    )
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                }
             }
             if let flag = SnapshotWords.rowFlag(item.restore) {
                 Text(flag)

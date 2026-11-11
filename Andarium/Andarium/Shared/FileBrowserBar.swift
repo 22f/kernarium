@@ -430,7 +430,7 @@ struct TransferCapsule: View {
                     Text(reason)
                         .font(.caption)
                         .foregroundStyle(.red)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
             }
             Spacer(minLength: 8)

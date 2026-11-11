@@ -116,6 +116,17 @@ struct SnapshotWordsTests {
         #expect(SnapshotWords.rowDetail(of: unnamed) == "r20")
     }
 
+    /// A column too narrow for the whole line shows the date and the time on
+    /// their own lines; each half is part of what the whole line says.
+    @Test func theDateAndTheTimeAreTheTwoHalvesOfWhenItWasTaken() {
+        let created = SnapshotSample.item("").created
+        let whole = SnapshotWords.taken(created)
+        let date = SnapshotWords.takenDate(created), time = SnapshotWords.takenTime(created)
+        #expect(!date.isEmpty && !time.isEmpty)
+        #expect(whole.contains(date), "\(whole) does not contain \(date)")
+        #expect(whole.contains(time), "\(whole) does not contain \(time)")
+    }
+
     @Test func theConfirmationsSayWhatTheyDo() {
         let named = SnapshotSample.item("Before r20", release: "20261108-los24-r18")
         let unnamed = SnapshotSample.item("")

@@ -56,6 +56,11 @@ enum SnapshotWords {
     /// "Nov 11, 2026 at 7:45 AM", in the person's own format.
     static func taken(_ date: Date) -> String { date.formatted(date: .abbreviated, time: .shortened) }
 
+    /// The two halves of `taken`: "Nov 11, 2026" and "7:45 AM", for a column
+    /// too narrow to hold them on one line.
+    static func takenDate(_ date: Date) -> String { date.formatted(date: .abbreviated, time: .omitted) }
+    static func takenTime(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
+
     /// The date with the month in full, for a snapshot's page.
     static func takenLong(_ date: Date) -> String { date.formatted(date: .long, time: .shortened) }
 

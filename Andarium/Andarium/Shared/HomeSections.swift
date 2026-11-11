@@ -75,9 +75,10 @@ struct OptionRow<Control: View>: View {
             IconTile(symbol: symbol, color: dimmed ? .gray : .accentColor)
                 .opacity(dimmed ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 1) {
+                // A long title wraps (a translation, or a large text size) rather
+                // than being cut.
                 Text(title)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .fixedSize(horizontal: false, vertical: true)
                     .opacity(dimmed ? 0.55 : 1)
                 if let detail {
                     if let detailAction {

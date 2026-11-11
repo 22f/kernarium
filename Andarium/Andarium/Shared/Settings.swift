@@ -329,8 +329,7 @@ struct SessionSettingsSheet: View {
         HStack(spacing: 12) {
             IconTile(symbol: symbol)
             Text(title)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

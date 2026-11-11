@@ -204,5 +204,8 @@ struct InfoSheet: View {
                 }
             }
         }
+        // Tall enough for every row, in any language, without scrolling to
+        // the last one; the system keeps it inside a smaller window.
+        .presentationSizing(FixedSheetSizing(width: 540, height: 900))
     }
 }
