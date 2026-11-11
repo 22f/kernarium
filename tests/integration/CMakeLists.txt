@@ -173,6 +173,38 @@ if(UML_V4L2_MMAP_CAPTURE_PROBE_BINARY)
         GPUS 1)
 endif()
 
+# The Virtio camera's capture and metadata nodes, on the synthetic camera's
+# tablet profile: live, where frames carry the chart and stills are taken, and
+# started blocked, where frames are black and a still fails. The probe builds
+# in the guest; a live session boots twice, because Bayer stills are offered
+# once the host has learned the camera's colour data.
+foreach(_camera IN ITEMS synthetic blocked)
+    if(_camera STREQUAL synthetic)
+        set(_camera_suffix "")
+        set(_camera_timeout 1500)
+    else()
+        set(_camera_suffix "-${_camera}")
+        set(_camera_timeout 900)
+    endif()
+    uml_add_guest_integration_test(
+        NAME guest-v4l2-capture${_camera_suffix}
+        SCRIPT video/run_camera_capture.py
+        ARGS --mode ${_camera}
+        LABELS guest;video
+        TIMEOUT ${_camera_timeout}
+        CPUS 2)
+endforeach()
+
+# A camera stream carries on across the guest's system suspend, by the host's
+# route and by the guest's own: the driver stops its streams first, so the
+# device holds nothing and is not reset.
+uml_add_guest_integration_test(
+    NAME guest-v4l2-capture-suspend
+    SCRIPT video/run_camera_suspend.py
+    LABELS guest;video
+    TIMEOUT 900
+    CPUS 2)
+
 set(UML_FUTEX_PROBE_BINARY "" CACHE FILEPATH
     "Static guest executable built from tests/integration/futex/futex_atomic_probe.cpp")
 if(UML_FUTEX_PROBE_BINARY)

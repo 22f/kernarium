@@ -169,6 +169,10 @@ that check it.
 A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself.
+A test that needs what only an earlier session leaves behind boots more than
+once: `guest-v4l2-capture` first lets the host learn the synthetic camera's
+colour data into a calibration directory of the run, because Bayer stills are
+offered from the next session on.
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
