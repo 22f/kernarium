@@ -81,6 +81,12 @@ the window's interface orientation (`MotionMount`). Returning to a locked
 scene restores the guest's previous rotation preferences
 (`SessionOrientationPolicy`).
 
+While the guest's display is shown (the boot and the run) everything behind it
+is black, in the light appearance too: the scene's root view and its window
+carry it, so the area outside the safe area stays black through a rotation or
+a window resize. Home and sheets follow the system appearance
+(`AndariumHostingController`).
+
 ## Build
 
 Packaging the Android runtime alone, and staging the system from the accepted
