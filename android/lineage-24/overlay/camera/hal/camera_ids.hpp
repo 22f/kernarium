@@ -10,6 +10,8 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -73,6 +75,70 @@ inline std::vector<IdAssignment> assign_ids(std::span<const CameraKey> cameras)
         result.push_back({id, camera.index});
     }
     std::sort(result.begin(), result.end(), [](const IdAssignment& a, const IdAssignment& b) { return a.id < b.id; });
+    return result;
+}
+
+// What the concurrency rules need of a camera: the ID Android gave it and the
+// masks of its description, which name other cameras by the host's number.
+struct Concurrency {
+    std::uint32_t id = 0;
+    std::uint32_t index = 0;
+    std::uint32_t concurrent_mask = 0;
+    std::uint32_t conflict_mask = 0;
+};
+
+inline bool names(std::uint32_t mask, std::uint32_t index) noexcept
+{
+    return index < 32 && (mask & (1u << index)) != 0;
+}
+
+// The largest sets of two or more cameras that can stream at the same time: in
+// a set, every camera's concurrent mask names every other camera. Each set is
+// ascending by ID, and the sets are ordered by their first IDs.
+inline std::vector<std::vector<std::uint32_t>> concurrent_sets(std::span<const Concurrency> cameras)
+{
+    const std::size_t count = std::min<std::size_t>(cameras.size(), abi::max_cameras);
+    std::vector<std::uint32_t> valid; // bit i of an entry: cameras[i] is in the set
+    for (std::uint32_t subset = 1; subset < (1u << count); ++subset) {
+        if (std::popcount(subset) < 2) continue;
+        bool ok = true;
+        for (std::size_t i = 0; ok && i < count; ++i) {
+            if (!(subset & (1u << i))) continue;
+            for (std::size_t j = 0; ok && j < count; ++j)
+                if (i != j && (subset & (1u << j)) && !names(cameras[i].concurrent_mask, cameras[j].index)) ok = false;
+        }
+        if (ok) valid.push_back(subset);
+    }
+    std::vector<std::vector<std::uint32_t>> sets;
+    for (const auto subset : valid) {
+        const bool maximal = std::none_of(valid.begin(), valid.end(), [subset](std::uint32_t other) {
+            return other != subset && (other & subset) == subset;
+        });
+        if (!maximal) continue;
+        std::vector<std::uint32_t> ids;
+        for (std::size_t i = 0; i < count; ++i)
+            if (subset & (1u << i)) ids.push_back(cameras[i].id);
+        std::sort(ids.begin(), ids.end());
+        sets.push_back(std::move(ids));
+    }
+    std::sort(sets.begin(), sets.end());
+    return sets;
+}
+
+// The IDs of the cameras that cannot be open while this one is: the cameras its
+// conflict mask names, or that name it.
+inline std::vector<std::uint32_t> conflicting_ids(std::span<const Concurrency> cameras, std::uint32_t id)
+{
+    std::vector<std::uint32_t> result;
+    const Concurrency* self = nullptr;
+    for (const auto& camera : cameras)
+        if (camera.id == id) self = &camera;
+    if (self == nullptr) return result;
+    for (const auto& other : cameras) {
+        if (other.id == id) continue;
+        if (names(self->conflict_mask, other.index) || names(other.conflict_mask, self->index)) result.push_back(other.id);
+    }
+    std::sort(result.begin(), result.end());
     return result;
 }
 

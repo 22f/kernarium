@@ -203,8 +203,11 @@ inline float minimum_focus_dioptres(const abi::Desc& desc) noexcept
 }
 
 // The Android sensitivity range: the description's, widened to include the 100
-// the sensor's default is. ISO below 100 is allowed (iOS has 25 or 32).
-inline std::int32_t sensitivity_min(const abi::Desc& desc) noexcept { return std::int32_t(std::max<std::uint32_t>(desc.iso_min, 1)); }
+// the HAL's default is, at either end. ISO below 100 is allowed (iOS has 25 or 32).
+inline std::int32_t sensitivity_min(const abi::Desc& desc) noexcept
+{
+    return std::int32_t(std::clamp<std::uint32_t>(desc.iso_min, 1, 100));
+}
 inline std::int32_t sensitivity_max(const abi::Desc& desc) noexcept
 {
     return std::int32_t(std::max<std::uint32_t>(desc.iso_max, 100));

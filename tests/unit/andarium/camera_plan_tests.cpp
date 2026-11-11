@@ -205,8 +205,52 @@ void check_numbers()
     fixed.min_focus_distance_mm = 0;
     require(minimum_focus_dioptres(fixed) == 0.0f, "fixed focus has no focus distance");
     require(sensitivity_min(desc) == 32 && sensitivity_max(desc) == 3200, "sensitivity");
+    auto coarse = desc;
+    coarse.iso_min = 200;
+    coarse.iso_max = 64;
+    require(sensitivity_min(coarse) == 100 && sensitivity_max(coarse) == 100, "the range includes the default ISO");
     require(from_q16(to_q16(0.5)) == 0.5f && from_q16(to_q16(-1.25)) == -1.25f, "Q16 round trip");
     require(max_frame_duration_ns(desc) == 1'000'000'000, "the longest frame is a second");
+}
+
+// The host's concurrency: which cameras stream together, and which exclude one another.
+void check_concurrency()
+{
+    const std::uint32_t front = 1u << 1;
+    // The host index is the ID here, and the zoom camera runs with the front one only.
+    const std::vector<Concurrency> pair = {{0, 0, front, 0}, {1, 1, 1u << 0, 0}, {2, 2, 0, 0}};
+    auto sets = concurrent_sets(pair);
+    require(sets.size() == 1 && sets[0] == std::vector<std::uint32_t>({0, 1}), "the zoom and the front camera stream together");
+
+    // One side naming the other is not enough.
+    const std::vector<Concurrency> lopsided = {{0, 0, front, 0}, {1, 1, 0, 0}};
+    require(concurrent_sets(lopsided).empty(), "both masks must agree");
+
+    // Three cameras that all name one another are one set, not three pairs.
+    const std::vector<Concurrency> triple = {{0, 0, 0b110, 0}, {1, 1, 0b101, 0}, {2, 2, 0b011, 0}};
+    sets = concurrent_sets(triple);
+    require(sets.size() == 1 && sets[0] == std::vector<std::uint32_t>({0, 1, 2}), "a maximal set");
+
+    // A chain a-b, b-c is two sets.
+    const std::vector<Concurrency> chain = {{0, 0, 0b010, 0}, {1, 1, 0b101, 0}, {2, 2, 0b010, 0}};
+    sets = concurrent_sets(chain);
+    require(sets.size() == 2 && sets[0] == std::vector<std::uint32_t>({0, 1}) && sets[1] == std::vector<std::uint32_t>({1, 2}),
+            "two pairs");
+
+    // The ID differs from the host's number.
+    const std::vector<Concurrency> renumbered = {{0, 4, 1u << 5, 0}, {1, 5, 1u << 4, 0}};
+    sets = concurrent_sets(renumbered);
+    require(sets.size() == 1 && sets[0] == std::vector<std::uint32_t>({0, 1}), "masks are in the host's numbers");
+
+    require(concurrent_sets(std::vector<Concurrency>{}).empty(), "no cameras, no sets");
+
+    const std::vector<Concurrency> conflicts = {{0, 0, 0, 1u << 3}, {1, 1, 0, 0}, {3, 3, 0, 0}, {4, 4, 1u << 0, 0}};
+    auto ids = conflicting_ids(conflicts, 0);
+    require(ids == std::vector<std::uint32_t>({3}), "the conflict mask names camera 3");
+    ids = conflicting_ids(conflicts, 3);
+    require(ids == std::vector<std::uint32_t>({0}), "a conflict is symmetric");
+    require(conflicting_ids(conflicts, 1).empty(), "camera 1 conflicts with none");
+    require(conflicting_ids(conflicts, 9).empty(), "an unknown camera has no conflicts");
 }
 
 } // namespace
@@ -214,6 +258,7 @@ void check_numbers()
 int main()
 {
     check_ids();
+    check_concurrency();
     check_capabilities();
     check_tables();
     check_numbers();
