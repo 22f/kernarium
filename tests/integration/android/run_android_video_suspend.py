@@ -12,7 +12,7 @@ this runner shows it with the apps that use the devices:
   suspends, by the route the host's quiesce takes (``suspend`` and ``wake`` on
   the management console) and by the route Android takes itself with its
   screen off and adb disconnected, ended by a ``wake``;
-- after the wake the picture is moving again, no thread of the guest sits in
+- after the wake the picture is moving again, no thread of the guest stays in
   uninterruptible sleep, ``screenrecord`` ends with status 0 and a file, and
   Back closes the player, which returns only if the device handed every
   buffer back;
@@ -61,11 +61,13 @@ SPEC.loader.exec_module(boot_android)
 DEFAULT_ADB_PORT = 5583
 COMMAND_SECONDS = 120
 SETTLE_SECONDS = 45
+CLIP_SECONDS = 120
 RECORD_SECONDS = 30
 HOLD_SECONDS = 4.0
 RESUME_SECONDS = 90
 MOVING_SECONDS = 60
 CLOSE_SECONDS = 30
+SLEEP_SECONDS = 20
 CLIP = "/sdcard/Movies/clip.mp4"
 RECORDING = "/sdcard/Movies/rec.mp4"
 RECORDING_STATUS = "/sdcard/rec.out"
@@ -73,7 +75,7 @@ SCROLL_MARK = "swipe 360"
 SCROLL = (f"while :; do input {SCROLL_MARK} 1000 360 300 1500; input {SCROLL_MARK} 300 360 1000 1500; done")
 SUSPEND_ENTRY = "PM: suspend entry"
 CLOSE = re.compile(r"^uml-video \S+ (encoder )?stream=(\d+) close=(\w+)(.*)$", re.M)
-THREAD_IN_D = re.compile(r"^\s*\d+\s+\d+\s+D\S*\s", re.M)
+THREAD_IN_D = re.compile(r"^\s*\d+\s+\d+\s+D\S*\s.*$", re.M)
 MAGIC, VERSION, DATA = 0xCAFEBABE, 2, 512
 
 
@@ -167,7 +169,21 @@ class Guest:
         return changed >= 2
 
     def threads_in_d(self) -> list[str]:
-        return THREAD_IN_D.findall(self.shell("ps -A -T -o PID,TID,STAT,NAME"))
+        return [line.strip() for line in THREAD_IN_D.findall(self.shell("ps -A -T -o PID,TID,STAT,WCHAN,NAME"))]
+
+    def diagnose(self) -> str:
+        """What a failed check leaves to classify it by: the host's video log, the focus and the codec lines."""
+        parts = ["video activity log tail:\n"
+                 + (self.activity.read_text(errors="replace")[-2000:] if self.activity.is_file() else "(none)")]
+        for title, command in (
+                ("threads in uninterruptible sleep", "ps -A -T -o PID,TID,STAT,WCHAN,NAME | grep ' D' | tail -20"),
+                ("focus", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | tail -4"),
+                ("codec log", "logcat -d -t 600 | grep -E 'MediaCodec|ExoPlayer|CCodec|v4l2|FATAL|ANR' | tail -40")):
+            try:
+                parts.append(f"{title}:\n{self.shell(command, timeout=30).strip()}")
+            except (Failure, subprocess.TimeoutExpired, OSError) as problem:
+                parts.append(f"{title}: unavailable ({problem})")
+        return "\n".join(parts)
 
     def suspend_entries(self) -> int:
         return self.log.read_text(errors="replace").count(SUSPEND_ENTRY)
@@ -235,7 +251,7 @@ def make_clip(guest: Guest) -> int:
     guest.shell(f"rm -f {CLIP}")
     start_scrolling(guest)
     try:
-        guest.shell(f"screenrecord --time-limit 20 {CLIP}", timeout=90)
+        guest.shell(f"screenrecord --time-limit {CLIP_SECONDS} {CLIP}", timeout=CLIP_SECONDS + 60)
     finally:
         stop_scrolling(guest)
     guest.shell("content call --uri content://media/ --method scan_volume --arg external_primary")
@@ -263,6 +279,16 @@ def play(guest: Guest, media_id: int) -> None:
              lambda: None if guest.moving() else "the picture is still", guest)
 
 
+def check_no_thread_in_d(guest: Guest, route: str) -> None:
+    """A thread is in uninterruptible sleep for an instant at a flush or a binder
+    transaction; one still there after SLEEP_SECONDS is the wedge a device must not cause."""
+    def clear() -> str | None:
+        stuck = guest.threads_in_d()
+        return f"still in uninterruptible sleep: {stuck}" if stuck else None
+
+    wait_for(f"no thread in uninterruptible sleep after the {route} suspend", SLEEP_SECONDS, clear, guest)
+
+
 def check_player(guest: Guest, media_id: int, route: str) -> None:
     print(f"player across a {route} suspend")
     opened = len(guest.closes())
@@ -270,9 +296,7 @@ def check_player(guest: Guest, media_id: int, route: str) -> None:
     ROUTES[route](guest)
     wait_for("the picture moves after the wake", MOVING_SECONDS,
              lambda: None if guest.moving() else "the picture is still", guest)
-    stuck = guest.threads_in_d()
-    if stuck:
-        raise Failure(f"threads in uninterruptible sleep after the {route} suspend: {stuck}")
+    check_no_thread_in_d(guest, route)
     guest.shell("input keyevent KEYCODE_BACK")
 
     def decoder_closed() -> str | None:
@@ -311,9 +335,7 @@ def check_recording(guest: Guest, route: str) -> None:
     size = int(guest.shell(f"stat -c %s {RECORDING}").strip())
     if size < 1 << 20:
         raise Failure(f"the recording is {size} bytes")
-    stuck = guest.threads_in_d()
-    if stuck:
-        raise Failure(f"threads in uninterruptible sleep after the {route} suspend: {stuck}")
+    check_no_thread_in_d(guest, route)
     closes = [close for close in guest.closes()[opened:] if close[0]]
     if not closes or closes[-1][1] != "destroy" or "errors=0" not in closes[-1][2]:
         raise Failure(f"the encoder stream did not close cleanly: {closes}")
@@ -414,6 +436,8 @@ def main() -> int:
         return 0
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
         print(f"FAIL: {problem}", file=sys.stderr)
+        if guest is not None:
+            print(guest.diagnose(), file=sys.stderr)
         log = private / "emulator.log"
         if log.is_file():
             print("launcher log tail:\n" + "\n".join(log.read_text(errors="replace").splitlines()[-30:]),
