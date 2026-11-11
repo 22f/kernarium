@@ -368,10 +368,12 @@ struct PreparedArguments {
 	std::string location;
 	bool video {};
 	bool video_encoder {};
-	/* --hardware-input adds the guest's hardware keyboard, mouse and pointer
-	 * (darwin/device/input), unplugged at boot, and feeds them from the
-	 * display's keys and pointer in place of its touchscreen and side keys.
-	 * They are the last devices, after the camera. */
+	/* --hardware-input gives the guest the input devices an Andarium guest
+	 * has: the touchscreen and the side keys, which nothing feeds, and the
+	 * hardware keyboard, mouse and pointer (darwin/device/input), unplugged at
+	 * boot and fed from the display's keys and pointer. The guest has no VNC
+	 * input device. The hardware devices are the last devices, after the
+	 * camera. */
 	bool hardware_input {};
 	CameraSource camera {CameraSource::none};
 	/* --camera-profile=: the synthetic camera is the source of `synthetic`
@@ -1030,6 +1032,10 @@ struct BootServices final {
 	VirtioService gnss;
 	/* The camera, after the GNSS receiver. */
 	VirtioService camera;
+	/* The touchscreen and the side keys of a guest with hardware input, right
+	 * after the battery as in Andarium's runtime. Nothing feeds them. */
+	std::unique_ptr<uml::input::virtio::InProcessInputService> touchscreen;
+	std::unique_ptr<uml::input::virtio::InProcessInputService> side_keys;
 	/* The hardware keyboard, mouse and pointer, the last devices. */
 	std::unique_ptr<uml::input::virtio::InProcessInputService>
 		hardware_keyboard;
@@ -1048,6 +1054,10 @@ struct BootServices final {
 			hardware_mouse->stop();
 		if (hardware_keyboard)
 			hardware_keyboard->stop();
+		if (side_keys)
+			side_keys->stop();
+		if (touchscreen)
+			touchscreen->stop();
 		vsock_forwarder.reset();
 		if (camera)
 			camera->stop();
@@ -1404,8 +1414,14 @@ private:
 				kernel.emplace_back(uml::gpu::virtioDeviceArgument(
 					gpu_service_->takeConnectionName(),
 					uml::gpu::protocol::virtioGpuDeviceId));
-				kernel.emplace_back("uml_vnc_input." +
-					gpu_service_->takeInputConnectionName());
+				/* With hardware input the display's input goes to the
+				 * hardware devices, and a VNC input device in the guest
+				 * would be a dead keyboard Android takes for a built-in
+				 * one. */
+				if (!prepared_.hardware_input) {
+					kernel.emplace_back("uml_vnc_input." +
+						gpu_service_->takeInputConnectionName());
+				}
 			} catch (const std::exception &error) {
 				std::fprintf(stderr,
 					restart ? "Unable to restart in-process Virtio-GPU: %s\n" :
@@ -1425,6 +1441,9 @@ private:
 			    uml::battery::protocol::deviceId,
 			    [] { return uml::battery::makeInProcessService(); },
 			    "--battery", "Virtio battery"))
+			return false;
+		if (prepared_.hardware_input && !information_only_ &&
+		    !start_fixed_input(kernel))
 			return false;
 		/* The guest's host-visible shared-memory region belongs to the GPU
 		 * backend, and the video decoder fills capture buffers that live in
@@ -1508,6 +1527,32 @@ private:
 		if (prepared_.hardware_input && !information_only_ &&
 		    !start_hardware_input(kernel))
 			return false;
+		return true;
+	}
+
+	/* Starts the touchscreen and the side keys of a guest with hardware input,
+	 * as Andarium's runtime does after the battery. They are always plugged
+	 * in, and the display never feeds them, so the guest has the input
+	 * devices an Andarium guest has and no more of them. */
+	[[nodiscard]] bool start_fixed_input(std::vector<std::string> &kernel)
+	{
+		using Kind = uml::input::virtio::DeviceKind;
+		try {
+			const auto start = [&](Kind kind, auto &service) {
+				service = std::make_unique<
+					uml::input::virtio::InProcessInputService>(kind);
+				kernel.emplace_back(uml::gpu::virtioDeviceArgument(
+					service->takeConnectionName(),
+					uml::input::virtio::protocol::deviceId));
+			};
+			start(Kind::touchscreen, services_.touchscreen);
+			start(Kind::keyboard, services_.side_keys);
+		} catch (const std::exception &error) {
+			std::fprintf(stderr,
+				"Unable to start the touchscreen and side keys: %s\n",
+				error.what());
+			return false;
+		}
 		return true;
 	}
 

@@ -73,16 +73,17 @@ held.
 
 ## macOS launcher
 
-`--hardware-input` of the macOS launchers adds the keyboard, mouse and pointer
-after every other device, unplugged, and sends the display's keys and pointer
-to them instead of the touchscreen and the side keys. It requires `--gpu` with
-a VNC or native display. The first key of a client plugs the keyboard and the
-first pointer event plugs the mouse and the pointer; when the last client of a
-VNC display has gone both are unplugged, and a native window keeps what it
-plugged. No key is reserved: every key goes to the guest. The launcher prints
-each plug and unplug, each registration the guest announces, and Android's
-lock LEDs and pointer capture, on stderr as `Hardware keyboard: ...`,
-`Hardware mouse: ...` and `Hardware pointer: ...`.
+`--hardware-input` of the macOS launchers gives the guest the input devices an
+Andarium guest has: the touchscreen and the side keys, which nothing feeds, and
+the keyboard, mouse and pointer after every other device, unplugged. The guest
+has no VNC input device. The display's keys and pointer go to the hardware
+devices. It requires `--gpu` with a VNC or native display. The first key of a
+client plugs the keyboard and the first pointer event plugs the mouse and the
+pointer; when the last client of a VNC display has gone both are unplugged, and
+a native window keeps what it plugged. No key is reserved: every key goes to
+the guest. The launcher prints each plug and unplug, each registration the
+guest announces, and Android's lock LEDs and pointer capture, on stderr as
+`Hardware keyboard: ...`, `Hardware mouse: ...` and `Hardware pointer: ...`.
 
 ## Testing
 
