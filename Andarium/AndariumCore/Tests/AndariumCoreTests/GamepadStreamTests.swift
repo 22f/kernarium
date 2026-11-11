@@ -166,6 +166,15 @@ struct GamepadStreamTests {
         return frames
     }
 
+    @Test func aGuestThatReadsNothingHasOnlyAFewReportsAhead() {
+        let rig = connected()
+        let sent = fill(rig)
+        // A report of three bytes is 15 on the wire; the last one sent did not fit.
+        let ahead = (sent - 1) * 15
+        #expect(ahead <= Int(GamepadStream.sendBufferBytes))
+        #expect(ahead >= Int(GamepadStream.sendBufferBytes) / 2)
+    }
+
     @Test func aFullConnectionKeepsOnlyTheNewestReportOfEachSlot() {
         let rig = connected(buffer: 2048)
         let sent = fill(rig)

@@ -19,8 +19,17 @@ import Foundation
 /// **What is.** An input report is only a state. When the connection cannot
 /// take it, the newest report of each slot is kept (at most 8, a few bytes
 /// each) and written when the connection can, so a guest that is paused or slow
-/// loses only the states between, and never has a queue behind it.
+/// loses only the states between, and never has a queue behind it. What the
+/// connection takes ahead of a guest that reads nothing is bounded here by
+/// `sendBufferBytes`, a few reports of each slot; the runtime's own end of the
+/// connection (and the guest's credit) holds more, which this side cannot
+/// bound.
 public final class GamepadStream: @unchecked Sendable {
+    /// The send buffer of the connection's descriptor: a few input reports for
+    /// each slot, and more than any frame the session writes whole (a `CREATE`
+    /// of the profiles here is a few hundred bytes).
+    static let sendBufferBytes: Int32 = 4096
+
     public enum Event: Sendable {
         /// A connection was made.
         case connected
@@ -274,6 +283,10 @@ public final class GamepadStream: @unchecked Sendable {
                 Darwin.close(opened)
                 return false
             }
+            // Best effort: a larger buffer only holds older states ahead of a
+            // guest that is not reading.
+            var buffer = Self.sendBufferBytes
+            _ = setsockopt(opened, SOL_SOCKET, SO_SNDBUF, &buffer, socklen_t(MemoryLayout.size(ofValue: buffer)))
             descriptor = opened
             frames.reset()
             let source = DispatchSource.makeReadSource(fileDescriptor: opened, queue: queue)
