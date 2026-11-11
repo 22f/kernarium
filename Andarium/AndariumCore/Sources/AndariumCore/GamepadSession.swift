@@ -75,8 +75,8 @@ public protocol GamepadIndicators: AnyObject, Sendable {
 /// `CREATE` is unanswered, or while its output is in flight, may be replaced at
 /// once by another that takes the slot, so the session counts the `CREATE`s of
 /// each slot that the relay has not answered and takes nothing of the slot
-/// until the `CREATED` of the latest: what comes before it is of a device that
-/// is gone.
+/// (its events, its output, the requests of its driver) until the `CREATED` of
+/// the latest: what comes before it is of a device that is gone.
 ///
 /// **Rumble.** An output report of the guest's driver sets a motor's level
 /// until the next one; each motor plays as a tone of the haptics' vocabulary on
@@ -553,12 +553,17 @@ public final class GamepadSession: @unchecked Sendable {
             apply(slot.profile.decodeOutput(data), to: index)
         case .getReport(let index, let reportType, let number, let id):
             guard greeted else { return protocolBroken() }
+            // A request of a device that is gone, while the slot's new one is
+            // made: uhid matches a reply by the device's own counter, so the
+            // new device's probe could take the reply meant for the old one.
+            guard unanswered[index] == 0 else { return }
             let report = reportType == GamepadReportType.feature
                 ? slots[index]?.profile.featureReport(number: number, slot: index) : nil
             stream?.send(
                 .getReportReply(slot: index, id: id, error: report == nil ? GamepadErrno.invalid : 0, data: report ?? []))
         case .setReport(let index, _, _, let id, _):
             guard greeted else { return protocolBroken() }
+            guard unanswered[index] == 0 else { return }  // See GET_REPORT.
             stream?.send(.setReportReply(slot: index, id: id, error: 0))
         }
     }

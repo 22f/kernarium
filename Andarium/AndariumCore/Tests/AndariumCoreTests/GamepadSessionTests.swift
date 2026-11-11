@@ -190,6 +190,8 @@ struct GamepadSessionTests {
     @Test func aNinthControllerHasNoSlotAndIsSaidSo() {
         let rig = greeted()
         for id in 1...9 { rig.session.connect(GamepadController(id: id, family: .generic, name: "P\(id)"), state: .neutral) }
+        // The marker is a request of slot 7's device, which the session answers once its CREATE has been.
+        rig.guest.send(.created(slot: 7, result: 0))
         let frames = framesUntilBarrier(rig) ?? []
         #expect(frames.count == 8)
         rig.session.settle()
@@ -264,6 +266,28 @@ struct GamepadSessionTests {
         rig.guest.send(.created(slot: 0, result: 0))
         rig.guest.send(.event(slot: 0, event: .start))
         #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(second, GamepadState(buttons: .south))))
+    }
+
+    @Test func aSlotUsedAgainIsNotAskedForTheFirstControllersReports() {
+        let (rig, _) = reusedSlot()
+        // The first device's driver was still asking when it went.
+        rig.guest.send(.getReport(slot: 0, reportType: GamepadReportType.feature, number: 0x09, id: 1))
+        rig.guest.send(.setReport(slot: 0, reportType: GamepadReportType.feature, number: 8, id: 2, data: [8, 1]))
+        #expect(barrier(rig))
+        // Still the first device's: the second's CREATE is unanswered.
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.getReport(slot: 0, reportType: GamepadReportType.feature, number: 0x09, id: 3))
+        rig.guest.send(.setReport(slot: 0, reportType: GamepadReportType.feature, number: 8, id: 4, data: [8, 1]))
+        #expect(barrier(rig))
+        // The second device's own requests are answered, in order.
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.getReport(slot: 0, reportType: GamepadReportType.feature, number: 0x09, id: 5))
+        rig.guest.send(.setReport(slot: 0, reportType: GamepadReportType.feature, number: 8, id: 6, data: [8, 1]))
+        let profile = DualSenseProfile(edge: false)
+        #expect(
+            rig.guest.nextFrame()
+                == .getReportReply(slot: 0, id: 5, error: 0, data: profile.featureReport(number: 0x09, slot: 0)!))
+        #expect(rig.guest.nextFrame() == .setReportReply(slot: 0, id: 6, error: 0))
     }
 
     @Test func aFailedCreateOfTheFirstControllerDoesNotFailTheSecond() {
