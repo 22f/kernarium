@@ -295,9 +295,11 @@ fake guests and players, the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator, thermal and gamepad
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
-descriptor parser, and the stream and session on a fake relay; and the session
-record's stall slot against the golden slot there, which `runtime-stall-record`
-checks the runtime's writer against);
+descriptor parser, and the stream and session on a fake relay; the session
+record's stall and network slots against the golden slots there, which
+`runtime-stall-record` and `runtime-session-record` check the runtime's writers
+against; and the notice that iOS denies the network, from the path's mapping to
+the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol`,
 `andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),

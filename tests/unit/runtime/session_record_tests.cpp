@@ -512,6 +512,50 @@ bool test_network_reader(uml::runtime::SessionNetworkCounts &counts) noexcept
 /* The network slot sits between the stall slot and the state: it holds this
  * session's share of the counts and the notice, rewritten at each checkpoint
  * and at the end, and it touches no other part. */
+/* The network slot's lines up to the blanks that pad it. */
+std::string network_slot_text(const std::string &slot)
+{
+	return slot.substr(0, slot.find_last_of('\n', slot.size() - 2) + 1);
+}
+
+/* The slot's text for fixed figures is the golden file AndariumCore parses
+ * too (tests/unit/andarium/fixtures/network-slot-golden.txt). */
+void the_network_slot_matches_the_golden_file(const char *golden_path)
+{
+	using uml::runtime::NetworkNotice;
+	uml::runtime::reset_session_record();
+	uml::runtime::set_network_notice(NetworkNotice::none);
+	reader_counts = {};
+	reader_present = true;
+	uml::runtime::set_network_counts_reader(&test_network_reader);
+	const std::string path = temporary_record();
+	require(uml::runtime::begin_session_record(path, {}));
+	reader_counts = {.dns_answered = 5, .dns_policy_denied = 3,
+			 .dns_timed_out = 2, .dns_failed = 1,
+			 .dhcp_discovers = 1, .dhcp_requests = 2,
+			 .dhcp_acks = 1, .tcp_attempts = 12,
+			 .tcp_established = 4, .tcp_unreachable = 2,
+			 .tcp_refused = 1};
+	uml::runtime::set_network_notice(NetworkNotice::cellular_denied);
+	uml::runtime::set_network_notice(NetworkNotice::none);
+	uml::runtime::set_network_notice(NetworkNotice::wifi_denied);
+	uml::runtime::checkpoint_session_memory();
+	const std::string text = network_slot_text(read_file(path).substr(
+		uml::runtime::session_network_offset,
+		uml::runtime::session_network_slot_bytes));
+	const std::string golden = read_file(golden_path);
+	require(!golden.empty(), "the golden network slot opens");
+	if (golden != text) {
+		std::fprintf(stderr, "golden:\n%s\nslot:\n%s\n", golden.c_str(),
+			text.c_str());
+		require(false, "the network slot differs from the golden file");
+	}
+	uml::runtime::set_network_counts_reader(nullptr);
+	uml::runtime::set_network_notice(NetworkNotice::none);
+	uml::runtime::reset_session_record();
+	unlink(path.c_str());
+}
+
 void test_network_slot()
 {
 	using uml::runtime::NetworkNotice;
@@ -623,7 +667,7 @@ void test_unopenable_record()
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
 	try {
 		/* The child forks before this process has a thread of its own. */
@@ -635,6 +679,8 @@ int main()
 		test_record_lifecycle();
 		test_memory_checkpoints();
 		test_network_slot();
+		if (argc == 2)
+			the_network_slot_matches_the_golden_file(argv[1]);
 		test_memory_terms();
 		test_kernel_crash();
 		test_host_fault();
