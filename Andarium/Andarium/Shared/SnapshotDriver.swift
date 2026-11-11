@@ -44,7 +44,8 @@ protocol SnapshotDriver: AnyObject {
     /// it would take alone, the space they use together and what Create would
     /// say. The figures are measured off the main actor. `measured: false`
     /// leaves the figures out and returns without measuring, so the names can
-    /// show first (`SnapshotListing.isMeasured`).
+    /// show first (`SnapshotListing.isMeasured`). A caller that is cancelled
+    /// stops the measuring and gets the names, unmeasured.
     ///
     /// A listing is never older than the last finished operation: it waits for
     /// one under way and reads again if one started or finished while it read.

@@ -1245,9 +1245,10 @@ extension LiveRuntime: SnapshotDriver {
             while storageBusy, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(50)) }
             let revision = snapshotRevision
             let quick = cancelled || Task.isCancelled
-            var listing = await Task.detached(priority: .utility) {
-                storage.snapshotListing(measured: measured && !quick)
-            }.value
+            // A cancellation reaches the measure, which stops between two
+            // files and answers unmeasured.
+            let reading = Task.detached(priority: .utility) { storage.snapshotListing(measured: measured && !quick) }
+            var listing = await withTaskCancellationHandler { await reading.value } onCancel: { reading.cancel() }
             // An operation that started or finished while this one read makes
             // it older than the files: read again.
             guard quick || (snapshotOperation == nil && !storageBusy && snapshotRevision == revision) else { continue }

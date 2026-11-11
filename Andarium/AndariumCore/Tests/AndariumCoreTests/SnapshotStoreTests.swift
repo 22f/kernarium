@@ -184,6 +184,54 @@ struct SnapshotStoreTests {
         #expect(quick.space.snapshotsUse == unknown)
     }
 
+    @Test func aListingThatIsCancelledStopsMeasuringAndAnswersUnmeasured() async throws {
+        let fixture = try await SnapshotFixture.make(marker: 1)
+        defer { fixture.cleanUp() }
+        for name in ["one", "two", "three"] { _ = try fixture.storage.createSnapshot(named: name) }
+        try rewriteTwoMiB(fixture)
+
+        /// The measuring calls made, and the moment a test cancels the task that makes them.
+        final class Calls: @unchecked Sendable {
+            private let lock = NSLock()
+            private var made = 0
+            var cancelAt: Int?
+            var count: Int { lock.withLock { made } }
+            func call() {
+                let now = lock.withLock { made += 1; return made }
+                if now == cancelAt { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+        }
+        func listing(cancelAt: Int?, beforeStart: Bool = false) async -> (SnapshotListing, Int) {
+            let calls = Calls()
+            calls.cancelAt = cancelAt
+            var io = SnapshotFileOperations.live
+            io.measure = SnapshotMeasure.Primitives(
+                privateSize: { calls.call(); return SnapshotMeasure.privateSize(of: $0) },
+                extents: { calls.call(); return SnapshotMeasure.physicalExtents(of: $0) })
+            let app = fixture.app(using: io)
+            let answer = await Task.detached {
+                if beforeStart { withUnsafeCurrentTask { $0?.cancel() } }
+                return app.snapshotListing(measured: true)
+            }.value
+            return (answer, calls.count)
+        }
+
+        let (whole, wholeCalls) = await listing(cancelAt: nil)
+        #expect(whole.isMeasured && wholeCalls > 3)
+        // Cancelled before it starts: no measuring call at all.
+        let (early, earlyCalls) = await listing(cancelAt: nil, beforeStart: true)
+        #expect(!early.isMeasured && earlyCalls == 0)
+        // Cancelled by the first call: it stops there, between two measures.
+        let (partial, partialCalls) = await listing(cancelAt: 1)
+        #expect(!partial.isMeasured && partialCalls < wholeCalls)
+        // What the unmeasured answer says is what a quick read says: every name, no figure.
+        let quick = fixture.storage.snapshotListing(measured: false)
+        #expect(partial.items.map(\.id) == quick.items.map(\.id))
+        let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)
+        #expect(partial.items.allSatisfy { $0.freesWhenDeleted == unknown && $0.kept == unknown })
+        #expect(partial.space.snapshotsUse == unknown)
+    }
+
     @Test func createIsAllowedWhileANewerAndroidWaitsToUpdateTheData() async throws {
         let fixture = try await SnapshotFixture.make()
         defer { fixture.cleanUp() }
