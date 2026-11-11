@@ -197,6 +197,10 @@ CONFIG_IPV6_ROUTE_INFO=y
 CONFIG_CRYPTO_NULL=y
 CONFIG_CRYPTO_SHA512=y
 CONFIG_CRYPTO_XCBC=y
+# AES-CMAC integrity for IPsec (IpSecAlgorithm.AUTH_AES_CMAC), which an IKEv2
+# VPN server may negotiate. The base list names it, and without it the kernel
+# has no cmac(aes) for the transform.
+CONFIG_CRYPTO_CMAC=y
 CONFIG_NET_SCH_INGRESS=y
 CONFIG_NET_SCH_TBF=y
 CONFIG_NET_CLS_ACT=y
@@ -264,6 +268,12 @@ CONFIG_LEDS_CLASS=y
 CONFIG_LEDS_CLASS_MULTICOLOR=y
 CONFIG_HID_PLAYSTATION=y
 CONFIG_PLAYSTATION_FF=y
+# A game controller of the host reaches the guest as a uhid device, which the
+# kernel's own driver binds: hid-playstation for a DualSense or DualShock 4
+# above, hid-microsoft for an Xbox controller. The latter adds the force
+# feedback an Xbox controller's rumble needs and changes no input mapping.
+# Only this product has UHID and a relay to feed it.
+CONFIG_HID_MICROSOFT=y
 
 # --- Incremental install ----------------------------------------------------
 CONFIG_INCREMENTAL_FS=y

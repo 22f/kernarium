@@ -8,19 +8,22 @@ application that must:
   - declare no non-exempt encryption, require arm64 and Metal, target iPhone
     and iPad, and have no background mode;
   - carry no automation knob: no ANDARIUM_, KERNARIUM_, UML_ or DARWIN_UML_
-    environment name in the host code of the application or of any embedded
-    framework (the guest kernel image inside a runtime is not host code);
+    environment name (ANDARIUM_THERMAL_STATE, which states the thermal state
+    in place of iOS's, among them) in the host code of the application or of
+    any embedded framework (the guest kernel image inside a runtime is not
+    host code);
   - carry none of the harness's console lines (ConsoleReport in the
     application: the statistics, thermal state, runtime and focus lines),
     which the configuration compiles out;
   - carry no debugging or automation support in the host code of the
     application or of a framework: the frame mirror, console input, the
     guest sampler, the footprint log, the virtual Jetsam, the activity logs,
-    the census and histogram, the automation entries and the harness's
+    the census and histogram, the automation entries, the synthetic camera, the
+    simulated controllers, the UI tests' input probe and the harness's
     leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
-    keep the runtime API's layout, runtimeSetFrameSink,
-    runtimeSendConsoleInput and runtimePrepareJit, are allowed), and contain
-    no test bundle and no XCTest or Testing framework;
+    keep the runtime API's layout, runtimeSetFrameSink, runtimeSendConsoleInput
+    and runtimePrepareJit, are allowed), and contain no test bundle and no
+    XCTest or Testing framework;
   - carry no JIT: no arm64 JIT engine, no executable-memory owner, none of the
     runtime's or the application's JIT entries or text, and no instruction
     word of the debugger request (`brk #0xf00d`, JIT_DEBUGGER_REQUEST) in the
@@ -307,7 +310,25 @@ DEBUG_SYMBOLS = (
     ("test tooling", (b"5vsock9Forwarder", b"17UnixSocketChannel", b"_rfbGetScreen",
                       b"_rfbInitServer")),
     ("launch harness", (b"13ConsoleReport", b"15environmentName", b"13applyDeferred",
-                        b"16printsStatistics", b"13launchApplied")),
+                        b"16printsStatistics", b"13launchApplied",
+                        b"15ThermalOverride")),
+    # The UI tests' probe of the guest's keyboard and mouse
+    # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
+    # runtime and the session that runs without a guest.
+    ("input probe", (b"10InputProbe", b"16InputProbeLaunch", b"29RecordingHardwareInputRuntime",
+                     b"15beginInputProbe", b"17InputProbeReadout", b"19makeInputProbeModel",
+                     b"10inputProbe")),
+    # The camera without hardware (darwin/platform/synthetic_camera): a source
+    # for tests and launchers, which an App Store runtime does not build.
+    # namespace uml::platform, its class and entries.
+    ("synthetic camera", (b"15SyntheticCamera", b"19SyntheticCameraImpl",
+                          b"19makeSyntheticCamera", b"19encodeSyntheticJpeg",
+                          b"17decodeChartMarker")),
+    # Simulated game controllers: the scripted input and the guest end of the
+    # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
+    # tool link) and the host reader that moved there.
+    ("synthetic controllers", (b"13GamepadScript", b"22GamepadHostFrameReader",
+                               b"23AndariumCoreTestSupport")),
     # The arm64 JIT engine, the owner of executable memory and the debugger
     # route of the runtime and of the loader. namespace uml::cpu::jit_memory
     # and uml::cpu::arm64::jit, the engine's classes and entry names.
@@ -329,6 +350,9 @@ DEBUG_STRINGS = (
     ("automation", (b"kernarium_runtime_automation_", b"automation boot with",
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
+    ("input probe", (b"inputProbeLog", b"inputProbeField")),
+    ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
+                          b"SyntheticLaptop1,1", b"synthetic-back-wide")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
              b"running on gadgets, not the JIT", b"open Andarium from StikDebug",
              b"Started without JIT")),

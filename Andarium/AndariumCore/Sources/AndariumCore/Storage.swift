@@ -16,12 +16,14 @@ public protocol GuestStorage: Sendable {
     /// The guest on disk, with its measured data, or nil if there is none.
     func load() throws -> Guest?
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest
-    /// Deletes everything the guest has: its data, its record and its
-    /// choices. Afterwards `load` finds no guest, and the application is
-    /// where it was before the first one was set up.
+    /// Deletes everything the guest has: its data, its record, its snapshots
+    /// and its choices. Afterwards `load` finds no guest, and the application
+    /// is where it was before the first one was set up.
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws
     /// What a start would be, from the instance on disk; nil when its record
-    /// cannot be read.
+    /// cannot be read. A snapshot restore that did not finish is planned as
+    /// the start that completes it will find the guest: from the snapshot's
+    /// record.
     func startPlan() -> StartPlan?
     /// The data Android has written: what the data disk occupies now, which
     /// the guest changes while it runs and `load` measures once. Zero where
@@ -114,14 +116,21 @@ public struct TwoDiskStorage: GuestStorage {
     public let release: ReleaseIdentity
     /// The release directory inside the application.
     public let releaseDirectory: URL
+    /// The file calls of the snapshot store, which a test replaces.
+    let snapshotIO: SnapshotFileOperations
 
     public init(locations: GuestLocations, release: ReleaseIdentity, releaseDirectory: URL) {
+        self.init(locations: locations, release: release, releaseDirectory: releaseDirectory, snapshotIO: .live)
+    }
+
+    init(locations: GuestLocations, release: ReleaseIdentity, releaseDirectory: URL, snapshotIO: SnapshotFileOperations) {
         self.locations = locations
         self.release = release
         self.releaseDirectory = releaseDirectory
+        self.snapshotIO = snapshotIO
     }
 
-    private var files: InstanceFiles { InstanceFiles(directory: locations.directory) }
+    var files: InstanceFiles { InstanceFiles(directory: locations.directory) }
 
     public var createRequirementBytes: UInt64 { Limits.firstStartReserveBytes }
 
@@ -178,11 +187,22 @@ public struct TwoDiskStorage: GuestStorage {
     }
 
     public func startPlan() -> StartPlan? {
-        files.startPlan(for: release)
+        // A snapshot restore that put its data in place and did not finish
+        // completes before a start reads the files (`prepareStart`): the guest
+        // then starts as the snapshot's record says, whatever the record it
+        // replaces says, and Start is offered on that.
+        if let restored = snapshotStore.recordOfUnfinishedRestore() {
+            return InstanceRules.plan(state: restored, dataDiskExists: true, snapshotExists: false, release: release)
+        }
+        return files.startPlan(for: release)
     }
 
     public func prepareStart(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
         try requireUsablePaths()
+        // A restore that began and did not finish completes before anything
+        // reads the files; launch does it, and this catches the one a failure
+        // left in this process.
+        if snapshotStore.restoreUnderWay { try recoverSnapshots() }
         var decision = try files.decide(for: release)
         if decision.action == .refusePending {
             // Start is Try Again; a release other than the one updating
@@ -194,6 +214,10 @@ public struct TwoDiskStorage: GuestStorage {
     }
 
     public func restoreUpdate() throws {
+        // A snapshot restore that began completes before anything else changes
+        // the guest's files; after it there is no update copy, and this then
+        // says that no update is pending.
+        if snapshotStore.restoreUnderWay { try recoverSnapshots() }
         try files.apply(files.decide(for: release, flags: InstanceFlags(restoreSnapshot: true)), release: release)
     }
 
@@ -230,9 +254,10 @@ public struct TwoDiskStorage: GuestStorage {
 
     /// iCloud and computer backups include the guest's files only when the
     /// user chose that for the guest. The flag sits on the guest's directory,
-    /// which covers whatever is later put in it (the data disk, a snapshot),
-    /// and on its files.
-    private func applyBackupPolicy(_ guest: Guest) {
+    /// which covers whatever is later put in it (the data disk), and on its
+    /// files. The user's snapshots are never backed up, whatever the choice:
+    /// a backup would hold each at its full size.
+    func applyBackupPolicy(_ guest: Guest) {
         var excluded = URLResourceValues()
         excluded.isExcludedFromBackup = true
         var included = URLResourceValues()
@@ -246,6 +271,9 @@ public struct TwoDiskStorage: GuestStorage {
             // new file and leaves that record in place, so the flag is set
             // first and the clear then removes both.
             if guest.includeInBackups { try? target.setResourceValues(included) }
+        }
+        if FileManager.default.fileExists(atPath: files.snapshots.path) {
+            SnapshotStore.excludeFromBackup(files.snapshots)
         }
     }
 }

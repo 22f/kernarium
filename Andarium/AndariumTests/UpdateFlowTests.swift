@@ -34,7 +34,7 @@ final class StubDriver: RuntimeDriver {
         begunGuests.append(guest)
         savedWhenBegun.append(savedGuest)
     }
-    func restoreUpdate() throws {
+    func restoreUpdate() async throws {
         if restoreFails { throw InstanceError.refused("No update is pending.") }
         restored += 1
         // The files now say the update waits for the next start.
@@ -43,6 +43,11 @@ final class StubDriver: RuntimeDriver {
     var motionSensors = false
     var savedGuest: Guest?
     func setMotionSensors(_ on: Bool) { motionSensors = on }
+    /// What "Use the pointer as touch" and the pointer lock told the driver.
+    var pointerAsTouch = false
+    var pointerLocked = false
+    func setPointerAsTouch(_ on: Bool) { pointerAsTouch = on }
+    func pointerLockDidChange(_ locked: Bool) { pointerLocked = locked }
     private(set) var geometryChanges = 0
     func sceneGeometryDidChange() { geometryChanges += 1 }
 
@@ -227,9 +232,9 @@ struct UpdateFlowTests {
         #expect(driver.restored == 0)
     }
 
-    @Test func restoreOnlyPutsTheDataBackAndHomeShowsThePendingUpdate() {
+    @Test func restoreOnlyPutsTheDataBackAndHomeShowsThePendingUpdate() async {
         let (model, driver) = model(plan: .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))
-        model.restoreUpdate()
+        await model.restoreUpdate()
         #expect(driver.restored == 1)
         #expect(model.phase == .home)
         #expect(driver.begun.isEmpty)
@@ -241,10 +246,10 @@ struct UpdateFlowTests {
         #expect(model.bootFrom == "r1")
     }
 
-    @Test func aRestoreThatFailsSaysSoAndStaysAtHome() {
+    @Test func aRestoreThatFailsSaysSoAndStaysAtHome() async {
         let (model, driver) = model(plan: .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))
         driver.restoreFails = true
-        model.restoreUpdate()
+        await model.restoreUpdate()
         #expect(model.alert?.title == "The guest could not be restored")
         #expect(model.phase == .home)
         #expect(model.plan == .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))

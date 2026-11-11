@@ -16,17 +16,21 @@ public struct HostDevice: Equatable, Sendable {
     /// Whether the device's GPU can draw the guest. The guest's graphics need
     /// Metal 4, which the A14 and later chips (and the M1 and later) have.
     public var runsGuestGraphics: Bool
+    /// Whether the device can have a mouse or trackpad whose pointer iOS shows
+    /// the application: an iPad or a Mac, not an iPhone.
+    public var supportsPointer: Bool
 
     /// `processorCount` is the vCPU limit.
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
-        runsGuestGraphics: Bool = true
+        runsGuestGraphics: Bool = true, supportsPointer: Bool = true
     ) {
         self.name = name
         self.processorCount = max(1, processorCount)
         self.memory = memory
         self.freeStorageBytes = freeStorageBytes
         self.runsGuestGraphics = runsGuestGraphics
+        self.supportsPointer = supportsPointer
     }
 
     public func hasRoom(for bytes: UInt64) -> Bool { freeStorageBytes >= bytes }

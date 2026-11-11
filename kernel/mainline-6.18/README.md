@@ -227,6 +227,12 @@ shared series because it depends on the guest OS:
   nl80211 interface; a desktop guest has no Wi-Fi manager, and the code adds
   about 1.5 MB to `vmlinux` and a phy nothing uses.
 
+A game controller of the host reaches the Android guest as a uhid device, which
+the kernel's own driver binds and drives for force feedback: the Android overlay
+builds `HID_PLAYSTATION` for a DualSense or DualShock 4 and `HID_MICROSOFT` for
+an Xbox controller. Only this configuration has UHID and a relay to feed it, so
+the Linux overlay builds neither.
+
 The cgroup, FUSE, `quota2`, `IDLETIMER`, and Incremental file system topics come
 from the Android common kernel. The shared series also carries topics only the
 Android product exercises, each inert in a Linux guest: the `XFRM_SPI_PER_DESTINATION`

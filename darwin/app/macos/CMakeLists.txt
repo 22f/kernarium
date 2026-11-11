@@ -112,8 +112,12 @@ function(uml_add_macos_embedded_kernel_app
         UML::AudioDevice
         UML::BatteryDevice
         UML::VideoDevice
+        UML::CameraDevice
+        UML::CameraSource
         UML::ConsoleDevice
         UML::VsockDevice
+        UML::GnssDevice
+        UML::GnssSyntheticSource
         UML::GpuDevice
         UML::GpuMetalShaderCache
         UML::GpuMesaShaderCache

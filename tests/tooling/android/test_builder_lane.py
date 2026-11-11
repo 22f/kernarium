@@ -375,9 +375,11 @@ def tracked_erofs_parameters(android_root: Path) -> tuple[str, str]:
 def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
+    integers: list[tuple[str, int]] = (),
 ) -> bytes:
-    """A compiled resource table whose one package holds the given string-array resources and
-    bool resources (as compact entries when `compact` is set, as a recent aapt2 writes them)."""
+    """A compiled resource table whose one package holds the given string-array resources, bool
+    resources and integer resources (the latter two as compact entries when `compact` is set, as a
+    recent aapt2 writes them)."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -395,7 +397,7 @@ def synthetic_resource_table(
                 + struct.pack(f"<{len(strings)}I", *offsets) + data)
 
     values = sorted({item for _, items in arrays for item in items})
-    names = [name for name, _ in arrays] + [name for name, _ in booleans]
+    names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
     configuration = struct.pack("<I", 64) + b"\x00" * 60
     type_header = 20 + len(configuration)
 
@@ -422,8 +424,20 @@ def synthetic_resource_table(
             bool_entries.append(struct.pack("<HHI", index, 0x1200 | 0x08, data))
         else:
             bool_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x12, data))
-    chunks = type_chunk(1, array_entries) + (type_chunk(2, bool_entries) if booleans else b"")
-    type_pool, key_pool = pool(["array", "bool"] if booleans else ["array"]), pool(names)
+    integer_entries = []
+    for index, (_, value) in enumerate(integers, start=len(arrays) + len(booleans)):
+        data = value & 0xFFFFFFFF
+        if compact:
+            integer_entries.append(struct.pack("<HHI", index, 0x1000 | 0x08, data))
+        else:
+            integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
+    chunks = type_chunk(1, array_entries)
+    type_names = ["array"]
+    for type_name, typed in (("bool", bool_entries), ("integer", integer_entries)):
+        if typed:
+            type_names.append(type_name)
+            chunks += type_chunk(len(type_names), typed)
+    type_pool, key_pool = pool(type_names), pool(names)
     package_header = 288
     package = (struct.pack("<HHII", 0x0200, package_header,
                            package_header + len(type_pool) + len(key_pool) + len(chunks), 0x7F)
@@ -536,9 +550,13 @@ def adjust_archive(path: Path, entries: dict[str, bytes | None]) -> None:
 def verify_target_files_fixtures(verifier: Path) -> None:
     sys.path.insert(0, str(verifier.parent))
     from release_common import BUILD_VARIANTS, configured_build_variant
+    import camera_layouts
 
     tool = load_tool(verifier)
     pinner_overlay_entry = tool.PINNER_OVERLAY
+    wifi_overlay_entry = tool.WIFI_OVERLAY
+    wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
+    wifi_permanent, wifi_temporary = tool.WIFI_NO_INTERNET_THRESHOLDS
     statistics_apks = tool.STATISTICS_APKS
     # The Setup Wizard overlay's artwork, as the build would carry it: the raw animation unchanged and
     # the compiled vector holding its path data as strings.
@@ -572,6 +590,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             fail(f"the resource bool reader misreads {'compact' if compact else 'full'} entries")
         if tool.resource_arrays(table) != expected_arrays:
             fail(f"the resource array reader misreads a table that also holds {'compact' if compact else 'full'} bools")
+    # ... and an integer resource, signed, in a table with or without bools, full or compact.
+    numbers = [("config_threshold", 2**31 - 1), ("config_low", 1), ("config_threshold", 0), ("config_negative", -1)]
+    expected_integers = {"config_threshold": [2**31 - 1, 0], "config_low": [1], "config_negative": [-1]}
+    for compact in (False, True):
+        for typed_booleans in ([], flags):
+            table = synthetic_resource_table(tables, booleans=typed_booleans, integers=numbers, compact=compact)
+            if tool.resource_integers(table) != expected_integers:
+                fail(f"the resource integer reader misreads {'compact' if compact else 'full'} entries")
+            if tool.resource_arrays(table) != expected_arrays:
+                fail("the resource array reader misreads a table that also holds integers")
     release_manifest = synthetic_compiled_manifest(None, debuggable=False)
     release_apk = synthetic_apk(debuggable=False)
     preopt_apks = sorted(tool.REQUIRED_PREOPT_APKS)
@@ -579,6 +607,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         entry for entry in tool.REQUIRED_ENTRIES
         if entry.endswith(".apk") and entry not in tool.REQUIRED_PREOPT_APKS
         and entry != pinner_overlay_entry
+        and entry != wifi_overlay_entry  # written with its own resources
+        and entry != tool.CAMERA_APP  # written with its own resources
     )
     arm_preopt_apks = sorted(tool.REQUIRED_ARM_PREOPT_APKS)
     uml_fstab = tracked_fstab(verifier.parents[1])
@@ -656,12 +686,135 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         good_net_setup_label = (
             "/vendor/bin/kernarium_net_setup  u:object_r:kernarium_net_setup_exec:s0\n"
         )
+        good_vibrator_label = (
+            "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.vibrator-service\\.andarium"
+            "  u:object_r:hal_vibrator_default_exec:s0\n"
+        )
+        good_gnss_label = (
+            "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.gnss-service\\.andarium"
+            "  u:object_r:hal_gnss_default_exec:s0\n"
+        )
+        good_thermal_label = (
+            "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.thermal-service\\.andarium"
+            "  u:object_r:hal_thermal_default_exec:s0\n"
+        )
+        good_camera_label = (
+            "/vendor/bin/hw/android\\.hardware\\.camera\\.provider@2\\.7-service-google-lazy"
+            " u:object_r:hal_camera_default_exec:s0\n"
+        )
+        good_gamepad_label = (
+            "/vendor/bin/kernarium_gamepad  u:object_r:kernarium_gamepad_exec:s0\n"
+        )
         good_video_contexts = (
             "/dev/hvc0  u:object_r:serial_device:s0\n"
             + good_net_setup_label
             + "/(vendor|system/vendor)/bin/hw/android\\.hardware\\.media\\.c2-service-v4l2"
             "  u:object_r:mediacodec_exec:s0\n"
+            + good_vibrator_label
+            + good_gnss_label
+            + good_thermal_label
+            + good_camera_label
+            + good_gamepad_label
         )
+        # The GNSS HAL: declared on every device by one vendor fragment, and started at boot with its
+        # class.
+        good_gnss_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.gnss</name><version>7</version>"
+            "<fqname>IGnss/default</fqname></hal></manifest>"
+        )
+        good_gnss_rc = (
+            "service vendor.gnss-andarium /vendor/bin/hw/android.hardware.gnss-service.andarium\n"
+            "    interface aidl android.hardware.gnss.IGnss/default\n"
+            "    class hal\n    user gps\n    group gps\n"
+        )
+        gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
+        gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
+        # The host's cameras: the lazy provider (a service that init starts when a client asks), its one
+        # declaration, the HWL library that holds the V4L2 source (the names only route p0030 puts in
+        # it), the characteristics template, and the layouts' files (the generator's own).
+        camera_provider = "android.hardware.camera.provider@2.7-service-google-lazy"
+        camera_provider_path = f"VENDOR/bin/hw/{camera_provider}"
+        camera_rc_path = f"VENDOR/etc/init/{camera_provider}.rc"
+        camera_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.camera.provider@2.7-service-google.xml"
+        camera_library_path = "VENDOR/lib64/libgooglecamerahwl_impl.so"
+        camera_template_path = "VENDOR/etc/config/emu_camera_v4l2.json"
+        camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
+        good_camera_rc = (
+            f"service vendor.camera-provider-2-7-google /vendor/bin/hw/{camera_provider}\n"
+            "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n"
+            "    oneshot\n    disabled\n    class hal\n    user system\n    group system\n"
+            "    capabilities SYS_NICE\n"
+        )
+        good_camera_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.camera.provider</name><version>4</version>"
+            "<interface><name>ICameraProvider</name><instance>internal/0</instance></interface>"
+            "</hal></manifest>"
+        )
+
+        def camera_library(*markers: bytes) -> bytes:
+            return synthetic_aarch64_elf() + b"".join(marker + b"\x00" for marker in markers)
+
+        camera_layout_files = camera_layouts.installed()
+        camera_front_path = "VENDOR/etc/permissions/sku_front/kernarium_camera.xml"
+        camera_init_path = "VENDOR/etc/init/init.kernarium_camera.rc"
+        good_camera_markers = tuple(tool.CAMERA_HWL_MARKERS)
+        good_camera_template = json.dumps({"android.lens.facing": [1], "android.sensor.orientation": [90]})
+        # The thermal HAL: declared on every device by one vendor fragment, started at boot with its
+        # class. The default display configuration holds the one point that holds the render rate to
+        # 30 Hz from the SEVERE status on.
+        good_thermal_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.thermal</name><version>3</version>"
+            "<fqname>IThermal/default</fqname></hal></manifest>"
+        )
+        good_thermal_rc = (
+            "service vendor.thermal-andarium /vendor/bin/hw/android.hardware.thermal-service.andarium\n"
+            "    interface aidl android.hardware.thermal.IThermal/default\n"
+            "    class hal\n    user nobody\n    group system\n"
+        )
+        # The gamepad relay: a daemon that init starts with its class, in a domain of its own.
+        good_gamepad_rc = (
+            "service kernarium_gamepad /vendor/bin/kernarium_gamepad\n"
+            "    class main\n    user nobody\n    group uhid\n"
+        )
+        gamepad_binary_path = "VENDOR/bin/kernarium_gamepad"
+        gamepad_rc_path = "VENDOR/etc/init/kernarium_gamepad.rc"
+        thermal_rc_path = "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc"
+        thermal_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml"
+        # The device configuration of the host's keyboard and mouse (overlay/input), and where each lands.
+        input_device_files = {
+            "Vendor_1af4_Product_0002.kl": "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
+            "Vendor_1af4_Product_0003.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
+            "Vendor_1af4_Product_0004.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
+            "Vendor_1af4_Product_0005.idc": "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc",
+        }
+        side_key_layout = (verifier.parents[1] / "overlay/input/Vendor_1af4_Product_0002.kl").read_text()
+        display_config_path = "VENDOR/etc/displayconfig/default.xml"
+        good_display_config = (
+            '<?xml version="1.0" encoding="utf-8"?>\n<!-- comment -->\n<displayConfiguration>\n'
+            "  <thermalThrottling>\n    <refreshRateThrottlingMap>\n"
+            "      <refreshRateThrottlingPoint>\n        <thermalStatus>severe</thermalStatus>\n"
+            "        <refreshRateRange>\n          <minimum>0</minimum>\n          <maximum>30</maximum>\n"
+            "        </refreshRateRange>\n      </refreshRateThrottlingPoint>\n"
+            "    </refreshRateThrottlingMap>\n  </thermalThrottling>\n</displayConfiguration>\n"
+        )
+        # The vibrator HAL: declared by the ODM manifest of the haptics SKU alone, and started by init
+        # for that SKU alone.
+        good_vibrator_manifest = (
+            '<manifest version="1.0" type="device"><hal format="aidl">'
+            "<name>android.hardware.vibrator</name><version>4</version>"
+            "<fqname>IVibrator/default</fqname></hal></manifest>"
+        )
+        good_vibrator_rc = (
+            "service vendor.vibrator-andarium /vendor/bin/hw/android.hardware.vibrator-service.andarium\n"
+            "    interface aidl android.hardware.vibrator.IVibrator/default\n"
+            "    class hal\n    user nobody\n    group nobody\n    disabled\n\n"
+            "on boot && property:ro.boot.product.hardware.sku=haptics\n"
+            "    enable vendor.vibrator-andarium\n    start vendor.vibrator-andarium\n"
+        )
+        vibrator_rc_path = "VENDOR/etc/init/android.hardware.vibrator-service.andarium.rc"
 
         def software_update(name: str, hevc_rate: str, vp9_size: str, vp9_blocks: str) -> str:
             # The software decoders' 3840x2160 update (config/media_codecs_c2.xml).
@@ -753,6 +906,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           unsupported_hal: bool = False,
                           unsupported_feature: bool = False,
                           missing_multitouch_feature: str | None = None,
+                          missing_location_feature: str | None = None,
                           missing_microphone_feature: bool = False,
                           missing_companion_feature: bool = False,
                           missing_midi_feature: bool = False,
@@ -769,6 +923,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           missing_net_setup_binary: bool = False,
                           missing_net_library: bool = False,
                           net_policy_variant: str | None = None,
+                          gamepad_policy_variant: str | None = None,
                           wifi_network_variant: str | None = None,
                           wifi_hal_variant: str | None = None,
                           wifi_dirs_variant: str | None = None,
@@ -818,6 +973,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           userdata_grow_policy_variant: str | None = None,
                           discrete_ops_variant: str | None = None,
                           pinner_overlay_variant: str | None = None,
+                          wifi_overlay_variant: str | None = None,
                           statistics_variant: str | None = None,
                           wizard_branding_variant: str | None = None,
                           navigation_variant: str | None = None,
@@ -827,11 +983,13 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           flip_variant: str | None = None,
                           reclaim_variant: str | None = None,
                           time_zone_variant: str | None = None,
+                          keyboard_default_variant: str | None = None,
                           wallpaper_variant: str | None = None,
-                          thermal_hal_variant: str | None = None,
                           cas_hal_variant: str | None = None,
                           adbd_variant: str | None = None,
                           services_jar_variant: str | None = None,
+                          input_flinger_variant: str | None = None,
+                          network_stack_variant: str | None = None,
                           ota_certificates: str | None = None,
                           signed: bool = False,
                           adbd_launch_unreadable: bool = False,
@@ -852,6 +1010,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           arm_flags: int = 0x05000200,
                           arm_edit: tuple[str, int, int] | None = None,
                           missing_arm_gallium_dependency: bool = False,
+                          camera_variant: str | None = None,
                           entries: dict[str, bytes | None] | None = None,
                           init_variant: str | None = None,
                           extra_entry: str | None = None,
@@ -890,6 +1049,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "userdata_extfs_inode_count": (
                         "32768" if wrong_userdata_inodes else "8192"
                     ),
+                    "vintf_odm_manifest_skus": "haptics",
                 }
                 for key, value in (misc_info_edits or {}).items():
                     if value is None:
@@ -1006,6 +1166,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     }.get(lmkd_variant, "ro.lmk.gpu_reclaim=true\n")
                     + ("ro.boot.vendor.overlay.theme=com.android.internal.systemui.navbar.gestural\n"
                        if navigation_variant == "overlay-theme-property" else "")
+                    + {
+                        "lazy-property-missing": "",
+                        "lazy-property-off": "ro.camera.enableLazyHal=false\n",
+                    }.get(camera_variant, "ro.camera.enableLazyHal=true\n")
                     + {
                         None: "apexd.config.use_fiemap=false\n",
                         "missing": "",
@@ -1245,7 +1409,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "    start adbd\n"
                     + rcu_restore + blocker_rules + net_rules
                     + ("" if init_variant == "no-adbd-keep-alive"
-                       else "on property:init.svc.adbd=stopped\n    start adbd\n"),
+                       else "on property:init.svc.adbd=stopped\n    start adbd\n")
+                    # Cuttlefish's bugreport service, which the product keeps without its keychord.
+                    + "service bugreport /system/bin/dumpstate -d -p -z\n    class main\n    user root\n"
+                      "    disabled\n    oneshot\n"
+                    + ("    keycodes 30 48\n" if init_variant == "bugreport-keychord" else ""),
                 )
                 if extra_entry is not None:
                     archive.writestr(extra_entry, "on early-init\n")
@@ -1345,7 +1513,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             if wifi_network_variant == "no-add"
                             else "cmd wifi add-network VirtWifi open\n"
                         )
+                        + ("" if wifi_network_variant == "no-list" else "cmd wifi list-networks\n")
+                        + ("" if wifi_network_variant == "no-status" else "cmd wifi status\n")
                         + ('setprop "$marker" 1\n' if wifi_network_variant != "no-marker" else "")
+                        + (
+                            'setprop "$marker" 2\n'
+                            if wifi_network_variant not in ("no-marker", "no-joined-marker")
+                            else ""
+                        )
                         + {
                             "enables-wifi": "cmd wifi set-wifi-enabled enabled\n",
                             "connects": "cmd wifi connect-network VirtWifi open\n",
@@ -1456,6 +1631,53 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         time_zone_rc = time_zone_rc.replace(old, new)
                 if time_zone_variant != "missing-rc":
                     archive.writestr("SYSTEM_EXT/etc/init/kernarium_time_zone.rc", time_zone_rc)
+                # The script that moves an older guest to the on-screen keyboard default, with its init
+                # file: the tracked ones, and the ways each can go wrong.
+                keyboard_script = (
+                    verifier.parents[1] / "overlay/tools/kernarium_keyboard_default.sh"
+                ).read_text()
+                keyboard_rc = (
+                    verifier.parents[1] / "overlay/tools/kernarium_keyboard_default.rc"
+                ).read_text()
+                for variant, (old, new) in {
+                    "no-read": ("cmd settings get secure show_ime_with_hard_keyboard", "true"),
+                    "no-put": ("cmd settings put secure show_ime_with_hard_keyboard 0", "true"),
+                    "no-marker": ('setprop "$marker" 1', "true"),
+                    "turns-it-on": ("tag=kernarium_keyboard_default\n",
+                                    "tag=kernarium_keyboard_default\n"
+                                    "cmd settings put secure show_ime_with_hard_keyboard 1\n"),
+                    "writes-another-setting": ("tag=kernarium_keyboard_default\n",
+                                               "tag=kernarium_keyboard_default\n"
+                                               "cmd settings put system screen_off_timeout 1000\n"),
+                    "deletes-the-setting": ("tag=kernarium_keyboard_default\n",
+                                            "tag=kernarium_keyboard_default\n"
+                                            "cmd settings delete secure show_ime_with_hard_keyboard\n"),
+                    "other-user": ("tag=kernarium_keyboard_default\n",
+                                   "tag=kernarium_keyboard_default\n"
+                                   "cmd settings --user 10 get secure show_ime_with_hard_keyboard\n"),
+                }.items():
+                    if keyboard_default_variant == variant:
+                        if old not in keyboard_script:
+                            fail(f"the keyboard default script lacks '{old}' for the {variant} variant")
+                        keyboard_script = keyboard_script.replace(old, new)
+                if keyboard_default_variant != "missing-script":
+                    archive.writestr("SYSTEM_EXT/bin/kernarium_keyboard_default.sh", keyboard_script)
+                for variant, (old, new) in {
+                    "missing-service": ("service kernarium_keyboard_default ", "service other_service "),
+                    "not-oneshot": ("    oneshot\n", ""),
+                    "not-disabled": ("    disabled\n", ""),
+                    "started-at-boot": ("on property:sys.boot_completed=1", "on boot"),
+                    "no-start": ("    start kernarium_keyboard_default\n", ""),
+                }.items():
+                    if keyboard_default_variant == variant:
+                        if old not in keyboard_rc:
+                            fail(f"the keyboard default init file lacks '{old}' for the {variant} variant")
+                        keyboard_rc = keyboard_rc.replace(old, new)
+                if keyboard_default_variant != "missing-rc":
+                    archive.writestr("SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc", keyboard_rc)
+                # The device configuration of the host's keyboard and mouse: the tracked files.
+                for name, destination in input_device_files.items():
+                    archive.writestr(destination, (verifier.parents[1] / "overlay/input" / name).read_text())
                 archive.writestr(
                     "SYSTEM_EXT/etc/selinux/system_ext_file_contexts",
                     "/(system_ext|system/system_ext)/bin/other\\.sh  u:object_r:system_file:s0\n"
@@ -1476,6 +1698,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if time_zone_variant == "missing-label"
                         else "/(system_ext|system/system_ext)/bin/kernarium_time_zone\\.sh  "
                         "u:object_r:kernarium_time_zone_exec:s0\n"
+                    )
+                    + (
+                        ""
+                        if keyboard_default_variant == "missing-label"
+                        else "/(system_ext|system/system_ext)/bin/kernarium_keyboard_default\\.sh  "
+                        "u:object_r:kernarium_keyboard_default_exec:s0\n"
                     ),
                 )
                 # Platform, vendor and system_ext policy as the builder emits them: the
@@ -1557,13 +1785,24 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         ""
                         if wifi_network_variant == "missing-marker-context"
                         else "persist.sys.kernarium.virtwifi_saved    "
-                        "u:object_r:kernarium_wifi_network_prop:s0 exact bool\n"
+                        "u:object_r:kernarium_wifi_network_prop:s0 exact "
+                        + {
+                            "marker-type-bool": "bool",
+                            "marker-type-enum-one": "enum 1",
+                        }.get(wifi_network_variant or "", "enum 1 2")
+                        + "\n"
                     )
                     + (
                         ""
                         if time_zone_variant == "missing-marker-context"
                         else "persist.sys.kernarium.timezone_applied    "
                         "u:object_r:kernarium_time_zone_prop:s0 exact string\n"
+                    )
+                    + (
+                        ""
+                        if keyboard_default_variant == "missing-marker-context"
+                        else "persist.sys.kernarium.keyboard_default    "
+                        "u:object_r:kernarium_keyboard_default_prop:s0 exact bool\n"
                     ),
                 )
                 archive.writestr(
@@ -1616,6 +1855,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                        else "kernarium_wifi_network_prop ")
                     + ("" if time_zone_variant == "marker-not-system"
                        else "kernarium_time_zone_prop ")
+                    + ("" if keyboard_default_variant == "marker-not-system"
+                       else "kernarium_keyboard_default_prop ")
                     + "))\n"
                     + (
                         ""
@@ -1695,6 +1936,38 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if time_zone_variant == "sets-zone-property"
                         else ""
                     )
+                    + "".join(
+                        rule
+                        for variant, rule in (
+                            ("missing-transition",
+                             "(typetransition init kernarium_keyboard_default_exec process "
+                             "kernarium_keyboard_default)\n"),
+                            ("missing-settings-find",
+                             "(allow kernarium_keyboard_default settings_service "
+                             "(service_manager (find)))\n"),
+                            ("missing-transfer",
+                             "(allow kernarium_keyboard_default system_server (binder (transfer)))\n"),
+                            ("missing-call",
+                             "(allow system_server kernarium_keyboard_default (binder (call)))\n"),
+                            ("missing-fd",
+                             "(allow system_server kernarium_keyboard_default (fd (use)))\n"),
+                            ("missing-fifo",
+                             "(allow system_server kernarium_keyboard_default "
+                             "(fifo_file (read write getattr)))\n"),
+                        )
+                        if keyboard_default_variant != variant
+                    )
+                    + (
+                        ""
+                        if keyboard_default_variant == "missing-marker-rule"
+                        else "(allow kernarium_keyboard_default kernarium_keyboard_default_prop "
+                        "(property_service (set)))\n"
+                    )
+                    + (
+                        "(allow kernarium_keyboard_default timezone_prop (property_service (set)))\n"
+                        if keyboard_default_variant == "sets-another-property"
+                        else ""
+                    )
                     + (
                         ""
                         if missing_adb_prop_policy
@@ -1751,6 +2024,34 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         else "(typetransition init_202604 kernarium_net_setup_exec process "
                         "kernarium_net_setup)\n"
                     )
+                    # The gamepad relay: init enters its domain through its executable's label, and
+                    # the domain may use the uhid node and vsock, as an unconstrained vsock user.
+                    + (
+                        ""
+                        if gamepad_policy_variant == "missing-transition"
+                        else "(typetransition init_202604 kernarium_gamepad_exec process "
+                        "kernarium_gamepad)\n"
+                    )
+                    + (
+                        ""
+                        if gamepad_policy_variant == "no-uhid"
+                        else "(allow kernarium_gamepad uhid_device_202604 (chr_file ("
+                        + ("getattr open read ioctl lock map" if gamepad_policy_variant == "uhid-read-only"
+                           else "getattr open read ioctl lock map append write")
+                        + ")))\n"
+                    )
+                    + (
+                        ""
+                        if gamepad_policy_variant == "no-vsock"
+                        else "(allow kernarium_gamepad self (vsock_socket ("
+                        + ("read write create getattr bind accept getopt shutdown"
+                           if gamepad_policy_variant == "vsock-no-listen"
+                           else "read write create getattr bind listen accept getopt shutdown")
+                        + ")))\n"
+                    )
+                    + "(typeattributeset unconstrained_vsock_violators (hal_sensors_default"
+                    + ("" if gamepad_policy_variant == "no-attribute" else " kernarium_gamepad")
+                    + "))\n"
                     # The ClearKey HAL's rule for the memfd files of application domains: the
                     # generated attribute names the application domains less the isolated ones.
                     + (
@@ -1928,6 +2229,33 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             else b"\x00config_pinnerHomePinBytes\x00",
                         )
                 archive.writestr(pinner_overlay_entry, pinner_overlay.getvalue())
+                # The Wi-Fi module's overlay: the thresholds that keep the guest's one network
+                # enabled, and the ways the table can lack or lower one.
+                permanent, temporary, never = wifi_permanent, wifi_temporary, wifi_never
+                wifi_thresholds = {
+                    None: [(permanent, never), (temporary, never)],
+                    "compact": [(permanent, never), (temporary, never)],
+                    "missing-permanent": [(temporary, never)],
+                    "missing-temporary": [(permanent, never)],
+                    "missing-both": [],
+                    "no-table": [],
+                    "permanent-one": [(permanent, 1), (temporary, never)],
+                    "temporary-zero": [(permanent, never), (temporary, 0)],
+                    "temporary-large-not-largest": [(permanent, never), (temporary, never - 1)],
+                    "permanent-negative": [(permanent, -1), (temporary, never)],
+                    "qualified-low": [(permanent, never), (temporary, never), (permanent, 1)],
+                }[wifi_overlay_variant]
+                wifi_overlay = io.BytesIO()
+                with zipfile.ZipFile(wifi_overlay, "w") as overlay:
+                    overlay.writestr("AndroidManifest.xml", release_manifest)
+                    if wifi_overlay_variant != "no-table":
+                        overlay.writestr(
+                            "resources.arsc",
+                            synthetic_resource_table(
+                                [("config_fixture", [])], integers=wifi_thresholds,
+                                compact=wifi_overlay_variant == "compact"),
+                        )
+                archive.writestr(wifi_overlay_entry, wifi_overlay.getvalue())
                 # The runtime resource overlay Soong generates from the product's
                 # SimpleDeviceConfig overlays. Its string pool holds each DeviceConfig list:
                 # LineageOS's, then the product's, which adds the ops of AOSP's default.
@@ -2118,9 +2446,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         flip_values = [False, True]
                     elif flip_variant == "missing":
                         flip_values = []
+                    toggle_values = {
+                        "toggle-off": [False],
+                        "toggle-missing": [],
+                        "toggle-qualified": [True, False],
+                    }.get(camera_variant, [True])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
-                        booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values],
+                        booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
+                        + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
                     )
                     framework_apk = io.BytesIO()
@@ -2150,6 +2484,49 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                                  '<manifest version="1.0" type="device"><hal format="aidl">'
                                  '<name>android.hardware.sensors</name><version>3</version>'
                                  '<fqname>ISensors/default</fqname></hal></manifest>')
+                archive.writestr("VENDOR/bin/hw/android.hardware.vibrator-service.andarium", synthetic_aarch64_elf())
+                archive.writestr(vibrator_rc_path, good_vibrator_rc)
+                archive.writestr("ODM/etc/vintf/manifest_haptics.xml", good_vibrator_manifest)
+                archive.writestr("VENDOR/bin/hw/android.hardware.gnss-service.andarium", synthetic_aarch64_elf())
+                archive.writestr(gnss_rc_path, good_gnss_rc)
+                archive.writestr(gnss_fragment_path, good_gnss_manifest)
+                for camera_entry, camera_payload in camera_layouts.installed().items():
+                    archive.writestr(camera_entry, camera_payload)
+                archive.writestr(camera_provider_path, synthetic_aarch64_elf())
+                archive.writestr(camera_rc_path, good_camera_rc)
+                archive.writestr(camera_fragment_path, good_camera_manifest)
+                archive.writestr(camera_library_path, camera_library(*good_camera_markers))
+                archive.writestr(camera_template_path, good_camera_template)
+                # Aperture's resources as the build leaves them with the product's static overlay: each
+                # lens of the host is its own camera device, and the wide lens is the zoom camera's 1x.
+                aux_booleans = {
+                    None: [("config_enableAuxCameras", True)],
+                    "aux-off": [("config_enableAuxCameras", False)],
+                    "aux-missing": [],
+                    "aux-qualified": [("config_enableAuxCameras", True), ("config_enableAuxCameras", False)],
+                }[camera_variant if camera_variant in {"aux-off", "aux-missing", "aux-qualified"} else None]
+                ignored_ids = {
+                    "ignored-extra": [["2", "3"]],
+                    "ignored-none": [[]],
+                    "ignored-missing": [],
+                }.get(camera_variant, [["2"]])
+                aperture_table = synthetic_resource_table(
+                    [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
+                    booleans=aux_booleans, compact=camera_variant == "compact",
+                )
+                aperture_apk = io.BytesIO()
+                with zipfile.ZipFile(aperture_apk, "w") as apk:
+                    apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
+                    apk.writestr("resources.arsc", aperture_table)
+                archive.writestr(camera_app_path, aperture_apk.getvalue())
+                archive.writestr("VENDOR/bin/hw/android.hardware.thermal-service.andarium", synthetic_aarch64_elf())
+                archive.writestr(thermal_rc_path, good_thermal_rc)
+                archive.writestr(thermal_fragment_path, good_thermal_manifest)
+                archive.writestr(display_config_path, good_display_config)
+                archive.writestr(gamepad_binary_path, synthetic_aarch64_elf())
+                archive.writestr(gamepad_rc_path, good_gamepad_rc)
+                # The sample file of the platform: comments only, no assistance server.
+                archive.writestr("SYSTEM/etc/gps_debug.conf", "# SUPL_HOST=supl.example\n# NTP_SERVER=ntp.example\n\n")
                 advertised_features = ["android.hardware.touchscreen",
                                        "android.hardware.sensor.accelerometer",
                                        "android.hardware.sensor.gyroscope"]
@@ -2159,6 +2536,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         "android.hardware.touchscreen.multitouch.distinct",
                         "android.hardware.touchscreen.multitouch.jazzhand",
                     ) if feature != missing_multitouch_feature
+                )
+                advertised_features.extend(
+                    feature for feature in ("android.hardware.location", "android.hardware.location.gps")
+                    if feature != missing_location_feature
                 )
                 if not missing_microphone_feature:
                     advertised_features.append("android.hardware.microphone")
@@ -2311,6 +2692,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     }[board_variant]
                     + "#ro.soc.manufacturer=Google\n#ro.soc.model=vsoc_arm64_pgagnostic\n"
                     + {
+                        "config-property-missing": "",
+                        "config-property-stock": "ro.vendor.camera.config=back\n",
+                        "extensions-property": "ro.vendor.camera.config=v4l2\nro.camerax.extensions.enabled=true\n",
+                    }.get(camera_variant, "ro.vendor.camera.config=v4l2\n")
+                    + {
                         "vendor-manufacturer": "ro.soc.manufacturer=Google\n",
                         "vendor-model": "ro.soc.model=vsoc_arm64_pgagnostic\n",
                         "vendor-other": "ro.soc.et=true\n",
@@ -2397,31 +2783,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                 if unsupported_hal:
                     archive.writestr("VENDOR/apex/com.google.cf.light.apex", b"apex")
-                # The AOSP example thermal service as the vendor APEX Cuttlefish installs: the service
-                # binary as a file under bin/hw, the VINTF fragment that declares it and the init
-                # script that starts it. The init script names the binary too, so the file is read
-                # from the payload's directories, not found by its name.
-                thermal_binary = b"android.hardware.thermal-service.example"
-                thermal_content = b"\x00" * 8
-                thermal_files = ("etc/init.rc",)
-                if thermal_hal_variant != "no-binary":
-                    thermal_files += (f"bin/hw/{thermal_binary.decode()}",)
-                if thermal_hal_variant != "no-fragment":
-                    thermal_content += (
-                        b'<manifest version="1.0" type="device"><hal format="aidl">'
-                        b"<name>android.hardware.thermal</name><version>3</version>"
-                        b"<fqname>IThermal/default</fqname></hal></manifest>"
-                    )
-                if thermal_hal_variant != "no-service":
-                    thermal_content += (
-                        b"service vendor.thermal-example "
-                        b"/apex/com.android.hardware.thermal/bin/hw/" + thermal_binary + b"\n"
-                    )
-                if thermal_hal_variant != "missing-apex":
-                    archive.writestr(
-                        "VENDOR/apex/com.android.hardware.thermal.apex",
-                        synthetic_apex("erofs", thermal_content, files=thermal_files),
-                    )
                 # The adb daemon in its APEX: bin/adbd is a file of the payload, stored uncompressed (the payload
                 # hints), and holds the names of the launch properties that the p0011 topics read.
                 adbd_content = b"\x00" * 8
@@ -2458,9 +2819,32 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             "classes.dex",
                             b"dex\n039\x00"
                             + (b"" if services_jar_variant == "no-marker"
-                               else b"kernarium: USB debugging is now \x00"),
+                               else b"kernarium: USB debugging is now \x00")
+                            + (b"" if services_jar_variant == "no-display-marker"
+                               else b"RefreshRateThrottling: using the map of the default configuration\x00"),
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
+                # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
+                if input_flinger_variant != "missing":
+                    archive.writestr(
+                        "SYSTEM/lib64/libinputflinger.so",
+                        b"\x00" * 8
+                        + (b"" if input_flinger_variant == "no-marker"
+                           else b"      PointerCaptureLed: %s\n\x00"),
+                    )
+                # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
+                # validation log line is in the bytes.
+                if network_stack_variant != "missing":
+                    network_stack = io.BytesIO()
+                    with zipfile.ZipFile(network_stack, "w", zipfile.ZIP_STORED) as apk:
+                        apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
+                        apk.writestr(
+                            "classes.dex",
+                            b"dex\n039\x00"
+                            + (b"" if network_stack_variant == "no-marker"
+                               else b"Wi-Fi is validated without probes\x00"),
+                        )
+                    archive.writestr("SYSTEM/priv-app/NetworkStack/NetworkStack.apk", network_stack.getvalue())
                 # The OTA certificates, the system's and the recovery's: an unsigned build of either variant holds
                 # the AOSP test certificate under its file name, and the signer names the release certificate after
                 # the release key's path.
@@ -2560,7 +2944,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         run_tool(verifier, "--target-files", good, *kernel_options, check=True)
         # A recent aapt2 writes a resource that holds one value as a compact entry.
         compact_good = root / "compact-good.zip"
-        write_fixture(compact_good, flip_variant="compact")
+        write_fixture(compact_good, flip_variant="compact", camera_variant="compact",
+                      wifi_overlay_variant="compact")
         run_tool(verifier, "--target-files", compact_good, *kernel_options, check=True)
         # Signed target files are checked with --signed: the release certificate alone is trusted,
         # and only a user build is signed. The unsigned fixtures above hold the test certificate's
@@ -2857,7 +3242,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-no-start", {"wifi_network_variant": "no-start"}),
             ("wifi-network-started-at-boot", {"wifi_network_variant": "started-at-boot"}),
             ("wifi-network-no-add", {"wifi_network_variant": "no-add"}),
+            ("wifi-network-no-list", {"wifi_network_variant": "no-list"}),
+            ("wifi-network-no-status", {"wifi_network_variant": "no-status"}),
             ("wifi-network-no-marker", {"wifi_network_variant": "no-marker"}),
+            ("wifi-network-no-joined-marker", {"wifi_network_variant": "no-joined-marker"}),
             ("wifi-network-enables-wifi", {"wifi_network_variant": "enables-wifi"}),
             ("wifi-network-connects", {"wifi_network_variant": "connects"}),
             ("wifi-network-settings-put", {"wifi_network_variant": "settings-put"}),
@@ -2868,12 +3256,24 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-missing-binder-transfer", {"wifi_network_variant": "missing-binder-transfer"}),
             ("wifi-network-missing-binder-call", {"wifi_network_variant": "missing-binder-call"}),
             ("wifi-network-missing-marker-context", {"wifi_network_variant": "missing-marker-context"}),
+            ("wifi-network-marker-type-bool", {"wifi_network_variant": "marker-type-bool"}),
+            ("wifi-network-marker-type-enum-one", {"wifi_network_variant": "marker-type-enum-one"}),
             ("wifi-network-script", {"missing_wifi_network_script": True}),
             ("wificond-present", {"entries": {"SYSTEM/bin/wificond": synthetic_aarch64_elf()}}),
             ("wifi-dirs-missing", {"wifi_dirs_variant": "missing"}),
             ("wifi-dirs-wrong-owner", {"wifi_dirs_variant": "wrong-owner"}),
             ("missing-wifi-feature", {"missing_wifi_feature": True}),
             ("missing-wifi-overlay", {"entries": {"VENDOR/overlay/KernariumWifiOverlay.apk": None}}),
+            ("wifi-overlay-missing-permanent", {"wifi_overlay_variant": "missing-permanent"}),
+            ("wifi-overlay-missing-temporary", {"wifi_overlay_variant": "missing-temporary"}),
+            ("wifi-overlay-missing-both", {"wifi_overlay_variant": "missing-both"}),
+            ("wifi-overlay-permanent-one", {"wifi_overlay_variant": "permanent-one"}),
+            ("wifi-overlay-temporary-zero", {"wifi_overlay_variant": "temporary-zero"}),
+            ("wifi-overlay-temporary-large-not-largest",
+             {"wifi_overlay_variant": "temporary-large-not-largest"}),
+            ("wifi-overlay-permanent-negative", {"wifi_overlay_variant": "permanent-negative"}),
+            ("wifi-overlay-qualified-low", {"wifi_overlay_variant": "qualified-low"}),
+            ("wifi-overlay-no-table", {"wifi_overlay_variant": "no-table"}),
             ("ethernet-feature", {"wifi_feature_file": "android.hardware.ethernet"}),
             ("wifi-aware-feature", {"wifi_feature_file": "android.hardware.wifi.aware"}),
             ("wifi-rtt-feature", {"wifi_feature_file": "android.hardware.wifi.rtt"}),
@@ -2995,10 +3395,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("vendor-soc-model", {"soc_variant": "vendor-model"}),
             ("vendor-soc-other", {"soc_variant": "vendor-other"}),
             ("vendor-soc-same-as-odm", {"soc_variant": "vendor-same"}),
-            ("missing-thermal-apex", {"thermal_hal_variant": "missing-apex"}),
-            ("thermal-apex-without-binary", {"thermal_hal_variant": "no-binary"}),
-            ("thermal-apex-without-fragment", {"thermal_hal_variant": "no-fragment"}),
-            ("thermal-apex-without-service", {"thermal_hal_variant": "no-service"}),
             ("missing-cas-apex", {"cas_hal_variant": "missing-apex"}),
             ("cas-apex-without-binary", {"cas_hal_variant": "no-binary"}),
             ("cas-apex-without-fragment", {"cas_hal_variant": "no-fragment"}),
@@ -3012,6 +3408,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("adb-root-service-without-the-debuggable-rule", {"adbd_variant": "no-root-guard"}),
             ("missing-adb-root-service", {"adbd_variant": "no-root-service"}),
             ("services-jar-without-the-adb-topics", {"services_jar_variant": "no-marker"}),
+            ("services-jar-without-the-display-topic", {"services_jar_variant": "no-display-marker"}),
+            ("input-flinger-without-the-pointer-capture-led", {"input_flinger_variant": "no-marker"}),
+            ("missing-input-flinger", {"input_flinger_variant": "missing"}),
+            ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
             ("signed-with-an-extra-certificate", {"signed": True, "ota_certificates": "extra"}),
@@ -3020,6 +3420,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("unsigned-with-an-extra-certificate", {"ota_certificates": "extra"}),
             ("unsigned-without-recovery-certificates", {"ota_certificates": "missing-recovery"}),
             ("missing-services-jar", {"services_jar_variant": "missing"}),
+            ("missing-network-stack", {"network_stack_variant": "missing"}),
             ("adbd-cannot-read-launch-properties", {"adbd_launch_unreadable": True}),
             ("missing-cas-plugin-64", {"cas_hal_variant": "no-plugin64"}),
             ("missing-cas-plugin-32", {"cas_hal_variant": "no-plugin32"}),
@@ -3162,6 +3563,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"SYSTEM_EXT/priv-app/LineageSetupWizard/LineageSetupWizard.apk": None}}),
             ("auto-provisioner-bypasses-setup",
              {"extra_entry": "SYSTEM/priv-app/Provision/Provision.apk"}),
+            ("gamepad-probe-left-in-the-image",
+             {"entries": {"SYSTEM/app/AndariumGamepadProbe/AndariumGamepadProbe.apk":
+                          synthetic_apk(debuggable=False)}}),
             ("motion-probe-left-in-the-image",
              {"entries": {"SYSTEM/app/AndariumMotionProbe/AndariumMotionProbe.apk":
                           synthetic_apk(debuggable=False)}}),
@@ -3381,8 +3785,14 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "starts kernarium_wifi_network under 'boot'"),
             ("wifi-network-no-add-cause", {"wifi_network_variant": "no-add"},
              "does not contain 'cmd wifi add-network VirtWifi open'"),
+            ("wifi-network-no-list-cause", {"wifi_network_variant": "no-list"},
+             "does not contain 'cmd wifi list-networks'"),
+            ("wifi-network-no-status-cause", {"wifi_network_variant": "no-status"},
+             "does not contain 'cmd wifi status'"),
             ("wifi-network-no-marker-cause", {"wifi_network_variant": "no-marker"},
-             "does not contain 'setprop'"),
+             re.escape("does not contain 'setprop \"$marker\" 1'")),
+            ("wifi-network-no-joined-marker-cause", {"wifi_network_variant": "no-joined-marker"},
+             re.escape("does not contain 'setprop \"$marker\" 2'")),
             ("wifi-network-enables-wifi-cause", {"wifi_network_variant": "enables-wifi"},
              "contains 'set-wifi-enabled'"),
             ("wifi-network-connects-cause", {"wifi_network_variant": "connects"},
@@ -3403,6 +3813,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "does not let system_server call the Wi-Fi network domain's binder"),
             ("wifi-network-missing-marker-context-cause", {"wifi_network_variant": "missing-marker-context"},
              "do not label persist.sys.kernarium.virtwifi_saved"),
+            ("wifi-network-marker-type-bool-cause", {"wifi_network_variant": "marker-type-bool"},
+             "type persist.sys.kernarium.virtwifi_saved as 'exact bool', which rejects 2"),
+            ("wifi-network-marker-type-enum-one-cause", {"wifi_network_variant": "marker-type-enum-one"},
+             "type persist.sys.kernarium.virtwifi_saved as 'exact enum 1', which rejects 2"),
             ("wifi-network-script-cause", {"missing_wifi_network_script": True},
              "SYSTEM_EXT/bin/kernarium_wifi_network.sh"),
             ("wificond-present-cause", {"entries": {"SYSTEM/bin/wificond": synthetic_aarch64_elf()}},
@@ -3488,6 +3902,27 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-wifi-overlay-cause",
              {"entries": {"VENDOR/overlay/KernariumWifiOverlay.apk": None}},
              "VENDOR/overlay/KernariumWifiOverlay.apk"),
+            ("wifi-overlay-missing-permanent-cause", {"wifi_overlay_variant": "missing-permanent"},
+             "KernariumWifiOverlay.apk does not set config_wifiDisableReasonNoInternetPermanentThreshold: "
+             "the platform would disable the guest's one network"),
+            ("wifi-overlay-missing-temporary-cause", {"wifi_overlay_variant": "missing-temporary"},
+             "KernariumWifiOverlay.apk does not set config_wifiDisableReasonNoInternetTemporaryThreshold"),
+            ("wifi-overlay-missing-both-cause", {"wifi_overlay_variant": "missing-both"},
+             "KernariumWifiOverlay.apk does not set config_wifiDisableReasonNoInternetPermanentThreshold"),
+            ("wifi-overlay-permanent-one-cause", {"wifi_overlay_variant": "permanent-one"},
+             "config_wifiDisableReasonNoInternetPermanentThreshold is not 2147483647 in .*"
+             "KernariumWifiOverlay.apk: a lower threshold is reached by the first failed internet check"),
+            ("wifi-overlay-temporary-zero-cause", {"wifi_overlay_variant": "temporary-zero"},
+             "config_wifiDisableReasonNoInternetTemporaryThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-temporary-large-not-largest-cause",
+             {"wifi_overlay_variant": "temporary-large-not-largest"},
+             "config_wifiDisableReasonNoInternetTemporaryThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-permanent-negative-cause", {"wifi_overlay_variant": "permanent-negative"},
+             "config_wifiDisableReasonNoInternetPermanentThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-qualified-low-cause", {"wifi_overlay_variant": "qualified-low"},
+             "config_wifiDisableReasonNoInternetPermanentThreshold is not 2147483647 in .*KernariumWifiOverlay"),
+            ("wifi-overlay-no-table-cause", {"wifi_overlay_variant": "no-table"},
+             "KernariumWifiOverlay.apk has no readable resource table"),
             ("ethernet-feature-cause", {"wifi_feature_file": "android.hardware.ethernet"},
              "VENDOR/etc/permissions/android.hardware.ethernet.xml"),
             ("wifi-aware-feature-cause", {"wifi_feature_file": "android.hardware.wifi.aware"},
@@ -3680,14 +4115,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "VENDOR/build.prop sets ro.soc.et=true: the SoC identity is the ODM"),
             ("vendor-soc-same-as-odm-cause", {"soc_variant": "vendor-same"},
              "VENDOR/build.prop sets ro.soc.manufacturer=Kernarium: the SoC identity is the ODM"),
-            ("missing-thermal-apex-cause", {"thermal_hal_variant": "missing-apex"},
-             "com.android.hardware.thermal.apex is missing: the product needs a thermal HAL"),
-            ("thermal-apex-without-binary-cause", {"thermal_hal_variant": "no-binary"},
-             "does not hold the service binary bin/hw/android.hardware.thermal-service.example"),
-            ("thermal-apex-without-fragment-cause", {"thermal_hal_variant": "no-fragment"},
-             "does not declare IThermal/default in a VINTF fragment"),
-            ("thermal-apex-without-service-cause", {"thermal_hal_variant": "no-service"},
-             "does not start the vendor.thermal-example service"),
             ("missing-adbd-apex-cause", {"adbd_variant": "missing-apex"},
              "SYSTEM/apex/com.android.adbd.apex is missing: the product needs the adb daemon"),
             ("adbd-apex-without-binary-cause", {"adbd_variant": "no-binary"},
@@ -3721,8 +4148,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "RECOVERY/RAMDISK/system/etc/security/otacerts.zip is missing from the unsigned"),
             ("services-jar-without-the-adb-topics-cause", {"services_jar_variant": "no-marker"},
              "lacks the AdbService topics of route p0007"),
+            ("services-jar-without-the-display-topic-cause", {"services_jar_variant": "no-display-marker"},
+             "lacks the display topic that reads the default configuration's refresh rate throttling map "
+             "of route p0007"),
             ("missing-services-jar-cause", {"services_jar_variant": "missing"},
              "SYSTEM/framework/services.jar is missing"),
+            ("input-flinger-without-the-pointer-capture-led-cause", {"input_flinger_variant": "no-marker"},
+             "lacks the pointer capture LED topic of route p0022"),
+            ("missing-input-flinger-cause", {"input_flinger_variant": "missing"},
+             "SYSTEM/lib64/libinputflinger.so is missing"),
+            ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
+             "lacks the NetworkMonitor topic of route p0029"),
+            ("missing-network-stack-cause", {"network_stack_variant": "missing"},
+             "SYSTEM/priv-app/NetworkStack/NetworkStack.apk is missing"),
             ("adbd-cannot-read-launch-properties-cause", {"adbd_launch_unreadable": True},
              "adbd may not read ro.boot.kernarium.adb_key, labelled bootloader_prop"),
             ("missing-cas-apex-cause", {"cas_hal_variant": "missing-apex"},
@@ -3758,6 +4196,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-pinner-overlay-cause",
              {"entries": {"VENDOR/overlay/KernariumPinnerOverlay.apk": None}},
              "VENDOR/overlay/KernariumPinnerOverlay.apk"),
+            ("gamepad-probe-left-in-the-image-cause",
+             {"entries": {"SYSTEM/app/AndariumGamepadProbe/AndariumGamepadProbe.apk":
+                          synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: "
+             "SYSTEM/app/AndariumGamepadProbe"),
             ("motion-probe-left-in-the-image-cause",
              {"entries": {"SYSTEM/app/AndariumMotionProbe/AndariumMotionProbe.apk":
                           synthetic_apk(debuggable=False)}},
@@ -4117,7 +4560,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-midi-feature-cause", {"missing_midi_feature": True},
              "feature is not declared: android.software.midi"),
             ("camera-feature-cause", {"unsupported_feature": True},
-             "absent hardware feature is advertised.*android.hardware.camera"),
+             "a camera feature is declared outside the camera layouts.*android.hardware.camera"),
             ("missing-mic-policy-cause", {"missing_mic_policy": True},
              "ordinary mixer input"),
             ("extra-input-device-cause", {"extra_input_device": True},
@@ -4297,6 +4740,530 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                           good_video_contexts.replace("mediacodec_exec", "vendor_file").encode()}},
              "not labeled mediacodec_exec"),
+            ("missing-vibrator-service", {"entries": {
+                "VENDOR/bin/hw/android.hardware.vibrator-service.andarium": None}},
+             "required entries are missing"),
+            ("missing-haptics-manifest", {"entries": {"ODM/etc/vintf/manifest_haptics.xml": None}},
+             "required entries are missing"),
+            ("always-declared-vibrator", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_vibrator_manifest.encode()}},
+             "declares a vibrator HAL"),
+            ("vibrator-in-a-vendor-fragment", {"entries": {
+                "VENDOR/etc/vintf/manifest/android.hardware.vibrator.xml": good_vibrator_manifest.encode()}},
+             "declares a vibrator HAL"),
+            ("vibrator-in-the-plain-odm-manifest", {"entries": {
+                "ODM/etc/vintf/manifest.xml": good_vibrator_manifest.encode()}},
+             "declares a vibrator HAL"),
+            ("vibrator-manager-in-the-haptics-manifest", {"entries": {
+                "ODM/etc/vintf/manifest_haptics.xml": good_vibrator_manifest.replace(
+                    "IVibrator/default", "IVibratorManager/default").encode()}},
+             "must declare exactly the AIDL IVibrator/default at version 4"),
+            ("vibrator-version-3-in-the-haptics-manifest", {"entries": {
+                "ODM/etc/vintf/manifest_haptics.xml": good_vibrator_manifest.replace(
+                    "<version>4", "<version>3").encode()}},
+             "must declare exactly the AIDL IVibrator/default at version 4"),
+            ("second-odm-sku-manifest", {"entries": {
+                "ODM/etc/vintf/manifest_other.xml": b'<manifest version="1.0" type="device"/>'}},
+             "ODM SKU manifests must be exactly the haptics one"),
+            ("odm-skus-in-the-build", {"misc_info_edits": {"vintf_odm_manifest_skus": "haptics other"}},
+             "must name only the haptics ODM manifest SKU"),
+            ("no-odm-sku-in-the-build", {"misc_info_edits": {"vintf_odm_manifest_skus": None}},
+             "must name only the haptics ODM manifest SKU"),
+            ("cuttlefish-vibrator-apex", {"entries": {
+                "VENDOR/apex/com.android.hardware.vibrator.apex": b"apex"}},
+             "nonstatic image or metadata is forbidden"),
+            ("vibrator-service-not-disabled", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace("    disabled\n", "").encode()}},
+             "must carry 'disabled'"),
+            ("vibrator-service-without-interface", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace(
+                    "    interface aidl android.hardware.vibrator.IVibrator/default\n", "").encode()}},
+             "must carry 'interface aidl"),
+            ("vibrator-service-for-any-sku", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace(
+                    "on boot && property:ro.boot.product.hardware.sku=haptics", "on boot").encode()}},
+             "must start on 'on boot && property:ro.boot.product.hardware.sku=haptics'"),
+            ("vibrator-service-at-early-hal", {"entries": {
+                vibrator_rc_path: (good_vibrator_rc + "\non early-hal\n    start vendor.vibrator-andarium\n").encode()}},
+             "may have no trigger but the haptics SKU's boot trigger"),
+            ("vibrator-service-wrong-binary", {"entries": {
+                vibrator_rc_path: good_vibrator_rc.replace(
+                    "android.hardware.vibrator-service.andarium", "android.hardware.vibrator-service.example").encode()}},
+             "must define one service that runs the Andarium vibrator HAL"),
+            ("vibrator-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_vibrator_default_exec", "vendor_file").encode()}},
+             "hal_vibrator_default_exec label"),
+            ("missing-gnss-service", {"entries": {
+                "VENDOR/bin/hw/android.hardware.gnss-service.andarium": None}},
+             "required entries are missing"),
+            ("missing-gnss-rc", {"entries": {gnss_rc_path: None}}, "required entries are missing"),
+            ("missing-gnss-fragment", {"entries": {gnss_fragment_path: None}},
+             "required entries are missing"),
+            ("gnss-in-the-vendor-manifest", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_gnss_manifest.encode()}},
+             "declares a GNSS HAL"),
+            ("gnss-in-a-second-fragment", {"entries": {
+                "VENDOR/etc/vintf/manifest/android.hardware.gnss.xml": good_gnss_manifest.encode()}},
+             "declares a GNSS HAL"),
+            ("gnss-in-the-plain-odm-manifest", {"entries": {
+                "ODM/etc/vintf/manifest.xml": good_gnss_manifest.encode()}},
+             "declares a GNSS HAL"),
+            ("gnss-fragment-version-6", {"entries": {
+                gnss_fragment_path: good_gnss_manifest.replace("<version>7", "<version>6").encode()}},
+             "must declare exactly the AIDL IGnss/default at version 7"),
+            ("gnss-fragment-with-a-second-hal", {"entries": {
+                gnss_fragment_path: good_gnss_manifest.replace(
+                    "</manifest>", '<hal format="aidl"><name>android.hardware.light</name>'
+                    "<version>2</version><fqname>ILights/default</fqname></hal></manifest>").encode()}},
+             "must declare exactly the AIDL IGnss/default at version 7"),
+            ("gnss-fragment-other-instance", {"entries": {
+                gnss_fragment_path: good_gnss_manifest.replace("IGnss/default", "IGnss/other").encode()}},
+             "must declare exactly the AIDL IGnss/default at version 7"),
+            ("cuttlefish-gnss-apex", {"entries": {
+                "VENDOR/apex/com.android.hardware.gnss.apex": b"apex"}},
+             "nonstatic image or metadata is forbidden"),
+            ("gnss-service-disabled", {"entries": {
+                gnss_rc_path: (good_gnss_rc + "    disabled\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gnss-service-oneshot", {"entries": {
+                gnss_rc_path: (good_gnss_rc + "    oneshot\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gnss-service-triggered", {"entries": {
+                gnss_rc_path: (good_gnss_rc + "\non boot\n    start vendor.gnss-andarium\n").encode()}},
+             "may have no trigger"),
+            ("gnss-service-without-interface", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace(
+                    "    interface aidl android.hardware.gnss.IGnss/default\n", "").encode()}},
+             "must carry 'interface aidl"),
+            ("gnss-service-wrong-user", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace("user gps", "user root").encode()}},
+             "must carry 'user gps'"),
+            ("gnss-service-wrong-group", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace("group gps", "group system").encode()}},
+             "must carry 'group gps'"),
+            ("gnss-service-wrong-binary", {"entries": {
+                gnss_rc_path: good_gnss_rc.replace(
+                    "android.hardware.gnss-service.andarium", "android.hardware.gnss-service.example").encode()}},
+             "must define one service that runs the Andarium GNSS HAL"),
+            ("gnss-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_gnss_default_exec", "vendor_file").encode()}},
+             "hal_gnss_default_exec label"),
+            ("gnss-supl-server", {"entries": {
+                "SYSTEM/etc/gps_debug.conf": b"SUPL_HOST=supl.example\nSUPL_PORT=7275\n"}},
+             "configures an assistance server"),
+            ("gnss-ntp-server", {"entries": {
+                "SYSTEM/etc/gps_debug.conf": b"# comment\nNTP_SERVER=time.example\n"}},
+             "configures an assistance server"),
+            ("missing-thermal-service", {"entries": {
+                "VENDOR/bin/hw/android.hardware.thermal-service.andarium": None}},
+             "required entries are missing"),
+            ("missing-thermal-rc", {"entries": {thermal_rc_path: None}}, "required entries are missing"),
+            ("missing-thermal-fragment", {"entries": {thermal_fragment_path: None}},
+             "required entries are missing"),
+            ("missing-display-config", {"entries": {display_config_path: None}},
+             "required entries are missing"),
+            ("thermal-in-the-vendor-manifest", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_thermal_manifest.encode()}},
+             "declares android.hardware.thermal"),
+            ("thermal-in-a-second-fragment", {"entries": {
+                "VENDOR/etc/vintf/manifest/android.hardware.thermal.xml": good_thermal_manifest.encode()}},
+             "declares android.hardware.thermal"),
+            ("thermal-in-the-plain-odm-manifest", {"entries": {
+                "ODM/etc/vintf/manifest.xml": good_thermal_manifest.encode()}},
+             "declares android.hardware.thermal"),
+            ("cuttlefish-thermal-apex", {"entries": {
+                "VENDOR/apex/com.android.hardware.thermal.apex": b"apex"}},
+             "nonstatic image or metadata is forbidden"),
+            ("thermal-fragment-version-2", {"entries": {
+                thermal_fragment_path: good_thermal_manifest.replace("<version>3", "<version>2").encode()}},
+             "must declare exactly the AIDL IThermal/default at version 3"),
+            ("thermal-fragment-with-a-second-hal", {"entries": {
+                thermal_fragment_path: good_thermal_manifest.replace(
+                    "</manifest>", '<hal format="aidl"><name>android.hardware.light</name>'
+                    "<version>2</version><fqname>ILights/default</fqname></hal></manifest>").encode()}},
+             "must declare exactly the AIDL IThermal/default at version 3"),
+            ("thermal-fragment-other-instance", {"entries": {
+                thermal_fragment_path: good_thermal_manifest.replace("IThermal/default", "IThermal/other").encode()}},
+             "must declare exactly the AIDL IThermal/default at version 3"),
+            ("thermal-service-disabled", {"entries": {
+                thermal_rc_path: (good_thermal_rc + "    disabled\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("thermal-service-oneshot", {"entries": {
+                thermal_rc_path: (good_thermal_rc + "    oneshot\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("thermal-service-triggered", {"entries": {
+                thermal_rc_path: (good_thermal_rc + "\non boot\n    start vendor.thermal-andarium\n").encode()}},
+             "may have no trigger"),
+            ("thermal-service-without-interface", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace(
+                    "    interface aidl android.hardware.thermal.IThermal/default\n", "").encode()}},
+             "must carry 'interface aidl"),
+            ("thermal-service-wrong-user", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace("user nobody", "user root").encode()}},
+             "must carry 'user nobody'"),
+            ("thermal-service-wrong-group", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace("group system", "group root").encode()}},
+             "must carry 'group system'"),
+            ("thermal-service-wrong-binary", {"entries": {
+                thermal_rc_path: good_thermal_rc.replace(
+                    "android.hardware.thermal-service.andarium", "android.hardware.thermal-service.example").encode()}},
+             "must define one service that runs the Andarium thermal HAL"),
+            ("thermal-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_thermal_default_exec", "vendor_file").encode()}},
+             "hal_thermal_default_exec label"),
+            ("display-config-in-the-product-partition", {"entries": {
+                "PRODUCT/etc/displayconfig/default.xml": good_display_config.encode()}},
+             "would hide VENDOR/etc/displayconfig/default.xml"),
+            ("display-config-malformed", {"entries": {display_config_path: b"<displayConfiguration>"}},
+             "cannot parse VENDOR/etc/displayconfig/default.xml"),
+            ("display-config-with-another-setting", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<thermalThrottling>", "<name>display</name><thermalThrottling>").encode()}},
+             "with thermalThrottling and nothing else"),
+            ("display-config-with-a-brightness-map", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "</thermalThrottling>", "<brightnessThrottlingMap/></thermalThrottling>").encode()}},
+             "must hold the one default refreshRateThrottlingMap"),
+            ("display-config-with-a-named-map", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "<refreshRateThrottlingMap>", '<refreshRateThrottlingMap id="other">').encode()}},
+             "must hold the one default refreshRateThrottlingMap"),
+            ("display-config-with-a-second-point", {"entries": {
+                display_config_path: good_display_config.replace(
+                    "</refreshRateThrottlingMap>",
+                    "<refreshRateThrottlingPoint><thermalStatus>critical</thermalStatus>"
+                    "<refreshRateRange><minimum>0</minimum><maximum>20</maximum></refreshRateRange>"
+                    "</refreshRateThrottlingPoint></refreshRateThrottlingMap>").encode()}},
+             "must hold one refreshRateThrottlingPoint"),
+            ("display-config-critical-point", {"entries": {
+                display_config_path: good_display_config.replace("severe", "critical").encode()}},
+             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+            ("display-config-60-hz", {"entries": {
+                display_config_path: good_display_config.replace("<maximum>30", "<maximum>60").encode()}},
+             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+            ("display-config-minimum-30", {"entries": {
+                display_config_path: good_display_config.replace("<minimum>0", "<minimum>30").encode()}},
+             "must hold the severe point with the refresh rate range 0 to 30 Hz"),
+            ("missing-gamepad-binary", {"entries": {gamepad_binary_path: None}}, "required entries are missing"),
+            ("missing-gamepad-rc", {"entries": {gamepad_rc_path: None}}, "required entries are missing"),
+            ("gamepad-service-disabled", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    disabled\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gamepad-service-oneshot", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    oneshot\n").encode()}},
+             "neither disabled nor oneshot"),
+            ("gamepad-service-triggered", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "\non boot\n    start kernarium_gamepad\n").encode()}},
+             "may have no trigger"),
+            ("gamepad-service-with-a-seclabel", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    seclabel u:r:init:s0\n").encode()}},
+             "takes its domain from its file label"),
+            ("gamepad-service-with-a-capability", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "    capabilities SYS_ADMIN\n").encode()}},
+             "takes its domain from its file label"),
+            ("gamepad-service-wrong-user", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace("user nobody", "user root").encode()}},
+             "must carry 'user nobody'"),
+            ("gamepad-service-wrong-group", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace("group uhid", "group nobody").encode()}},
+             "must carry 'group uhid'"),
+            ("gamepad-service-wrong-class", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace("class main", "class hal").encode()}},
+             "must carry 'class main'"),
+            ("gamepad-service-wrong-binary", {"entries": {
+                gamepad_rc_path: good_gamepad_rc.replace(
+                    "/vendor/bin/kernarium_gamepad", "/vendor/bin/other").encode()}},
+             "must define the one service kernarium_gamepad"),
+            ("gamepad-service-twice", {"entries": {
+                gamepad_rc_path: (good_gamepad_rc + "service second /vendor/bin/kernarium_gamepad\n").encode()}},
+             "must define the one service kernarium_gamepad"),
+            ("gamepad-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace(good_gamepad_label, "").encode()}},
+             "do not label /vendor/bin/kernarium_gamepad"),
+            ("gamepad-label-of-another-domain", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("kernarium_gamepad_exec", "vendor_file").encode()}},
+             "do not label /vendor/bin/kernarium_gamepad"),
+            ("gamepad-policy-transition", {"gamepad_policy_variant": "missing-transition"},
+             "does not move init into the gamepad relay domain"),
+            ("gamepad-policy-without-uhid", {"gamepad_policy_variant": "no-uhid"},
+             "does not let the gamepad relay open, read and write the uhid device"),
+            ("gamepad-policy-read-only-uhid", {"gamepad_policy_variant": "uhid-read-only"},
+             "does not let the gamepad relay open, read and write the uhid device"),
+            ("gamepad-policy-without-vsock", {"gamepad_policy_variant": "no-vsock"},
+             "does not give the gamepad relay vsock sockets to listen on"),
+            ("gamepad-policy-vsock-without-listen", {"gamepad_policy_variant": "vsock-no-listen"},
+             "does not give the gamepad relay vsock sockets to listen on"),
+            ("gamepad-policy-without-the-vsock-attribute", {"gamepad_policy_variant": "no-attribute"},
+             "does not classify the gamepad relay as an unconstrained vsock user"),
+            ("missing-location-feature", {"missing_location_feature": "android.hardware.location"},
+             "feature is not declared: android.hardware.location(?!\\.gps)"),
+            ("missing-gps-feature", {"missing_location_feature": "android.hardware.location.gps"},
+             "feature is not declared: android.hardware.location.gps"),
+            ("location-probe-left-in-the-image", {"entries": {
+                "SYSTEM/app/AndariumLocationProbe/AndariumLocationProbe.apk": synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumLocationProbe"),
+            ("keymouse-probe-left-in-the-image", {"entries": {
+                "SYSTEM/app/AndariumKeyMouseProbe/AndariumKeyMouseProbe.apk": synthetic_apk(debuggable=False)}},
+             "unneeded built-in application payload is forbidden: SYSTEM/app/AndariumKeyMouseProbe"),
+            ("bugreport-keychord", {"init_variant": "bugreport-keychord"},
+             "starts bugreport on a keychord \\('keycodes 30 48'\\)"),
+            ("keyboard-default-missing-script", {"keyboard_default_variant": "missing-script"},
+             "required entries are missing: .*SYSTEM_EXT/bin/kernarium_keyboard_default.sh"),
+            ("keyboard-default-missing-rc", {"keyboard_default_variant": "missing-rc"},
+             "required entries are missing: .*SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc"),
+            ("keyboard-default-missing-service", {"keyboard_default_variant": "missing-service"},
+             "does not declare the kernarium_keyboard_default service"),
+            ("keyboard-default-not-oneshot", {"keyboard_default_variant": "not-oneshot"},
+             "does not declare kernarium_keyboard_default as oneshot"),
+            ("keyboard-default-not-disabled", {"keyboard_default_variant": "not-disabled"},
+             "does not declare kernarium_keyboard_default as disabled"),
+            ("keyboard-default-started-at-boot", {"keyboard_default_variant": "started-at-boot"},
+             "starts kernarium_keyboard_default under 'boot'"),
+            ("keyboard-default-no-start", {"keyboard_default_variant": "no-start"},
+             "does not start kernarium_keyboard_default when boot completes"),
+            ("keyboard-default-no-read", {"keyboard_default_variant": "no-read"},
+             "does not contain 'cmd settings get secure show_ime_with_hard_keyboard'"),
+            ("keyboard-default-no-put", {"keyboard_default_variant": "no-put"},
+             "does not contain 'cmd settings put secure show_ime_with_hard_keyboard 0'"),
+            ("keyboard-default-no-marker", {"keyboard_default_variant": "no-marker"},
+             "does not contain 'setprop \"\\$marker\" 1'"),
+            ("keyboard-default-turns-it-on", {"keyboard_default_variant": "turns-it-on"},
+             "contains 'settings put secure show_ime_with_hard_keyboard 1'"),
+            ("keyboard-default-writes-another-setting", {"keyboard_default_variant": "writes-another-setting"},
+             "contains 'settings put system'"),
+            ("keyboard-default-deletes-the-setting", {"keyboard_default_variant": "deletes-the-setting"},
+             "contains 'settings delete'"),
+            ("keyboard-default-other-user", {"keyboard_default_variant": "other-user"},
+             "contains '--user'"),
+            ("keyboard-default-missing-label", {"keyboard_default_variant": "missing-label"},
+             "do not label /system_ext/bin/kernarium_keyboard_default.sh"),
+            ("keyboard-default-missing-transition", {"keyboard_default_variant": "missing-transition"},
+             "does not move init into the keyboard default domain"),
+            ("keyboard-default-missing-settings-find", {"keyboard_default_variant": "missing-settings-find"},
+             "does not allow kernarium_keyboard_default settings_service service_manager find"),
+            ("keyboard-default-missing-transfer", {"keyboard_default_variant": "missing-transfer"},
+             "does not allow kernarium_keyboard_default system_server binder transfer"),
+            ("keyboard-default-missing-call", {"keyboard_default_variant": "missing-call"},
+             "does not allow system_server kernarium_keyboard_default binder call"),
+            ("keyboard-default-missing-fd", {"keyboard_default_variant": "missing-fd"},
+             "does not allow system_server kernarium_keyboard_default fd use"),
+            ("keyboard-default-missing-fifo", {"keyboard_default_variant": "missing-fifo"},
+             "does not allow system_server kernarium_keyboard_default fifo_file write"),
+            ("keyboard-default-marker-not-system", {"keyboard_default_variant": "marker-not-system"},
+             "does not define the system-owned kernarium_keyboard_default_prop"),
+            ("keyboard-default-missing-marker-rule", {"keyboard_default_variant": "missing-marker-rule"},
+             "does not let the keyboard default domain set persist.sys.kernarium.keyboard_default"),
+            ("keyboard-default-sets-another-property", {"keyboard_default_variant": "sets-another-property"},
+             "lets the keyboard default domain set"),
+            ("keyboard-default-missing-marker-context", {"keyboard_default_variant": "missing-marker-context"},
+             "do not label persist.sys.kernarium.keyboard_default"),
+            ("missing-side-key-layout", {"entries": {input_device_files["Vendor_1af4_Product_0002.kl"]: None}},
+             "required entries are missing"),
+            ("missing-keyboard-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0003.idc"]: None}},
+             "required entries are missing"),
+            ("missing-mouse-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0004.idc"]: None}},
+             "required entries are missing"),
+            ("missing-pointer-configuration", {"entries": {input_device_files["Vendor_1af4_Product_0005.idc"]: None}},
+             "required entries are missing"),
+            ("side-key-layout-with-a-sixth-key", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "key 30   A\n").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-without-home", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 172   HOME\n", "").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-with-another-label", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 172   HOME", "key 172   MOVE_HOME").encode()}},
+             "must map the five side keys alone"),
+            ("side-key-layout-with-a-flag", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: side_key_layout.replace(
+                    "key 116   POWER", "key 116   POWER   WAKE").encode()}},
+             "must be a 'key <scan code> <label>' line"),
+            ("side-key-layout-with-an-axis", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "axis 0x00 X\n").encode()}},
+             "must be a 'key <scan code> <label>' line"),
+            ("side-key-layout-maps-a-key-twice", {"entries": {
+                input_device_files["Vendor_1af4_Product_0002.kl"]: (side_key_layout + "key 116   SLEEP\n").encode()}},
+             "maps scan code 116 twice"),
+            ("keyboard-configuration-internal", {"entries": {
+                input_device_files["Vendor_1af4_Product_0003.idc"]: b"device.internal = 1\n"}},
+             "must set \\{'device.internal': '0'\\} and nothing else"),
+            ("keyboard-configuration-with-a-layout", {"entries": {
+                input_device_files["Vendor_1af4_Product_0003.idc"]: b"device.internal = 0\nkeyboard.layout = Generic\n"}},
+             "must set .* and nothing else"),
+            ("mouse-configuration-empty", {"entries": {input_device_files["Vendor_1af4_Product_0004.idc"]: b"# none\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-without-wake", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware = 1\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-orientation-unaware", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware = 0\ntouch.wake = 1\n"}},
+             "must set .* and nothing else"),
+            ("pointer-configuration-malformed", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: b"touch.orientationAware 1\n"}},
+             "must be a 'name = value' line"),
+            ("pointer-configuration-sets-a-property-twice", {"entries": {
+                input_device_files["Vendor_1af4_Product_0005.idc"]: (
+                    b"touch.orientationAware = 1\ntouch.wake = 1\ntouch.wake = 0\n")}},
+             "sets touch.wake twice"),
+            ("keyboard-with-a-key-layout-of-its-own", {"entries": {
+                "VENDOR/usr/keylayout/Vendor_1af4_Product_0003.kl": b"key 30   A\n"}},
+             "a key layout or character map of its own"),
+            ("mouse-with-a-versioned-key-layout", {"entries": {
+                "VENDOR/usr/keylayout/Vendor_1af4_Product_0004_Version_0001.kl": b"key 30   A\n"}},
+             "a key layout or character map of its own"),
+            ("pointer-with-a-character-map", {"entries": {
+                "VENDOR/usr/keychars/Vendor_1af4_Product_0005.kcm": b"type FULL\n"}},
+             "a key layout or character map of its own"),
+            # The host's cameras. The layouts' files are the generator's, byte for byte, and nothing
+            # else uses the vendor SKU axis.
+            ("camera-feature-in-a-permission-file", {"entries": {
+                "VENDOR/etc/permissions/android.hardware.camera.xml":
+                    b'<permissions><feature name="android.hardware.camera"/></permissions>'}},
+             "a camera feature is declared outside the camera layouts.*android.hardware.camera"),
+            ("camera-feature-in-a-layout-of-another-name", {"entries": {
+                "VENDOR/etc/permissions/kernarium_camera.xml":
+                    camera_layouts.permissions_file(camera_layouts.by_name()["front"])}},
+             "a camera feature is declared outside the camera layouts"),
+            ("stock-camera-feature-file", {"entries": {
+                "VENDOR/etc/permissions/android.hardware.camera.front.xml": b"<permissions/>"}},
+             "absent hardware feature declaration is forbidden"),
+            ("missing-camera-layout", {"entries": {camera_front_path: None}},
+             "sku_front/kernarium_camera.xml is missing"),
+            ("camera-layout-with-more-features", {"entries": {camera_front_path: camera_layout_files[
+                "VENDOR/etc/permissions/sku_bf-small/kernarium_camera.xml"]}},
+             "differs from what tools/camera_layouts.py generates"),
+            ("camera-layout-edited", {"entries": {camera_front_path: camera_layout_files[camera_front_path].replace(
+                b"android.hardware.camera.any", b"android.hardware.camera.level.full")}},
+             "differs from what tools/camera_layouts.py generates"),
+            ("camera-sku-directory-of-another-name", {"entries": {
+                "VENDOR/etc/permissions/sku_extra/kernarium_camera.xml": b"<permissions/>"}},
+             "is not a file of a camera layout"),
+            ("camera-sku-directory-with-another-file", {"entries": {
+                "VENDOR/etc/permissions/sku_front/other.xml": b"<permissions/>"}},
+             "is not a file of a camera layout"),
+            ("camera-sku-sysconfig", {"entries": {"VENDOR/etc/sysconfig/sku_front/other.xml": b"<config/>"}},
+             "SKU configuration beside the camera layouts"),
+            ("missing-camera-media-profiles", {"entries": {"VENDOR/etc/media_profiles_camsmall.xml": None}},
+             "media_profiles_camsmall.xml is missing"),
+            ("camera-media-profiles-edited", {"entries": {
+                "VENDOR/etc/media_profiles_camlarge.xml": b"<MediaSettings/>"}},
+             "media_profiles_camlarge.xml differs from what tools/camera_layouts.py generates"),
+            ("camera-media-profiles-of-no-layout", {"entries": {
+                "VENDOR/etc/media_profiles_camhuge.xml": b"<MediaSettings/>"}},
+             "media profiles variant that no camera layout selects"),
+            ("missing-camera-init", {"entries": {camera_init_path: None}},
+             "init.kernarium_camera.rc is missing"),
+            ("camera-init-edited", {"entries": {camera_init_path: camera_layout_files[camera_init_path].replace(
+                b"_camsmall", b"_camlarge")}},
+             "init.kernarium_camera.rc differs from what tools/camera_layouts.py generates"),
+            ("camera-layout-manifest", {"entries": {"VENDOR/etc/vintf/manifest_bf-small.xml": b"<manifest/>"}},
+             "VINTF manifest of a camera layout"),
+            # The lazy provider and the HWL library of route p0030.
+            ("missing-camera-provider", {"entries": {camera_provider_path: None}},
+             "required entries are missing"),
+            ("missing-camera-provider-rc", {"entries": {camera_rc_path: None}},
+             "required entries are missing"),
+            ("missing-camera-library", {"entries": {camera_library_path: None}},
+             "required entries are missing"),
+            ("missing-camera-template", {"entries": {camera_template_path: None}},
+             "required entries are missing"),
+            ("eager-camera-provider", {"entries": {
+                "VENDOR/bin/hw/android.hardware.camera.provider@2.7-service-google": b"x"}},
+             "only the lazy camera provider runs"),
+            ("eager-camera-provider-rc", {"entries": {
+                "VENDOR/etc/init/android.hardware.camera.provider@2.7-service-google.rc": b"# x\n"}},
+             "only the lazy camera provider runs"),
+            ("camera-provider-not-an-elf", {"entries": {camera_provider_path: b"not an ELF file"}},
+             "is not an ELF file"),
+            ("camera-library-not-an-elf", {"entries": {camera_library_path: b"not an ELF file"}},
+             "is not an ELF file"),
+            *((f"camera-library-without-{index}", {"entries": {camera_library_path: camera_library(
+                *(other for other in good_camera_markers if other != marker))}},
+              f"lacks {marker.decode()!r}") for index, marker in enumerate(good_camera_markers)),
+            ("camera-provider-enabled", {"entries": {
+                camera_rc_path: good_camera_rc.replace("    disabled\n", "").encode()}},
+             "must carry 'disabled'"),
+            ("camera-provider-not-oneshot", {"entries": {
+                camera_rc_path: good_camera_rc.replace("    oneshot\n", "").encode()}},
+             "must carry 'oneshot'"),
+            ("camera-provider-without-interface", {"entries": {
+                camera_rc_path: good_camera_rc.replace(
+                    "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n", "").encode()}},
+             "must carry 'interface aidl android.hardware.camera.provider.ICameraProvider/internal/0'"),
+            ("camera-provider-wrong-user", {"entries": {
+                camera_rc_path: good_camera_rc.replace("user system", "user root").encode()}},
+             "must carry 'user system'"),
+            ("camera-provider-wrong-binary", {"entries": {
+                camera_rc_path: good_camera_rc.replace(camera_provider, "android.hardware.camera.provider@2.7-service-google").encode()}},
+             "must define one service that runs the lazy provider"),
+            ("camera-provider-triggered", {"entries": {
+                camera_rc_path: (good_camera_rc + "\non boot\n    start vendor.camera-provider-2-7-google\n").encode()}},
+             "may have no trigger"),
+            ("camera-provider-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
+                good_video_contexts.replace("hal_camera_default_exec", "vendor_file").encode()}},
+             "hal_camera_default_exec label"),
+            ("missing-camera-declaration", {"entries": {camera_fragment_path: None}},
+             "must be declared exactly once"),
+            ("camera-declared-twice", {"entries": {
+                "VENDOR/etc/vintf/manifest.xml": good_camera_manifest.encode()}},
+             "must be declared exactly once"),
+            ("camera-declared-in-the-odm", {"entries": {
+                camera_fragment_path: None, "ODM/etc/vintf/manifest.xml": good_camera_manifest.encode()}},
+             "in the vendor"),
+            ("camera-declared-for-another-instance", {"entries": {
+                camera_fragment_path: good_camera_manifest.replace("internal/0", "external/0").encode()}},
+             "must declare the AIDL ICameraProvider/internal/0"),
+            ("camera-declared-as-hidl", {"entries": {
+                camera_fragment_path: good_camera_manifest.replace('format="aidl"', 'format="hidl"').encode()}},
+             "must declare the AIDL ICameraProvider/internal/0"),
+            # The characteristics template, the properties and the vendor camera extensions.
+            ("camera-template-not-json", {"entries": {camera_template_path: b"{"}},
+             "cannot parse VENDOR/etc/config/emu_camera_v4l2.json"),
+            ("camera-template-without-characteristics", {"entries": {camera_template_path: b"{}"}},
+             "not a camera characteristics template"),
+            ("stock-emulated-camera", {"entries": {"VENDOR/etc/config/emu_camera_back.json": b"{}"}},
+             "a camera of the stock emulated HAL"),
+            ("camera-extensions-declaration", {"entries": {
+                "SYSTEM_EXT/etc/permissions/sample_camera_extensions.xml": b"<permissions/>"}},
+             "is a vendor camera extension"),
+            ("camera-extensions-library", {"entries": {
+                "SYSTEM_EXT/framework/androidx.camera.extensions.impl.jar": b"jar"}},
+             "is a vendor camera extension"),
+            ("lazy-camera-property-missing", {"camera_variant": "lazy-property-missing"},
+             "lacks ro.camera.enableLazyHal=true"),
+            ("lazy-camera-property-off", {"camera_variant": "lazy-property-off"},
+             "lacks ro.camera.enableLazyHal=true"),
+            ("camera-config-property-missing", {"camera_variant": "config-property-missing"},
+             "lacks ro.vendor.camera.config=v4l2"),
+            ("camera-config-property-stock", {"camera_variant": "config-property-stock"},
+             "lacks ro.vendor.camera.config=v4l2"),
+            ("camera-extensions-property", {"camera_variant": "extensions-property"},
+             "sets ro.camerax.extensions.enabled"),
+            # The camera application and the camera switch.
+            ("missing-camera-application", {"entries": {camera_app_path: None}},
+             "required entries are missing"),
+            ("camera-lens-launcher", {"entries": {
+                "PRODUCT/app/ApertureLensLauncher/ApertureLensLauncher.apk": synthetic_apk()}},
+             "unneeded built-in application payload is forbidden"),
+            ("stock-camera-application", {"entries": {"PRODUCT/app/Camera2/Camera2.apk": synthetic_apk()}},
+             "unneeded built-in application payload is forbidden"),
+            ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
+            ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
+             "must set config_enableAuxCameras to true"),
+            ("camera-aux-cameras-qualified", {"camera_variant": "aux-qualified"},
+             "must set config_enableAuxCameras to true"),
+            ("camera-ignored-ids-extra", {"camera_variant": "ignored-extra"},
+             "must list the camera IDs"),
+            ("camera-ignored-ids-empty", {"camera_variant": "ignored-none"}, "must list the camera IDs"),
+            ("camera-ignored-ids-missing", {"camera_variant": "ignored-missing"}, "must list the camera IDs"),
+            ("camera-toggle-off", {"camera_variant": "toggle-off"},
+             "must set config_supportsHardwareCamToggle to true"),
+            ("camera-toggle-missing", {"camera_variant": "toggle-missing"},
+             "must set config_supportsHardwareCamToggle to true"),
+            ("camera-toggle-qualified", {"camera_variant": "toggle-qualified"},
+             "must set config_supportsHardwareCamToggle to true"),
         ):
             reject(label, options, reason)
 
@@ -4658,6 +5625,128 @@ def verify_host_cpu_name(root: Path, android_root: Path) -> None:
     expected = load_tool(android_root / "tools/verify-target-files.py").SOC_IDENTITY
     if expected["ro.soc.manufacturer"] + " " + expected["ro.soc.model"] != host:
         fail(f"the verifier expects a CPU other than the host's {host!r}: {expected}")
+
+
+def verify_wifi_network(android_root: Path) -> None:
+    """The tracked Wi-Fi network script, its init file and the module's overlay meet the rules the
+    verifier holds the built image to, and the overlay sets exactly the thresholds it requires."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    tools = android_root / "overlay/tools"
+    verifier.check_wifi_network(
+        (tools / "kernarium_wifi_network.rc").read_text(encoding="utf-8"),
+        (tools / "kernarium_wifi_network.sh").read_bytes(),
+    )
+    module = android_root / "overlay/rro/KernariumWifiOverlay"
+    thresholds = {
+        element.get("name"): int(element.text)
+        for element in ET.parse(module / "res/values/config.xml").getroot().iter("integer")
+    }
+    for name in verifier.WIFI_NO_INTERNET_THRESHOLDS:
+        if thresholds.get(name) != verifier.WIFI_NEVER_DISABLED_THRESHOLD:
+            fail(
+                f"the Wi-Fi overlay sets {name} to {thresholds.get(name)}, not "
+                f"{verifier.WIFI_NEVER_DISABLED_THRESHOLD}"
+            )
+    # The marker holds 1 and 2: the verifier's reading of a property type accepts both for an
+    # enum that lists them and rejects 2 for the types that cannot hold it.
+    accepts = verifier.property_type_accepts
+    for tokens, value, expected in (
+        (["exact", "enum", "1", "2"], "2", True),
+        (["exact", "enum", "1"], "2", False),
+        (["exact", "bool"], "2", False),
+        (["exact", "bool"], "1", True),
+        (["exact", "string"], "2", True),
+        (["exact", "int"], "2", True),
+        (["exact", "uint"], "-1", False),
+    ):
+        if accepts(tokens, value) is not expected:
+            fail(f"the verifier reads {' '.join(tokens)} as {'not ' * expected}accepting {value}")
+    # The script settles and rejoins for bounded times and ends; nothing in it waits for ever.
+    script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
+    for needle in ("settle=", "rejoin=", 'wait_joined "$settle"', 'wait_joined "$rejoin"', '"$waited" -ge "$1"'):
+        if needle not in code:
+            fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
+
+    # Run on stubs, the script sets 2 only once it has seen the station joined: a listing that
+    # fails prints what a forgotten network does, so neither marks the disk done.
+    marker = verifier.WIFI_NETWORK_MARKER
+
+    def run(stored: str, flags: tuple[str, ...], runs: int) -> tuple[list[int], list[str], str]:
+        """Runs the script `runs` times on one guest whose Wi-Fi the flags describe; returns each
+        run's exit status, every recorded call and the marker."""
+        with tempfile.TemporaryDirectory(prefix="wifi-network-script-") as temporary:
+            stubs = Path(temporary)
+            calls = stubs / "calls"
+            state = stubs / "state"
+            properties = state / "properties"
+            properties.mkdir(parents=True)
+            (properties / marker).write_text(stored + "\n")
+            for flag in flags:
+                (state / flag).touch()
+            for name, body in {
+                "getprop": f'cat {properties}/"$1" 2>/dev/null || echo\n',
+                "setprop": f'echo "setprop $*" >> {calls}\necho "$2" > {properties}/"$1"\n',
+                "cmd": (
+                    f'echo "cmd $*" >> {calls}\n'
+                    'case "$1 $2" in\n'
+                    '"wifi list-networks")\n'
+                    f'    if [ -f {state}/saved ] && [ ! -f {state}/listing-fails ]; then\n'
+                    '        echo "Network Id      SSID                         Security type"\n'
+                    '        echo "0            VirtWifi                         open"\n'
+                    '    else\n'
+                    '        echo "No networks"\n'
+                    '    fi\n'
+                    # One listing fails, as a Wi-Fi thread that does not answer in time does.
+                    f'    rm -f {state}/listing-fails ;;\n'
+                    '"wifi status")\n'
+                    f'    if [ -f {state}/off ]; then echo "Wifi is disabled"; exit 0; fi\n'
+                    '    echo "Wifi is enabled"\n'
+                    f'    if [ -f {state}/joined ]; then echo \'Wifi is connected to "VirtWifi"\'\n'
+                    '    else echo "Wifi is not connected"; fi ;;\n'
+                    '"wifi add-network")\n'
+                    f'    touch {state}/saved\n'
+                    f'    if [ -f {state}/joins-when-saved ]; then touch {state}/joined; fi ;;\n'
+                    "*) exit 2 ;;\n"
+                    "esac\n"
+                ),
+                "log": f'echo "log $*" >> {calls}\n',
+                "sleep": f'echo "sleep $*" >> {calls}\n',
+            }.items():
+                (stubs / name).write_text("#!/bin/sh\n" + body)
+                (stubs / name).chmod(0o755)
+            env = {"PATH": f"{stubs}:/usr/bin:/bin"}
+            statuses = [
+                subprocess.run(["/bin/sh", str(tools / "kernarium_wifi_network.sh")], env=env,
+                               capture_output=True, text=True, timeout=120).returncode
+                for _ in range(runs)
+            ]
+            recorded = calls.read_text().splitlines() if calls.exists() else []
+            return statuses, recorded, (properties / marker).read_text().strip()
+
+    for what, stored, flags, runs, expected in (
+        ("a first boot", "", ("joins-when-saved",), 1, ("2", 1, 0)),
+        ("a station that joins within the settle time", "1", ("saved", "joined"), 1, ("2", 0, 0)),
+        ("a disabled network", "1", ("saved", "joins-when-saved"), 1, ("2", 1, 1)),
+        ("a disabled network that does not join once saved again", "1", ("saved",), 1, ("1", 1, 1)),
+        ("a forgotten network", "1", (), 1, ("1", 0, 0)),
+        ("Wi-Fi that is off", "1", ("saved", "off"), 1, ("1", 0, 0)),
+        ("a listing that fails", "1", ("saved", "listing-fails", "joins-when-saved"), 1, ("1", 0, 0)),
+        ("a listing that fails, then a boot that lists the network", "1",
+         ("saved", "listing-fails", "joins-when-saved"), 2, ("2", 1, 1)),
+        ("a joined network", "2", ("saved",), 1, ("2", 0, 0)),
+    ):
+        statuses, recorded, marked = run(stored, flags, runs)
+        saves = len([line for line in recorded if line.startswith("cmd wifi add-network")])
+        notes = len([line for line in recorded if line.startswith("log ")])
+        if statuses != [0] * runs or (marked, saves, notes) != expected:
+            fail(
+                f"the Wi-Fi network script on {what}: exits {statuses}, marker {marked!r}, saves {saves}, "
+                f"repair lines {notes}; expected marker {expected[0]!r}, saves {expected[1]}, "
+                f"repair lines {expected[2]}"
+            )
+        if stored == "2" and any(line.startswith("cmd ") for line in recorded):
+            fail(f"the Wi-Fi network script asks the Wi-Fi service at marker 2: {recorded}")
 
 
 def verify_pinner_overlay(android_root: Path) -> None:
@@ -5816,6 +6905,79 @@ def verify_lmkd_gpu_reclaim(android_root: Path) -> None:
         fail("the route table does not route system/memory/lmkd as its 25th route")
 
 
+NETWORK_STACK_PROJECT = "platform/packages/modules/NetworkStack"
+NETWORK_MONITOR_FILE = "src/com/android/server/connectivity/NetworkMonitor.java"
+
+
+def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
+    """What the p0029 patch lacks of the Wi-Fi exemption: it changes NetworkMonitor alone, it holds the
+    name the verifier looks for, it applies to the Wi-Fi transport and to nothing else, and it takes no
+    transition out of the evaluation."""
+    problems = []
+    touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
+    if touched != [NETWORK_MONITOR_FILE]:
+        problems.append(f"it changes {touched}, not {NETWORK_MONITOR_FILE} alone")
+    added = "\n".join(
+        line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")
+    )
+    removed = "\n".join(
+        line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")
+    )
+    if f'"{marker}"' not in added:
+        problems.append(f"it does not add the string {marker!r} that the verifier requires")
+    for needle, what in (
+        ("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "apply to the Wi-Fi transport"),
+        ("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "leave a test network alone"),
+        ("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "leave a VPN alone"),
+    ):
+        if needle not in added:
+            problems.append(f"it does not {what}")
+    if "transitionTo" in removed:
+        problems.append("it removes a transition of the evaluation")
+    return problems
+
+
+def verify_network_stack_topic(android_root: Path) -> None:
+    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi exemption.
+
+    The target-files fixtures prove what the verifier rejects; this proves that the topic puts in the
+    APK the name the verifier looks for, and that its exemption reaches a Wi-Fi network and no other."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    rows = [
+        line.split("\t")
+        for line in (android_root / "patches/projects.tsv").read_text().splitlines()
+        if line and not line.startswith("#")
+    ][1:]
+    routes = [row for row in rows if row[3] == NETWORK_STACK_PROJECT]
+    if [(row[1], row[4]) for row in routes] != [("p0029", "packages/modules/NetworkStack")]:
+        fail("the route table does not route packages/modules/NetworkStack once, as p0029")
+    patches = sorted((android_root / "patches/projects/p0029/series").glob("*.patch"))
+    if len(patches) != 1:
+        fail(f"p0029 has {len(patches)} patches, not one")
+    patch = patches[0].read_text()
+    if len(verifier.NETWORK_STACK_MARKERS) != 1:
+        fail("the verifier no longer names exactly one NetworkMonitor marker")
+    marker = verifier.NETWORK_STACK_MARKERS[0].decode()
+    problems = network_stack_topic_problems(patch, marker)
+    if problems:
+        fail("the NetworkMonitor topic: " + "; ".join(problems))
+    for label, edited in (
+        ("a topic without the verifier's string", patch.replace(marker, "Wi-Fi is checked")),
+        ("a topic that skips every transport",
+         patch.replace("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "hasTransport(0)")),
+        ("a topic that exempts test networks",
+         patch.replace("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "true")),
+        ("a topic that exempts a VPN",
+         patch.replace("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "isEmpty()")),
+        ("a topic that also changes another file",
+         patch + "diff --git a/src/com/android/networkstack/util/NetworkStackUtils.java b/x\n"),
+        ("a topic that removes a transition",
+         patch + "-                            transitionTo(mEvaluatingPrivateDnsState);\n"),
+    ):
+        if not network_stack_topic_problems(edited, marker):
+            fail(f"the NetworkMonitor topic check accepted {label}")
+
+
 def verify_media_codecs_overlay(android_root: Path) -> None:
     """The tracked software decoder update satisfies the verifier that checks the image."""
     verifier = load_tool(android_root / "tools/verify-target-files.py")
@@ -5848,7 +7010,8 @@ def verify_package_assertions(android_root: Path) -> None:
     for package in (
         "android.hardware.sensors-service.multihal",
         "android.hardware.sensors@2.1-impl.andarium",
-        "com.android.hardware.thermal",
+        "android.hardware.thermal-service.andarium",
+        "kernarium_gamepad",
         "com.android.hardware.cas",
         "libclearkeycasplugin",
         "com.android.hardware.wifi",
@@ -5861,9 +7024,178 @@ def verify_package_assertions(android_root: Path) -> None:
         "kernarium_wifi_network_script",
         "kernarium_reclaim_boot_apps_script",
         "kernarium_time_zone_script",
+        "kernarium_keyboard_default_script",
     ):
         if package not in present:
             fail(f"build-aosp.sh does not assert that {package} is present")
+
+
+def verify_keyboard_default(android_root: Path) -> None:
+    """A new guest hides Android's on-screen keyboard while a hardware keyboard is attached, and a guest
+    that an older release created with it on is moved once.
+
+    The script runs with stub tools: getprop and setprop read and write a table of properties, `cmd
+    settings get` prints the stored setting (nothing while the service is not up) and `cmd settings put`
+    stores a value or, for the refusal case, does not, and log and sleep record what the script says."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    tools = android_root / "overlay/tools"
+    script = tools / "kernarium_keyboard_default.sh"
+    defaults = ET.fromstring(
+        (android_root / "overlay/overlay/frameworks/base/packages/SettingsProvider/"
+         "res/values/defaults.xml").read_text()
+    )
+    values = [
+        element.text for element in defaults.findall("bool")
+        if element.get("name") == "def_show_ime_with_hard_keyboard"
+    ]
+    if values != ["false"]:
+        fail(f"the SettingsProvider overlay must default the on-screen keyboard with a hardware keyboard off: {values}")
+    if not os.access(script, os.X_OK) or not script.read_text().startswith("#!/system/bin/sh\n"):
+        fail("kernarium_keyboard_default.sh must be an executable /system/bin/sh script, as its siblings are")
+    # The sepolicy sources hold what the built-policy check looks for.
+    policy = (android_root / "overlay/sepolicy/system_ext/private/kernarium_keyboard_default.te").read_text()
+    for needle in (
+        "init_daemon_domain(kernarium_keyboard_default)",
+        "allow kernarium_keyboard_default settings_service:service_manager find;",
+        "allow kernarium_keyboard_default system_server:binder transfer;",
+        "allow system_server kernarium_keyboard_default:binder call;",
+        "allow system_server kernarium_keyboard_default:fd use;",
+        "allow system_server kernarium_keyboard_default:fifo_file { getattr read write };",
+        "allow kernarium_keyboard_default system_file:file execute_no_trans;",
+        "system_internal_prop(kernarium_keyboard_default_prop)",
+        "set_prop(kernarium_keyboard_default, kernarium_keyboard_default_prop)",
+    ):
+        if needle not in policy:
+            fail(f"the keyboard default domain lacks '{needle}'")
+    if len(re.findall(r"^set_prop\(", policy, re.M)) != 1:
+        fail("the keyboard default domain sets a property besides its marker")
+    contexts = (android_root / "overlay/sepolicy/system_ext/private/file_contexts").read_text()
+    if (
+        r"/(system_ext|system/system_ext)/bin/kernarium_keyboard_default\.sh  "
+        "u:object_r:kernarium_keyboard_default_exec:s0"
+    ) not in contexts:
+        fail("the system_ext file contexts do not label the keyboard default script")
+    properties = (android_root / "overlay/sepolicy/system_ext/private/property_contexts").read_text()
+    if (
+        "persist.sys.kernarium.keyboard_default    u:object_r:kernarium_keyboard_default_prop:s0 exact bool"
+    ) not in properties:
+        fail("the system_ext property contexts do not label the keyboard default marker")
+    blueprint = (tools / "Android.bp").read_text()
+    for needle in (
+        'name: "kernarium_keyboard_default_script"',
+        'src: "kernarium_keyboard_default.sh"',
+        'init_rc: ["kernarium_keyboard_default.rc"]',
+    ):
+        if needle not in blueprint:
+            fail(f"overlay/tools/Android.bp lacks {needle}")
+    product = (android_root / "overlay/lineage_andarium.mk").read_text()
+    if len(re.findall(r"^PRODUCT_PACKAGES \+= kernarium_keyboard_default_script$", product, re.M)) != 1:
+        fail("lineage_andarium.mk does not add the keyboard default script to PRODUCT_PACKAGES exactly once")
+    verifier.check_keyboard_default((tools / "kernarium_keyboard_default.rc").read_text(), script.read_bytes())
+
+    marker = "persist.sys.kernarium.keyboard_default"
+
+    def run(stored: str | None, applied: str = "", *, refuse: bool = False, silent_reads: int = 0,
+            runs: int = 1) -> tuple[subprocess.CompletedProcess, list[str], str | None, str]:
+        """Runs the script `runs` times on one guest; returns the last process, every recorded call, the
+        stored setting (None when there is none) and the marker."""
+        with tempfile.TemporaryDirectory(prefix="keyboard-default-script-") as temporary:
+            stubs = Path(temporary)
+            calls = stubs / "calls"
+            state = stubs / "state"
+            state.mkdir()
+            properties = state / "properties"
+            properties.mkdir()
+            (properties / marker).write_text(applied + "\n")
+            if stored is not None:
+                (state / "setting").write_text(stored + "\n")
+            (state / "silent").write_text(f"{silent_reads}\n")
+            for name, body in {
+                "getprop": f'cat {properties}/"$1" 2>/dev/null || echo\n',
+                "setprop": f'echo "setprop $*" >> {calls}\necho "$2" > {properties}/"$1"\n',
+                "cmd": (
+                    f'echo "cmd $*" >> {calls}\n'
+                    'if [ "$1 $2 $3 $4" = "settings get secure show_ime_with_hard_keyboard" ]; then\n'
+                    f'    silent=$(cat {state}/silent)\n'
+                    '    if [ "$silent" -gt 0 ]; then\n'
+                    f'        echo $((silent - 1)) > {state}/silent\n'
+                    "        exit 1\n"
+                    "    fi\n"
+                    f'    if [ -f {state}/setting ]; then cat {state}/setting; else echo null; fi\n'
+                    'elif [ "$1 $2 $3 $4 $5" = "settings put secure show_ime_with_hard_keyboard $5" ]; then\n'
+                    + ("    :\n" if refuse else f'    echo "$5" > {state}/setting\n')
+                    + "else\n    exit 2\nfi\n"
+                ),
+                "log": f'echo "log $*" >> {calls}\n',
+                "sleep": f'echo "sleep $*" >> {calls}\n',
+            }.items():
+                (stubs / name).write_text("#!/bin/sh\n" + body)
+                (stubs / name).chmod(0o755)
+            env = {"PATH": f"{stubs}:/usr/bin:/bin"}
+            result = None
+            for _ in range(runs):
+                result = subprocess.run(["/bin/sh", str(script)], env=env, capture_output=True, text=True)
+            assert result is not None
+            recorded = calls.read_text().splitlines() if calls.exists() else []
+            return (
+                result,
+                recorded,
+                (state / "setting").read_text().strip() if (state / "setting").exists() else None,
+                (properties / marker).read_text().strip(),
+            )
+
+    def puts(recorded: list[str]) -> list[str]:
+        return [line for line in recorded if line.startswith("cmd settings put")]
+
+    def notes(recorded: list[str]) -> list[str]:
+        return [line for line in recorded if line.startswith("log ")]
+
+    # A guest that an older release created holds 1: it becomes 0, once, and the marker records it.
+    result, recorded, final, marked = run("1")
+    if (
+        result.returncode != 0
+        or final != "0"
+        or marked != "1"
+        or puts(recorded) != ["cmd settings put secure show_ime_with_hard_keyboard 0"]
+        or len(notes(recorded)) != 1
+    ):
+        fail(f"the keyboard default script did not turn a stored 1 off: {recorded} {final} {marked}")
+    # A guest that already has the default (0, or no row) is not written, and the marker is set.
+    for stored in ("0", None):
+        result, recorded, final, marked = run(stored)
+        if result.returncode != 0 or puts(recorded) or final != stored or marked != "1" or len(notes(recorded)) != 1:
+            fail(f"the keyboard default script touched a guest at the default ({stored!r}): "
+                 f"{recorded} {final} {marked}")
+    # It acts once: a person who turned the setting on afterwards keeps it, and a second run reads and
+    # writes nothing.
+    result, recorded, final, marked = run("1", "1")
+    if result.returncode != 0 or recorded or final != "1" or marked != "1":
+        fail(f"the keyboard default script acted again after its marker: {recorded} {final}")
+    result, recorded, final, marked = run("1", runs=2)
+    if result.returncode != 0 or len(puts(recorded)) != 1 or final != "0" or marked != "1":
+        fail(f"the keyboard default script is not idempotent: {recorded} {final}")
+    # It writes only the one setting, and never anything but 0.
+    for line in recorded:
+        if line.startswith("cmd settings put") and line != "cmd settings put secure show_ime_with_hard_keyboard 0":
+            fail(f"the keyboard default script wrote something else: {line}")
+    # A service that is not up yet is waited for: the script retries, then acts.
+    result, recorded, final, marked = run("1", silent_reads=5)
+    if (
+        result.returncode != 0
+        or final != "0"
+        or marked != "1"
+        or len([line for line in recorded if line.startswith("sleep")]) != 5
+    ):
+        fail(f"the keyboard default script did not wait for the settings service: {recorded} {final} {marked}")
+    # A setting that cannot be read at all leaves everything alone, sets no marker and fails the
+    # script (not the boot), so the next boot tries again.
+    result, recorded, final, marked = run("1", silent_reads=1000)
+    if result.returncode == 0 or puts(recorded) or final != "1" or marked != "":
+        fail(f"the keyboard default script acted on an unreadable setting: {recorded} {final} {marked}")
+    # A write the platform refuses leaves the 1 and no marker, and the next boot tries again.
+    result, recorded, final, marked = run("1", refuse=True)
+    if result.returncode == 0 or len(puts(recorded)) != 1 or final != "1" or marked != "":
+        fail(f"the keyboard default script claimed a write the platform refused: {recorded} {final} {marked}")
 
 
 def verify_debugging_defaults(android_root: Path) -> None:
@@ -7034,16 +8366,19 @@ def main() -> None:
     verify_hardware_identity(android_root)
     verify_host_cpu_name(root, android_root)
     verify_pinner_overlay(android_root)
+    verify_wifi_network(android_root)
     verify_secondary_zygote_topic(android_root)
     verify_decoder_output_delay_topic(android_root)
     verify_secure_element_topic(android_root)
     verify_reclaim_boot_apps(android_root)
     verify_time_zone(android_root)
+    verify_keyboard_default(android_root)
     verify_default_wallpaper(android_root)
     verify_setup_wizard_flow(android_root)
     verify_launcher_layouts(android_root)
     verify_overlay_sepolicy(android_root)
     verify_lmkd_gpu_reclaim(android_root)
+    verify_network_stack_topic(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)
     verify_debugging_defaults(android_root)

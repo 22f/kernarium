@@ -59,6 +59,37 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
     private let motion = MotionSensors()
+    /// The guest's hardware keyboard and mouse: plugged while iOS has the
+    /// hardware, and fed by the display's view (`GuestLayer`).
+    let keyboardMouse: KeyboardMouse
+    /// The runtime reported that this run has started, so the keyboard and the
+    /// mouse exist in it and can be plugged.
+    private var inputRunReady = false
+    /// The device's haptics for the guest's vibrator. A device without a Taptic
+    /// Engine never runs it: the guest finds no vibrator.
+    private let hapticsAvailable = DeviceHaptics.isAvailable
+    /// One player for the device's own actuator and every game controller's,
+    /// each target with the engine its own source makes.
+    private let controllerEngines = GameControllerEngines()
+    private lazy var hapticPlayer = CoreHapticsPlayer(
+        source: HapticEngineSources(device: DeviceHapticEngines(), controllers: controllerEngines))
+    private lazy var haptics = HapticsSession(opener: HapticsConnector(), player: hapticPlayer)
+    /// The game controllers iOS has connected, as HID devices in the guest.
+    /// Their rumble plays on `hapticPlayer`, which a controller has whether or
+    /// not the device has a Taptic Engine.
+    private lazy var gameControllers = GameControllers(player: hapticPlayer, engines: controllerEngines)
+    /// Tells the guest's thermal HAL how hot the device is; Android lowers
+    /// its frame rate for it, and the session says so once.
+    private lazy var thermal = ThermalSession(opener: ThermalConnector()) { [weak self] in
+        Task { @MainActor [weak self] in self?.thermalCapStarted() }
+    }
+    private lazy var thermalMonitor = ThermalMonitor { [weak self] state in self?.thermal.observe(state) }
+    /// The device's position for the guest's GNSS receiver, read from Core
+    /// Location only while the person's Location switch, iOS, the foreground,
+    /// a normal run and the guest's own receiver all say so
+    /// (`LocationSession`).
+    private let hostLocation = HostLocation()
+    private lazy var location = LocationSession(updates: hostLocation, sink: RuntimeLocationSink())
     /// The interface orientation the sensors' axes are mounted to.
     private var motionMount = MotionMount()
     private lazy var rotation = GuestRotationController(
@@ -80,7 +111,7 @@ final class LiveRuntime: RuntimeDriver {
         })
     private var normalRun = false
     /// The runtime runs a guest, from its start until its run returns.
-    private var runActive = false
+    private var runActive = false { didSet { publishSnapshotActivity() } }
     private var active = UIApplication.shared.applicationState == .active
     /// The device's free space, which the run watches. The application's
     /// own reading unless a test supplies another.
@@ -99,9 +130,24 @@ final class LiveRuntime: RuntimeDriver {
     /// Writes what the person sets, for the next launch.
     private let preferences: PreferenceKeeper
 
-    private var pending: PendingRun?
-    private var launching = false
-    private var preparing = false
+    private var pending: PendingRun? { didSet { publishSnapshotActivity() } }
+    private var launching = false { didSet { publishSnapshotActivity() } }
+    private var preparing = false { didSet { publishSnapshotActivity() } }
+    /// The snapshot operation under way (`SnapshotDriver`). It clears the
+    /// field itself before it ends, so what waits for it never sees it set.
+    private var snapshotOperation: Task<Void, Never>?
+    /// What that operation is.
+    private var snapshotWork: SnapshotWork? { didSet { publishSnapshotActivity() } }
+    /// A guest is being created or erased.
+    private var storageBusy = false { didSet { publishSnapshotActivity() } }
+    /// The operations finished so far (`SnapshotActivity.revision`).
+    private var snapshotRevision = 0 { didSet { publishSnapshotActivity() } }
+    /// What the snapshot driver is doing, as the model has it.
+    private(set) var activity = SnapshotActivity()
+    var activityChanged: (@MainActor (SnapshotActivity) -> Void)?
+    /// What stopped the last attempt in this process to finish a restore that
+    /// did not finish; the listing carries it.
+    private var rollForwardFailure: SnapshotFailure?
     private var view: GuestMetalView?
     private var geometry: GuestDisplayGeometry?
     private var bootStartedAt = Date()
@@ -112,9 +158,13 @@ final class LiveRuntime: RuntimeDriver {
     init(
         model: AppModel, storage: TwoDiskStorage, marker: PauseMarker, keyStore: AdbKeyStore = AdbKeyStore(),
         sessionRecord: URL? = nil,
-        freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() }
+        freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
+        keyboardMouse: KeyboardMouse? = nil
     ) {
         self.model = model
+        self.keyboardMouse = keyboardMouse ?? KeyboardMouse.live(supportsMouse: model.host.supportsPointer) {
+            [weak model] wanted in model?.pointerLockWanted = wanted
+        }
         self.preferences = PreferenceKeeper(model: model)
         self.storage = storage
         self.keyStore = keyStore
@@ -128,10 +178,22 @@ final class LiveRuntime: RuntimeDriver {
             // itself; a guest records silence while access is out of reach.
             _ = kernarium_runtime_loader_set_microphone($0 ? 1 : 0)
         }
+        hostLocation.deliver = { [weak self] fix in self?.location.deliver(fix) }
+        model.location = LocationController(model: model, source: hostLocation.access) { [weak self] in
+            self?.updateLocation()
+        }
+        // The guest's receiver powers up when an Android app wants a position
+        // and again when it stops; the loader delivers each event on the main
+        // queue.
+        kernarium_runtime_loader_set_location_receiver_handler { @Sendable [weak self] powered in
+            MainActor.assumeIsolated { self?.location.receiverPower(powered) }
+        }
         model.motionSensorsAvailable = motion.available
         motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
+        self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
         observeRotationPolicy()
+        observeOverlay()
         preferences.start()
     }
 
@@ -139,11 +201,24 @@ final class LiveRuntime: RuntimeDriver {
 
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
+        await settleSnapshotOperation()
+        storageBusy = true
+        defer {
+            snapshotRevision += 1
+            storageBusy = false
+        }
         return try await storage.create(guest, progress: progress)
     }
 
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
+        // The snapshots go with the guest: an operation on them finishes first.
+        await settleSnapshotOperation()
+        storageBusy = true
+        defer {
+            snapshotRevision += 1
+            storageBusy = false
+        }
         try await storage.erase(progress: progress)
         // The next guest is a new one: it boots with a key of its own.
         keyStore.delete()
@@ -164,9 +239,29 @@ final class LiveRuntime: RuntimeDriver {
         storage.measuredUsedBytes()
     }
 
-    func restoreUpdate() throws {
+    /// The update's Restore: after the snapshot operation under way, as a
+    /// start is. It changes the guest's files (it completes a snapshot
+    /// restore that did not finish first), so what a screen has listed is stale.
+    func restoreUpdate() async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        try storage.restoreUpdate()
+        await settleSnapshotOperation()
+        // A guest being set up or erased has no update to restore.
+        guard !storageBusy else { return }
+        defer { snapshotRevision += 1 }
+        do {
+            try storage.restoreUpdate()
+            rollForwardFailure = nil
+        } catch let unfinished as SnapshotRestoreUnfinished {
+            rollForwardFailure = SnapshotFailure(unfinished.cause)
+            throw unfinished
+        }
+    }
+
+    /// A restore that began in an earlier process and could not be finished
+    /// at launch (`TwoDiskStorage.recoverSnapshots`): the listing says so.
+    func snapshotRecoveryFailed(_ error: any Error) {
+        let cause = (error as? SnapshotRestoreUnfinished)?.cause ?? error
+        rollForwardFailure = SnapshotFailure(cause)
     }
 
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
@@ -200,7 +295,7 @@ final class LiveRuntime: RuntimeDriver {
     private func prepareAndLaunch(_ run: PendingRun) async {
         preparing = true
         do {
-            try await storage.prepareStart(run.guest) { fraction in
+            try await prepareFiles(for: run.guest) { fraction in
                 Task { @MainActor in self.preparingDisk(fraction) }
             }
         } catch {
@@ -233,6 +328,20 @@ final class LiveRuntime: RuntimeDriver {
             return
         }
         launch(run, view: view, geometry: geometry, extras: extras)
+    }
+
+    /// The guest's files, ready for the run: a snapshot operation under way
+    /// finishes first, and the update rules then apply to what it left (a
+    /// restore that did not finish completes here).
+    func prepareFiles(for guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws {
+        await settleSnapshotOperation()
+        do {
+            try await storage.prepareStart(guest, progress: progress)
+            rollForwardFailure = nil
+        } catch let unfinished as SnapshotRestoreUnfinished {
+            rollForwardFailure = SnapshotFailure(unfinished.cause)
+            throw unfinished
+        }
     }
 
     #if !APP_STORE
@@ -311,7 +420,15 @@ final class LiveRuntime: RuntimeDriver {
         let dataGiB = storage.dataGiB(for: run.guest)
         reachedBootCompleted = false
         normalRun = run.mode == .normal
+        updateThermal()
+        if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
+        updateHaptics()
+        updateGameControllers()
+        updateLocation()
+        inputRunReady = false
+        updateKeyboardMouse()
+        let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -330,7 +447,7 @@ final class LiveRuntime: RuntimeDriver {
                 view: view, dataDiskPath: dataDiskPath, releasePath: releasePath, dataGiB: dataGiB, bootMode: bootMode,
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
                 processorCount: processorCount, adbKeyLine: adbKeyLine, timeZone: timeZone,
-                sessionRecordPath: sessionRecordPath, extras: extras
+                sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, extras: extras
             )
             Task { @MainActor in self.finished(result: result) }
         }
@@ -342,7 +459,7 @@ final class LiveRuntime: RuntimeDriver {
         view: GuestMetalView, dataDiskPath: String, releasePath: String, dataGiB: UInt32, bootMode: UInt32,
         width: UInt32, height: UInt32, dotsPerInch: UInt32, memoryMiB: UInt32,
         processorCount: UInt32, adbKeyLine: String?, timeZone: String?, sessionRecordPath: String?,
-        extras: StartExtras
+        hostFeatures: UInt32, extras: StartExtras
     ) -> Int32 {
         dataDiskPath.withCString { dataDisk in
             releasePath.withCString { release in
@@ -374,6 +491,8 @@ final class LiveRuntime: RuntimeDriver {
                             request.android_time_zone = zone
                             // Where the runtime records how the session ends.
                             request.session_record_path = record
+                            // What the host has that the guest is to find.
+                            request.android_host_features = hostFeatures
                             #if !APP_STORE
                             // The JIT engine, once its memory is prepared; gadgets otherwise.
                             request.use_jit = extras.jit ? 1 : 0
@@ -393,6 +512,12 @@ final class LiveRuntime: RuntimeDriver {
         return text.withCString(body)
     }
 
+    /// What the boot request tells the guest the host has
+    /// (`android_host_features`): a vibrator, on a device with haptics.
+    nonisolated static func hostFeatures(hapticsAvailable: Bool) -> UInt32 {
+        hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0
+    }
+
     // MARK: Android operations
 
     /// What adb does for the screens, with the key this boot carries.
@@ -408,6 +533,10 @@ final class LiveRuntime: RuntimeDriver {
 
     func createBugReport(update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
         try await operations.createBugReport(update: update)
+    }
+
+    func guestStallFiles() async -> [BugReportArchive.Entry] {
+        await operations.guestProcFiles()
     }
 
     func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
@@ -444,9 +573,16 @@ final class LiveRuntime: RuntimeDriver {
 
     private func reached(_ milestones: [BootMilestone], bootCompleted: Bool) {
         guard let model else { return }
+        // The guest console answers, so the emulator exists and takes requests
+        // for the keyboard and the mouse.
+        if !inputRunReady {
+            inputRunReady = true
+            updateKeyboardMouse()
+        }
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
         if bootCompleted {
             reachedBootCompleted = true
+            updateThermal()
             updateGuestRotation()
             updateSpaceWatch()
             // An update counts as applied once its start has booted, whatever
@@ -466,6 +602,12 @@ final class LiveRuntime: RuntimeDriver {
         reachedBootCompleted = false
         spaceAlertOpen = false
         motion.stop()
+        haptics.restart()
+        gameControllers.restart()
+        thermal.restart()
+        location.guestRestarted()
+        keyboardMouse.guestRestarted()
+        updateThermal()
         updateGuestRotation()
         updateSpaceWatch()
         switch model.phase {
@@ -480,11 +622,14 @@ final class LiveRuntime: RuntimeDriver {
     private func finished(result: Int32) {
         normalRun = false
         runActive = false
+        inputRunReady = false
         shuttingDown = false
         spaceAlertOpen = false
         motion.stop()
         updateGuestRotation()
         updateSpaceWatch()
+        updateThermal()
+        thermalMonitor.stop()
         stopThermalObservation()
         kernarium_runtime_loader_set_restart_handler(nil)
         kernarium_runtime_loader_set_console_output_handler(nil)
@@ -566,6 +711,10 @@ final class LiveRuntime: RuntimeDriver {
         if motionMount.update(policy: policy, interface: interfaceMotionAxes) { motion.restart() }
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
+        updateHaptics()
+        updateGameControllers()
+        updateLocation()
+        updateKeyboardMouse()
     }
 
     func setMotionSensors(_ on: Bool) {
@@ -580,6 +729,89 @@ final class LiveRuntime: RuntimeDriver {
                 && rotation.applied == rotationPolicy,
             axes: motionMount.axes
         )
+    }
+
+    // MARK: Keyboard and mouse
+
+    /// The guest's keyboard and mouse follow the run and the foreground: they
+    /// exist from the first word the guest's console says to its end, and the
+    /// display's keys and pointer reach them while the application is in front
+    /// and the guest is not held still.
+    private func updateKeyboardMouse() {
+        keyboardMouse.update(
+            running: runActive && inputRunReady, foreground: active && !holdsGuestStill,
+            overlaid: !(model?.guestHasKeys ?? true))
+    }
+
+    /// A sheet, an alert, Settings or the share sheet over the guest takes the
+    /// keys, and with them the pointer lock the guest's capture asked for.
+    private func observeOverlay() {
+        guard let model else { return }
+        withObservationTracking {
+            _ = model.guestHasKeys
+        } onChange: {
+            Task { @MainActor in
+                guard self.model != nil else { return }
+                self.updateKeyboardMouse()
+                self.observeOverlay()
+            }
+        }
+    }
+
+    func setPointerAsTouch(_ on: Bool) {
+        keyboardMouse.setPointerAsTouch(on)
+    }
+
+    #if !APP_STORE
+    /// A UI test's launch (`InputProbeLaunch`) has no guest: the session is
+    /// treated as one whose run has started, so the guest's keyboard and mouse
+    /// can be exercised. Nothing else of a run (rotation, sensors, haptics)
+    /// starts, because nothing answers it.
+    func beginInputProbe() {
+        runActive = true
+        inputRunReady = true
+        updateKeyboardMouse()
+    }
+    #endif
+
+    func pointerLockDidChange(_ locked: Bool) {
+        keyboardMouse.pointerLockChanged(locked)
+    }
+
+    // MARK: Haptics
+
+    /// The guest's vibrator plays while a normal run is in front and holds
+    /// the guest running; the connection is made from the run's start, because
+    /// the guest's HAL starts early. The screens have no part in it: Android's
+    /// own settings decide what it asks for.
+    private func updateHaptics() {
+        haptics.update(
+            available: hapticsAvailable, running: normalRun, booted: reachedBootCompleted,
+            foreground: active && !holdsGuestStill)
+    }
+
+    // MARK: Game controllers
+
+    /// The game controllers are the guest's while a normal run is in front and
+    /// holds the guest running, and are looked for from the run's start to its
+    /// end. The guest's relay starts early, so the connection is made at once.
+    private func updateGameControllers() {
+        gameControllers.update(
+            running: normalRun, booted: reachedBootCompleted, foreground: active && !holdsGuestStill)
+    }
+
+    // MARK: Location
+
+    /// Sets the location session to what is wanted now: the switch as the
+    /// screens show it, what iOS allows, whether Andarium is in front and not
+    /// holding the guest still, and whether a normal run goes on. The guest's
+    /// own receiver decides the rest, and the session ends it all the moment
+    /// a run does.
+    private func updateLocation() {
+        guard let model else { return }
+        location.update(
+            enabled: model.locationShownOn, authorization: model.locationAuthorization,
+            foreground: active && !holdsGuestStill, running: normalRun)
     }
 
     // MARK: Microphone
@@ -681,9 +913,24 @@ final class LiveRuntime: RuntimeDriver {
 
     // MARK: Thermal state
 
-    // The thermal state and uptime go to the console for the iPad harness
-    // (`Shared/ConsoleReport.swift`); an App Store build prints neither and
-    // reads neither the system uptime nor the thermal state.
+    // Two readers of the thermal state. The guest's thermal HAL is told how
+    // hot the device is in every build (`ThermalSession`). The state and the
+    // uptime also go to the console for the iPad harness
+    // (`Shared/ConsoleReport.swift`); an App Store build prints neither line
+    // and reads no system uptime.
+
+    /// The guest's thermal HAL is told while a normal run goes on; Recovery
+    /// has none.
+    private func updateThermal() {
+        thermal.update(running: normalRun, booted: reachedBootCompleted)
+    }
+
+    /// Android starts to lower its frame rate: the first time in the run that
+    /// the device is hot enough and the HAL has heard of it.
+    private func thermalCapStarted() {
+        guard runActive, normalRun else { return }
+        model?.thermalCapStarted()
+    }
 
     #if !APP_STORE
     private func reportThermalState(_ phase: ConsoleReport.ThermalPhase) {
@@ -909,6 +1156,7 @@ final class LiveRuntime: RuntimeDriver {
         #endif
         active = true
         updateGuestRotation()
+        if normalRun { thermalMonitor.refresh() }
         guard let model else { return }
         model.applicationActive = true
         let free = freeSpace()
@@ -917,6 +1165,7 @@ final class LiveRuntime: RuntimeDriver {
         // room while Andarium was away: the screen says what is free now.
         if model.spacePause != nil { model.spacePause?.freeBytes = free }
         model.microphone?.refresh()
+        model.location?.refresh()
     }
 
     private func observeRotationPolicy() {
@@ -1026,5 +1275,130 @@ final class PauseTaskAssertion {
         guard identifier != .invalid else { return }
         UIApplication.shared.endBackgroundTask(identifier)
         identifier = .invalid
+    }
+}
+
+// MARK: Snapshots
+
+/// The guest's data snapshots. The application's own state is the lock on the
+/// disk: no file lock says on iOS that a guest holds it, so an operation runs
+/// only while the guest is stopped (`SnapshotRules.gate`), one at a time, off
+/// the main actor, and a start, an erase or the update's Restore waits for the
+/// one under way.
+extension LiveRuntime: SnapshotDriver {
+    var snapshotGate: SnapshotRefusal? {
+        guard let model else { return .guestNotStopped }
+        return SnapshotRules.gate(
+            phase: model.phase, runtimeActive: activity.runtimeActive, operationUnderWay: activity.operation != nil)
+    }
+
+    /// Tells the model what the driver is doing when it changed.
+    fileprivate func publishSnapshotActivity() {
+        let now = SnapshotActivity(
+            runtimeActive: SnapshotRules.runtimeActive(
+                running: runActive, pending: pending != nil, launching: launching, preparing: preparing),
+            operation: snapshotWork ?? (storageBusy ? .guestStorage : nil), revision: snapshotRevision)
+        guard now != activity else { return }
+        activity = now
+        activityChanged?(now)
+    }
+
+    func snapshotListing(measured: Bool) async -> SnapshotListing {
+        let storage = self.storage
+        while true {
+            // A caller that was cancelled wants no answer: it gets what the
+            // files say now, unmeasured, without waiting or reading again.
+            // Waiting on a cancelled task would return at once and spin here.
+            let cancelled = Task.isCancelled
+            if !cancelled { await settleSnapshotOperation() }
+            // A guest being set up or erased changes the files under a listing.
+            while storageBusy, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(50)) }
+            let revision = snapshotRevision
+            let quick = cancelled || Task.isCancelled
+            // A cancellation reaches the measure, which stops between two
+            // files and answers unmeasured.
+            let reading = Task.detached(priority: .utility) { storage.snapshotListing(measured: measured && !quick) }
+            var listing = await withTaskCancellationHandler { await reading.value } onCancel: { reading.cancel() }
+            // An operation that started or finished while this one read makes
+            // it older than the files: read again.
+            guard quick || (snapshotOperation == nil && !storageBusy && snapshotRevision == revision) else { continue }
+            listing.revision = revision
+            listing.whileNotStopped = snapshotGate
+            if var unfinished = listing.unfinishedRestore {
+                unfinished.lastFailure = rollForwardFailure
+                listing.unfinishedRestore = unfinished
+            }
+            return listing
+        }
+    }
+
+    func createSnapshot(named name: String) async -> SnapshotResult<SnapshotSummary> {
+        await performSnapshot(.create, gated: true) { try $0.createSnapshot(named: name) }
+    }
+
+    func restoreSnapshot(_ id: SnapshotID, guest: Guest) async -> SnapshotResult<Guest> {
+        await performSnapshot(.restore, gated: true) { try $0.restoreSnapshot(id, guest: guest) }
+    }
+
+    func deleteSnapshot(_ id: SnapshotID) async -> SnapshotResult<Void> {
+        await performSnapshot(.delete, gated: true) { try $0.deleteSnapshot(id) }
+    }
+
+    func renameSnapshot(_ id: SnapshotID, to name: String) async -> SnapshotResult<Void> {
+        await performSnapshot(.rename, gated: false) { try $0.renameSnapshot(id, to: name) }
+    }
+
+    /// Waits for the snapshot operation under way, if any.
+    fileprivate func settleSnapshotOperation() async {
+        while let operation = snapshotOperation { await operation.value }
+    }
+
+    /// Runs `body` on the storage off the main actor as the one operation
+    /// under way. A gated one refuses unless the guest is stopped and idle;
+    /// one that is not (Rename) waits its turn, and refuses only while a guest
+    /// is being set up or erased.
+    private func performSnapshot<Value: Sendable>(
+        _ work: SnapshotWork, gated: Bool, _ body: @escaping @Sendable (TwoDiskStorage) throws -> Value
+    ) async -> SnapshotResult<Value> {
+        if gated {
+            if let refusal = snapshotGate { return .refused(refusal) }
+        } else {
+            await settleSnapshotOperation()
+            if storageBusy { return .refused(.busy) }
+        }
+        let storage = self.storage
+        let working = Task.detached(priority: .userInitiated) { () -> SnapshotResult<Value> in
+            do {
+                return .done(try body(storage))
+            } catch let unfinished as SnapshotRestoreUnfinished {
+                // The data is in place and the intent stands: the caller is told as a value, and the cause is kept.
+                return .failed(unfinished)
+            } catch let refusal as SnapshotRefusal {
+                return .refused(refusal)
+            } catch {
+                return .failed(error)
+            }
+        }
+        // The operation clears itself before it ends, so what waits for it
+        // never sees it set once it has finished.
+        let operation = Task { [weak self] in
+            _ = await working.value
+            self?.snapshotWork = nil
+            self?.snapshotRevision += 1
+            self?.snapshotOperation = nil
+        }
+        snapshotWork = work
+        snapshotOperation = operation
+        var result = await working.value
+        await operation.value
+        if case .failed(let error) = result, let unfinished = error as? SnapshotRestoreUnfinished {
+            rollForwardFailure = SnapshotFailure(unfinished.cause)
+            result = .refused(.restoreUnfinished)
+        } else if work == .restore, result.value != nil {
+            rollForwardFailure = nil
+        }
+        // A restore or a delete changes what the device has free.
+        model?.host.freeStorageBytes = AppEntry.freeStorageBytes()
+        return result
     }
 }

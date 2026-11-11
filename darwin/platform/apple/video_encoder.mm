@@ -887,6 +887,10 @@ public:
 
 #if UML_VIDEO_ENCODER_TESTING
     void loseSessionForTest(unsigned count) override { shared_->injectedLosses.store(count); }
+    void invalidateSessionForTest() override
+    {
+        if (session_) VTCompressionSessionInvalidate(session_.get());
+    }
 #endif
 
 private:
@@ -1682,6 +1686,11 @@ void testing::loseSession(VideoEncoder& encoder, unsigned count)
 {
     // The variant's factory only ever makes the Apple session.
     static_cast<apple_encoder::ProbeEncoder&>(encoder).loseSessionForTest(count);
+}
+
+void testing::invalidateSession(VideoEncoder& encoder)
+{
+    static_cast<apple_encoder::ProbeEncoder&>(encoder).invalidateSessionForTest();
 }
 #endif
 

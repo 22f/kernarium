@@ -20,6 +20,15 @@ uml_add_unit_test(NAME platform-video-decoder
     COMMAND uml_video_decoder_tests ${PROJECT_SOURCE_DIR}/tests/support/video
     LABELS video TIMEOUT 120)
 
+# Losing the hardware session: the decoder's test variant invalidates the
+# session of the next picture, as iOS does to an app that was in the background.
+add_executable(uml_video_decoder_recovery_tests video_decoder_recovery_tests.cpp)
+target_link_libraries(uml_video_decoder_recovery_tests PRIVATE
+    uml_video_decoder_test_variant)
+uml_add_unit_test(NAME platform-video-decoder-recovery
+    COMMAND uml_video_decoder_recovery_tests ${PROJECT_SOURCE_DIR}/tests/support/video
+    LABELS video TIMEOUT 120)
+
 # The decoder's HEVC header readers and output ordering, which need no hardware.
 add_executable(uml_hevc_stream_tests hevc_stream_tests.cpp)
 target_link_libraries(uml_hevc_stream_tests PRIVATE UML::VideoDecoder)

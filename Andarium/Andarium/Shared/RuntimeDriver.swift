@@ -66,6 +66,9 @@ enum MicrophoneState: Equatable {
 /// person can change in Settings.
 enum PermissionPrompt: Identifiable, Equatable {
     case microphone
+    /// The location is refused, restricted, off or approximate; the words
+    /// follow the access (`LocationWords.alert`).
+    case location
 
     var id: Self { self }
 }
@@ -89,8 +92,9 @@ protocol RuntimeDriver: AnyObject {
     /// size, after the disk is ready.
     func begin(guest: Guest, mode: StartMode, kind: BootKind)
     /// Puts the data back to what the update that did not finish started
-    /// from; the guest does not start.
-    func restoreUpdate() throws
+    /// from; the guest does not start. It waits for a snapshot operation under
+    /// way, as a start does.
+    func restoreUpdate() async throws
     /// The person resumes a guest paused for want of space. Reads the space
     /// again and wakes the guest when it is at least `RunSpace.resumeAtBytes`;
     /// returns whether it did. The guest stays paused otherwise.
@@ -107,12 +111,20 @@ protocol RuntimeDriver: AnyObject {
     func shutDownAfterSpacePause() async throws
     /// Enables or stops sharing motion with the guest.
     func setMotionSensors(_ on: Bool)
+    /// Settings' "Use the pointer as touch" changed: the guest has no mouse
+    /// while it is on.
+    func setPointerAsTouch(_ on: Bool)
+    /// The scene's pointer lock was granted or released.
+    func pointerLockDidChange(_ locked: Bool)
     /// The scene's geometry changed, which may include its interface
     /// orientation.
     func sceneGeometryDidChange()
     /// Asks the guest for a bug report and copies it into `BugReportStaging`.
     /// Returns the staged file; cancelling the task stops the report.
     func createBugReport(update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> URL
+    /// The guest kernel's counters that bear on a stall (`GuestProcFiles`), as
+    /// entries for the bug report; empty when the guest cannot be read now.
+    func guestStallFiles() async -> [BugReportArchive.Entry]
     /// Installs the APK at `url`, which the caller can read, into the guest.
     /// Cancelling the task stops it while the file is still being sent.
     func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws
@@ -165,6 +177,11 @@ protocol RuntimeDriver: AnyObject {
     /// thread. Without a servicing debugger it asks the runtime nothing.
     func prepareJit(wanted: Bool, shape: JitShape) async -> JitAnswer
     #endif
+}
+
+extension RuntimeDriver {
+    /// A driver with no guest to read adds nothing.
+    func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

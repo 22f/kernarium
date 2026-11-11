@@ -383,6 +383,14 @@ PRODUCT_PACKAGES=" $(get_build_var PRODUCT_PACKAGES) "
 	fail "the Android motion sensor service is absent"
 [[ "$PRODUCT_PACKAGES" == *" android.hardware.sensors@2.1-impl.andarium "* ]] ||
 	fail "the Andarium motion sensor backend is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.vibrator-service.andarium "* ]] ||
+	fail "the Andarium vibrator service is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.gnss-service.andarium "* ]] ||
+	fail "the Andarium GNSS service is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.thermal-service.andarium "* ]] ||
+	fail "the Andarium thermal service is absent"
+[[ "$(get_build_var ODM_MANIFEST_SKUS)" == haptics ]] ||
+	fail "ODM_MANIFEST_SKUS must be exactly haptics: the vibrator HAL exists only in that SKU's manifest"
 for package in \
 	android.hardware.health-service.example \
 	android.hardware.health-service.example_recovery \
@@ -416,11 +424,9 @@ for package in \
 		fail "required UML product package is absent: $package"
 done
 # The curated LineageOS application set leaves out the updater and the apps
-# for hardware this machine lacks. LineageOS's switches (no camera, no AudioFX,
-# no charger, no fastbootd) keep most out of the package set; the rest are
-# excluded by name.
+# for hardware this machine lacks. LineageOS's switches (no AudioFX, no charger,
+# no fastbootd) keep most out of the package set; the rest are excluded by name.
 for package in \
-	Aperture \
 	AudioFX \
 	Canvas \
 	F-Droid \
@@ -451,12 +457,16 @@ fi
 	fail "the suspend blocker that holds the guest awake for an adb host is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_net_setup "* ]] ||
 	fail "the network setup tool that configures eth0 and the virtual Wi-Fi is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_gamepad "* ]] ||
+	fail "the gamepad relay that turns the host's game controllers into HID devices is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_wifi_network_script "* ]] ||
 	fail "the script that saves the virtual Wi-Fi network is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_reclaim_boot_apps_script "* ]] ||
 	fail "the script that reclaims the cached boot-started apps is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_time_zone_script "* ]] ||
 	fail "the script that applies the host's time zone is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_keyboard_default_script "* ]] ||
+	fail "the script that moves an older guest to the on-screen keyboard default is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||
@@ -467,10 +477,16 @@ fi
 	fail "the overlay that releases the home app's memory pin is absent"
 [[ "$PRODUCT_PACKAGES" == *" SecureElement "* ]] ||
 	fail "the OMAPI service that SEService clients bind on demand is absent"
+for package in \
+	Aperture \
+	android.hardware.camera.provider@2.7-service-google-lazy \
+	emu_camera_v4l2.json \
+	libgooglecamerahwl_impl; do
+	[[ "$PRODUCT_PACKAGES" == *" $package "* ]] ||
+		fail "the camera application or the lazy camera provider and its HAL are absent: $package"
+done
 [[ "$PRODUCT_PACKAGES" == *" EasterEgg "* ]] ||
 	fail "the easter egg that the platform logo screen opens is absent"
-[[ "$PRODUCT_PACKAGES" == *" com.android.hardware.thermal "* ]] ||
-	fail "the example thermal HAL that the thermal manager needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.cas "* ]] ||
 	fail "the default CAS HAL that MediaCas needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" libclearkeycasplugin "* ]] ||
@@ -481,12 +497,15 @@ for package in \
 	BluetoothMidiService \
 	Calendar \
 	Camera2 \
+	CameraExtensionsProxy \
 	Contacts \
 	CuttlefishService \
 	DeskClock \
+	DeviceAsWebcam \
 	DeviceDiagnostics \
 	Dialer \
 	DynamicSystemInstallationService \
+	EyesFreeVidService \
 	Gallery2 \
 	QuickSearchBox \
 	TeleService \
@@ -497,13 +516,16 @@ for package in \
 	com.android.hardware.graphics.composer.ranchu \
 	android.hardware.health-service.cuttlefish_recovery \
 	com.android.hardware.contexthub \
+	com.android.hardware.gnss \
 	com.android.hardware.input.processor \
 	com.android.hardware.net.nlinterceptor \
 	com.android.hardware.rebootescrow \
 	com.android.hardware.security.authgraph \
 	com.android.hardware.security.secretkeeper \
 	com.android.hardware.tetheroffload \
+	com.android.hardware.thermal \
 	com.android.hardware.usb \
+	com.android.hardware.vibrator \
 	com.android.vndk.v31 \
 	com.android.vndk.v32 \
 	com.android.vndk.v33 \
@@ -514,6 +536,11 @@ for package in \
 	com.google.cf.identity \
 	com.google.cf.ir \
 	com.google.cf.wifi \
+	com.google.emulated.camera.provider.hal \
+	com.google.emulated.camera.provider.hal.v4l2 \
+	emu_camera_back.json \
+	emu_camera_depth.json \
+	emu_camera_front.json \
 	CuttlefishTetheringOverlay \
 	CuttlefishWifiOverlay \
 	gsi_tool \
@@ -539,6 +566,10 @@ done
 [[ -z "$(get_build_var PRODUCT_EXTRA_VNDK_VERSIONS)" ]] ||
 	fail "PRODUCT_EXTRA_VNDK_VERSIONS must be empty for the fixed vendor image"
 PRODUCT_VENDOR_PROPERTIES=" $(get_build_var PRODUCT_VENDOR_PROPERTIES) "
+[[ "$PRODUCT_VENDOR_PROPERTIES" == *" ro.vendor.camera.config=v4l2 "* ]] ||
+	fail "the camera HAL is not told to take its cameras from the camera device: ro.vendor.camera.config=v4l2"
+[[ "$PRODUCT_VENDOR_PROPERTIES" != *" ro.camerax.extensions.enabled="* ]] ||
+	fail "the inherited CameraX extensions switch remains: the image has no vendor extensions"
 [[ "$PRODUCT_VENDOR_PROPERTIES" != *" ro.rebootescrow.device="* ]] ||
 	fail "the unsupported reboot-escrow backing property remains present"
 for property in \
@@ -557,6 +588,8 @@ for property in \
 done
 [[ "$PRODUCT_PRODUCT_PROPERTIES" == *" ro.lmk.gpu_reclaim=true "* ]] ||
 	fail "required lmkd property is absent: ro.lmk.gpu_reclaim=true"
+[[ "$PRODUCT_PRODUCT_PROPERTIES" == *" ro.camera.enableLazyHal=true "* ]] ||
+	fail "cameraserver is not told to wait for the lazy camera provider: ro.camera.enableLazyHal=true"
 [[ "$(get_build_var LOCAL_USE_VENDOR_AUDIO_CONFIGURATION)" == true ]] ||
 	fail "the UML product must own its minimal primary audio policy"
 for package in \

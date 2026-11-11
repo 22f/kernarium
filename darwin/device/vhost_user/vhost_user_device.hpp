@@ -131,13 +131,38 @@ public:
     {
         return false;
     }
-    /* Whether the transport answers a guest's kick before it runs the
-     * kicked queue rather than after. The kicking vCPU waits for that answer
-     * with its interrupts off, so a device whose requests can run long, or
-     * whose guest waits for their completions anyway, frees the vCPU for the
-     * length of the work. While such a queue runs the guest adds buffers
-     * without kicking, and the transport looks for them before it finishes.
-     */
+    /* Whether a request the device deferred survives the disable of its
+     * ring. A guest suspends by disabling its rings one after another and
+     * resumes by enabling them in the same order, sending nothing else but
+     * kicks, which keep or drop a disabled ring's request buffers as below,
+     * so a device that holds a request across the suspend, a codec stream's
+     * queued buffer, is not reset by the disable: the transport keeps what
+     * the device completes meanwhile and writes it to the ring when the ring
+     * is enabled again. A message that changes the memory, the features, a
+     * ring's layout or base, or ends the connection resets such a device
+     * first, as does the GET_FEATURES that closes a driver's teardown.
+     * Without it, disabling a ring while the device holds a request resets
+     * the device. Setting it also keeps the request buffers on a disabled
+     * ring, as keepsRequestsOnDisabledRing() does, since the guest can post
+     * one before the ring's enable reaches the transport. Such a device
+     * raises no shared-memory map or unmap, the backend requests a request
+     * can make: the GET_FEATURES the transport answers while it waits for
+     * the acknowledgement would reset the device and release the request
+     * being run. A device that also names a shared-memory region is refused
+     * with std::invalid_argument when the server is built. */
+    [[nodiscard]] virtual bool keepsDeferredRequestsWhileDisabled() const noexcept
+    {
+        return false;
+    }
+    /* Whether the transport runs a kicked queue with the guest's
+     * notifications off: it tells the guest not to kick
+     * (VRING_USED_F_NO_NOTIFY) while the queue runs, looks for the buffers
+     * the guest adds meanwhile before it finishes, and answers a kick that
+     * asks for an answer before it runs the queue rather than after. Only a
+     * console's kick asks for one; every other driver's asks for none, so its
+     * vCPU never waits for the backend. A device whose requests can run long,
+     * or whose guest waits for their completions anyway, sets it, so the
+     * guest's kicks do not pile up behind the work. */
     [[nodiscard]] virtual bool answersKicksBeforeRunning() const noexcept
     {
         return false;

@@ -39,6 +39,16 @@
                ReferencedContainer = "container:Andarium.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A10000000000000000000009"
+               BuildableName = "AndariumUITests.xctest"
+               BlueprintName = "AndariumUITests"
+               ReferencedContainer = "container:Andarium.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

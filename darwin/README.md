@@ -16,8 +16,8 @@ memory/    guest address spaces, software MMU, and TLBs
 cpu/       gadgets, JIT, executable memory, shared decode, and neutral
            engine selection
 runtime/   guest-entry composition
-device/    block, console, GPU, input, audio, video, vsock, and network
-           providers, and the vhost-user transport they share
+device/    block, console, GPU, input, audio, video, camera, vsock, GNSS, and
+           network providers, and the vhost-user transport they share
 emulator/  options and product composition
 app/macos/ standalone process adapter
 app/initramfs/ host tool that writes a guest's per-run initramfs
@@ -32,7 +32,8 @@ only composes them. Subsystem contracts are in the README beside the code:
 [x86_64 gadgets](cpu/x86_64/gadgets/README.md),
 [x86_64 JIT](cpu/x86_64/jit/README.md)), and the devices
 ([audio](device/audio/README.md), [block](device/block/README.md),
-[video](device/video/README.md), [vsock](device/vsock/README.md)).
+[video](device/video/README.md), [camera](device/camera/README.md),
+[vsock](device/vsock/README.md), [GNSS](device/gnss/README.md)).
 
 ## Products and defaults
 

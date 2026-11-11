@@ -113,6 +113,13 @@ uml_add_tooling_test(
     TIMEOUT 30)
 
 uml_add_tooling_test(
+    NAME android17-guest-proc-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_guest_proc_runner.py
+    LABELS android
+    TIMEOUT 60)
+
+uml_add_tooling_test(
     NAME android17-provision-helper
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_android_provision.py
@@ -126,6 +133,53 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The thermal runner's reading of the guest's dumps, and the records it sends.
+uml_add_tooling_test(
+    NAME android17-thermal-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_thermal_runner.py
+    LABELS android
+    TIMEOUT 30)
+
+# The Wi-Fi network runner's reading of the guest's status, listing, dumps and
+# overlay list, and of the boot script's settle time; its upgrade checks against
+# scripted answers.
+uml_add_tooling_test(
+    NAME android17-wifi-network-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_wifi_network_runner.py
+    LABELS android
+    TIMEOUT 60)
+
+# The gamepad runner without a guest: the host's end of the wire against the
+# golden frames and the C++ header, the controller families against the
+# drivers' own report structures, the parsers of what the guest prints, the
+# checks, and the reader thread against a fake relay on loopback.
+uml_add_tooling_test(
+    NAME android17-gamepad-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_gamepad_runner.py
+    LABELS android
+    TIMEOUT 60)
+
+# The keyboard and mouse runner's reading of the guest's input dump and of the
+# probe's log, its VNC client's wire, and its key table against the launcher's.
+uml_add_tooling_test(
+    NAME android17-keymouse-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_keymouse_runner.py
+    LABELS android
+    TIMEOUT 30)
+
+# The camera runner's plan for every layout, its reading of the guest's dumps,
+# screenshot and still, and its arguments against the launcher's option parser.
+uml_add_tooling_test(
+    NAME android17-camera-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_runner.py
+    LABELS android
+    TIMEOUT 60)
+
 # The microG spoofing probe's sources agree with each other and with the
 # certificate LineageOS compares with, and its runner reads `am instrument`.
 uml_add_tooling_test(
@@ -134,3 +188,13 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_microg_probe.py
     LABELS android
     TIMEOUT 60)
+
+# The camera layouts: the closed set of names the host composes, their fallback
+# order, and the permission, media profiles and init files the generator renders
+# from them (overlay/camera/generated holds exactly its output).
+uml_add_tooling_test(
+    NAME android17-camera-layouts
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_layouts.py
+    LABELS android
+    TIMEOUT 30)

@@ -468,8 +468,19 @@ the GPU provider depends on `UML_BUILD_GPU`; the others build on the transport
 alone. A disabled ring is given no new data: a buffer the backend only fills (a
 virtio-input event) stays in the ring until it is enabled again, and a buffer
 that carries a request is consumed and dropped, because its sender may be
-waiting with interrupts off; only the GPU, whose requests are asynchronous, asks
-to keep them.
+waiting with interrupts off; only the GPU, whose requests are asynchronous, the
+vsock and GNSS devices, whose requests the guest never waits on, and the video
+devices, whose streams outlive a suspend, ask to keep them. A ring disable also
+resets a device that holds a deferred request, unless the device asks to keep it
+(`keepsDeferredRequestsWhileDisabled()`, which the video devices do): the
+transport then leaves the device alone, keeps what it completes while a ring is
+disabled and writes it to the ring at its enable, in the order the device
+finished it. A message that changes the memory, the
+features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
+follows a teardown's disables included) resets such a device first. A
+`VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
+ring is handled as that ring's buffers are, and a kick that asks for no
+acknowledgement gets none.
 
 **Request gate.** A service can be given a request gate, which another thread
 closes to hold the device's requests back: a closed gate lets no request reach
@@ -486,10 +497,19 @@ plain hold for the next guest.
 
 The [Virtio video devices](../darwin/device/video/README.md) bridge the shared
 V4L2 drivers to the platform VideoToolbox decoder and encoder over their own
-vhost-user connections and need no GPU context. The
+vhost-user connections and need no GPU context. Their event queues never defer,
+and the devices keep the buffers a stream has queued, so a stream and an idle
+device alike survive a guest suspend without a reset, and the platform
+sessions the system invalidates are rebuilt without a word to the guest. The
 [Virtio vsock device](../darwin/device/vsock/README.md) carries a byte stream
 from the host application to a service in the guest (adbd) with no listening
-socket on the host; the guest cannot open a connection to the host.
+socket on the host; the guest cannot open a connection to the host. The
+[Virtio GNSS device](../darwin/device/gnss/README.md) is the guest's
+`/dev/gnssN`: it carries the host's fixes as an NMEA stream while the guest has
+the receiver open, and nothing else of the host's location. The
+[Virtio camera device](../darwin/device/camera/README.md) serves the host's cameras
+through the video wire, on a platform camera the caller supplies; a blocked
+session never opens a capture session.
 
 **Lost backend.** A virtqueue call or kick descriptor, or the backend request
 stream, that reports end of file or an error other than would-block means the
@@ -608,8 +628,13 @@ A launch that passes `--session-record=PATH` gets a record of how its session
 ended (`runtime/session_record`): "running" from the boot on, overwritten by
 every end that runs code, a panic with its message and the kernel's last
 output included. A record still "running" at the next launch means the process
-was ended from outside without running, as a memory-limit end is. Its first
-4 KiB are a memory checkpoint that a thread of its own rewrites every 2 s
+was ended from outside without running, as a memory-limit end is. The file is
+text of a fixed layout (`uml-session 4`) that never passes 13312 bytes
+(`session_record_max_bytes`): a 4 KiB memory slot, a 4 KiB stall slot and the
+state with the kernel output it quotes, at most 5 KiB. Each part is rewritten in
+place by its own writer, so nothing grows with the session; layouts 1 to 3,
+which have the state where the stall slot is, still parse. The first 4 KiB are a
+memory checkpoint that a thread of its own rewrites every 2 s
 (`memory_checkpoint_interval_ms`): the footprint, its peak and what the
 process's memory limit still allows, the large terms of the footprint (guest
 RAM, the host GPU's use against its budget, graphics, the gadget cache, the
@@ -619,6 +644,28 @@ the first checkpoint and when the footprint climbs 64 MiB past the highest
 reading's (`memory_malloc_reading_due`); every checkpoint also writes the
 footprint less the other terms. Andarium names the file in its boot request and
 reads it at launch.
+
+The stall slot records why the vCPUs stopped running. In every build a thread
+of the process, `uml-stall-watch`, looks every 50 ms (`runtime/stall_watch`) at
+each vCPU carrier's run state and CPU time, and the loader's wrappers mark the
+host waits a carrier sits in (`platform/host_wait.hpp`). A carrier that for
+100 ms or more is runnable but gets under a fifth of the time, sits in an
+uninterruptible wait, or sits in one host wait while it is not using the CPU is
+stalled; a carrier that is busy is never held to a wait it was merely sampled
+in. A late tick of the watch itself, measured against its own deadline and not
+against the work it did, is a stall of the whole process. Stalls form events
+that carry the host's thermal, power, memory and main-queue state
+(`runtime/stall_record`). The slot is bounded: the newest events that fit in
+4 KiB, at most 32, the last 8 changes of each host state, and counts of the idle
+and unmarked waits the watch saw, which show whether the markers reach the
+wrappers. Times are milliseconds after a base wall time on the system's
+continuous clock, which runs through a sleep. The watch reads no guest memory,
+takes no lock a carrier takes, suspends nothing and calls no framework from its
+own thread, which the kernel-thread fence can hold: the host's state is read on
+a serial queue of system threads, and the main queue is asked only while a stall
+is open or being confirmed. A hold of the kernel's threads is not recorded as a
+stall. Andarium adds the previous and current records, the stalls in words and
+the guest's `/proc` counters to its bug report.
 
 A guest that restarts itself boots again in the same process, because iOS can
 neither re-exec nor respawn an application. The macOS launchers

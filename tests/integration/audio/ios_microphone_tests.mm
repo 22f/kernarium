@@ -46,6 +46,14 @@ std::atomic<int> engineStarts {};
 std::atomic<int> engineStops {};
 std::atomic<int> sessionActivations {};
 std::atomic<int> sessionDeactivations {};
+// The last category the session was given, and whether the session refuses
+// the Bluetooth options (a category call that carries them fails).
+std::atomic<NSUInteger> categoryOptions {};
+std::atomic<int> categoryCalls {};
+std::atomic<bool> categoryIsPlayAndRecord {};
+std::atomic<bool> refuseBluetoothOptions {};
+// The engine the microphone started last, to post its configuration change.
+AVAudioEngine* __weak startedEngine {};
 
 struct Counts final {
     int starts {};
@@ -89,7 +97,23 @@ void installHooks()
     Method category = class_getInstanceMethod([AVAudioSession class],
         @selector(setCategory:mode:options:error:));
     method_setImplementation(category, imp_implementationWithBlock(
-        ^BOOL(id, NSString*, NSString*, NSUInteger, NSError* __autoreleasing*) {
+        ^BOOL(id, NSString* name, NSString*, NSUInteger options,
+            NSError* __autoreleasing* error) {
+          ++categoryCalls;
+          categoryIsPlayAndRecord = [name isEqualToString:
+              AVAudioSessionCategoryPlayAndRecord];
+          categoryOptions = options;
+          const NSUInteger bluetooth =
+              AVAudioSessionCategoryOptionAllowBluetoothHFP |
+              AVAudioSessionCategoryOptionBluetoothHighQualityRecording;
+          if (refuseBluetoothOptions.load() && (options & bluetooth) != 0) {
+              if (error != nullptr) {
+                  *error = [NSError errorWithDomain:NSOSStatusErrorDomain
+                                               code:-50
+                                           userInfo:nil];
+              }
+              return NO;
+          }
           return YES;
         }));
 
@@ -113,8 +137,9 @@ void installHooks()
     Method start = class_getInstanceMethod(
         [AVAudioEngine class], @selector(startAndReturnError:));
     method_setImplementation(start, imp_implementationWithBlock(
-        ^BOOL(id, NSError* __autoreleasing*) {
+        ^BOOL(id engine, NSError* __autoreleasing*) {
           ++engineStarts;
+          startedEngine = engine;
           return YES;
         }));
 
@@ -356,6 +381,105 @@ void stoppedAndDestroyedMicrophones()
     }
 }
 
+// While the guest records, a Bluetooth headset may be the input; the session
+// is asked for it only then (the options themselves are checked by
+// audio-session-category).
+void sessionAllowsTheHeadsetMicrophone()
+{
+    otherAudioPlaying = false;
+    refuseBluetoothOptions = false;
+    Recording recording;
+    check(recording.start(), "the microphone starts for the category check");
+    const NSUInteger wanted = AVAudioSessionCategoryOptionMixWithOthers |
+        AVAudioSessionCategoryOptionDefaultToSpeaker |
+        AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+        AVAudioSessionCategoryOptionAllowBluetoothHFP |
+        AVAudioSessionCategoryOptionBluetoothHighQualityRecording;
+    check(categoryIsPlayAndRecord.load() && categoryOptions.load() == wanted,
+        "recording asks for play-and-record with the headset microphone",
+        "options " + std::to_string(categoryOptions.load()));
+}
+
+// A session that refuses the Bluetooth options must not cost the guest its
+// microphone: it records from the built-in one.
+void refusedBluetoothOptionsFallBack()
+{
+    otherAudioPlaying = false;
+    refuseBluetoothOptions = true;
+    Recording recording;
+    const int callsBefore = categoryCalls.load();
+    const bool started = recording.start();
+    refuseBluetoothOptions = false;
+    check(started, "the microphone starts although the session refuses the "
+                   "Bluetooth options");
+    const NSUInteger bluetooth =
+        AVAudioSessionCategoryOptionAllowBluetoothHFP |
+        AVAudioSessionCategoryOptionBluetoothHighQualityRecording;
+    check(categoryCalls.load() == callsBefore + 2 &&
+            categoryIsPlayAndRecord.load() &&
+            (categoryOptions.load() & bluetooth) == 0 &&
+            (categoryOptions.load() &
+                AVAudioSessionCategoryOptionAllowBluetoothA2DP) != 0,
+        "it asks again for play-and-record without them",
+        "calls " + std::to_string(categoryCalls.load() - callsBefore) +
+            ", options " + std::to_string(categoryOptions.load()));
+}
+
+// A headset that connects or leaves changes the route under the running
+// engine, which the microphone builds again. The session stays taken, because
+// releasing it would return the category to playback, which switches a
+// headset from the hands-free profile to A2DP and back (a route change each).
+void routeChangeRebuildsTheEngineOnTheSameSession()
+{
+    otherAudioPlaying = false;
+    refuseBluetoothOptions = false;
+    Recording recording;
+    check(recording.start(), "the microphone starts before the route changes");
+    AVAudioEngine* const engine = startedEngine;
+    check(engine != nil, "the microphone started an engine");
+    const auto before = Counts::now();
+    const int callsBefore = categoryCalls.load();
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:AVAudioEngineConfigurationChangeNotification
+                      object:engine];
+    const auto seen = since(before);
+    check(seen.stops == 1 && seen.starts == 1 && seen.deactivations == 0,
+        "a route change builds the engine again without releasing the session",
+        seen.text());
+    check(categoryIsPlayAndRecord.load() && categoryCalls.load() - callsBefore == 1,
+        "and the category stays play-and-record",
+        "category calls " + std::to_string(categoryCalls.load() - callsBefore));
+    check(startedEngine != engine, "the engine is a new one");
+
+    // The new engine is observed in its turn, and the old one no longer.
+    AVAudioEngine* const rebuilt = startedEngine;
+    const auto second = Counts::now();
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:AVAudioEngineConfigurationChangeNotification
+                      object:engine];
+    check(since(second) == Counts {},
+        "the engine that was replaced is no longer observed",
+        since(second).text());
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:AVAudioEngineConfigurationChangeNotification
+                      object:rebuilt];
+    check(since(second).starts == 1 && since(second).deactivations == 0,
+        "the new engine is observed", since(second).text());
+
+    const auto stopping = Counts::now();
+    recording.stop();
+    const auto stopped = since(stopping);
+    check(stopped.stops == 1 && stopped.deactivations == 1,
+        "stopping releases the session", stopped.text());
+    const auto idle = Counts::now();
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:AVAudioEngineConfigurationChangeNotification
+                      object:rebuilt];
+    check(since(idle) == Counts {},
+        "a route change after the guest stopped recording starts nothing",
+        since(idle).text());
+}
+
 // The notification iOS 27 deprecates is no longer observed.
 void deprecatedNotificationIsIgnored()
 {
@@ -392,6 +516,9 @@ int main()
         noAdviceWhileNoAppPlays();
         guestRestartsRecording();
         stoppedAndDestroyedMicrophones();
+        sessionAllowsTheHeadsetMicrophone();
+        refusedBluetoothOptionsFallBack();
+        routeChangeRebuildsTheEngineOnTheSameSession();
         deprecatedNotificationIsIgnored();
     }
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL",

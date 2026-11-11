@@ -50,6 +50,9 @@ struct OptionRow<Control: View>: View {
     let title: String
     let symbol: String
     var detail: String?
+    /// What the line under the title does when it is touched; the line then
+    /// reads as a button. None leaves it plain text.
+    var detailAction: (() -> Void)?
     /// The capability is off and unreachable: the tile and the words dim.
     var dimmed = false
     @ViewBuilder var control: Control
@@ -64,11 +67,25 @@ struct OptionRow<Control: View>: View {
                     .minimumScaleFactor(0.85)
                     .opacity(dimmed ? 0.55 : 1)
                 if let detail {
-                    Text(detail)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if let detailAction {
+                        Button(action: detailAction) {
+                            HStack(spacing: 4) {
+                                Text(detail)
+                                Image(systemName: "info.circle")
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(Color.accentColor)
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("option-detail-button")
+                    } else {
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             Spacer(minLength: 8)
@@ -87,10 +104,11 @@ struct RowDivider: View {
 
 // MARK: System
 
-/// The guest's system in one section, as two rows of one shape: CPU and
+/// The guest's system in one section, as three rows of one shape: CPU and
 /// memory states the vCPUs and RAM, with Edit opening the sheet that changes
 /// them; Storage states what the guest holds of its capacity under a bar,
-/// with Resize.
+/// with Resize; Snapshots states how many there are and the space they use,
+/// with Manage opening them.
 struct SystemSection: View {
     @Environment(AppModel.self) private var model
 
@@ -106,6 +124,8 @@ struct SystemSection: View {
                 )
                 RowDivider()
                 StorageRow(guest: guest, stops: model.capacityStopsGiB, resize: { model.sheet = .resize })
+                RowDivider()
+                SnapshotsRow()
             }
         }
     }
@@ -127,7 +147,7 @@ struct SystemRowButton {
 
     /// The longest title: every button is as wide as this word, at any text
     /// size, so the buttons of the rows share one width and one edge.
-    static let widestTitle = "Resize"
+    static let widestTitle = "Manage"
 }
 
 extension VerticalAlignment {
@@ -236,6 +256,30 @@ extension SystemRow where Below == EmptyView {
     }
 }
 
+/// The third row of Guest system: how many snapshots there are and the space
+/// all of them use, with Manage opening the Snapshots sheet. Home reads them
+/// when none was read, after an operation and when a run ends, not each time
+/// it appears (`SnapshotsModel.reload`).
+struct SnapshotsRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let store = model.snapshots
+        SystemRow(
+            symbol: "clock.arrow.circlepath", title: SnapshotWords.title,
+            // Not yet read: the line holds its height and says nothing.
+            subtitle: store.listing == nil
+                ? "\u{00A0}" : SnapshotWords.homeSubtitle(count: store.count, total: store.total),
+            button: SystemRowButton(
+                title: SnapshotWords.manage, identifier: "home-snapshots-manage",
+                accessibilityName: SnapshotWords.manageAccessibility,
+                action: { model.sheet = .snapshots }
+            )
+        )
+        .task { await store.reload() }
+    }
+}
+
 // MARK: Display
 
 /// Retina mode: the guest draws at the screen's own pixel density instead of
@@ -259,17 +303,27 @@ struct DisplaySection: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the microphone, which iOS asks
-/// about when it is turned on, and the gyroscope.
+/// What the guest may use of this device: the location and the microphone,
+/// which iOS asks about when they are turned on, and the gyroscope.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
+
+    /// The rows, top to bottom; VoiceOver reads them in this order.
+    enum Row: CaseIterable {
+        case location, microphone, gyroscope
+    }
 
     var body: some View {
         if model.guest != nil {
             HomeSection(title: "Capabilities") {
-                MicrophoneRow()
-                RowDivider()
-                GyroscopeRow()
+                ForEach(Array(Row.allCases.enumerated()), id: \.element) { index, row in
+                    if index > 0 { RowDivider() }
+                    switch row {
+                    case .location: LocationRow()
+                    case .microphone: MicrophoneRow()
+                    case .gyroscope: GyroscopeRow()
+                    }
+                }
             } footer: {
                 if let reason = model.motionSensorsProblem ?? Self.gyroscopeUnavailable(available: model.motionSensorsAvailable) {
                     SectionNote(reason)
@@ -324,6 +378,30 @@ struct GyroscopeRow: View {
     }
 }
 
+struct LocationRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let access = model.locationAuthorization
+        let shownOn = model.locationShownOn
+        let approximate = access.isApproximate && shownOn
+        OptionRow(
+            title: LocationWords.title, symbol: "location.fill",
+            detail: LocationWords.detail(for: access, shownOn: shownOn),
+            detailAction: approximate ? { model.permissionPrompt = .location } : nil,
+            dimmed: access.refuses
+        ) {
+            Toggle(LocationWords.title, isOn: Binding(
+                get: { model.locationShownOn },
+                set: { model.setLocation($0) }
+            ))
+            .labelsHidden()
+            .accessibilityIdentifier("home-location-switch")
+        }
+        .accessibilityHint(LocationWords.hint(for: access, shownOn: shownOn))
+    }
+}
+
 /// When iOS has refused the microphone there is nothing to ask again: say so,
 /// and offer Andarium's page in Settings.
 struct MicrophoneAccessAlert: ViewModifier {
@@ -347,6 +425,37 @@ struct MicrophoneAccessAlert: ViewModifier {
 
 extension View {
     func microphoneAccessAlert() -> some View { modifier(MicrophoneAccessAlert()) }
+}
+
+/// When iOS refuses the location, or gives only an approximate one, there is
+/// nothing to ask: say why, and offer Andarium's page in Settings where it has
+/// the way out.
+struct LocationAccessAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    func body(content: Content) -> some View {
+        @Bindable var model = model
+        let words = LocationWords.alert(for: model.locationAuthorization)
+        content.alert(
+            words?.title ?? "", isPresented: Binding(
+                get: { model.permissionPrompt == .location && words != nil },
+                set: { if !$0, model.permissionPrompt == .location { model.permissionPrompt = nil } }
+            )
+        ) {
+            if words?.offersSettings == true {
+                Button("Open Settings") { model.openLocationSettings() }
+                Button("Not now", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: {
+            Text(words?.message ?? "")
+        }
+    }
+}
+
+extension View {
+    func locationAccessAlert() -> some View { modifier(LocationAccessAlert()) }
 }
 
 #if !APP_STORE
@@ -395,11 +504,13 @@ struct BackupOption: View {
 }
 
 /// What the Back up guest data row does to iCloud and computer backups.
+/// Snapshots are never in a backup, which the note says once there are some.
 struct BackupNote: View {
     let host: HostDevice
+    var hasSnapshots = false
 
     var body: some View {
-        SectionNote("Puts the guest's apps and files in iCloud and computer backups of this \(host.name).")
+        SectionNote(SnapshotWords.backupNote(device: host.name, hasSnapshots: hasSnapshots))
     }
 }
 
@@ -414,7 +525,7 @@ struct BackupSection: View {
                     set: { model.guest?.includeInBackups = $0 }
                 ))
             } footer: {
-                BackupNote(host: model.host)
+                BackupNote(host: model.host, hasSnapshots: model.snapshots.count > 0)
             }
             .id("backup")
         }

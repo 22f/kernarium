@@ -179,8 +179,13 @@ boot request carries the adb host key to authorize for that boot
 (`android_adb_public_key`, runtime API 19) and the host's time zone
 (`android_time_zone`, API 23: Kernarium sends none,
 [Andarium](../Andarium/README.md#runtime) the system's zone), and a launch with
-no `KERNARIUM_HOST_FORWARD` has adbd listen on vsock alone. The runtime
-validates the values (`KernariumAdbChannel.hpp`, `KernariumGuestTimeZone.hpp`).
+no `KERNARIUM_HOST_FORWARD` has adbd listen on vsock alone. The request also
+states what the host has that the guest is to find (`android_host_features`,
+API 31): the runtime turns each bit it knows into one kernel argument, from the
+table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
+`haptics`, which declares the guest's vibrator), and ignores the others;
+Kernarium sends none. The runtime validates the values
+(`KernariumAdbChannel.hpp`, `KernariumGuestTimeZone.hpp`).
 
 ## Devices and display
 
@@ -192,10 +197,23 @@ Kernarium attaches:
   turns on Microphone;
 - an Android-only Virtio battery reflecting the Apple host's battery;
 - SLiRP networking from the verified iOS prefix;
-- a Virtio vsock device ([the device](../darwin/device/vsock/README.md)), the
-  last Virtio device, through which the application opens streams to guest
-  ports (`connect_vsock`, runtime API 19; the guest cannot connect to the
-  application);
+- a Virtio vsock device ([the device](../darwin/device/vsock/README.md)),
+  through which the application opens streams to guest ports (`connect_vsock`,
+  runtime API 19; the guest cannot connect to the application);
+- an Android-only Virtio GNSS receiver ([the device](../darwin/device/gnss/README.md)),
+  which gives the guest the position the application reports
+  (`report_location`) and tells it when the guest powers the receiver
+  (`set_location_receiver_callback`; runtime API 32). The Linux runtime keeps
+  both entries and answers `-ENODEV`;
+- an Android-only hardware keyboard, mouse and pointer
+  ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
+  unplugged until the application plugs them (`set_input_connected`) and then
+  fed with `send_keyboard_usage`, `send_pointer` and `send_mouse`; the guest's
+  lock lights and pointer capture come back through
+  `set_input_status_callback` (runtime API 33), and so does whether the guest
+  has registered the keyboard and the pointer (runtime API 35), off again at a
+  guest restart and at the run's end. The Linux runtime keeps the entries and
+  answers `-ENODEV`. Kernarium itself uses none of them;
 - a Virtio-GPU Metal framebuffer; and
 - the guest's `ttyS0` stream mirrored to a terminal view.
 
@@ -241,7 +259,8 @@ owns the device side.
 
 Kernarium asks the guest to write back when the application loses focus,
 quiesces it before the application is backgrounded or terminated, and resumes
-it on foregrounding. A key press also wakes a guest that suspended itself, as a
+it on foregrounding. A key press, and a game controller's button through
+`wake_for_input` (runtime API 34), also wake a guest that suspended itself, as a
 phone wakes to its keyboard; a touch does not. The runtime side of sync,
 quiesce, resume, and wake is in
 [`../docs/architecture.md`](../docs/architecture.md#guest-lifecycle).

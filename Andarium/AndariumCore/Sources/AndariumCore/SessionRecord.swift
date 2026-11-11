@@ -43,6 +43,20 @@ public struct SessionRecord: Equatable, Sendable {
     /// H/B ..."); nil in a record that has none.
     public var terms: String?
     public var peakTerms: String?
+    /// The stall record of the session, from layout 4 on: when the guest's
+    /// vCPUs stopped running on the host and what the host was doing then; nil
+    /// in an earlier layout or when the slot is of a version this reader does
+    /// not know.
+    public var stalls: StallRecord?
+
+    /// The layouts this reader knows: 1 to 3 keep the session's state right
+    /// after the memory slot, 4 puts the stall slot between them.
+    static let layouts = ["uml-session 1", "uml-session 2", "uml-session 3", "uml-session 4"]
+
+    /// The most a record file ever holds is 13312 bytes
+    /// (`session_record_max_bytes`); a file longer than this is not one the
+    /// runtime wrote, and is neither read nor copied beyond it.
+    public static let maximumBytes = 16 << 10
 
     /// Reads a record's text; nil when it is not one.
     public init?(text: String) {
@@ -50,7 +64,7 @@ public struct SessionRecord: Equatable, Sendable {
         var fields: [String: String] = [:]
         let lines = parts[0].split(separator: "\n", omittingEmptySubsequences: true)
             .filter { !$0.allSatisfy { $0 == " " } }
-        guard let format = lines.first, ["uml-session 1", "uml-session 2", "uml-session 3"].contains(format)
+        guard let format = lines.first, Self.layouts.contains(String(format))
         else { return nil }
         for line in lines.dropFirst() {
             guard let space = line.firstIndex(of: " ") else { continue }
@@ -68,6 +82,7 @@ public struct SessionRecord: Equatable, Sendable {
         memory = fields["memory"].flatMap(Self.memory(from:))
         terms = fields["terms"]
         peakTerms = fields["peak-terms"]
+        stalls = format == "uml-session 4" ? StallRecord(text: parts[0]) : nil
     }
 
     /// "at T footprint F peak P [available A]".
@@ -86,11 +101,12 @@ public struct SessionRecord: Equatable, Sendable {
         )
     }
 
-    /// The record at `url`, or nil when there is none or it is not a record.
+    /// The record at `url`, or nil when there is none, it is longer than
+    /// `maximumBytes` or it is not a record.
     public static func read(at url: URL) -> SessionRecord? {
-        guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else {
-            return nil
-        }
+        guard let data = BoundedFile.read(url, limit: maximumBytes), data.count <= maximumBytes,
+            let text = String(data: data, encoding: .utf8)
+        else { return nil }
         return SessionRecord(text: text)
     }
 
