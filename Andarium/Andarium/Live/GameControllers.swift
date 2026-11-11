@@ -332,13 +332,13 @@ nonisolated final class GameControllerIndicators: GamepadIndicators, @unchecked 
 /// application have the Home button), and are given back when the controller
 /// is let go.
 nonisolated final class GameControllers: @unchecked Sendable {
-    /// How often the battery is read.
-    static let batteryInterval: DispatchTimeInterval = .seconds(30)
-
     let session: GamepadSession
     let table = ControllerTable()
     private let center: NotificationCenter
     private let discover: @Sendable () -> [GCController]
+    private let include: @Sendable (GCController) -> Bool
+    private let readBattery: @Sendable (GCController) -> GamepadBattery
+    private let batteryInterval: DispatchTimeInterval
     private let lock = NSLock()
     private var running = false
     private var foreground = false
@@ -347,16 +347,24 @@ nonisolated final class GameControllers: @unchecked Sendable {
     private let queue = DispatchQueue(label: "andarium-game-controllers", qos: .userInteractive)
 
     /// `center` and `discover` are where connects are announced and the
-    /// connected controllers listed, which a test replaces.
+    /// connected controllers listed, `include` which of them are taken,
+    /// `readBattery` how a battery is read and `batteryInterval` how often:
+    /// a test replaces them, and the application leaves the defaults.
     init(
         player: any HapticPlayer, engines: GameControllerEngines, opener: any GuestStreamOpener = GamepadConnector(),
         center: NotificationCenter = .default,
         discover: @escaping @Sendable () -> [GCController] = { GCController.controllers() },
+        include: @escaping @Sendable (GCController) -> Bool = { _ in true },
+        readBattery: @escaping @Sendable (GCController) -> GamepadBattery = { GamepadInputMapper.battery($0.battery) },
+        batteryInterval: DispatchTimeInterval = .seconds(30),
         retryDelay: DispatchTimeInterval = .seconds(1),
         wake: @escaping @Sendable () -> Void = { kernarium_runtime_loader_wake_for_input() }
     ) {
         self.center = center
         self.discover = discover
+        self.include = include
+        self.readBattery = readBattery
+        self.batteryInterval = batteryInterval
         let table = table
         let session = GamepadSession(
             opener: opener, player: player, indicators: GameControllerIndicators(table: table), retryDelay: retryDelay,
@@ -430,7 +438,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
     /// Takes a controller: its gestures, its input, its battery, and the
     /// guest's device for it.
     func attach(_ controller: GCController) {
-        guard lock.withLock({ running }) else { return }
+        guard lock.withLock({ running }), include(controller) else { return }
         guard let pad = controller.extendedGamepad else {
             GamepadDiagnostics.note("a controller with no extended gamepad profile is left out")
             return
@@ -449,7 +457,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
         live.queue = queue
         live.inputStateQueueDepth = 20
         session.connect(description, state: GamepadInputMapper.state(GamepadReading(profile: pad)))
-        session.updateBattery(GamepadInputMapper.battery(controller.battery), for: entry.id)
+        session.updateBattery(readBattery(controller), for: entry.id)
         let id = entry.id
         // The input object cannot be referenced weakly: the handler takes it
         // from its own argument.
@@ -495,7 +503,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
         lock.withLock {
             guard batteryTimer == nil else { return }
             let timer = DispatchSource.makeTimerSource(queue: queue)
-            timer.schedule(deadline: .now() + Self.batteryInterval, repeating: Self.batteryInterval)
+            timer.schedule(deadline: .now() + batteryInterval, repeating: batteryInterval)
             timer.setEventHandler { [weak self] in self?.readBatteries() }
             batteryTimer = timer
             timer.resume()
@@ -513,7 +521,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
     /// Reads every controller's battery and tells the session.
     func readBatteries() {
         for entry in table.all {
-            session.updateBattery(GamepadInputMapper.battery(entry.controller.battery), for: entry.id)
+            session.updateBattery(readBattery(entry.controller), for: entry.id)
         }
     }
 }

@@ -366,38 +366,44 @@ struct GameControllersTests {
         try await virtual.connect()
         defer { virtual.disconnect() }
         let controller = try #require(virtual.controller)
+        // A button held on it as the application takes it is in the state the
+        // device is first given: what the profile's live values say, through the
+        // mapper and the family's encoder, to the relay. (The buffered input
+        // states that follow a real press cannot be driven from here: setValue
+        // changes the elements, and the controller queues nothing for it.)
+        virtual.setValue(1, forButtonElement: GCInputButtonA)
         let relay = Relay()
+        // The host may list other controllers: only this one is taken.
+        let identity = ObjectIdentifier(controller)
         let controllers = GameControllers(
-            player: Player(), engines: GameControllerEngines(), opener: relay, retryDelay: .milliseconds(10), wake: {})
+            player: Player(), engines: GameControllerEngines(), opener: relay, include: { ObjectIdentifier($0) == identity },
+            retryDelay: .milliseconds(10), wake: {})
         controllers.update(running: true, booted: false, foreground: true)
-        #expect(await eventually { controllers.table.all.contains { $0.controller === controller } })
-        let entry = try #require(controllers.table.all.first { $0.controller === controller })
+        #expect(await eventually { controllers.table.all.count == 1 })
+        let entry = try #require(controllers.table.all.first)
+        #expect(entry.controller === controller)
         #expect(await eventually { relay.connections == 1 })
         relay.send(.hello(version: 1, slotCount: 8))
-        // Every controller the host lists is made, in slot order; this one is found by its name.
-        var slot: Int?
-        while slot == nil, let frame = await relay.next() {
-            if case .create(let create) = frame, create.name == controller.vendorName { slot = create.slot }
-        }
-        let own = try #require(slot)
+        guard case .create(let create)? = await relay.next() else { Issue.record("no device was made"); return }
+        let own = create.slot
+        #expect(own == 0)
         #expect(controllers.session.slot(ofController: entry.id) == own)
         relay.send(.created(slot: own, result: 0))
         relay.send(.event(slot: own, event: .start))
-        var gotState = false
-        while !gotState, let frame = await relay.next() {
-            if case .input(own, _) = frame { gotState = true }
-        }
-        #expect(gotState)
-        // The buffered input of a controller nobody touches is the neutral state.
-        #expect(GamepadInputMapper.state(GamepadReading(state: controller.input.capture())) == .neutral)
-        // Leaving the front lets the controller go, and returning to it reads
-        // what the controller holds again.
+        let elements = GamepadInputMapper.elements(of: controller.physicalInputProfile)
+        var encoder = GamepadProfiles.profile(family: .generic, name: controller.vendorName ?? "", elements: elements).makeEncoder()
+        let pressedReport = encoder.reports(for: GamepadState(buttons: .south), after: nil)[0]
+        guard case .input(own, let first)? = await relay.next() else { Issue.record("no state was sent"); return }
+        #expect(first == pressedReport)
+        // Leaving the front lets the controller go: the next report says nothing is pressed.
+        let neutralReport = encoder.reports(for: .neutral, after: nil)[0]
         controllers.update(running: true, booted: false, foreground: false)
         var released = false
         while !released, let frame = await relay.next() {
-            if case .input(own, _) = frame { released = true }
+            if case .input(own, let report) = frame, report == neutralReport { released = true }
         }
         #expect(released)
+        // Returning to it reads what the controller holds again.
         controllers.update(running: true, booted: false, foreground: true)
         controllers.session.settle()
         #expect(controllers.session.isConnected)
@@ -408,6 +414,44 @@ struct GameControllersTests {
             if frame == .destroy(slot: own) { destroyed = true }
         }
         #expect(destroyed)
+        controllers.update(running: false, booted: false, foreground: false)
+    }
+
+    /// The state a battery reading returns, which a test changes.
+    private nonisolated final class Charge: @unchecked Sendable {
+        private let lock = NSLock()
+        private var battery = GamepadBattery.none
+        private var count = 0
+        var reads: Int { lock.withLock { count } }
+        func set(_ value: GamepadBattery) { lock.withLock { battery = value } }
+        func read() -> GamepadBattery {
+            lock.withLock {
+                count += 1
+                return battery
+            }
+        }
+    }
+
+    @Test func theBatteryIsReadOnATimerAndAChangeReachesTheGuest() async throws {
+        let relay = Relay()
+        let software = GCController.withExtendedGamepad()
+        let charge = Charge()
+        let controllers = GameControllers(
+            player: Player(), engines: GameControllerEngines(), opener: relay, center: NotificationCenter(),
+            discover: { [software] in [software] }, readBattery: { _ in charge.read() }, batteryInterval: .milliseconds(20),
+            retryDelay: .milliseconds(10), wake: {})
+        controllers.update(running: true, booted: false, foreground: true)
+        #expect(await eventually { relay.connections == 1 })
+        relay.send(.hello(version: 1, slotCount: 8))
+        guard case .create? = await relay.next() else { Issue.record("no device was made"); return }
+        relay.send(.created(slot: 0, result: 0))
+        relay.send(.event(slot: 0, event: .start))
+        // The state when it is ready, and the one the device is sent again once it has settled.
+        guard case .input? = await relay.next(), case .input? = await relay.next() else { Issue.record("no state"); return }
+        // The timer reads again and again; a reading that changes is a report.
+        #expect(await eventually { charge.reads >= 2 })
+        charge.set(GamepadBattery(level: 0.5, state: .discharging))
+        guard case .input(0, _)? = await relay.next() else { Issue.record("a battery change was not sent"); return }
         controllers.update(running: false, booted: false, foreground: false)
     }
 
