@@ -59,6 +59,13 @@ are one mouse to Android and are plugged together.
   Input that does not fit is dropped, and so is what follows until the
   registration; the host forgets what it holds of that device, so the release
   of a key that was dropped is nothing and its next press goes down afresh.
+- A queue that has no room for a report drops it whole, and a lift or a
+  release may be what was lost. The queue follows what the guest was told is
+  held (`HeldInput`: the `EV_KEY` codes and the multitouch contacts) and sends
+  one report that ends all of it ahead of the next report it accepts, or when
+  the guest reads the queue empty first. A device that is unplugged, or whose
+  guest input device is not registered, owes none, and a reset, an unplug or a
+  registration or unregistration starts the tracking afresh.
 - Each input returns whether it wakes a guest that suspended itself: a key or a
   button going down, or a wheel taking a whole step; never motion or a
   release.
