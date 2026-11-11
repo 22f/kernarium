@@ -448,7 +448,11 @@ private:
 /* The user network whose counts the session record writes: the run's, from
  * when it exists to when it is destroyed. The record reads from its own
  * thread and from the end of a session, a signal handler included, so a
- * reader that is inside the provider holds the destruction back. */
+ * reader that is inside the provider holds the destruction back. A reader
+ * announces itself (readers) and then looks for the context; the destructor
+ * clears the context and then looks for readers. Each side must see the
+ * other's first store, which only sequentially consistent ordering gives, so
+ * the four operations carry it. */
 struct PublishedNetwork final {
     std::atomic<void*> context {nullptr};
     std::atomic<int> readers {0};
@@ -457,9 +461,9 @@ PublishedNetwork publishedNetwork;
 
 bool readPublishedNetwork(uml::runtime::SessionNetworkCounts& counts) noexcept
 {
-    publishedNetwork.readers.fetch_add(1, std::memory_order_acquire);
+    publishedNetwork.readers.fetch_add(1, std::memory_order_seq_cst);
     uml_slirp_net_counters read {};
-    void* context = publishedNetwork.context.load(std::memory_order_acquire);
+    void* context = publishedNetwork.context.load(std::memory_order_seq_cst);
     const bool ok = context != nullptr &&
         uml_slirp_net_read_counters(context, &read) == 0;
     publishedNetwork.readers.fetch_sub(1, std::memory_order_release);
@@ -487,13 +491,13 @@ public:
     {
         uml::runtime::set_network_counts_reader(&readPublishedNetwork);
         publishedNetwork.context.store(
-            network.context(), std::memory_order_release);
+            network.context(), std::memory_order_seq_cst);
     }
 
     ~PublishNetworkCounts()
     {
-        publishedNetwork.context.store(nullptr, std::memory_order_release);
-        while (publishedNetwork.readers.load(std::memory_order_acquire) != 0)
+        publishedNetwork.context.store(nullptr, std::memory_order_seq_cst);
+        while (publishedNetwork.readers.load(std::memory_order_seq_cst) != 0)
             std::this_thread::yield();
     }
 
