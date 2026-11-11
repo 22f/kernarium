@@ -59,10 +59,15 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
     /// What this run puts in the names of its imports' partial files, new at
-    /// every start (`GuestRunMark`).
+    /// every start and at every restart of the guest inside the run
+    /// (`GuestRunMark`).
     private(set) var runMark = GuestRunMark.random()
+    /// Whether the guest's storage may hold partial files that imports left,
+    /// on disk beside the guest's other files: the sweep below is made only
+    /// when it does.
+    let partials: PartialSweepLedger
     /// The sweep of the partial files earlier runs left in the guest, which a
-    /// normal run makes once, after Android has booted.
+    /// normal run makes once per boot that owes it, after Android has booted.
     private(set) var partialSweep: PartialFileSweep?
     private let motion = MotionSensors()
     /// The guest's hardware keyboard and mouse: plugged while iOS has the
@@ -173,6 +178,7 @@ final class LiveRuntime: RuntimeDriver {
         }
         self.preferences = PreferenceKeeper(model: model)
         self.storage = storage
+        partials = PartialSweepLedger(directory: storage.locations.directory)
         self.keyStore = keyStore
         self.sessionRecord = sessionRecord
         self.freeSpace = freeSpace
@@ -231,6 +237,7 @@ final class LiveRuntime: RuntimeDriver {
             storageBusy = false
         }
         try await storage.erase(progress: progress)
+        partials.diskErased()
         // The next guest is a new one: it boots with a key of its own.
         keyStore.delete()
         adbIdentity = nil
@@ -541,25 +548,38 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     /// A new run has its own mark, and a normal one sweeps the partial files
-    /// that earlier runs left once Android is up (`PartialFileSweep`). A
-    /// recovery boot starts no Android to ask, and a guest that booted without
-    /// the application's adb key cannot be asked either.
+    /// that earlier runs left once Android is up, when the record says there
+    /// may be some (`PartialFileSweep`). A recovery boot starts no Android to
+    /// ask, and a guest that booted without the application's adb key cannot
+    /// be asked either.
     private func beginPartialSweep() {
         partialSweep?.runEnded()
         runMark = GuestRunMark.random()
-        let guest = operations
-        guard normalRun, guest.identity != nil else {
+        guard normalRun, adbIdentity != nil else {
             partialSweep = nil
             return
         }
+        // Each step reads the operations when it runs: the mark it spares is
+        // the one current then, which a restart of the guest has renewed.
         partialSweep = PartialFileSweep(
-            storageReady: { await guest.storageReady() }, sweep: { try await guest.sweepPartialFiles() })
+            owed: { [partials] in partials.isOwed },
+            storageReady: { [weak self] in await self?.storageReady() },
+            sweep: { [weak self] in try await self?.sweepPartialFiles() ?? 0 })
+    }
+
+    /// The sweep, with the mark that is current when it runs. `walk` is what
+    /// removes the leftovers in the guest and returns how many.
+    func sweepPartialFiles(
+        using walk: @Sendable (AdbGuestOperations) async throws -> Int = { try await $0.sweepPartialFiles() }
+    ) async throws -> Int {
+        let guest = operations
+        return try await partials.sweeping(excluding: guest.run) { try await walk(guest) }
     }
 
     /// The file browser's backend: it reads the operations for each call, as
     /// the key changes with each boot.
     func makeGuestFiles(hostFree: @escaping @Sendable () -> UInt64) -> LiveGuestFiles {
-        LiveGuestFiles(operations: { [unowned self] in operations }, hostFree: hostFree)
+        LiveGuestFiles(operations: { [unowned self] in operations }, partials: partials, hostFree: hostFree)
     }
 
     func createBugReport(update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
@@ -626,12 +646,18 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    private func guestRestarted(_ event: GuestRestartEvent) {
+    func guestRestarted(_ event: GuestRestartEvent) {
         print("Andarium: \(event)")
         guard case .began = event, let model else { return }
         // The boot that follows is another one: it ends an update only by
         // reaching sys.boot_completed itself.
         reachedBootCompleted = false
+        // No import outlives the restart (the browser stops its transfer
+        // below and the guest's adb connections end with it), so the files of
+        // the run so far are leftovers to the boot that follows. Only the
+        // removal of a cut-off import's own partial file waits for that boot,
+        // and it names its file.
+        runMark = GuestRunMark.random()
         partialSweep?.guestRestarting()
         spaceAlertOpen = false
         motion.stop()

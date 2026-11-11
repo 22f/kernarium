@@ -126,7 +126,7 @@ public protocol AdbSource: AnyObject {
 /// a sweep of the guest's storage tells them from the ones an earlier run left
 /// (`GuestFiles.sweepCommand`). It is random for each run and held by the
 /// application, so no clock decides which run a file belongs to.
-public struct GuestRunMark: Equatable, Sendable {
+public struct GuestRunMark: Hashable, Sendable {
     public static let length = 8
     private static let digits = Array("0123456789abcdef")
 

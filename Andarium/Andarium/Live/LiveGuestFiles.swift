@@ -304,14 +304,21 @@ extension AdbGuestOperations {
 
     /// Writes the pick at `path`. A stopped or failed upload removes its
     /// temporary file, on a connection of its own that nothing cancels.
+    ///
+    /// `partials` is told that an import is under way before its first byte
+    /// can be written, and that it has ended once its file is in place or its
+    /// partial file is known to be gone. Throws, with nothing written, when it
+    /// cannot be told.
     func upload(
-        _ pick: FilePick, to path: String, replacing: Bool,
+        _ pick: FilePick, to path: String, replacing: Bool, partials: PartialSweepLedger,
         progress: @escaping @Sendable (UInt64, UInt64) -> Void
     ) async throws {
+        let run = run
         let temporary = GuestFiles.temporaryPath(
             in: GuestFilePath.parent(of: path), run: run, token: String(UUID().uuidString.prefix(8)).lowercased())
         let coordinator = FileCoordinatorBox()
         let throttle = ProgressThrottle(deliver: progress)
+        try partials.importBegan(mark: run)
         do {
             try await perform(onCancel: { coordinator.cancel() }) { session in
                 try FileUploadOperation.run(
@@ -319,22 +326,25 @@ extension AdbGuestOperations {
                     replacing: replacing, progress: throttle.report)
             }
         } catch {
-            removeInBackground(temporary)
+            removeInBackground(temporary) { partials.importEnded(mark: run, clean: $0) }
             throw error
         }
+        partials.importEnded(mark: run, clean: true)
     }
 
     /// Removes a partial file. It waits for a guest that is paused, and for
-    /// one that is back, so it never holds a transfer's end up.
-    private func removeInBackground(_ temporary: String) {
+    /// one that is back, so it never holds a transfer's end up. `ended` is told
+    /// whether the file is known to be gone.
+    private func removeInBackground(_ temporary: String, ended: @escaping @Sendable (Bool) -> Void) {
         let operations = self
         Task.detached {
-            _ = try? await operations.perform(cancellable: false) { session in
+            let removed = try? await operations.perform(cancellable: false) { session in
                 try session.run { connection in
                     session.watchdog.arm(idle: .seconds(15), overall: .seconds(30))
-                    try connection.runShell(GuestFiles.removeCommand(for: temporary))
+                    return try connection.runShell(GuestFiles.removeCommand(for: temporary))
                 }
             }
+            ended(removed?.exitCode == 0)
         }
     }
 
@@ -351,12 +361,18 @@ extension AdbGuestOperations {
 /// The file browser's backend on the running guest.
 final class LiveGuestFiles: GuestFilesBackend {
     private let operations: () -> AdbGuestOperations
+    private let partials: PartialSweepLedger
     private let hostFree: @Sendable () -> UInt64
 
-    /// `operations` is read for each call, since the key changes with each
-    /// boot; `hostFree` is this device's free space.
-    init(operations: @escaping () -> AdbGuestOperations, hostFree: @escaping @Sendable () -> UInt64) {
+    /// `operations` is read for each call, since the key and the run's mark
+    /// change; `partials` is the guest's record of the partial files its
+    /// imports may leave, and `hostFree` is this device's free space.
+    init(
+        operations: @escaping () -> AdbGuestOperations, partials: PartialSweepLedger,
+        hostFree: @escaping @Sendable () -> UInt64
+    ) {
         self.operations = operations
+        self.partials = partials
         self.hostFree = hostFree
     }
 
@@ -398,7 +414,7 @@ final class LiveGuestFiles: GuestFilesBackend {
         _ pick: FilePick, to path: String, replacing: Bool,
         progress: @escaping @Sendable (UInt64, UInt64) -> Void
     ) async throws {
-        try await operations().upload(pick, to: path, replacing: replacing, progress: progress)
+        try await operations().upload(pick, to: path, replacing: replacing, partials: partials, progress: progress)
     }
 
     func receive(

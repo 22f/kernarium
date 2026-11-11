@@ -197,8 +197,10 @@ nonisolated struct AdbGuestOperations: Sendable {
     var connector: any AdbConnector = VsockConnector()
     /// The guest run these operations belong to. Its mark is in the name of
     /// every partial file an import of this run writes, which is how the sweep
-    /// of the guest's storage leaves them alone (`sweepPartialFiles`).
-    var run = GuestRunMark.random()
+    /// of the guest's storage leaves them alone (`sweepPartialFiles`). A caller
+    /// that is not the run itself gives the run's mark (`LiveRuntime.runMark`)
+    /// or one of its own that no sweep of the run's guest could take for it.
+    var run: GuestRunMark
 
     /// Asks Android for a bug report and stages it for the share sheet.
     /// Cancelling the task stops the dump in the guest and removes what it

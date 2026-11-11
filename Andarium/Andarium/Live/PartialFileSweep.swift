@@ -4,10 +4,11 @@ import AndariumCore
 import Foundation
 
 /// The sweep of the partial files that earlier runs' imports left in the
-/// guest's internal storage, which a run makes once. An import that the guest's
-/// abrupt end or iOS ending the application cut short cannot remove its own
-/// partial file, and nothing else would, so each run finds them after Android
-/// is up: no person, no import and no open Settings is needed.
+/// guest's internal storage. An import that the guest's abrupt end or iOS
+/// ending the application cut short cannot remove its own partial file, and
+/// nothing else would, so a start that owes the walk (`PartialSweepLedger`)
+/// makes it after Android is up: no person, no import and no open Settings is
+/// needed. A start that does not owe it sends nothing and says nothing.
 ///
 /// The run waits for the storage to be mounted (Android reports its boot done
 /// before it is, and a walk of the empty folder that stands there before would
@@ -15,9 +16,10 @@ import Foundation
 /// main actor, within the time bound of its steps. An import of this run may be
 /// writing while it does, so a leftover is told from it by the mark in its
 /// name, never by its age or the guest's clock (`GuestRunMark`). A failure is
-/// one console line and the sweep is not tried again in the run, except that a
-/// guest which restarts inside the run before the sweep finished gets one more
-/// attempt after its next boot.
+/// one console line and the sweep is not tried again in the run (the record
+/// stays owed, so the next run tries). A guest that restarts inside the run
+/// asks again at its next boot: a sweep cut off by the restart is made, and so
+/// is one that an import cut off by it now owes.
 nonisolated final class PartialFileSweep: @unchecked Sendable {
     /// How long the run waits for the storage: about three minutes, which is
     /// longer than Android takes after its boot is done, and each reading is
@@ -26,13 +28,16 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
     static let storageInterval = Duration.seconds(5)
 
     enum Phase: Equatable, Sendable {
-        /// No boot of this run has finished yet, or the sweep was cut off by
-        /// the guest restarting.
+        /// The boot under way has not been looked at yet, or the sweep was
+        /// cut off by the guest restarting.
         case waiting
         /// Waiting for the storage, or removing.
         case running
-        /// Finished, failed or ended with the run: no more attempts.
+        /// The boot under way owed nothing, or its sweep finished; a restart
+        /// asks again.
         case settled
+        /// A sweep failed or the run ended: no more attempts.
+        case stopped
     }
 
     private enum Outcome {
@@ -41,6 +46,7 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
         case cancelled
     }
 
+    private let owed: @Sendable () -> Bool
     private let storageReady: @Sendable () async -> Bool?
     private let sweep: @Sendable () async throws -> Int
     private let pause: @Sendable (Duration) async throws -> Void
@@ -53,15 +59,19 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
     private var generation = 0
     private var started = 0
 
-    /// `storageReady` reads whether internal storage is up (nil when it cannot
-    /// be read yet) and `sweep` removes the leftovers and returns how many;
-    /// `pause` waits between two readings and `report` is the console.
+    /// `owed` says whether the guest's storage may hold partial files to
+    /// remove. `storageReady` reads whether internal storage is up (nil when
+    /// it cannot be read yet) and `sweep` removes the leftovers and returns
+    /// how many; `pause` waits between two readings and `report` is the
+    /// console.
     init(
+        owed: @escaping @Sendable () -> Bool,
         storageReady: @escaping @Sendable () async -> Bool?,
         sweep: @escaping @Sendable () async throws -> Int,
         pause: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         report: @escaping @Sendable (String) -> Void = { print($0) }
     ) {
+        self.owed = owed
         self.storageReady = storageReady
         self.sweep = sweep
         self.pause = pause
@@ -73,11 +83,16 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
     /// How many attempts the run has begun.
     var attempts: Int { lock.withLock { started } }
 
-    /// Android reported its boot done. The first boot of the run begins the
-    /// sweep; any later call, while it runs or after it, does nothing.
+    /// Android reported its boot done. The first report of a boot looks at the
+    /// record and begins the sweep when it owes one; any later call, while it
+    /// runs or after it, does nothing.
     func guestBooted() {
         lock.withLock {
             guard phase == .waiting else { return }
+            guard owed() else {
+                phase = .settled
+                return
+            }
             phase = .running
             started += 1
             generation += 1
@@ -90,14 +105,20 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
     }
 
     /// The guest restarts inside the run: an attempt that has not finished is
-    /// cut off, and the next boot begins another.
+    /// cut off, and the next boot looks at the record again.
     func guestRestarting() {
         lock.withLock {
-            guard phase == .running else { return }
-            task?.cancel()
-            task = nil
-            generation += 1
-            phase = .waiting
+            switch phase {
+            case .running:
+                task?.cancel()
+                task = nil
+                generation += 1
+                phase = .waiting
+            case .settled:
+                phase = .waiting
+            case .waiting, .stopped:
+                break
+            }
         }
     }
 
@@ -107,7 +128,7 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
             task?.cancel()
             task = nil
             generation += 1
-            phase = .settled
+            phase = .stopped
         }
     }
 
@@ -132,7 +153,7 @@ nonisolated final class PartialFileSweep: @unchecked Sendable {
     private func finish(_ outcome: Outcome, generation mine: Int) {
         let current = lock.withLock { () -> Bool in
             guard generation == mine, phase == .running else { return false }
-            phase = .settled
+            if case .failed = outcome { phase = .stopped } else { phase = .settled }
             task = nil
             return true
         }

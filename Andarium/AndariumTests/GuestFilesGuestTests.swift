@@ -20,7 +20,8 @@ import Testing
 /// ANDARIUM_GUEST_INSTANCE=files-sweep-route, with ANDARIUM_FILES_SWEEP_PHASE=1
 /// (an import is cut off by the application's abrupt end, which the test
 /// brings about itself, so the launch ends as a crash) and then =2 (the guest
-/// starts again and nothing is done).
+/// starts again and nothing is done: the record the abrupt end left is what
+/// makes the run sweep).
 /// The background test needs a device: it runs alone on an iPad with
 /// ANDARIUM_FILES_BACKGROUND=1 and ANDARIUM_GUEST_INSTANCE=filex-bg, and a
 /// harness that sends the application to the background and back when the
@@ -723,10 +724,14 @@ struct GuestFilesGuestTests {
             defer { bench.remove() }
             let guest = GuestSide(operations)
             #expect(await guest.waitForStorage(), "internal storage did not come up")
-            // The run sweeps on its own once the storage is up, with no one asking.
+            // An ordinary start sends no sweep: this guest is a new one, whose disk
+            // holds nothing, so the record says nothing is owed and the run looks at it
+            // once, after Android is up, and goes no further.
             let sweeper = try #require(runtime.partialSweep, "a normal run has a sweep")
-            try await waitUntil("the run's own sweep is over", seconds: 300) { sweeper.currentPhase == .settled }
-            #expect(sweeper.attempts == 1)
+            try await waitUntil("the run has looked at the record", seconds: 300) { sweeper.currentPhase == .settled }
+            #expect(sweeper.attempts == 0, "a guest that owes nothing is not swept")
+            let guestDirectory = runtime.partials.url.deletingLastPathComponent()
+            #expect(!PartialSweepLedger.isOwed(in: guestDirectory) && !runtime.partials.isOwed)
             let watcher = try await openSettingsOnTheFiles(model, operations)
             defer { watcher.cancel() }
 
@@ -770,6 +775,8 @@ struct GuestFilesGuestTests {
             let transfer = try #require(browser.transfer)
             try await waitUntil("the import has moved 32 MiB", seconds: 180) { transfer.items[0].moved >= 32 * mib || !transfer.running }
             #expect(transfer.running, "the import is still running when the sweep starts: \(transfer.detail)")
+            // The record says so, on disk, while the import writes.
+            #expect(PartialSweepLedger.isOwed(in: guestDirectory), "an import under way owes the walk")
             let ownBefore = Set(ownFiles.map(GuestFilePath.name(of:)))
             let inFlight = try await guest.names(work).filter { $0.hasPrefix(mine) && !ownBefore.contains($0) }
             #expect(inFlight.count == 1, "the import's partial file carries this run's mark: \(inFlight)")
@@ -801,6 +808,8 @@ struct GuestFilesGuestTests {
             #expect(try await guest.sha256(work + "/sweep large.bin") == bench.sha256(large), "the import in flight arrived whole")
             let afterImport = try await guest.names(work)
             #expect(!afterImport.contains(where: { inFlight.contains($0) }), "the finished import left no partial file: \(afterImport)")
+            // A clean import leaves the record as it was: nothing owed.
+            #expect(!PartialSweepLedger.isOwed(in: guestDirectory) && !runtime.partials.isOwed, "a clean import owes nothing afterwards")
             browser.closeTransfer()
 
             // This run never sweeps its own files; the next run, with another mark, does.
@@ -808,8 +817,8 @@ struct GuestFilesGuestTests {
             let nextRun = AdbGuestOperations(
                 identity: operations.identity, clock: operations.clock, device: operations.device, run: GuestRunMark.random())
             #expect(try await nextRun.sweepPartialFiles() == ownFiles.count, "the next run takes what this run's imports left")
-            // The run's own sweep happened once and not again while the guest stayed up.
-            #expect(sweeper.attempts == 1 && sweeper.currentPhase == .settled)
+            // The run never swept: nothing was owed, and a clean import does not owe.
+            #expect(sweeper.attempts == 0 && sweeper.currentPhase == .settled)
             browser.sheetClosed()
         }
     }
@@ -861,7 +870,12 @@ struct GuestFilesGuestTests {
                 _ = try await guest.run("sync", seconds: 300)
                 let synced = try await guest.size(work + "/" + partial)
                 try Data("\(partial) \(synced)\n".utf8).write(to: record)
-                note("the application ends now: \(partial) is \(size) bytes, \(synced) after sync, mark \(runtime.runMark.value)")
+                // The record was written before the import's first byte: it is on disk now,
+                // with no sweep having settled it, and nothing else is written before the kill.
+                let guestDirectory = runtime.partials.url.deletingLastPathComponent()
+                let onDisk = try String(contentsOf: runtime.partials.url, encoding: .utf8)
+                #expect(PartialSweepLedger.isOwed(in: guestDirectory) && onDisk.contains("\"imports\":true"), "\(onDisk)")
+                note("the application ends now: \(partial) is \(size) bytes, \(synced) after sync, mark \(runtime.runMark.value), record \(onDisk)")
                 fflush(stdout)
                 kill(getpid(), SIGKILL)
                 try await Task.sleep(for: .seconds(120))
@@ -878,6 +892,8 @@ struct GuestFilesGuestTests {
             #expect(GuestFiles.isPartial(partial) && leftSize > 0, "\(text)")
             let sweeper = try #require(runtime.partialSweep, "the new run has a sweep")
             note("second run: the sweep is \(sweeper.currentPhase) as the test begins, mark \(runtime.runMark.value)")
+            // The record that the application's end left is what made this run sweep: it
+            // survived the kill, a fresh guest's record being settled before the import began.
             // An import that begins as soon as the browser may (what a person would do first).
             let large = try bench.pick("route again.bin", bytes: 300 * Int(mib), seed: 82, modified: .now)
             var phaseAtImport: PartialFileSweep.Phase?
@@ -907,7 +923,7 @@ struct GuestFilesGuestTests {
             note("second run: the cut-off import's partial file (\(leftSize) bytes) was \(seenAt == nil ? "already gone at the first look" : "there at first and") gone after \(String(describing: goneAfter)); sweep \(sweeper.currentPhase)")
             #expect(goneAfter != nil, "the partial file of the cut-off import is still in the guest")
             try await waitUntil("the sweep is over", seconds: 300) { sweeper.currentPhase == .settled }
-            #expect(sweeper.attempts == 1)
+            #expect(sweeper.attempts == 1, "the record the kill left made the run sweep, once")
             try await waitUntil("the new import has begun", seconds: 300) { importStarted }
             note("second run: the new import began while the sweep was \(String(describing: phaseAtImport))")
             let transfer = try #require(browser.transfer)
@@ -915,6 +931,9 @@ struct GuestFilesGuestTests {
             #expect(transfer.stage == .finished, "\(transfer.title) \(transfer.detail)")
             #expect(try await guest.sha256(work + "/route again.bin") == bench.sha256(large), "the new import arrived whole")
             await guest.expectNoPartials(work, "after the new import")
+            // The finished sweep settled the record and the clean import left it so: the
+            // next start of this guest sends no sweep.
+            #expect(!runtime.partials.isOwed && !PartialSweepLedger.isOwed(in: runtime.partials.url.deletingLastPathComponent()))
             browser.closeTransfer()
             browser.sheetClosed()
             try? FileManager.default.removeItem(at: record)
