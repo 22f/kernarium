@@ -31,7 +31,7 @@ struct GuestLayer: View {
 
     private var display: GuestDisplayView {
         var display = GuestDisplayView(
-            retinaMode: model.retina,
+            scale: model.resolution,
             // A touch beside the side keys reaches the guest, and
             // puts the keys away.
             touchDidBegin: { model.session.closeSideKeys() },

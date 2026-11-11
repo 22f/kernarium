@@ -362,7 +362,8 @@ sets, its CPU time standing still), the graphics-memory notice (a real refusal
 in Chrome's WebGL under the host's GPU budget, on a guest with Chrome
 installed), the graphics-memory reading and the process list the reclaim
 parses (any guest), the session record's network slot (a real guest's DHCP
-lease, `NetworkRecordGuestTests`), Retina memory, the ADB-over-vsock guest
+lease, `NetworkRecordGuestTests`), Retina memory, the resolution a real guest gets
+(`ResolutionGuestTests`: the size and density Android reports at a scale), the ADB-over-vsock guest
 tests (including Android storage and the touch-cancel path), the side keys'
 pass-through of touches to Android, the ADB-over-network hold, the
 background disk locks (which also requires a guest that was allocating

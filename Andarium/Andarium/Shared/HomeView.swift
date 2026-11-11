@@ -153,10 +153,9 @@ struct HomeView: View {
         #endif
     }
 
-    /// Display, Capabilities and Backup: what the guest shows and may use.
+    /// Capabilities and Backup: what the guest may use.
     @ViewBuilder
     private var guestSections: some View {
-        DisplaySection()
         CapabilitiesSection()
         BackupSection()
     }

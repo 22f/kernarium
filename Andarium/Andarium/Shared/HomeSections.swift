@@ -280,27 +280,6 @@ struct SnapshotsRow: View {
     }
 }
 
-// MARK: Display
-
-/// Retina mode: the guest draws at the screen's own pixel density instead of
-/// at points. It applies when the guest next starts.
-struct DisplaySection: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        HomeSection(title: "Display") {
-            OptionRow(title: "Retina mode", symbol: "rectangle.inset.filled") {
-                Toggle("Retina mode", isOn: Binding(
-                    get: { model.retina },
-                    set: { model.chooseRetina($0) }
-                ))
-                .labelsHidden()
-            }
-        }
-        .id("display")
-    }
-}
-
 // MARK: Capabilities
 
 /// What the guest may use of this device: the location and the microphone,
