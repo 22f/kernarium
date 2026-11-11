@@ -280,7 +280,7 @@ final class AppModel {
         case .noDebugger, .failed, .otherSettings, .unsupported:
             // A fall-back is only worth a sentence to a person who asked for the JIT.
             jitLastStart = wanted ? answer : nil
-            if wanted { print("Andarium: \(answer.fallbackSentence ?? "started without JIT")") }
+            if wanted { print("Andarium: \(answer.fallbackLog ?? "started without JIT")") }
             return false
         }
     }

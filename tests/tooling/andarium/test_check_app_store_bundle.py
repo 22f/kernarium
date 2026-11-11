@@ -310,6 +310,23 @@ def main() -> int:
               passes=True, expect="ready for the App Store")
         check(make_app(root, "guest-section", clean, app_info(), framework=carrier), passes=True)
 
+        # Localized text: the JIT table and any text that names JIT or StikDebug are for the other configurations.
+        def localized(name: str, tables: dict[str, dict]) -> Path:
+            app = make_app(root, name, clean, app_info())
+            lproj = app / "ja.lproj"
+            lproj.mkdir()
+            for table, content in tables.items():
+                (lproj / table).write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+            return app
+
+        check(localized("localized-clean", {"Localizable.strings": {"Start": "起動", "Note": "Preparing"}}), passes=True)
+        check(localized("jit-table", {"JIT.strings": {"Preparing JIT": "JITを準備中"}}),
+              passes=False, expect="the JIT strings table")
+        check(localized("jit-value", {"Localizable.strings": {"Note": "StikDebugからAndariumを開いてください"}}),
+              passes=False, expect="carries JIT text")
+        check(localized("jit-key", {"Localizable.strings": {"To use JIT, open Andarium": "x"}}),
+              passes=False, expect="carries JIT text")
+
         # Info.plist.
         check(make_app(root, "no-encryption-key", clean, app_info(ITSAppUsesNonExemptEncryption=None)),
               passes=False, expect="ITSAppUsesNonExemptEncryption")

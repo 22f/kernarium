@@ -30,6 +30,9 @@ application that must:
     code of the application or of a framework (the JIT is for the other
     configurations, which a debugger prepares; an App Store build has no
     executable memory of its own);
+  - carry no JIT text in a language: no JIT strings table in any lproj, and no
+    localized key or value that names JIT or StikDebug (the JIT texts are a
+    String Catalog of their own that the configuration excludes);
   - carry no trace of the machine that built it: no path under a user's home
     directory (/Users/<name>/), on a mounted volume (/Volumes/<name>/) or in
     the per-user temporary directories (/var/folders/) in the host code of an
@@ -394,6 +397,44 @@ def debug_support(path: Path) -> list[str]:
     return found
 
 
+JIT_TEXT = re.compile(r"StikDebug|\bJIT\b", re.IGNORECASE)
+
+
+def strings_in(value: object) -> list[str]:
+    """Every key and string value of a property list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in (strings_in(key) + strings_in(item))]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in strings_in(item)]
+    return []
+
+
+def localized_jit_text(app: Path) -> list[str]:
+    """The JIT text carried as localized text: a JIT strings table of any
+    language, and any key or value of another table that names JIT or StikDebug."""
+    found = []
+    for table in sorted(app.rglob("*.lproj/*")):
+        if table.suffix not in (".strings", ".stringsdict"):
+            continue
+        relative = table.relative_to(app)
+        if table.stem == "JIT":
+            found.append(f"{relative}: the JIT strings table, which an App Store build does not carry")
+            continue
+        raw = table.read_bytes()
+        try:
+            texts = strings_in(plistlib.loads(raw))
+        except (plistlib.InvalidFileException, ValueError, OverflowError):
+            # An old-style text file: UTF-16 with a mark, or UTF-8.
+            texts = [raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8", errors="replace")]
+        for text in texts:
+            if JIT_TEXT.search(text):
+                found.append(f"{relative}: carries JIT text ({text[:60]!r})")
+                break
+    return found
+
+
 def test_support(app: Path) -> list[str]:
     """The test bundles and test frameworks anywhere in the application."""
     found = []
@@ -461,6 +502,8 @@ def main() -> int:
         problems.extend(
             f"{binary.relative_to(app)}: {trace}"
             for trace in build_host_traces(binary, debug_map=binary.parent != app))
+
+    problems.extend(f"{app.name}: {text}" for text in localized_jit_text(app))
 
     problems.extend(
         f"{path}: a test bundle or test framework; build the application "
