@@ -41,18 +41,18 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  drivers/media/virtio/Kconfig                  |    7 +-
  drivers/media/virtio/Makefile                 |    4 +-
  drivers/media/virtio/README                   |   10 +-
- drivers/media/virtio/virtio_video.h           |   60 +-
- drivers/media/virtio/virtio_video_camera.c    | 1670 +++++++++++++++++
+ drivers/media/virtio/virtio_video.h           |   62 +-
+ drivers/media/virtio/virtio_video_camera.c    | 1672 +++++++++++++++++
  drivers/media/virtio/virtio_video_camera.h    |  233 +++
  .../media/virtio/virtio_video_camera_cmd.c    |  290 +++
  .../media/virtio/virtio_video_camera_ctrl.c   |  568 ++++++
- .../media/virtio/virtio_video_camera_dev.c    |  418 +++++
+ .../media/virtio/virtio_video_camera_dev.c    |  433 +++++
  drivers/media/virtio/virtio_video_caps.c      |   12 +-
  drivers/media/virtio/virtio_video_ctrls.c     |   16 +-
  drivers/media/virtio/virtio_video_device.c    |   48 +-
  drivers/media/virtio/virtio_video_driver.c    |   68 +-
  drivers/media/virtio/virtio_video_vq.c        |  132 +-
- 14 files changed, 3497 insertions(+), 39 deletions(-)
+ 14 files changed, 3516 insertions(+), 39 deletions(-)
  create mode 100644 drivers/media/virtio/virtio_video_camera.c
  create mode 100644 drivers/media/virtio/virtio_video_camera.h
  create mode 100644 drivers/media/virtio/virtio_video_camera_cmd.c
@@ -115,7 +115,7 @@ index d928f9d09e6d96b4a161cd4c26847f3046b05c4e..8693cd8b4303b2bd2f1e33c31348aa52
 +of kernel/common/video/README.md in the owning Darwin host repository, which is
 +the one place that states them.
 diff --git a/drivers/media/virtio/virtio_video.h b/drivers/media/virtio/virtio_video.h
-index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec41223b8c14a 100644
+index e95160addc0f9579ce96f06e31c403974f4861ff..f3063cb1203e2858edd50ff13f2a236d4fc02491 100644
 --- a/drivers/media/virtio/virtio_video.h
 +++ b/drivers/media/virtio/virtio_video.h
 @@ -35,6 +35,8 @@
@@ -140,7 +140,7 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
  
  	bool is_sync;
  	struct completion reclaimed;
-@@ -282,6 +290,17 @@ struct virtio_video_device {
+@@ -282,6 +290,19 @@ struct virtio_video_device {
  	/* Device ID 30, the encoder; the decoder otherwise. */
  	bool encoder;
  
@@ -154,11 +154,13 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
 +	struct virtio_video_camera *cameras;
 +	unsigned int num_cameras;
 +	u32 camera_session_flags;
++	/* The camera buffers the device holds: VIRTIO_VIDEO_CAMERA_MAX_QUEUED. */
++	atomic_t cam_queued;
 +
  	bool has_iommu;
  	bool supp_non_contig;
  
-@@ -428,8 +447,7 @@ int virtio_video_dec_init(struct virtio_video_device *vvd);
+@@ -428,8 +449,7 @@ int virtio_video_dec_init(struct virtio_video_device *vvd);
  int virtio_video_enc_init(struct virtio_video_device *vvd);
  
  void virtio_video_stream_id_get(struct virtio_video_device *vvd,
@@ -168,7 +170,7 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
  void virtio_video_stream_id_put(struct virtio_video_device *vvd, uint32_t id);
  void virtio_video_resource_id_get(struct virtio_video_device *vvd,
  				  uint32_t *id);
-@@ -489,11 +507,11 @@ int virtio_video_cmd_query_v4l2_controls(struct virtio_video_device *vvd,
+@@ -489,11 +509,11 @@ int virtio_video_cmd_query_v4l2_controls(struct virtio_video_device *vvd,
  					 uint32_t start_index, void *resp_buf,
  					 size_t resp_size, size_t *resp_len);
  int virtio_video_cmd_set_v4l2_control(struct virtio_video_device *vvd,
@@ -182,7 +184,7 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
  				      uint32_t id, int64_t *value,
  				      void *payload, uint32_t size);
  int virtio_video_cmd_set_stream_info(struct virtio_video_device *vvd,
-@@ -505,6 +523,35 @@ int virtio_video_cmd_get_stream_info(struct virtio_video_device *vvd,
+@@ -505,6 +525,35 @@ int virtio_video_cmd_get_stream_info(struct virtio_video_device *vvd,
  				     enum virtio_video_queue_type queue_type,
  				     struct video_stream_info *info);
  
@@ -218,7 +220,7 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
  void virtio_video_queue_res_chg_event(struct virtio_video_stream *stream);
  void virtio_video_queue_eos_event(struct virtio_video_stream *stream);
  void virtio_video_handle_error(struct virtio_video_stream *stream);
-@@ -544,6 +591,11 @@ int virtio_video_subscribe_event(struct v4l2_fh *fh,
+@@ -544,6 +593,11 @@ int virtio_video_subscribe_event(struct v4l2_fh *fh,
  				 const struct v4l2_event_subscription *sub);
  
  void virtio_video_free_caps_list(struct list_head *caps_list);
@@ -232,10 +234,10 @@ index e95160addc0f9579ce96f06e31c403974f4861ff..a05eaf39c1783c1d61aea5e6aadec412
  void virtio_video_clean_capability(struct virtio_video_device *vvd);
 diff --git a/drivers/media/virtio/virtio_video_camera.c b/drivers/media/virtio/virtio_video_camera.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931fe9a54f1
+index 0000000000000000000000000000000000000000..dabbc29fcff0c0a1ff8af3bd31fe1055ee34c1fc
 --- /dev/null
 +++ b/drivers/media/virtio/virtio_video_camera.c
-@@ -0,0 +1,1670 @@
+@@ -0,0 +1,1672 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * The Virtio camera's V4L2 nodes.
@@ -492,21 +494,14 @@ index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931
 +}
 +
 +/*
-+ * Reserves one of the metadata buffers a camera, and the device, may have at
-+ * the device; the other kinds of buffer are bounded by their queues.
++ * Reserves one of the buffers the device may hold in all
++ * (VIRTIO_VIDEO_CAMERA_MAX_QUEUED); a buffer over the budget is refused.
 + */
-+static bool cam_meta_reserve(struct virtio_video_camera *cam)
++static bool cam_buffer_reserve(struct virtio_video_device *vvd)
 +{
-+	struct virtio_video_device *vvd = cam->vvd;
-+	unsigned int i, total = 0;
-+
-+	if (atomic_inc_return(&cam->meta_queued) <= VIRTIO_VIDEO_CAMERA_MAX_META) {
-+		for (i = 0; i < vvd->num_cameras; i++)
-+			total += atomic_read(&vvd->cameras[i].meta_queued);
-+		if (total <= VIRTIO_VIDEO_CAMERA_MAX_META_DEVICE)
-+			return true;
-+	}
-+	atomic_dec(&cam->meta_queued);
++	if (atomic_inc_return(&vvd->cam_queued) <= VIRTIO_VIDEO_CAMERA_MAX_QUEUED)
++		return true;
++	atomic_dec(&vvd->cam_queued);
 +
 +	return false;
 +}
@@ -514,8 +509,7 @@ index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931
 +/* A buffer left the device: its answer came, or it was taken back. */
 +static void cam_inflight_dec(struct virtio_video_cam_file *file)
 +{
-+	if (file->kind == VIRTIO_VIDEO_CAMERA_STREAM_META)
-+		atomic_dec(&file->cam->meta_queued);
++	atomic_dec(&cam_vvd(file)->cam_queued);
 +	atomic_dec(&file->inflight);
 +}
 +
@@ -765,10 +759,8 @@ index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931
 +		buf->group_more = false;
 +	}
 +
-+	if (file->kind == VIRTIO_VIDEO_CAMERA_STREAM_META) {
-+		if (!cam_meta_reserve(file->cam))
-+			return -EBUSY;
-+	}
++	if (!cam_buffer_reserve(cam_vvd(file)))
++		return -EBUSY;
 +	atomic_inc(&file->inflight);
 +	ret = virtio_video_cam_cmd_queue(cam_vvd(file), file->stream_id, buf);
 +	if (ret) {
@@ -966,8 +958,13 @@ index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931
 + * after it answers the clear, so the answer and then every buffer are waited
 + * for. A device that does not say so in time may still write a buffer, and the
 + * pages of one the client gets back are the client's to reuse: the stream is
-+ * destroyed instead, which the device answers only once it has dropped
-+ * the stream's buffers (it takes the ring in order), and its buffers must be
++ * destroyed instead. The destroy is only queued here, so the wait for the
++ * buffers goes on after it, without a limit, in steps that say so: the device
++ * takes the ring in order and completes every buffer it holds when it
++ * processes either command, so the wait ends when the device does its work,
++ * and a removal ends it whatever the device does, because it clears the
++ * queue's ready flag and virtio_video_cancel_cmds() then returns every
++ * command, a buffer's among them. The buffers of a destroyed stream must be
 + * attached to a new one before they are queued again.
 + */
 +static void cam_halt_stream(struct virtio_video_cam_file *file)
@@ -993,6 +990,13 @@ index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931
 +		if (vb)
 +			to_cam_buffer(vb)->attached = false;
 +	}
++
++	while (!wait_event_timeout(file->idle,
++				   !atomic_read(&file->inflight) ||
++				   !READ_ONCE(vvd->commandq.ready), 5 * HZ))
++		v4l2_warn(&vvd->v4l2_dev,
++			  "camera %u: still waiting for the device to give back a stream's buffers\n",
++			  file->cam->index);
 +}
 +
 +/*
@@ -1908,7 +1912,7 @@ index 0000000000000000000000000000000000000000..61f9c97d8add48c64737611642ec2931
 +}
 diff --git a/drivers/media/virtio/virtio_video_camera.h b/drivers/media/virtio/virtio_video_camera.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..17df2df838ba88d4380754036824cc2dd3d27b47
+index 0000000000000000000000000000000000000000..e1547651ce3cfc9228ad503ca3cfa460dcf806fa
 --- /dev/null
 +++ b/drivers/media/virtio/virtio_video_camera.h
 @@ -0,0 +1,233 @@
@@ -1960,13 +1964,15 @@ index 0000000000000000000000000000000000000000..17df2df838ba88d4380754036824cc2d
 +#define VIRTIO_VIDEO_CAMERA_MAX_PLANE_SIZE (128U << 20)
 +
 +/*
-+ * The metadata buffers a camera may hold at the device, and the device in all.
-+ * Each takes two descriptors of the command queue's 256, and a client that
-+ * queues without end, as several metadata files can, would leave no room for
-+ * a command: the wait for room has no end.
++ * The buffers of every kind (frames, stills and metadata) and of every camera
++ * that the device may hold at once. Each takes two descriptors of the command
++ * queue's 256, and a client that queues without end, as several metadata
++ * files can, would leave no room for a command, whose wait for room has no
++ * end: 64 descriptors stay for commands. The HAL queues at most 16 metadata
++ * buffers and two for each of the five streams Android allows (a camera in use
++ * holds 26), so three cameras at once hold 78.
 + */
-+#define VIRTIO_VIDEO_CAMERA_MAX_META 32
-+#define VIRTIO_VIDEO_CAMERA_MAX_META_DEVICE 64
++#define VIRTIO_VIDEO_CAMERA_MAX_QUEUED 96
 +
 +enum virtio_video_cam_node_type {
 +	CAM_NODE_CAPTURE,
@@ -2013,8 +2019,6 @@ index 0000000000000000000000000000000000000000..17df2df838ba88d4380754036824cc2d
 +	 */
 +	atomic_t seq_next;
 +	atomic_t seq_offset;
-+	/* The metadata buffers the device holds, for VIRTIO_VIDEO_CAMERA_MAX_META. */
-+	atomic_t meta_queued;
 +
 +	struct v4l2_ctrl_handler hdl;
 +	struct virtio_video_cam_ctrl *ctrls;
@@ -3017,10 +3021,10 @@ index 0000000000000000000000000000000000000000..ba252c4ade1471f6a6da357fbbc383fc
 +}
 diff --git a/drivers/media/virtio/virtio_video_camera_dev.c b/drivers/media/virtio/virtio_video_camera_dev.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0023bfd11a5d59790e3cc54efcde42b21d0d8cfb
+index 0000000000000000000000000000000000000000..8228d664f5aa010ee0b638136ac10319ab763030
 --- /dev/null
 +++ b/drivers/media/virtio/virtio_video_camera_dev.c
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,433 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * The Virtio camera device.
@@ -3243,6 +3247,21 @@ index 0000000000000000000000000000000000000000..0023bfd11a5d59790e3cc54efcde42b2
 +	BUILD_BUG_ON(sizeof(struct virtio_video_camera_stream_create) != 88);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_camera_queue_resp) != 64);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_camera_meta) != 168);
++	/* The rest the camera's commands and answers carry or parse. */
++	BUILD_BUG_ON(sizeof(struct virtio_video_stream_destroy) != 8);
++	BUILD_BUG_ON(sizeof(struct virtio_video_resource_attach) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_resource_sg_list) != 8);
++	BUILD_BUG_ON(sizeof(struct virtio_video_resource_sg_entry) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_queue_detach_resources) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_get_stream_info) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_get_stream_info_resp) != 40);
++	BUILD_BUG_ON(sizeof(struct virtio_video_set_stream_info) != 40);
++	BUILD_BUG_ON(sizeof(struct virtio_video_query_v4l2_controls) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_query_v4l2_controls_resp) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_format_desc) != 24);
++	BUILD_BUG_ON(sizeof(struct virtio_video_format_frame) != 40);
++	BUILD_BUG_ON(sizeof(struct virtio_video_format_range) != 16);
++	BUILD_BUG_ON(sizeof(struct virtio_video_event) != 8);
 +}
 +
 +int virtio_video_camera_init(struct virtio_video_device *vvd)
