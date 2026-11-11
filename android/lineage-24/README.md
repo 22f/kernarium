@@ -287,12 +287,14 @@ from them and writes the controls back. Its provider is the lazy service
 `android.hardware.camera.provider@2.7-service-google-lazy`
 (`ICameraProvider/internal/0`, declared once in the vendor manifest): init
 starts it when an application opens a camera or the torch, and no process
-exists while none does. The HAL's rules (the wire, camera IDs, controls, Exif,
-concurrency) are the headers of `overlay/camera/hal/`, which the HAL includes
-and the `andarium-camera-*` unit tests compile without Android. The camera
-application is LineageOS's Aperture, without its Google Lens launcher and
-button (route `p0031`), and its lens selector lists each lens of the host as
-a camera of its own (a static overlay in
+exists while none does. The image expects the driver to register the camera
+nodes as `/dev/video10` and above; the codec nodes stay in `video0` to
+`video9`, which the HAL never opens. The HAL's rules (the wire, camera IDs,
+controls, Exif, concurrency) are the headers of `overlay/camera/hal/`, which
+the HAL includes and the `andarium-camera-*` unit tests compile without
+Android. The camera application is LineageOS's Aperture, without its Google
+Lens launcher and button (route `p0031`), and its lens selector lists each
+lens of the host as a camera of its own (a static overlay in
 `overlay/overlay/packages/apps/Aperture`).
 
 The image states no camera feature of its own. The host composes a camera
