@@ -237,6 +237,35 @@ struct MotionTests {
         #expect(recv(sockets[1], &byte, 1, MSG_DONTWAIT) == 0)
     }
 
+    private final class Changes: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [Bool] = []
+        func add(_ value: Bool) { lock.withLock { list.append(value) } }
+        var all: [Bool] { lock.withLock { list } }
+    }
+
+    @Test func aGuestThatReadsNothingNeverHoldsTheCallerAndTheConnectionIsClosed() throws {
+        let sockets = try pair()
+        let opener = Opener(descriptor: sockets[0])
+        let changes = Changes()
+        let stream = MotionStream(opener: opener, connectionChanged: { changes.add($0) })
+        let epoch = stream.start()
+        // The peer is closed first, which also frees a send that a regression would leave blocked.
+        defer { stream.stop() }
+        defer { close(sockets[1]) }
+        #expect(opener.entered.wait(timeout: .now() + 2) == .success)
+        let sample = MotionSample(sensor: .gyroscope, x: 1, y: 2, z: 3)
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            // A record is 20 bytes and the socket holds a few hundred: far more than it takes.
+            for _ in 0..<2_000 { stream.submit(sample, epoch: epoch) }
+            done.signal()
+        }
+        #expect(done.wait(timeout: .now() + 5) == .success, "a submit waited for a guest that reads nothing")
+        // The record that did not fit closed the connection, as the stream says.
+        #expect(changes.all.contains(false))
+    }
+
     @Test func aClosedPeerCannotRaiseSigpipe() throws {
         let sockets = try pair()
         close(sockets[1])

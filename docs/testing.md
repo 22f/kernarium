@@ -288,8 +288,11 @@ files in a temporary directory, with a crash between every two file calls of
 each operation and a real error at each call in turn, the haptics session on
 fake guests and players, the haptics wire against the golden frames in
 `tests/unit/andarium/fixtures`, which the guest's vibrator, thermal and gamepad
-relay test against too, and the session record's stall slot against the golden
-slot there, which `runtime-stall-record` checks the runtime's writer against);
+relay test against too; the game controllers' wire against that directory's
+gamepad frames, each family's reports read back through a test-only HID
+descriptor parser, and the stream and session on a fake relay; and the session
+record's stall slot against the golden slot there, which `runtime-stall-record`
+checks the runtime's writer against);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol`,
 `andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
@@ -315,7 +318,16 @@ controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
 (`AndariumTestBundle`) shows the side keys' tip in every session of the run,
 whatever the device's tip store says, except in an `ANDARIUM_HOLD_SECONDS`
-harness launch, which hides it.
+harness launch, which hides it. No test attaches, scans for or pairs a real
+controller: the game controller tests use software controllers and the
+system's virtual controller (which needs the host's window) against a fake
+relay, and the package's test-only `andarium-gamepad-probe` plays a script to a
+TCP port, where the macOS launcher's `--vsock-forward` reaches a guest's relay.
+The script and the guest end of the wire are the package's
+`AndariumCoreTestSupport` target, which only the package's tests, the probe
+and `AndariumTests` link, and the test bundle carries in its own Frameworks
+folder, so a device can load it; the application never does (the App Store
+bundle check refuses a build that does).
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,

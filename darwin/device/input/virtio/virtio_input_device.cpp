@@ -145,10 +145,19 @@ void EventQueue::wake() noexcept
     }
 }
 
+void EventQueue::forgetGuestLocked() noexcept
+{
+    guestHolds_.reset();
+    dropped_ = false;
+    for (const auto& event : events_)
+        guestHolds_.observe({&event, 1});
+}
+
 void EventQueue::queueLocked(
     std::span<const protocol::InputEvent> events) noexcept
 {
     events_.insert(events_.end(), events.begin(), events.end());
+    guestHolds_.observe(events);
 }
 
 bool EventQueue::holdLocked(
@@ -212,7 +221,12 @@ bool EventQueue::enqueue(
             return false;
         if (!registered_)
             return holdLocked(events);
-        if (events.size() > maximumQueuedEvents - events_.size()) {
+        /* After a drop, the guest first gets the release of what it holds,
+         * so the room needed is the release's and the report's. */
+        const auto release = dropped_ ? guestHolds_.releaseSize() : 0;
+        const auto room = maximumQueuedEvents - events_.size();
+        if (release > room || events.size() > room - release) {
+            dropped_ = true;
             if (!reportedOverflow_) {
                 std::fputs(
                     "Kernarium: dropping input because the virtio queue is full\n",
@@ -222,6 +236,10 @@ bool EventQueue::enqueue(
             return false;
         }
         wasEmpty = events_.empty();
+        if (dropped_) {
+            guestHolds_.appendRelease(events_);
+            dropped_ = false;
+        }
         queueLocked(events);
     }
     if (wasEmpty)
@@ -256,6 +274,7 @@ bool EventQueue::setConnectedLocked(bool connected) noexcept
     held_.clear();
     heldLost_ = false;
     reportedHoldOverflow_ = false;
+    forgetGuestLocked();
     /* A driver that has not probed has nothing to be told: it reads the
      * state when it does, and the first buffer it posts finds it. */
     if (probed_)
@@ -301,6 +320,17 @@ void EventQueue::setStatusSink(StatusSink sink)
 bool EventQueue::take(protocol::InputEvent& event) noexcept
 {
     std::lock_guard lock(mutex_);
+    if (registered_ && events_.empty() && dropped_) {
+        /* The guest has read everything and the host may have nothing more
+         * to send: a lift that was dropped must not wait for a later report.
+         * The queue is empty, so the release fits. appendRelease forgets
+         * what it ends, so the report that comes next, and the lock that
+         * orders it with this call, owe no second one. A device that is
+         * unplugged or whose input device is not registered injects
+         * nothing. */
+        guestHolds_.appendRelease(events_);
+        dropped_ = false;
+    }
     if (events_.empty())
         return false;
     event = events_.front();
@@ -360,12 +390,16 @@ void EventQueue::guestStatus(const protocol::InputEvent& event) noexcept
         if (!pluggable_)
             return;
         if (connected_) {
+            if (registered_ != on)
+                forgetGuestLocked();
             registered_ = on;
             if (on) {
                 flushed = !held_.empty();
                 heldLost_ = false;
                 if (flushed) {
                     events_.insert(events_.end(), held_.begin(), held_.end());
+                    for (const auto& held : held_)
+                        guestHolds_.observe({&held, 1});
                     held_.clear();
                 }
             }
@@ -412,6 +446,8 @@ void EventQueue::reset() noexcept
     std::lock_guard lock(mutex_);
     events_.clear();
     held_.clear();
+    guestHolds_.reset();
+    dropped_ = false;
     heldLost_ = false;
     reportedHoldOverflow_ = false;
     probed_ = !pluggable_;
@@ -422,6 +458,8 @@ void EventQueue::clear() noexcept
 {
     std::lock_guard lock(mutex_);
     events_.clear();
+    guestHolds_.reset();
+    dropped_ = false;
 }
 
 VirtioInputDevice::VirtioInputDevice(
