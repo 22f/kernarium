@@ -205,6 +205,49 @@ uml_add_guest_integration_test(
     TIMEOUT 900
     CPUS 2)
 
+# The Virtio camera driver against a device that is reset during a suspend
+# (the stream carries on, the zoom is written again, the sequences keep
+# rising) and against one that is late to stop a stream (the driver destroys
+# the stream, so the buffers it gives back are never written again, and the
+# late clears fall due with the rings disabled and are not lost). No switch in
+# a production target can do either, so the device is the production one behind
+# the delayed-answer shim, which resets it or holds its requests.
+if(TARGET UML::CameraSource AND TARGET UML::SyntheticCamera)
+    uml_add_freestanding_cxx_payload(UML_GUEST_CAMERA_RESET_INIT
+        guest-video-camera-reset-init
+        video/camera_reset_init.cpp
+        COMMENT "Building the freestanding arm64 init of the camera reset tests"
+        ARCH_OPTIONS -march=armv8-a)
+    add_executable(uml_camera_reset_tests video/camera_reset_tests.cpp)
+    target_link_libraries(uml_camera_reset_tests PRIVATE
+        UML::BootInitramfs
+        UML::CameraDevice
+        UML::CameraSource
+        UML::DelayedAnswerDevice
+        UML::Emulator)
+    target_link_options(uml_camera_reset_tests PRIVATE
+        "LINKER:-export_dynamic"
+        "LINKER:-force_load,$<TARGET_FILE:uml_emulator>")
+    add_dependencies(uml_camera_reset_tests
+        "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}")
+    add_dependencies(integration-test-binaries uml_camera_reset_tests)
+    get_target_property(_uml_camera_reset_kernel
+        "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}" UML_KERNEL_IMAGE)
+    foreach(_case IN ITEMS reset slow-clear)
+        uml_add_integration_test(
+            NAME guest-video-camera-${_case}
+            COMMAND uml_camera_reset_tests
+                ${_uml_camera_reset_kernel}
+                ${UML_GUEST_CAMERA_RESET_INIT}
+                ${CMAKE_CURRENT_BINARY_DIR}/video-camera-${_case}
+                ${_case}
+            LABELS guest;kernel;video
+            TIMEOUT 600
+            PROCESSORS 2
+            RESOURCE_GROUPS cpus:2)
+    endforeach()
+endif()
+
 set(UML_FUTEX_PROBE_BINARY "" CACHE FILEPATH
     "Static guest executable built from tests/integration/futex/futex_atomic_probe.cpp")
 if(UML_FUTEX_PROBE_BINARY)

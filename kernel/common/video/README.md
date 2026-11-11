@@ -12,7 +12,10 @@ update the copy under `include/uapi/linux/` in each patch-producing kernel
 checkout. Amend the owning video topic and regenerate each line's series;
 ordinary checks use `sync-protocol.py --kernel-source PATH --verify`. Never edit
 generated patch output. A change to the driver runs `guest-v4l2-decode`,
-`guest-v4l2-encode` and `guest-video-teardown` before a kernel release.
+`guest-v4l2-encode`, `guest-video-teardown`, `guest-v4l2-capture`,
+`guest-v4l2-capture-blocked`, `guest-v4l2-capture-suspend` and the camera's
+reset cases (`guest-video-camera-reset`, `guest-video-camera-slow-clear`)
+before a kernel release.
 
 `virtio_video_v4l2_ids.h` lists the V4L2 numbers the host uses, one
 `#define UML_<kernel symbol> <number>` per value. `sync-protocol.py` checks each
@@ -159,17 +162,21 @@ streams, and a metadata node, for its meta streams.
   back when it delivers a frame.
 - **Suspend and reset.** The camera's event buffers stay in the guest's ring:
   the device answers one only when it has an event, and the buffer the guest
-  posted waits in the ring, across a suspend as well. A guest suspend that finds
-  a request held (a queued stream buffer) resets the device, as it resets any
-  device of the transport, and the driver does not use
-  `virtio_uml_set_no_vq_suspend`. The driver therefore stops the device's
-  streams before it suspends, which completes every held buffer, and keeps its
-  own V4L2 state; a camera with no stream holds nothing, so its suspend resets
-  nothing and its next event reaches the buffer already posted. After a reset
-  the driver creates its streams again, applies the controls again and queues
-  the buffers; the device keeps nothing across a reset and has stopped every
-  capture (its camera indicator is off and no host buffer remains), and the
-  first frames after a re-created stream are black and flagged `_RESUMING`.
+  posted waits in the ring, across a suspend as well. The device keeps the
+  requests it holds while a ring is disabled, as the codecs' devices do, so a
+  guest suspend that finds a stream buffer held resets nothing and loses no
+  answer; the driver does not use `virtio_uml_set_no_vq_suspend`. It still
+  stops the device's streams before it suspends, which completes every held
+  buffer and keeps its own V4L2 state, and the resume asks the device about one
+  stream to learn whether it was reset anyway (a new memory table, the end of
+  the connection, a release of the device). After a reset the driver creates its
+  streams again, applies the controls again and queues the buffers; the device
+  keeps nothing across a reset and has stopped every capture (its camera
+  indicator is off and no host buffer remains), and the first frames after a
+  re-created stream are black and flagged `_RESUMING`. The device counts
+  sequences from the start again after a reset, so the driver adds an offset to
+  every sequence of a camera, frames and metadata alike, and the sequences the
+  client sees keep rising.
 
 ### Guest nodes
 
@@ -182,6 +189,11 @@ which `QUERYCAP`'s `bus_info` (`virtio-camera:<i>`) repeats. `guest-v4l2-capture
 checks the contract on the synthetic camera, live and blocked, and
 `guest-v4l2-capture-suspend` the suspend contract above: a stream carries on
 across a suspend by either route, with no failed buffer and no device reset.
+`guest-video-camera-reset` makes the host forget every stream during a suspend
+and checks that the stream carries on, the zoom is applied again and the
+sequences keep rising, and `guest-video-camera-slow-clear` delays the host's
+processing of a stream's clear past the driver's wait and checks that no
+buffer is written once the client has it.
 
 - **Files and streams.** Opening a node starts nothing. A file creates its host
   stream when it sets a format or asks for buffers, so two files of one node
@@ -197,12 +209,13 @@ across a suspend by either route, with no failed buffer and no device reset.
   buffer: a non-zero `timestamp.tv_sec` is the cookie, and the buffers of a
   cookie are exposed together up to the one flagged `V4L2_BUF_FLAG_LAST`. A
   frame's timestamp is the driver's clock minus the frame's age. A still is
-  stamped when it completes, because the time of its exposure is in the
-  metadata. A still the device could not take completes with
-  `V4L2_BUF_FLAG_ERROR` and no payload.
+  stamped when it completes, because the wire returns only the guest's cookie
+  for it and its metadata has the exposure's duration, not its time. A still
+  the device could not take completes with `V4L2_BUF_FLAG_ERROR` and no
+  payload.
 - **Metadata node.** One format, `VCAM`, a `virtio_video_camera_meta` per
-  buffer, and the same sequence as the frame or still of that exposure. Records
-  flow while a video or still stream of the camera runs.
+  `MMAP` buffer, and the same sequence as the frame or still of that exposure.
+  Records flow while a video or still stream of the camera runs.
 - **Controls.** Every file of a camera has the device's list of controls and
   their ranges, one set of values for both nodes. A control needs a stream on
   the wire, so a camera keeps a metadata stream that carries them: a torch is
