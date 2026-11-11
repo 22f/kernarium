@@ -22,6 +22,12 @@ to 4K), the back flash, manual sensor control, RAW (only with manual control), t
 concurrent streaming of the front and the back camera, and for the large tier the
 front camera's video maximum (1080p or 2160p). A front camera alone has manual
 control or not. That is 3 + 2 x 2 x 3 x 2 + 12 = 39 layouts.
+
+`concurrent` means one thing, here, in the HAL (camera_ids.hpp, concurrent_feature)
+and in the application: the cameras "0" and "1" are in one set that the host
+streams together, and both meet the camera API's guaranteed concurrent stream
+sizes as the HAL derives them (camera_plan.hpp, meets_concurrent_streams). It is
+Android's own condition for the feature android.hardware.camera.concurrent.
 """
 
 from __future__ import annotations

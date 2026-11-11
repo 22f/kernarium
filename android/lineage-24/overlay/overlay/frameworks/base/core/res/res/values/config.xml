@@ -20,10 +20,11 @@
     <bool name="config_flipToScreenOffEnabled">false</bool>
 
     <!-- The camera has a hardware switch: a guest that starts with Camera off (or with the host's
-         camera access refused) reports the keyboard device's SW_CAMERA_LENS_COVER as 1 for the whole
-         boot. With this flag the sensor privacy service reads that switch and shows Android's own
-         blocked-camera state; the camera service then mutes every camera, which the host answers
-         with black frames. A live session reports 0. -->
+         camera access refused) reports SW_CAMERA_LENS_COVER as 1 for the whole boot, on the side-key
+         device (1af4:0002), the one input device that is always registered. With this flag the
+         sensor privacy service reads that switch and shows Android's own blocked-camera state; the
+         camera service then mutes every camera, which the host answers with black frames. A live
+         session reports 0. -->
     <bool name="config_supportsHardwareCamToggle">true</bool>
     <integer name="config_audio_notif_vol_default">7</integer>
     <integer name="config_audio_ring_vol_default">7</integer>

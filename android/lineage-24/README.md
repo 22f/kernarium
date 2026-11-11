@@ -292,7 +292,8 @@ concurrency) are the headers of `overlay/camera/hal/`, which the HAL includes
 and the `andarium-camera-*` unit tests compile without Android. The camera
 application is LineageOS's Aperture, without its Google Lens launcher and
 button (route `p0031`), and its lens selector lists each lens of the host as
-a camera of its own (a static overlay in `overlay/overlay/packages/apps/Aperture`).
+a camera of its own (a static overlay in
+`overlay/overlay/packages/apps/Aperture`).
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as
@@ -308,8 +309,10 @@ and fallbacks):
 - `bf-<small|large>[-flash][-manual[-raw]][-concurrent][-front2160]`, a back
   and a front camera: `small` caps video at 1080p, `large` at 4K; `flash` is
   the back flash, `manual` manual sensor control, `raw` RAW capture (only with
-  `manual`), `concurrent` streaming both cameras at once, and `front2160` the
-  front camera's video at 2160p (only with `large`).
+  `manual`), `concurrent` streaming both cameras at once (cameras "0" and "1"
+  in one set the host streams together, both meeting the guaranteed concurrent
+  stream sizes), and `front2160` the front camera's video at 2160p (only with
+  `large`).
 
 That is 39 layouts. A host whose combination the image lacks takes the nearest
 by dropping dimensions in this order: concurrent, RAW, front 2160p, flash,
@@ -318,12 +321,17 @@ features and media profiles and never in HALs: there is no manifest per layout,
 and none declares `android.hardware.camera.level.full`.
 
 A session started with Camera off lists the same cameras and delivers black
-frames. The host reports the keyboard device's camera lens cover as closed for
-the whole boot, the framework overlay reads that switch
-(`config_supportsHardwareCamToggle`), and Android shows its own blocked-camera
+frames. The image expects the always-registered side-key device (1af4:0002) to
+report `SW_CAMERA_LENS_COVER` as 1 for the whole boot of such a session and 0
+otherwise; the framework overlay reads that switch
+(`config_supportsHardwareCamToggle`) and Android shows its own blocked-camera
 state. The host also sends black frames while it interrupts a camera, and the
-HAL passes them on as frames of the camera. `tests/integration/android/run_android_camera.py` (`android-camera`) is the
-candidate's smoke test.
+HAL passes them on as frames of the camera. Output sizes the host lacks that
+CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
+smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
+smallest native video mode that covers them, scaled in the HAL and, for a
+JPEG, encoded there. `BURST_CAPTURE` is never declared. The candidate's smoke
+test is `tests/integration/android/run_android_camera.py` (`android-camera`).
 
 ### Networking
 
