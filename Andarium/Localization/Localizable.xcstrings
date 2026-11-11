@@ -1,25 +1,91 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "%@ exported" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を書き出しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已导出"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已輸出"
+          }
+        }
+      }
+    },
     "%@ free on this %@" : {
       "comment" : "First the size, then the device name: 41.6 GiB free on this iPhone.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この%2$@の空き容量は%1$@です"
+            "value" : "この%2$@の空き容量: %1$@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 %2$@ 上还有 %1$@ 可用空间"
+            "value" : "此%2$@上还有%1$@可用空间"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 %2$@ 尚有 %1$@ 可用空間"
+            "value" : "此%2$@尚有%1$@可用空間"
+          }
+        }
+      }
+    },
+    "%@ imported" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を読み込みました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已导入"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已輸入"
+          }
+        }
+      }
+    },
+    "%@ is installed in the virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を仮想マシンにインストールしました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安装到虚拟机中。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安裝到虛擬機器中。"
           }
         }
       }
@@ -29,19 +95,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@は一時停止中です"
+            "value" : "%@は一時停止中"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 已暂停"
+            "value" : "%@已暂停"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 已暫停"
+            "value" : "%@已暫停"
           }
         }
       }
@@ -57,13 +123,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 正在保存数据并关机。"
+            "value" : "%@正在保存数据并关机。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 正在儲存資料並關機。"
+            "value" : "%@正在儲存資料並關機。"
           }
         }
       }
@@ -73,19 +139,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@はまだ実行中です"
+            "value" : "%@はまだ実行中"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 仍在运行"
+            "value" : "%@仍在运行"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 仍在執行"
+            "value" : "%@仍在執行"
           }
         }
       }
@@ -101,36 +167,36 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 是最大容量"
+            "value" : "%@是最大容量"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 是最大容量"
+            "value" : "%@是最大容量"
           }
         }
       }
     },
     "%@ of %@" : {
-      "comment" : "Storage in use of the virtual machine's capacity: first the used size, then the capacity, as in 5.4 GiB of 16 GiB.",
+      "comment" : "A meter or progress readout, the part first: the memory or graphics memory in use of its limit, the bytes moved of a file's size. Written 1.4 GiB / 2.5 GiB. The storage rows use another key.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%2$@中 %1$@"
+            "value" : "%1$@ / %2$@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%1$@，共 %2$@"
+            "value" : "%1$@ / %2$@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%1$@，共 %2$@"
+            "value" : "%1$@ / %2$@"
           }
         }
       }
@@ -147,35 +213,58 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在此 %2$@ 上占用 %1$@"
+            "value" : "在此%2$@上占用%1$@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在此 %2$@ 上佔用 %1$@"
+            "value" : "在此%2$@上佔用%1$@"
           }
         }
       }
     },
-    "%@ used of %@" : {
+    "%@ ready" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%2$@中 %1$@使用中"
+            "value" : "%@の準備ができました"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已使用 %1$@，共 %2$@"
+            "value" : "%@已就绪"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已使用 %1$@，共 %2$@"
+            "value" : "%@已就緒"
+          }
+        }
+      }
+    },
+    "%@ used of %@" : {
+      "comment" : "The storage line of the resize sheet, in the form iOS uses for storage in use.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@使用済み / %2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用%1$@/%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用%1$@（共%2$@）"
           }
         }
       }
@@ -199,6 +288,34 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "%@ · %@ free" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$@ · %2$@ free"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · 空き容量: %2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · 可用空间%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · 可用空間%2$@"
           }
         }
       }
@@ -231,7 +348,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ · 読み取り専用"
+            "value" : "%@ · 読み出し専用"
           }
         },
         "zh-Hans" : {
@@ -248,6 +365,108 @@
         }
       }
     },
+    "%lld" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld"
+          }
+        }
+      }
+    },
+    "%lld files" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld個のファイル"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld个文件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld個檔案"
+          }
+        }
+      }
+    },
+    "%lld items" : {
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld item"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld items"
+                }
+              }
+            }
+          }
+        },
+        "ja" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld項目"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld个项目"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hant" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld個項目"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "%lld more" : {
       "localizations" : {
         "ja" : {
@@ -259,13 +478,41 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "另外 %lld 项"
+            "value" : "另外%lld项"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "另外 %lld 項"
+            "value" : "另外%lld項"
+          }
+        }
+      }
+    },
+    "%lld names are already in %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld names are already in %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$@にすでに同じ名前の項目が%1$lld件あります"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$@中已存在%1$lld个同名项目"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$@中已有%1$lld個同名項目"
           }
         }
       }
@@ -308,7 +555,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld 项新功能"
+                  "value" : "%lld项新功能"
                 }
               }
             }
@@ -320,10 +567,94 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld 項新功能"
+                  "value" : "%lld項新功能"
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "%lld of %lld not exported" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld not exported"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld件中%1$lld件が書き出されませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld个中有%1$lld个未导出"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld個中有%1$lld個未輸出"
+          }
+        }
+      }
+    },
+    "%lld of %lld not imported" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld not imported"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld件中%1$lld件が読み込まれませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld个中有%1$lld个未导入"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld個中有%1$lld個未輸入"
+          }
+        }
+      }
+    },
+    "%lld of %lld · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld of %2$lld · %3$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld件中%1$lld件目 · %3$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "第%1$lld个，共%2$lld个 · %3$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "第%1$lld個，共%2$lld個 · %3$@"
           }
         }
       }
@@ -333,24 +664,75 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%lld パーセント"
+            "value" : "%lldパーセント"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "百分之 %lld"
+            "value" : "百分之%lld"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "百分之 %lld"
+            "value" : "百分之%lld"
+          }
+        }
+      }
+    },
+    "%lld selected" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld件を選択中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已选择%lld项"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已選取%lld項"
+          }
+        }
+      }
+    },
+    "%lld selected · %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$lld selected · %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld件を選択中 · %2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已选择%1$lld项 · %2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已選取%1$lld項 · %2$@"
           }
         }
       }
     },
     "%lld snapshots" : {
+      "comment" : "The number of snapshots, under the row titled Snapshots on Home.",
       "localizations" : {
         "en" : {
           "variations" : {
@@ -376,7 +758,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld個のスナップショット"
+                  "value" : "%lld件"
                 }
               }
             }
@@ -388,7 +770,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld 个快照"
+                  "value" : "%lld个快照"
                 }
               }
             }
@@ -400,7 +782,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld 個快照"
+                  "value" : "%lld個快照"
                 }
               }
             }
@@ -430,25 +812,68 @@
         }
       }
     },
-    ", " : {
-      "comment" : "Separates the parts of what VoiceOver reads for the stats capsule.",
+    "A file with that name is already there." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "、"
+            "value" : "同じ名前のファイルがすでにあります。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "，"
+            "value" : "已存在同名文件。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "，"
+            "value" : "已有同名檔案。"
+          }
+        }
+      }
+    },
+    "A folder with that name is already there." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同じ名前のフォルダがすでにあります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已存在同名文件夹。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已有同名檔案夾。"
+          }
+        }
+      }
+    },
+    "A name has at most %lld characters, and no line breaks, tabs or other control characters." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名前は%lld文字以内で、改行、タブ、その他の制御文字は使用できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名称最多%lld个字符，且不能包含换行符、制表符或其他控制字符。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名稱最多%lld個字元，且不能包含換行、定位字元或其他控制字元。"
           }
         }
       }
@@ -458,19 +883,151 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新しいスナップショットは容量を使いません。そのあとゲストが変化するにつれて増えていきます。"
+            "value" : "新しいスナップショットは容量を使いません。そのあと仮想マシンが変化するにつれて増えていきます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新快照不占用空间，之后随着客户机的变化而增大。"
+            "value" : "新快照不占用空间，之后随着虚拟机的变化而增大。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新快照不佔用空間，之後會隨著客體的變化而增加。"
+            "value" : "新快照不佔用空間，之後會隨著虛擬機器的變化而增加。"
+          }
+        }
+      }
+    },
+    "A new snapshot takes no space. When Android later changes or deletes data, the snapshot keeps the old version, so it grows as the virtual machine is used, and by a lot after an update of Android." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しいスナップショットは容量を使いません。その後Androidがデータを変更または削除すると、スナップショットは古いバージョンを保持するため、仮想マシンを使うにつれて増え、Androidをアップデートしたあとは大きく増えます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新快照不占用空间。之后Android更改或删除数据时，快照会保留旧版本，因此它会随着虚拟机的使用而增大，Android更新后会增大很多。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新快照不佔用空間。之後Android變更或刪除資料時，快照會保留舊版本，因此會隨著虛擬機器的使用而增加，Android更新後會大幅增加。"
+          }
+        }
+      }
+    },
+    "A newer version of this app is already installed." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリの新しいバージョンがすでにインストールされています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安装此应用的较新版本。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安裝此應用程式的較新版本。"
+          }
+        }
+      }
+    },
+    "A restore did not finish. Start finishes it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "復元が完了していません。起動すると復元が完了します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复未完成。启动将完成恢复。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回復未完成。啟動將完成回復。"
+          }
+        }
+      }
+    },
+    "A snapshot restore did not finish, and Andarium cannot read which one." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットの復元が完了しておらず、Andariumはどのスナップショットか読み取れません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照恢复未完成，且Andarium无法读取是哪一个快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照回復未完成，且Andarium無法讀取是哪一個快照。"
+          }
+        }
+      }
+    },
+    "A snapshot restore did not finish, and its snapshot is missing or damaged." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットの復元が完了しておらず、そのスナップショットが見つからないか破損しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照恢复未完成，且其快照已丢失或已损坏。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照回復未完成，且其快照已遺失或損毀。"
+          }
+        }
+      }
+    },
+    "A version of this app signed by someone else is installed. Uninstall it in the virtual machine first." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "他の署名者によるこのアプリのバージョンがインストールされています。先に仮想マシンでアンインストールしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安装由他人签名的此应用版本。请先在虚拟机中将其卸载。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安裝由他人簽署的此應用程式版本。請先在虛擬機器中將其解除安裝。"
           }
         }
       }
@@ -487,13 +1044,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "致谢"
+            "value" : "版权声明"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "致謝"
+            "value" : "版權宣告"
           }
         }
       }
@@ -509,13 +1066,35 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "通过网络使用 ADB"
+            "value" : "通过网络使用ADB"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "透過網路使用 ADB"
+            "value" : "透過網路使用ADB"
+          }
+        }
+      }
+    },
+    "ADB over network could not start." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ネットワーク経由のADBを開始できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动通过网络使用ADB。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法啟動透過網路使用ADB。"
           }
         }
       }
@@ -564,6 +1143,28 @@
         }
       }
     },
+    "Allow location access" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置情報へのアクセスを許可"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许访问位置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允許取用位置"
+          }
+        }
+      }
+    },
     "Allow microphone access" : {
       "localizations" : {
         "ja" : {
@@ -581,7 +1182,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "允許存取麥克風"
+            "value" : "允許取用麥克風"
           }
         }
       }
@@ -609,24 +1210,184 @@
         }
       }
     },
-    "Andarium is not allowed to use the microphone. Turning this on offers to open Settings." : {
+    "Andarium could not finish restoring the snapshot from %@. Start finishes it." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andariumはマイクの使用を許可されていません。オンにすると、設定を開くよう案内されます。"
+            "value" : "Andariumは%@のスナップショットの復元を完了できませんでした。起動すると復元が完了します。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium 未获准使用麦克风。开启此项会提供打开“设置”的选项。"
+            "value" : "Andarium未能完成恢复%@的快照。启动将完成恢复。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium 未獲允許使用麥克風。開啟此項目會提供開啟「設定」的選項。"
+            "value" : "Andarium未能完成回復%@的快照。啟動將完成回復。"
+          }
+        }
+      }
+    },
+    "Andarium could not finish restoring “%@” from %@. Start finishes it." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Andarium could not finish restoring “%1$@” from %2$@. Start finishes it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは“%1$@”（%2$@）の復元を完了できませんでした。起動すると復元が完了します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未能完成恢复“%1$@”（%2$@）。启动将完成恢复。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未能完成回復「%1$@」（%2$@）。啟動將完成回復。"
+          }
+        }
+      }
+    },
+    "Andarium couldn’t make room for the copy." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumはコピー用の空き領域を確保できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium无法为副本腾出空间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium無法為拷貝騰出空間。"
+          }
+        }
+      }
+    },
+    "Andarium is incomplete" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumが不完全です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium不完整"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium不完整"
+          }
+        }
+      }
+    },
+    "Andarium is not allowed to use the location. Turning this on offers to open Settings." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumは位置情報の使用を許可されていません。オンにすると“設定”を開くよう案内されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未获准使用位置。打开此开关会提示你前往“设置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未獲允許使用位置。開啟此開關會提示你前往「設定」。"
+          }
+        }
+      }
+    },
+    "Andarium is not allowed to use the microphone. Turning this on offers to open Settings." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumはマイクの使用を許可されていません。オンにすると“設定”を開くよう案内されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未获准使用麦克风。打开此开关会提示你前往“设置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未獲允許使用麥克風。開啟此開關會提示你前往「設定」。"
+          }
+        }
+      }
+    },
+    "Andarium system image is updated to %@. The next start finishes the update and takes a little longer." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumのシステムイメージが%@にアップデートされました。次回の起動でアップデートが完了し、少し時間がかかります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium系统镜像已更新到%@。下次启动将完成更新，耗时会稍长一些。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium系統映像檔已更新到%@。下次啟動將完成更新，所需時間會稍長一些。"
+          }
+        }
+      }
+    },
+    "Andarium's update didn't finish" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumのアップデートが完了していません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium的更新未完成"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium的更新未完成"
           }
         }
       }
@@ -637,19 +1398,195 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andariumの未完了のアップデートは終了します。"
+            "value" : "Andariumの未完了のアップデートは中止されます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium 未完成的更新将会结束。"
+            "value" : "Andarium未完成的更新将被终止。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Andarium 未完成的更新將會結束。"
+            "value" : "Andarium未完成的更新將被終止。"
+          }
+        }
+      }
+    },
+    "Andarium’s unfinished update keeps its own copy until it ends. Restoring a snapshot ends it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumの未完了のアップデートは、終了するまで独自のコピーを保持します。スナップショットを復元すると、アップデートは中止されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未完成的更新会保留其自己的副本，直到更新结束。恢复快照会终止该更新。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium未完成的更新會保留自己的拷貝，直到更新結束。回復快照會終止該更新。"
+          }
+        }
+      }
+    },
+    "Android could not be shut down" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidをシャットダウンできません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法关机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法關機"
+          }
+        }
+      }
+    },
+    "Android did not power off." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの電源がオフになりませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android未关机。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android未關機。"
+          }
+        }
+      }
+    },
+    "Android doesn’t allow changes to this folder." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはこのフォルダへの変更を許可していません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android不允许更改此文件夹。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android不允許變更此檔案夾。"
+          }
+        }
+      }
+    },
+    "Android doesn’t allow this folder to be opened." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはこのフォルダを開くことを許可していません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android不允许打开此文件夹。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android不允許打開此檔案夾。"
+          }
+        }
+      }
+    },
+    "Android is still paused." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはまだ一時停止中です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android仍处于暂停状态。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android仍處於暫停狀態。"
+          }
+        }
+      }
+    },
+    "Android is still starting" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはまだ起動中です"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android仍在启动"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android仍在啟動"
+          }
+        }
+      }
+    },
+    "Android refused to power off (%lld)." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidが電源オフを拒否しました（%lld）。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android拒绝关机（%lld）。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android拒絕關機（%lld）。"
           }
         }
       }
@@ -665,13 +1602,189 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android 版本"
+            "value" : "Android版本"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android 版本"
+            "value" : "Android版本"
+          }
+        }
+      }
+    },
+    "Android wasn’t shut down when the virtual machine last ran. Start the virtual machine and shut it down from Android, then take a snapshot." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが前回動作したとき、Androidは正常にシャットダウンされませんでした。仮想マシンを起動してAndroidからシャットダウンしてから、スナップショットを作成してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机上次运行时，Android未正常关机。请启动虚拟机并从Android中将其关机，然后再创建快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器上次執行時，Android未正常關機。請啟動虛擬機器並從Android中將其關機，然後再建立快照。"
+          }
+        }
+      }
+    },
+    "Android, LineageOS, Linux and the other names and marks here belong to their owners. They identify the software built into Andarium and imply no endorsement." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android、LineageOS、Linux、およびここに記載されているその他の名称やマークは、それぞれの所有者に帰属します。これらはAndariumに組み込まれているソフトウェアを識別するためのもので、いかなる推奨も意味しません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android、LineageOS、Linux及此处的其他名称和标志均归其各自所有者所有。它们用于标识Andarium内置的软件，并不代表任何认可。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android、LineageOS、Linux及此處的其他名稱和標誌均屬其各自擁有者所有。它們用於識別Andarium內建的軟體，並不代表任何背書。"
+          }
+        }
+      }
+    },
+    "Another snapshot operation is under way." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "別のスナップショット操作が進行中です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "另一个快照操作正在进行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "另一個快照操作正在進行。"
+          }
+        }
+      }
+    },
+    "Another snapshot operation is under way. Try again in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "別のスナップショット操作が進行中です。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "另一个快照操作正在进行。请稍后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "另一個快照操作正在進行。請稍後再試一次。"
+          }
+        }
+      }
+    },
+    "App installed" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリをインストールしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用已安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "應用程式已安裝"
+          }
+        }
+      }
+    },
+    "App not installed" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリをインストールできませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "应用未安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "應用程式未安裝"
+          }
+        }
+      }
+    },
+    "Approximate" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "おおよそ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大致"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大約"
+          }
+        }
+      }
+    },
+    "Approximate location" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "おおよその位置情報"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大致位置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大約位置"
           }
         }
       }
@@ -734,13 +1847,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "至少 %@"
+            "value" : "至少%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "至少 %@"
+            "value" : "至少%@"
           }
         }
       }
@@ -757,13 +1870,35 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "至少 %@"
+            "value" : "至少%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "至少 %@"
+            "value" : "至少%@"
+          }
+        }
+      }
+    },
+    "Back" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "戻る"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "返回"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "返回"
           }
         }
       }
@@ -774,19 +1909,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストのデータをバックアップ"
+            "value" : "仮想マシンのデータをバックアップ"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "备份客户机数据"
+            "value" : "备份虚拟机数据"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "備份客體資料"
+            "value" : "備份虛擬機器資料"
           }
         }
       }
@@ -814,6 +1949,28 @@
         }
       }
     },
+    "Bug report not created" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バグレポートを作成できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未创建错误报告"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未建立錯誤報告"
+          }
+        }
+      }
+    },
     "Build" : {
       "comment" : "The build of the Android system image the app carries.",
       "localizations" : {
@@ -826,7 +1983,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "构建"
+            "value" : "构建版本"
           }
         },
         "zh-Hant" : {
@@ -859,6 +2016,50 @@
         }
       }
     },
+    "Cancel import" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "読み込みをキャンセル"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消导入"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消輸入"
+          }
+        }
+      }
+    },
+    "Cancelling…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "キャンセル中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在取消…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在取消…"
+          }
+        }
+      }
+    },
     "Can’t be restored" : {
       "localizations" : {
         "ja" : {
@@ -876,7 +2077,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無法還原"
+            "value" : "無法回復"
           }
         }
       }
@@ -926,6 +2127,72 @@
         }
       }
     },
+    "Chooses the highlighted item" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "強調表示された項目を選択します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选取高亮显示的项目"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇醒目標示的項目"
+          }
+        }
+      }
+    },
+    "Clear" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "解除"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "清除"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "清除"
+          }
+        }
+      }
+    },
+    "Clear Selection" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選択をすべて解除"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消全选"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消全選"
+          }
+        }
+      }
+    },
     "Close" : {
       "localizations" : {
         "ja" : {
@@ -953,7 +2220,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "「新機能」を閉じる"
+            "value" : "“新機能”を閉じる"
           }
         },
         "zh-Hans" : {
@@ -1010,6 +2277,116 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "拷貝指令"
+          }
+        }
+      }
+    },
+    "Copy report" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "レポートをコピー"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拷贝报告"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拷貝報告"
+          }
+        }
+      }
+    },
+    "Copying the report…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "レポートをコピー中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷贝报告…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷貝報告…"
+          }
+        }
+      }
+    },
+    "Copyright" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "著作権"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "版权"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "版權"
+          }
+        }
+      }
+    },
+    "Couldn’t open this folder" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このフォルダを開けませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法打开此文件夹"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法打開此檔案夾"
+          }
+        }
+      }
+    },
+    "Counting files…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルを数えています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在统计文件…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在計算檔案數量…"
           }
         }
       }
@@ -1071,13 +2448,35 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "CPU 和内存"
+            "value" : "CPU和内存"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "CPU 與記憶體"
+            "value" : "CPU與記憶體"
+          }
+        }
+      }
+    },
+    "Create" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "作成"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "建立"
           }
         }
       }
@@ -1100,6 +2499,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "建立錯誤報告…"
+          }
+        }
+      }
+    },
+    "Creating bug report" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "バグレポートを作成中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在创建错误报告"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在建立錯誤報告"
+          }
+        }
+      }
+    },
+    "Creating virtual machine" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを作成中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在创建虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在建立虛擬機器"
           }
         }
       }
@@ -1148,6 +2591,28 @@
         }
       }
     },
+    "Date Modified" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "変更日"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修改日期"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修改日期"
+          }
+        }
+      }
+    },
     "Delete" : {
       "localizations" : {
         "ja" : {
@@ -1192,6 +2657,50 @@
         }
       }
     },
+    "Delete the snapshot from %@?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@のスナップショットを削除しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要删除%@的快照吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要刪除%@的快照嗎？"
+          }
+        }
+      }
+    },
+    "Delete “%@”?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を削除しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要删除“%@”吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要刪除「%@」嗎？"
+          }
+        }
+      }
+    },
     "Delete…" : {
       "localizations" : {
         "ja" : {
@@ -1214,6 +2723,138 @@
         }
       }
     },
+    "Deleting everything the virtual machine stored." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンに保存されているすべての内容を削除しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在删除虚拟机存储的所有内容。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在刪除虛擬機器儲存的所有內容。"
+          }
+        }
+      }
+    },
+    "Deleting files in Android frees nothing a snapshot still keeps. Deleting or restoring a snapshot gives space back." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidでファイルを削除しても、スナップショットが保持している分の容量は解放されません。スナップショットを削除または復元すると、容量が戻ります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除Android中的文件不会释放快照仍保留的空间。删除或恢复快照才会归还空间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刪除Android中的檔案不會釋出快照仍保留的空間。刪除或回復快照才會歸還空間。"
+          }
+        }
+      }
+    },
+    "Deleting it frees %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除すると%@が解放されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除后将释放%@。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刪除後將釋出%@。"
+          }
+        }
+      }
+    },
+    "Deleting it frees at least %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "削除すると%@以上が解放されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除后至少将释放%@。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刪除後至少將釋出%@。"
+          }
+        }
+      }
+    },
+    "Deselect" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選択解除"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消选择"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消選取"
+          }
+        }
+      }
+    },
+    "Deselect %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@の選択を解除"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消选择%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消選取%@"
+          }
+        }
+      }
+    },
     "Developer" : {
       "localizations" : {
         "ja" : {
@@ -1231,7 +2872,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開發人員"
+            "value" : "開發者"
           }
         }
       }
@@ -1303,6 +2944,28 @@
         }
       }
     },
+    "Display rotation unavailable" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "画面の回転を使用できません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法使用屏幕旋转"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法使用螢幕旋轉"
+          }
+        }
+      }
+    },
     "Done" : {
       "localizations" : {
         "ja" : {
@@ -1321,6 +2984,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "完成"
+          }
+        }
+      }
+    },
+    "Down" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "向下"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "向下"
           }
         }
       }
@@ -1371,25 +3056,47 @@
         }
       }
     },
+    "Empty folder" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "空のフォルダ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "空文件夹"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "空檔案夾"
+          }
+        }
+      }
+    },
     "Erase virtual machine" : {
       "comment" : "Destructive button of the confirmation.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストを消去"
+            "value" : "仮想マシンを消去"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "抹掉客户机"
+            "value" : "抹掉虚拟机"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "清除客體"
+            "value" : "清除虛擬機器"
           }
         }
       }
@@ -1399,19 +3106,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストを消去しますか？"
+            "value" : "仮想マシンを消去しますか？"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要抹掉客户机吗？"
+            "value" : "要抹掉虚拟机吗？"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要清除客體嗎？"
+            "value" : "要清除虛擬機器嗎？"
           }
         }
       }
@@ -1421,19 +3128,41 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストを消去…"
+            "value" : "仮想マシンを消去…"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "抹掉客户机…"
+            "value" : "抹掉虚拟机…"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "清除客體…"
+            "value" : "清除虛擬機器…"
+          }
+        }
+      }
+    },
+    "Erasing virtual machine" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを消去中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在抹掉虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在清除虛擬機器"
           }
         }
       }
@@ -1443,19 +3172,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストに保存されているすべての内容とその%lld個のスナップショットが削除されます。この操作は取り消せません。"
+            "value" : "仮想マシンに保存されているすべての内容と%lld件のスナップショットが削除されます。この操作は取り消せません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机存储的所有内容及其 %lld 个快照都将被删除。此操作无法撤销。"
+            "value" : "虚拟机存储的所有内容及其%lld个快照都将被删除。此操作无法撤销。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體儲存的所有內容及其 %lld 個快照都會被刪除。此操作無法還原。"
+            "value" : "虛擬機器儲存的所有內容及其%lld個快照都會被刪除。此動作無法還原。"
           }
         }
       }
@@ -1465,19 +3194,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストに保存されているすべての内容とそのスナップショットが削除されます。この操作は取り消せません。"
+            "value" : "仮想マシンに保存されているすべての内容とスナップショットが削除されます。この操作は取り消せません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机存储的所有内容及其快照都将被删除。此操作无法撤销。"
+            "value" : "虚拟机存储的所有内容及其快照都将被删除。此操作无法撤销。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體儲存的所有內容及其快照都會被刪除。此操作無法還原。"
+            "value" : "虛擬機器儲存的所有內容及其快照都會被刪除。此動作無法還原。"
           }
         }
       }
@@ -1487,19 +3216,85 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストに保存されているすべての内容が削除されます。この操作は取り消せません。"
+            "value" : "仮想マシンに保存されているすべての内容が削除されます。この操作は取り消せません。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机存储的所有内容都将被删除。此操作无法撤销。"
+            "value" : "虚拟机存储的所有内容都将被删除。此操作无法撤销。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體儲存的所有內容都會被刪除。此操作無法還原。"
+            "value" : "虛擬機器儲存的所有內容都會被刪除。此動作無法還原。"
+          }
+        }
+      }
+    },
+    "Export" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "書き出す"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "导出"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "輸出"
+          }
+        }
+      }
+    },
+    "Exporting %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を書き出し中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在导出%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在輸出%@"
+          }
+        }
+      }
+    },
+    "Failed" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "失敗"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "失败"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "失敗"
           }
         }
       }
@@ -1549,6 +3344,28 @@
         }
       }
     },
+    "Folders and packages can’t be imported." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "フォルダとパッケージは読み込めません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法导入文件夹和包。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法輸入檔案夾和套件。"
+          }
+        }
+      }
+    },
     "Frame rate" : {
       "localizations" : {
         "ja" : {
@@ -1560,13 +3377,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "帧率"
+            "value" : "帧速率"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "影格速率"
+            "value" : "影格率"
           }
         }
       }
@@ -1577,19 +3394,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "フレームレート %@"
+            "value" : "フレームレート%@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "帧率 %@"
+            "value" : "帧速率%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "影格速率 %@"
+            "value" : "影格率%@"
           }
         }
       }
@@ -1605,13 +3422,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 %@ 的可用空间"
+            "value" : "此%@的可用空间"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 %@ 的可用空間"
+            "value" : "此%@的可用空間"
           }
         }
       }
@@ -1627,13 +3444,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "删除后可释放 %@"
+            "value" : "删除后可释放%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "刪除後可釋出 %@"
+            "value" : "刪除後可釋出%@"
           }
         }
       }
@@ -1649,13 +3466,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "删除后至少可释放 %@"
+            "value" : "删除后至少可释放%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "刪除後至少可釋出 %@"
+            "value" : "刪除後至少可釋出%@"
           }
         }
       }
@@ -1693,13 +3510,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "原为 %@"
+            "value" : "原为%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "原為 %@"
+            "value" : "原為%@"
           }
         }
       }
@@ -1710,19 +3527,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ファイルから"
+            "value" : "“ファイル”から"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "来自“文件”"
+            "value" : "从“文件”选择"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "來自「檔案」"
+            "value" : "從「檔案」選取"
           }
         }
       }
@@ -1733,19 +3550,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "グラフィックスメモリ %@"
+            "value" : "グラフィックスメモリ%@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "图形内存 %@"
+            "value" : "图形内存%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "圖形記憶體 %@"
+            "value" : "圖形記憶體%@"
           }
         }
       }
@@ -1761,13 +3578,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "从 %1$@ 扩展到 %2$@"
+            "value" : "正在从%1$@扩展到%2$@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "從 %1$@ 擴增到 %2$@"
+            "value" : "正在從%1$@擴充到%2$@"
           }
         }
       }
@@ -1783,13 +3600,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下次启动时扩展到 %@"
+            "value" : "下次启动时扩展到%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下次啟動時擴增到 %@"
+            "value" : "下次啟動時擴充到%@"
           }
         }
       }
@@ -1816,12 +3633,78 @@
         }
       }
     },
+    "Hides the files" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルを非表示にします"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隐藏文件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隱藏檔案"
+          }
+        }
+      }
+    },
+    "Hold for the power menu" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "長押しで電源メニューを表示"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按住可打开电源菜单"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按住可打開電源選單"
+          }
+        }
+      }
+    },
+    "Home" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ホーム"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主屏幕"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主畫面"
+          }
+        }
+      }
+    },
     "How snapshots use space" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "スナップショットの容量の仕組み"
+            "value" : "スナップショットが容量を使う仕組み"
           }
         },
         "zh-Hans" : {
@@ -1834,6 +3717,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "快照如何佔用空間"
+          }
+        }
+      }
+    },
+    "Importing %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を読み込み中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在导入%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在輸入%@"
+          }
+        }
+      }
+    },
+    "In %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@内"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位于%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位於%@"
           }
         }
       }
@@ -1872,13 +3799,57 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安装 APK…"
+            "value" : "安装APK…"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安裝 APK…"
+            "value" : "安裝APK…"
+          }
+        }
+      }
+    },
+    "Install apps, ADB, stats and options" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリのインストール、ADB、統計情報、オプション"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安装应用、ADB、统计信息和选项"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安裝應用程式、ADB、統計資料和選項"
+          }
+        }
+      }
+    },
+    "Installing app" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アプリをインストール中"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安装应用"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安裝應用程式"
           }
         }
       }
@@ -1906,24 +3877,178 @@
         }
       }
     },
-    "iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it." : {
+    "iOS closed Andarium" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iOSはAndariumによるマイクの使用を許可していません。設定でAndariumのマイクをオンにしてから、戻ってお使いください。"
+            "value" : "iOSがAndariumを終了しました"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iOS 不允许 Andarium 使用麦克风。请在“设置”中为 Andarium 打开“麦克风”，然后返回使用。"
+            "value" : "iOS已关闭Andarium"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iOS 不允許 Andarium 使用麥克風。請在「設定」中為 Andarium 開啟「麥克風」，然後回來使用。"
+            "value" : "iOS已關閉Andarium"
+          }
+        }
+      }
+    },
+    "iOS gives only an approximate location. Activate the line under the title to see why." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSはおおよその位置情報のみ提供しています。タイトルの下の行をアクティブにすると、理由を確認できます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS仅提供大致位置。激活标题下方的这一行可了解原因。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS僅提供大約位置。啟用標題下方的這一行即可了解原因。"
+          }
+        }
+      }
+    },
+    "iOS is giving Andarium only the area you are in, because Precise Location is off for it. Apps in the virtual machine see a wide area. To share the exact position, turn on Precise Location for Andarium in Settings." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumの“正確な位置情報”がオフになっているため、iOSはAndariumにあなたがいるおおよその地域だけを提供しています。仮想マシン内のアプリには広い範囲しか見えません。正確な位置を共有するには、“設定”でAndariumの“正確な位置情報”をオンにしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由于Andarium的“精确位置”已关闭，iOS仅向其提供你所在的区域。虚拟机中的应用只能看到较大的范围。要共享确切位置，请在“设置”中为Andarium打开“精确位置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由於Andarium的「準確位置」已關閉，iOS僅向其提供你所在的區域。虛擬機器中的應用程式只能看到較大的範圍。若要分享確切位置，請在「設定」中為Andarium開啟「準確位置」。"
+          }
+        }
+      }
+    },
+    "iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSがAndariumのマイクの使用を許可していません。“設定”でAndariumの“マイク”をオンにしてから、もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允许Andarium使用麦克风。请在“设置”中为Andarium打开“麦克风”，然后返回使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允許Andarium使用麥克風。請在「設定」中為Andarium開啟「麥克風」，然後回來使用。"
+          }
+        }
+      }
+    },
+    "iOS is not allowing Andarium to use this device’s location. Turn on Location for Andarium in Settings, then come back to use it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSはAndariumによるこのデバイスの位置情報の使用を許可していません。“設定”でAndariumの“位置情報”をオンにしてから、もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允许Andarium使用此设备的位置。请在“设置”中为Andarium打开“位置”，然后返回使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS不允許Andarium使用此裝置的位置。請在「設定」中為Andarium開啟「位置」，然後回來使用。"
+          }
+        }
+      }
+    },
+    "It could not be asked to power off. Try again, or close Andarium and open it again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "電源をオフにするよう要求できませんでした。もう一度お試しいただくか、Andariumを閉じてからもう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法请求其关机。请重试，或关闭Andarium后重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法要求其關機。請再試一次，或關閉Andarium後重新打開。"
+          }
+        }
+      }
+    },
+    "It is no longer in the virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンにはもうありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它已不在虚拟机中。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它已不在虛擬機器中。"
+          }
+        }
+      }
+    },
+    "Its storage isn’t ready yet. The files appear here in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ストレージの準備がまだできていません。まもなくファイルがここに表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其储存空间尚未就绪。文件稍后将显示在此处。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其儲存空間尚未就緒。檔案稍後會顯示在此處。"
           }
         }
       }
@@ -1978,19 +4103,41 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "同じネットワーク上のコンピュータからadbでゲストに接続できるようにします。"
+            "value" : "同じネットワーク上のコンピュータからadbで仮想マシンに接続できるようにします。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "允许同一网络上的电脑通过 adb 连接客户机。"
+            "value" : "允许同一网络上的电脑通过adb连接虚拟机。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "允許同一網路上的電腦透過 adb 連線到客體。"
+            "value" : "允許同一網路上的電腦透過adb連線到虛擬機器。"
+          }
+        }
+      }
+    },
+    "License" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ライセンス"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "许可证"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "授權"
           }
         }
       }
@@ -2006,13 +4153,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Linux 内核"
+            "value" : "Linux内核"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Linux 核心"
+            "value" : "Linux核心"
           }
         }
       }
@@ -2057,6 +4204,94 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "位置"
+          }
+        }
+      }
+    },
+    "Location is restricted" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置情報が制限されています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置受限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置受到限制"
+          }
+        }
+      }
+    },
+    "Location Services are off" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位置情報サービスがオフです"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "定位服务已关闭"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "定位服務已關閉"
+          }
+        }
+      }
+    },
+    "Location Services are off on this device. Turning this on explains how to turn them on." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスでは位置情報サービスがオフです。オンにすると、オンにする方法が表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上的定位服务已关闭。打开此开关会说明如何将其打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上的定位服務已關閉。開啟此開關會說明如何開啟。"
+          }
+        }
+      }
+    },
+    "Location Services are turned off on this device. Turn them on in Settings, under Privacy & Security, then come back to use Location." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスでは位置情報サービスがオフです。“設定”の“プライバシーとセキュリティ”でオンにしてから、“位置情報”をお使いください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上的定位服务已关闭。请在“设置”的“隐私与安全性”中将其打开，然后返回使用“位置”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上的定位服務已關閉。請在「設定」的「隱私權與安全性」中將其開啟，然後回來使用「位置」。"
           }
         }
       }
@@ -2159,19 +4394,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "メモリ %@"
+            "value" : "メモリ%@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "内存 %@"
+            "value" : "内存%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "記憶體 %@"
+            "value" : "記憶體%@"
           }
         }
       }
@@ -2194,6 +4429,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "麥克風"
+          }
+        }
+      }
+    },
+    "Modified" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "変更日"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修改日期"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "修改日期"
+          }
+        }
+      }
+    },
+    "More" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "その他"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更多"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更多"
           }
         }
       }
@@ -2247,19 +4526,107 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新しいバージョンのAndariumが必要です"
+            "value" : "Andariumのアップデートが必要です"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "需要更新版本的 Andarium"
+            "value" : "需要更高版本的Andarium"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "需要較新版本的 Andarium"
+            "value" : "需要較新版本的Andarium"
+          }
+        }
+      }
+    },
+    "New" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新規"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新增"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新增"
+          }
+        }
+      }
+    },
+    "New virtual machine" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新しい仮想マシン"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新建虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新增虛擬機器"
+          }
+        }
+      }
+    },
+    "No access" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "アクセスできません"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法访问"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法取用"
+          }
+        }
+      }
+    },
+    "No license" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ライセンスなし"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无许可证"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無授權"
           }
         }
       }
@@ -2336,19 +4703,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストはまだありません"
+            "value" : "仮想マシンはまだありません"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "还没有客户机"
+            "value" : "尚无虚拟机"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "尚未建立客體"
+            "value" : "尚無虛擬機器"
           }
         }
       }
@@ -2381,7 +4748,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "設定で許可されていません"
+            "value" : "“設定”で許可されていません"
           }
         },
         "zh-Hans" : {
@@ -2420,6 +4787,94 @@
         }
       }
     },
+    "Not enough space in the virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの空き容量が足りません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机中的空间不足。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器中的空間不足。"
+          }
+        }
+      }
+    },
+    "Not enough space on this %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この%@の空き容量が足りません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%@上的空间不足。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%@上的空間不足。"
+          }
+        }
+      }
+    },
+    "Not exported" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "書き出せませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未导出"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未輸出"
+          }
+        }
+      }
+    },
+    "Not imported" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "読み込めませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未导入"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未輸入"
+          }
+        }
+      }
+    },
     "Not now" : {
       "localizations" : {
         "ja" : {
@@ -2431,13 +4886,79 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "以后再说"
+            "value" : "以后"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "稍後再說"
+          }
+        }
+      }
+    },
+    "Not while Andarium’s update is unfinished. Start tries it again, or use Restore on Home." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumのアップデートが未完了の間は使用できません。“起動”でアップデートが再試行されます。または“ホーム”で“復元”を使用してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium的更新未完成时不可用。“启动”会重新尝试更新，也可以在“主页”中使用“恢复”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium的更新未完成時無法使用。「啟動」會重新嘗試更新，也可以在「首頁」中使用「回復」。"
+          }
+        }
+      }
+    },
+    "Not while the virtual machine is starting or running." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの起動中または実行中は使用できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机正在启动或运行时不可用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器正在啟動或執行時無法使用。"
+          }
+        }
+      }
+    },
+    "Not while the virtual machine’s files do not match this app version." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのファイルがこのバージョンのアプリと一致しない間は使用できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的文件与此App版本不匹配时不可用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的檔案與此App版本不相符時無法使用。"
           }
         }
       }
@@ -2469,7 +4990,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "同じネットワーク上のコンピュータで次を実行します："
+            "value" : "同じネットワーク上のコンピュータで、次のコマンドを実行してください:"
           }
         },
         "zh-Hans" : {
@@ -2491,19 +5012,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "空き容量は%1$@しかなく、%2$@はまだ実行中です。空き容量がなくなる前にシャットダウンするか、さらに空き容量を確保してからもう一度確認してください。%3$@が続行するには%4$@の空き容量が必要です。"
+            "value" : "空き容量は%1$@しかなく、%2$@はまだ実行中です。空き容量がなくなる前にシャットダウンするか、さらに空き容量を確保してからもう一度確認してください。%3$@が動作を続けるには%4$@の空き容量が必要です。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仅有 %1$@ 可用，而且 %2$@ 仍在运行。请在空间用尽前将其关机，或释放更多空间后重新检查。%3$@ 需要 %4$@ 可用空间才能继续。"
+            "value" : "仅有%1$@可用，而且%2$@仍在运行。请在空间用尽前将其关机，或释放更多空间后重新检查。%3$@需要%4$@可用空间才能继续运行。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "僅有 %1$@ 可用，而且 %2$@ 仍在執行。請在空間用盡前將其關機，或釋出更多空間後重新檢查。%3$@ 需要 %4$@ 可用空間才能繼續。"
+            "value" : "僅有%1$@可用，而且%2$@仍在執行。請在空間用盡前將其關機，或釋出更多空間後重新檢查。%3$@需要%4$@可用空間才能繼續執行。"
           }
         }
       }
@@ -2513,19 +5034,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "空き容量は%1$@しかありません。さらに空き容量を確保してから再開してください。%2$@が続行するには%3$@の空き容量が必要です。"
+            "value" : "空き容量は%1$@しかありません。さらに空き容量を確保してから再開してください。%2$@が動作を続けるには%3$@の空き容量が必要です。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仅有 %1$@ 可用。请释放更多空间，然后继续。%2$@ 需要 %3$@ 可用空间才能继续。"
+            "value" : "仅有%1$@可用。请释放更多空间，然后继续。%2$@需要%3$@可用空间才能恢复运行。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "僅有 %1$@ 可用。請釋出更多空間，然後繼續。%2$@ 需要 %3$@ 可用空間才能繼續。"
+            "value" : "僅有%1$@可用。請釋出更多空間，然後繼續。%2$@需要%3$@可用空間才能恢復執行。"
           }
         }
       }
@@ -2535,7 +5056,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "設定を開く"
+            "value" : "“設定”を開く"
           }
         },
         "zh-Hans" : {
@@ -2547,7 +5068,29 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開啟「設定」"
+            "value" : "打開「設定」"
+          }
+        }
+      }
+    },
+    "Opens Power, volume, Back, Home and Settings" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "電源、音量、戻る、ホーム、設定を開きます"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开电源、音量、返回、主屏幕和设置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打開電源、音量、返回、主畫面和設定"
           }
         }
       }
@@ -2563,13 +5106,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在暂停 %@"
+            "value" : "正在暂停%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在暫停 %@"
+            "value" : "正在暫停%@"
           }
         }
       }
@@ -2592,6 +5135,72 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在暫停…"
+          }
+        }
+      }
+    },
+    "Port %u is already in use on this device." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスではポート%uがすでに使用されています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上的端口%u已被占用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上的連接埠%u已被佔用。"
+          }
+        }
+      }
+    },
+    "Power" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "電源"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电源"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "電源"
+          }
+        }
+      }
+    },
+    "Power menu" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "電源メニュー"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "电源菜单"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "電源選單"
           }
         }
       }
@@ -2629,13 +5238,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在为首次使用准备 %@"
+            "value" : "正在为首次使用准备%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在準備 %@ 供首次使用"
+            "value" : "正在準備%@供首次使用"
           }
         }
       }
@@ -2718,13 +5327,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "GitHub 上的项目"
+            "value" : "GitHub项目"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "GitHub 上的專案"
+            "value" : "GitHub專案"
           }
         }
       }
@@ -2735,19 +5344,41 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストのアプリとファイルを、この%@のiCloudバックアップとコンピュータのバックアップに含めます。"
+            "value" : "仮想マシンのアプリとファイルを、この%@のiCloudバックアップとコンピュータのバックアップに含めます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "将客户机的应用和文件放入此 %@ 的 iCloud 备份和电脑备份。"
+            "value" : "将虚拟机的应用和文件纳入此%@的iCloud云备份和电脑备份。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "將客體的應用程式和檔案放入此 %@ 的 iCloud 備份和電腦備份。"
+            "value" : "將虛擬機器的應用程式和檔案納入此%@的iCloud備份和電腦備份。"
+          }
+        }
+      }
+    },
+    "Ready to share" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "共有の準備完了"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已准备好共享"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已準備好分享"
           }
         }
       }
@@ -2786,13 +5417,35 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "恢复与抹掉"
+            "value" : "恢复模式与抹掉"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "復原與清除"
+            "value" : "復原模式與清除"
+          }
+        }
+      }
+    },
+    "Remove %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を取り除く"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除%@"
           }
         }
       }
@@ -2802,7 +5455,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "スナップショットの名前を変更"
+            "value" : "スナップショットの名称を変更"
           }
         },
         "zh-Hans" : {
@@ -2824,7 +5477,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "名称を変更…"
+            "value" : "名称変更…"
           }
         },
         "zh-Hans" : {
@@ -2837,6 +5490,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重新命名…"
+          }
+        }
+      }
+    },
+    "Replace" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "置き換える"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "替换"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取代"
           }
         }
       }
@@ -2847,19 +5522,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストの現在のデータを、%@のこのスナップショットで置き換えます。"
+            "value" : "仮想マシンの現在のデータを、%@のこのスナップショットで置き換えます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "将用此快照（来自 %@）替换客户机当前的数据。"
+            "value" : "将用此快照（来自%@）替换虚拟机当前的数据。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "將以此快照（來自 %@）取代客體目前的資料。"
+            "value" : "將以此快照（來自%@）取代虛擬機器目前的資料。"
           }
         }
       }
@@ -2870,19 +5545,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストの現在のデータをこのスナップショットで置き換えます。"
+            "value" : "仮想マシンの現在のデータをこのスナップショットで置き換えます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "将用此快照替换客户机当前的数据。"
+            "value" : "将用此快照替换虚拟机当前的数据。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "將以此快照取代客體目前的資料。"
+            "value" : "將以此快照取代虛擬機器目前的資料。"
           }
         }
       }
@@ -2921,7 +5596,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "调整储存空间"
+            "value" : "调整储存空间大小"
           }
         },
         "zh-Hant" : {
@@ -2971,7 +5646,51 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "還原"
+            "value" : "回復"
+          }
+        }
+      }
+    },
+    "Restore this snapshot?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットを復元しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要恢复此快照吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要回復此快照嗎？"
+          }
+        }
+      }
+    },
+    "Restore “%@”?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”を復元しますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要恢复“%@”吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要回復「%@」嗎？"
           }
         }
       }
@@ -2993,7 +5712,29 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "還原…"
+            "value" : "回復…"
+          }
+        }
+      }
+    },
+    "Restricted on this device" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスでは制限されています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上受限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上受到限制"
           }
         }
       }
@@ -3054,13 +5795,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Retina 模式"
+            "value" : "Retina模式"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Retina 模式"
+            "value" : "Retina模式"
           }
         }
       }
@@ -3076,7 +5817,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "存储"
+            "value" : "保存"
           }
         },
         "zh-Hant" : {
@@ -3110,24 +5851,134 @@
         }
       }
     },
-    "Set up virtual machine" : {
+    "Select" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストを設定"
+            "value" : "選択"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "设置客户机"
+            "value" : "选择"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "設定客體"
+            "value" : "選取"
+          }
+        }
+      }
+    },
+    "Select %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を選択"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選取%@"
+          }
+        }
+      }
+    },
+    "Select All" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "すべてを選択"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全选"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全選"
+          }
+        }
+      }
+    },
+    "Set up virtual machine" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを設定"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设置虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定虛擬機器"
+          }
+        }
+      }
+    },
+    "Setting up Andarium with %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@のストレージでAndariumを設定しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在以%@的储存空间设置Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在以%@的儲存空間設定Andarium。"
+          }
+        }
+      }
+    },
+    "Setting up Andarium with 16 GiB." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "16 GiBのストレージでAndariumを設定しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在以16 GiB的储存空间设置Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在以16 GiB的儲存空間設定Andarium。"
           }
         }
       }
@@ -3154,6 +6005,34 @@
         }
       }
     },
+    "Setting up needs %@ free for the virtual machine's setup. This %@ has %@. Free up space in Settings › General › %@ Storage." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Setting up needs %1$@ free for the virtual machine's setup. This %2$@ has %3$@. Free up space in Settings › General › %4$@ Storage."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの設定には%1$@の空き容量が必要です。この%2$@の空き容量は%3$@です。設定 › 一般 › %4$@ストレージで容量を空けてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设置虚拟机需要%1$@的可用空间。此%2$@有%3$@可用。请在设置 › 通用 › %4$@储存空间中释放空间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定虛擬機器需要%1$@的可用空間。此%2$@有%3$@可用。請在設定 › 一般 › %4$@儲存空間中釋出空間。"
+          }
+        }
+      }
+    },
     "Settings" : {
       "localizations" : {
         "ja" : {
@@ -3172,6 +6051,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "設定"
+          }
+        }
+      }
+    },
+    "Settings not saved" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定を保存できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未保存设置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未儲存設定"
+          }
+        }
+      }
+    },
+    "Share" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "共有"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "共享"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分享"
           }
         }
       }
@@ -3195,6 +6118,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在螢幕上顯示"
+          }
+        }
+      }
+    },
+    "Shows the files" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルを表示します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示文件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "顯示檔案"
+          }
+        }
+      }
+    },
+    "Shows what is selected" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選択中の項目を表示します"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示已选择的内容"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "顯示已選取的內容"
           }
         }
       }
@@ -3239,6 +6206,116 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在關機…"
+          }
+        }
+      }
+    },
+    "Side keys" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サイドキー"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "侧边按键"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "側邊按鍵"
+          }
+        }
+      }
+    },
+    "Size" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サイズ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大小"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大小"
+          }
+        }
+      }
+    },
+    "Skip" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スキップ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "跳过"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "略過"
+          }
+        }
+      }
+    },
+    "Snapshot restore not finished" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットの復元が未完了"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照恢复未完成"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照回復未完成"
+          }
+        }
+      }
+    },
+    "Snapshot restored" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットを復元しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照已恢复"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照已回復"
           }
         }
       }
@@ -3306,6 +6383,101 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "不包含快照。"
+          }
+        }
+      }
+    },
+    "Snapshots stay on this %@. They are not in backups, and Erase virtual machine deletes them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットはこの%@に保存されます。バックアップには含まれず、“仮想マシンを消去”で削除されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照保留在此%@上，不包含在备份中，“抹掉虚拟机”会将其删除。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照保留在此%@上，不包含在備份中，「清除虛擬機器」會將其刪除。"
+          }
+        }
+      }
+    },
+    "Some of this snapshot’s files are missing, so it can’t be restored. It can only be deleted." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットの一部のファイルが見つからないため、復元できません。削除のみ可能です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照的部分文件已丢失，因此无法恢复，只能删除。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照的部分檔案已遺失，因此無法回復，只能刪除。"
+          }
+        }
+      }
+    },
+    "Sort By" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "並べ替え"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "排序方式"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "排序方式"
+          }
+        }
+      }
+    },
+    "spoken.of" : {
+      "comment" : "What VoiceOver says for a part of a whole, as memory 1.4 GiB of 2.5 GiB; the meters on screen use another key.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ of %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$@中%1$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@（共%2$@）"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@（共%2$@）"
           }
         }
       }
@@ -3379,6 +6551,28 @@
         }
       }
     },
+    "Start the virtual machine once first. Until then there is no data to keep." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "先に仮想マシンを一度起動してください。それまでは保存するデータがありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先启动一次虚拟机。在此之前没有可保留的数据。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請先啟動一次虛擬機器。在此之前沒有可保留的資料。"
+          }
+        }
+      }
+    },
     "Starting" : {
       "localizations" : {
         "ja" : {
@@ -3406,19 +6600,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "起動には、ゲスト自身の書き込み用に%1$@の空き容量が必要です。この%2$@の空き容量は%3$@です。"
+            "value" : "起動には、仮想マシン自身の書き込み用に%1$@の空き容量が必要です。この%2$@の空き容量は%3$@です。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "启动需要 %1$@ 的可用空间，供客户机自身写入。此 %2$@ 目前有 %3$@ 可用。"
+            "value" : "启动需要%1$@的可用空间，供虚拟机自身写入。此%2$@目前有%3$@可用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "啟動需要 %1$@ 的可用空間，供客體自行寫入。此 %2$@ 目前有 %3$@ 可用。"
+            "value" : "啟動需要%1$@的可用空間，供虛擬機器自行寫入。此%2$@目前有%3$@可用。"
           }
         }
       }
@@ -3523,13 +6717,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "保持为 %@"
+            "value" : "保持为%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "維持為 %@"
+            "value" : "維持為%@"
           }
         }
       }
@@ -3578,6 +6772,28 @@
         }
       }
     },
+    "Stopped when Andarium left the foreground." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumがフォアグラウンドから離れたため停止しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium离开前台时已停止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium離開前景時已停止。"
+          }
+        }
+      }
+    },
     "Storage" : {
       "comment" : "The virtual machine's disk space (what the virtual machine may store), as in iOS Settings > General > Storage.",
       "localizations" : {
@@ -3619,6 +6835,35 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "儲存空間只能增加。較大的容量會在下次啟動時生效。"
+          }
+        }
+      }
+    },
+    "storage.of" : {
+      "comment" : "The storage row of Home and of the first start: the space the virtual machine's data takes of its capacity, as in 5.4 GiB of 16 GiB. Follows iOS's own form for storage in use.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ of %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@使用済み / %2$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用%1$@/%2$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用%1$@（共%2$@）"
           }
         }
       }
@@ -3691,6 +6936,28 @@
         }
       }
     },
+    "System image updated" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "システムイメージをアップデートしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系统镜像已更新"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "系統映像檔已更新"
+          }
+        }
+      }
+    },
     "System info" : {
       "localizations" : {
         "ja" : {
@@ -3740,19 +7007,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "スナップショットを作成すると、ゲストの現在のデータを保存して、あとで元に戻せます。"
+            "value" : "スナップショットを作成すると、仮想マシンの現在のデータを保存して、あとで元に戻せます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "创建一个快照，即可保留客户机当前的数据，以后随时恢复。"
+            "value" : "创建一个快照，即可保留虚拟机当前的数据，以后随时恢复。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "建立快照即可保留客體目前的資料，日後可隨時還原。"
+            "value" : "建立快照即可保留虛擬機器目前的資料，日後可隨時回復。"
           }
         }
       }
@@ -3801,6 +7068,138 @@
         }
       }
     },
+    "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "タップで戻る、ホーム、設定を使用できます。電源を長押しすると電源メニューが開きます。ドラッグして移動できます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点按可使用返回、主屏幕和设置。按住电源可打开电源菜单。拖移可移动。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "點按可使用返回、主畫面和設定。按住電源可打開電源選單。拖曳可移動。"
+          }
+        }
+      }
+    },
+    "The app conflicts with an app that’s already installed." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリは、すでにインストールされているアプリと競合しています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用与已安装的应用冲突。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式與已安裝的應用程式衝突。"
+          }
+        }
+      }
+    },
+    "The app isn’t signed correctly." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリの署名が正しくありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用的签名不正确。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式的簽署不正確。"
+          }
+        }
+      }
+    },
+    "The app needs a system library this virtual machine doesn’t have." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリには、この仮想マシンにないシステムライブラリが必要です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用需要虚拟机中没有的系统库。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式需要虛擬機器中沒有的系統程式庫。"
+          }
+        }
+      }
+    },
+    "The file changed while it was being copied." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "コピー中にファイルが変更されました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文件在拷贝过程中发生了变化。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "檔案在拷貝過程中發生了變更。"
+          }
+        }
+      }
+    },
+    "The file isn’t a valid app." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルは有効なアプリではありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此文件不是有效的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此檔案不是有效的應用程式。"
+          }
+        }
+      }
+    },
     "The first-run setup may take a few minutes." : {
       "localizations" : {
         "ja" : {
@@ -3812,13 +7211,35 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "首次运行设置可能需要几分钟。"
+            "value" : "首次设置可能需要几分钟。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "首次執行設定可能需要幾分鐘。"
+            "value" : "首次設定可能需要幾分鐘。"
+          }
+        }
+      }
+    },
+    "The folder is no longer in the virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このフォルダは仮想マシンにはもうありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该文件夹已不在虚拟机中。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "該檔案夾已不在虛擬機器中。"
           }
         }
       }
@@ -3834,13 +7255,57 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "扩展到 %@ 的操作已取消。"
+            "value" : "将取消扩展到%@。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "擴增到 %@ 的操作已取消。"
+            "value" : "將取消擴充至%@。"
+          }
+        }
+      }
+    },
+    "The last attempt stopped: %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前回の試行は停止しました: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次尝试已停止：%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次嘗試已停止：%@"
+          }
+        }
+      }
+    },
+    "The location is restricted on this device. Turning this on explains why." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスでは位置情報が制限されています。オンにすると理由が表示されます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备上的位置受到限制。打开此开关会说明原因。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置上的位置受到限制。開啟此開關會說明原因。"
           }
         }
       }
@@ -3857,13 +7322,189 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下次启动时会将其更新到 %@。"
+            "value" : "下次启动时会将其更新到%@。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下次啟動時會將其更新到 %@。"
+            "value" : "下次啟動時會將其更新到%@。"
+          }
+        }
+      }
+    },
+    "The size beside a snapshot is what deleting it frees. Snapshots can share old data that none of them frees alone, so together they use more than their sizes add up to." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットの横のサイズは、削除すると解放される容量です。スナップショット同士が古いデータを共有している場合、1つだけ削除してもその分は解放されないため、合計の使用量は各サイズの合計より大きくなります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照旁边的大小是删除它所能释放的空间。快照之间可能共享旧数据，单独删除任何一个都不会释放这部分空间，因此它们合计占用的空间会超过各自大小之和。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快照旁的大小是刪除該快照可釋出的空間。快照之間可能共用舊資料，單獨刪除任何一個都不會釋出這部分空間，因此它們合計佔用的空間會超過各自大小的總和。"
+          }
+        }
+      }
+    },
+    "The snapshot could not be deleted" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットを削除できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法删除快照"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法刪除快照"
+          }
+        }
+      }
+    },
+    "The snapshot could not be renamed" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットの名称を変更できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法重新命名快照"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法重新命名快照"
+          }
+        }
+      }
+    },
+    "The snapshot could not be restored" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットを復元できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法恢复快照"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法回復快照"
+          }
+        }
+      }
+    },
+    "The snapshot could not be taken" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "スナップショットを作成できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法创建快照"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法建立快照"
+          }
+        }
+      }
+    },
+    "The start that updates to %@ did not reach its end, and nothing from before it is left to put back. Erase the virtual machine to start over." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@へアップデートする起動が完了しておらず、元に戻せる更新前のデータも残っていません。仮想マシンを消去して最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新到%@的启动未能完成，且没有更新前的数据可供恢复。请抹掉虚拟机以重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新到%@的啟動未能完成，且沒有更新前的資料可供回復。請清除虛擬機器以重新開始。"
+          }
+        }
+      }
+    },
+    "The start that updates to %@ did not reach its end. Start tries it again, or erase the virtual machine to start over." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@へアップデートする起動が完了していません。“起動”で再試行するか、仮想マシンを消去して最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新到%@的启动未能完成。“启动”会重试，或抹掉虚拟机以重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新到%@的啟動未能完成。「啟動」會重試，或清除虛擬機器以重新開始。"
+          }
+        }
+      }
+    },
+    "The start that updates to %@ did not reach its end. Start tries it again, or Restore puts back your data from before the update." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@へアップデートする起動が完了していません。“起動”で再試行するか、“復元”で更新前のデータを元に戻せます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新到%@的启动未能完成。“启动”会重试，使用“恢复”可找回更新前的数据。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新到%@的啟動未能完成。「啟動」會重試，使用「回復」可找回更新前的資料。"
           }
         }
       }
@@ -3873,19 +7514,1033 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "コンピュータが初めて接続するときに、ゲストが許可を求めます。ゲストが停止するか、USBデバッグがオフになると、ADBはオフになります。"
+            "value" : "コンピュータが初めて接続するときに、仮想マシンが許可を求めます。仮想マシンが停止するか、USBデバッグがオフになると、ADBはオフになります。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机会在电脑首次连接时请求允许。客户机停止或关闭 USB 调试后，ADB 会关闭。"
+            "value" : "电脑首次连接时，虚拟机会询问是否允许。虚拟机停止或关闭USB调试后，ADB会关闭。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體會在電腦首次連線時請求允許。客體停止或關閉 USB 偵錯後，ADB 會關閉。"
+            "value" : "電腦首次連線時，虛擬機器會詢問是否允許。虛擬機器停止或關閉USB偵錯後，ADB會關閉。"
+          }
+        }
+      }
+    },
+    "The virtual machine can’t take a file with this name." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはこの名前のファイルを受け付けられません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法接受此名称的文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法接受此名稱的檔案。"
+          }
+        }
+      }
+    },
+    "The virtual machine could not be created" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを作成できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法创建虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法建立虛擬機器"
+          }
+        }
+      }
+    },
+    "The virtual machine could not be erased" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを消去できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法抹掉虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法清除虛擬機器"
+          }
+        }
+      }
+    },
+    "The virtual machine could not be restored" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンを復元できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法恢复虚拟机"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法回復虛擬機器"
+          }
+        }
+      }
+    },
+    "The virtual machine couldn’t copy the file." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがファイルをコピーできませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法拷贝该文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法拷貝該檔案。"
+          }
+        }
+      }
+    },
+    "The virtual machine couldn’t install the app (%@)." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがアプリをインストールできませんでした（%@）。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法安装此应用（%@）。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法安裝此應用程式（%@）。"
+          }
+        }
+      }
+    },
+    "The virtual machine couldn’t install the app." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがアプリをインストールできませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法安装此应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法安裝此應用程式。"
+          }
+        }
+      }
+    },
+    "The virtual machine couldn’t make the bug report." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがバグレポートを作成できませんでした。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机无法创建错误报告。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器無法建立錯誤報告。"
+          }
+        }
+      }
+    },
+    "The virtual machine didn’t accept Andarium’s key. Restart the virtual machine and try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがAndariumのキーを受け付けませんでした。仮想マシンを再起動してから、もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机未接受Andarium的密钥。请重新启动虚拟机后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器未接受Andarium的密鑰。請重新啟動虛擬機器後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine doesn’t have enough free space. Free some up in the virtual machine, or give it more storage with Resize." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの空き容量が足りません。仮想マシン内で容量を空けるか、“サイズを変更”でストレージを増やしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的可用空间不足。请在虚拟机中释放一些空间，或使用“调整大小”为其增加储存空间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的可用空間不足。請在虛擬機器中釋出一些空間，或使用「調整大小」為其增加儲存空間。"
+          }
+        }
+      }
+    },
+    "The virtual machine is already making a bug report." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはすでにバグレポートを作成中です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机正在创建错误报告。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器正在建立錯誤報告。"
+          }
+        }
+      }
+    },
+    "The virtual machine is collecting its logs and state. This can take several minutes." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがログと状態を収集しています。数分かかることがあります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机正在收集其日志和状态。这可能需要几分钟。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器正在收集其記錄檔和狀態。這可能需要幾分鐘。"
+          }
+        }
+      }
+    },
+    "The virtual machine is installing the app…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがアプリをインストールしています…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机正在安装此应用…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器正在安裝此應用程式…"
+          }
+        }
+      }
+    },
+    "The virtual machine is starting or running. Snapshots can be taken, restored and deleted only while it is stopped." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンは起動中または実行中です。スナップショットの作成、復元、削除は、仮想マシンが停止している間のみ行えます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机正在启动或运行。只有在其停止时才能创建、恢复和删除快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器正在啟動或執行。只有在其停止時才能建立、回復和刪除快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine isn’t answering yet. Try again once it has started." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだ応答していません。起動してからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机尚未响应。请在其启动后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器尚未回應。請在其啟動後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine isn’t ready to install apps. Try again in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだアプリをインストールする準備ができていません。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机尚未准备好安装应用。请稍后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器尚未準備好安裝應用程式。請稍後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine isn’t ready to make a bug report. Try again in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだバグレポートを作成する準備ができていません。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机尚未准备好创建错误报告。请稍后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器尚未準備好建立錯誤報告。請稍後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine isn’t ready to open its files. Try again in a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはまだファイルを開く準備ができていません。しばらくしてからもう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机尚未准备好打开其文件。请稍后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器尚未準備好打開其檔案。請稍後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine needs %@ free to start. Free up space in Settings › General › %@ Storage, or delete snapshots." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The virtual machine needs %1$@ free to start. Free up space in Settings › General › %2$@ Storage, or delete snapshots."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの起動には%1$@の空き容量が必要です。設定 › 一般 › %2$@ストレージで容量を空けるか、スナップショットを削除してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机启动需要%1$@的可用空间。请在设置 › 通用 › %2$@储存空间中释放空间，或删除快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器啟動需要%1$@的可用空間。請在設定 › 一般 › %2$@儲存空間中釋出空間，或刪除快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine needs %@ free to start. Free up space in Settings › General › %@ Storage." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The virtual machine needs %1$@ free to start. Free up space in Settings › General › %2$@ Storage."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの起動には%1$@の空き容量が必要です。設定 › 一般 › %2$@ストレージで容量を空けてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机启动需要%1$@的可用空间。请在设置 › 通用 › %2$@储存空间中释放空间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器啟動需要%1$@的可用空間。請在設定 › 一般 › %2$@儲存空間中釋出空間。"
+          }
+        }
+      }
+    },
+    "The virtual machine refused to install the app." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがアプリのインストールを拒否しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机拒绝安装此应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器拒絕安裝此應用程式。"
+          }
+        }
+      }
+    },
+    "The virtual machine stopped responding while copying the files." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがファイルのコピー中に応答しなくなりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机在拷贝文件时停止了响应。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器在拷貝檔案時停止回應。"
+          }
+        }
+      }
+    },
+    "The virtual machine stopped responding while installing the app." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがアプリのインストール中に応答しなくなりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机在安装应用时停止了响应。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器在安裝應用程式時停止回應。"
+          }
+        }
+      }
+    },
+    "The virtual machine stopped responding while making the bug report." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンがバグレポートの作成中に応答しなくなりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机在创建错误报告时停止了响应。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器在建立錯誤報告時停止回應。"
+          }
+        }
+      }
+    },
+    "The virtual machine stopped unexpectedly" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンが予期せず停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机意外停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器意外停止"
+          }
+        }
+      }
+    },
+    "The virtual machine was shut down in the background." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンはバックグラウンドでシャットダウンされました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机已在后台关机。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器已在背景關機。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s current data is replaced by this snapshot from %@, and anything not in it is deleted. Some apps may ask you to sign in again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの現在のデータは、%@のこのスナップショットで置き換えられ、スナップショットにないものは削除されます。一部のアプリでは、もう一度サインインが必要になることがあります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机当前的数据将被%@的此快照替换，不在快照中的内容都会被删除。部分应用可能会要求你重新登录。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器目前的資料將由%@的此快照取代，不在快照中的內容都會被刪除。部分應用程式可能會要求你重新登入。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s data cannot be snapshotted (it needs an APFS volume)." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデータのスナップショットを作成できません（APFSボリュームが必要です）。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法为虚拟机的数据创建快照（需要APFS宗卷）。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法為虛擬機器的資料建立快照（需要APFS卷宗）。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s data is back to the snapshot from %@." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデータが%@のスナップショットに戻りました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的数据已恢复到%@的快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的資料已回復到%@的快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s data is back to “%@” from %@." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The virtual machine’s data is back to “%1$@” from %2$@."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデータが%2$@の“%1$@”に戻りました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的数据已恢复到%2$@的“%1$@”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的資料已回復到%2$@的「%1$@」。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s data may be from before the restore or from the snapshot." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデータは、復元前のものか、スナップショットのものである可能性があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的数据可能来自恢复前，也可能来自快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的資料可能來自回復前，也可能來自快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s debugging service restarted before the app was installed. Try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデバッグサービスがアプリのインストール完了前に再起動しました。もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的调试服务在应用安装完成前重启了。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的偵錯服務在應用程式安裝完成前重新啟動。請再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s debugging service restarted before the bug report was finished. Try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデバッグサービスがバグレポートの完了前に再起動しました。もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的调试服务在错误报告完成前重启了。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的偵錯服務在錯誤報告完成前重新啟動。請再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s debugging service restarted before the transfer finished. Try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンのデバッグサービスが転送の完了前に再起動しました。もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的调试服务在传输完成前重启了。请重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的偵錯服務在傳輸完成前重新啟動。請再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s records cannot be read, so its data cannot be snapshotted." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの記録を読み取れないため、データのスナップショットを作成できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法读取虚拟机的记录，因此无法为其数据创建快照。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法讀取虛擬機器的記錄，因此無法為其資料建立快照。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの画面がこのウインドウに追従できませんでした。Andariumを閉じてもう一度開き、再度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的屏幕无法跟随此窗口。请关闭并重新打开Andarium后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的螢幕無法跟隨此視窗。請關閉並重新打開Andarium後再試一次。"
+          }
+        }
+      }
+    },
+    "The virtual machine’s settings could not be read: %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの設定を読み取れませんでした: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法读取虚拟机的设置：%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法讀取虛擬機器的設定：%@"
+          }
+        }
+      }
+    },
+    "There is not enough free space on this %@. Free up space in Settings › General › %@ Storage and try again." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "There is not enough free space on this %1$@. Free up space in Settings › General › %2$@ Storage and try again."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この%1$@の空き容量が足りません。設定 › 一般 › %2$@ストレージで容量を空けてから、もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%1$@的可用空间不足。请在设置 › 通用 › %2$@储存空间中释放空间，然后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%1$@的可用空間不足。請在設定 › 一般 › %2$@儲存空間中釋出空間，然後再試一次。"
+          }
+        }
+      }
+    },
+    "This %@ measures only part of what snapshots share, so they use at least the size shown." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この%@では、スナップショットが共有する容量の一部しか測定できないため、実際の使用量は表示されているサイズ以上です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%@只能测量快照共享空间的一部分，因此它们实际占用的空间至少为所示大小。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%@只能測量快照共用空間的一部分，因此它們實際佔用的空間至少為所示大小。"
+          }
+        }
+      }
+    },
+    "This app comes in several parts, which Andarium can’t install yet." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリは複数のパーツで構成されており、Andariumではまだインストールできません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用由多个部分组成，Andarium暂时无法安装。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式由多個部分組成，Andarium目前無法安裝。"
+          }
+        }
+      }
+    },
+    "This app has no code for this device’s processor." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用没有适用于此设备处理器的代码。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。"
+          }
+        }
+      }
+    },
+    "This app needs a newer system than this virtual machine runs." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリには、この仮想マシンで動作しているシステムより新しいシステムが必要です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用需要比此虚拟机所运行的系统更高的系统版本。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式需要比此虛擬機器所執行的系統更新的系統。"
+          }
+        }
+      }
+    },
+    "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the virtual machine to start over." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このバージョンのアプリに含まれるシステムのリリースは、完了しなかったアップデートのものと異なります。“復元”で更新前のデータを元に戻すか、仮想マシンを消去して最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此App版本携带的系统版本与未完成更新的版本不同。使用“恢复”可找回更新前的数据，或抹掉虚拟机以重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此App版本所含的系統版本與未完成的更新不同。使用「回復」可找回更新前的資料，或清除虛擬機器以重新開始。"
+          }
+        }
+      }
+    },
+    "This app version is older than the one the virtual machine last started with, and its data does not go back. Install a newer version of Andarium, restore an older snapshot, or erase the virtual machine to start again with this one." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このバージョンのアプリは、仮想マシンが前回起動したときのバージョンより古く、仮想マシンのデータを古いバージョンに戻すことはできません。新しいバージョンのAndariumをインストールするか、古いスナップショットを復元するか、仮想マシンを消去してこのバージョンで最初からやり直してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此App版本比虚拟机上次启动时使用的版本更旧，且虚拟机数据无法降级到旧版本。请安装更高版本的Andarium、恢复较早的快照，或抹掉虚拟机以使用此版本重新开始。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此App版本比虛擬機器上次啟動時使用的版本更舊，且虛擬機器資料無法降級回舊版本。請安裝較新版本的Andarium、回復較早的快照，或清除虛擬機器以使用此版本重新開始。"
+          }
+        }
+      }
+    },
+    "This app was made for a system version that this virtual machine no longer installs." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリは、この仮想マシンがもうインストールに対応していないシステムバージョン向けに作られています。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为此虚拟机已不再支持安装的系统版本制作的。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為此虛擬機器已不再支援安裝的系統版本製作的。"
           }
         }
       }
@@ -3907,7 +8562,51 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此操作無法還原。"
+            "value" : "此動作無法還原。"
+          }
+        }
+      }
+    },
+    "This copy of Andarium does not carry a system." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このAndariumにはシステムが含まれていません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此Andarium副本不含系统。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此Andarium拷貝不含系統。"
+          }
+        }
+      }
+    },
+    "This copy of Andarium does not carry a usable system: %@" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このAndariumには使用可能なシステムが含まれていません: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此Andarium副本不含可用的系统：%@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此Andarium拷貝不含可用的系統：%@"
           }
         }
       }
@@ -3923,13 +8622,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备仅剩 %1$@ 可用空间，%2$@ 无法暂停。请在空间用尽前将其关机，或释放空间后重新检查。"
+            "value" : "此设备仅剩%1$@可用空间，%2$@无法暂停。请在空间用尽前将其关机，或释放空间后重新检查。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置僅剩 %1$@ 可用空間，%2$@ 無法暫停。請在空間用盡前將其關機，或釋出空間後重新檢查。"
+            "value" : "此裝置僅剩%1$@可用空間，%2$@無法暫停。請在空間用盡前將其關機，或釋出空間後重新檢查。"
           }
         }
       }
@@ -3939,19 +8638,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このデバイスの空き容量は残り%1$@で、%2$@が書き込みを続けるには足りません。空き容量を確保してから再開してください。%3$@が続行するには%4$@の空き容量が必要です。"
+            "value" : "このデバイスの空き容量は残り%1$@で、%2$@が書き込みを続けるには足りません。空き容量を確保してから再開してください。%3$@が動作を続けるには%4$@の空き容量が必要です。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备仅剩 %1$@ 可用空间，%2$@ 无法继续写入。请释放空间，然后继续。%3$@ 需要 %4$@ 可用空间才能继续。"
+            "value" : "此设备仅剩%1$@可用空间，%2$@无法继续写入。请释放空间，然后继续。%3$@需要%4$@可用空间才能恢复运行。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置僅剩 %1$@ 可用空間，%2$@ 無法繼續寫入。請釋出空間，然後繼續。%3$@ 需要 %4$@ 可用空間才能繼續。"
+            "value" : "此裝置僅剩%1$@可用空間，%2$@無法繼續寫入。請釋出空間，然後繼續。%3$@需要%4$@可用空間才能恢復執行。"
           }
         }
       }
@@ -3967,13 +8666,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此设备仅剩 %1$@ 可用空间。%2$@ 正在将数据保存到储存空间。"
+            "value" : "此设备仅剩%1$@可用空间。%2$@正在将数据保存到储存空间。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置僅剩 %1$@ 可用空間。%2$@ 正在將資料儲存到儲存空間。"
+            "value" : "此裝置僅剩%1$@可用空間。%2$@正在將資料儲存到儲存空間。"
           }
         }
       }
@@ -3995,7 +8694,233 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此裝置沒有可共享的陀螺儀或加速度計。"
+            "value" : "此裝置沒有可分享的陀螺儀或加速度計。"
+          }
+        }
+      }
+    },
+    "This device has no Wi-Fi address. Connect to Wi-Fi to use ADB over network." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスにはWi-Fiアドレスがありません。ネットワーク経由のADBを使うには、Wi-Fiに接続してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备没有Wi-Fi地址。请连接Wi-Fi以通过网络使用ADB。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置沒有Wi-Fi位址。請連接Wi-Fi以透過網路使用ADB。"
+          }
+        }
+      }
+    },
+    "This device’s settings, such as Screen Time or a profile, do not let apps use the location, so Andarium cannot share it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このデバイスの設定（“スクリーンタイム”やプロファイルなど）でアプリによる位置情報の使用が許可されていないため、Andariumは位置情報を共有できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此设备的设置（例如“屏幕时间”或描述文件）不允许App使用位置，因此Andarium无法共享位置。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此裝置的設定（例如「螢幕使用時間」或描述檔）不允許App使用位置，因此Andarium無法分享位置。"
+          }
+        }
+      }
+    },
+    "This snapshot is from %@, newer than this app’s %@. Update Andarium to restore it." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This snapshot is from %1$@, newer than this app’s %2$@. Update Andarium to restore it."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットは%1$@のもので、このアプリの%2$@より新しいものです。復元するにはAndariumをアップデートしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照来自%1$@，比此App的%2$@更新。请更新Andarium以恢复它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照來自%1$@，比此App的%2$@更新。請更新Andarium以回復此快照。"
+          }
+        }
+      }
+    },
+    "This snapshot is from a newer release, newer than this app’s %@. Update Andarium to restore it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットはより新しいリリースのもので、このアプリの%@より新しいものです。復元するにはAndariumをアップデートしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照来自更新的系统版本，比此App的%@更新。请更新Andarium以恢复它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照來自更新的系統版本，比此App的%@更新。請更新Andarium以回復此快照。"
+          }
+        }
+      }
+    },
+    "This snapshot is not there any more." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットはもうありません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照已不存在。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照已不存在。"
+          }
+        }
+      }
+    },
+    "This snapshot was taken with a different system image of the same release, so this app version can’t restore it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットは同じリリースの別のシステムイメージで作成されたため、このバージョンのアプリでは復元できません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照是用同一版本的另一个系统镜像创建的，因此此App版本无法恢复它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照是用同一版本的另一個系統映像檔建立的，因此此App版本無法回復此快照。"
+          }
+        }
+      }
+    },
+    "This snapshot’s data uses a newer layout than this app version can open. Update Andarium to restore it." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットのデータは、このバージョンのアプリでは開けない新しい形式です。復元するにはAndariumをアップデートしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照的数据格式比此App版本支持的更新。请更新Andarium以恢复它。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照的資料格式比此App版本支援的更新。請更新Andarium以回復此快照。"
+          }
+        }
+      }
+    },
+    "This snapshot’s disk is %lld GiB, a size this app version does not accept. It can only be deleted." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このスナップショットのディスクは%lld GiBで、このバージョンのアプリでは受け付けられないサイズです。削除のみ可能です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照的磁盘为%lld GiB，此App版本不接受该大小。只能将其删除。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此快照的磁碟為%lld GiB，此App版本不接受該大小。只能將其刪除。"
+          }
+        }
+      }
+    },
+    "To start it again, close Andarium and open it again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "もう一度起動するには、Andariumを閉じてからもう一度開いてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要重新启动，请关闭Andarium后重新打开。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若要重新啟動，請關閉Andarium後重新打開。"
+          }
+        }
+      }
+    },
+    "Try Again" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再試行"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重试"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再試一次"
           }
         }
       }
@@ -4005,19 +8930,19 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ネットワーク経由のADBを使うには、ゲストの「開発者向けオプション」でUSBデバッグをオンにしてください。"
+            "value" : "ネットワーク経由のADBを使うには、仮想マシンの“開発者向けオプション”でUSBデバッグをオンにしてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要通过网络使用 ADB，请在客户机的“开发者选项”中开启 USB 调试。"
+            "value" : "要通过网络使用ADB，请在虚拟机的“开发者选项”中开启USB调试。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "若要透過網路使用 ADB，請在客體的「開發人員選項」中開啟 USB 偵錯。"
+            "value" : "若要透過網路使用ADB，請在虛擬機器的「開發人員選項」中開啟USB偵錯。"
           }
         }
       }
@@ -4040,6 +8965,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未完成的更新"
+          }
+        }
+      }
+    },
+    "Up" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "向上"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "向上"
           }
         }
       }
@@ -4100,13 +9047,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在为 %@ 更新应用"
+            "value" : "正在为%@更新应用"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在為 %@ 更新應用程式"
+            "value" : "正在為%@更新應用程式"
           }
         }
       }
@@ -4122,13 +9069,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在从 %1$@ 更新到 %2$@。应用和文件会保留。"
+            "value" : "正在从%1$@更新到%2$@。应用和文件会保留。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在從 %1$@ 更新到 %2$@。應用程式和檔案都會保留。"
+            "value" : "正在從%1$@更新到%2$@。應用程式和檔案都會保留。"
           }
         }
       }
@@ -4144,13 +9091,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在更新到 %@。应用和文件会保留。"
+            "value" : "正在更新到%@。应用和文件会保留。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在更新到 %@。應用程式和檔案都會保留。"
+            "value" : "正在更新到%@。應用程式和檔案都會保留。"
           }
         }
       }
@@ -4183,42 +9130,42 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "バージョン %@"
+            "value" : "バージョン%@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "版本 %@"
+            "value" : "版本%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "版本 %@"
+            "value" : "版本%@"
           }
         }
       }
     },
     "Virtual machine" : {
-      "comment" : "Home section: the Android system the app runs (CPU, memory, storage, snapshots).",
+      "comment" : "The title of the Home section with the CPU and memory, storage and snapshots rows (the Android system the app runs).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストシステム"
+            "value" : "仮想マシン"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机系统"
+            "value" : "虚拟机"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體系統"
+            "value" : "虛擬機器"
           }
         }
       }
@@ -4228,19 +9175,63 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ゲストのデータ"
+            "value" : "仮想マシンのデータ"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客户机数据"
+            "value" : "虚拟机数据"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "客體資料"
+            "value" : "虛擬機器資料"
+          }
+        }
+      }
+    },
+    "Volume down" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "音量を下げる"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "调低音量"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "調低音量"
+          }
+        }
+      }
+    },
+    "Volume up" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "音量を上げる"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "调高音量"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "調高音量"
           }
         }
       }
@@ -4268,24 +9259,24 @@
         }
       }
     },
-    "VRAM is graphics memory, separate from the virtual machine’s RAM." : {
+    "Wait for the file transfer to finish, then install the app." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAMはグラフィックスメモリで、ゲストのRAMとは別です。"
+            "value" : "ファイルの転送が完了するまで待ってから、アプリをインストールしてください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAM 是图形内存，与客户机的 RAM 相互独立。"
+            "value" : "请等待文件传输完成，然后再安装应用。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAM 是圖形記憶體，與客體的 RAM 各自獨立。"
+            "value" : "請等待檔案傳輸完成，然後再安裝應用程式。"
           }
         }
       }
@@ -4331,6 +9322,56 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "處理中"
+          }
+        }
+      }
+    },
+    "“%@” is already in %@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "“%1$@” is already in %2$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%1$@”はすでに%2$@にあります"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%1$@”已在%2$@中"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「%1$@」已在%2$@中"
+          }
+        }
+      }
+    },
+    "•" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "•"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "•"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "•"
           }
         }
       }
