@@ -357,41 +357,41 @@ requires reopening Andarium.
   Keyboard/Keypad page), Android owns the layout and the repeat, and Andarium
   keeps no key command or reserved combination: what iOS keeps for itself
   (Command-Tab, Command-H, the Globe key) never reaches the app. The display
-  holds the keyboard focus, which shows no software keyboard, and gives it up
-  to a sheet, an alert or the bug report's share sheet while one is open, so
+  holds the keyboard focus, which shows no software keyboard, and gives it up to
+  a sheet, an alert or the bug report's share sheet while one is open, so
   Andarium's own text fields take the keys then and a sheet without a field
-  takes them from the guest all the same. The keyboard is plugged while iOS reports one and by the first
-  key that goes down, and unplugged 3 s after the last report or key and once
-  no key is held (`HardwareInputPolicy`). The system pointer is the guest's
-  mouse on an iPad: Android draws its cursor and the system pointer is hidden
-  over the display. The mouse is plugged once iOS reports one and the person
-  has moved it over the display, clicked or scrolled, so a mouse the Simulator
-  reports without one being there plugs nothing; the pointer's position uses
-  the touchscreen's range and its buttons and scroll are the mouse's, once the
-  guest has registered the pointer (runtime API 35 reports the registration of
-  the keyboard and of the pointer and publishes both off when a boot ends);
-  until then, and for good on a kernel that never registers it, the system
-  pointer's clicks are touches and its use only plugs the mouse. The devices
-  need a kernel that follows configuration changes (the hot-plug topic of
-  the virtio-input devices); on the accepted kernel they plug and nothing sees
-  them, and input sent is dropped. A touch of the pointer is the mouse's or a
-  finger's from its beginning to its end. An
-  iPhone has no pointer to give the guest, and Settings' "Use the pointer as
-  touch" (off for a fresh install, kept as `PointerPreference`, absent on an
-  iPhone) leaves the guest without a mouse so that the pointer's clicks are
-  touches. An Android application that captures the pointer lights an LED on
-  its mouse; the application then asks the scene for the pointer lock and
-  sends the mouse's raw motion, buttons and scroll from Game Controller, and
-  where iOS refuses the lock (a window that is not full screen) the raw motion
-  goes on while the pointer is over the display (`PointerCapture`); the capture
-  waits while a sheet or an alert is up and ends with the guest's boot.
-  Leaving the front, the end of a run, a sheet, a keyboard that goes and the
-  window losing key release every key and button and
-  end the pointer's contact; the devices exist only while a run goes on, and
-  plug once the guest's console has answered (`KeyboardMouse`). Caps Lock is
-  Android's: the application taps it once before a key when iOS's state differs
-  from the light Android reports (`CapsLockReconciler`). Android hides its
-  on-screen keyboard while it has a hardware keyboard.
+  takes them from the guest all the same. The keyboard is plugged while iOS
+  reports one and by the first key that goes down, and unplugged 3 s after the
+  last report or key and once no key is held (`HardwareInputPolicy`). The system
+  pointer is the guest's mouse on an iPad: Android draws its cursor and the
+  system pointer is hidden over the display. The mouse is plugged once iOS
+  reports one and the person has moved it over the display, clicked or scrolled,
+  so a mouse the Simulator reports without one being there plugs nothing; the
+  pointer's position uses the touchscreen's range and its buttons and scroll are
+  the mouse's, once the guest has registered the pointer (runtime API 35 reports
+  the registration of the keyboard and of the pointer and publishes both off
+  when a boot ends); until then, and for good on a kernel that never registers
+  it, the system pointer's clicks are touches and its use only plugs the mouse.
+  The devices need a kernel that follows configuration changes (the hot-plug
+  topic of the virtio-input devices); on the accepted kernel they plug and
+  nothing sees them, and input sent is dropped. A touch of the pointer is the
+  mouse's or a finger's from its beginning to its end. An iPhone has no pointer
+  to give the guest, and Settings' "Use the pointer as touch" (off for a fresh
+  install, kept as `PointerPreference`, absent on an iPhone) leaves the guest
+  without a mouse so that the pointer's clicks are touches. An Android
+  application that captures the pointer lights an LED on its mouse; the
+  application then asks the scene for the pointer lock and sends the mouse's raw
+  motion, buttons and scroll from Game Controller, and where iOS refuses the
+  lock (a window that is not full screen) the raw motion goes on while the
+  pointer is over the display (`PointerCapture`); the capture waits while a
+  sheet or an alert is up and ends with the guest's boot. Leaving the front, the
+  end of a run, a sheet, a keyboard that goes and the window losing key release
+  every key and button and end the pointer's contact; the devices exist only
+  while a run goes on, and plug once the guest's console has answered
+  (`KeyboardMouse`). Caps Lock is Android's: the application taps it once before
+  a key when iOS's state differs from the light Android reports
+  (`CapsLockReconciler`). Android hides its on-screen keyboard while it has a
+  hardware keyboard.
 - **Retina.** Retina mode applies at the next start and uses the screen's
   native pixels, whose host allocations count against the same iOS process
   limit as guest RAM (`DisplayOptions`).
