@@ -184,6 +184,54 @@ struct SnapshotStoreTests {
         #expect(quick.space.snapshotsUse == unknown)
     }
 
+    @Test func aListingThatIsCancelledStopsMeasuringAndAnswersUnmeasured() async throws {
+        let fixture = try await SnapshotFixture.make(marker: 1)
+        defer { fixture.cleanUp() }
+        for name in ["one", "two", "three"] { _ = try fixture.storage.createSnapshot(named: name) }
+        try rewriteTwoMiB(fixture)
+
+        /// The measuring calls made, and the moment a test cancels the task that makes them.
+        final class Calls: @unchecked Sendable {
+            private let lock = NSLock()
+            private var made = 0
+            var cancelAt: Int?
+            var count: Int { lock.withLock { made } }
+            func call() {
+                let now = lock.withLock { made += 1; return made }
+                if now == cancelAt { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+        }
+        func listing(cancelAt: Int?, beforeStart: Bool = false) async -> (SnapshotListing, Int) {
+            let calls = Calls()
+            calls.cancelAt = cancelAt
+            var io = SnapshotFileOperations.live
+            io.measure = SnapshotMeasure.Primitives(
+                privateSize: { calls.call(); return SnapshotMeasure.privateSize(of: $0) },
+                extents: { calls.call(); return SnapshotMeasure.physicalExtents(of: $0) })
+            let app = fixture.app(using: io)
+            let answer = await Task.detached {
+                if beforeStart { withUnsafeCurrentTask { $0?.cancel() } }
+                return app.snapshotListing(measured: true)
+            }.value
+            return (answer, calls.count)
+        }
+
+        let (whole, wholeCalls) = await listing(cancelAt: nil)
+        #expect(whole.isMeasured && wholeCalls > 3)
+        // Cancelled before it starts: no measuring call at all.
+        let (early, earlyCalls) = await listing(cancelAt: nil, beforeStart: true)
+        #expect(!early.isMeasured && earlyCalls == 0)
+        // Cancelled by the first call: it stops there, between two measures.
+        let (partial, partialCalls) = await listing(cancelAt: 1)
+        #expect(!partial.isMeasured && partialCalls < wholeCalls)
+        // What the unmeasured answer says is what a quick read says: every name, no figure.
+        let quick = fixture.storage.snapshotListing(measured: false)
+        #expect(partial.items.map(\.id) == quick.items.map(\.id))
+        let unknown = SnapshotFigure(bytes: 0, isLowerBound: true)
+        #expect(partial.items.allSatisfy { $0.freesWhenDeleted == unknown && $0.kept == unknown })
+        #expect(partial.space.snapshotsUse == unknown)
+    }
+
     @Test func createIsAllowedWhileANewerAndroidWaitsToUpdateTheData() async throws {
         let fixture = try await SnapshotFixture.make()
         defer { fixture.cleanUp() }
@@ -625,6 +673,54 @@ struct SnapshotStoreTests {
         try await fixture.storage.prepareStart(fixture.guest)
         #expect(try TestDisk.read(fixture.data, at: 0) == [1])
         #expect(!exists(fixture.snapshots.appendingPathComponent("restore.json")))
+    }
+
+    @Test func anUnfinishedRestorePlansTheStartFromTheSnapshotsRecord() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        let made = try fixture.storage.createSnapshot(named: "then")
+        // The guest moved on to a newer Android, which this older app cannot start.
+        let newer = fixture.app(on: snapshotNewer)
+        try await newer.prepareStart(fixture.guest)
+        try newer.completeRun()
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        #expect(newer.startPlan() == .normal)
+
+        // A restore of the older snapshot put its data in place and did not finish. A start completes it
+        // first, so the start is the snapshot's, and Start is offered on that.
+        try writeIntent(for: made.id, in: fixture)
+        #expect(fixture.storage.startPlan() == .normal)
+        #expect(fixture.storage.startPlan()?.allowsStart == true)
+        #expect(newer.startPlan() == .update(from: "20261031-los24-r4", to: "20261102-los24-r5"))
+
+        // What the plan said is what the start then is.
+        try await fixture.storage.prepareStart(fixture.guest)
+        #expect(!exists(fixture.snapshots.appendingPathComponent("restore.json")))
+        #expect(fixture.storage.startPlan() == .normal)
+    }
+
+    @Test func aRestoreThatCannotBeCarriedThroughLeavesThePlanAsTheFilesSayIt() async throws {
+        let fixture = try await SnapshotFixture.make()
+        defer { fixture.cleanUp() }
+        let made = try fixture.storage.createSnapshot(named: "then")
+        let newer = fixture.app(on: snapshotNewer)
+        try await newer.prepareStart(fixture.guest)
+        try newer.completeRun()
+        let intent = fixture.snapshots.appendingPathComponent("restore.json")
+
+        // An intent that cannot be read: launch and Start drop it, so nothing changes.
+        try Data("garbage".utf8).write(to: intent)
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        // A snapshot that is no longer whole.
+        try writeIntent(for: made.id, in: fixture)
+        try FileManager.default.removeItem(at: fixture.snapshots.appendingPathComponent(made.id.rawValue).appendingPathComponent("data.img"))
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        // One that is not there at all.
+        try FileManager.default.removeItem(at: fixture.snapshots.appendingPathComponent(made.id.rawValue))
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
+        // And no restore: the same.
+        try FileManager.default.removeItem(at: intent)
+        #expect(fixture.storage.startPlan() == .blocked(.olderAndroid))
     }
 
     /// A volume that cannot clone, and one that is full, refuse as values.
