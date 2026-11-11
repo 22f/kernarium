@@ -3,6 +3,7 @@
 #include "hardware_input_run.hpp"
 #include "hardware_test_support.hpp"
 #include "hid_keyboard.hpp"
+#include "registration_summary.hpp"
 
 #include <array>
 #include <atomic>
@@ -657,6 +658,87 @@ void theUnregistrationThatAnswersAnUnplugReachesTheCallback()
     require(rig.statuses.empty() && !rig.keyboardQueue->registered());
 }
 
+// The application hears two registrations: the keyboard, and the pointer once
+// the mouse and the absolute pointer both are registered.
+void theApplicationHearsTheKeyboardAndThePointerRegister()
+{
+    using Group = RegistrationSummary::Group;
+    using Edge = RegistrationSummary::Edge;
+    RegistrationSummary summary;
+    // Nothing that is not a registration is a change.
+    require(!summary.update(HardwareStatus::capsLock, true));
+    require(!summary.update(HardwareStatus::pointerCapture, true));
+
+    require(summary.update(HardwareStatus::keyboardRegistered, true) ==
+        Edge {Group::keyboard, true});
+    // The same news again is not news.
+    require(!summary.update(HardwareStatus::keyboardRegistered, true));
+    // One of the pointer's two devices is not the pointer.
+    require(!summary.update(HardwareStatus::mouseRegistered, true));
+    require(summary.update(HardwareStatus::pointerRegistered, true) ==
+        Edge {Group::pointer, true});
+    require(!summary.update(HardwareStatus::pointerRegistered, true));
+    // Losing either one takes the pointer away, and the other's loss after it
+    // changes nothing.
+    require(summary.update(HardwareStatus::mouseRegistered, false) ==
+        Edge {Group::pointer, false});
+    require(!summary.update(HardwareStatus::pointerRegistered, false));
+    require(!summary.update(HardwareStatus::mouseRegistered, false));
+    require(summary.update(HardwareStatus::keyboardRegistered, false) ==
+        Edge {Group::keyboard, false});
+}
+
+// A boot's end, whether the guest restarts or the run is over, takes every
+// registration away and tells the application so each time, so it never keeps
+// one the guest lost.
+void aBootsEndTakesTheRegistrationsAway()
+{
+    using Group = RegistrationSummary::Group;
+    using Edge = RegistrationSummary::Edge;
+    RegistrationSummary summary;
+    (void)summary.update(HardwareStatus::keyboardRegistered, true);
+    (void)summary.update(HardwareStatus::mouseRegistered, true);
+    (void)summary.update(HardwareStatus::pointerRegistered, true);
+    const std::array<Edge, 2> lost {
+        Edge {Group::keyboard, false}, Edge {Group::pointer, false}};
+    require(summary.reset() == lost);
+    // Nothing is remembered: the next boot registers afresh, and a loss
+    // reported after the reset is not a change.
+    require(summary.reset() == lost);
+    require(!summary.update(HardwareStatus::pointerRegistered, false));
+    require(summary.update(HardwareStatus::keyboardRegistered, true) ==
+        Edge {Group::keyboard, true});
+    require(!summary.update(HardwareStatus::pointerRegistered, true));
+    require(summary.update(HardwareStatus::mouseRegistered, true) ==
+        Edge {Group::pointer, true});
+}
+
+// The summary over the real devices: what the three queues announce is what
+// the application hears, and a boot's end after it.
+void theSummaryFollowsTheDevicesRegistrations()
+{
+    using Group = RegistrationSummary::Group;
+    using Edge = RegistrationSummary::Edge;
+    Rig rig;
+    RegistrationSummary summary;
+    std::vector<Edge> heard;
+    rig.input.setStatusCallback([&](HardwareStatus status, bool on) {
+        if (const auto edge = summary.update(status, on))
+            heard.push_back(*edge);
+    });
+    rig.plugEverything();
+    require((heard == std::vector<Edge> {
+        Edge {Group::keyboard, true}, Edge {Group::pointer, true}}));
+    heard.clear();
+    rig.input.setMouseConnected(false);
+    Rig::status(rig.mouseDevice, event(
+        protocol::statusNotice, protocol::noticeRegistration, 0));
+    require((heard == std::vector<Edge> {Edge {Group::pointer, false}}));
+    for (const auto& edge : summary.reset())
+        heard.push_back(edge);
+    require(heard.size() == 3 && heard[1] == (Edge {Group::keyboard, false}));
+}
+
 // One boot's three devices and the input over them, as the runtime builds them:
 // unplugged, with the guest's drivers yet to probe.
 struct BootRig final {
@@ -760,6 +842,9 @@ int main()
     aClickAfterALongWaitForTheGuestIsDelivered();
     aPlugBeforeTheGuestProbesIsToldWhenItDoes();
     theUnregistrationThatAnswersAnUnplugReachesTheCallback();
+    theApplicationHearsTheKeyboardAndThePointerRegister();
+    aBootsEndTakesTheRegistrationsAway();
+    theSummaryFollowsTheDevicesRegistrations();
     aRunKeepsWhatTheApplicationAskedForAcrossBoots();
     return EXIT_SUCCESS;
 }

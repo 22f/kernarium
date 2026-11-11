@@ -27,8 +27,9 @@ typedef void (^KernariumRestartHandler)(
 /* The guest powered its GNSS receiver on (`powered` is true) or off, delivered
  * on the main queue. */
 typedef void (^KernariumLocationReceiverHandler)(BOOL powered);
-/* The guest's keyboard lights or an application's pointer capture changed
- * (a KERNARIUM_RUNTIME_INPUT_STATUS_ value, and whether it is on), delivered on
+/* The guest's keyboard lights, an application's pointer capture or the guest's
+ * registration of its keyboard or pointer changed (a
+ * KERNARIUM_RUNTIME_INPUT_STATUS_ value, and whether it is on), delivered on
  * the main queue. */
 typedef void (^KernariumInputStatusHandler)(int status, BOOL on);
 

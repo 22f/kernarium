@@ -59,6 +59,12 @@ final class LiveRuntime: RuntimeDriver {
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
     private let motion = MotionSensors()
+    /// The guest's hardware keyboard and mouse: plugged while iOS has the
+    /// hardware, and fed by the display's view (`GuestLayer`).
+    let keyboardMouse: KeyboardMouse
+    /// The runtime reported that this run has started, so the keyboard and the
+    /// mouse exist in it and can be plugged.
+    private var inputRunReady = false
     /// The device's haptics for the guest's vibrator. A device without a Taptic
     /// Engine never runs it: the guest finds no vibrator.
     private let hapticsAvailable = DeviceHaptics.isAvailable
@@ -152,9 +158,13 @@ final class LiveRuntime: RuntimeDriver {
     init(
         model: AppModel, storage: TwoDiskStorage, marker: PauseMarker, keyStore: AdbKeyStore = AdbKeyStore(),
         sessionRecord: URL? = nil,
-        freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() }
+        freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
+        keyboardMouse: KeyboardMouse? = nil
     ) {
         self.model = model
+        self.keyboardMouse = keyboardMouse ?? KeyboardMouse.live(supportsMouse: model.host.supportsPointer) {
+            [weak model] wanted in model?.pointerLockWanted = wanted
+        }
         self.preferences = PreferenceKeeper(model: model)
         self.storage = storage
         self.keyStore = keyStore
@@ -180,8 +190,10 @@ final class LiveRuntime: RuntimeDriver {
         }
         model.motionSensorsAvailable = motion.available
         motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
+        self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
         observeRotationPolicy()
+        observeOverlay()
         preferences.start()
     }
 
@@ -414,6 +426,8 @@ final class LiveRuntime: RuntimeDriver {
         updateHaptics()
         updateGameControllers()
         updateLocation()
+        inputRunReady = false
+        updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
@@ -559,6 +573,12 @@ final class LiveRuntime: RuntimeDriver {
 
     private func reached(_ milestones: [BootMilestone], bootCompleted: Bool) {
         guard let model else { return }
+        // The guest console answers, so the emulator exists and takes requests
+        // for the keyboard and the mouse.
+        if !inputRunReady {
+            inputRunReady = true
+            updateKeyboardMouse()
+        }
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
         if bootCompleted {
             reachedBootCompleted = true
@@ -586,6 +606,7 @@ final class LiveRuntime: RuntimeDriver {
         gameControllers.restart()
         thermal.restart()
         location.guestRestarted()
+        keyboardMouse.guestRestarted()
         updateThermal()
         updateGuestRotation()
         updateSpaceWatch()
@@ -601,6 +622,7 @@ final class LiveRuntime: RuntimeDriver {
     private func finished(result: Int32) {
         normalRun = false
         runActive = false
+        inputRunReady = false
         shuttingDown = false
         spaceAlertOpen = false
         motion.stop()
@@ -692,6 +714,7 @@ final class LiveRuntime: RuntimeDriver {
         updateHaptics()
         updateGameControllers()
         updateLocation()
+        updateKeyboardMouse()
     }
 
     func setMotionSensors(_ on: Bool) {
@@ -706,6 +729,53 @@ final class LiveRuntime: RuntimeDriver {
                 && rotation.applied == rotationPolicy,
             axes: motionMount.axes
         )
+    }
+
+    // MARK: Keyboard and mouse
+
+    /// The guest's keyboard and mouse follow the run and the foreground: they
+    /// exist from the first word the guest's console says to its end, and the
+    /// display's keys and pointer reach them while the application is in front
+    /// and the guest is not held still.
+    private func updateKeyboardMouse() {
+        keyboardMouse.update(
+            running: runActive && inputRunReady, foreground: active && !holdsGuestStill,
+            overlaid: !(model?.guestHasKeys ?? true))
+    }
+
+    /// A sheet, an alert, Settings or the share sheet over the guest takes the
+    /// keys, and with them the pointer lock the guest's capture asked for.
+    private func observeOverlay() {
+        guard let model else { return }
+        withObservationTracking {
+            _ = model.guestHasKeys
+        } onChange: {
+            Task { @MainActor in
+                guard self.model != nil else { return }
+                self.updateKeyboardMouse()
+                self.observeOverlay()
+            }
+        }
+    }
+
+    func setPointerAsTouch(_ on: Bool) {
+        keyboardMouse.setPointerAsTouch(on)
+    }
+
+    #if !APP_STORE
+    /// A UI test's launch (`InputProbeLaunch`) has no guest: the session is
+    /// treated as one whose run has started, so the guest's keyboard and mouse
+    /// can be exercised. Nothing else of a run (rotation, sensors, haptics)
+    /// starts, because nothing answers it.
+    func beginInputProbe() {
+        runActive = true
+        inputRunReady = true
+        updateKeyboardMouse()
+    }
+    #endif
+
+    func pointerLockDidChange(_ locked: Bool) {
+        keyboardMouse.pointerLockChanged(locked)
     }
 
     // MARK: Haptics

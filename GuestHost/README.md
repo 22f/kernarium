@@ -20,13 +20,18 @@ Core/                                  GuestHostCore, a Swift package both
                                        free-space thresholds (RunSpace), the start
                                        check's text (StartSpace), and the pause
                                        for space (SpacePauser, SuspensionCheck,
-                                       SpacePause)
+                                       SpacePause), and the hardware keyboard and
+                                       pointer (the keys held down, Caps Lock, the
+                                       pointer's position, buttons and scroll)
 Sources/KernariumRuntimeLoader.h/.mm   loads the embedded runtime framework and
                                        wraps its C API (Runtime/KernariumRuntime.h)
 Sources/GuestDisplay.swift             the Metal view that shows the guest's display,
                                        its view controller, and the SwiftUI wrapper
 Sources/GuestInput.swift               touch and pointer mapping onto the guest's
                                        touchscreen range, display viewport geometry
+Sources/GuestHardwareInput.swift       what the display does with hardware keys and
+                                       the system pointer, between UIKit's events and
+                                       the application's sink
 Sources/GuestResizeHold.swift          when the guest keeps its display mode while the
                                        host view changes size
 Sources/SceneCoverage.swift            whether a window scene fills its screen
@@ -77,6 +82,18 @@ application that draws controls over the display passes `touchDidBegin`, which
 the display calls after it has sent the contacts of each touch that begins on
 it; Kernarium passes none.
 
+- The display takes hardware keys and the system pointer only for an
+  application that gives it a `hardwareInput` (Andarium); Kernarium gives none
+  and keeps UIKit's behaviour and its on-screen text path (`keyboardVisible`).
+  A key is its position, the usage on the HID Keyboard/Keypad page, and the
+  pointer's position is on the touchscreen's range, so Android's cursor is
+  where a finger would be. The application decides whether the pointer is the
+  guest's mouse (`routesPointer`, set once the guest has registered it) or only
+  watched (`watchesPointer`: its use is reported, its touches stay the
+  touchscreen's). A touch of the pointer is the mouse's or a finger's from its
+  beginning to its end, and the system pointer is hidden over the display
+  alone. Leaving the front, a sheet taking the keys, the window losing key and
+  the pointer leaving lift every key and button the guest was told is down.
 - A file here depends only on the system frameworks, the runtime header, and
   the prebuilt `LibZstd` XCFramework. It names neither application's views,
   settings or product text; an application supplies those.

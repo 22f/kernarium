@@ -210,8 +210,10 @@ Kernarium attaches:
   unplugged until the application plugs them (`set_input_connected`) and then
   fed with `send_keyboard_usage`, `send_pointer` and `send_mouse`; the guest's
   lock lights and pointer capture come back through
-  `set_input_status_callback` (runtime API 33). The Linux runtime keeps the
-  entries and answers `-ENODEV`. Kernarium itself uses none of them;
+  `set_input_status_callback` (runtime API 33), and so does whether the guest
+  has registered the keyboard and the pointer (runtime API 35), off again at a
+  guest restart and at the run's end. The Linux runtime keeps the entries and
+  answers `-ENODEV`. Kernarium itself uses none of them;
 - a Virtio-GPU Metal framebuffer; and
 - the guest's `ttyS0` stream mirrored to a terminal view.
 

@@ -408,6 +408,16 @@ VhostUserServer::VhostUserServer(
     if (!device_ || device_->queueCount() == 0 ||
         device_->queueCount() > maximumQueueCount)
         throw std::invalid_argument("invalid vhost-user device queue count");
+    /* The shared-memory map or unmap a request raises waits for the
+     * front-end's acknowledgement (awaitBackendAcknowledgement), answering
+     * a GET_FEATURES meanwhile; that resets a device that keeps deferred
+     * requests and would release the request being run. A device with a
+     * shared-memory region therefore cannot keep them. */
+    if (device_->keepsDeferredRequestsWhileDisabled() &&
+        device_->sharedMemoryRegion())
+        throw std::invalid_argument(
+            "a vhost-user device that keeps deferred requests cannot "
+            "have a shared-memory region");
     device_->setGuestMapper([this](std::uint64_t address, std::size_t length) {
         auto* pointer = translate(address, length, false);
         return pointer ? std::span(pointer, length) : std::span<std::uint8_t>{};
@@ -458,6 +468,29 @@ void VhostUserServer::resetDeviceState() noexcept
     }
     device_->reset();
     pendingRequests_.clear();
+    heldCompletions_.clear();
+}
+
+bool VhostUserServer::requestsAreHeld() const noexcept
+{
+    if (pendingRequests_.empty() || !device_->keepsDeferredRequestsWhileDisabled())
+        return false;
+    return std::any_of(queues_.begin(), queues_.end(), [](const Queue& queue) {
+        return queue.size != 0 && !queue.enabled;
+    });
+}
+
+void VhostUserServer::retireHeldRequests() noexcept
+{
+    if (requestsAreHeld())
+        resetDeviceState();
+}
+
+bool VhostUserServer::everyConfiguredRingIsEnabled() const noexcept
+{
+    return std::all_of(queues_.begin(), queues_.end(), [](const Queue& queue) {
+        return queue.size == 0 || queue.enabled;
+    });
 }
 
 void VhostUserServer::resetQueues() noexcept
@@ -1047,6 +1080,16 @@ void VhostUserServer::drainQueueCompletions()
             continue;
         }
         const auto queueIndex = found->second.queueIndex;
+        if (queueIndex < queues_.size() && !queues_[queueIndex].enabled &&
+            device_->keepsDeferredRequestsWhileDisabled()) {
+            /* The guest suspended its ring while the device held this
+             * request. The used ring is not written while the ring is
+             * disabled; the answer waits for the enable. */
+            heldCompletions_.push_back(
+                {completion.requestId, std::move(completion.response)});
+            completion = {};
+            continue;
+        }
         completeRequest(found->second, completion.response);
         pendingRequests_.erase(found);
         completedQueues[queueIndex] = true;
@@ -1056,6 +1099,39 @@ void VhostUserServer::drainQueueCompletions()
         if (completedQueues[index])
             notifyQueue(index);
     }
+}
+
+void VhostUserServer::publishHeldCompletions(std::uint32_t index)
+{
+    bool published = false;
+    for (auto held = heldCompletions_.begin(); held != heldCompletions_.end();) {
+        const auto found = pendingRequests_.find(held->requestId);
+        if (found == pendingRequests_.end()) {
+            held = heldCompletions_.erase(held);
+            continue;
+        }
+        if (found->second.queueIndex != index) {
+            ++held;
+            continue;
+        }
+        completeRequest(found->second, held->response);
+        pendingRequests_.erase(found);
+        held = heldCompletions_.erase(held);
+        published = true;
+    }
+    if (published)
+        notifyQueue(index);
+}
+
+void VhostUserServer::resumeQueues()
+{
+    for (std::uint32_t index = 0; index < queues_.size(); ++index) {
+        if (queues_[index].enabled)
+            publishHeldCompletions(index);
+    }
+    drainQueueCompletions();
+    for (std::uint32_t index = 0; index < queues_.size(); ++index)
+        processQueue(index);
 }
 
 void VhostUserServer::dispatchSharedMemoryActions()
@@ -1323,7 +1399,9 @@ void VhostUserServer::processQueue(std::uint32_t index)
              * a request's response only after the ring is enabled again. */
             if (requestSize == 0 && responseCapacity != 0)
                 break;
-            if (requestSize != 0 && device_->keepsRequestsOnDisabledRing())
+            if (requestSize != 0 &&
+                (device_->keepsRequestsOnDisabledRing() ||
+                 device_->keepsDeferredRequestsWhileDisabled()))
                 break;
             const PendingRequest disabled {
                 .requestId = 0,
@@ -1495,16 +1573,37 @@ void VhostUserServer::handleMessage(
             throw;
         }
     };
+    /* The enable of a ring the device held requests across: its held
+     * completions go to the used ring, in order, before the ring runs. */
+    const auto enableAcceptedQueue = [&](std::uint32_t index) {
+        try {
+            if (device_->keepsDeferredRequestsWhileDisabled())
+                publishHeldCompletions(index);
+            processQueue(index);
+            if (device_->keepsDeferredRequestsWhileDisabled() &&
+                everyConfiguredRingIsEnabled()) {
+                resumeQueues();
+            }
+        } catch (...) {
+            acknowledgeAcceptedRequest();
+            throw;
+        }
+    };
     switch (request) {
     case protocol::VhostRequest::getFeatures:
         requirePayloadSize(message, 0, "GET_FEATURES");
         requireNoDescriptors(message, "GET_FEATURES");
+        /* A driver's teardown sends it after disabling its rings, to know
+         * that the disables were handled, and then frees the rings. A
+         * suspend never sends it. */
+        retireHeldRequests();
         sendIntegerReply(socket, message.header, offeredFeatures);
         sentReply = true;
         break;
     case protocol::VhostRequest::setFeatures:
         requirePayloadSize(message, sizeof(std::uint64_t), "SET_FEATURES");
         requireNoDescriptors(message, "SET_FEATURES");
+        retireHeldRequests();
         negotiatedFeatures_ = payloadAs<std::uint64_t>(message.payload);
         if ((negotiatedFeatures_ & ~offeredFeatures) != 0)
             throw std::runtime_error("guest negotiated unknown features");
@@ -1524,6 +1623,7 @@ void VhostUserServer::handleMessage(
         requirePayloadSize(
             message, sizeof(std::uint64_t), "SET_PROTOCOL_FEATURES");
         requireNoDescriptors(message, "SET_PROTOCOL_FEATURES");
+        retireHeldRequests();
         const auto requestedProtocolFeatures =
             payloadAs<std::uint64_t>(message.payload);
         if ((requestedProtocolFeatures & ~offeredProtocolFeatures) != 0) {
@@ -1624,6 +1724,7 @@ void VhostUserServer::handleMessage(
         requireNoDescriptors(message, "SET_VRING_NUM");
         const auto state =
             payloadAs<protocol::VringState>(message.payload);
+        retireHeldRequests();
         if (!pendingRequests_.empty())
             throw std::runtime_error(
                 "SET_VRING_NUM while deferred requests are pending");
@@ -1640,6 +1741,7 @@ void VhostUserServer::handleMessage(
         requireNoDescriptors(message, "SET_VRING_BASE");
         const auto state =
             payloadAs<protocol::VringState>(message.payload);
+        retireHeldRequests();
         if (!pendingRequests_.empty())
             throw std::runtime_error(
                 "SET_VRING_BASE while deferred requests are pending");
@@ -1680,6 +1782,7 @@ void VhostUserServer::handleMessage(
         requireNoDescriptors(message, "SET_VRING_ADDR");
         const auto address =
             payloadAs<protocol::VringAddress>(message.payload);
+        retireHeldRequests();
         if (!pendingRequests_.empty())
             throw std::runtime_error(
                 "SET_VRING_ADDR while deferred requests are pending");
@@ -1705,12 +1808,15 @@ void VhostUserServer::handleMessage(
             throw std::runtime_error("SET_VRING_ENABLE was not negotiated");
         if (state.index >= queues_.size() || state.value > 1)
             throw std::runtime_error("invalid SET_VRING_ENABLE");
-        if (state.value == 0 && !pendingRequests_.empty()) {
+        /* A device that keeps its deferred requests across the disable is
+         * reset only by a message that changes what they refer to. */
+        if (state.value == 0 && !pendingRequests_.empty() &&
+            !device_->keepsDeferredRequestsWhileDisabled()) {
             resetDeviceState();
         }
         queues_[state.index].enabled = state.value != 0;
         if (queues_[state.index].enabled)
-            processAcceptedQueue(state.index);
+            enableAcceptedQueue(state.index);
         break;
     }
     case protocol::VhostRequest::setVringKick:
