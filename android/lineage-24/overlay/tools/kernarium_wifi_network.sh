@@ -16,11 +16,12 @@
 # join. If Wi-Fi is on, the network is still saved and nothing has joined by
 # then, saving it again enables it and the platform's own scan joins it; the
 # script waits up to $rejoin seconds for that join, so the same boot ends at 2.
-# A forgotten network is not saved again and leaves the marker at 2, because a
-# network added later cannot be disabled. Wi-Fi that is off leaves the marker
-# alone, so the next boot with Wi-Fi on still repairs. At 2 the script does
-# nothing more: saving replaces the network's settings (metered, auto-connect),
-# which the user may have chosen since.
+# Only a join the script sees sets 2. A forgotten network is not saved again
+# and leaves the marker as it is, because a listing that fails (the Wi-Fi
+# service busy) prints the same as one without the network. Wi-Fi that is off
+# leaves the marker alone, so the next boot with Wi-Fi on still repairs. At 2
+# the script does nothing more: saving replaces the network's settings
+# (metered, auto-connect), which the user may have chosen since.
 
 marker=persist.sys.kernarium.virtwifi_saved
 settle=45
@@ -73,10 +74,9 @@ case "$status" in
     *"Wifi is enabled"*) ;;
     *) exit 0 ;;
 esac
-if saved; then
-    cmd wifi add-network VirtWifi open >/dev/null 2>&1
-    log -t kernarium_wifi_network "VirtWifi saved again: Wi-Fi is on and nothing joined" 2>/dev/null
-    wait_joined "$rejoin" || exit 0
-fi
+saved || exit 0
+cmd wifi add-network VirtWifi open >/dev/null 2>&1
+log -t kernarium_wifi_network "VirtWifi saved again: Wi-Fi is on and nothing joined" 2>/dev/null
+wait_joined "$rejoin" || exit 0
 setprop "$marker" 2
 exit 0
