@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AndariumCore
 import Foundation
 
 /// A timed run of controllers for something that is not a person: connects,
 /// states, battery levels and disconnects, played against a `GamepadSession`.
-/// The unit tests and the test-only probe tool use it; the application never
-/// does.
-public struct GamepadScript: Sendable {
-    public enum Step: Sendable {
+/// It is simulated input: the unit tests and the test-only probe tool use it,
+/// and the application does not link this target (the App Store bundle check
+/// refuses a build that does).
+package struct GamepadScript: Sendable {
+    package enum Step: Sendable {
         case connect(GamepadController, GamepadState)
         case submit(id: Int, GamepadState)
         case battery(id: Int, GamepadBattery)
@@ -15,12 +17,12 @@ public struct GamepadScript: Sendable {
         case wait(milliseconds: Int)
     }
 
-    public var steps: [Step]
+    package var steps: [Step]
 
-    public init(_ steps: [Step]) { self.steps = steps }
+    package init(_ steps: [Step]) { self.steps = steps }
 
     /// Plays the steps in order against `session`; `sleep` is asked for each wait.
-    public func play(
+    package func play(
         on session: GamepadSession, sleep: (Int) -> Void = { usleep(UInt32(max(0, $0)) * 1000) }
     ) {
         for step in steps {
@@ -37,7 +39,7 @@ public struct GamepadScript: Sendable {
     // MARK: Built-in scripts
 
     /// One controller of each family the guest tells apart.
-    public static let controllers: [GamepadController] = [
+    package static let controllers: [GamepadController] = [
         GamepadController(id: 1, family: .dualSense, name: "DualSense Wireless Controller", haptics: .handles),
         GamepadController(id: 2, family: .dualShock4, name: "DualShock 4", haptics: .handles),
         GamepadController(id: 3, family: .xbox, name: "Xbox Wireless Controller", haptics: .handles),
@@ -45,9 +47,9 @@ public struct GamepadScript: Sendable {
     ]
 
     /// The names a probe tool can ask for.
-    public static let names = ["identity", "buttons", "hotplug"]
+    package static let names = ["identity", "buttons", "hotplug"]
 
-    public static func named(_ name: String) -> GamepadScript? {
+    package static func named(_ name: String) -> GamepadScript? {
         switch name {
         case "identity": identity
         case "buttons": buttons
@@ -57,13 +59,13 @@ public struct GamepadScript: Sendable {
     }
 
     /// The four controllers connect and stay, at rest.
-    public static var identity: GamepadScript {
+    package static var identity: GamepadScript {
         GamepadScript(controllers.map { .connect($0, .neutral) } + [.wait(milliseconds: 500)])
     }
 
     /// Every button, each stick direction, each trigger and each direction of
     /// the pad, one at a time, on every controller.
-    public static var buttons: GamepadScript {
+    package static var buttons: GamepadScript {
         var steps: [Step] = controllers.map { .connect($0, .neutral) }
         steps.append(.wait(milliseconds: 500))
         let singles: [GamepadState] =
@@ -90,7 +92,7 @@ public struct GamepadScript: Sendable {
 
     /// Controllers come and go, three times over, with the third slot's
     /// controller replaced by another family each time.
-    public static var hotPlug: GamepadScript {
+    package static var hotPlug: GamepadScript {
         var steps: [Step] = [
             .connect(controllers[0], .neutral), .connect(controllers[1], .neutral), .wait(milliseconds: 300),
         ]

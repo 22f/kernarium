@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The gamepad session against a fake relay on the other end of real sockets,
 /// a fake haptic player and fake indicators: how a controller becomes a

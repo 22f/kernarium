@@ -71,6 +71,11 @@ DEBUG_SUPPORT = (
     ("synthetic camera", "int _ZN3uml8platform17decodeChartMarkerEPKhmjj(void) { return 1; }\n"),
     ("synthetic camera", 'const char *fixture(void) { return "SyntheticPhone1,1"; }\n'),
     ("synthetic camera", 'const char *fixture(void) { return "synthetic-back-wide"; }\n'),
+    # The simulated controllers: the scripted input, the guest end of the wire
+    # and the test-support module that holds them.
+    ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),
+    ("synthetic controllers", "int _s23AndariumCoreTestSupport13GamepadScriptV7controllerSayAA0A10ControllerVGvgZ(void) { return 1; }\n"),
+    ("synthetic controllers", "int _s12AndariumCore22GamepadHostFrameReaderV4feedyAC6OutputVxSlRzs5UInt8V7ElementRtzlF(void) { return 1; }\n"),
     # The arm64 JIT: its owner of executable memory, its engine and its
     # entries, the runtime's and the loader's, the options that select it, and
     # the instruction that asks a debugger for JIT memory.

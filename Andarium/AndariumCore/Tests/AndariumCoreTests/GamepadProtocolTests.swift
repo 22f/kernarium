@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The gamepad wire format against the golden frames in
 /// `tests/unit/andarium/fixtures/gamepad-golden-frames.txt`, which the guest's

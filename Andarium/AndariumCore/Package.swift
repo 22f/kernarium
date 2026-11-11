@@ -21,15 +21,21 @@ let package = Package(
             name: "AndariumCore",
             dependencies: [.product(name: "GuestHostCore", package: "Core")]
         ),
-        // A test-only tool that plays a gamepad script to the guest's relay; the
-        // application does not link it.
+        // Simulated controllers and the guest end of the gamepad wire, for tests
+        // and the probe tool. It is not a product and the application never
+        // links it (the App Store bundle check refuses a build that does).
+        .target(
+            name: "AndariumCoreTestSupport",
+            dependencies: ["AndariumCore"]
+        ),
+        // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
-            dependencies: ["AndariumCore"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport"]
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport"]
         ),
     ]
 )

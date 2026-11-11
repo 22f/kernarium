@@ -7,6 +7,7 @@
 // It is never linked into the application.
 
 import AndariumCore
+import AndariumCoreTestSupport
 import Darwin
 import Foundation
 

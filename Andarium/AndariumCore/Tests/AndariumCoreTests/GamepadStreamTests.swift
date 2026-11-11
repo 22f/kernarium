@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The gamepad connection against a fake guest on the other end of real
 /// sockets: connecting and connecting again, what is read, what is written

@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The guest's end of the gamepad connection, for the stream and session tests:
 /// it accepts while `accepting`, keeps the peer of every connection, and

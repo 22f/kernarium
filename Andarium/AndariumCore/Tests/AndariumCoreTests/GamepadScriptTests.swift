@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The scripts the probe tool plays: that each plays against a session in
 /// order, and that the built-in ones name what they promise.

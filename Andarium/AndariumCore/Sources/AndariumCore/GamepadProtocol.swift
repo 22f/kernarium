@@ -163,7 +163,7 @@ public enum GamepadProtocol {
     /// The type and payload length a frame's first 8 bytes declare, whichever
     /// end sent it. A length over the limit is refused before the type is
     /// looked at, so the header alone decides.
-    static func parseHeader(_ bytes: some Collection<UInt8>) throws(Failure) -> (type: UInt16, length: Int) {
+    package static func parseHeader(_ bytes: some Collection<UInt8>) throws(Failure) -> (type: UInt16, length: Int) {
         let header = Array(bytes.prefix(headerSize))
         precondition(header.count == headerSize, "a header is 8 bytes")
         guard Array(header[0..<4]) == magic else { throw Failure.badMagic }
@@ -186,22 +186,8 @@ public enum GamepadProtocol {
         return (type, header.length)
     }
 
-    /// The type and payload length of a host's frame.
-    public static func parseHostHeader(_ bytes: some Collection<UInt8>) throws(Failure) -> (type: HostType, length: Int) {
-        let header = try parseHeader(bytes)
-        guard let type = HostType(rawValue: header.type) else { throw Failure.unknownType(header.type) }
-        switch type {
-        case .create: guard header.length >= createFixedSize + 1 else { throw Failure.badLength(header.type, header.length) }
-        case .destroy: guard header.length == 4 else { throw Failure.badLength(header.type, header.length) }
-        case .input: guard header.length >= 5 else { throw Failure.badLength(header.type, header.length) }
-        case .getReportReply: guard header.length >= 10 else { throw Failure.badLength(header.type, header.length) }
-        case .setReportReply: guard header.length == 8 else { throw Failure.badLength(header.type, header.length) }
-        }
-        return (type, header.length)
-    }
-
     /// The fixed part of a `CREATE` payload, before the descriptor.
-    static let createFixedSize = 2 + 2 + 4 * 4 + nameSize + uniqSize + 2
+    package static let createFixedSize = 2 + 2 + 4 * 4 + nameSize + uniqSize + 2
 
     /// The frame in the payload a guest header of `type` declared.
     public static func decodeGuestPayload(_ payload: some Collection<UInt8>, type: GuestType) throws(Failure) -> GamepadGuestFrame {
@@ -238,70 +224,9 @@ public enum GamepadProtocol {
         }
     }
 
-    /// The frame in the payload a host header of `type` declared.
-    public static func decodeHostPayload(_ payload: some Collection<UInt8>, type: HostType) throws(Failure) -> GamepadHostFrame {
-        let bytes = Array(payload)
-        func slot(_ index: Int) throws(Failure) -> Int {
-            guard Int(bytes[index]) < slotCount else { throw Failure.badSlot(Int(bytes[index])) }
-            return Int(bytes[index])
-        }
-        switch type {
-        case .create:
-            guard bytes.count >= createFixedSize + 1 else { throw Failure.badLength(type.rawValue, bytes.count) }
-            let descriptorOffset = createFixedSize
-            let length = Int(uint16(bytes, descriptorOffset - 2))
-            guard (1...maximumDescriptor).contains(length) else { throw Failure.badDescriptor(length) }
-            guard bytes.count == descriptorOffset + length else { throw Failure.badLength(type.rawValue, bytes.count) }
-            let nameOffset = 2 + 2 + 4 * 4
-            return .create(
-                GamepadCreate(
-                    slot: try slot(0), bus: uint16(bytes, 2), vendor: uint32(bytes, 4), product: uint32(bytes, 8),
-                    version: uint32(bytes, 12), country: uint32(bytes, 16),
-                    name: string(bytes[(nameOffset)..<(nameOffset + nameSize)]),
-                    uniq: string(bytes[(nameOffset + nameSize)..<(nameOffset + nameSize + uniqSize)]),
-                    descriptor: Array(bytes[descriptorOffset...])))
-        case .destroy:
-            guard bytes.count == 4 else { throw Failure.badLength(type.rawValue, bytes.count) }
-            return .destroy(slot: try slot(0))
-        case .input:
-            guard bytes.count >= 5 else { throw Failure.badLength(type.rawValue, bytes.count) }
-            let length = Int(uint16(bytes, 2))
-            guard (1...maximumReport).contains(length), bytes.count == 4 + length else {
-                throw Failure.badLength(type.rawValue, bytes.count)
-            }
-            return .input(slot: try slot(0), report: Array(bytes[4...]))
-        case .getReportReply:
-            guard bytes.count >= 10 else { throw Failure.badLength(type.rawValue, bytes.count) }
-            let length = Int(uint16(bytes, 8))
-            guard length <= maximumReport, bytes.count == 10 + length else { throw Failure.badLength(type.rawValue, bytes.count) }
-            return .getReportReply(slot: try slot(0), id: uint32(bytes, 4), error: uint16(bytes, 2), data: Array(bytes[10...]))
-        case .setReportReply:
-            guard bytes.count == 8 else { throw Failure.badLength(type.rawValue, bytes.count) }
-            return .setReportReply(slot: try slot(0), id: uint32(bytes, 4), error: uint16(bytes, 2))
-        }
-    }
-
-    /// The guest's frame in one whole message, header and payload.
-    public static func decodeGuest(_ message: some Collection<UInt8>) throws(Failure) -> GamepadGuestFrame {
-        let bytes = Array(message)
-        guard bytes.count >= headerSize else { throw Failure.badLength(0, bytes.count) }
-        let header = try parseGuestHeader(bytes)
-        guard bytes.count == headerSize + header.length else { throw Failure.badLength(header.type.rawValue, bytes.count) }
-        return try decodeGuestPayload(bytes[headerSize...], type: header.type)
-    }
-
-    /// The host's frame in one whole message, header and payload.
-    public static func decodeHost(_ message: some Collection<UInt8>) throws(Failure) -> GamepadHostFrame {
-        let bytes = Array(message)
-        guard bytes.count >= headerSize else { throw Failure.badLength(0, bytes.count) }
-        let header = try parseHostHeader(bytes)
-        guard bytes.count == headerSize + header.length else { throw Failure.badLength(header.type.rawValue, bytes.count) }
-        return try decodeHostPayload(bytes[headerSize...], type: header.type)
-    }
-
     // MARK: Encoding
 
-    static func header(type: UInt16, length: Int) -> [UInt8] {
+    package static func header(type: UInt16, length: Int) -> [UInt8] {
         var bytes = magic
         append(type, to: &bytes)
         append(UInt16(length), to: &bytes)
@@ -310,7 +235,7 @@ public enum GamepadProtocol {
 
     /// A C string field of `size` bytes: UTF-8 cut at a character boundary
     /// short of the NUL that ends it, and padded with zeros.
-    static func append(_ text: String, size: Int, to bytes: inout [UInt8]) {
+    package static func append(_ text: String, size: Int, to bytes: inout [UInt8]) {
         var field = [UInt8]()
         for character in text {
             let encoded = Array(String(character).utf8)
@@ -321,25 +246,25 @@ public enum GamepadProtocol {
         bytes.append(contentsOf: field)
     }
 
-    static func append(_ value: UInt16, to bytes: inout [UInt8]) {
+    package static func append(_ value: UInt16, to bytes: inout [UInt8]) {
         bytes.append(UInt8(value & 0xff))
         bytes.append(UInt8(value >> 8))
     }
 
-    static func append(_ value: UInt32, to bytes: inout [UInt8]) {
+    package static func append(_ value: UInt32, to bytes: inout [UInt8]) {
         for shift in stride(from: 0, to: 32, by: 8) { bytes.append(UInt8((value >> UInt32(shift)) & 0xff)) }
     }
 
-    private static func uint16(_ bytes: [UInt8], _ offset: Int) -> UInt16 {
+    package static func uint16(_ bytes: [UInt8], _ offset: Int) -> UInt16 {
         UInt16(bytes[offset]) | UInt16(bytes[offset + 1]) << 8
     }
 
-    private static func uint32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+    package static func uint32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
         (0..<4).reduce(0) { $0 | UInt32(bytes[offset + $1]) << UInt32(8 * $1) }
     }
 
     /// The text of a NUL padded field.
-    private static func string(_ field: ArraySlice<UInt8>) -> String {
+    package static func string(_ field: ArraySlice<UInt8>) -> String {
         String(decoding: field.prefix { $0 != 0 }, as: UTF8.self)
     }
 }
@@ -389,45 +314,6 @@ extension GamepadHostFrame {
     }
 }
 
-extension GamepadGuestFrame {
-    /// The frame as it goes on the wire; the guest's relay sends these, and
-    /// tests and the probe tool play the relay.
-    public var encoded: [UInt8] {
-        var payload = [UInt8]()
-        let type: GamepadProtocol.GuestType
-        switch self {
-        case .hello(let version, let slotCount):
-            type = .hello
-            GamepadProtocol.append(version, to: &payload)
-            payload.append(slotCount)
-            payload.append(0)
-        case .created(let slot, let result):
-            type = .created
-            payload = [UInt8(slot), 0, 0, 0]
-            GamepadProtocol.append(UInt32(bitPattern: result), to: &payload)
-        case .event(let slot, let event):
-            type = .event
-            payload = [UInt8(slot), event.rawValue, 0, 0]
-        case .output(let slot, let reportType, let data):
-            type = .output
-            payload = [UInt8(slot), reportType]
-            GamepadProtocol.append(UInt16(data.count), to: &payload)
-            payload.append(contentsOf: data)
-        case .getReport(let slot, let reportType, let number, let id):
-            type = .getReport
-            payload = [UInt8(slot), reportType, number, 0]
-            GamepadProtocol.append(id, to: &payload)
-        case .setReport(let slot, let reportType, let number, let id, let data):
-            type = .setReport
-            payload = [UInt8(slot), reportType, number, 0]
-            GamepadProtocol.append(id, to: &payload)
-            GamepadProtocol.append(UInt16(data.count), to: &payload)
-            payload.append(contentsOf: data)
-        }
-        return GamepadProtocol.header(type: type.rawValue, length: payload.count) + payload
-    }
-}
-
 /// The guest's frames out of a byte stream. Bytes arrive in any pieces; whole
 /// frames come out in order. A frame that breaks the format ends the stream's
 /// use: the owner closes the connection, and the frames that arrived before
@@ -457,43 +343,6 @@ public struct GamepadGuestFrameReader: Sendable {
                 guard buffer.count >= total else { return output }
                 output.frames.append(
                     try GamepadProtocol.decodeGuestPayload(buffer[GamepadProtocol.headerSize..<total], type: header.type))
-                buffer.removeFirst(total)
-            } catch {
-                output.failure = error
-                buffer.removeAll()
-                return output
-            }
-        }
-        return output
-    }
-}
-
-/// The host's frames out of a byte stream, for whatever plays the guest's
-/// relay: the same rules as `GamepadGuestFrameReader`.
-public struct GamepadHostFrameReader: Sendable {
-    public struct Output: Sendable {
-        public var frames: [GamepadHostFrame] = []
-        public var failure: GamepadProtocol.Failure?
-    }
-
-    private var buffer: [UInt8] = []
-
-    public init() {}
-
-    public var pendingByteCount: Int { buffer.count }
-
-    public mutating func reset() { buffer.removeAll() }
-
-    public mutating func feed(_ bytes: some Collection<UInt8>) -> Output {
-        buffer.append(contentsOf: bytes)
-        var output = Output()
-        while buffer.count >= GamepadProtocol.headerSize {
-            do {
-                let header = try GamepadProtocol.parseHostHeader(buffer.prefix(GamepadProtocol.headerSize))
-                let total = GamepadProtocol.headerSize + header.length
-                guard buffer.count >= total else { return output }
-                output.frames.append(
-                    try GamepadProtocol.decodeHostPayload(buffer[GamepadProtocol.headerSize..<total], type: header.type))
                 buffer.removeFirst(total)
             } catch {
                 output.failure = error
