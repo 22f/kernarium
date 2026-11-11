@@ -1078,22 +1078,33 @@ void aReportHeldForTheRegistrationIsHeldByTheGuestAfterIt()
 
 void aResetOfTheDeviceForgetsWhatTheGuestHeld()
 {
-    EventQueue queue(EventQueue::Attachment::pluggable);
-    require(queue.setConnected(true));
-    queue.guestStatus(registration(1));
-    queue.enqueue(Events {key(keyA, 1), synchronize()});
-    fillQueue(queue, 2);
-    queue.enqueue(Events {key(keyA, 0), synchronize()}); // dropped
-
-    // The guest reset the device: it has no events and no input device, and
-    // the host plugged nothing new.
-    queue.reset();
-    queue.guestStatus(registration(1));
+    // A fixed device stays registered through a reset, so the reset alone
+    // decides what the queue still owes.
+    EventQueue fixed;
+    fixed.enqueue(Events {key(keyA, 1), synchronize()});
+    fillQueue(fixed, 2);
+    fixed.enqueue(Events {key(keyA, 0), synchronize()}); // dropped
+    fixed.reset();
     const Events next {key(keyB, 1), synchronize()};
-    queue.enqueue(next);
+    fixed.enqueue(next);
     Events got;
     protocol::InputEvent event {};
-    while (queue.take(event))
+    while (fixed.take(event))
+        got.push_back(event);
+    requireStream(got, next);
+
+    // A plugged device is unregistered by a reset and registers again.
+    EventQueue plugged(EventQueue::Attachment::pluggable);
+    require(plugged.setConnected(true));
+    plugged.guestStatus(registration(1));
+    plugged.enqueue(Events {key(keyA, 1), synchronize()});
+    fillQueue(plugged, 2);
+    plugged.enqueue(Events {key(keyA, 0), synchronize()}); // dropped
+    plugged.reset();
+    plugged.guestStatus(registration(1));
+    plugged.enqueue(next);
+    got.clear();
+    while (plugged.take(event))
         got.push_back(event);
     requireStream(got, next);
 }
