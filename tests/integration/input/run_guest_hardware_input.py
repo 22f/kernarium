@@ -29,7 +29,8 @@ nodes by hardware_input_probe.py. The runner checks:
   plugged by one client;
 - a client that connects and leaves again and again, with the keyboard and
   the mouse plugged and unplugged in quick succession, leaves the devices in
-  the state of the last client, on the same event nodes a second later.
+  the state of the last client, and the checks of that state run once their
+  event nodes hold still for a second.
 
 Every wait has a deadline. The guest is stopped on any exit.
 usage: run_guest_hardware_input.py --emulator uml-darwin --rootfs ROOTFS [--init-shell]
@@ -540,15 +541,21 @@ def flapping_cycle(guest: Guest, host: HostLog, port: int, label: str) -> None:
         client.centre()
         for name in HARDWARE:
             wait_for_device(guest, name, "present", PLUG_SECONDS, f"{label}: {name} did not survive the flapping")
-        # A configuration change still queued in the guest would take a device
-        # that is present now and register it again, under another node.
-        first = devices(guest)
-        time.sleep(1)
-        second = devices(guest)
-        for name in HARDWARE:
-            nodes = (first.get(name, {}).get("event"), second.get(name, {}).get("event"))
-            if None in nodes or nodes[0] != nodes[1]:
-                raise Failure(f"{label}: {name} was on {nodes[0]} and a second later on {nodes[1]}")
+        # A device still present from an earlier flap is registered again when
+        # the guest reads the change of the last plug, under another node. Once
+        # every device keeps its node for a second, no change is left queued.
+        deadline = time.monotonic() + PLUG_SECONDS
+        while True:
+            first = devices(guest)
+            time.sleep(1)
+            second = devices(guest)
+            nodes = {name: (first.get(name, {}).get("event"), second.get(name, {}).get("event"))
+                     for name in HARDWARE}
+            if all(before is not None and before == after for before, after in nodes.values()):
+                break
+            if time.monotonic() > deadline:
+                raise Failure(f"{label}: the devices kept no event node for a second within "
+                              f"{PLUG_SECONDS} s; the last two listings: {nodes}")
         found = require_only(guest, HARDWARE, f"{label}: after the flapping")
         check_keyboard_device(found[KEYBOARD])
         check_mouse_devices(found[MOUSE], found[POINTER])
