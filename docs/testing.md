@@ -301,13 +301,14 @@ checks the runtime's writer against);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol`,
 `andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image` and
-`andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
+`andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
-ranges of every field and the frame reader), system image staging and the
-screenshot script, and `kernarium-host-features` (unit)
+ranges of every field and the frame reader), system image staging, the
+screenshot script, the String Catalogs' check and their sync with the
+compiler's extraction, and `kernarium-host-features` (unit)
 the table of host features the boot request carries to an Android guest. The
 application builds with Xcode (`AndariumPreview` is the Simulator build with
 mock data, `Andarium` the device application,

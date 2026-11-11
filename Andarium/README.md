@@ -570,6 +570,15 @@ iOS device prefix contract declares a component, that no entry covers
 ([`docs/testing.md`](../docs/testing.md#andarium)). Adding a library therefore
 means adding its entry to the script's table and running it.
 
+## Languages
+
+Andarium is in English, Simplified Chinese, Traditional Chinese (Taiwan usage)
+and Japanese, and follows the language of iOS and the per-app language setting.
+The strings are String Catalogs in `Localization/` (screens, permission texts,
+What's New notes) and in `AndariumCore`'s resources; `scripts/localization.py`
+checks them and syncs them with the compiler's extraction. Bug report and
+session record text, log lines and technical names stay English.
+
 ## Automation
 
 A harness launch (`xcrun devicectl device process launch`, environment given
