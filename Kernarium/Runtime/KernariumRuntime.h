@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 35U
+#define KERNARIUM_RUNTIME_API_VERSION 36U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -746,6 +746,25 @@ typedef void (*kernarium_runtime_set_input_status_callback_function)(
  * no guest ignores it. */
 typedef void (*kernarium_runtime_wake_for_input_function)(void);
 
+/* Which denial of the network the application's notice is up for (runtime
+ * API 36). The application watches the system's network path; when iOS denies
+ * Andarium cellular or Wi-Fi access it shows a notice, and tells the runtime,
+ * which keeps it in the session record (how many denials began during the
+ * session and the one in force) beside the counts of the guest's user network.
+ * The notice stays reported after the person dismisses it. It is a note for
+ * bug reports: nothing in the guest's network follows it. */
+enum {
+    KERNARIUM_RUNTIME_NETWORK_NOTICE_NONE = 0,
+    KERNARIUM_RUNTIME_NETWORK_NOTICE_CELLULAR_DENIED = 1,
+    KERNARIUM_RUNTIME_NETWORK_NOTICE_WIFI_DENIED = 2,
+};
+
+/* Sets the denial above; the same value again changes nothing. It may be called
+ * at any time, before a guest runs and between two boots included: the next
+ * session's record starts with the denial in force. Returns 0, or -EINVAL for
+ * another value. Any thread. */
+typedef int (*kernarium_runtime_set_network_notice_function)(int notice);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -791,6 +810,7 @@ typedef struct kernarium_runtime_api {
     kernarium_runtime_set_input_status_callback_function
         set_input_status_callback;
     kernarium_runtime_wake_for_input_function wake_for_input;
+    kernarium_runtime_set_network_notice_function set_network_notice;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

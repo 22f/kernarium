@@ -482,8 +482,13 @@ requires reopening Andarium.
   runs (`StatsSampling.isWanted`). Memory is the guest's in use against its
   size, and VRAM the host GPU's usage against the guest's budget
   ([`docs/graphics.md`](../docs/graphics.md#device-memory-budget)), a dash
-  without one; each has a bar of its share, orange from 90%. Settings' Show on
-  screen is kept for the install and restored at launch, off on a fresh one
+  without one; each has a bar of its share, orange from 90%. The readings go
+  on every second, but one reaches the views only when it draws something
+  other than they show (`StatsPublishGate`, `Readout.Drawn`: the figures as
+  written, the bars to a thousandth and the sparkline's slots), so a steady
+  guest redraws nothing; the harness's console report prints every reading.
+  Settings' Show on screen is kept for the install and restored at launch,
+  off on a fresh one
   (`StatsPreference`, its own stored value beside `DisplayOptions`). A launch
   with any launch setting is a harness's and starts with them off, so a
   measured run never inherits the overlay; `ANDARIUM_STATS` (`1` or `0`) states
@@ -506,6 +511,17 @@ requires reopening Andarium.
   It stands down while the guest's own low-memory killer reclaims the budget
   (`guest_reclaims`, runtime API 29), which is then the only one that ends an
   app.
+- **Network denied.** While the application is active and has a guest, the
+  model watches the system's network path (`NetworkAccessWatcher`, an
+  `NWPathMonitor` that calls back for a change of the path alone and makes no
+  request). A path unsatisfied because iOS denies Andarium cellular data or
+  Wi-Fi shows one notice per cause, a card on Home and a banner in a session
+  (`NetworkWords`), with Open Settings and a dismissal that holds until the
+  path has been allowed; no network at all, an inactive VPN and the Local
+  Network permission are not this notice. The runtime is told which denial is
+  in force (runtime API 36), and the session record notes it beside the counts
+  of the guest's network (`NetworkRecord`), which the bug report carries in
+  words.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end

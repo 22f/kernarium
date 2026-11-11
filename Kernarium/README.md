@@ -196,7 +196,9 @@ Kernarium attaches:
 - Virtio-Sound playback and capture, which records silence unless the user
   turns on Microphone;
 - an Android-only Virtio battery reflecting the Apple host's battery;
-- SLiRP networking from the verified iOS prefix;
+- SLiRP networking from the verified iOS prefix, whose counts of DNS, DHCP and
+  TCP set-up go into the session record, beside the denial of the network that
+  the application states (`set_network_notice`, runtime API 36);
 - a Virtio vsock device ([the device](../darwin/device/vsock/README.md)),
   through which the application opens streams to guest ports (`connect_vsock`,
   runtime API 19; the guest cannot connect to the application);

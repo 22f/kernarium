@@ -17,6 +17,7 @@
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <string>
 #include <time.h>
@@ -56,14 +57,28 @@ char record_text[session_state_max_bytes];
 char tail_text[output_size];
 
 /* The record's first bytes are a fixed slot that only the checkpoints write,
- * the next are the stall slot that only the stall watch writes, and the rest
- * is the session's state that only its begin and its end write, so none ever
- * overwrites another's bytes, whichever finishes last. */
+ * the next are the stall slot that only the stall watch writes, the network
+ * slot after it is written by the checkpoints and the session's begin and
+ * end, and the rest is the session's state that only its begin and its end
+ * write, so none ever overwrites another's bytes, whichever finishes last. */
 constexpr std::size_t memory_slot_size = session_memory_slot_bytes;
 constexpr std::size_t stall_slot_offset = session_memory_slot_bytes;
 std::atomic<bool> checkpoint_thread_started{false};
 
 std::atomic<MemoryTermsReader> terms_reader{nullptr};
+
+/* The network slot: the counts since the session began, and the notice. The
+ * baseline is the reading at the begin, written before the session opens and
+ * read after. */
+std::atomic<SessionNetworkReader> network_reader{nullptr};
+SessionNetworkCounts network_baseline{};
+std::atomic<NetworkNotice> notice_now{NetworkNotice::none};
+std::atomic<std::uint32_t> notice_times{0};
+/* The slot is formatted in static storage, so one writer at a time: the
+ * checkpoint thread, or the session's end, which may run in a signal handler
+ * and so never waits. A writer that finds it taken leaves the slot to the
+ * other, whose reading is as new. */
+std::atomic_flag network_slot_busy = ATOMIC_FLAG_INIT;
 
 /* One checkpoint's figures in MiB, as the history keeps them. */
 struct HistoryEntry final {
@@ -228,7 +243,7 @@ void write_memory_slot(int descriptor) noexcept
 	os_unfair_lock_lock(&history_lock);
 	Text text{slot, sizeof(slot) - 1};
 	const std::int64_t at = now();
-	text.text("uml-session 4\nmemory at ").number(at);
+	text.text("uml-session 5\nmemory at ").number(at);
 	task_vm_info_data_t info{};
 	mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
 	std::uint64_t footprint = 0;
@@ -339,6 +354,99 @@ void write_blank_stall_slot(int descriptor) noexcept
 	} while (written < 0 && errno == EINTR);
 }
 
+/* The counts of `now` since `baseline`; a count that fell below its baseline
+ * belongs to a provider made since, and is counted whole. */
+SessionNetworkCounts network_since(const SessionNetworkCounts &now,
+	const SessionNetworkCounts &baseline) noexcept
+{
+	const bool replaced = now.dns_answered < baseline.dns_answered ||
+		now.dns_policy_denied < baseline.dns_policy_denied ||
+		now.dns_timed_out < baseline.dns_timed_out ||
+		now.dns_failed < baseline.dns_failed ||
+		now.dhcp_discovers < baseline.dhcp_discovers ||
+		now.dhcp_requests < baseline.dhcp_requests ||
+		now.dhcp_acks < baseline.dhcp_acks ||
+		now.tcp_attempts < baseline.tcp_attempts ||
+		now.tcp_established < baseline.tcp_established ||
+		now.tcp_unreachable < baseline.tcp_unreachable ||
+		now.tcp_reset < baseline.tcp_reset;
+	if (replaced)
+		return now;
+	return {
+		.dns_answered = now.dns_answered - baseline.dns_answered,
+		.dns_policy_denied =
+			now.dns_policy_denied - baseline.dns_policy_denied,
+		.dns_timed_out = now.dns_timed_out - baseline.dns_timed_out,
+		.dns_failed = now.dns_failed - baseline.dns_failed,
+		.dhcp_discovers = now.dhcp_discovers - baseline.dhcp_discovers,
+		.dhcp_requests = now.dhcp_requests - baseline.dhcp_requests,
+		.dhcp_acks = now.dhcp_acks - baseline.dhcp_acks,
+		.tcp_attempts = now.tcp_attempts - baseline.tcp_attempts,
+		.tcp_established = now.tcp_established - baseline.tcp_established,
+		.tcp_unreachable = now.tcp_unreachable - baseline.tcp_unreachable,
+		.tcp_reset = now.tcp_reset - baseline.tcp_reset,
+	};
+}
+
+std::string_view notice_word(NetworkNotice notice) noexcept
+{
+	switch (notice) {
+	case NetworkNotice::none:
+		return "none";
+	case NetworkNotice::cellular_denied:
+		return "cellular";
+	case NetworkNotice::wifi_denied:
+		return "wifi";
+	}
+	return "none";
+}
+
+/* The network slot: a format line, the counts when the guest has a network
+ * (one line each for DNS, DHCP and TCP), and the notice; padded to the slot's
+ * size. */
+void write_network_slot(int descriptor) noexcept
+{
+	static char slot[session_network_slot_bytes];
+	if (network_slot_busy.test_and_set(std::memory_order_acquire))
+		return;
+	Text text{slot, sizeof(slot) - 1};
+	text.text("network 1\n");
+	SessionNetworkCounts counts{};
+	const auto reader = network_reader.load(std::memory_order_acquire);
+	if (reader != nullptr && reader(counts)) {
+		counts = network_since(counts, network_baseline);
+		const auto n = [](std::uint64_t value) {
+			return static_cast<std::int64_t>(std::min<std::uint64_t>(
+				value, INT64_MAX));
+		};
+		text.text("net-dns answered ").number(n(counts.dns_answered))
+			.text(" policy-denied ").number(n(counts.dns_policy_denied))
+			.text(" timed-out ").number(n(counts.dns_timed_out))
+			.text(" failed ").number(n(counts.dns_failed)).text("\n");
+		text.text("net-dhcp discovers ").number(n(counts.dhcp_discovers))
+			.text(" requests ").number(n(counts.dhcp_requests))
+			.text(" acks ").number(n(counts.dhcp_acks)).text("\n");
+		text.text("net-tcp attempts ").number(n(counts.tcp_attempts))
+			.text(" established ").number(n(counts.tcp_established))
+			.text(" unreachable ").number(n(counts.tcp_unreachable))
+			.text(" reset ").number(n(counts.tcp_reset)).text("\n");
+	}
+	text.text("net-notice denials ")
+		.number(notice_times.load(std::memory_order_relaxed))
+		.text(" now ")
+		.text(notice_word(notice_now.load(std::memory_order_relaxed)))
+		.text("\n");
+	const std::size_t used = text.size();
+	std::memset(slot + used, ' ', sizeof(slot) - 1 - used);
+	slot[sizeof(slot) - 1] = '\n';
+	ssize_t written;
+	do {
+		written = pwrite(descriptor, slot, sizeof(slot),
+			session_network_offset);
+	} while (written < 0 && errno == EINTR);
+	network_slot_busy.clear(std::memory_order_release);
+}
+
 /* Waits one checkpoint interval inside libsystem_kernel alone: the thread
  * fence defers a thread inside libsystem_c (nanosleep, usleep) on every pass,
  * and so never holds this uml-* thread. */
@@ -396,6 +504,8 @@ void write_record(SessionEnd end, int status, std::string_view message,
 	const int descriptor = record_descriptor.load(std::memory_order_acquire);
 	if (descriptor < 0)
 		return;
+	/* The last counts of the session, which no checkpoint may follow. */
+	write_network_slot(descriptor);
 	Text record{record_text, sizeof(record_text)};
 	record.text("state ")
 		.text(end == SessionEnd::running ? "running" : "ended")
@@ -587,8 +697,24 @@ bool begin_session_record(std::string_view path,
 		(void)atexit(record_process_exit);
 	session_started.store(now(), std::memory_order_relaxed);
 	forget_history();
+	/* A checkpoint thread of the session before may still be formatting the
+	 * network slot from the old baseline: write the new one between two
+	 * writers. This runs in no signal handler, so it may wait for the slot. */
+	while (network_slot_busy.test_and_set(std::memory_order_acquire))
+		sched_yield();
+	network_baseline = {};
+	if (const auto reader = network_reader.load(std::memory_order_acquire);
+	    reader == nullptr || !reader(network_baseline))
+		network_baseline = {};
+	network_slot_busy.clear(std::memory_order_release);
+	/* A denial under way when the session begins is one the session saw. */
+	notice_times.store(
+		notice_now.load(std::memory_order_relaxed) != NetworkNotice::none ?
+			1 : 0,
+		std::memory_order_relaxed);
 	write_memory_slot(descriptor);
 	write_blank_stall_slot(descriptor);
+	write_network_slot(descriptor);
 	session_open.store(true, std::memory_order_release);
 	write_record(SessionEnd::running, 0, {}, {});
 	start_checkpoints();
@@ -624,8 +750,23 @@ void set_memory_terms_reader(MemoryTermsReader reader) noexcept
 void checkpoint_session_memory() noexcept
 {
 	const int descriptor = record_descriptor.load(std::memory_order_acquire);
-	if (descriptor >= 0)
+	if (descriptor >= 0) {
 		write_memory_slot(descriptor);
+		write_network_slot(descriptor);
+	}
+}
+
+void set_network_counts_reader(SessionNetworkReader reader) noexcept
+{
+	network_reader.store(reader, std::memory_order_release);
+}
+
+void set_network_notice(NetworkNotice notice) noexcept
+{
+	const auto before =
+		notice_now.exchange(notice, std::memory_order_relaxed);
+	if (notice != NetworkNotice::none && notice != before)
+		notice_times.fetch_add(1, std::memory_order_relaxed);
 }
 
 void end_session_record(SessionEnd end, int status,

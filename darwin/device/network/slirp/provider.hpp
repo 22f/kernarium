@@ -3,6 +3,7 @@
 
 #include "uml_darwin_network.h"
 #include "dns_resolver.hpp"
+#include "network_counters.hpp"
 #include "platform/descriptor.hpp"
 
 #include <libslirp.h>
@@ -110,6 +111,12 @@ public:
     int read(std::span<std::byte> buffer);
     int write(std::span<const std::byte> frame);
 	void stop() noexcept;
+	/* What the provider has counted since it was made, and across the
+	 * links it brings up; any thread, and it takes no lock. */
+	[[nodiscard]] NetworkCounts counters() const noexcept
+	{
+		return counters_.read();
+	}
 
 #if UML_SLIRP_TESTING
 	void pause_transmit_for_testing() noexcept;
@@ -156,6 +163,32 @@ public:
 	void set_dns_interface_for_testing(std::uint32_t index) noexcept
 	{
 		dns_interface_for_testing_ = index;
+	}
+	/* The resolver's wiring checks (dns_resolver.hpp). */
+	void inject_dns_submit_error_for_testing(std::int32_t error) noexcept
+	{
+		resolver_.inject_submit_error_for_testing(error);
+	}
+	void inject_dns_reply_error_for_testing(std::int32_t error) noexcept
+	{
+		resolver_.inject_reply_error_for_testing(error);
+	}
+	void set_dns_deadline_for_testing(
+		std::chrono::milliseconds deadline) noexcept
+	{
+		resolver_.set_deadline_for_testing(deadline);
+	}
+	void hold_dns_answers_for_testing(bool held) noexcept
+	{
+		resolver_.hold_answers_for_testing(held);
+	}
+	[[nodiscard]] std::uint64_t dns_answers_dropped_for_testing() const noexcept
+	{
+		return resolver_.answers_dropped_for_testing();
+	}
+	void set_dns_pending_limit_for_testing(std::size_t limit) noexcept
+	{
+		resolver_.set_pending_limit_for_testing(limit);
 	}
 	/* The next open() finds no socket path for DNS over TCP. */
 	void set_dns_streams_unavailable_for_testing(bool unavailable) noexcept
@@ -234,6 +267,9 @@ private:
 	std::unique_ptr<Slirp, SlirpDeleter> slirp_;
 	std::array<uml::platform::UniqueDescriptor, 2> wake_pipe_;
 	std::array<uml::platform::UniqueDescriptor, 2> receive_pipe_;
+	/* Declared before what counts into them. */
+	NetworkCounters counters_;
+	TrafficObserver observer_{counters_};
 	HostResolver resolver_;
 	std::uint16_t next_identification_{1};
 	/* Where SLiRP's guest forward carries DNS over TCP to the resolver;
