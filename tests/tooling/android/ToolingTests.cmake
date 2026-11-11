@@ -169,3 +169,13 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_microg_probe.py
     LABELS android
     TIMEOUT 60)
+
+# The camera layouts: the closed set of names the host composes, their fallback
+# order, and the permission, media profiles and init files the generator renders
+# from them (overlay/camera/generated holds exactly its output).
+uml_add_tooling_test(
+    NAME android17-camera-layouts
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_camera_layouts.py
+    LABELS android
+    TIMEOUT 30)
