@@ -10,8 +10,10 @@ guest's hardware keyboard, whose pointer plugs the mouse and the pointer, and wh
 probe is tests/integration/android/keymouse, an application outside the image that logs what Android
 delivers to it; build its APK and name it with --probe-apk. The runner checks:
 
-- before any client: only the side keys' "Kernarium Keyboard" is an input device, with the non-alphabetic
-  layout of its key layout file, and none of the three devices the host plugs;
+- before any client: the guest has the input devices an Andarium guest has before a host keyboard is plugged,
+  the touchscreen and the side keys' "Kernarium Keyboard" (the macOS launcher's ``--hardware-input`` attaches
+  both, and nothing feeds them), the keyboard with the non-alphabetic layout of its key layout file, and none
+  of the three devices the host plugs;
 - a first key plugs "Kernarium Hardware Keyboard": the launcher reports the plug and the guest's
   registration, Android lists it as an external alphabetic keyboard with the product's device configuration
   and the generic layout, the side keys' device stays non-alphabetic, the key that plugged it reaches the
@@ -615,7 +617,7 @@ def check_before_any_client(guest: Guest) -> None:
         raise Failure(f"before any client: {problem}")
     if plug_lines(guest.host_lines()):
         raise Failure(f"the launcher plugged a device before any client: {guest.host_lines()}")
-    print("before any client: only the side keys' keyboard, non-alphabetic; none of the host's devices")
+    print("before any client: the side keys' keyboard is non-alphabetic; none of the host's devices")
 
 
 def install_probe(guest: Guest, apk: pathlib.Path) -> None:
