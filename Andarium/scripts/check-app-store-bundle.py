@@ -18,8 +18,8 @@ application that must:
   - carry no debugging or automation support in the host code of the
     application or of a framework: the frame mirror, console input, the
     guest sampler, the footprint log, the virtual Jetsam, the activity logs,
-    the census and histogram, the automation entries, the synthetic camera and
-    the harness's leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
+    the census and histogram, the automation entries, the synthetic camera, the
+    UI tests' input probe and the harness's leftovers (DEBUG_SYMBOLS and DEBUG_STRINGS name them; the stand-ins that
     keep the runtime API's layout, runtimeSetFrameSink,
     runtimeSendConsoleInput and runtimePrepareJit, are allowed), and contain
     no test bundle and no XCTest or Testing framework;
@@ -311,6 +311,12 @@ DEBUG_SYMBOLS = (
     ("launch harness", (b"13ConsoleReport", b"15environmentName", b"13applyDeferred",
                         b"16printsStatistics", b"13launchApplied",
                         b"15ThermalOverride")),
+    # The UI tests' probe of the guest's keyboard and mouse
+    # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
+    # runtime and the session that runs without a guest.
+    ("input probe", (b"10InputProbe", b"16InputProbeLaunch", b"29RecordingHardwareInputRuntime",
+                     b"15beginInputProbe", b"17InputProbeReadout", b"19makeInputProbeModel",
+                     b"10inputProbe")),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.
@@ -338,6 +344,7 @@ DEBUG_STRINGS = (
     ("automation", (b"kernarium_runtime_automation_", b"automation boot with",
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
+    ("input probe", (b"inputProbeLog", b"inputProbeField")),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
                           b"SyntheticLaptop1,1", b"synthetic-back-wide")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
