@@ -1,0 +1,483 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * The provider counts the guest's network for the session record: DNS queries
+ * by how they ended, DHCP exchanges, and TCP connection attempts by how SLiRP
+ * answered them. The probe drives the provider the way a guest does and reads
+ * the counts back through the provider and through the C entry the runtime
+ * uses (uml_slirp_net_read_counters).
+ *
+ * The resolver is confined to kDNSServiceInterfaceIndexLocalOnly, which needs
+ * no network. A listener on the host's loopback, reached through the gateway,
+ * is a connection that is made; the same address with no listener is one that
+ * is refused; a connect to port 0 of a documentation address is one SLiRP
+ * leaves unanswered. The classes SLiRP's ICMP errors fall in (unreachable)
+ * come from SLiRP itself, in the second part, which feeds the observer the
+ * frames of an unmodified SLiRP.
+ */
+#include "network_counters.hpp"
+#include "provider.hpp"
+#include "slirp_tcp_harness.hpp"
+#include "uml_slirp_net.h"
+
+#include <dns_sd.h>
+
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+using namespace slirp_harness;
+using Address = std::array<std::uint8_t, 4>;
+using Bytes = std::vector<std::uint8_t>;
+using Clock = std::chrono::steady_clock;
+using uml::network::NetworkCounters;
+using uml::network::NetworkCounts;
+using uml::network::TrafficObserver;
+
+constexpr Address gateway{10, 0, 2, 2};
+constexpr Address name_server{10, 0, 2, 3};
+constexpr Address documentation{192, 0, 2, 1};
+
+int failures;
+
+void fail(const char *label, const std::string &message)
+{
+	std::fprintf(stderr, "%s: %s\n", label, message.c_str());
+	failures++;
+}
+
+std::string describe(const NetworkCounts &counts)
+{
+	return "dns " + std::to_string(counts.dns_answered) + "/" +
+		std::to_string(counts.dns_policy_denied) + "/" +
+		std::to_string(counts.dns_timed_out) + "/" +
+		std::to_string(counts.dns_failed) + " dhcp " +
+		std::to_string(counts.dhcp_discovers) + "/" +
+		std::to_string(counts.dhcp_requests) + "/" +
+		std::to_string(counts.dhcp_acks) + " tcp " +
+		std::to_string(counts.tcp_attempts) + "/" +
+		std::to_string(counts.tcp_established) + "/" +
+		std::to_string(counts.tcp_unreachable) + "/" +
+		std::to_string(counts.tcp_refused);
+}
+
+Bytes udp_frame(const Address &source, const Address &destination,
+		std::uint16_t source_port, std::uint16_t destination_port,
+		const Bytes &payload)
+{
+	const std::size_t udp_length = 8 + payload.size();
+	Bytes frame(14 + 20 + udp_length, 0);
+	for (std::size_t index = 0; index < 6; ++index) {
+		frame[index] = 0xff;
+		frame[6 + index] = guest_mac[index];
+	}
+	put16(frame, 12, 0x0800);
+	frame[14] = 0x45;
+	put16(frame, 16, static_cast<std::uint16_t>(20 + udp_length));
+	put16(frame, 20, 0x4000);
+	frame[22] = 64;
+	frame[23] = IPPROTO_UDP;
+	for (std::size_t index = 0; index < 4; ++index) {
+		frame[26 + index] = source[index];
+		frame[30 + index] = destination[index];
+	}
+	put16(frame, 24, checksum_fold(checksum_add(0, &frame[14], 20)));
+	put16(frame, 34, source_port);
+	put16(frame, 36, destination_port);
+	put16(frame, 38, static_cast<std::uint16_t>(udp_length));
+	std::copy(payload.begin(), payload.end(), frame.begin() + 42);
+	std::uint32_t sum = checksum_add(0, &frame[26], 8);
+	sum += IPPROTO_UDP;
+	sum += static_cast<std::uint32_t>(udp_length);
+	sum = checksum_add(sum, &frame[34], udp_length);
+	const auto folded = checksum_fold(sum);
+	put16(frame, 40, folded == 0 ? 0xffff : folded);
+	return frame;
+}
+
+/* A DHCP client message of `type`: a DISCOVER, or a REQUEST for the lease. */
+Bytes dhcp_message(std::uint8_t type)
+{
+	Bytes bootp(240, 0);
+	bootp[0] = 1;
+	bootp[1] = 1;
+	bootp[2] = 6;
+	put32(bootp, 4, 0x1badcafe);
+	put16(bootp, 10, 0x8000);
+	std::copy(guest_mac.begin(), guest_mac.end(), bootp.begin() + 28);
+	put32(bootp, 236, 0x63825363U);
+	bootp.insert(bootp.end(), {53, 1, type});
+	if (type == 3) {
+		bootp.insert(bootp.end(), {50, 4, 10, 0, 2, 15});
+		bootp.insert(bootp.end(), {54, 4, 10, 0, 2, 2});
+	}
+	bootp.push_back(255);
+	return bootp;
+}
+
+/* The DHCP message type of a frame from SLiRP's server port, or 0. */
+std::uint8_t server_dhcp_type(const Bytes &frame)
+{
+	if (frame.size() < 42 + 240 || get16(frame, 12) != 0x0800 ||
+	    frame[23] != IPPROTO_UDP || get16(frame, 34) != 67 ||
+	    get16(frame, 36) != 68)
+		return 0;
+	for (std::size_t index = 42 + 240; index + 2 < frame.size();) {
+		const std::uint8_t code = frame[index];
+		if (code == 255)
+			break;
+		if (code == 0) {
+			index++;
+			continue;
+		}
+		if (code == 53)
+			return frame[index + 2];
+		index += 2 + frame[index + 1];
+	}
+	return 0;
+}
+
+class Guest final {
+public:
+	explicit Guest(uml::network::SlirpProvider &provider)
+		: provider_(provider)
+	{
+	}
+
+	bool send(const Bytes &frame)
+	{
+		return provider_.write({reinterpret_cast<const std::byte *>(
+						frame.data()),
+					frame.size()}) == 0;
+	}
+
+	template <class Accept>
+	std::optional<Bytes> receive(Accept accept, int timeout_ms = 3000)
+	{
+		const auto deadline =
+			Clock::now() + std::chrono::milliseconds{timeout_ms};
+		std::array<std::byte, 2048> buffer{};
+		while (Clock::now() < deadline) {
+			const int length = provider_.read(buffer);
+			if (length <= 0) {
+				pollfd descriptor{provider_.irq_fd(), POLLIN, 0};
+				(void)::poll(&descriptor, 1, 10);
+				continue;
+			}
+			Bytes frame(
+				reinterpret_cast<const std::uint8_t *>(buffer.data()),
+				reinterpret_cast<const std::uint8_t *>(buffer.data()) +
+					length);
+			if (accept(frame))
+				return frame;
+		}
+		return std::nullopt;
+	}
+
+private:
+	uml::network::SlirpProvider &provider_;
+};
+
+Bytes arp_request()
+{
+	Bytes frame(42, 0);
+	for (std::size_t index = 0; index < 6; ++index) {
+		frame[index] = 0xff;
+		frame[6 + index] = guest_mac[index];
+		frame[22 + index] = guest_mac[index];
+	}
+	put16(frame, 12, 0x0806);
+	put16(frame, 14, 1);
+	put16(frame, 16, 0x0800);
+	frame[18] = 6;
+	frame[19] = 4;
+	put16(frame, 20, 1);
+	std::copy(guest_ip.begin(), guest_ip.end(), frame.begin() + 28);
+	std::copy(gateway.begin(), gateway.end(), frame.begin() + 38);
+	return frame;
+}
+
+Bytes query_message(std::uint16_t id, const char *name)
+{
+	Bytes message(12, 0);
+	put16(message, 0, id);
+	put16(message, 2, 0x0100);
+	put16(message, 4, 1);
+	for (const char *label = name; *label != '\0';) {
+		const char *end = label;
+		while (*end != '\0' && *end != '.')
+			++end;
+		message.push_back(static_cast<std::uint8_t>(end - label));
+		message.insert(message.end(), label, end);
+		label = *end == '.' ? end + 1 : end;
+	}
+	message.push_back(0);
+	message.insert(message.end(), {0, 1, 0, 1});
+	return message;
+}
+
+/* A listener on the host's loopback; the gateway reaches it. */
+struct Listener final {
+	int descriptor{-1};
+	std::uint16_t port{};
+
+	Listener()
+	{
+		descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
+		sockaddr_in address{};
+		address.sin_family = AF_INET;
+		address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+		socklen_t length = sizeof(address);
+		if (descriptor < 0 ||
+		    ::bind(descriptor, reinterpret_cast<sockaddr *>(&address),
+			   sizeof(address)) != 0 ||
+		    ::listen(descriptor, 4) != 0 ||
+		    ::getsockname(descriptor,
+				  reinterpret_cast<sockaddr *>(&address),
+				  &length) != 0)
+			return;
+		port = ntohs(address.sin_port);
+	}
+
+	~Listener()
+	{
+		if (descriptor >= 0)
+			::close(descriptor);
+	}
+};
+
+std::uint16_t unused_loopback_port()
+{
+	Listener listener;
+	return listener.port;
+}
+
+void expect(const char *label, bool condition,
+	    const NetworkCounts &counts)
+{
+	if (!condition)
+		fail(label, "unexpected counts: " + describe(counts));
+}
+
+void check_provider()
+{
+	uml::network::SlirpProvider provider;
+	Guest guest{provider};
+	std::array<unsigned char, 6> mac{};
+	unsigned int mtu = 0;
+	provider.set_dns_interface_for_testing(kDNSServiceInterfaceIndexLocalOnly);
+	if (provider.open(mac, mtu) != 0) {
+		fail("open", "the provider did not open");
+		return;
+	}
+	(void)guest.send(arp_request());
+	(void)guest.receive([](const Bytes &frame) {
+		return frame.size() >= 14 && get16(frame, 12) == 0x0806;
+	});
+	auto counts = provider.counters();
+	expect("a fresh provider", describe(counts) == "dns 0/0/0/0 dhcp 0/0/0 tcp 0/0/0/0",
+	       counts);
+
+	/* DHCP: DISCOVER is answered by an OFFER, REQUEST by an ACK. */
+	const Address any{0, 0, 0, 0};
+	const Address broadcast{255, 255, 255, 255};
+	const char *label = "DHCP";
+	if (!guest.send(udp_frame(any, broadcast, 68, 67, dhcp_message(1))))
+		fail(label, "the provider refused the DISCOVER");
+	if (!guest.receive([](const Bytes &frame) {
+		    return server_dhcp_type(frame) == 2;
+	    }))
+		fail(label, "no OFFER");
+	if (!guest.send(udp_frame(any, broadcast, 68, 67, dhcp_message(3))))
+		fail(label, "the provider refused the REQUEST");
+	if (!guest.receive([](const Bytes &frame) {
+		    return server_dhcp_type(frame) == 5;
+	    }))
+		fail(label, "no ACK");
+	counts = provider.counters();
+	expect(label,
+	       counts.dhcp_discovers == 1 && counts.dhcp_requests == 1 &&
+		       counts.dhcp_acks == 1,
+	       counts);
+
+	/* TCP made, refused, and unanswered. */
+	Listener listener;
+	if (listener.port == 0) {
+		fail("listener", "no loopback listener");
+		return;
+	}
+	label = "a connection that is made";
+	(void)guest.send(tcp_frame(guest_ip, gateway, 42000, listener.port, 100,
+				   0, tcp_syn, 65535));
+	const auto made = guest.receive([&](const Bytes &frame) {
+		const auto segment = parse_tcp(frame);
+		return segment && segment->source_port == listener.port &&
+			segment->destination_port == 42000;
+	});
+	if (!made || (parse_tcp(*made)->flags & (tcp_syn | tcp_ack)) !=
+			     (tcp_syn | tcp_ack))
+		fail(label, "no SYN-ACK");
+	counts = provider.counters();
+	expect(label,
+	       counts.tcp_attempts == 1 && counts.tcp_established == 1 &&
+		       counts.tcp_refused == 0 && counts.tcp_unanswered() == 0,
+	       counts);
+
+	label = "a connection that is refused";
+	const std::uint16_t closed = unused_loopback_port();
+	(void)guest.send(tcp_frame(guest_ip, gateway, 42001, closed, 200, 0,
+				   tcp_syn, 65535));
+	const auto refused = guest.receive([&](const Bytes &frame) {
+		const auto segment = parse_tcp(frame);
+		return segment && segment->source_port == closed &&
+			segment->destination_port == 42001;
+	});
+	if (!refused || (parse_tcp(*refused)->flags & tcp_rst) == 0)
+		fail(label, "no reset");
+	counts = provider.counters();
+	expect(label,
+	       counts.tcp_attempts == 2 && counts.tcp_established == 1 &&
+		       counts.tcp_refused == 1 && counts.tcp_unanswered() == 0,
+	       counts);
+
+	/* Port 0 of a documentation address: Darwin refuses it before sending
+	 * anything, and SLiRP leaves the SYN unanswered, however often the guest
+	 * sends it. */
+	label = "a connection nothing answers";
+	for (int attempt = 0; attempt < 3; ++attempt)
+		(void)guest.send(tcp_frame(guest_ip, documentation, 42002, 0, 300,
+					   0, tcp_syn, 65535));
+	if (guest.receive([](const Bytes &frame) {
+		    const auto segment = parse_tcp(frame);
+		    return segment && segment->destination_port == 42002;
+	    }, 300))
+		fail(label, "it was answered");
+	counts = provider.counters();
+	expect(label,
+	       counts.tcp_attempts == 3 && counts.tcp_established == 1 &&
+		       counts.tcp_refused == 1 && counts.tcp_unanswered() == 1,
+	       counts);
+
+	/* DNS: a name in /etc/hosts and a missing one are both answers. */
+	label = "DNS";
+	for (const char *name : {"localhost", "uml-counters-probe-missing.invalid"}) {
+		const std::uint16_t port = name[0] == 'l' ? 43000 : 43001;
+		(void)guest.send(udp_frame(guest_ip, name_server, port, 53,
+					   query_message(port, name)));
+		if (!guest.receive([&](const Bytes &frame) {
+			    return frame.size() > 42 && frame[23] == IPPROTO_UDP &&
+				    get16(frame, 34) == 53 &&
+				    get16(frame, 36) == port;
+		    }))
+			fail(label, std::string{"no answer for "} + name);
+	}
+	counts = provider.counters();
+	expect(label,
+	       counts.dns_answered == 2 && counts.dns_policy_denied == 0 &&
+		       counts.dns_timed_out == 0 && counts.dns_failed == 0,
+	       counts);
+
+	/* The runtime reads them through the C entry. */
+	label = "the C entry";
+	uml_slirp_net_counters read{};
+	if (uml_slirp_net_read_counters(&provider, &read) != 0 ||
+	    read.dns_answered != 2 || read.dhcp_discovers != 1 ||
+	    read.dhcp_requests != 1 || read.dhcp_acks != 1 ||
+	    read.tcp_attempts != 3 || read.tcp_established != 1 ||
+	    read.tcp_unreachable != 0 || read.tcp_refused != 1)
+		fail(label, "the counts differ from the provider's");
+	if (uml_slirp_net_read_counters(nullptr, &read) >= 0 ||
+	    uml_slirp_net_read_counters(&provider, nullptr) >= 0)
+		fail(label, "a null argument was accepted");
+
+	/* The counts belong to the provider, not to the link. */
+	label = "a link that comes up again";
+	provider.stop();
+	if (provider.open(mac, mtu) != 0) {
+		fail(label, "the provider did not open again");
+		return;
+	}
+	counts = provider.counters();
+	expect(label, counts.dns_answered == 2 && counts.tcp_attempts == 3,
+	       counts);
+	provider.stop();
+}
+
+/* The frames of an unmodified SLiRP, through the observer: a destination the
+ * host cannot route to is answered with ICMP net unreachable, which the guest
+ * reads as unreachable. */
+void check_slirp_errors()
+{
+	Network network;
+	if (network.slirp() == nullptr || !network.resolve()) {
+		fail("SLiRP", "SLiRP did not start or answer ARP");
+		return;
+	}
+	NetworkCounters counters;
+	TrafficObserver observer{counters};
+	const auto send = [&](const Bytes &frame) {
+		observer.from_guest(frame, TrafficObserver::Clock::now());
+		network.input(frame);
+	};
+	const auto collect = [&] {
+		for (int pass = 0; pass < 30; ++pass)
+			network.pump(20, 5);
+		while (!network.frames().empty()) {
+			observer.from_network(network.frames().front());
+			network.frames().pop_front();
+		}
+	};
+
+	/* Linux refuses a TCP connect to a multicast address with ENETUNREACH,
+	 * and so does Darwin; SLiRP answers with net unreachable. */
+	send(tcp_frame(guest_ip, {224, 0, 0, 1}, 44000, 80, 500, 0, tcp_syn,
+		       65535));
+	collect();
+	auto counts = counters.read();
+	expect("ICMP net unreachable",
+	       counts.tcp_attempts == 1 && counts.tcp_unreachable == 1 &&
+		       counts.tcp_refused == 0 && counts.tcp_unanswered() == 0,
+	       counts);
+
+	/* A reset in answer to a SYN, as SLiRP writes it. */
+	const std::uint16_t closed = unused_loopback_port();
+	send(tcp_frame(guest_ip, gateway, 44001, closed, 600, 0, tcp_syn, 65535));
+	collect();
+	counts = counters.read();
+	expect("a reset",
+	       counts.tcp_attempts == 2 && counts.tcp_refused == 1 &&
+		       counts.tcp_unreachable == 1,
+	       counts);
+
+	Listener listener;
+	send(tcp_frame(guest_ip, gateway, 44002, listener.port, 700, 0, tcp_syn,
+		       65535));
+	collect();
+	counts = counters.read();
+	expect("a SYN-ACK",
+	       counts.tcp_attempts == 3 && counts.tcp_established == 1 &&
+		       counts.tcp_unanswered() == 0,
+	       counts);
+}
+
+} // namespace
+
+int main(void)
+{
+	check_provider();
+	check_slirp_errors();
+	if (failures != 0) {
+		std::fprintf(stderr, "%d check(s) failed\n", failures);
+		return 1;
+	}
+	std::puts("the network counters read what the provider saw");
+	return 0;
+}

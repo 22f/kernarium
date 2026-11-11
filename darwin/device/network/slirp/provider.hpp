@@ -3,6 +3,7 @@
 
 #include "uml_darwin_network.h"
 #include "dns_resolver.hpp"
+#include "network_counters.hpp"
 #include "platform/descriptor.hpp"
 
 #include <libslirp.h>
@@ -110,6 +111,12 @@ public:
     int read(std::span<std::byte> buffer);
     int write(std::span<const std::byte> frame);
 	void stop() noexcept;
+	/* What the provider has counted since it was made, and across the
+	 * links it brings up; any thread, and it takes no lock. */
+	[[nodiscard]] NetworkCounts counters() const noexcept
+	{
+		return counters_.read();
+	}
 
 #if UML_SLIRP_TESTING
 	void pause_transmit_for_testing() noexcept;
@@ -234,6 +241,9 @@ private:
 	std::unique_ptr<Slirp, SlirpDeleter> slirp_;
 	std::array<uml::platform::UniqueDescriptor, 2> wake_pipe_;
 	std::array<uml::platform::UniqueDescriptor, 2> receive_pipe_;
+	/* Declared before what counts into them. */
+	NetworkCounters counters_;
+	TrafficObserver observer_{counters_};
 	HostResolver resolver_;
 	std::uint16_t next_identification_{1};
 	/* Where SLiRP's guest forward carries DNS over TCP to the resolver;

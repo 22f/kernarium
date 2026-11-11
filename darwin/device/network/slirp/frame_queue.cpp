@@ -34,6 +34,9 @@ slirp_ssize_t SlirpProvider::send_packet_callback(
 	auto *emulator = from_opaque(opaque);
 	if (emulator == nullptr || data == nullptr)
 		return -1;
+	/* Every frame SLiRP sends is counted once, wherever it ends up. */
+	emulator->observer_.from_network(
+		{static_cast<const std::uint8_t *>(data), length});
 	try {
 		return emulator->enqueue_received(
 			{static_cast<const std::byte *>(data), length});
@@ -87,6 +90,10 @@ void SlirpProvider::process_transmit_queue() noexcept
 #endif
 		if (answer_locally({frame.data(), length}))
 			continue;
+		observer_.from_guest(
+			{reinterpret_cast<const std::uint8_t *>(frame.data()),
+			 length},
+			TrafficObserver::Clock::now());
 		slirp_input(slirp_.get(),
 			reinterpret_cast<const std::uint8_t *>(frame.data()),
 			static_cast<int>(length));

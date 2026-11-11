@@ -18,6 +18,7 @@
 
 #include "dns_frames.hpp"
 #include "dns_message.hpp"
+#include "network_counters.hpp"
 #include "platform/descriptor.hpp"
 #include "socket_paths.hpp"
 
@@ -80,6 +81,12 @@ public:
 	 * thread.
 	 */
 	int start(FrameSink sink, const std::vector<std::string> &stream_paths);
+	/* Where each query's outcome is counted; null for none. Set before
+	 * start(), and the counters outlive the resolver's thread. */
+	void set_counters(NetworkCounters *counters) noexcept
+	{
+		counters_ = counters;
+	}
 	/* Cancels every query, closes every connection and joins the thread;
 	 * no frame reaches the sink after it returns. */
 	void stop() noexcept;
@@ -153,6 +160,7 @@ private:
 	Stream *find_stream(std::uint64_t serial) noexcept;
 
 	FrameSink sink_;
+	NetworkCounters *counters_{};
 	std::jthread worker_;
 	std::array<uml::platform::UniqueDescriptor, 2> wake_pipe_;
 	uml::platform::UniqueDescriptor listener_;

@@ -46,6 +46,9 @@ struct HostResolver::Pending final {
 	/* Answer now, whatever the batch: the deadline passed or the daemon
 	 * connection was lost. */
 	bool expired{};
+	/* How the query ends, for the counters: an answer unless a failure
+	 * says otherwise. */
+	DnsOutcome outcome{DnsOutcome::answered};
 };
 
 namespace {
@@ -370,6 +373,7 @@ void HostResolver::drop_connection() noexcept
 		pending->rcode = dns::rcode_servfail;
 		pending->answers.clear();
 		pending->expired = true;
+		pending->outcome = DnsOutcome::failed;
 	}
 	DNSServiceRefDeallocate(connection_);
 	connection_ = nullptr;
@@ -408,6 +412,8 @@ void HostResolver::handle(std::optional<dns::Endpoints> datagram,
 			return;
 	}
 	if (pending_.size() >= dns_pending_limit || !ensure_connection()) {
+		if (counters_ != nullptr)
+			counters_->dns(DnsOutcome::failed);
 		respond(datagram, stream,
 			dns::build_response(parsed.query, dns::rcode_servfail,
 					    {}, limit));
@@ -433,6 +439,8 @@ void HostResolver::handle(std::optional<dns::Endpoints> datagram,
 		entry.query.klass, query_reply, &entry);
 	if (error != kDNSServiceErr_NoError) {
 		entry.reference = nullptr;
+		if (counters_ != nullptr)
+			counters_->dns(classify_dns_error(error));
 		const auto reply = dns::build_response(
 			entry.query, dns::rcode_servfail, {}, limit);
 		pending_.pop_back();
@@ -458,11 +466,13 @@ void HostResolver::record(Pending &pending, std::uint32_t flags,
 		batch_ended_ = true;
 	if (pending.closed)
 		return;
-	const auto fail = [&pending]() {
+	const auto fail = [&pending](DnsOutcome outcome =
+					     DnsOutcome::failed) {
 		pending.rcode = dns::rcode_servfail;
 		pending.answers.clear();
 		pending.done = true;
 		pending.closed = true;
+		pending.outcome = outcome;
 	};
 	switch (error) {
 	case kDNSServiceErr_NoError:
@@ -480,7 +490,7 @@ void HostResolver::record(Pending &pending, std::uint32_t flags,
 		}
 		return;
 	default:
-		fail();
+		fail(classify_dns_error(error));
 		return;
 	}
 	if ((flags & kDNSServiceFlagsAdd) == 0 || fullname == nullptr)
@@ -534,6 +544,8 @@ void HostResolver::finish(Pending &pending) noexcept
 	if (auto *stream = find_stream(pending.stream);
 	    stream != nullptr && stream->pending != 0)
 		--stream->pending;
+	if (counters_ != nullptr)
+		counters_->dns(pending.outcome);
 	try {
 		const std::size_t limit = pending.datagram ?
 			dns::udp_limit(pending.query) : dns::tcp_limit;
@@ -555,6 +567,9 @@ void HostResolver::expire(Clock::time_point now) noexcept
 			pending->rcode = dns::rcode_servfail;
 			pending->answers.clear();
 			pending->expired = true;
+			/* A failure that was already in stands. */
+			if (pending->outcome == DnsOutcome::answered)
+				pending->outcome = DnsOutcome::timed_out;
 			any = true;
 		}
 	if (any) {

@@ -135,6 +135,8 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		 * provider answers the name server itself (answer_locally and
 		 * HostResolver), so SLiRP never addresses that server. */
 		config.disable_dns = true;
+		/* The attempts of a link that ended wait for no answer. */
+		observer_.reset();
 		(void)inet_pton(AF_INET, network_address, &config.vnetwork);
 		(void)inet_pton(AF_INET, network_mask, &config.vnetmask);
 		(void)inet_pton(AF_INET, host_alias_address, &config.vhost);
@@ -180,6 +182,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 #else
 			const auto stream_paths = dns_stream_paths();
 #endif
+			resolver_.set_counters(&counters_);
 			if (resolver_.start(
 				    [this](std::span<const std::uint8_t> frame) {
 					    try {
@@ -609,6 +612,29 @@ extern "C" int uml_slirp_net_add_forward(
 	} catch (...) {
 		return -EIO;
 	}
+}
+
+extern "C" int uml_slirp_net_read_counters(
+	void *context, uml_slirp_net_counters *counters)
+{
+	if (context == nullptr || counters == nullptr)
+		return -EINVAL;
+	const auto counts =
+		static_cast<uml::network::SlirpProvider *>(context)->counters();
+	*counters = {
+		.dns_answered = counts.dns_answered,
+		.dns_policy_denied = counts.dns_policy_denied,
+		.dns_timed_out = counts.dns_timed_out,
+		.dns_failed = counts.dns_failed,
+		.dhcp_discovers = counts.dhcp_discovers,
+		.dhcp_requests = counts.dhcp_requests,
+		.dhcp_acks = counts.dhcp_acks,
+		.tcp_attempts = counts.tcp_attempts,
+		.tcp_established = counts.tcp_established,
+		.tcp_unreachable = counts.tcp_unreachable,
+		.tcp_refused = counts.tcp_refused,
+	};
+	return 0;
 }
 
 extern "C" void uml_slirp_net_stop(void *context)
