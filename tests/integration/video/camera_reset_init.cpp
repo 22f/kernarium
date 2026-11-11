@@ -10,8 +10,9 @@
 //   - no buffer comes back flagged as an error;
 //   - the sequences of the frames, and of the metadata records, keep rising
 //     across the suspend, whatever the device did meanwhile;
-//   - after the suspend the metadata still shows the zoom, and the records
-//     match the frames by sequence;
+//   - after the suspend the metadata still shows the zoom (the device's
+//     stand-in records for the first frames of a re-created stream aside),
+//     and the records match the frames by sequence;
 //   - a buffer the client has got back after STREAMOFF is never written again.
 //
 // What the host did to the camera device meanwhile is the test's case: it
@@ -206,6 +207,10 @@ constexpr u32 cid_zoom_q16 = 0x00981c00 + 5;
 constexpr u32 zoom_two = 0x20000;
 constexpr u32 meta_size = 168;
 constexpr unsigned meta_zoom_offset = 68;
+constexpr unsigned meta_flags_offset = 28;
+/* VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK and _RESUMING: the device's stand-ins for
+ * the frames of a stream whose capture has not delivered yet. */
+constexpr u32 meta_placeholder_flags = (1u << 0) | (1u << 3);
 
 /* ---------------------------------------------------------------------- */
 /* Console                                                                 */
@@ -481,6 +486,11 @@ struct Tally {
 	bool resumed = false;
 	unsigned after_frames = 0;
 	unsigned after_records = 0;
+	/* The device makes a stand-in record for a frame of a re-created stream
+	 * until its capture delivers, which can be before the driver has written
+	 * the zoom again; it shows the default zoom. Only a record of a real
+	 * exposure with the wrong zoom is wrong. */
+	unsigned placeholder_zoom = 0;
 	unsigned after_wrong_zoom = 0;
 	u32 first_after_frame = 0;
 	u32 after_frame[kept] = {};
@@ -534,11 +544,13 @@ void took_record(const Dequeued &record)
 	}
 	const u8 *bytes = metadata.address[record.index];
 	u64 sequence = 0;
-	u32 zoom = 0;
+	u32 zoom = 0, flags = 0;
 	for (int i = 7; i >= 0; i--)
 		sequence = (sequence << 8) | bytes[i];
 	for (int i = 3; i >= 0; i--)
 		zoom = (zoom << 8) | bytes[meta_zoom_offset + i];
+	for (int i = 3; i >= 0; i--)
+		flags = (flags << 8) | bytes[meta_flags_offset + i];
 	tally.records++;
 	if (tally.have_record && sequence <= tally.last_record) {
 		/* The first one is told, with its neighbours, for the log. */
@@ -551,8 +563,16 @@ void took_record(const Dequeued &record)
 	tally.last_record = sequence;
 	tally.last_zoom = zoom;
 	if (tally.resumed) {
-		if (zoom != zoom_two)
-			tally.after_wrong_zoom++;
+		if (zoom != zoom_two) {
+			if ((flags & meta_placeholder_flags) != 0)
+				tally.placeholder_zoom++;
+			else if (tally.after_wrong_zoom++ == 0)
+				Line().text("CAMRESET wrong zoom ").number(static_cast<long>(zoom))
+					.text(" in record ").number(static_cast<long>(sequence))
+					.text(" (record ").number(tally.after_records + 1)
+					.text(" after the resume, flags ").number(static_cast<long>(flags))
+					.text(")").write();
+		}
 		if (tally.after_records < kept)
 			tally.after_record[tally.after_records] = sequence;
 		tally.after_records++;
@@ -768,6 +788,7 @@ extern "C" [[noreturn]] void _start()
 		.text(" errors=").number(tally.frame_errors)
 		.text(" firstframe=").number(tally.first_after_frame)
 		.text(" matched=").number(found)
+		.text(" placeholderzoom=").number(tally.placeholder_zoom)
 		.text(" wrongzoom=").number(tally.after_wrong_zoom)
 		.text(" frameregressions=").number(tally.frame_regressions)
 		.text(" recordregressions=").number(tally.record_regressions)
