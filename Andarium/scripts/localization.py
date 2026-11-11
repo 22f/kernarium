@@ -20,7 +20,8 @@ key with no value, or a value that is not marked translated, in a language; a
 stale key; a format specifier or plural category that does not fit the source
 or the language; a Google name; a value left as the English one without being
 on the explicit list in Localization/english-only.json; an Info.plist
-permission text, or a note of WhatsNew.json, without a catalog entry.
+permission text, or a note of WhatsNew.json, without a catalog entry. A key
+is its English text, or a name with the English text as its `en` value.
 
 `sync` is Xcode's catalog update, for a build that did not run in the editor:
 it merges the strings the Swift compiler extracted (`*.stringsdata`, found
@@ -148,6 +149,15 @@ def plural_cases(localization: dict) -> set[str]:
     return set(localization.get("variations", {}).get("plural", {}))
 
 
+def source_text(key: str, english: dict | None) -> str:
+    """The text a translation's specifiers are checked against: the key, or, for a named key, its English value."""
+    if english is not None:
+        values = [unit.get("value", "") for _, unit, _ in leaves(english)]
+        if values and not SPECIFIER.search(key):
+            return values[-1]
+    return key
+
+
 def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: Problems) -> set[str]:
     """One catalog's rules; the keys it holds."""
     where = path.name if name == "Localizable" else f"{name} ({path.name})"
@@ -179,8 +189,9 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
                 if category is not None and category not in PLURAL_CATEGORIES[SOURCE_LANGUAGE]:
                     problems.add(label, f"English has the plural category {category!r}, which English does not use")
                 problem = format_problem(key, unit.get("value", ""))
-                if problem:
+                if problem and SPECIFIER.search(key):
                     problems.add(f"{label} (en{place})", problem)
+        source = source_text(key, english)
         for language in LANGUAGES:
             localization = localizations.get(language)
             if localization is None:
@@ -201,7 +212,7 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
                     problems.add(tag, f"uses the plural category {category!r}, which {language} does not have")
                 if GOOGLE_NAMES.search(value):
                     problems.add(tag, "names a Google product; no string of Andarium does")
-                problem = format_problem(key, value)
+                problem = format_problem(source, value)
                 if problem:
                     problems.add(tag, problem)
                 if value == key and not english:
