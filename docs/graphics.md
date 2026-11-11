@@ -333,7 +333,10 @@ that reached its bound is not repeated until Metal's counter falls again.
   a draw uploads, the program's constants and the attributes it has no array
   for, come from the driver too: a draw whose upload is refused is skipped and
   raises `GL_OUT_OF_MEMORY`, and the next draw sets its state up again
-  (`gpu-host-gl-upload-refusal`).
+  (`gpu-host-gl-upload-refusal`). The upload buffer glthread shares between a
+  context's `glBufferSubData` calls is refused the same way: the write then
+  copies its data through the command stream and needs no buffer
+  (`gpu-host-gl-glthread-upload-refusal`).
 - Venus: the guest driver submits `vkAllocateMemory` asynchronously, so a
   refusal reaches the guest as a failed context at the next command naming the
   allocation, and only that guest process aborts. The Android guest allocates

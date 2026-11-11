@@ -399,6 +399,16 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY TIMEOUT 240)
 
+    # glthread's shared upload buffer is refused with the rest of the budget;
+    # a glBufferSubData that meets the refusal neither faults the host nor
+    # blocks uploads once the memory is back.
+    uml_add_gpu_unit_test(gpu-host-gl-glthread-upload-refusal
+        uml_gpu_host_gl_glthread_upload_refusal_tests
+        host_gl_glthread_upload_refusal_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY TIMEOUT 240)
+
     # The command storage a destroyed context's batches grew to is released
     # with it, not kept with the batch states the screen holds for later.
     uml_add_gpu_unit_test(gpu-host-gl-batch-storage
