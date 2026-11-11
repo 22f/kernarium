@@ -30,7 +30,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "準備完了。次回の起動から適用されます。"
+            "value" : "準備完了。次回の起動時に適用されます。"
           }
         },
         "zh-Hans" : {
@@ -53,7 +53,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "JITなしで起動しました：StikDebugがJITを準備できませんでした。"
+            "value" : "JITなしで起動しました。StikDebugがJITを準備できませんでした。"
           }
         },
         "zh-Hans" : {
@@ -76,7 +76,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "JITなしで起動しました：StikDebugが接続されていません。"
+            "value" : "JITなしで起動しました。StikDebugが接続されていません。"
           }
         },
         "zh-Hans" : {
@@ -99,7 +99,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "JITなしで起動しました：StikDebugが準備したあとにCPUまたはメモリが変更されました。もう一度StikDebugからAndariumを開いてください。"
+            "value" : "JITなしで起動しました。StikDebugが準備したあとにCPUまたはメモリが変更されました。もう一度StikDebugからAndariumを開いてください。"
           }
         },
         "zh-Hans" : {
@@ -122,7 +122,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "JITなしで起動しました：このAndariumではJITを使用できません。"
+            "value" : "JITなしで起動しました。このAndariumではJITを使用できません。"
           }
         },
         "zh-Hans" : {
@@ -168,7 +168,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "JITを使用するには、StikDebugからAndariumを開いてください。"
+            "value" : "JITを使うには、StikDebugからAndariumを開いてください。"
           }
         },
         "zh-Hans" : {

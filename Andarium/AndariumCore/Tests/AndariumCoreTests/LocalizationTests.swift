@@ -55,8 +55,8 @@ private enum Say {
     }
 
     @Test func japaneseAndChineseCountVcpusWithoutPluralForms() {
-        #expect(Say.text("\(1) vCPUs", in: "ja") == "1個のvCPU")
-        #expect(Say.text("\(6) vCPUs", in: "ja") == "6個のvCPU")
+        #expect(Say.text("\(1) vCPUs", in: "ja") == "1 vCPU")
+        #expect(Say.text("\(6) vCPUs", in: "ja") == "6 vCPU")
         #expect(Say.text("\(1) vCPUs", in: "zh-Hans") == "1个vCPU")
         #expect(Say.text("\(6) vCPUs", in: "zh-Hans") == "6个vCPU")
         #expect(Say.text("\(6) vCPUs", in: "zh-Hant") == "6個vCPU")
@@ -74,8 +74,8 @@ private enum Say {
         let first = "One", second = "Two"
         #expect(Say.named("list.join", "\(first), \(second)", in: "en") == "One, Two")
         #expect(Say.named("list.join", "\(first), \(second)", in: "ja") == "One、Two")
-        #expect(Say.named("list.join", "\(first), \(second)", in: "zh-Hans") == "One，Two")
-        #expect(Say.named("list.join", "\(first), \(second)", in: "zh-Hant") == "One，Two")
+        #expect(Say.named("list.join", "\(first), \(second)", in: "zh-Hans") == "One、Two")
+        #expect(Say.named("list.join", "\(first), \(second)", in: "zh-Hant") == "One、Two")
     }
 
     @Test func joiningNothingOrOneSentenceAddsNothing() {

@@ -27,7 +27,7 @@
               "other" : {
                 "stringUnit" : {
                   "state" : "translated",
-                  "value" : "%lld個のvCPU"
+                  "value" : "%lld vCPU"
                 }
               }
             }
@@ -339,7 +339,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Androidはカーネルパニックで停止しました：%@。"
+            "value" : "Androidはカーネルパニックで停止しました。%@"
           }
         },
         "zh-Hans" : {
@@ -362,7 +362,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "AndroidがiOSでAndariumに許可されているメモリのほぼすべてを使用していました。メモリサイズを小さくすると安全です。"
+            "value" : "AndroidがiOSでAndariumに許可されているメモリのほぼすべてを使用していました。メモリサイズを小さくする方が安全です。"
           }
         },
         "zh-Hans" : {
@@ -505,13 +505,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "arm64，%lld KiB页面"
+            "value" : "arm64、%lld KiB页面"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "arm64，%lld KiB頁面"
+            "value" : "arm64、%lld KiB頁面"
           }
         }
       }
@@ -572,13 +572,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "设备发热期间已降低帧速率"
+            "value" : "设备温度较高，已降低帧速率"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裝置發熱期間已降低影格率"
+            "value" : "裝置溫度較高，已降低影格率"
           }
         }
       }
@@ -657,7 +657,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "この%2$@で仮想マシンのメモリが%1$@の場合、iOSによってAndariumが終了される可能性が高くなります。%3$@以下にすると安全です。“仮想マシン”の“編集”で下げてください。"
+            "value" : "この%2$@で仮想マシンのメモリが%1$@の場合、iOSによってAndariumが終了される可能性が高くなります。%3$@以下にする方が安全です。“仮想マシン”の“編集”で下げてください。"
           }
         },
         "zh-Hans" : {
@@ -692,13 +692,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%1$@，%2$@"
+            "value" : "%1$@、%2$@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%1$@，%2$@"
+            "value" : "%1$@、%2$@"
           }
         }
       }
@@ -847,7 +847,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このバージョンのアプリは、仮想マシンが前回起動したときのバージョンより古く、仮想マシンのデータを古いバージョンに戻すことはできません。新しいバージョンのAndariumをインストールするか、仮想マシンを消去してこのバージョンで最初からやり直してください。"
+            "value" : "このアプリのバージョンは、仮想マシンが前回起動したときのバージョンより古く、仮想マシンのデータを古いバージョンに戻すことはできません。新しいバージョンのAndariumをインストールするか、仮想マシンを消去してこのバージョンで最初からやり直してください。"
           }
         },
         "zh-Hans" : {
@@ -935,7 +935,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仮想マシンのメモリが大きすぎます"
+            "value" : "仮想マシンのメモリが多めです"
           }
         },
         "zh-Hans" : {

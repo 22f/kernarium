@@ -214,7 +214,7 @@ struct AppEntry {
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
         case "busy-create":
-            model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with 16 GiB."), progress: 0.42)
+            model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with \(Formats.size(gib: 16))."), progress: 0.42)
         case "busy-erase":
             model.busy = BusyState(title: String(localized: "Erasing virtual machine"), detail: String(localized: "Deleting everything the virtual machine stored."), progress: 0.65)
         case "boot":
