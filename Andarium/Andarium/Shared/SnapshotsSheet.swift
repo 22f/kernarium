@@ -371,6 +371,7 @@ struct SnapshotDetail: View {
                 }
             }
             .modifier(PageTitle(title: title, pushed: pushed))
+            #if !APP_STORE
             .onAppear {
                 if store.focusName {
                     store.focusName = false
@@ -380,6 +381,7 @@ struct SnapshotDetail: View {
                     }
                 }
             }
+            #endif
             .onDisappear { Task { await store.flushName() } }
         } else {
             ContentUnavailableView("No snapshot selected", systemImage: "clock.arrow.circlepath")

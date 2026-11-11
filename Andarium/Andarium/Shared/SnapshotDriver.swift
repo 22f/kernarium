@@ -119,8 +119,10 @@ extension AppModel {
         case .done(let restored):
             lifecycle.guest = restored
             refreshPlan()
+            #if !APP_STORE
             // The preview reads no files: it plays the plan the restore leaves.
             if self.driver == nil, let planAfterRestore { plan = planAfterRestore }
+            #endif
             return .done(())
         case .refused(let refusal):
             // A restore that took effect and did not finish changed the files.
