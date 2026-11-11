@@ -288,6 +288,18 @@ it. The bridge fields used below are defined by the comments in
   writeback under pressure (`guest-ubd-request-memory`). The project adds no
   behavior to upstream UML's COW implementation, and Apple launchers never
   construct a COW image pair.
+- While the guest runs, a full host volume holds a direct UBD disk's I/O and
+  the file system does not see a failure. A write, a flush or a write of zeroes
+  that the host refuses with `ENOSPC` is redone, after a back-off that doubles
+  from 10 ms to 1 s, until the host has room. The driver prints one line when a
+  hold begins and one when it ends. The requests behind the held one wait, on
+  every disk, and so does whatever needs a held write: a guest's own power-off
+  or restart ends only when the host has room again. The worker sleeps as
+  `TASK_IDLE` and the driver has no timeout handler, so no watchdog reports it.
+  A discard and a COW disk are not held and fail as before. Once the kernel's
+  exitcall begins, a held request fails (the journal aborts); a host stop ends
+  the run without waiting for it. `kernel-darwin-ubd-hold` checks the
+  decisions.
 
 ## Shutdown and device removal
 
@@ -409,10 +421,15 @@ it. The bridge fields used below are defined by the comments in
   ends only with the host's wake; a host that forwards a key also sends the
   wake, because Virtio input is not a wake source.
 - A wake request that arrives while a suspend is being entered is answered at
-  once and still ends that suspend. A host-asked suspend that ends with `-EBUSY`
-  is entered again up to three more times, and a request that gives up replies
-  `Suspend failed`. `guest-suspend-holds` checks the host's suspend under
-  traffic, early wakes, and every guest-started wake path.
+  once and still ends that suspend. It ends every host-asked suspend that
+  arrived before it, too, including one that waits behind another console
+  request: that suspend replies `Suspend failed: -16` when its turn comes and
+  does not put the guest to sleep, in whichever order queued requests run. A
+  host-asked suspend that ends with `-EBUSY` is entered again up to three more
+  times, and a request that gives up replies `Suspend failed`.
+  `guest-suspend-holds` checks the host's suspend under traffic, early wakes,
+  and every guest-started wake path; `kernel-darwin-mconsole-suspend` checks
+  the bookkeeping.
 - The Virtio sound driver starts a substream afresh after a suspend and pads the
   last period of a drain with silence (`guest-virtio-sound-suspend`).
 
