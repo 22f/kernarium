@@ -80,8 +80,8 @@ struct BootView: View {
     private func shownSteps(guest: Guest) -> [Step] {
         var steps = Self.steps(kind, guest: guest, system: model.system, grewFromGiB: model.lifecycle.grewFromGiB)
         if model.preparingDisk {
-            let detail = model.diskProgress.map { "Preparing \u{00B7} \(Int(($0 * 100).rounded()))%" }
-                ?? "Preparing"
+            let detail = model.diskProgress.map { String(localized: "Preparing \u{00B7} \(Int(($0 * 100).rounded()))%") }
+                ?? String(localized: "Preparing")
             steps[0] = Step(title: steps[0].title, detail: detail, seconds: 0)
         }
         #if !APP_STORE
@@ -223,11 +223,11 @@ struct BootView: View {
 
     static func status(_ kind: BootKind) -> String {
         switch kind {
-        case .normal: "Starting"
-        case .firstStart: "First start"
-        case .upgrade: "Updating"
-        case .recovery: "Starting recovery"
-        case .restart: "Restarting"
+        case .normal: String(localized: "Starting")
+        case .firstStart: String(localized: "First start")
+        case .upgrade: String(localized: "Updating")
+        case .recovery: String(localized: "Starting recovery")
+        case .restart: String(localized: "Restarting")
         }
     }
 
@@ -240,9 +240,13 @@ struct BootView: View {
     static func note(_ kind: BootKind, from: String?, system: SystemInfo) -> String? {
         switch kind {
         case .firstStart:
-            "The first-run setup may take a few minutes."
+            String(localized: "The first-run setup may take a few minutes.")
         case .upgrade:
-            "Updating \(from.map { "from \(ReleaseLabel.revision(of: $0)) " } ?? "")to \(system.releaseRevision). Apps and files are kept."
+            if let from {
+                String(localized: "Updating from \(ReleaseLabel.revision(of: from)) to \(system.releaseRevision). Apps and files are kept.")
+            } else {
+                String(localized: "Updating to \(system.releaseRevision). Apps and files are kept.")
+            }
         case .normal, .restart, .recovery:
             nil
         }
@@ -253,27 +257,39 @@ struct BootView: View {
     /// start but the first, which creates it, and the guest's capacity is
     /// already the new one.
     static func steps(_ kind: BootKind, guest: Guest, system info: SystemInfo, grewFromGiB: Int? = nil) -> [Step] {
-        let system = Step(title: "System image", detail: "\(info.releaseRevision) · read-only", seconds: 0.7)
-        let kernel = Step(title: "Linux kernel", detail: "\(info.kernel.replacingOccurrences(of: "Linux ", with: "")) · \(Formats.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB)) RAM", seconds: 0.9)
-        let used = "\(Formats.size(bytes: guest.usedBytes)) of \(Formats.size(gib: guest.capacityGiB))"
-        let growing = grewFromGiB.map { "Growing from \(Formats.size(gib: $0)) to \(Formats.size(gib: guest.capacityGiB))" }
+        let system = Step(
+            title: String(localized: "System image"), detail: String(localized: "\(info.releaseRevision) · read-only"), seconds: 0.7)
+        let kernelVersion = info.kernel.replacingOccurrences(of: "Linux ", with: "")
+        let kernel = Step(
+            title: String(localized: "Linux kernel"),
+            detail: String(localized: "\(kernelVersion) · \(CountWords.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB)) RAM"),
+            seconds: 0.9)
+        let used = String(localized: "\(Formats.size(bytes: guest.usedBytes)) of \(Formats.size(gib: guest.capacityGiB))")
+        let growing = grewFromGiB.map {
+            String(localized: "Growing from \(Formats.size(gib: $0)) to \(Formats.size(gib: guest.capacityGiB))")
+        }
+        let storage = String(localized: "Storage")
+        let startup = String(localized: "Startup")
         switch kind {
         case .recovery:
             return [system, kernel,
-                    Step(title: "Storage", detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
-                    Step(title: "Recovery", detail: "Loading recovery", seconds: 1.4)]
+                    Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
+                    Step(title: String(localized: "Recovery"), detail: String(localized: "Loading recovery"), seconds: 1.4)]
         case .firstStart:
             return [system, kernel,
-                    Step(title: "Storage", detail: "Preparing \(Formats.size(gib: guest.effectiveCapacityGiB)) for first use", seconds: 0.9),
-                    Step(title: "Startup", detail: "Setting up for the first time", seconds: 4.0)]
+                    Step(
+                        title: storage,
+                        detail: String(localized: "Preparing \(Formats.size(gib: guest.effectiveCapacityGiB)) for first use"),
+                        seconds: 0.9),
+                    Step(title: startup, detail: String(localized: "Setting up for the first time"), seconds: 4.0)]
         case .upgrade:
             return [system, kernel,
-                    Step(title: "Storage", detail: growing ?? used, seconds: growing == nil ? 0.7 : 1.2),
-                    Step(title: "Startup", detail: "Updating apps for \(info.releaseRevision)", seconds: 3.6)]
+                    Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.7 : 1.2),
+                    Step(title: startup, detail: String(localized: "Updating apps for \(info.releaseRevision)"), seconds: 3.6)]
         case .normal, .restart:
             return [system, kernel,
-                    Step(title: "Storage", detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
-                    Step(title: "Startup", detail: "Starting services", seconds: 1.8)]
+                    Step(title: storage, detail: growing ?? used, seconds: growing == nil ? 0.6 : 1.2),
+                    Step(title: startup, detail: String(localized: "Starting services"), seconds: 1.8)]
         }
     }
 }

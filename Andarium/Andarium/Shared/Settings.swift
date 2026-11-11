@@ -264,7 +264,7 @@ struct SessionSettingsSheet: View {
     private func inputProbe(_ probe: InputProbe) -> some View {
         @Bindable var probe = probe
         return Section {
-            TextField("Input probe", text: $probe.fieldText)
+            TextField(text: $probe.fieldText) { Text(verbatim: "Input probe") }
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .accessibilityIdentifier("inputProbeField")
@@ -325,7 +325,7 @@ struct SessionSettingsSheet: View {
         }
     }
 
-    private func rowLabel(_ title: String, symbol: String) -> some View {
+    private func rowLabel(_ title: LocalizedStringKey, symbol: String) -> some View {
         HStack(spacing: 12) {
             IconTile(symbol: symbol)
             Text(title)

@@ -102,5 +102,5 @@ nonisolated enum AdbNetworkMessages {
         return "ADB over network could not start."
     }
 
-    static let noAddress = "This device has no Wi-Fi address. Connect to Wi-Fi to use ADB over network."
+    static let noAddress = String(localized: "This device has no Wi-Fi address. Connect to Wi-Fi to use ADB over network.")
 }
