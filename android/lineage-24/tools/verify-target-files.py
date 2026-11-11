@@ -9,6 +9,7 @@ import argparse
 import functools
 import hashlib
 import io
+import json
 import re
 import stat
 import struct
@@ -20,6 +21,7 @@ from pathlib import Path, PurePosixPath
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import android_image  # noqa: E402
+import camera_layouts  # noqa: E402
 import default_wallpaper  # noqa: E402
 from release_common import (  # noqa: E402
     BUILD_VARIANTS,
@@ -219,6 +221,11 @@ REQUIRED_ENTRIES = {
     "VENDOR/etc/displayconfig/default.xml",
     "VENDOR/bin/kernarium_gamepad",
     "VENDOR/etc/init/kernarium_gamepad.rc",
+    "VENDOR/bin/hw/android.hardware.camera.provider@2.7-service-google-lazy",
+    "VENDOR/etc/init/android.hardware.camera.provider@2.7-service-google-lazy.rc",
+    "VENDOR/lib64/libgooglecamerahwl_impl.so",
+    "VENDOR/etc/config/emu_camera_v4l2.json",
+    "PRODUCT/app/Aperture/Aperture.apk",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -469,20 +476,24 @@ FORBIDDEN_EXECUTABLE_FILENAMES = {
     "update_verifier",
 }
 FORBIDDEN_APP_DIRECTORIES = {
-    "Aperture",
+    # The camera application stays; its Google Lens launcher does not (route p0031).
+    "ApertureLensLauncher",
     "AudioFX",
     "BasicDreams",
     "BluetoothMidiService",
     "Calendar",
     "Camera2",
+    "CameraExtensionsProxy",
     "Canvas",
     "Contacts",
     "CuttlefishService",
     "DeskClock",
+    "DeviceAsWebcam",
     "DeviceDiagnostics",
     "Dialer",
     "DynamicSystemInstallationService",
     "EmergencyInfo",
+    "EyesFreeVidService",
     "F-Droid",
     "F-DroidPrivilegedExtension",
     "Gallery2",
@@ -560,14 +571,19 @@ REQUIRED_FEATURE_NAMES = {
     "android.software.midi",
     "android.hardware.opengles.aep",
 }
+# The camera features are the host's to decide (overlay/camera): only the permission file of a
+# camera layout may declare one, and check_camera compares those files with the generator's.
+CAMERA_FEATURE_PREFIX = "android.hardware.camera"
+
+
+@functools.cache
+def camera_layout_files() -> frozenset[str]:
+    """The files of the camera layouts, by their path in the target-files archive."""
+    return frozenset(camera_layouts.installed())
+
 FORBIDDEN_FEATURE_NAMES = {
     "android.hardware.bluetooth",
     "android.hardware.bluetooth_le",
-    "android.hardware.camera",
-    "android.hardware.camera.any",
-    "android.hardware.camera.autofocus",
-    "android.hardware.camera.flash",
-    "android.hardware.camera.front",
     "android.hardware.context_hub",
     "android.hardware.ethernet",
     "android.hardware.fingerprint",
@@ -2939,6 +2955,219 @@ def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo
     check_default_display_config(archive, infos)
 
 
+# The host's cameras (overlay/camera; routes p0030 and p0031). The camera device gives the guest V4L2
+# nodes, and the emulated camera HAL of hardware/google/camera takes the cameras from them: the lazy
+# provider runs only while an application holds a camera or the torch, and its HWL library holds the
+# V4L2 source of route p0030. The host composes one camera layout from its cameras and passes it as
+# the vendor SKU: the permission directory of that name declares the camera features and an init
+# trigger selects the media profiles that match its size caps, all of them generated (camera_layouts.py).
+# Nothing here fails loudly when it is missing: a stock library lists no camera, a missing declaration
+# lists no feature, and a missing file leaves the default profiles.
+CAMERA_HAL_NAME = "android.hardware.camera.provider"
+CAMERA_HAL_INTERFACE = "ICameraProvider/internal/0"
+CAMERA_PROVIDER = "android.hardware.camera.provider@2.7-service-google-lazy"
+CAMERA_EAGER_PROVIDER = "android.hardware.camera.provider@2.7-service-google"
+CAMERA_PROVIDER_RC_OPTIONS = (
+    f"interface aidl {CAMERA_HAL_NAME}.{CAMERA_HAL_INTERFACE}",
+    "oneshot",
+    "disabled",
+    "class hal",
+    "user system",
+)
+CAMERA_PROVIDER_FILE_CONTEXT = re.compile(
+    re.escape(rb"/vendor/bin/hw/android\.hardware\.camera\.provider@2\.7-service-google-lazy")
+    + rb"\s+u:object_r:hal_camera_default_exec:s0"
+)
+CAMERA_HWL = "VENDOR/lib64/libgooglecamerahwl_impl.so"
+CAMERA_HWL_LIMIT = 64 << 20
+# What only route p0030 puts in the library: the bus name of the camera nodes, the template of the
+# characteristics, and a message of the host-driven sensor. The library of the stock tree has none.
+CAMERA_HWL_MARKERS = (
+    b"virtio-camera:",
+    b"emu_camera_v4l2.json",
+    b"was not queued completely",
+)
+CAMERA_TEMPLATE = "VENDOR/etc/config/emu_camera_v4l2.json"
+CAMERA_CONFIG_DIRECTORY = "VENDOR/etc/config/"
+CAMERA_APP = "PRODUCT/app/Aperture/Aperture.apk"
+CAMERA_APP_LIMIT = 256 << 20
+CAMERA_AUX_CAMERAS = "config_enableAuxCameras"
+CAMERA_IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
+CAMERA_IGNORED_AUX_IDS = ["2"]
+CAMERA_HARDWARE_TOGGLE = "config_supportsHardwareCamToggle"
+CAMERA_LAZY_HAL_PROPERTY = ("PRODUCT/etc/build.prop", "ro.camera.enableLazyHal", "true")
+CAMERA_CONFIG_PROPERTY = ("VENDOR/build.prop", "ro.vendor.camera.config", "v4l2")
+CAMERA_EXTENSIONS_PROPERTY = "ro.camerax.extensions.enabled"
+
+
+def camera_resources(
+    archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], entry: str, limit: int
+) -> bytes:
+    """The compiled resource table of an APK of the image."""
+    info = infos.get(entry)
+    if info is None or info.is_dir():
+        fail(f"{entry} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, limit))) as apk:
+            return apk.read("resources.arsc")
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile) as error:
+        fail(f"{entry} has no readable resource table: {error}")
+
+
+def check_camera_layout_files(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The permission directories, the media profiles and the init file are the generator's, and
+    nothing else uses the vendor SKU axis."""
+    expected = camera_layouts.installed()
+    for entry, payload in sorted(expected.items()):
+        info = infos.get(entry)
+        if info is None or info.is_dir():
+            fail(f"{entry} is missing: the camera layouts are generated by tools/camera_layouts.py")
+        if read_small(archive, info) != payload:
+            fail(f"{entry} differs from what tools/camera_layouts.py generates")
+    layout_manifests = {f"manifest_{name}.xml" for name in camera_layouts.by_name()}
+    for entry in sorted(infos):
+        path = PurePosixPath(entry)
+        if path.parts[0] not in TARGET_PARTITIONS:
+            continue
+        # The vendor SKU axis belongs to the layouts: a directory they do not generate would
+        # declare features or system configuration to a device of that name alone.
+        if len(path.parts) > 3 and path.parts[3].startswith("sku_") and not infos[entry].is_dir():
+            if path.parts[:3] == ("VENDOR", "etc", "permissions") and entry not in expected:
+                fail(f"{entry} is not a file of a camera layout: the vendor SKU axis is the layouts' alone")
+            if path.parts[:3] == ("VENDOR", "etc", "sysconfig"):
+                fail(f"{entry} is a SKU configuration beside the camera layouts")
+        if path.name.startswith("media_profiles_cam") and entry not in expected:
+            fail(f"{entry} is a media profiles variant that no camera layout selects")
+        # A VINTF manifest named after a layout would be read for a device of that layout alone,
+        # and the camera provider is declared in the main manifest of every device.
+        if "vintf" in path.parts and path.name in layout_manifests:
+            fail(f"{entry} is a VINTF manifest of a camera layout: the layouts differ in features, not in HALs")
+
+
+def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The lazy provider is installed alone, declared once, started on demand, and loads the V4L2 HWL."""
+    binary = f"VENDOR/bin/hw/{CAMERA_PROVIDER}"
+    for entry in (binary, CAMERA_HWL):
+        info = infos.get(entry)
+        if info is None or info.is_dir():
+            fail(f"{entry} is missing: the image has no camera provider")
+        if read_small(archive, info, CAMERA_HWL_LIMIT)[:4] != b"\x7fELF":
+            fail(f"{entry} is not an ELF file")
+    for entry in (f"VENDOR/bin/hw/{CAMERA_EAGER_PROVIDER}", f"VENDOR/etc/init/{CAMERA_EAGER_PROVIDER}.rc"):
+        if entry in infos:
+            fail(f"{entry} is installed: only the lazy camera provider runs, so that no process exists "
+                 "while no application holds a camera")
+    library = read_small(archive, infos[CAMERA_HWL], CAMERA_HWL_LIMIT)
+    for marker in CAMERA_HWL_MARKERS:
+        if marker not in library:
+            fail(
+                f"{CAMERA_HWL} lacks {marker.decode()!r}: route p0030 is missing from the build, so "
+                "the camera HAL would list no camera of the host"
+            )
+    script = read_small(archive, infos[f"VENDOR/etc/init/{CAMERA_PROVIDER}.rc"]).decode("utf-8", errors="strict")
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(rf"service \S+ /vendor/bin/hw/{re.escape(CAMERA_PROVIDER)}", service[0]):
+        fail("the camera provider init script must define one service that runs the lazy provider")
+    for required in CAMERA_PROVIDER_RC_OPTIONS:
+        if required not in lines:
+            fail(f"the camera provider service must carry '{required}'")
+    if any(line.startswith("on ") for line in lines):
+        fail("the camera provider init script may have no trigger: init starts the service when a client asks")
+    declarations = []
+    for entry, info in sorted(infos.items()):
+        path = PurePosixPath(entry)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {entry}: {error}")
+        for hal in root.iter("hal"):
+            if hal.findtext("name") == CAMERA_HAL_NAME:
+                declarations.append((entry, hal.get("format"), declared_hals(hal)[0][2]))
+    if len(declarations) != 1:
+        fail(f"{CAMERA_HAL_NAME} must be declared exactly once: {[entry for entry, _, _ in declarations]}")
+    entry, hal_format, interfaces = declarations[0]
+    if not entry.startswith("VENDOR/") or hal_format != "aidl" or interfaces != [CAMERA_HAL_INTERFACE]:
+        fail(f"{entry} must declare the AIDL {CAMERA_HAL_INTERFACE} of {CAMERA_HAL_NAME} in the vendor: {interfaces}")
+    if not CAMERA_PROVIDER_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the lazy camera provider its hal_camera_default_exec label")
+
+
+def check_camera_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """One characteristics template, the properties that select it, and no vendor extensions."""
+    info = infos.get(CAMERA_TEMPLATE)
+    if info is None or info.is_dir():
+        fail(f"{CAMERA_TEMPLATE} is missing: the camera HAL has no template for the cameras of the host")
+    try:
+        template = json.loads(read_small(archive, info))
+    except ValueError as error:
+        fail(f"cannot parse {CAMERA_TEMPLATE}: {error}")
+    if not isinstance(template, dict) or "android.lens.facing" not in template:
+        fail(f"{CAMERA_TEMPLATE} is not a camera characteristics template")
+    for entry in sorted(infos):
+        if entry.startswith(CAMERA_CONFIG_DIRECTORY + "emu_camera_") and entry != CAMERA_TEMPLATE:
+            fail(f"{entry} is a camera of the stock emulated HAL: the host's cameras are the only ones")
+        if PurePosixPath(entry).name.endswith("camera_extensions.xml") or PurePosixPath(entry).name.startswith(
+            "androidx.camera.extensions.impl"
+        ):
+            fail(f"{entry} is a vendor camera extension: the image has none")
+    for entry, key, value in (CAMERA_LAZY_HAL_PROPERTY, CAMERA_CONFIG_PROPERTY):
+        properties = parse_properties(read_small(archive, infos[entry]).decode("utf-8", errors="strict"))
+        if properties.get(key) != value:
+            fail(f"{entry} lacks {key}={value}: {properties.get(key)!r}")
+    for entry, info in infos.items():
+        if PurePosixPath(entry).name in {"build.prop", "default.prop"} and not info.is_dir():
+            if CAMERA_EXTENSIONS_PROPERTY in parse_properties(read_small(archive, info).decode("utf-8", errors="strict")):
+                fail(f"{entry} sets {CAMERA_EXTENSIONS_PROPERTY}: the image has no vendor camera extensions")
+
+
+def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The camera application lists each lens the host has, and the sensor privacy service reads
+    the camera switch."""
+    table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
+    try:
+        booleans = resource_booleans(table)
+        arrays = resource_arrays(table)
+    except (ValueError, struct.error, IndexError) as error:
+        fail(f"{CAMERA_APP} has no readable resource table: {error}")
+    if booleans.get(CAMERA_AUX_CAMERAS) != [True]:
+        fail(
+            f"{CAMERA_APP} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
+            "each lens of the host is its own camera device"
+        )
+    if arrays.get(CAMERA_IGNORED_AUX_CAMERAS) != [CAMERA_IGNORED_AUX_IDS]:
+        fail(
+            f"{CAMERA_APP} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
+            f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
+            "the wide lens is the zoom camera's 1x"
+        )
+    try:
+        toggle = resource_booleans(camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT))
+    except (ValueError, struct.error, IndexError) as error:
+        fail(f"{FRAMEWORK_OVERLAY} has no readable resource table: {error}")
+    if toggle.get(CAMERA_HARDWARE_TOGGLE) != [True]:
+        fail(
+            f"{FRAMEWORK_OVERLAY} must set {CAMERA_HARDWARE_TOGGLE} to true: {toggle.get(CAMERA_HARDWARE_TOGGLE)}; "
+            "a session started with Camera off could not show the camera blocked"
+        )
+
+
+def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    check_camera_layout_files(archive, infos)
+    check_camera_provider(archive, infos)
+    check_camera_configuration(archive, infos)
+    check_camera_app(archive, infos)
+
+
+
 # The gamepad relay (overlay/gamepad) turns the host's game controllers into HID devices through
 # /dev/uhid, and every device has a host, so every device runs it: a daemon that init starts with
 # its class at boot, in a domain of its own (not a HAL, so no VINTF fragment) that may use the uhid
@@ -3056,6 +3285,15 @@ def check_hardware_features(
             feature = element.attrib.get("name")
             if feature in FORBIDDEN_FEATURE_NAMES:
                 fail(f"absent hardware feature is advertised in {name}: {feature}")
+            if (
+                feature
+                and feature.startswith(CAMERA_FEATURE_PREFIX)
+                and name not in camera_layout_files()
+            ):
+                fail(
+                    f"a camera feature is declared outside the camera layouts in {name}: {feature}; "
+                    "the host's cameras decide it, through the permission directory of the layout"
+                )
             if feature == "android.software.vulkan.deqp.level":
                 fail(f"a Vulkan dEQP level is declared in {name}: the Vulkan lists are not qualified")
             if feature == OPENGLES_DEQP_LEVEL_FEATURE:
@@ -4889,6 +5127,7 @@ def main() -> None:
         check_pinner_overlay(archive, infos)
         check_application_manifests(archive, infos, build_variant)
         check_thermal_hal(archive, infos)
+        check_camera(archive, infos)
         check_gamepad_relay(archive, infos)
         check_cas_hal(archive, infos)
         check_wifi_hals(archive, infos)

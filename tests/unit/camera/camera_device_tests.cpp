@@ -1029,6 +1029,7 @@ void testControlsOnStreams()
             "and reads back");
 
     // A button counts presses; the focus status follows the exposure.
+    rig.setOk(1, {{UML_V4L2_CID_FOCUS_AUTO, 0, {}}});
     for (int press = 0; press < 3; ++press) rig.setOk(1, {{UML_V4L2_CID_AUTO_FOCUS_START, 1, {}}});
     require(rig.camera->appliedSettings(0).focusTriggerSerial == 3, "three presses of the focus button");
     rig.setOk(1, {{UML_V4L2_CID_FOCUS_AUTO, 1, {}}});
@@ -1155,7 +1156,7 @@ void testCamerasJoin()
         options.profile = SyntheticCameraProfile::tabletDualFront;
         Rig rig(options);
         EventQueue events(rig, 4);
-        videoStream(rig, 1, 0, 1600, 900, 3);
+        videoStream(rig, 1, 0, 1600, 900, 2);
         videoStream(rig, 2, 1, 640, 480, 3);
         const auto first = rig.queue(1, 1);
         require(rig.camera->videoSize(0) == std::make_pair(1600u, 900u), "alone, the back camera runs the format that covers 1600 x 900");
@@ -1237,10 +1238,16 @@ void testStillOnAnotherCamera()
     };
     using Size = std::pair<std::uint32_t, std::uint32_t>;
 
-    // The back camera streams at a size of its own, and the front camera takes a still.
-    videoStream(rig, 1, 0, 1600, 900, 2);
+    // The back camera streams at a size of its own, and the front camera takes a still. The first
+    // buffer starts the capture, and the stream's frames are black until the capture delivers one,
+    // on a timer in real time: a captured frame ends that, so that the frames below are the
+    // camera's whatever time this thread takes between the steps.
+    videoStream(rig, 1, 0, 1600, 900, 3);
     stillStream(2, 1);
-    const auto frame = rig.queue(1, 1);
+    rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    const auto frame = rig.queue(1, 2);
     require(rig.camera->videoSize(0) == Size(1600, 900), "alone, the back camera runs the format that covers 1600 x 900");
     const auto still = rig.queue(2, 1, 777);
     require(rig.camera->videoSize(0) == Size(1920, 1080), "the back camera moved to a format a multi-camera session takes");
@@ -1257,6 +1264,9 @@ void testStillOnAnotherCamera()
     clearStream(rig, 1);
     rig.destroy(1);
     videoStream(rig, 1, 0, 3840, 2160, 1);
+    rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
     const auto big = rig.queue(1, 1);
     require(rig.camera->videoSize(0) == Size(3840, 2160), "4K on the back camera");
     const auto refused = rig.queue(2, 2, 778);
@@ -1605,7 +1615,11 @@ void testSuspendWithNoStreamResetsNothing()
     rig.step();
     require(events.arrived().size() >= 1 && events.arrived()[0].first == VIRTIO_VIDEO_EVENT_CAMERA_INTERRUPTED,
             "a later event reaches the buffer posted before the suspend");
-    require(rig.held.size() == 1, "and the stream's buffer is the one request the device holds now");
+    // An interrupted stream's buffer is completed black by a timer in real time, so the held request
+    // is made, and used, before the device is stepped again.
+    clearStream(rig, 1);
+    rig.queue(1, 2);
+    require(rig.held.size() == 1, "the stream's buffer is the one request the device holds now");
     rig.disableRings();
     require(rig.resets == 1, "a suspend that finds it held still resets the device, as the fallback");
 }

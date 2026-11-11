@@ -63,3 +63,28 @@ uml_add_unit_test(NAME andarium-gamepad-protocol
     COMMAND uml_andarium_gamepad_protocol_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/gamepad-golden-frames.txt
     LABELS andarium)
+
+# The guest's camera HAL (android/lineage-24/overlay/camera/hal): its copy of the
+# camera device's records and controls against the wire header, the IDs and
+# stream tables that a host's cameras become, how a request's settings become
+# controls and an exposure's metadata its results, and the edits to a JPEG that
+# the host encoded.
+add_executable(uml_andarium_camera_abi_tests camera_abi_tests.cpp)
+target_include_directories(uml_andarium_camera_abi_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal
+    ${PROJECT_SOURCE_DIR}/darwin/device/camera
+    ${PROJECT_SOURCE_DIR}/kernel/common/video)
+uml_add_unit_test(NAME andarium-camera-abi
+    COMMAND uml_andarium_camera_abi_tests LABELS andarium)
+
+add_executable(uml_andarium_camera_plan_tests camera_plan_tests.cpp)
+target_include_directories(uml_andarium_camera_plan_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-plan
+    COMMAND uml_andarium_camera_plan_tests LABELS andarium)
+
+add_executable(uml_andarium_camera_controls_tests camera_controls_tests.cpp)
+target_include_directories(uml_andarium_camera_controls_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-controls
+    COMMAND uml_andarium_camera_controls_tests LABELS andarium)

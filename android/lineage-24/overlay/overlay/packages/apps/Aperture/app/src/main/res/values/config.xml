@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  Copyright 2026 The Android Open Source Project
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<resources>
+    <!-- Each back lens of the host is its own camera device (ID 2 wide, 3 ultra wide, 4 telephoto)
+         beside the zoom camera "0", which zooms across the lenses on its own. The lens buttons open
+         the lens cameras, which have manual control. The wide lens is the zoom camera's 1x, so its
+         button comes from "0" and the lens camera "2" stays out of the list. A host that lacks a
+         lens has no camera for it. -->
+    <bool name="config_enableAuxCameras">true</bool>
+    <string-array name="config_ignoredAuxCameraIds">
+        <item>2</item>
+    </string-array>
+</resources>

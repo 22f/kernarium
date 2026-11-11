@@ -411,7 +411,9 @@ struct CameraState {
     std::uint32_t stillsOut {};
     std::uint32_t stillCounter {};
     std::uint32_t seenFocusSerial {};
-    bool scanning {};
+    std::uint32_t seenDistanceSerial {};
+    // Where the lens is, in dioptres; the chart is at 1.
+    float lens {1.0f};
     std::map<std::pair<std::uint32_t, std::uint32_t>, Picture> bases;
 };
 
@@ -705,19 +707,26 @@ private:
             result.scene.gain = std::pow(2.0, settings.exposureBiasStops);
         }
         // Focus.
+        // A new trigger scans in any mode, and the lens ends on the chart; a manual
+        // lens moves only when the distance was written anew; a locked or manual
+        // lens holds; continuous focus keeps the chart sharp.
         if (info.autofocus) {
-            if (settings.focusMode == CameraFocusMode::manual && info.manualFocus) {
-                exposure.lensPositionDioptres = settings.focusDistanceDioptres;
+            const bool moved = settings.focusDistanceSerial != state.seenDistanceSerial;
+            state.seenDistanceSerial = settings.focusDistanceSerial;
+            if (settings.focusTriggerSerial != state.seenFocusSerial) {
+                state.seenFocusSerial = settings.focusTriggerSerial;
+                state.lens = 1.0f;
+                exposure.af = CameraControlState::searching;
+            } else if (settings.focusMode == CameraFocusMode::manual && info.manualFocus) {
+                if (moved) state.lens = settings.focusDistanceDioptres;
+                exposure.af = CameraControlState::locked;
+            } else if (settings.focusMode == CameraFocusMode::locked) {
                 exposure.af = CameraControlState::locked;
             } else {
-                exposure.lensPositionDioptres = 1.0f;
-                exposure.af = settings.focusMode == CameraFocusMode::locked ? CameraControlState::locked
-                                                                             : CameraControlState::converged;
-                if (settings.focusTriggerSerial != state.seenFocusSerial) {
-                    state.seenFocusSerial = settings.focusTriggerSerial;
-                    exposure.af = CameraControlState::searching;
-                }
+                state.lens = 1.0f;
+                exposure.af = CameraControlState::converged;
             }
+            exposure.lensPositionDioptres = state.lens;
             result.scene.blur = std::min(8, int(std::lround(std::fabs(exposure.lensPositionDioptres - 1.0f) * 2.0f)));
         }
         // White balance.
