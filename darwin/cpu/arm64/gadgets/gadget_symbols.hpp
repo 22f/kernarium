@@ -2050,6 +2050,31 @@ void uml_arm64_gadget_run_epilogue_7_0();
 void uml_arm64_gadget_run_epilogue_7_1();
 void uml_arm64_gadget_run_epilogue_8_0();
 void uml_arm64_gadget_run_epilogue_8_1();
+/* The prologue run heads, by pairs, single stores and SUB SP count. */
+void uml_arm64_gadget_run_prologue_1_0_0();
+void uml_arm64_gadget_run_prologue_1_0_1();
+void uml_arm64_gadget_run_prologue_1_1_0();
+void uml_arm64_gadget_run_prologue_1_1_1();
+void uml_arm64_gadget_run_prologue_2_0_0();
+void uml_arm64_gadget_run_prologue_2_0_1();
+void uml_arm64_gadget_run_prologue_2_1_0();
+void uml_arm64_gadget_run_prologue_2_1_1();
+void uml_arm64_gadget_run_prologue_3_0_0();
+void uml_arm64_gadget_run_prologue_3_0_1();
+void uml_arm64_gadget_run_prologue_3_1_0();
+void uml_arm64_gadget_run_prologue_3_1_1();
+void uml_arm64_gadget_run_prologue_4_0_0();
+void uml_arm64_gadget_run_prologue_4_0_1();
+void uml_arm64_gadget_run_prologue_4_1_0();
+void uml_arm64_gadget_run_prologue_4_1_1();
+void uml_arm64_gadget_run_prologue_5_0_0();
+void uml_arm64_gadget_run_prologue_5_0_1();
+void uml_arm64_gadget_run_prologue_5_1_0();
+void uml_arm64_gadget_run_prologue_5_1_1();
+void uml_arm64_gadget_run_prologue_6_0_0();
+void uml_arm64_gadget_run_prologue_6_0_1();
+void uml_arm64_gadget_run_prologue_6_1_0();
+void uml_arm64_gadget_run_prologue_6_1_1();
 /* Everything a condition has: the branch, its linked and inline forms, and
  * the fused CMP and B.cond in both widths with the same three forms. */
 #define UML_DECLARE_FUSED_COMPARE_BRANCH(kind, width, name) \
