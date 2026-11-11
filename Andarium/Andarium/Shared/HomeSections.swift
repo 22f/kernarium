@@ -469,7 +469,7 @@ struct MicrophoneAccessAlert: ViewModifier {
             Button("Open Settings") { model.openMicrophoneSettings() }
             Button("Not now", role: .cancel) {}
         } message: {
-            Text("iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it.")
+            Text(String(localized: "iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it.").keepingTogether)
         }
     }
 }
@@ -500,7 +500,7 @@ struct LocationAccessAlert: ViewModifier {
                 Button("OK", role: .cancel) {}
             }
         } message: {
-            Text(words?.message ?? "")
+            Text((words?.message ?? "").keepingTogether)
         }
     }
 }

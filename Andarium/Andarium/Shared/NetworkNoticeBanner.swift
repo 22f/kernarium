@@ -73,7 +73,7 @@ struct NetworkNoticeBanner: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NetworkWords.title(for: denial))
                         .font(.subheadline.weight(.semibold))
-                    Text(NetworkWords.text(for: denial))
+                    Text(NetworkWords.text(for: denial).keepingTogether)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

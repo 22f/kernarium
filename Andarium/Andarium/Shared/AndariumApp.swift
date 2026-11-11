@@ -123,7 +123,7 @@ struct RootView: View {
         ) { _ in
             Button("OK", role: .cancel) {}
         } message: { alert in
-            Text(alert.message)
+            Text(alert.message.keepingTogether)
         }
         #if !APP_STORE
         .task {

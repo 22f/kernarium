@@ -161,12 +161,18 @@ struct SessionSettingsSheet: View {
             } label: {
                 HStack(spacing: 12) {
                     IconTile(symbol: "square.and.arrow.down.fill")
+                    // The name gets its width first: it wraps only when the
+                    // line is too narrow for it alone, and the hint beside
+                    // it gives way.
                     Text("Install APK\u{2026}")
                         .foregroundStyle(Color.accentColor)
-                    Spacer()
+                        .layoutPriority(1)
+                    Spacer(minLength: 0)
                     Text("From Files")
                         .font(.subheadline)
                         .foregroundStyle(Color(.secondaryLabel))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
             }
             .disabled(model.fileBrowser?.busy == true)

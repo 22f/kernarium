@@ -79,13 +79,13 @@ struct HomeView: View {
             Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count))
+            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count).keepingTogether)
         }
         .alert(StartSpaceWords.title, isPresented: $model.startBlocked) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(StartSpaceWords.message(
-                neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes, device: model.host.name))
+                neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes, device: model.host.name).keepingTogether)
         }
     }
 
@@ -446,8 +446,8 @@ struct NoticeCard: View {
                 .foregroundStyle(color)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(text)
+                Text(title.keepingTogether).font(.subheadline.weight(.semibold))
+                Text(text.keepingTogether)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

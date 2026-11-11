@@ -611,7 +611,9 @@ joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
 number keeps its space before its unit. Bug report and session record text, log
-lines and technical names stay English.
+lines and technical names stay English. Text shown on a card, an alert or an
+overlay passes `String.keepingTogether`, so a number stays with its unit and a
+short quoted Chinese or Japanese name is not cut across two lines.
 
 `scripts/localization.py check` is the catalogs' gate. After a build with
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check

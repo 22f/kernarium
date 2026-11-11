@@ -148,7 +148,7 @@ struct BootView: View {
 
             if let note = Self.note(kind, from: model.bootFrom, system: system) {
                 Label {
-                    Text(note)
+                    Text(note.keepingTogether)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -207,7 +207,7 @@ struct BootView: View {
                 Text(step.title)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(state == .pending ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
-                Text(step.detail)
+                Text(step.detail.keepingTogether)
                     .font(.subheadline)
                     .monospacedDigit()
                     .foregroundStyle(state == .active ? AnyShapeStyle(Color.accentColor) : (state == .done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary)))
