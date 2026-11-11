@@ -98,7 +98,7 @@ final class LiveRuntime: RuntimeDriver {
             let result = try await operations.shell(policy.command, limit: .seconds(15))
             guard result.exitCode == 0 else {
                 print("Andarium: display rotation command failed: \(result.text)")
-                throw AdbFailure(message: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again.")
+                throw AdbFailure(message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
             }
         }, changed: { [weak self] in
             self?.updateMotionSensors()
@@ -106,8 +106,8 @@ final class LiveRuntime: RuntimeDriver {
             print("Andarium: display rotation unavailable: \(error)")
             guard let model = self?.model, model.alert == nil else { return }
             model.alert = AppAlert(
-                title: "Display rotation unavailable",
-                message: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again.")
+                title: String(localized: "Display rotation unavailable"),
+                message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
         })
     private var normalRun = false
     /// The runtime runs a guest, from its start until its run returns.
@@ -1074,12 +1074,12 @@ final class LiveRuntime: RuntimeDriver {
         await wakeGuest()
         guard !pause.isPausedForSpace else {
             shuttingDown = false
-            throw AdbFailure(message: "Android is still paused.")
+            throw AdbFailure(message: String(localized: "Android is still paused."))
         }
         do {
             let result = try await operations.shell("reboot -p", limit: .seconds(30))
             if let code = result.exitCode, code != 0 {
-                throw AdbFailure(message: "Android refused to power off (\(code)).")
+                throw AdbFailure(message: String(localized: "Android refused to power off (\(code))."))
             }
             // Android powers off after the command returns, which ends the
             // run; the screen goes with it. Until it has, it is going down.
@@ -1101,7 +1101,7 @@ final class LiveRuntime: RuntimeDriver {
         let deadline = ContinuousClock.now + limit
         while runActive {
             guard ContinuousClock.now < deadline else {
-                throw AdbFailure(message: "Android did not power off.")
+                throw AdbFailure(message: String(localized: "Android did not power off."))
             }
             try await Task.sleep(for: .milliseconds(250))
         }

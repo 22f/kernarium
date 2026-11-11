@@ -195,9 +195,9 @@ struct AppEntry {
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
         case "busy-create":
-            model.busy = BusyState(title: "Creating virtual machine", detail: "Setting up Andarium with 16 GiB.", progress: 0.42)
+            model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with 16 GiB."), progress: 0.42)
         case "busy-erase":
-            model.busy = BusyState(title: "Erasing virtual machine", detail: "Deleting everything the virtual machine stored.", progress: 0.65)
+            model.busy = BusyState(title: String(localized: "Erasing virtual machine"), detail: String(localized: "Deleting everything the virtual machine stored."), progress: 0.65)
         case "boot":
             // The start applied the growth as it began.
             model.guest?.setCapacity(24)
@@ -328,19 +328,19 @@ struct AppEntry {
         switch screen {
         case "bug-report":
             return BusyState(
-                title: "Creating bug report",
-                detail: "The virtual machine is collecting its logs and state. This can take several minutes.",
+                title: String(localized: "Creating bug report"),
+                detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."),
                 progress: 0.6, cancel: cancel
             )
         case "install-done":
             return BusyState(
-                title: "App installed", detail: "\(file) is installed in the virtual machine.",
+                title: String(localized: "App installed"), detail: String(localized: "\(file) is installed in the virtual machine."),
                 result: BusyResult(failed: false, dismiss: dismiss)
             )
         case "install-failed":
             return BusyState(
                 title: AppModel.installFailure,
-                detail: "The virtual machine couldn\u{2019}t install it: this app has no version for arm64 devices.",
+                detail: PackageInstallMessages.message(forCode: "FAILED_NO_MATCHING_ABIS"),
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
         case "install-not-apk":
@@ -441,8 +441,8 @@ struct AppEntry {
             if let browser = model.fileBrowser, let transfer = browser.transfer { browser.share(transfer) }
         case "alert-error":
             model.alert = AppAlert(
-                title: "Settings not saved",
-                message: "The file couldn\u{2019}t be saved because there is no space left on the device."
+                title: String(localized: "Settings not saved"),
+                message: CocoaError(.fileWriteOutOfSpace).localizedDescription
             )
         case "bug-report" where play:
             try? await Task.sleep(for: .milliseconds(450))

@@ -10,35 +10,40 @@ nonisolated enum AdbActivity {
     /// Browsing the guest's files, importing and exporting.
     case files
 
+    /// Each sentence is whole for each activity, so a language is free to
+    /// order the words of the activity as it needs.
     fileprivate var notReady: String {
         switch self {
-        case .installApp: "install apps"
-        case .bugReport: "make a bug report"
-        case .files: "open its files"
+        case .installApp: String(localized: "The virtual machine isn\u{2019}t ready to install apps. Try again in a moment.")
+        case .bugReport: String(localized: "The virtual machine isn\u{2019}t ready to make a bug report. Try again in a moment.")
+        case .files: String(localized: "The virtual machine isn\u{2019}t ready to open its files. Try again in a moment.")
         }
     }
 
-    fileprivate var stoppedBefore: String {
+    fileprivate var restarted: String {
         switch self {
-        case .installApp: "the app was installed"
-        case .bugReport: "the bug report was finished"
-        case .files: "the transfer finished"
+        case .installApp:
+            String(localized: "The virtual machine\u{2019}s debugging service restarted before the app was installed. Try again.")
+        case .bugReport:
+            String(localized: "The virtual machine\u{2019}s debugging service restarted before the bug report was finished. Try again.")
+        case .files:
+            String(localized: "The virtual machine\u{2019}s debugging service restarted before the transfer finished. Try again.")
         }
     }
 
-    fileprivate var whileDoing: String {
+    fileprivate var stoppedResponding: String {
         switch self {
-        case .installApp: "installing the app"
-        case .bugReport: "making the bug report"
-        case .files: "copying the files"
+        case .installApp: String(localized: "The virtual machine stopped responding while installing the app.")
+        case .bugReport: String(localized: "The virtual machine stopped responding while making the bug report.")
+        case .files: String(localized: "The virtual machine stopped responding while copying the files.")
         }
     }
 
     fileprivate var couldNot: String {
         switch self {
-        case .installApp: "install the app"
-        case .bugReport: "make the bug report"
-        case .files: "copy the file"
+        case .installApp: String(localized: "The virtual machine couldn\u{2019}t install the app.")
+        case .bugReport: String(localized: "The virtual machine couldn\u{2019}t make the bug report.")
+        case .files: String(localized: "The virtual machine couldn\u{2019}t copy the file.")
         }
     }
 }
@@ -56,21 +61,21 @@ nonisolated struct AdbFailure: LocalizedError, Equatable {
     init(_ error: AdbError, activity: AdbActivity) {
         switch error {
         case .refused:
-            message = "The virtual machine isn\u{2019}t ready to \(activity.notReady). Try again in a moment."
+            message = activity.notReady
         case .notAnswering:
-            message = "The virtual machine isn\u{2019}t answering yet. Try again once it has started."
+            message = String(localized: "The virtual machine isn\u{2019}t answering yet. Try again once it has started.")
         case .keyRejected:
-            message = "The virtual machine didn\u{2019}t accept Andarium\u{2019}s key. Restart the virtual machine and try again."
+            message = String(localized: "The virtual machine didn\u{2019}t accept Andarium\u{2019}s key. Restart the virtual machine and try again.")
         case .guestGone, .streamClosed:
             // adbd restarts when the guest's USB debugging turns off, which
             // ends a connection in use; the next try reaches the new one.
-            message = "The virtual machine\u{2019}s debugging service restarted before \(activity.stoppedBefore). Try again."
+            message = activity.restarted
         case .timedOut:
-            message = "The virtual machine stopped responding while \(activity.whileDoing)."
+            message = activity.stoppedResponding
         case let .remote(text):
             message = Self.remote(text, activity: activity)
         case .serviceRefused, .protocolViolation, .io, .cancelled:
-            message = "The virtual machine couldn\u{2019}t \(activity.couldNot)."
+            message = activity.couldNot
         }
     }
 
@@ -80,15 +85,15 @@ nonisolated struct AdbFailure: LocalizedError, Equatable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = trimmed.lowercased()
         if activity == .bugReport, lower.contains("in progress") {
-            return "The virtual machine is already making a bug report."
+            return String(localized: "The virtual machine is already making a bug report.")
         }
         if activity == .files {
-            if lower.contains("no space left") { return "Not enough space in the virtual machine." }
+            if lower.contains("no space left") { return String(localized: "Not enough space in the virtual machine.") }
             if lower.contains("permission denied") || lower.contains("read-only") {
-                return "Android doesn\u{2019}t allow changes to this folder."
+                return String(localized: "Android doesn\u{2019}t allow changes to this folder.")
             }
         }
-        return trimmed.isEmpty ? "The virtual machine couldn\u{2019}t \(activity.couldNot)." : trimmed
+        return trimmed.isEmpty ? activity.couldNot : trimmed
     }
 }
 
@@ -97,9 +102,9 @@ nonisolated struct AdbFailure: LocalizedError, Equatable {
 nonisolated enum AdbNetworkMessages {
     static func cannotStart(_ error: Error) -> String {
         if let adb = error as? AdbError, adb == .io(EADDRINUSE) {
-            return "Port \(AdbNetworkBridge.defaultPort) is already in use on this device."
+            return String(localized: "Port \(AdbNetworkBridge.defaultPort) is already in use on this device.")
         }
-        return "ADB over network could not start."
+        return String(localized: "ADB over network could not start.")
     }
 
     static let noAddress = String(localized: "This device has no Wi-Fi address. Connect to Wi-Fi to use ADB over network.")
