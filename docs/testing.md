@@ -325,8 +325,9 @@ relay, and the package's test-only `andarium-gamepad-probe` plays a script to a
 TCP port, where the macOS launcher's `--vsock-forward` reaches a guest's relay.
 The script and the guest end of the wire are the package's
 `AndariumCoreTestSupport` target, which only the package's tests, the probe
-and `AndariumTests` link; the application never does (the App Store bundle
-check refuses a build that does).
+and `AndariumTests` link, and the test bundle carries in its own Frameworks
+folder, so a device can load it; the application never does (the App Store
+bundle check refuses a build that does).
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
