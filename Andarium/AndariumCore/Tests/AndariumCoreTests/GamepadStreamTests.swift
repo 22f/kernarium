@@ -197,10 +197,13 @@ struct GamepadStreamTests {
 
     @Test func aFullConnectionDoesNotBlockTheCaller() {
         let rig = connected(buffer: 2048)
-        let started = Date()
         _ = fill(rig)
-        for value in 0..<10_000 { _ = rig.stream.send(.input(slot: 0, report: [1, UInt8(value & 0xff)])) }
-        #expect(Date().timeIntervalSince(started) < 2)
+        let stream = rig.stream
+        let finished = returnsWithoutWaiting {
+            for value in 0..<10_000 { _ = stream.send(.input(slot: 0, report: [1, UInt8(value & 0xff)])) }
+        }
+        if !finished { rig.guest.dropLatest() }
+        #expect(finished, "a send waited for a guest that reads nothing")
         #expect(rig.events.lost == 0)
     }
 

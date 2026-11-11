@@ -30,6 +30,10 @@ struct SessionSettingsSheet: View {
             ScrollViewReader { proxy in
                 List {
                     if model.capabilities.statistics { stats(session) }
+                    if model.host.supportsPointer { pointer }
+                    #if !APP_STORE
+                    if let probe = model.inputProbe { inputProbe(probe) }
+                    #endif
                     if normalSession, model.capabilities.apkInstall { apps }
                     if normalSession, model.capabilities.guestFiles, model.fileBrowser != nil { files }
                     if normalSession, model.capabilities.adbOverNetwork { developer(session) }
@@ -241,6 +245,32 @@ struct SessionSettingsSheet: View {
         }
         .padding(.vertical, 4)
     }
+
+    // MARK: Pointer
+
+    /// Off, Android sees a mouse with its own cursor; on, the pointer's clicks
+    /// are touches, as a game that only understands touch needs.
+    private var pointer: some View {
+        Section {
+            Toggle(isOn: Binding(get: { model.pointerAsTouch }, set: { model.setPointerAsTouch($0) })) {
+                rowLabel("Use the pointer as touch", symbol: "cursorarrow.click")
+            }
+            .accessibilityIdentifier("pointerAsTouch")
+        }
+    }
+
+    #if !APP_STORE
+    /// The text field a UI test types into while Settings is open.
+    private func inputProbe(_ probe: InputProbe) -> some View {
+        @Bindable var probe = probe
+        return Section {
+            TextField("Input probe", text: $probe.fieldText)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .accessibilityIdentifier("inputProbeField")
+        }
+    }
+    #endif
 
     // MARK: Stats
 

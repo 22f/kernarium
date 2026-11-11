@@ -52,6 +52,13 @@ struct AppEntry {
     }
 
     func configureTips() {
+        #if !APP_STORE
+        // The input probe's UI tests tap the side keys and Settings; a tip's
+        // popover over them is no part of what they check.
+        if InputProbeLaunch.requested(in: ProcessInfo.processInfo.environment) {
+            Tips.hideAllTipsForTesting()
+        }
+        #endif
         try? Tips.configure([.displayFrequency(.immediate)])
     }
 
@@ -66,6 +73,13 @@ struct AppEntry {
         let version = Self.appVersion(bundle)
         let systemFolder = bundle.resourceURL?.appendingPathComponent(SystemFolder.name)
         let host = Self.hostDevice()
+        #if !APP_STORE
+        // A UI test of the hardware keyboard and mouse opens the session with
+        // no guest behind it.
+        if InputProbeLaunch.requested(in: ProcessInfo.processInfo.environment) {
+            return Self.makeInputProbeModel(host: host, version: version)
+        }
+        #endif
 
         var problem: String?
         var system = SystemInfo(
@@ -141,6 +155,11 @@ struct AppEntry {
         let stats = StatsPreference().launch(for: launch)
         model.session.showStats = stats.showOnScreen
         model.statsDecidedByLaunch = !stats.keepsChanges
+        // "Use the pointer as touch" is the person's last choice, unless the
+        // launch is a harness's and decides for its run alone.
+        let pointer = PointerPreference().launch(automated: !launch.isEmpty)
+        model.pointerAsTouch = pointer.isOn
+        model.pointerAsTouchDecidedByLaunch = !pointer.keepsChanges
         #if !APP_STORE
         model.printsStatistics = launch.statistics == true
         // The JIT row follows the person's last choice, unless the launch is a
@@ -210,6 +229,48 @@ struct AppEntry {
     }
 
     #if !APP_STORE
+    /// The model of a UI test's launch of the hardware keyboard and mouse
+    /// (`InputProbeLaunch`): a guest that exists only in memory and a session
+    /// that is open as if its run had booted, so the display takes the keys
+    /// and the pointer. The guest's keyboard and mouse send to the probe's log
+    /// instead of the runtime, and nothing is read from or written to the
+    /// application's own guest or settings.
+    @MainActor
+    private static func makeInputProbeModel(host: HostDevice, version: String) -> AppModel {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("InputProbe", isDirectory: true)
+        let locations = GuestLocations(directory: directory)
+        let storage = TwoDiskStorage(
+            locations: locations,
+            release: ReleaseIdentity(
+                releaseID: "probe", buildFingerprint: "probe", buildNumber: 1, securityPatch: "",
+                systemDiskSHA256: String(repeating: "0", count: 64), dataLayout: 1, minimumGiB: 4, defaultGiB: 8,
+                maximumGiB: 64
+            ),
+            releaseDirectory: directory
+        )
+        let system = SystemInfo(
+            version: "", release: "probe", securityPatch: nil, kernel: "", architecture: "", appVersion: version)
+        let model = AppModel(
+            guest: Guest.fresh(on: host), host: host, system: system, capabilities: .device,
+            createRequirementBytes: 0
+        )
+        // The launch decides the setting for its own run.
+        model.pointerAsTouch = PointerPreference().launch(automated: true).isOn
+        model.pointerAsTouchDecidedByLaunch = true
+        let probe = InputProbe()
+        model.inputProbe = probe
+        let runtime = LiveRuntime(
+            model: model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")),
+            keyboardMouse: KeyboardMouse.probe(
+                probe, supportsMouse: host.supportsPointer,
+                guestRegisters: InputProbeLaunch.guestRegisters(in: ProcessInfo.processInfo.environment)
+            ) { [weak model] wanted in model?.pointerLockWanted = wanted })
+        model.driver = runtime
+        model.phase = .running(.normal)
+        runtime.beginInputProbe()
+        return model
+    }
+
     /// An automation launch creates the guest if there is none, erases it
     /// when asked, and starts it; a normal launch stops at Home.
     @MainActor
@@ -321,7 +382,8 @@ struct AppEntry {
             name: name, processorCount: limit,
             memory: memoryPolicy(processorCount: limit),
             freeStorageBytes: freeStorageBytes(),
-            runsGuestGraphics: drawsGuestGraphics()
+            runsGuestGraphics: drawsGuestGraphics(),
+            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone
         )
     }
 

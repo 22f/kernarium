@@ -639,9 +639,10 @@ uml_add_guest_integration_test(
     CPUS 4)
 
 # A host suspend and the guest's own suspend, with the Virtio video decoder and
-# encoder idle, leave both devices as they were: a descriptor opened before the
-# suspend decodes and encodes after it, a new decode session gets its source
-# change and a picture, and the host resets neither device.
+# encoder idle or with a stream in progress, leave both devices as they were: a
+# descriptor opened before the suspend decodes and encodes after it, a new
+# decode session gets its source change and a picture, a stream gets its next
+# picture or coded buffer and closes, and the host resets neither device.
 uml_add_guest_integration_test(
     NAME guest-video-suspend
     SCRIPT kernel/run_guest_video_suspend.py
