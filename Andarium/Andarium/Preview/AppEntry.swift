@@ -66,6 +66,7 @@ struct AppEntry {
         "home-new-recovery": "erase",
         "home-display": "display",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
+        "home-haptics-off": "capabilities",
         "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
         "home-location-on": "capabilities", "home-location-denied": "capabilities",
         "home-location-approximate": "capabilities", "home-location-restricted": "capabilities",
@@ -129,6 +130,9 @@ struct AppEntry {
         model.fileBrowser = browser
         let freeze = !play
         model.jitAvailable = true
+        // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
+        // preview, like the device, has no Haptics row.
+        model.hapticsAvailable = host.name == "iPhone"
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil
@@ -182,6 +186,8 @@ struct AppEntry {
             model.microphoneState = .denied
         case "home-gyroscope-unavailable":
             model.motionSensorsAvailable = false
+        case "home-haptics-off":
+            model.guest?.haptics = false
         case "home-location-on":
             model.guest?.location = true
             model.locationAuthorization = .precise

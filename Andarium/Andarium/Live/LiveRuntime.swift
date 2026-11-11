@@ -189,6 +189,7 @@ final class LiveRuntime: RuntimeDriver {
             MainActor.assumeIsolated { self?.location.receiverPower(powered) }
         }
         model.motionSensorsAvailable = motion.available
+        model.hapticsAvailable = hapticsAvailable
         motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
@@ -782,12 +783,19 @@ final class LiveRuntime: RuntimeDriver {
 
     /// The guest's vibrator plays while a normal run is in front and holds
     /// the guest running; the connection is made from the run's start, because
-    /// the guest's HAL starts early. The screens have no part in it: Android's
-    /// own settings decide what it asks for.
+    /// the guest's HAL starts early. Android's own settings decide what it
+    /// asks for, and the Haptics switch whether the device plays it: the guest
+    /// keeps its vibrator either way, and while the switch is off the session
+    /// holds no connection and the player no engine for the device. A game
+    /// controller's rumble is not governed by the switch.
     private func updateHaptics() {
         haptics.update(
-            available: hapticsAvailable, running: normalRun, booted: reachedBootCompleted,
-            foreground: active && !holdsGuestStill)
+            available: hapticsAvailable, enabled: model?.hapticsOn ?? true, running: normalRun,
+            booted: reachedBootCompleted, foreground: active && !holdsGuestStill)
+    }
+
+    func setHaptics(_ on: Bool) {
+        updateHaptics()
     }
 
     // MARK: Game controllers

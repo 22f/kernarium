@@ -346,6 +346,10 @@ final class AppModel {
     var diskProgress: Double?
     var motionSensorsAvailable = true
     var motionSensorsProblem: String?
+    /// The device has haptics (a Taptic Engine) for the guest's vibrator to
+    /// play on. The runtime states it; an iPad, a Mac and the Simulator have
+    /// none, and Capabilities then has no Haptics row.
+    var hapticsAvailable = false
     /// Settings' "Use the pointer as touch": the system pointer's clicks are the
     /// guest's touches and the guest has no mouse. Kept for the install
     /// (`PointerPreference`); off, Android sees a mouse with its own cursor.
@@ -1250,6 +1254,19 @@ final class AppModel {
         guest?.motionChoice = on
         persistNow()
         driver?.setMotionSensors(on)
+    }
+
+    /// The Haptics switch as the screens show it: the guest's choice, which
+    /// is on until the person turns it off.
+    var hapticsOn: Bool { guest?.haptics ?? true }
+
+    /// The Haptics switch. It asks for nothing and applies at once, in a run
+    /// too: the guest keeps its vibrator either way.
+    func setHaptics(_ on: Bool) {
+        guard guest != nil else { return }
+        guest?.haptics = on
+        persistNow()
+        driver?.setHaptics(on)
     }
 
     /// The Microphone switch as the screens show it: the guest's choice is on

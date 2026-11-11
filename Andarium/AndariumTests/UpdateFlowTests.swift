@@ -43,6 +43,9 @@ final class StubDriver: RuntimeDriver {
     var motionSensors = false
     var savedGuest: Guest?
     func setMotionSensors(_ on: Bool) { motionSensors = on }
+    /// What the Haptics switch told the driver.
+    var haptics = true
+    func setHaptics(_ on: Bool) { haptics = on }
     /// What "Use the pointer as touch" and the pointer lock told the driver.
     var pointerAsTouch = false
     var pointerLocked = false
