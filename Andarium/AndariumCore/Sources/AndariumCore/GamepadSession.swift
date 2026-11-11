@@ -72,6 +72,9 @@ public protocol GamepadIndicators: AnyObject, Sendable {
 /// **Rumble.** An output report of the guest's driver sets a motor's level
 /// until the next one; each motor plays as a tone of the haptics' vocabulary on
 /// the controller's handle (`GamepadRumble`), which the `HapticPlayer` plays.
+/// Something else may end a tone (the system stopping the engine, a stop of
+/// every target), so a level change on a tone that is not there plays it
+/// again.
 ///
 /// Every call returns at once. The work is in order on one queue, and the
 /// streams and the player are only touched there.
@@ -81,9 +84,6 @@ public final class GamepadSession: @unchecked Sendable {
     public static let attemptsAfterBoot = 5
     /// The shortest time between two reports that change only an analog value.
     public static let analogInterval: UInt64 = 8_000_000
-/// Something else may end a tone (the system stopping the engine, a stop of
-/// every target), so a level change on a tone that is not there plays it
-/// again.
     /// How long after a device is ready its state is sent once more: a driver
     /// that is still being probed refuses a report.
     public static let settleDelay: UInt64 = 300_000_000
@@ -574,6 +574,14 @@ public final class GamepadSession: @unchecked Sendable {
             if tone.intensity <= 0 {
                 if slot.tones.removeValue(forKey: tone.target) != nil { player.stop(tone.target) }
             } else {
+                if let playing = slot.tones[tone.target], now - playing.began < longest {
+                    if playing.intensity == tone.intensity { continue }
+                    if player.setToneIntensity(tone.intensity, on: tone.target) {
+                        slot.tones[tone.target]?.intensity = tone.intensity
+                        continue
+                    }
+                    // Something else ended the tone: it plays again.
+                }
                 scoreSequence &+= 1
                 let score = HapticScore(
                     target: tone.target, sequence: scoreSequence,
@@ -588,11 +596,3 @@ public final class GamepadSession: @unchecked Sendable {
         slots[index] = slot
     }
 }
-                if let playing = slot.tones[tone.target], now - playing.began < longest {
-                    if playing.intensity == tone.intensity { continue }
-                    if player.setToneIntensity(tone.intensity, on: tone.target) {
-                        slot.tones[tone.target]?.intensity = tone.intensity
-                        continue
-                    }
-                    // Something else ended the tone: it plays again.
-                }

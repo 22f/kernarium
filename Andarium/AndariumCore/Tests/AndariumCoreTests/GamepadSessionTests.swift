@@ -474,6 +474,30 @@ struct GamepadSessionTests {
         #expect(rig.player.calls.count == 3)
     }
 
+    @Test func aToneThatSomethingElseEndedPlaysAgainWhenItsLevelChanges() {
+        let rig = greeted()
+        ready(rig, dualSense(1))
+        rig.guest.send(rumble(strong: 255, weak: 0))
+        #expect(waitForCalls(rig, 1))
+        // The system stopped the engine, or a stop of every target came: no tone is there.
+        rig.player.toneAlive = false
+        rig.guest.send(rumble(strong: 102, weak: 0))
+        #expect(waitForCalls(rig, 3))
+        let left = HapticTarget.controller(slot: 0, locality: .leftHandle)
+        #expect(
+            rig.player.calls == [
+                tone(0, .leftHandle, sequence: 1, intensity: 1, sharpness: 0.2),
+                .intensity(102.0 / 255, left),
+                tone(0, .leftHandle, sequence: 2, intensity: 102.0 / 255, sharpness: 0.2),
+            ])
+        // The new tone is the one that is changed in place from now on.
+        rig.player.toneAlive = true
+        rig.guest.send(rumble(strong: 51, weak: 0))
+        #expect(waitForCalls(rig, 4))
+        #expect(rig.player.calls[3] == .intensity(51.0 / 255, left))
+        #expect(rig.player.calls.count == 4)
+    }
+
     @Test func aToneIsStartedAgainWhenItsLongestTimeHasPassed() {
         let rig = greeted()
         ready(rig, dualSense(1))
@@ -554,30 +578,6 @@ struct GamepadSessionTests {
     @Test func aReportThatIsNotTheDriversOutputReportAsksNothing() {
         let rig = greeted()
         ready(rig, dualSense(4))
-    @Test func aToneThatSomethingElseEndedPlaysAgainWhenItsLevelChanges() {
-        let rig = greeted()
-        ready(rig, dualSense(1))
-        rig.guest.send(rumble(strong: 255, weak: 0))
-        #expect(waitForCalls(rig, 1))
-        // The system stopped the engine, or a stop of every target came: no tone is there.
-        rig.player.toneAlive = false
-        rig.guest.send(rumble(strong: 102, weak: 0))
-        #expect(waitForCalls(rig, 3))
-        let left = HapticTarget.controller(slot: 0, locality: .leftHandle)
-        #expect(
-            rig.player.calls == [
-                tone(0, .leftHandle, sequence: 1, intensity: 1, sharpness: 0.2),
-                .intensity(102.0 / 255, left),
-                tone(0, .leftHandle, sequence: 2, intensity: 102.0 / 255, sharpness: 0.2),
-            ])
-        // The new tone is the one that is changed in place from now on.
-        rig.player.toneAlive = true
-        rig.guest.send(rumble(strong: 51, weak: 0))
-        #expect(waitForCalls(rig, 4))
-        #expect(rig.player.calls[3] == .intensity(51.0 / 255, left))
-        #expect(rig.player.calls.count == 4)
-    }
-
         // A feature report type, and an output report for a slot with no controller.
         rig.guest.send(.output(slot: 0, reportType: GamepadReportType.feature, data: dualSenseOutput(flag1: 0x14, leds: 1)))
         rig.guest.send(.output(slot: 3, reportType: GamepadReportType.output, data: dualSenseOutput(flag1: 0x14, leds: 1)))
