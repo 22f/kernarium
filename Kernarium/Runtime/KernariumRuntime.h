@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 32U
+#define KERNARIUM_RUNTIME_API_VERSION 33U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -616,6 +616,113 @@ typedef void (*kernarium_runtime_set_location_receiver_callback_function)(
 typedef int (*kernarium_runtime_report_location_function)(
     const kernarium_runtime_location_fix* fix);
 
+/* The hardware keyboard, mouse and pointer of an Android guest
+ * (darwin/device/input/README.md). The guest has the three devices from boot,
+ * unplugged: it sees no keyboard, mouse or cursor until the application plugs
+ * them, and unplugging takes them away again with every key and button
+ * released. What the application last asked of each device holds for the run:
+ * a guest that restarts itself has the devices plugged as the application left
+ * them, and a plug asked for between two boots is kept for the next. A plug
+ * that is asked for before the guest's driver has probed takes effect when it
+ * has. An Android guest whose kernel lacks the hot-plug topic never plugs
+ * them, and input sent to them is dropped. The Linux runtime keeps the entries
+ * and answers -ENODEV, as does a runtime with no guest running.
+ *
+ * Input for a device that is not plugged, or a key the keyboard has no code
+ * for, is dropped and returns 0, and input sent between two boots returns
+ * -ENODEV; every call may come from any thread. */
+enum {
+    /* The keyboard. */
+    KERNARIUM_RUNTIME_INPUT_KEYBOARD = 1,
+    /* The mouse, which is the relative mouse and the absolute pointer together:
+     * Android sees one mouse, with its own cursor. */
+    KERNARIUM_RUNTIME_INPUT_MOUSE = 2,
+};
+
+/* The bits of the buttons of send_pointer and send_mouse, in the order of
+ * UIKit's button numbers. Back and Forward are Android's navigation buttons. */
+enum {
+    KERNARIUM_RUNTIME_BUTTON_PRIMARY = 1U << 0,
+    KERNARIUM_RUNTIME_BUTTON_SECONDARY = 1U << 1,
+    KERNARIUM_RUNTIME_BUTTON_MIDDLE = 1U << 2,
+    KERNARIUM_RUNTIME_BUTTON_BACK = 1U << 3,
+    KERNARIUM_RUNTIME_BUTTON_FORWARD = 1U << 4,
+};
+
+/* One wheel detent, in the high-resolution units of send_mouse's wheels. */
+enum {
+    KERNARIUM_RUNTIME_WHEEL_DETENT = 120,
+};
+
+/* Plugs (`connected` nonzero) or unplugs one of the KERNARIUM_RUNTIME_INPUT_
+ * devices; plugging a plugged device or unplugging an unplugged one changes
+ * nothing. Returns 0, -EINVAL for another device, or -ENODEV when no guest
+ * run is in progress. */
+typedef int (*kernarium_runtime_set_input_connected_function)(
+    int device,
+    int connected);
+
+/* A key of the keyboard, by its position: the usage on the HID Keyboard/Keypad
+ * page (0x04 is A, 0xe3 the left Command key), which the runtime turns into
+ * the Linux key code a USB keyboard with that usage would send. Android's own
+ * key layout turns it into a character. The keyboard has no auto-repeat, as
+ * Android repeats keys itself. A key going down wakes a guest that suspended
+ * itself, at most once a second. Returns 0 or -ENODEV. */
+typedef int (*kernarium_runtime_send_keyboard_usage_function)(
+    uint32_t usage,
+    int pressed);
+
+/* The pointer at (x, y), in the touchscreen's range 0 through
+ * KERNARIUM_RUNTIME_TOUCH_MAXIMUM on both axes (see send_touch) over the guest's
+ * display, with the buttons that are down, which are the
+ * KERNARIUM_RUNTIME_BUTTON_ bits (any other bit is ignored). `in_range` zero
+ * releases the buttons and ends the pointer's contact, and Android's cursor
+ * stays where it was. A position in range before the guest has a display is
+ * dropped. A button going down wakes a guest that suspended itself; a pointer
+ * that only moves does not. Returns 0, -EINVAL for a coordinate out of range,
+ * or -ENODEV. */
+typedef int (*kernarium_runtime_send_pointer_function)(
+    uint32_t x,
+    uint32_t y,
+    uint32_t buttons,
+    int in_range);
+
+/* The mouse's relative motion in guest pixels (what an application that
+ * captured the pointer reads), the buttons that are down (the
+ * KERNARIUM_RUNTIME_BUTTON_ bits, any other ignored), and the vertical and
+ * horizontal wheels in 1/120 of a detent, positive up and to the right. A
+ * button going down or a wheel taking a whole step wakes a guest that
+ * suspended itself; motion does not. Returns 0 or -ENODEV. */
+typedef int (*kernarium_runtime_send_mouse_function)(
+    int32_t dx,
+    int32_t dy,
+    uint32_t buttons,
+    int32_t wheel,
+    int32_t horizontal_wheel);
+
+/* What Android tells the host of the keyboard and the mouse: the lock lights
+ * of its keyboard, and an application capturing or releasing the pointer. */
+enum {
+    KERNARIUM_RUNTIME_INPUT_STATUS_NUM_LOCK = 1,
+    KERNARIUM_RUNTIME_INPUT_STATUS_CAPS_LOCK = 2,
+    KERNARIUM_RUNTIME_INPUT_STATUS_SCROLL_LOCK = 3,
+    KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_CAPTURE = 4,
+};
+
+/* `on` is nonzero when the light is lit or the pointer is captured. It runs
+ * on a runtime thread and must return promptly. */
+typedef void (*kernarium_runtime_input_status_callback)(
+    void* context,
+    int status,
+    int on);
+/* Sets, or with a null callback clears, the one receiver of the input status
+ * events. Once it returns, no call to the previous callback is running or will
+ * start, so its context may be released; the callback must not call this. A
+ * runtime without the devices keeps the entry and never calls back. */
+typedef void (*kernarium_runtime_set_input_status_callback_function)(
+    kernarium_runtime_input_status_callback callback,
+    void* context);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -654,6 +761,12 @@ typedef struct kernarium_runtime_api {
     kernarium_runtime_set_location_receiver_callback_function
         set_location_receiver_callback;
     kernarium_runtime_report_location_function report_location;
+    kernarium_runtime_set_input_connected_function set_input_connected;
+    kernarium_runtime_send_keyboard_usage_function send_keyboard_usage;
+    kernarium_runtime_send_pointer_function send_pointer;
+    kernarium_runtime_send_mouse_function send_mouse;
+    kernarium_runtime_set_input_status_callback_function
+        set_input_status_callback;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

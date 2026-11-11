@@ -36,6 +36,7 @@ sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
 
 PROBE = TESTS / "integration/android/keymouse"
+BRIDGE = REPOSITORY / "darwin/emulator/src/hardware_input_bridge.hpp"
 VNC_INPUT = REPOSITORY / "darwin/device/input/vnc/vnc_input.cpp"
 
 
@@ -271,6 +272,30 @@ class ProbeLogTests(unittest.TestCase):
         self.assertEqual(runner.host_lines(log), [
             "Hardware keyboard: plugged", "Hardware mouse: pointer capture on",
             "Hardware keyboard: registered by the guest"])
+
+    def test_the_launchers_start_line_is_not_a_plug(self) -> None:
+        # The line the launcher prints at start says the devices are offered "unplugged".
+        launcher = (REPOSITORY / "darwin/app/macos/main.cpp").read_text()
+        # The launcher's literal, which its source splits over two lines.
+        printed = [re.findall(r'"((?:[^"\\]|\\.)*)"', call) for call in
+                   re.findall(r'std::fputs\(((?:\s*"(?:[^"\\]|\\.)*")+)', launcher)]
+        starts = ["".join(parts).removesuffix("\\n") for parts in printed
+                  if "".join(parts).startswith("Hardware input:")]
+        self.assertEqual(len(starts), 1)
+        start = starts[0]
+        self.assertEqual(start, "Hardware input: keyboard, mouse and pointer offered, unplugged")
+        log = f"VNC display: 127.0.0.1:5992\n{start}\n"
+        self.assertEqual(runner.host_lines(log), [start])
+        # A test for the word in the line would take it for a plug.
+        self.assertTrue(any("plugged" in line for line in runner.host_lines(log)))
+        self.assertEqual(runner.plug_lines(runner.host_lines(log)), [])
+        # What it prints for a plug is one, and only for the line as the runner waits for it.
+        plugged = f"{log}Hardware keyboard: plugged\nHardware mouse: plugged\n"
+        self.assertEqual(runner.plug_lines(runner.host_lines(plugged)),
+                         [runner.HOST_KEYBOARD_PLUGGED, runner.HOST_MOUSE_PLUGGED])
+        bridge = BRIDGE.read_text()
+        for line in (runner.HOST_KEYBOARD_PLUGGED, runner.HOST_MOUSE_PLUGGED):
+            self.assertIn(f'"{line}\\n"', bridge)
 
 
 class WireTests(unittest.TestCase):

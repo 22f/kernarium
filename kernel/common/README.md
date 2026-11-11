@@ -23,6 +23,8 @@ contracts every product shares:
   console PTY assertion, run by the standalone kernel build with explicit
   source and build paths (Apple product configuration consumes only bundles);
 - [`gpu/`](gpu/README.md): the private Virtio-GPU memory-report wire contract;
+- [`input/`](input/README.md): the private Virtio-input registration notice of the
+  hot-pluggable keyboard, mouse and pointer;
   and
 - [`video/`](video/README.md): the private Virtio video wire contract.
 
