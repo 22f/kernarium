@@ -243,6 +243,20 @@ it. The bridge fields used below are defined by the comments in
   and in `schedule()` when the caller stays runnable, so a kernel retry loop
   must service them: the IPI signal is only a wake edge. An idle virtual CPU
   never blocks while one of its IPI vectors is pending.
+- Darwin has no per-thread SIGIO, so a CPU collects the host's descriptor
+  events at its clock tick and when it leaves idle, one CPU at a time: a
+  non-blocking token guards the dispatch, and a CPU that finds it taken skips.
+  CPU0 always tries. Another CPU tries only when no CPU has begun a dispatch
+  for two ticks (20 ms), which is how an event waits no longer when the host
+  holds CPU0's carrier, since a busy CPU0 collects at its tick only. The
+  `uml-irq-notify` thread signals a CPU0 that idles, and for an event no
+  dispatch has followed within 20 ms it also wakes an idle secondary through
+  the pipe its idle wait reads. Handlers and their softirqs therefore run on
+  any online CPU, except that work already queued on CPU0, and a dispatch the
+  host stops CPU0 inside of, wait for it. A system suspend runs with the
+  secondaries offline and is unchanged. `guest-irq-takeover` holds CPU0's
+  carrier for 300 ms every second and checks a vsock echo every 20 ms with
+  every CPU busy, with CPU0 only busy and with every CPU idle.
 - A sleeping uaccess retries its fault until the handler refuses it or the task
   is dying, as native uaccess does, so a sibling's `fork()` never fails the copy
   with `-EFAULT`.

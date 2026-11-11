@@ -1,0 +1,486 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 15:38:53 +0900
+Subject: [PATCH] um: let another CPU dispatch Darwin host events when CPU0 is
+ late
+
+Darwin has no per-thread SIGIO, so CPU0 alone collects the host's
+descriptor events: at its clock tick, when it leaves idle, and when the
+notification thread signals it while it idles. A guest whose CPU0 is
+busy sees an event only at the next tick, and the host can keep that
+carrier from running for hundreds of milliseconds under load, so a
+descriptor that is ready waits for as long as the host holds CPU0 while
+other CPUs run.
+
+Let any CPU dispatch, one at a time. triggered[] and the IRQ core's
+per-IRQ active and pending flags belong to whoever dispatches, so a
+token guards them: a compare-and-swap that never waits, taken around
+every call of sigio_handler(). CPU0 tries at every tick and idle exit,
+as before. Any other CPU tries only when no CPU has begun a dispatch for
+two ticks (20 ms), at its own tick and at its idle exit. A CPU that
+finds the token taken skips, and the edge stays in the dispatch queue
+for the holder's loop or the next dispatch; each EV_CLEAR edge is
+returned by exactly one kevent(), and the token orders the dispatchers.
+Generic irq.c is unchanged.
+
+The notification thread never waits for CPU0 any more, so it reads the
+next edge while CPU0 is held. For an edge that no dispatch has begun
+after within 20 ms, whether CPU0 is busy or idle and not running, it
+writes a byte to the wake pipe of a secondary that is idle, which
+dispatches from its idle exit; no signal is sent, so nothing interrupts
+a CPU in guest code. It asks again every 20 ms until a dispatch begins,
+sooner while no secondary is idle. The wake it owes a CPU0 that is not
+idle is left to that CPU0's next idle entry instead of a parked thread.
+
+CPU0's drain before an idle wait now sleeps for at most 200 us when
+another CPU held the token, so that an edge that arrived meanwhile is
+not slept on.
+
+A system suspend runs with the secondaries offline, so it is unchanged.
+A healthy CPU0 dispatches within a tick, so nothing is taken over.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ arch/um/os-Darwin/internal.h |   2 +
+ arch/um/os-Darwin/irq.c      | 167 +++++++++++++++++++++++++++++------
+ arch/um/os-Darwin/irq.h      |  12 +++
+ arch/um/os-Darwin/signal.c   |   4 +-
+ arch/um/os-Darwin/smp.c      |  33 +++++++
+ arch/um/os-Darwin/time.c     |  32 +++++--
+ 6 files changed, 218 insertions(+), 32 deletions(-)
+
+diff --git a/arch/um/os-Darwin/internal.h b/arch/um/os-Darwin/internal.h
+index 340e3e3f3341eb845b4554d1479be36e816c4d33..a3b76d3f4ff53f28df3dc65e0600e465590f03f9 100644
+--- a/arch/um/os-Darwin/internal.h
++++ b/arch/um/os-Darwin/internal.h
+@@ -75,6 +75,7 @@ void darwin_ipi_idle_begin(void);
+ int darwin_ipi_idle_pending(void);
+ void darwin_ipi_idle_end(void);
+ void darwin_ipi_idle_drain(void);
++int darwin_wake_idle_secondary(void);
+ unsigned int darwin_ipi_guest_snapshot(const unsigned int **sequence);
+ void darwin_ipi_guest_begin(void);
+ void darwin_ipi_guest_end(void);
+@@ -112,6 +113,7 @@ static inline void darwin_ipi_idle_begin(void) { }
+ static inline int darwin_ipi_idle_pending(void) { return 0; }
+ static inline void darwin_ipi_idle_end(void) { }
+ static inline void darwin_ipi_idle_drain(void) { }
++static inline int darwin_wake_idle_secondary(void) { return -1; }
+ static inline unsigned int darwin_ipi_guest_snapshot(
+ 	const unsigned int **sequence)
+ {
+diff --git a/arch/um/os-Darwin/irq.c b/arch/um/os-Darwin/irq.c
+index a2e13ae4e165e9f939f0feaed65d35d6bf7a0f1c..0972a7a47f7d29bb0f930e194e0c21881c349339 100644
+--- a/arch/um/os-Darwin/irq.c
++++ b/arch/um/os-Darwin/irq.c
+@@ -9,6 +9,7 @@
+ #include <unistd.h>
+ #include <irq_user.h>
+ #include <os.h>
++#include "internal.h"
+ #include "irq.h"
+ 
+ #define DARWIN_MAX_EVENTS 64
+@@ -33,22 +34,102 @@ static pthread_mutex_t watched_lock = PTHREAD_MUTEX_INITIALIZER;
+ static int notification_kqueue = -1;
+ static int dispatch_kqueue = -1;
+ static pthread_mutex_t idle_waiter_lock = PTHREAD_MUTEX_INITIALIZER;
+-static pthread_cond_t idle_waiter_ready = PTHREAD_COND_INITIALIZER;
+ static pthread_t idle_waiter;
+ static pthread_t notification_worker;
+ static int idle_waiter_valid;
++/* The notification thread left an edge's wake to CPU0's next idle entry. */
++static int idle_wake_pending;
+ static int notification_worker_joinable;
+-static int notification_stopping;
++
++/*
++ * The dispatch token.  triggered[] and the IRQ core's per-IRQ active and
++ * pending flags belong to whoever dispatches host events, so only one CPU
++ * dispatches at a time.  CPU0 tries at every tick and idle exit.  Another
++ * CPU tries only when no CPU has begun a dispatch for
++ * DARWIN_IRQ_TAKEOVER_NS, which bounds how long an event waits when the host
++ * keeps CPU0 from running.  Nothing waits for the token: a CPU that finds it
++ * taken skips its dispatch, and the edge stays in the dispatch queue for the
++ * holder's loop or the next dispatch.
++ */
++static int dispatch_owner = -1;
++static unsigned long long last_dispatch_ns;
+ 
+ static void wake_signal_handler(int signal)
+ {
+ 	(void)signal;
+ }
+ 
++/* True once a dispatch has begun at or after `edge'. */
++static int dispatched_since(unsigned long long edge)
++{
++	return (long long)(__atomic_load_n(&last_dispatch_ns,
++					   __ATOMIC_RELAXED) - edge) >= 0;
++}
++
++/*
++ * Dispatch the host's descriptor events if this CPU may: CPU0 always, any other
++ * CPU only when no dispatch has begun for DARWIN_IRQ_TAKEOVER_NS, and only
++ * while no other CPU holds the token.  Returns whether it dispatched.  It is
++ * called where an interrupt could arrive on this CPU, with the logical IRQs
++ * as the caller's tick has them, and may run any handler and softirq.
++ */
++int darwin_irq_dispatch(int cpu, unsigned long long now,
++			struct uml_pt_regs *registers)
++{
++	int free_owner = -1;
++
++	if (cpu != 0 &&
++	    (long long)(now - __atomic_load_n(&last_dispatch_ns,
++					      __ATOMIC_RELAXED)) <
++		    (long long)DARWIN_IRQ_TAKEOVER_NS)
++		return 0;
++	if (!__atomic_compare_exchange_n(&dispatch_owner, &free_owner, cpu, 0,
++					 __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
++		return 0;
++	/* Only the holder writes the stamp, and it never goes back. */
++	if ((long long)(now - last_dispatch_ns) > 0)
++		__atomic_store_n(&last_dispatch_ns, now, __ATOMIC_RELAXED);
++	sigio_handler(SIGIO, NULL, registers, NULL);
++	__atomic_store_n(&dispatch_owner, -1, __ATOMIC_RELEASE);
++	return 1;
++}
++
++static struct timespec relative_time(unsigned long long target,
++				     unsigned long long now)
++{
++	unsigned long long left = target > now ? target - now : 0;
++	struct timespec time = {
++		.tv_sec = (time_t)(left / UM_NSEC_PER_SEC),
++		.tv_nsec = (long)(left % UM_NSEC_PER_SEC),
++	};
++
++	return time;
++}
++
++/*
++ * The thread that turns a descriptor's edge into a wake.  It never consumes
++ * the edge, which stays in the dispatch queue; it makes sure a CPU comes to
++ * collect it:
++ *
++ * - a CPU0 in its idle wait is signalled, which ends the wait, and one that
++ *   is not idle is signalled at its next idle entry (idle_wake_pending; a
++ *   system suspend drains nothing before it sleeps, so it relies on this); and
++ * - an edge that no dispatch has begun after for DARWIN_IRQ_TAKEOVER_NS means
++ *   CPU0 is late, busy or idle, so an idle secondary is woken to dispatch it,
++ *   and again after each interval until a dispatch begins.  A secondary that
++ *   is busy needs no wake: its own tick takes over.
++ *
++ * The thread never waits for CPU0, so it reads the next edge while CPU0 is
++ * held.
++ */
+ static void *notification_thread(void *unused)
+ {
+ 	struct kevent events[DARWIN_NOTIFICATION_BATCH];
+ 	sigset_t blocked;
++	unsigned long long seen = 0;
++	unsigned long long late_at = 0;
++	unsigned long long retry = DARWIN_IRQ_TAKEOVER_CHECK_NS;
++	int unserved = 0;
+ 
+ 	(void)unused;
+ 	os_set_thread_name("uml-irq-notify");
+@@ -60,13 +141,19 @@ static void *notification_thread(void *unused)
+ 	sigaddset(&blocked, SIGALRM);
+ 	(void)pthread_sigmask(SIG_BLOCK, &blocked, NULL);
+ 	for (;;) {
+-		pthread_t target;
+-		int have_target;
++		struct timespec wait;
++		const struct timespec *timeout = NULL;
++		unsigned long long now;
+ 		int count;
+ 		int index;
+ 
++		if (unserved) {
++			wait = relative_time(late_at,
++					     (unsigned long long)os_nsecs());
++			timeout = &wait;
++		}
+ 		count = kevent(notification_kqueue, NULL, 0, events,
+-			       DARWIN_NOTIFICATION_BATCH, NULL);
++			       DARWIN_NOTIFICATION_BATCH, timeout);
+ 		if (count < 0) {
+ 			if (errno == EINTR)
+ 				continue;
+@@ -76,20 +163,48 @@ static void *notification_thread(void *unused)
+ 			if (events[index].filter == EVFILT_USER &&
+ 			    events[index].ident == DARWIN_NOTIFICATION_STOP_IDENT)
+ 				return NULL;
+-		pthread_mutex_lock(&idle_waiter_lock);
+-		/* Keep the wake until an idle carrier can dispatch it.  Dispatch has
+-		 * its own kqueue, so this helper never consumes the guest IRQ edge.
++		now = (unsigned long long)os_nsecs();
++		if (unserved && dispatched_since(seen))
++			unserved = 0;
++		if (unserved && now >= late_at) {
++			int woke = darwin_wake_idle_secondary();
++
++			if (woke < 0) {
++				/* A single CPU has nobody to take over. */
++				unserved = 0;
++			} else if (woke) {
++				late_at = now + DARWIN_IRQ_TAKEOVER_NS;
++			} else {
++				/* None is idle.  A busy one takes over at its
++				 * own tick, an idle one may be about to wait:
++				 * look again soon, then less often.
++				 */
++				late_at = now + retry;
++				retry = retry * 2 < DARWIN_IRQ_TAKEOVER_NS ?
++					retry * 2 : DARWIN_IRQ_TAKEOVER_NS;
++			}
++		}
++		if (count == 0)
++			continue;
++		/* The oldest edge no dispatch has begun after sets the
++		 * deadline; later ones share its dispatch.
+ 		 */
+-		while (!idle_waiter_valid && !notification_stopping)
+-			pthread_cond_wait(&idle_waiter_ready, &idle_waiter_lock);
+-		if (notification_stopping) {
+-			pthread_mutex_unlock(&idle_waiter_lock);
+-			return NULL;
++		if (!unserved) {
++			unserved = 1;
++			seen = now;
++			late_at = now + DARWIN_IRQ_TAKEOVER_NS;
++			retry = DARWIN_IRQ_TAKEOVER_CHECK_NS;
+ 		}
+-		have_target = idle_waiter_valid;
+-		target = idle_waiter;
+-		if (have_target)
+-			(void)pthread_kill(target, SIGUSR2);
++		/* Dispatch has its own kqueue, so this helper never consumes the
++		 * guest IRQ edge.  Keep the wake until an idle carrier can
++		 * dispatch it: signal CPU0 if it waits, else leave the wake to
++		 * its next idle entry.
++		 */
++		pthread_mutex_lock(&idle_waiter_lock);
++		if (idle_waiter_valid)
++			(void)pthread_kill(idle_waiter, SIGUSR2);
++		else
++			idle_wake_pending = 1;
+ 		pthread_mutex_unlock(&idle_waiter_lock);
+ 	}
+ }
+@@ -223,7 +338,13 @@ void darwin_irq_idle_begin(sigset_t *previous_mask)
+ 	pthread_mutex_lock(&idle_waiter_lock);
+ 	idle_waiter = pthread_self();
+ 	idle_waiter_valid = 1;
+-	pthread_cond_signal(&idle_waiter_ready);
++	/* SIGUSR2 is blocked here, so a wake the thread left to this idle entry
++	 * stays pending and ends the pselect() that follows at once.
++	 */
++	if (idle_wake_pending) {
++		idle_wake_pending = 0;
++		(void)pthread_kill(idle_waiter, SIGUSR2);
++	}
+ 	pthread_mutex_unlock(&idle_waiter_lock);
+ }
+ 
+@@ -260,6 +381,9 @@ int os_setup_epoll(void)
+ 
+ 	if (notification_kqueue >= 0)
+ 		return 0;
++	/* A guest that restarts in this process starts with a free token. */
++	__atomic_store_n(&dispatch_owner, -1, __ATOMIC_RELEASE);
++	__atomic_store_n(&last_dispatch_ns, 0, __ATOMIC_RELAXED);
+ 	action.sa_handler = wake_signal_handler;
+ 	sigemptyset(&action.sa_mask);
+ 	/* SIGUSR2 is a wake edge for the idle pselect(), not work to run from a
+@@ -303,9 +427,6 @@ int os_setup_epoll(void)
+ 		}
+ 	}
+ 	pthread_mutex_unlock(&watched_lock);
+-	pthread_mutex_lock(&idle_waiter_lock);
+-	notification_stopping = 0;
+-	pthread_mutex_unlock(&idle_waiter_lock);
+ 	error = pthread_create(&notification_worker, NULL,
+ 			       notification_thread, NULL);
+ 	if (error != 0) {
+@@ -427,10 +548,6 @@ void os_close_epoll_fd(void)
+ 	watched_count = 0;
+ 	pthread_mutex_unlock(&watched_lock);
+ 	if (notification_worker_joinable) {
+-		pthread_mutex_lock(&idle_waiter_lock);
+-		notification_stopping = 1;
+-		pthread_cond_broadcast(&idle_waiter_ready);
+-		pthread_mutex_unlock(&idle_waiter_lock);
+ 		EV_SET(&stop_event, DARWIN_NOTIFICATION_STOP_IDENT, EVFILT_USER,
+ 		       0, NOTE_TRIGGER, 0, NULL);
+ 		if (notification_kqueue < 0 ||
+diff --git a/arch/um/os-Darwin/irq.h b/arch/um/os-Darwin/irq.h
+index 026078d0e86bbcf9502a50d924511f90dfda07e0..19e94689a8fa4c192bf42d6899bc209e5d27cdac 100644
+--- a/arch/um/os-Darwin/irq.h
++++ b/arch/um/os-Darwin/irq.h
+@@ -4,7 +4,19 @@
+ 
+ #include <signal.h>
+ 
++struct uml_pt_regs;
++
++/*
++ * How long no CPU may have begun a dispatch of host descriptor events before
++ * a CPU other than CPU0 does (two clock ticks), and how long the notification
++ * thread then waits to see whether the woken CPU did.
++ */
++#define DARWIN_IRQ_TAKEOVER_NS 20000000ULL
++#define DARWIN_IRQ_TAKEOVER_CHECK_NS 2000000ULL
++
+ void darwin_irq_idle_begin(sigset_t *previous_mask);
+ void darwin_irq_idle_end(const sigset_t *previous_mask);
++int darwin_irq_dispatch(int cpu, unsigned long long now,
++			struct uml_pt_regs *registers);
+ 
+ #endif
+diff --git a/arch/um/os-Darwin/signal.c b/arch/um/os-Darwin/signal.c
+index 757777fb3aca3f35797b51a887eb284756787ca8..a0ee4f8084e6b0da43293948ac9cf68e32e62175 100644
+--- a/arch/um/os-Darwin/signal.c
++++ b/arch/um/os-Darwin/signal.c
+@@ -16,6 +16,7 @@
+ #include <sysdep/ptrace.h>
+ #include <smp.h>
+ #include "internal.h"
++#include "irq.h"
+ 
+ struct darwin_signal_state {
+ 	volatile sig_atomic_t enabled;
+@@ -133,7 +134,8 @@ static void run_timer(ucontext_t *context)
+ 	/* Darwin has no epoll-compatible SIGIO ownership.  Poll registered
+ 	 * descriptors at the timer boundary before advancing the clock.
+ 	 */
+-	sigio_handler(SIGIO, NULL, &registers, NULL);
++	darwin_irq_dispatch(uml_curr_cpu(), (unsigned long long)os_nsecs(),
++			    &registers);
+ 	timer_handler(SIGALRM, NULL, &registers);
+ }
+ 
+diff --git a/arch/um/os-Darwin/smp.c b/arch/um/os-Darwin/smp.c
+index 59a78eac66d9722b184243d82e8dd79f865b3ba8..751a21a3110dfb5c0ab87b4c1b9972726a28c0cc 100644
+--- a/arch/um/os-Darwin/smp.c
++++ b/arch/um/os-Darwin/smp.c
+@@ -400,6 +400,39 @@ void darwin_ipi_idle_end(void)
+ 	__atomic_store_n(&ipi_idle_waiting[uml_curr_cpu()], 0, __ATOMIC_RELEASE);
+ }
+ 
++/*
++ * Wake one secondary CPU that is in its idle wait, through the pipe that wait
++ * already reads, so that its idle exit can dispatch host descriptor events
++ * for a CPU0 that is late (see darwin_irq_dispatch()).  No vector is raised
++ * and no signal is sent, so a CPU running guest code is never interrupted.
++ * Only the IRQ notification thread calls it.  Returns 1 if a CPU was woken, 0
++ * if none is idle, and -1 if there is no secondary CPU.
++ */
++int darwin_wake_idle_secondary(void)
++{
++	static unsigned int cursor;
++	char wake = 1;
++	int ncpus = uml_ncpus;
++	int step;
++
++	if (ncpus < 2)
++		return -1;
++	for (step = 1; step < ncpus; step++) {
++		int cpu = 1 + (int)((cursor + (unsigned int)step) %
++				    (unsigned int)(ncpus - 1));
++
++		if (!__atomic_load_n(&ipi_idle_waiting[cpu], __ATOMIC_ACQUIRE) ||
++		    ipi_wake_pipes[cpu][1] < 0)
++			continue;
++		cursor = (unsigned int)cpu;
++		/* A full pipe already holds a wake for it. */
++		if (write(ipi_wake_pipes[cpu][1], &wake, sizeof(wake)) == 1 ||
++		    errno == EAGAIN)
++			return 1;
++	}
++	return 0;
++}
++
+ unsigned int darwin_ipi_guest_snapshot(const unsigned int **sequence)
+ {
+ 	int cpu = uml_curr_cpu();
+diff --git a/arch/um/os-Darwin/time.c b/arch/um/os-Darwin/time.c
+index 8eedfe75bdc319def9a0b83eb1ce25094560b51b..9c8aeb388a4c98addf52ad501ad07ada427dc5a9 100644
+--- a/arch/um/os-Darwin/time.c
++++ b/arch/um/os-Darwin/time.c
+@@ -17,6 +17,11 @@
+ #include "irq.h"
+ #include "internal.h"
+ 
++/* How long CPU0 sleeps at most when another CPU kept it from draining before
++ * the wait; see os_idle_sleep().
++ */
++#define DARWIN_IRQ_RETRY_NS 200000
++
+ struct darwin_cpu_timer {
+ 	unsigned long long delay_ns;
+ 	unsigned long long deadline_ns;
+@@ -167,10 +172,11 @@ void darwin_timer_poll(struct uml_pt_regs *registers)
+ 		 * CPU0 therefore owns host descriptor polling.  Do it at the same
+ 		 * safe clock boundary while CPU0 is busy as well as from its idle
+ 		 * path; otherwise a CPU-bound guest can starve console and network
+-		 * readiness indefinitely.
++		 * readiness indefinitely.  Another CPU takes over only when CPU0
++		 * has not dispatched for a while, as a busy CPU0 can be held by the
++		 * host for much longer than a tick; see darwin_irq_dispatch().
+ 		 */
+-		if (cpu == 0)
+-			sigio_handler(SIGIO, NULL, registers, NULL);
++		darwin_irq_dispatch(cpu, now, registers);
+ 		timer_handler(SIGALRM, NULL, registers);
+ 		darwin_restore_irqs_trace(previous);
+ 	}
+@@ -254,6 +260,7 @@ void os_idle_sleep(void)
+ 		int deadline_fd = -1;
+ 		int wake_fd;
+ 		int fire_timer = 0;
++		int drained = 1;
+ 
+ 		if (cpu == 0)
+ 			darwin_irq_idle_begin(&previous_mask);
+@@ -269,7 +276,8 @@ void os_idle_sleep(void)
+ 		 */
+ 		memset(&registers, 0, sizeof(registers));
+ 		if (cpu == 0)
+-			sigio_handler(SIGIO, NULL, &registers, NULL);
++			drained = darwin_irq_dispatch(
++				0, (unsigned long long)os_nsecs(), &registers);
+ 		if (state->active) {
+ 			now = (unsigned long long)os_nsecs();
+ 			remaining = state->deadline_ns > now ?
+@@ -305,6 +313,18 @@ void os_idle_sleep(void)
+ 			timeout.tv_sec = 0;
+ 			timeout.tv_nsec = 0;
+ 			timeout_pointer = &timeout;
++		} else if (!drained && (timeout_pointer == NULL ||
++					timeout.tv_sec > 0 ||
++					timeout.tv_nsec > DARWIN_IRQ_RETRY_NS)) {
++			/* Another CPU holds the dispatch token, so an edge that
++			 * arrived before this wait may be left in the queue, and
++			 * nothing signals for it: the notification thread's wake
++			 * went to a CPU0 that was not waiting yet.  Look again soon
++			 * rather than sleep on it.
++			 */
++			timeout.tv_sec = 0;
++			timeout.tv_nsec = DARWIN_IRQ_RETRY_NS;
++			timeout_pointer = &timeout;
+ 		}
+ 		(void)pselect(wake_fd >= 0 ? wake_fd + 1 : 0,
+ 			      wake_fd >= 0 ? &read_fds : NULL, NULL, NULL,
+@@ -337,7 +357,7 @@ void os_idle_sleep(void)
+ 		 * above; its handler does no work.
+ 		 */
+ 		memset(&registers, 0, sizeof(registers));
+-		if (cpu == 0)
+-			sigio_handler(SIGIO, NULL, &registers, NULL);
++		darwin_irq_dispatch(cpu, (unsigned long long)os_nsecs(),
++				    &registers);
+ 	}
+ }
