@@ -207,6 +207,18 @@ REQUIRED_ENTRIES = {
     "VENDOR/etc/vintf/manifest/android.hardware.sensors-multihal.xml",
     "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so",
     "VENDOR/etc/init/android.hardware.sensors-service-multihal.rc",
+    "VENDOR/bin/hw/android.hardware.vibrator-service.andarium",
+    "VENDOR/etc/init/android.hardware.vibrator-service.andarium.rc",
+    "ODM/etc/vintf/manifest_haptics.xml",
+    "VENDOR/bin/hw/android.hardware.gnss-service.andarium",
+    "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc",
+    "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml",
+    "VENDOR/bin/hw/android.hardware.thermal-service.andarium",
+    "VENDOR/etc/init/android.hardware.thermal-service.andarium.rc",
+    "VENDOR/etc/vintf/manifest/android.hardware.thermal-service.andarium.xml",
+    "VENDOR/etc/displayconfig/default.xml",
+    "VENDOR/bin/kernarium_gamepad",
+    "VENDOR/etc/init/kernarium_gamepad.rc",
 
     "BOOT/kernel",
     "INIT_BOOT/RAMDISK/init",
@@ -247,6 +259,12 @@ REQUIRED_ENTRIES = {
     "SYSTEM_EXT/etc/init/kernarium_reclaim_boot_apps.rc",
     "SYSTEM_EXT/bin/kernarium_time_zone.sh",
     "SYSTEM_EXT/etc/init/kernarium_time_zone.rc",
+    "SYSTEM_EXT/bin/kernarium_keyboard_default.sh",
+    "SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc",
+    "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc",
+    "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc",
     "SYSTEM_EXT/etc/selinux/system_ext_file_contexts",
     "SYSTEM_EXT/etc/selinux/system_ext_property_contexts",
     "SYSTEM_EXT/etc/selinux/system_ext_sepolicy.cil",
@@ -387,9 +405,12 @@ FORBIDDEN_STATIC_ENTRIES = {
     "SYSTEM/bin/wificond",
     "VENDOR/apex/com.android.hardware.boot.apex",
     "VENDOR/apex/com.android.hardware.contexthub.apex",
+    "VENDOR/apex/com.android.hardware.gnss.apex",
     "VENDOR/apex/com.android.hardware.neuralnetworks.apex",
+    "VENDOR/apex/com.android.hardware.thermal.apex",
     "VENDOR/apex/com.android.hardware.threadnetwork.apex",
     "VENDOR/apex/com.android.hardware.uwb.apex",
+    "VENDOR/apex/com.android.hardware.vibrator.apex",
     "VENDOR/apex/com.google.cf.bt.apex",
     "VENDOR/apex/com.google.cf.health.apex",
     "VENDOR/apex/com.google.cf.light.apex",
@@ -466,9 +487,12 @@ FORBIDDEN_APP_DIRECTORIES = {
     "F-DroidPrivilegedExtension",
     "Gallery2",
     "Jelly",
-    # In-tree test applications (tests/integration/android/{motion,webgl,storage}):
+    # In-tree test applications (tests/integration/android/{gamepad,keymouse,location,motion,webgl,storage}):
     # `m <module>` leaves them in the shared product output, and none belongs
     # in an image, whichever partition or DATA/app path it would reach.
+    "AndariumGamepadProbe",
+    "AndariumKeyMouseProbe",
+    "AndariumLocationProbe",
     "AndariumMotionProbe",
     "AndariumStorageTests",
     "AndariumWebGLProbe",
@@ -494,7 +518,6 @@ FORBIDDEN_FEATURE_DECLARATIONS = {
     "android.hardware.camera.raw.xml",
     "android.hardware.ethernet.xml",
     "android.hardware.fingerprint.xml",
-    "android.hardware.location.gps.xml",
     "android.hardware.telephony.xml",
     "android.hardware.usb.accessory.xml",
     "android.hardware.usb.host.xml",
@@ -505,6 +528,9 @@ FORBIDDEN_FEATURE_DECLARATIONS = {
     "android.hardware.wifi.rtt.xml",
     "android.software.verified_boot.xml",
 }
+# The host's position is the guest's GPS on every device (overlay/gnss), so the product
+# declares android.hardware.location and .gps permanently. The GNSS measurement tests of CTS
+# fail by design: the host gives positions and no raw measurements.
 # The Virtio sound capture stream is the product's microphone. A build
 # fingerprint cannot report it only on some boots, so the declaration is
 # permanent (CDD 7.8.1 C-0-7) and the audio policy carries its input.
@@ -520,6 +546,8 @@ FORBIDDEN_FEATURE_DECLARATIONS = {
 # MidiManager without a null check. Virtual MIDI devices (MidiDeviceService)
 # need no hardware transport, so the declaration adds no USB or Bluetooth MIDI.
 REQUIRED_FEATURE_NAMES = {
+    "android.hardware.location",
+    "android.hardware.location.gps",
     "android.hardware.touchscreen",
     "android.hardware.touchscreen.multitouch",
     "android.hardware.touchscreen.multitouch.distinct",
@@ -543,7 +571,6 @@ FORBIDDEN_FEATURE_NAMES = {
     "android.hardware.context_hub",
     "android.hardware.ethernet",
     "android.hardware.fingerprint",
-    "android.hardware.location.gps",
     "android.hardware.telephony",
     "android.hardware.usb.accessory",
     "android.hardware.usb.host",
@@ -794,6 +821,39 @@ TIME_ZONE_TRANSITION = re.compile(
     rb"kernarium_time_zone\)$",
     re.MULTILINE,
 )
+# Android hides its on-screen keyboard while a hardware keyboard is attached unless the user's
+# "Show on-screen keyboard" (Settings.Secure.show_ime_with_hard_keyboard) is on. The product's
+# default is off, which SettingsProvider writes only when it first creates a guest's settings, so
+# once boot completes a script changes a stored 1 to 0 in a guest that started with an older release,
+# once (overlay/tools/kernarium_keyboard_default.sh, in a core domain of its own on system_ext in
+# overlay/sepolicy/system_ext/private). A marker property records that it has looked, so a person who
+# turns the setting on afterwards keeps it on.
+KEYBOARD_DEFAULT_SERVICE = (
+    "kernarium_keyboard_default", "/system_ext/bin/kernarium_keyboard_default.sh"
+)
+KEYBOARD_DEFAULT_TRIGGER = "property:sys.boot_completed=1"
+KEYBOARD_DEFAULT_MARKER = "persist.sys.kernarium.keyboard_default"
+KEYBOARD_DEFAULT_MARKER_TYPE = "kernarium_keyboard_default_prop"
+KEYBOARD_DEFAULT_SCRIPT_REQUIRED = (
+    "cmd settings get secure show_ime_with_hard_keyboard",
+    "cmd settings put secure show_ime_with_hard_keyboard 0",
+    KEYBOARD_DEFAULT_MARKER,
+    'setprop "$marker" 1',
+)
+KEYBOARD_DEFAULT_SCRIPT_FORBIDDEN = (
+    "settings put secure show_ime_with_hard_keyboard 1",
+    "settings put global",
+    "settings put system",
+    "settings delete",
+    "settings reset",
+    "--user",
+    "svc ",
+)
+KEYBOARD_DEFAULT_TRANSITION = re.compile(
+    rb"^\(typetransition init(?:_[0-9]+)? kernarium_keyboard_default_exec process "
+    rb"kernarium_keyboard_default\)$",
+    re.MULTILINE,
+)
 # The partition the host grew is filled on every boot, once /data is mounted
 # (init.vendor.rc says why): the kernel's online resize needs neither a fsck nor
 # a recorded check. resize2fs runs as root with the group of /data's owner, so
@@ -974,6 +1034,19 @@ def init_services(payload: str) -> dict[str, tuple[str, list[str]]]:
         elif options is not None and raw[:1].isspace():
             options.append(" ".join(fields))
     return services
+
+
+def check_init_keychords(init_payload: str) -> None:
+    """No service starts on a keychord: init counts keys across every input device, so with a
+    hardware keyboard attached ordinary typing would start it (Cuttlefish's bugreport chord was A+B)."""
+    for name, (_, options) in init_services(init_payload).items():
+        for option in options:
+            if option.split()[0] == "keycodes":
+                fail(
+                    f"UML init policy starts {name} on a keychord ('{option}'): init fires it whenever "
+                    "those keys are down together on any input device, so typing on a hardware keyboard "
+                    "would start it"
+                )
 
 
 def check_suspend_blocker(init_payload: str, actions: dict[str, list[str]]) -> None:
@@ -1369,6 +1442,7 @@ def check_boot_policy(
         )
     check_zram_swap(actions)
     check_userdata_grow(actions)
+    check_init_keychords(init_payload)
     check_suspend_blocker(init_payload, actions)
     check_network_setup(init_payload, actions)
     check_wifi_network(
@@ -1388,6 +1462,12 @@ def check_boot_policy(
             "utf-8", errors="strict"
         ),
         read_small(archive, infos["SYSTEM_EXT/bin/kernarium_time_zone.sh"]),
+    )
+    check_keyboard_default(
+        read_small(archive, infos["SYSTEM_EXT/etc/init/kernarium_keyboard_default.rc"]).decode(
+            "utf-8", errors="strict"
+        ),
+        read_small(archive, infos["SYSTEM_EXT/bin/kernarium_keyboard_default.sh"]),
     )
     check_media_codecs_c2(read_small(archive, infos["VENDOR/etc/media_codecs_c2.xml"]))
 
@@ -2307,18 +2387,6 @@ def check_application_manifests(
 # (overlay/config/erofs_apex_payload_hints.txt) store every .rc and .xml file uncompressed, and
 # the binary is looked up in the payload's directories, since the init script names it too.
 APEX_PAYLOAD_READ_LIMIT = 64 << 20
-# system_server's thermal manager and CTS NativeThermalTest need a thermal HAL.
-THERMAL_HAL = {
-    "apex": "VENDOR/apex/com.android.hardware.thermal.apex",
-    "binary": b"android.hardware.thermal-service.example",
-    "fragment": (
-        b"<name>android.hardware.thermal</name>",
-        b"<fqname>IThermal/default</fqname>",
-    ),
-    "interface": "IThermal/default",
-    "service": "vendor.thermal-example",
-    "need": "a thermal HAL",
-}
 # MediaCas and CTS MediaCasTest need the default CAS HAL, which loads the ClearKey CAS plugin
 # (CAS system id 63192) from /vendor/lib*/mediacas.
 CAS_HAL = {
@@ -2397,8 +2465,16 @@ def check_payload_regular_file(payload: bytes, path: str, apex_name: str, what: 
 # persist.sys.usb.config and restart adbd, where stock stops it, when debugging is turned off.
 # The jar stores its dex files uncompressed, so the topic's log line is in the bytes. A build
 # without it would forget the user's choice at every boot and stop the host's channel.
+# The display topic of the same route lets a display without a refresh rate throttling map use the
+# default configuration's; without it the thermal HAL's SEVERE status holds no frame rate back.
 SERVICES_JAR = "SYSTEM/framework/services.jar"
-SERVICES_JAR_MARKERS = (b"kernarium: USB debugging is now ",)
+SERVICES_JAR_MARKERS = (
+    (b"kernarium: USB debugging is now ", "the AdbService topics"),
+    (
+        b"RefreshRateThrottling: using the map of the default configuration",
+        "the display topic that reads the default configuration's refresh rate throttling map",
+    ),
+)
 SERVICES_JAR_LIMIT = 48 << 20
 
 
@@ -2413,14 +2489,45 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
             ]
             if not dex:
                 fail(f"{SERVICES_JAR} holds no dex file")
-            for marker in SERVICES_JAR_MARKERS:
+            for marker, topic in SERVICES_JAR_MARKERS:
                 if not any(marker in jar.read(name) for name in dex):
                     fail(
-                        f"{SERVICES_JAR} lacks the AdbService topics of route p0007 "
+                        f"{SERVICES_JAR} lacks {topic} of route p0007 "
                         f"({marker.decode()!r} is not in its dex files)"
                     )
     except (OSError, zipfile.BadZipFile) as problem:
         fail(f"cannot inspect {SERVICES_JAR}: {problem}")
+
+
+# The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi without probes, so a blocked
+# validation server cannot leave the guest's one network unvalidated. NetworkStack is a priv-app of
+# the system partition, and its APK stores the dex file uncompressed, so the topic's validation log
+# line is in the bytes. A build without it would probe through the virtual Wi-Fi.
+NETWORK_STACK_APK = "SYSTEM/priv-app/NetworkStack/NetworkStack.apk"
+NETWORK_STACK_MARKERS = (b"Wi-Fi is validated without probes",)
+NETWORK_STACK_LIMIT = 16 << 20
+
+
+def check_network_stack(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(NETWORK_STACK_APK)
+    if info is None:
+        fail(f"{NETWORK_STACK_APK} is missing")
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, NETWORK_STACK_LIMIT))) as apk:
+            dex = [
+                name for name in apk.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)
+            ]
+            if not dex:
+                fail(f"{NETWORK_STACK_APK} holds no dex file")
+            for marker in NETWORK_STACK_MARKERS:
+                if not any(marker in apk.read(name) for name in dex):
+                    fail(
+                        f"{NETWORK_STACK_APK} lacks the NetworkMonitor topic of route p0029 "
+                        f"({marker.decode()!r} is not in its dex files): the guest's Wi-Fi would be "
+                        "probed and could stay unvalidated"
+                    )
+    except (OSError, zipfile.BadZipFile) as problem:
+        fail(f"cannot inspect {NETWORK_STACK_APK}: {problem}")
 
 
 def check_ota_certificates(
@@ -2498,6 +2605,27 @@ def check_adb_root_service(
         )
 
 
+# The input topic of route p0022 lights LED_MISC on a cursor device that advertises it while pointer
+# capture is on, which is how the host's mouse learns that an application captured the pointer. The
+# mapper's dump line for it is in libinputflinger.so's bytes. A build without the topic never tells the
+# host, and a game that captures the mouse would hold a pointer that the host does not release.
+INPUT_FLINGER = "SYSTEM/lib64/libinputflinger.so"
+INPUT_FLINGER_MARKER = b"PointerCaptureLed: "
+INPUT_FLINGER_LIMIT = 64 << 20
+
+
+def check_input_flinger(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    info = infos.get(INPUT_FLINGER)
+    if info is None or info.is_dir():
+        fail(f"{INPUT_FLINGER} is missing")
+    if INPUT_FLINGER_MARKER not in read_small(archive, info, INPUT_FLINGER_LIMIT):
+        fail(
+            f"{INPUT_FLINGER} lacks the pointer capture LED topic of route p0022 "
+            f"({INPUT_FLINGER_MARKER.decode()!r} is not in it): the mouse would not tell the host "
+            "that an application captured the pointer"
+        )
+
+
 def check_example_hal(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], hal: dict
 ) -> None:
@@ -2512,12 +2640,6 @@ def check_example_hal(
     service = f"service {hal['service']} /apex/{apex_dir}/bin/hw/".encode() + binary
     if service not in payload:
         fail(f"{apex_name} does not start the {hal['service']} service")
-
-
-def check_thermal_hal(
-    archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
-) -> None:
-    check_example_hal(archive, infos, THERMAL_HAL)
 
 
 def check_wifi_hals(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2548,6 +2670,367 @@ def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipI
     ]).decode()
     if not re.search(r"^service \S+ /vendor/bin/hw/android\.hardware\.sensors-service\.multihal$", script, re.M):
         fail("motion sensor HAL service does not start the multi-HAL binary")
+
+
+# The vibrator HAL exists only on a device with haptics. The host passes the "haptics" ODM SKU for
+# one; the SKU's manifest is the one place that declares a vibrator, and the service's init script
+# starts it for that SKU alone. Cuttlefish's vibrator (an APEX of the AOSP example HAL) is not
+# installed, and no other manifest, fragment or APEX declares the HAL.
+VIBRATOR_HAL_NAME = "android.hardware.vibrator"
+VIBRATOR_SKU = "haptics"
+VIBRATOR_SKU_MANIFEST = f"ODM/etc/vintf/manifest_{VIBRATOR_SKU}.xml"
+VIBRATOR_SERVICE = "android.hardware.vibrator-service.andarium"
+VIBRATOR_INTERFACE = "android.hardware.vibrator.IVibrator/default"
+# The file_contexts line itself is a regular expression, so the check looks for its text.
+VIBRATOR_FILE_CONTEXT = re.compile(
+    re.escape(rb"/(vendor|system/vendor)/bin/hw/android\.hardware\.vibrator-service\.andarium")
+    + rb"\s+u:object_r:hal_vibrator_default_exec:s0"
+)
+
+
+def declared_hals(root: ET.Element) -> list[tuple[str | None, str | None, list[str]]]:
+    """The (name, version, fully qualified names) of each HAL a VINTF manifest declares."""
+    hals = []
+    for hal in root.iter("hal"):
+        interfaces = [
+            f"{interface.findtext('name')}/{instance.text}"
+            for interface in hal.iter("interface")
+            for instance in interface.iter("instance")
+        ]
+        interfaces += [fqname.text or "" for fqname in hal.iter("fqname")]
+        hals.append((hal.findtext("name"), hal.findtext("version"), interfaces))
+    return hals
+
+
+def check_haptics_vibrator(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for name, info in infos.items():
+        path = PurePosixPath(name)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+            or name == VIBRATOR_SKU_MANIFEST
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {name}: {error}")
+        if any(hal_name == VIBRATOR_HAL_NAME for hal_name, _, _ in declared_hals(root)):
+            fail(
+                f"{name} declares a vibrator HAL: only {VIBRATOR_SKU_MANIFEST} may, so that a "
+                "device without haptics has none"
+            )
+    try:
+        manifest = ET.fromstring(read_small(archive, infos[VIBRATOR_SKU_MANIFEST]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {VIBRATOR_SKU_MANIFEST}: {error}")
+    hals = declared_hals(manifest)
+    if (
+        len(hals) != 1
+        or hals[0][0] != VIBRATOR_HAL_NAME
+        or hals[0][1] != "4"
+        or hals[0][2] != ["IVibrator/default"]
+        or any(hal.get("format") != "aidl" for hal in manifest.iter("hal"))
+    ):
+        fail(f"{VIBRATOR_SKU_MANIFEST} must declare exactly the AIDL IVibrator/default at version 4: {hals}")
+    skus = sorted(
+        PurePosixPath(name).name
+        for name in infos
+        if re.fullmatch(r"ODM/etc/vintf/manifest_[^/]+\.xml", name)
+    )
+    if skus != [PurePosixPath(VIBRATOR_SKU_MANIFEST).name]:
+        fail(f"the ODM SKU manifests must be exactly the {VIBRATOR_SKU} one: {skus}")
+    skus_line = [
+        line
+        for line in read_small(archive, infos["META/misc_info.txt"]).decode("utf-8").splitlines()
+        if line.startswith("vintf_odm_manifest_skus=")
+    ]
+    if skus_line != [f"vintf_odm_manifest_skus={VIBRATOR_SKU}"]:
+        fail(f"META/misc_info.txt must name only the {VIBRATOR_SKU} ODM manifest SKU: {skus_line}")
+    script = read_small(
+        archive, infos[f"VENDOR/etc/init/{VIBRATOR_SERVICE}.rc"]
+    ).decode("utf-8", errors="strict")
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(
+        rf"service \S+ /vendor/bin/hw/{re.escape(VIBRATOR_SERVICE)}", service[0]
+    ):
+        fail("the vibrator init script must define one service that runs the Andarium vibrator HAL")
+    for required in (f"interface aidl {VIBRATOR_INTERFACE}", "disabled"):
+        if required not in lines:
+            fail(f"the vibrator service must carry '{required}': it starts for the haptics SKU alone")
+    name = service[0].split()[1]
+    trigger = f"on boot && property:ro.boot.product.hardware.sku={VIBRATOR_SKU}"
+    if trigger not in lines:
+        fail(f"the vibrator service must start on '{trigger}'")
+    after = lines[lines.index(trigger) + 1 :]
+    if after[:2] != [f"enable {name}", f"start {name}"]:
+        fail(f"'{trigger}' must enable and start {name}")
+    if any(line.startswith("on ") for line in lines if line != trigger):
+        fail("the vibrator init script may have no trigger but the haptics SKU's boot trigger")
+    if not VIBRATOR_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the vibrator HAL its hal_vibrator_default_exec label")
+
+
+# The GNSS HAL (overlay/gnss) reads the host's receiver, /dev/gnss0, which every device has, so
+# every device declares it: one vendor fragment, an init script that starts the service at boot
+# with no condition, and no other declaration of android.hardware.gnss anywhere (the example
+# HAL's APEX is not installed). The image carries no assistance server: the sample
+# gps_debug.conf has comments only.
+GNSS_HAL_NAME = "android.hardware.gnss"
+GNSS_SERVICE = "android.hardware.gnss-service.andarium"
+GNSS_FRAGMENT = f"VENDOR/etc/vintf/manifest/{GNSS_SERVICE}.xml"
+GNSS_INTERFACE = "android.hardware.gnss.IGnss/default"
+GNSS_VERSION = "7"
+GNSS_FILE_CONTEXT = re.compile(
+    re.escape(rb"/(vendor|system/vendor)/bin/hw/android\.hardware\.gnss-service\.andarium")
+    + rb"\s+u:object_r:hal_gnss_default_exec:s0"
+)
+GNSS_DEBUG_CONF = "SYSTEM/etc/gps_debug.conf"
+
+
+def check_gnss_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for name, info in infos.items():
+        path = PurePosixPath(name)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+            or name == GNSS_FRAGMENT
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {name}: {error}")
+        if any(hal_name == GNSS_HAL_NAME for hal_name, _, _ in declared_hals(root)):
+            fail(f"{name} declares a GNSS HAL: only {GNSS_FRAGMENT} may")
+    try:
+        fragment = ET.fromstring(read_small(archive, infos[GNSS_FRAGMENT]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {GNSS_FRAGMENT}: {error}")
+    hals = declared_hals(fragment)
+    if (
+        len(hals) != 1
+        or hals[0][0] != GNSS_HAL_NAME
+        or hals[0][1] != GNSS_VERSION
+        or hals[0][2] != ["IGnss/default"]
+        or any(hal.get("format") != "aidl" for hal in fragment.iter("hal"))
+    ):
+        fail(
+            f"{GNSS_FRAGMENT} must declare exactly the AIDL IGnss/default at version "
+            f"{GNSS_VERSION}: {hals}"
+        )
+    script = read_small(archive, infos[f"VENDOR/etc/init/{GNSS_SERVICE}.rc"]).decode(
+        "utf-8", errors="strict"
+    )
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(
+        rf"service \S+ /vendor/bin/hw/{re.escape(GNSS_SERVICE)}", service[0]
+    ):
+        fail("the GNSS init script must define one service that runs the Andarium GNSS HAL")
+    for required in (f"interface aidl {GNSS_INTERFACE}", "class hal", "user gps", "group gps"):
+        if required not in lines:
+            fail(f"the GNSS service must carry '{required}'")
+    if "disabled" in lines or "oneshot" in lines:
+        fail("the GNSS service starts at boot on every device: it is neither disabled nor oneshot")
+    if any(line.startswith("on ") for line in lines):
+        fail("the GNSS init script may have no trigger: the service starts with its class")
+    if not GNSS_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the GNSS HAL its hal_gnss_default_exec label")
+    if GNSS_DEBUG_CONF in infos:
+        active = [
+            line.strip()
+            for line in read_small(archive, infos[GNSS_DEBUG_CONF]).decode("utf-8", errors="replace").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if active:
+            fail(f"{GNSS_DEBUG_CONF} configures an assistance server or a position: {active}")
+
+
+# The thermal HAL (overlay/thermal) reports the host's thermal state, and every device has a host,
+# so every device declares it: one vendor fragment, an init script that starts the service at boot
+# with no condition, and no other declaration of android.hardware.thermal anywhere (the example
+# HAL's APEX is not installed). system_server's thermal manager and CTS need a thermal HAL.
+THERMAL_HAL_NAME = "android.hardware.thermal"
+THERMAL_SERVICE = "android.hardware.thermal-service.andarium"
+THERMAL_FRAGMENT = f"VENDOR/etc/vintf/manifest/{THERMAL_SERVICE}.xml"
+THERMAL_INTERFACE = "android.hardware.thermal.IThermal/default"
+THERMAL_VERSION = "3"
+THERMAL_FILE_CONTEXT = re.compile(
+    re.escape(rb"/(vendor|system/vendor)/bin/hw/android\.hardware\.thermal-service\.andarium")
+    + rb"\s+u:object_r:hal_thermal_default_exec:s0"
+)
+# The default display configuration holds one point: the render rate is held to 30 Hz from the
+# SEVERE status on, which the thermal HAL reports while the host is hot. The framework gives a
+# display that has no refresh rate throttling map the default configuration's (the display topic of
+# route p0007), and reads the first default.xml it finds in the product, vendor and system
+# partitions, so a product copy would take the map away.
+DISPLAY_CONFIG_DEFAULT = "VENDOR/etc/displayconfig/default.xml"
+DISPLAY_CONFIG_SHADOW = "PRODUCT/etc/displayconfig/default.xml"
+DISPLAY_CONFIG_POINT = ("severe", "0", "30")
+
+
+def check_single_hal_declaration(
+    archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], hal_name: str, allowed: str
+) -> None:
+    """No VINTF manifest but `allowed` declares the HAL."""
+    for name, info in infos.items():
+        path = PurePosixPath(name)
+        if (
+            info.is_dir()
+            or path.suffix != ".xml"
+            or path.parts[0] not in TARGET_PARTITIONS
+            or path.parts[1:3] != ("etc", "vintf")
+            or not (path.name.startswith("manifest") or "manifest" in path.parts)
+            or name == allowed
+        ):
+            continue
+        try:
+            root = ET.fromstring(read_small(archive, info))
+        except ET.ParseError as error:
+            fail(f"cannot parse VINTF manifest {name}: {error}")
+        if any(declared == hal_name for declared, _, _ in declared_hals(root)):
+            fail(f"{name} declares {hal_name}: only {allowed} may")
+
+
+def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    check_single_hal_declaration(archive, infos, THERMAL_HAL_NAME, THERMAL_FRAGMENT)
+    try:
+        fragment = ET.fromstring(read_small(archive, infos[THERMAL_FRAGMENT]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {THERMAL_FRAGMENT}: {error}")
+    hals = declared_hals(fragment)
+    if (
+        len(hals) != 1
+        or hals[0][0] != THERMAL_HAL_NAME
+        or hals[0][1] != THERMAL_VERSION
+        or hals[0][2] != ["IThermal/default"]
+        or any(hal.get("format") != "aidl" for hal in fragment.iter("hal"))
+    ):
+        fail(
+            f"{THERMAL_FRAGMENT} must declare exactly the AIDL IThermal/default at version "
+            f"{THERMAL_VERSION}: {hals}"
+        )
+    script = read_small(archive, infos[f"VENDOR/etc/init/{THERMAL_SERVICE}.rc"]).decode(
+        "utf-8", errors="strict"
+    )
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if len(service) != 1 or not re.fullmatch(
+        rf"service \S+ /vendor/bin/hw/{re.escape(THERMAL_SERVICE)}", service[0]
+    ):
+        fail("the thermal init script must define one service that runs the Andarium thermal HAL")
+    for required in (f"interface aidl {THERMAL_INTERFACE}", "class hal", "user nobody", "group system"):
+        if required not in lines:
+            fail(f"the thermal service must carry '{required}'")
+    if "disabled" in lines or "oneshot" in lines:
+        fail("the thermal service starts at boot on every device: it is neither disabled nor oneshot")
+    if any(line.startswith("on ") for line in lines):
+        fail("the thermal init script may have no trigger: the service starts with its class")
+    if not THERMAL_FILE_CONTEXT.search(read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])):
+        fail("vendor_file_contexts does not give the thermal HAL its hal_thermal_default_exec label")
+    check_default_display_config(archive, infos)
+
+
+# The gamepad relay (overlay/gamepad) turns the host's game controllers into HID devices through
+# /dev/uhid, and every device has a host, so every device runs it: a daemon that init starts with
+# its class at boot, in a domain of its own (not a HAL, so no VINTF fragment) that may use the uhid
+# node and vsock and nothing else the product grants.
+GAMEPAD_SERVICE = ("kernarium_gamepad", "/vendor/bin/kernarium_gamepad")
+GAMEPAD_RC = "VENDOR/etc/init/kernarium_gamepad.rc"
+GAMEPAD_RC_OPTIONS = ("class main", "user nobody", "group uhid")
+GAMEPAD_TRANSITION = re.compile(
+    rb"^\(typetransition init(?:_[0-9]+)? kernarium_gamepad_exec process kernarium_gamepad\)$",
+    re.MULTILINE,
+)
+GAMEPAD_UHID_RULE = re.compile(
+    rb"^\(allow kernarium_gamepad uhid_device(?:_[0-9]+)? \(chr_file \(([^)]*)\)\)\)$", re.MULTILINE
+)
+GAMEPAD_UHID_PERMISSIONS = frozenset({"open", "read", "write"})
+GAMEPAD_VSOCK_RULE = re.compile(
+    rb"^\(allow kernarium_gamepad self \(vsock_socket \(([^)]*)\)\)\)$", re.MULTILINE
+)
+GAMEPAD_VSOCK_PERMISSIONS = frozenset({"create", "bind", "listen", "accept", "read", "write", "shutdown"})
+
+
+def check_gamepad_relay(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The init script runs the relay at boot as the user and group that may open /dev/uhid."""
+    name, executable = GAMEPAD_SERVICE
+    script = read_small(archive, infos[GAMEPAD_RC]).decode("utf-8", errors="strict")
+    lines = [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+    service = [line for line in lines if line.startswith("service ")]
+    if service != [f"service {name} {executable}"]:
+        fail(f"the gamepad init script must define the one service {name} that runs {executable}: {service}")
+    for required in GAMEPAD_RC_OPTIONS:
+        if required not in lines:
+            fail(f"the gamepad service must carry '{required}'")
+    if "disabled" in lines or "oneshot" in lines:
+        fail("the gamepad service starts at boot on every device: it is neither disabled nor oneshot")
+    if any(line.startswith("on ") for line in lines):
+        fail("the gamepad init script may have no trigger: the service starts with its class")
+    if any(line.startswith(("seclabel ", "capabilities ")) for line in lines):
+        fail("the gamepad service takes its domain from its file label and holds no capability")
+
+
+def check_gamepad_policy(vendor_policy: bytes, vendor_file_contexts: bytes) -> None:
+    """The relay runs in its own domain, with the uhid node and vsock."""
+    if file_context_label(vendor_file_contexts, GAMEPAD_SERVICE[1]) != "u:object_r:kernarium_gamepad_exec:s0":
+        fail("vendor file contexts do not label /vendor/bin/kernarium_gamepad")
+    if not GAMEPAD_TRANSITION.search(vendor_policy):
+        fail("vendor policy does not move init into the gamepad relay domain")
+    if not any(
+        GAMEPAD_UHID_PERMISSIONS <= set(match.group(1).decode().split())
+        for match in GAMEPAD_UHID_RULE.finditer(vendor_policy)
+    ):
+        fail("vendor policy does not let the gamepad relay open, read and write the uhid device")
+    if not any(
+        GAMEPAD_VSOCK_PERMISSIONS <= set(match.group(1).decode().split())
+        for match in GAMEPAD_VSOCK_RULE.finditer(vendor_policy)
+    ):
+        fail("vendor policy does not give the gamepad relay vsock sockets to listen on")
+    if "kernarium_gamepad" not in cil_attribute_members(vendor_policy, "unconstrained_vsock_violators"):
+        fail("vendor policy does not classify the gamepad relay as an unconstrained vsock user")
+
+
+def check_default_display_config(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    if DISPLAY_CONFIG_SHADOW in infos:
+        fail(
+            f"{DISPLAY_CONFIG_SHADOW} exists: the framework reads the first default display "
+            f"configuration it finds, so it would hide {DISPLAY_CONFIG_DEFAULT}"
+        )
+    try:
+        root = ET.fromstring(read_small(archive, infos[DISPLAY_CONFIG_DEFAULT]))
+    except ET.ParseError as error:
+        fail(f"cannot parse {DISPLAY_CONFIG_DEFAULT}: {error}")
+    shape = [child.tag for child in root]
+    throttling = root.find("thermalThrottling")
+    if root.tag != "displayConfiguration" or shape != ["thermalThrottling"] or throttling is None:
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold a displayConfiguration with thermalThrottling and nothing else")
+    maps = list(throttling)
+    if len(maps) != 1 or maps[0].tag != "refreshRateThrottlingMap" or maps[0].get("id") not in (None, "default"):
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold the one default refreshRateThrottlingMap")
+    points = list(maps[0])
+    if len(points) != 1 or points[0].tag != "refreshRateThrottlingPoint":
+        fail(f"{DISPLAY_CONFIG_DEFAULT} must hold one refreshRateThrottlingPoint")
+    point = points[0]
+    refresh_rates = point.find("refreshRateRange")
+    found = (
+        (point.findtext("thermalStatus") or "").strip(),
+        (refresh_rates.findtext("minimum") or "").strip() if refresh_rates is not None else "",
+        (refresh_rates.findtext("maximum") or "").strip() if refresh_rates is not None else "",
+    )
+    if [child.tag for child in point] != ["thermalStatus", "refreshRateRange"] or found != DISPLAY_CONFIG_POINT:
+        fail(
+            f"{DISPLAY_CONFIG_DEFAULT} must hold the severe point with the refresh rate range "
+            f"0 to 30 Hz: {found}"
+        )
 
 
 def check_hardware_features(
@@ -2696,6 +3179,7 @@ def check_kernel_policy(
     check_network_setup_policy(
         vendor_policy, read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"])
     )
+    check_gamepad_policy(vendor_policy, read_small(archive, infos["VENDOR/etc/selinux/vendor_file_contexts"]))
     platform_policy = read_small(
         archive, infos["SYSTEM/etc/selinux/plat_sepolicy.cil"], PLATFORM_POLICY_LIMIT
     )
@@ -2712,6 +3196,13 @@ def check_kernel_policy(
         read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
     )
     check_time_zone_policy(
+        system_ext_policy,
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
+        read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_property_contexts"]).decode(
+            "utf-8", errors="strict"
+        ),
+    )
+    check_keyboard_default_policy(
         system_ext_policy,
         read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_file_contexts"]),
         read_small(archive, infos["SYSTEM_EXT/etc/selinux/system_ext_property_contexts"]).decode(
@@ -3158,6 +3649,168 @@ def check_time_zone_policy(
         if line.strip() and not line.lstrip().startswith("#")
     ):
         fail(f"system_ext property contexts do not label {TIME_ZONE_MARKER}")
+
+
+def check_keyboard_default(rc_payload: str, script: bytes) -> None:
+    """The script that moves an older guest to the on-screen keyboard default runs once after boot."""
+    name, executable = KEYBOARD_DEFAULT_SERVICE
+    service = init_services(rc_payload).get(name)
+    if service is None or service[0] != executable:
+        fail(f"system_ext init policy does not declare the {name} service at {executable}")
+    for option in ("oneshot", "disabled"):
+        if option not in service[1]:
+            fail(f"system_ext init policy does not declare {name} as {option}")
+    actions = init_actions(rc_payload)
+    for trigger, commands in actions.items():
+        if f"start {name}" in commands and trigger != KEYBOARD_DEFAULT_TRIGGER:
+            fail(f"system_ext init policy starts {name} under '{trigger}'")
+    if f"start {name}" not in actions.get(KEYBOARD_DEFAULT_TRIGGER, []):
+        fail(f"system_ext init policy does not start {name} when boot completes")
+    code = "\n".join(
+        line
+        for line in script.decode("utf-8", errors="strict").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for token in KEYBOARD_DEFAULT_SCRIPT_REQUIRED:
+        if token not in code:
+            fail(f"{executable} does not contain '{token}'")
+    for token in KEYBOARD_DEFAULT_SCRIPT_FORBIDDEN:
+        if token in code:
+            fail(
+                f"{executable} contains '{token}': it may only read the on-screen keyboard setting "
+                "and turn it off, once"
+            )
+
+
+def check_keyboard_default_policy(
+    system_ext_policy: bytes, system_ext_file_contexts: bytes, system_ext_property_contexts: str
+) -> None:
+    """The script runs in its own core domain, uses only the settings service, sets only its marker."""
+    domain = KEYBOARD_DEFAULT_SERVICE[0]
+    if file_context_label(system_ext_file_contexts, KEYBOARD_DEFAULT_SERVICE[1]) != (
+        f"u:object_r:{domain}_exec:s0"
+    ):
+        fail(f"system_ext file contexts do not label {KEYBOARD_DEFAULT_SERVICE[1]}")
+    if not KEYBOARD_DEFAULT_TRANSITION.search(system_ext_policy):
+        fail("system_ext policy does not move init into the keyboard default domain")
+
+    def has(source: str, target: str, object_class: bytes, permission: bytes) -> bool:
+        return any(
+            CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) == source
+            and CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode()) == target
+            and match.group(3) == object_class
+            and permission in match.group(4).split()
+            for match in CIL_ALLOW_RULE.finditer(system_ext_policy)
+        )
+
+    for source, target, object_class, permission, why in (
+        (domain, "settings_service", b"service_manager", b"find",
+         "cmd finds the settings service to read and write the on-screen keyboard setting"),
+        (domain, "system_server", b"binder", b"transfer",
+         "cmd hands the service the receiver of its result"),
+        ("system_server", domain, b"binder", b"call",
+         "cmd waits for the receiver of its result"),
+        ("system_server", domain, b"fd", b"use",
+         "the service writes to the descriptors cmd passes"),
+        ("system_server", domain, b"fifo_file", b"write",
+         "the settings service writes the setting it reads to a pipe"),
+    ):
+        if not has(source, target, object_class, permission):
+            fail(
+                f"system_ext policy does not allow {source} {target} {object_class.decode()} "
+                f"{permission.decode()}: {why}"
+            )
+    if KEYBOARD_DEFAULT_MARKER_TYPE not in cil_attribute_members(
+        system_ext_policy, "system_property_type"
+    ):
+        fail(f"system_ext policy does not define the system-owned {KEYBOARD_DEFAULT_MARKER_TYPE}")
+    settable = {
+        CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(2).decode())
+        for match in CIL_PROPERTY_SET_RULE.finditer(system_ext_policy)
+        if CIL_PLATFORM_VERSION_SUFFIX.sub("", match.group(1).decode()) == domain
+        and b"set" in match.group(3).split()
+    }
+    if KEYBOARD_DEFAULT_MARKER_TYPE not in settable:
+        fail(f"system_ext policy does not let the keyboard default domain set {KEYBOARD_DEFAULT_MARKER}")
+    if settable != {KEYBOARD_DEFAULT_MARKER_TYPE}:
+        fail(
+            f"system_ext policy lets the keyboard default domain set {sorted(settable)}, not only "
+            f"its own marker {KEYBOARD_DEFAULT_MARKER_TYPE}"
+        )
+    if not any(
+        line.split()[:2] == [KEYBOARD_DEFAULT_MARKER, f"u:object_r:{KEYBOARD_DEFAULT_MARKER_TYPE}:s0"]
+        for line in system_ext_property_contexts.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ):
+        fail(f"system_ext property contexts do not label {KEYBOARD_DEFAULT_MARKER}")
+
+
+# The host's keyboard and mouse are virtio-input devices that Android finds by vendor and product
+# (overlay/input, the product makefile). The side-key keyboard (1af4:0002) carries Power, Volume Up
+# and Down, Back and Home, and its key layout holds those five keys alone: Android would otherwise
+# give it Generic.kl, count it as a full keyboard that is always attached, and never hide its
+# on-screen keyboard for a real one. The keyboard (0003) and the mouse (0004) are external, as a USB
+# keyboard and mouse are, so that a key or a click wakes the screen; the absolute pointer (0005)
+# follows the display's orientation and wakes it too. The three have no key layout or character map
+# of their own: Android's keyboard layout choice belongs to the user.
+INPUT_SIDE_KEY_LAYOUT = "VENDOR/usr/keylayout/Vendor_1af4_Product_0002.kl"
+INPUT_SIDE_KEYS = {116: "POWER", 115: "VOLUME_UP", 114: "VOLUME_DOWN", 158: "BACK", 172: "HOME"}
+INPUT_DEVICE_CONFIGURATIONS = {
+    "VENDOR/usr/idc/Vendor_1af4_Product_0003.idc": {"device.internal": "0"},
+    "VENDOR/usr/idc/Vendor_1af4_Product_0004.idc": {"device.internal": "0"},
+    "VENDOR/usr/idc/Vendor_1af4_Product_0005.idc": {"touch.orientationAware": "1", "touch.wake": "1"},
+}
+INPUT_HOST_DEVICE_LAYOUT = re.compile(
+    r"^VENDOR/usr/(?:keylayout|keychars)/Vendor_1af4_Product_000[345](?:_Version_[0-9a-f]{4})?\.(?:kl|kcm)$"
+)
+
+
+def input_file_lines(payload: bytes, path: str) -> list[tuple[int, str]]:
+    """The lines of an Android input configuration file that are not blank or comments."""
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        fail(f"{path} is not UTF-8: {error}")
+    return [
+        (number, line.strip())
+        for number, line in enumerate(text.splitlines(), 1)
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def check_input_device_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    keys: dict[int, str] = {}
+    for number, line in input_file_lines(
+        read_small(archive, infos[INPUT_SIDE_KEY_LAYOUT]), INPUT_SIDE_KEY_LAYOUT
+    ):
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != "key" or not fields[1].isdecimal():
+            fail(f"{INPUT_SIDE_KEY_LAYOUT}:{number} must be a 'key <scan code> <label>' line: {line}")
+        if int(fields[1]) in keys:
+            fail(f"{INPUT_SIDE_KEY_LAYOUT}:{number} maps scan code {fields[1]} twice")
+        keys[int(fields[1])] = fields[2]
+    if keys != INPUT_SIDE_KEYS:
+        fail(
+            f"{INPUT_SIDE_KEY_LAYOUT} must map the five side keys alone ({INPUT_SIDE_KEYS}), so that "
+            f"Android does not count the side-key keyboard as a full keyboard: {keys}"
+        )
+    for path, expected in INPUT_DEVICE_CONFIGURATIONS.items():
+        found: dict[str, str] = {}
+        for number, line in input_file_lines(read_small(archive, infos[path]), path):
+            name, separator, value = line.partition("=")
+            if not separator or not name.strip() or not value.strip():
+                fail(f"{path}:{number} must be a 'name = value' line: {line}")
+            if name.strip() in found:
+                fail(f"{path}:{number} sets {name.strip()} twice")
+            found[name.strip()] = value.strip()
+        if found != expected:
+            fail(f"{path} must set {expected} and nothing else: {found}")
+    for name in sorted(infos):
+        if INPUT_HOST_DEVICE_LAYOUT.match(name):
+            fail(
+                f"{name} gives a host input device a key layout or character map of its own: "
+                "Android's keyboard layout choice is the user's"
+            )
 
 
 def check_policy_relaxations(policies: tuple[bytes, ...], build_variant: str) -> None:
@@ -4221,6 +4874,8 @@ def main() -> None:
         check_app_dexpreopt(seen)
         check_hardware_features(archive, infos)
         check_motion_sensors(archive, infos)
+        check_haptics_vibrator(archive, infos)
+        check_gnss_hal(archive, infos)
         check_discrete_ops(archive, infos)
         check_default_wallpaper(archive, infos)
         check_no_statistics_uploader(archive, infos)
@@ -4230,15 +4885,19 @@ def main() -> None:
         check_launcher_workspace(archive, infos)
         check_network_time(archive, infos)
         check_flip_to_screen_off(archive, infos)
+        check_input_device_configuration(archive, infos)
         check_pinner_overlay(archive, infos)
         check_application_manifests(archive, infos, build_variant)
         check_thermal_hal(archive, infos)
+        check_gamepad_relay(archive, infos)
         check_cas_hal(archive, infos)
         check_wifi_hals(archive, infos)
         check_adbd_launch_properties(archive, infos)
         check_adb_root_service(archive, infos)
         check_lmkd_gpu_reclaim(archive, infos)
         check_services_jar(archive, infos)
+        check_input_flinger(archive, infos)
+        check_network_stack(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)
         check_video_encoders(archive, infos)

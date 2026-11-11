@@ -22,6 +22,10 @@ struct AppEntry {
     /// taking the access as given, so `simctl privacy` and the system's
     /// alert drive it as they drive the device's.
     var systemMicrophone: Bool
+    /// The Location switch asks the Simulator's own permission, as
+    /// `systemMicrophone` does for the microphone: `simctl privacy` sets it
+    /// and the system's alert asks.
+    var systemLocation: Bool
     /// How many CPU readings the stats overlay and Settings' Stats rows
     /// start with, and hold: 0 is a session before its first reading. Absent,
     /// the mock readings run on.
@@ -47,6 +51,7 @@ struct AppEntry {
             resetTips: defaults.bool(forKey: "resetTips"),
             bootStage: defaults.string(forKey: "bootStage").flatMap { Int($0) },
             systemMicrophone: defaults.bool(forKey: "systemMicrophone"),
+            systemLocation: defaults.bool(forKey: "systemLocation"),
             statsReadings: defaults.string(forKey: "statsReadings").flatMap { Int($0) },
             statsVramMiB: defaults.string(forKey: "statsVramMiB").flatMap { Int($0) },
             device: defaults.string(forKey: "device"),
@@ -62,6 +67,11 @@ struct AppEntry {
         "home-display": "display",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
+        "home-location-on": "capabilities", "home-location-denied": "capabilities",
+        "home-location-approximate": "capabilities", "home-location-restricted": "capabilities",
+        "home-location-services-off": "capabilities", "home-location-alert": "capabilities",
+        "home-location-approximate-alert": "capabilities", "home-location-restricted-alert": "capabilities",
+        "home-location-services-off-alert": "capabilities", "home-location-ask": "capabilities",
         "home-backup": "backup",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
@@ -153,7 +163,7 @@ struct AppEntry {
                 text: "Android stopped with a kernel panic: Attempted to kill init! exitcode=0x0000000b."))
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit":
+        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask":
             break
         case "home-jit":
             model.jitOn = true
@@ -171,6 +181,18 @@ struct AppEntry {
             model.microphoneState = .denied
         case "home-gyroscope-unavailable":
             model.motionSensorsAvailable = false
+        case "home-location-on":
+            model.guest?.location = true
+            model.locationAuthorization = .precise
+        case "home-location-approximate", "home-location-approximate-alert":
+            model.guest?.location = true
+            model.locationAuthorization = .approximate
+        case "home-location-denied", "home-location-alert":
+            model.locationAuthorization = .denied
+        case "home-location-restricted", "home-location-restricted-alert":
+            model.locationAuthorization = .restricted
+        case "home-location-services-off", "home-location-services-off-alert":
+            model.locationAuthorization = .servicesOff
         case "busy-create":
             model.busy = BusyState(title: "Creating guest", detail: "Setting up Andarium with 16 GiB.", progress: 0.42)
         case "busy-erase":
@@ -204,7 +226,7 @@ struct AppEntry {
             boot(.normal, stage: 1, seconds: 4)
         case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
-             "session-graphics-notice":
+             "session-graphics-notice", "session-thermal-notice":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -222,6 +244,7 @@ struct AppEntry {
             )
             model.phase = .running(.normal)
             if screen == "session-graphics-notice" { model.previewGraphicsNotice() }
+            if screen == "session-thermal-notice" { model.previewThermalNotice() }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
             let session = model.session
@@ -281,6 +304,9 @@ struct AppEntry {
             if let statsVramMiB { model.session.readout.vramUsedBytes = UInt64(statsVramMiB) * Limits.bytesPerMiB }
         }
         if systemMicrophone { useSystemMicrophone(in: model) }
+        if systemLocation { useSystemLocation(in: model) }
+        // Seeded snapshots no screen opens yet; a state sets its own seed.
+        model.snapshotDriver = PreviewSnapshotDriver(.sample())
         return model
     }
 
@@ -367,6 +393,18 @@ struct AppEntry {
         }
     }
 
+    /// The device's location conversation against the Simulator's
+    /// permission, which is read again whenever the app becomes active.
+    private func useSystemLocation(in model: AppModel) {
+        model.location = LocationController(model: model, source: SystemLocationAccess()) {}
+        model.location?.refresh()
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in model.location?.refresh() }
+        }
+    }
+
     /// Sheets and dialogs open after the first frame so SwiftUI presents them
     /// the way a tap would.
     @MainActor
@@ -381,6 +419,11 @@ struct AppEntry {
             model.sheet = .system
         case "home-mic-alert":
             model.setMicrophone(true)
+        case "home-location-alert", "home-location-restricted-alert", "home-location-services-off-alert",
+             "home-location-ask":
+            model.setLocation(true)
+        case "home-location-approximate-alert":
+            model.permissionPrompt = .location
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",

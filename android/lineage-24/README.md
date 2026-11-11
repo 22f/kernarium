@@ -89,10 +89,12 @@ UML implementation. `Build.SOC_MANUFACTURER` and `SOC_MODEL` are `Kernarium` and
   entry, the Bluetooth developer option, the media output switcher, and the
   hearing, Bluetooth pairing, telephony, biometric and USB pages) and hides the
   Wi-Fi hotspot, wireless display and System update pages.
-- **Hardware not advertised.** Telephony, GNSS, NFC, UWB, Thread, camera,
-  biometric, vibrator, secure element, USB, Bluetooth and Trusty. SecureElement
-  is kept but not persistent (route `p0024`): nothing starts it at boot, and the
-  first `SEService` client that binds it starts it.
+- **Hardware not advertised.** Telephony, NFC, UWB, Thread, camera,
+  biometric, secure element, USB, Bluetooth and Trusty; the vibrator only on a
+  device with haptics ([Haptics](#haptics)). The host's position is declared on
+  every device ([Location](#location)). SecureElement is kept but not
+  persistent (route `p0024`): nothing starts it at boot, and the first
+  `SEService` client that binds it starts it.
 - **Diagnostics.** A `user` image needs no guest root for diagnostics: the
   host-captured console, UML's mconsole and tracefs at `/sys/kernel/tracing`
   cover them. Only what these cannot reach needs a `userdebug` build with `su`.
@@ -158,6 +160,122 @@ multiplied by -9.80665, and events carry the guest's `CLOCK_BOOTTIME` at receipt
 a live input path, not a synchronized recording. Andarium's
 [scene policy](../../Andarium/README.md#devices) describes windowed operation.
 
+### Haptics
+
+The vibrator exists only on a device with haptics. The host passes
+`androidboot.product.hardware.sku=haptics` for one (Android's ODM SKU, which
+`Build.ODM_SKU` reports). The ODM manifest of that SKU
+(`overlay/vibrator/manifest_haptics.xml`, named by `ODM_MANIFEST_HAPTICS_FILES`
+in `overlay/BoardConfig.mk`) is the only place that declares
+`android.hardware.vibrator` `IVibrator/default`, and the service's init script
+starts it for that SKU alone. Without the SKU nothing is declared or started,
+and Android sees no vibrator.
+
+`overlay/vibrator/` is the vendor AIDL HAL (version 4). It offers amplitude
+control, the predefined effects CLICK, DOUBLE_CLICK, TICK, THUD, POP,
+HEAVY_CLICK and TEXTURE_TICK, the nine composition primitives (up to 128 per
+composition, delays up to 1 s) and completion callbacks; the framework's
+intensity settings are applied before the HAL. Envelope (PWLE) effects,
+frequency control, audio-coupled haptics, always-on effects and vendor effects
+are unsupported and not advertised. The HAL fixes the durations it reports
+(`haptics_effects.hpp`) and completes each callback at the declared time whether
+or not a host is connected; the host's Core Haptics player decides what fills
+them. The HAL listens on vsock port 5557 and accepts only host CID 2; a later
+connection replaces an earlier one. It sends each frame without waiting and shuts
+a connection down when a frame does not go whole. `overlay/vibrator/haptics_protocol.hpp`
+and `Andarium/AndariumCore/Sources/AndariumCore/HapticsProtocol.swift` own the
+wire format, which the golden frames in `tests/unit/andarium/fixtures` pin.
+
+### Location
+
+The host's position is the guest's GNSS receiver: `/dev/gnss0`, a Kernarium
+Virtio device that the guest kernel registers in Linux's GNSS class
+([stream contract](../../darwin/device/gnss/README.md)). Every device declares
+`android.hardware.location` and `android.hardware.location.gps` and the vendor
+manifest declares `android.hardware.gnss` `IGnss/default` (version 7), with no
+SKU: the node exists on every device, and the host reports no fix while it has
+no position to give. ueventd gives the node to `gps`.
+
+`overlay/gnss/` is the vendor AIDL HAL. It opens the node at the framework's
+`start()`, which powers the receiver on the host, and closes it at `stop()`; it
+reads the NMEA epochs and reports a location once for each newer fix, at the
+interval `setPositionMode` gave. A location carries the fix's own UTC time and
+its age, the ellipsoidal altitude (sea level altitude plus the geoid separation,
+or none when either is missing), and the accuracies, speed and bearing only
+when the host knew them. The HAL declares no capability, so the framework
+schedules fixes slower than every 10 s itself, and it answers every extension a
+real receiver offers that this one cannot (satellites, measurements, navigation
+messages, batching, geofencing, assistance data, antenna information,
+corrections) with `EX_UNSUPPORTED_OPERATION`. The satellite list is always
+empty, and nothing the framework injects (time, locations, assistance data) is
+used. A fix never sets the clock or the time zone.
+
+A fix the host marked approximate (iOS's reduced accuracy) is reported as a GNSS
+fix at least 2000 m uncertain with no altitude, speed or bearing, whatever the
+stream carries, and the NMEA sentences an application can listen to are
+rewritten to the same. An application that holds only the coarse permission
+gets Android's own coarse location of the fix.
+
+A session holds a system-suspend wakelock from `start()` to `stop()`. A guest
+that suspends itself with its display off is woken once an epoch while the
+receiver is open, and without the lock it would suspend and wake every second
+for as long as a client listens. The lock belongs to the HAL's process, so it
+goes with the HAL, and it holds back only Android's own autosuspend.
+
+`overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
+rules and `gnss_engine.hpp` the session, with no Android dependency; the
+`gnss-hal-*` unit tests read the host writer's own epochs through them.
+`tests/integration/android/location/` is a probe application for the candidate
+image, never installed in a release.
+
+### Thermal
+
+The thermal HAL tells Android how hot the host is. `overlay/thermal/` is the
+vendor AIDL HAL, which replaces the AOSP example HAL (its APEX is not
+installed); the vendor manifest declares `android.hardware.thermal`
+`IThermal/default` on every device. Its one SKIN sensor follows the severity
+the host application last sent (NONE to CRITICAL), and stays at NONE until a
+host connects. The HAL never reports EMERGENCY or SHUTDOWN, whatever the host
+sends, and keeps its severity when the host link drops.
+`overlay/thermal/thermal_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/ThermalProtocol.swift` own the wire,
+which the golden frames in `tests/unit/andarium/fixtures` pin.
+
+From SEVERE on, Android holds the display's render rate to 30 Hz; the display
+mode does not change. The map is the vendor default display configuration
+(`/vendor/etc/displayconfig/default.xml`, from `overlay/config/`), which the
+display topic of route `p0007` makes a display with no map of its own use.
+`tests/integration/android/run_android_thermal.py` drives the stream on a
+candidate image.
+
+### Game controllers
+
+The host application's game controllers are HID devices of the guest.
+`kernarium_gamepad` (`overlay/gamepad/`) is a vendor daemon that init starts at
+boot on every device, in a domain of its own. It listens on vsock port 5558,
+accepts only host CID 2, and creates a device through `/dev/uhid` for each
+controller the host describes: the node Android's Bluetooth stack uses for a
+paired controller, so the kernel's own driver for that device binds it and
+Android applies its stock key layout. The relay knows no controller family; the
+identity, the descriptor and the meaning of every report are the host's, so a
+fix to one ships in an application update. It moves the host's input reports
+into the device and the driver's output and feature requests (rumble, lights,
+calibration) back to the host.
+
+There is one device per controller, at most eight at a time. A connection that
+ends, or a host that connects again, removes every device, and the host creates
+its controllers again after the relay's `HELLO`. A driver request that the host
+cannot get is answered with `EIO` at once, so a driver never waits out uhid's
+five seconds. Writes to the host never block: a frame that does not go whole
+shuts the connection down. With no controller the relay only waits, and
+Recovery does not run it.
+`overlay/gamepad/gamepad_protocol.hpp` and
+`Andarium/AndariumCore/Sources/AndariumCore/GamepadProtocol.swift` own the wire
+format, which the golden frames in `tests/unit/andarium/fixtures` pin.
+`tests/integration/android/run_android_gamepad.py` (`android-gamepad`) plays the
+host against a booted release; its probe app is
+[`tests/integration/android/gamepad`](../../tests/integration/android/gamepad/README.md).
+
 ### Networking
 
 The guest's one network device, `eth0`, is the host's user-mode network (SLiRP,
@@ -168,8 +286,12 @@ device `wlan0` on it, and the kernel needs `CONFIG_MACVLAN`, `CONFIG_CFG80211`
 and `CONFIG_VIRT_WIFI` built in (the verifier requires them). Apps see Wi-Fi
 only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
-airplane mode off takes apps offline while adb keeps working. There is no
-SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped.
+airplane mode off takes apps offline while adb keeps working. The platform
+validates a Wi-Fi network without probes (route `p0029`): NetworkMonitor sends
+none and reports the network validated once private DNS passes, so a blocked
+validation server never leaves a no-internet state or a sign-in notification. A
+VPN, a test network, DNS and the private DNS settings keep the stock rules. There
+is no SoftAP, Wi-Fi Direct, Aware or RTT, and `wificond` is not shipped.
 
 ### Audio, settings and lock screen defaults
 
@@ -190,9 +312,55 @@ than making silence up (route `p0005`). A low-latency AAudio
 stream with a data callback that leaves its capacity unspecified starts with a
 two-burst buffer and grows it by one burst per underrun until the app sets a
 size (route `p0028`). A Virtio battery device reports the Apple host's
-percentage and charging state.
+percentage and charging state; on iOS the percentage is `UIDevice.batteryLevel`,
+which moves in 5% steps, so the guest's does too, and the Mac's is exact.
 The swipe lock screen can be turned on: `ro.lockscreen.disable.default` turns it
 off for user 0 of a fresh `/data` only.
+
+### Keyboard and mouse
+
+The host's keyboard and mouse are three virtio-input devices of the guest. They
+exist from boot and are plugged into Android only while the host reports the
+hardware: "Kernarium Hardware Keyboard" (1af4:0003), "Kernarium Mouse" (1af4:0004:
+the wheels, and relative motion while an app captures the pointer) and
+"Kernarium Pointer" (1af4:0005: the absolute position, which places Android's
+cursor). The ids and names are permanent, because Android keys a keyboard layout
+and its settings to a device's identity. The host sends key positions and never
+characters, so Android's own layout, key repeat and Caps Lock apply, and every
+key goes to Android.
+
+`overlay/input/` holds the configuration Android reads for them from
+`/vendor/usr`. The keyboard and the mouse are external, as USB devices are, so a
+key or a click wakes the screen; the pointer follows the display's orientation.
+None of the three has a key layout of its own: Android picks one for the
+keyboard from the language of the input method, asks when it cannot, and keeps
+the user's choice. The side-key keyboard (1af4:0002: Power, Volume Up and Down,
+Back and Home) has a layout of those five keys alone, so Android no longer counts
+it as a full keyboard that is always attached. The verifier requires each file's
+content.
+
+Android hides its on-screen keyboard while a hardware keyboard is attached
+unless "Show on-screen keyboard" is on, and the product's default is off (the
+SettingsProvider overlay): the keyboard shows until the host's keyboard is
+attached. SettingsProvider writes a default only when it first creates a guest's
+settings, so a guest that an older release created holds 1. Once boot completes,
+`kernarium_keyboard_default` (`overlay/tools`, a script in a core domain of its
+own) turns a stored 1 off, once; its marker property records that it has looked,
+so a person who turns the setting on afterwards keeps it on. The setting has no
+history that tells the old default from a person's choice of 1, so a 1 chosen
+earlier is turned off once as well.
+
+While an app holds pointer capture, Android lights the LED_MISC of a cursor
+device that advertises it, and puts it out when the capture ends; the mouse is
+that device, and the host reads the LED to take hold of its own pointer for the
+guest. A device without the LED sees no change. It is a topic of route `p0022`
+(`frameworks/native`), and the verifier requires its dump line in
+`libinputflinger.so`.
+
+init starts a service on a keychord whenever its keys are down together on any
+input device, so typing would fire one: the product's `bugreport` service has
+none (Cuttlefish's was A and B), and the verifier refuses a keychord in the
+product's init script. Bug reports are taken over adb.
 
 ### Debugging and adb
 
@@ -242,6 +410,10 @@ outcomes are known and not defects of the image:
 - HEVC 4K decoding at 60 frames per second and 32-bit encoding at the largest
   sizes miss the published point
   ([hardware video](#hardware-video-encoding-and-decoding)).
+- The measurement, satellite and navigation message cases of
+  `CtsLocationGnssTestCases` and `VtsHalGnssTargetTest` fail: the host's
+  position has no satellites, raw measurements or ephemeris, and the product
+  declares `android.hardware.location.gps` regardless.
 - DocumentsUI (Files) on a smallest width of 720 dp or more can throw an
   `IllegalStateException` from AppCompat's `CascadingMenuPopup` while its
   overflow menu changes during the popup's exit transition; real tablets share
@@ -382,8 +554,8 @@ patches, never by deleting files from a completed image.
 `KERNARIUM_REMOVED_PACKAGES` in `overlay/lineage_andarium.mk` lists what the
 product omits: HAL APEXes with no Darwin UML hardware, AVF guest payloads, OTA
 and DSU executables, and Cuttlefish host-monitoring services. The build and the
-verifier reject any excluded module that reappears. The thermal and CAS HAL
-APEXes (CTS needs both) stay, as do DeviceLock, Virtualization and the modular
+verifier reject any excluded module that reappears. The CAS HAL APEX (CTS needs
+it) stays, as do DeviceLock, Virtualization and the modular
 framework containers, which the platform SDK classes link. EasterEgg stays
 too: Settings' Android version row opens the platform logo screen, which starts
 the egg, and the verifier requires its package.

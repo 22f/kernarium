@@ -4,6 +4,8 @@
 #include "audio/protocol.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
+#include "camera/camera_source.hpp"
+#include "camera/in_process_service.hpp"
 #include "video/in_process_service.hpp"
 #include "video/virtio_video_device.hpp"
 #include "video/virtio_video_encoder_device.hpp"
@@ -12,11 +14,17 @@
 #include "vsock/protocol.hpp"
 #include "console/in_process_service.hpp"
 #include "console/protocol.hpp"
+#include "gnss/in_process_service.hpp"
+#include "gnss/protocol.hpp"
+#include "gnss/synthetic_source.hpp"
 #include "gpu/in_process_service.hpp"
 #include "gpu/mesa_shader_cache.hpp"
 #include "gpu/metal_shader_cache.hpp"
 #include "gpu/native_display_application.hpp"
 #include "gpu/protocol.hpp"
+#include "hardware_input_bridge.hpp"
+#include "input/virtio/hardware_input.hpp"
+#include "input/virtio/in_process_service.hpp"
 #include "launcher.hpp"
 #include "gpu_budget_plan.hpp"
 #include "guest_memory_argument.hpp"
@@ -30,6 +38,7 @@
 #include "uml_slirp_net.h"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -47,6 +56,7 @@
 #include <mutex>
 #include <new>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -329,14 +339,49 @@ struct HostGpuOptions {
 	[[nodiscard]] bool operator==(const HostGpuOptions &) const = default;
 };
 
+/* --camera=: where the guest's cameras come from. */
+enum class CameraSource : std::uint8_t {
+	/* No camera device. */
+	none,
+	/* The synthetic camera's chart, live. */
+	synthetic,
+	/* The cameras the host has, discovered and never opened: every frame the
+	 * guest receives is black. */
+	blocked,
+	/* The host's cameras, live. */
+	host,
+};
+
+/* The cameras the synthetic camera presents (--camera-profile=). */
+enum class CameraProfile : std::uint8_t { phone, tablet, laptop };
+
 struct PreparedArguments {
 	HostGpuOptions gpu;
 	bool audio {};
 	uml::audio::OutputMode audio_output {uml::audio::OutputMode::host};
 	bool audio_input_host {};
 	bool battery {};
+	/* --gnss adds the Virtio GNSS receiver, with no position; --location=
+	 * adds it with a synthetic one (gnss/synthetic_source.hpp). It is the
+	 * last device, after vsock. */
+	bool gnss {};
+	std::string location;
 	bool video {};
 	bool video_encoder {};
+	/* --hardware-input gives the guest the input devices an Andarium guest
+	 * has: the touchscreen and the side keys, which nothing feeds, and the
+	 * hardware keyboard, mouse and pointer (darwin/device/input), unplugged at
+	 * boot and fed from the display's keys and pointer. The guest has no VNC
+	 * input device. The hardware devices are the last devices, after the
+	 * camera. */
+	bool hardware_input {};
+	CameraSource camera {CameraSource::none};
+	/* --camera-profile=: the synthetic camera is the source of `synthetic`
+	 * and, when this is given, of `blocked`. */
+	std::optional<CameraProfile> camera_profile;
+	/* --camera-calibration-dir=: where the colour data a Bayer still teaches
+	 * is kept; in memory when empty. */
+	std::string camera_calibration_directory;
 	/* --gpu-budget-app=, --gpu-budget-engine= and --gpu-budget-headroom=:
 	 * A, E_rest and S of the host GPU's fixed budget
 	 * (platform/gpu_budget.hpp). */
@@ -381,12 +426,17 @@ struct PreparedArguments {
 		const PreparedArguments &other) const
 	{
 		return std::tie(gpu, gpu_budget, audio, audio_output,
-				audio_input_host, battery, video, video_encoder,
-				console_socket, serial_socket, net_forwards,
-				vsock_forwards) ==
+				audio_input_host, battery, gnss, location, video,
+				video_encoder, hardware_input, camera, camera_profile,
+				camera_calibration_directory, console_socket,
+				serial_socket, net_forwards, vsock_forwards) ==
 			std::tie(other.gpu, other.gpu_budget, other.audio,
 				 other.audio_output, other.audio_input_host,
-				 other.battery, other.video, other.video_encoder,
+				 other.battery, other.gnss, other.location,
+				 other.video, other.video_encoder,
+				 other.hardware_input, other.camera,
+				 other.camera_profile,
+				 other.camera_calibration_directory,
 				 other.console_socket, other.serial_socket,
 				 other.net_forwards, other.vsock_forwards);
 	}
@@ -518,10 +568,49 @@ PreparedArguments prepare_host_arguments(
 			prepared.audio = true;
 		} else if (argument == "--battery") {
 			prepared.battery = true;
+		} else if (argument == "--gnss") {
+			prepared.gnss = true;
+		} else if (valued("--location=")) {
+			std::string error;
+			if (uml::gnss::makeSyntheticSource(value, error) == nullptr)
+				throw std::invalid_argument(
+					"invalid --location '" + std::string(value) +
+					"': " + error);
+			prepared.location = std::string(value);
+			prepared.gnss = true;
 		} else if (argument == "--video") {
 			prepared.video = true;
 		} else if (argument == "--video-encoder") {
 			prepared.video_encoder = true;
+		} else if (argument == "--hardware-input") {
+			prepared.hardware_input = true;
+		} else if (valued("--camera=")) {
+			if (value == "none")
+				prepared.camera = CameraSource::none;
+			else if (value == "synthetic")
+				prepared.camera = CameraSource::synthetic;
+			else if (value == "blocked")
+				prepared.camera = CameraSource::blocked;
+			else if (value == "host")
+				prepared.camera = CameraSource::host;
+			else
+				throw std::invalid_argument(
+					"--camera must be none, synthetic, blocked or host");
+		} else if (valued("--camera-profile=")) {
+			if (value == "phone")
+				prepared.camera_profile = CameraProfile::phone;
+			else if (value == "tablet")
+				prepared.camera_profile = CameraProfile::tablet;
+			else if (value == "laptop")
+				prepared.camera_profile = CameraProfile::laptop;
+			else
+				throw std::invalid_argument(
+					"--camera-profile must be phone, tablet or laptop");
+		} else if (valued("--camera-calibration-dir=")) {
+			if (value.empty())
+				throw std::invalid_argument(
+					"--camera-calibration-dir requires a path");
+			prepared.camera_calibration_directory = value;
 		} else if (valued("--virtio-console-socket=")) {
 			set_socket_path(prepared.console_socket,
 					"--virtio-console-socket", value);
@@ -654,6 +743,22 @@ PreparedArguments prepare_host_arguments(
 	     prepared.gpu.height > uml::gpu::protocol::maximumEdidDimension))
 		throw std::invalid_argument(
 			"--gpu-dpi requires display dimensions no larger than 4095");
+	if (prepared.hardware_input &&
+	    (!prepared.gpu.enabled ||
+	     prepared.gpu.display_mode == uml::gpu::DisplayMode::offscreen))
+		throw std::invalid_argument(
+			"--hardware-input requires --gpu with a VNC or native "
+			"display");
+	if (prepared.camera_profile &&
+	    prepared.camera != CameraSource::synthetic &&
+	    prepared.camera != CameraSource::blocked)
+		throw std::invalid_argument(
+			"--camera-profile requires --camera=synthetic or "
+			"--camera=blocked");
+	if (!prepared.camera_calibration_directory.empty() &&
+	    prepared.camera == CameraSource::none)
+		throw std::invalid_argument(
+			"--camera-calibration-dir requires --camera");
 	if (!prepared.console_socket.empty() && !prepared.serial_socket.empty())
 		throw std::invalid_argument(
 			"--virtio-console-socket and --virtio-serial-socket are "
@@ -721,6 +826,65 @@ bool informational_option(std::string_view argument)
 }
 
 using VirtioService = std::unique_ptr<uml::gpu::InProcessVhostUserService>;
+
+/* Wakes a guest that suspended itself when its GNSS receiver has output that
+ * nobody takes, as a phone's receiver wakes its processor. The wake can wait
+ * on the guest's console, so it runs on a thread of its own, and requests that
+ * come meanwhile are one. */
+class GuestWaker final {
+public:
+	explicit GuestWaker(uml_emulator *emulator)
+		: emulator_(emulator), thread_([this] { run(); })
+	{
+	}
+
+	GuestWaker(const GuestWaker &) = delete;
+	GuestWaker &operator=(const GuestWaker &) = delete;
+
+	~GuestWaker()
+	{
+		{
+			std::lock_guard lock(mutex_);
+			stopping_ = true;
+		}
+		changed_.notify_all();
+		thread_.join();
+	}
+
+	/* May be called from any thread. */
+	void request() noexcept
+	{
+		{
+			std::lock_guard lock(mutex_);
+			requested_ = true;
+		}
+		changed_.notify_all();
+	}
+
+private:
+	void run()
+	{
+		(void)::pthread_setname_np("uml-wake");
+		std::unique_lock lock(mutex_);
+		for (;;) {
+			changed_.wait(lock, [this] { return requested_ || stopping_; });
+			if (stopping_)
+				return;
+			requested_ = false;
+			lock.unlock();
+			uml_emulator_wake(emulator_);
+			lock.lock();
+		}
+	}
+
+	uml_emulator *const emulator_;
+	std::mutex mutex_;
+	std::condition_variable changed_;
+	bool requested_ {};
+	bool stopping_ {};
+	/* Last, so everything above exists when the thread starts. */
+	std::thread thread_;
+};
 
 /* The thread behind --stats: once an interval it reads the running guest's
  * figures through the public calls, as the iOS applications do, and prints
@@ -864,10 +1028,41 @@ struct BootServices final {
 	 * through it; the listeners stop first. */
 	VirtioService vsock;
 	std::unique_ptr<uml::vsock::Forwarder> vsock_forwarder;
+	/* The GNSS receiver, after vsock. */
+	VirtioService gnss;
+	/* The camera, after the GNSS receiver. */
+	VirtioService camera;
+	/* The touchscreen and the side keys of a guest with hardware input, right
+	 * after the battery as in Andarium's runtime. Nothing feeds them. */
+	std::unique_ptr<uml::input::virtio::InProcessInputService> touchscreen;
+	std::unique_ptr<uml::input::virtio::InProcessInputService> side_keys;
+	/* The hardware keyboard, mouse and pointer, the last devices. */
+	std::unique_ptr<uml::input::virtio::InProcessInputService>
+		hardware_keyboard;
+	std::unique_ptr<uml::input::virtio::InProcessInputService> hardware_mouse;
+	std::unique_ptr<uml::input::virtio::InProcessInputService>
+		hardware_pointer;
+	std::shared_ptr<uml::app::HardwareInputBridge> hardware_bridge;
 
 	void stop() noexcept
 	{
+		if (hardware_bridge)
+			hardware_bridge->detach();
+		if (hardware_pointer)
+			hardware_pointer->stop();
+		if (hardware_mouse)
+			hardware_mouse->stop();
+		if (hardware_keyboard)
+			hardware_keyboard->stop();
+		if (side_keys)
+			side_keys->stop();
+		if (touchscreen)
+			touchscreen->stop();
 		vsock_forwarder.reset();
+		if (camera)
+			camera->stop();
+		if (gnss)
+			gnss->stop();
 		if (vsock)
 			vsock->stop();
 		if (audio)
@@ -970,6 +1165,8 @@ public:
 					static_cast<unsigned long long>(
 						plan.process_limit >> 20));
 		}
+		if (prepared_.hardware_input && !information_only_)
+			hardware_bridge_ = std::make_shared<uml::app::HardwareInputBridge>();
 		if (prepared_.gpu.enabled && !information_only_) {
 			if (has_virtio_device_argument(
 				prepared_.kernel, uml::gpu::protocol::virtioGpuDeviceId)) {
@@ -992,13 +1189,30 @@ public:
 							.height = prepared_.gpu.height,
 							.dotsPerInch =
 								prepared_.gpu.dots_per_inch,
+							/* The hardware devices need the
+							 * buttons' states, which only the mouse
+							 * form carries. */
 							.pointerMode = configuration_.input_mode !=
-									uml::app::DisplayInput::mouse ?
+									uml::app::DisplayInput::mouse &&
+								!prepared_.hardware_input ?
 								uml::input::vnc::PointerMode::touchscreen :
 								uml::input::vnc::PointerMode::mouse,
 							.autoResizeGuest =
 								prepared_.gpu.auto_resize_guest,
 							.offscreen = prepared_.gpu.offscreen,
+							.inputRedirect = hardware_bridge_ ?
+								uml::input::vnc::VncInputSink(
+									[bridge = hardware_bridge_](
+										std::span<const uml::input::vnc::VncInputEvent> events) {
+										bridge->deliver(events);
+									}) :
+								uml::input::vnc::VncInputSink(),
+							.clientObserver = hardware_bridge_ ?
+								uml::gpu::Display::ClientObserver(
+									[bridge = hardware_bridge_](std::uint32_t clients) {
+										bridge->clients(clients);
+									}) :
+								uml::gpu::Display::ClientObserver(),
 							.sharedMemoryRegions =
 								shared_memory_regions_,
 							.deviceMemoryLimit =
@@ -1015,6 +1229,26 @@ public:
 			stats_ = std::make_unique<StatsSampler>(
 				std::chrono::milliseconds(prepared_.stats_interval_ms),
 				emulator_.get(), gpu_service_.get());
+		if ((prepared_.gnss || prepared_.hardware_input) && !information_only_)
+			waker_ = std::make_unique<GuestWaker>(emulator_.get());
+		if (hardware_bridge_) {
+			hardware_bridge_->set_scanout_mode(
+				[gpu = gpu_service_.get()]()
+					-> std::optional<
+						uml::app::HardwareInputBridge::ScanoutMode> {
+					if (gpu == nullptr)
+						return std::nullopt;
+					const auto mode = gpu->guestScanoutMode();
+					if (!mode)
+						return std::nullopt;
+					return uml::app::HardwareInputBridge::ScanoutMode {
+						mode->width, mode->height};
+				});
+			hardware_bridge_->set_wake([waker = waker_.get()] {
+				if (waker != nullptr)
+					waker->request();
+			});
+		}
 		return true;
 	}
 
@@ -1180,8 +1414,14 @@ private:
 				kernel.emplace_back(uml::gpu::virtioDeviceArgument(
 					gpu_service_->takeConnectionName(),
 					uml::gpu::protocol::virtioGpuDeviceId));
-				kernel.emplace_back("uml_vnc_input." +
-					gpu_service_->takeInputConnectionName());
+				/* With hardware input the display's input goes to the
+				 * hardware devices, and a VNC input device in the guest
+				 * would be a dead keyboard Android takes for a built-in
+				 * one. */
+				if (!prepared_.hardware_input) {
+					kernel.emplace_back("uml_vnc_input." +
+						gpu_service_->takeInputConnectionName());
+				}
 			} catch (const std::exception &error) {
 				std::fprintf(stderr,
 					restart ? "Unable to restart in-process Virtio-GPU: %s\n" :
@@ -1201,6 +1441,9 @@ private:
 			    uml::battery::protocol::deviceId,
 			    [] { return uml::battery::makeInProcessService(); },
 			    "--battery", "Virtio battery"))
+			return false;
+		if (prepared_.hardware_input && !information_only_ &&
+		    !start_fixed_input(kernel))
 			return false;
 		/* The guest's host-visible shared-memory region belongs to the GPU
 		 * backend, and the video decoder fills capture buffers that live in
@@ -1269,11 +1512,212 @@ private:
 			    named_serial ? "Virtio serial" : "Virtio console",
 			    "Virtio console"))
 			return false;
-		/* Last, so that no other device's index moves. */
+		/* After the devices that existed before it, so that no other
+		 * device's index moves. */
 		if (!prepared_.vsock_forwards.empty() && !information_only_ &&
 		    !start_vsock(kernel))
 			return false;
+		/* After the vsock device, so that no other device's index moves. */
+		if (prepared_.gnss && !information_only_ && !start_gnss(kernel))
+			return false;
+		if (prepared_.camera != CameraSource::none && !information_only_ &&
+		    !start_camera(kernel))
+			return false;
+		/* The last devices. */
+		if (prepared_.hardware_input && !information_only_ &&
+		    !start_hardware_input(kernel))
+			return false;
 		return true;
+	}
+
+	/* Starts the touchscreen and the side keys of a guest with hardware input,
+	 * as Andarium's runtime does after the battery. They are always plugged
+	 * in, and the display never feeds them, so the guest has the input
+	 * devices an Andarium guest has and no more of them. */
+	[[nodiscard]] bool start_fixed_input(std::vector<std::string> &kernel)
+	{
+		using Kind = uml::input::virtio::DeviceKind;
+		try {
+			const auto start = [&](Kind kind, auto &service) {
+				service = std::make_unique<
+					uml::input::virtio::InProcessInputService>(kind);
+				kernel.emplace_back(uml::gpu::virtioDeviceArgument(
+					service->takeConnectionName(),
+					uml::input::virtio::protocol::deviceId));
+			};
+			start(Kind::touchscreen, services_.touchscreen);
+			start(Kind::keyboard, services_.side_keys);
+		} catch (const std::exception &error) {
+			std::fprintf(stderr,
+				"Unable to start the touchscreen and side keys: %s\n",
+				error.what());
+			return false;
+		}
+		return true;
+	}
+
+	/* Starts the guest's hardware keyboard, mouse and pointer, unplugged:
+	 * the display's first key or pointer event plugs them
+	 * (HardwareInputBridge). A guest that boots without the kernel's
+	 * hot-plug topic sees no input device and receives nothing. */
+	[[nodiscard]] bool start_hardware_input(std::vector<std::string> &kernel)
+	{
+		using Kind = uml::input::virtio::DeviceKind;
+		try {
+			const auto start = [&](Kind kind, auto &service) {
+				service = std::make_unique<
+					uml::input::virtio::InProcessInputService>(kind);
+				kernel.emplace_back(uml::gpu::virtioDeviceArgument(
+					service->takeConnectionName(),
+					uml::input::virtio::protocol::deviceId));
+			};
+			start(Kind::hardwareKeyboard, services_.hardware_keyboard);
+			start(Kind::mouse, services_.hardware_mouse);
+			start(Kind::pointer, services_.hardware_pointer);
+			auto input = std::make_shared<
+				uml::input::virtio::HardwareInput>(
+				services_.hardware_keyboard->events(),
+				services_.hardware_mouse->events(),
+				services_.hardware_pointer->events());
+			input->setStatusCallback(uml::app::HardwareInputBridge::report());
+			hardware_bridge_->attach(std::move(input));
+			services_.hardware_bridge = hardware_bridge_;
+		} catch (const std::exception &error) {
+			std::fprintf(stderr,
+				"Unable to start in-process hardware input: %s\n",
+				error.what());
+			return false;
+		}
+		std::fputs("Hardware input: keyboard, mouse and pointer offered, "
+			   "unplugged\n", stderr);
+		return true;
+	}
+
+	/* Starts the Virtio GNSS receiver, with the synthetic position the launch
+	 * asked for, and reports its power on stderr, which the guest's tests read
+	 * to see what the host was asked. */
+	[[nodiscard]] bool start_gnss(std::vector<std::string> &kernel)
+	{
+		std::shared_ptr<uml::gnss::Endpoint> endpoint;
+		if (!start_virtio_device(
+			    kernel, services_.gnss, uml::gnss::protocol::deviceId,
+			    [&] {
+				    std::unique_ptr<uml::gnss::FixSource> source;
+				    if (!prepared_.location.empty()) {
+					    std::string error;
+					    source = uml::gnss::makeSyntheticSource(
+						    prepared_.location, error);
+					    if (source == nullptr)
+						    throw std::runtime_error(
+							    "invalid --location: " + error);
+				    }
+				    auto started =
+					    uml::gnss::makeInProcessService(std::move(source));
+				    endpoint = std::move(started.endpoint);
+				    return std::move(started.service);
+			    },
+			    prepared_.location.empty() ? "--gnss" : "--location",
+			    "Virtio GNSS"))
+			return false;
+		endpoint->setPowerObserver([](bool powered) {
+			std::fprintf(stderr, "GNSS receiver: %s\n",
+				     powered ? "on" : "off");
+		});
+		if (waker_)
+			endpoint->setWakeHook([waker = waker_.get()] { waker->request(); });
+		return true;
+	}
+
+	/* Starts the Virtio camera device on the source --camera= names. Live
+	 * sources open a platform capture session only when the guest streams;
+	 * the blocked source never opens one. Nothing here asks the system for
+	 * access: `host` needs the camera permission granted to this program (or
+	 * to the terminal it runs in) beforehand, and is refused here, with the
+	 * way to grant it, when it is not. */
+	[[nodiscard]] bool start_camera(std::vector<std::string> &kernel)
+	{
+		uml::camera::CameraDeviceOptions options;
+		options.mode = prepared_.camera == CameraSource::blocked ?
+			uml::camera::CameraMode::blocked :
+			uml::camera::CameraMode::live;
+		options.tier =
+			uml::camera::cameraTierForBudget(device_memory_limit_);
+		if (!camera_calibration_)
+			camera_calibration_ =
+				std::make_shared<uml::camera::CalibrationStore>(
+					prepared_.camera_calibration_directory);
+		options.calibration = camera_calibration_;
+		options.onState = [](uml::camera::CameraState state) {
+			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
+		};
+		uml::camera::CameraSourceHandle source;
+		try {
+			if (prepared_.camera == CameraSource::synthetic ||
+			    (prepared_.camera == CameraSource::blocked &&
+			     prepared_.camera_profile)) {
+				if (!uml::camera::syntheticCameraAvailable()) {
+					std::fputs("--camera=synthetic needs the synthetic "
+						   "camera, which this build lacks\n", stderr);
+					return false;
+				}
+				uml::camera::SyntheticProfile profile {};
+				switch (prepared_.camera_profile.value_or(
+					CameraProfile::phone)) {
+				case CameraProfile::phone:
+					profile = uml::camera::SyntheticProfile::phone;
+					break;
+				case CameraProfile::tablet:
+					profile = uml::camera::SyntheticProfile::tablet;
+					break;
+				case CameraProfile::laptop:
+					profile = uml::camera::SyntheticProfile::laptop;
+					break;
+				}
+				source = uml::camera::makeSyntheticCameraSource(profile);
+			} else {
+				if (!uml::camera::hostCameraPermissionGranted()) {
+					std::fputs(
+						"--camera=host needs the system's camera "
+						"permission, granted beforehand: allow the "
+						"terminal this runs in (or the program) under "
+						"System Settings > Privacy & Security > Camera, "
+						"then start again. Nothing asks for it here.\n",
+						stderr);
+					return false;
+				}
+				source = uml::camera::makeHostCameraSource();
+			}
+		} catch (const std::exception &error) {
+			std::fprintf(stderr, "Unable to start the camera: %s\n",
+				error.what());
+			return false;
+		}
+		return start_virtio_device(
+			kernel, services_.camera, uml::camera::cameraDeviceId,
+			[&] {
+				return uml::camera::makeInProcessCameraService(
+					std::move(source), std::move(options),
+					gpu_service_ ? shared_memory_regions_ : nullptr);
+			},
+			"--camera", "Virtio camera");
+	}
+
+	static const char *camera_state_name(
+		uml::camera::CameraState state) noexcept
+	{
+		switch (state) {
+		case uml::camera::CameraState::idle:
+			return "idle";
+		case uml::camera::CameraState::streaming:
+			return "streaming";
+		case uml::camera::CameraState::interrupted:
+			return "interrupted";
+		case uml::camera::CameraState::interruptedByMultitasking:
+			return "interrupted by multitasking";
+		case uml::camera::CameraState::interruptedBySystemPressure:
+			return "interrupted by system pressure";
+		}
+		return "unknown";
 	}
 
 	/* Starts the Virtio vsock device and the listeners that reach it, and
@@ -1321,10 +1765,18 @@ private:
 		nullptr, uml_emulator_destroy};
 	std::shared_ptr<uml::virtio::SharedMemoryRegions> shared_memory_regions_{
 		std::make_shared<uml::virtio::SharedMemoryRegions>()};
+	/* Before the GPU service, whose display thread calls it. */
+	std::shared_ptr<uml::app::HardwareInputBridge> hardware_bridge_;
 	std::unique_ptr<uml::gpu::InProcessGpuService> gpu_service_;
 	/* After the handle and the GPU service it reads, so it ends before them. */
 	std::unique_ptr<StatsSampler> stats_;
+	/* After the handle it wakes and before the services that ask it to, so it
+	 * ends between them. */
+	std::unique_ptr<GuestWaker> waker_;
 	BootServices services_;
+	/* What the camera has learned about the host's lenses; it outlives the
+	 * boots, so a restarted guest keeps it. */
+	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;
 	std::uint64_t device_memory_limit_{};
 	std::atomic<bool> stop_requested_{};
 };

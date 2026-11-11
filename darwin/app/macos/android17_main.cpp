@@ -33,6 +33,13 @@ constexpr std::string_view boot_mode_option{"--android-boot-mode="};
 constexpr std::string_view dpi_option{"--gpu-dpi="};
 constexpr std::string_view adb_authorization_prefix{
 	"androidboot.kernarium.adb_auth="};
+/* The hardware SKU that tells the guest what the host has (the iOS runtime's
+ * KernariumHostFeatures.hpp states it from the boot request). A Mac has no
+ * Taptic Engine, so this launcher states none itself; a run that wants the
+ * guest's vibrator for a CTS, VTS or protocol check passes the argument, which
+ * is forwarded as given. A release's own command line may not carry it. */
+constexpr std::string_view hardware_sku_prefix{
+	"androidboot.product.hardware.sku="};
 
 struct AndroidOptions {
 	std::filesystem::path release;
@@ -85,6 +92,7 @@ AndroidOptions parse_options(int argc, char *const argv[])
 	bool has_gpu_display = false;
 	bool has_audio = false;
 	bool has_battery = false;
+	bool has_gnss = false;
 	bool has_video = false;
 	bool has_video_encoder = false;
 	for (int index = 1; index < argc; ++index) {
@@ -149,6 +157,7 @@ AndroidOptions parse_options(int argc, char *const argv[])
 			     argument.starts_with("--audio-output=") ||
 			     argument.starts_with("--audio-input=");
 		has_battery |= argument == "--battery";
+		has_gnss |= argument == "--gnss" || argument.starts_with("--location=");
 		has_video |= argument == "--video";
 		has_video_encoder |= argument == "--video-encoder";
 		options.forwarded.emplace_back(argument);
@@ -174,6 +183,8 @@ AndroidOptions parse_options(int argc, char *const argv[])
 		options.forwarded.emplace_back("--audio");
 	if (!has_battery)
 		options.forwarded.emplace_back("--battery");
+	if (!has_gnss)
+		options.forwarded.emplace_back("--gnss");
 	if (!has_video)
 		options.forwarded.emplace_back("--video");
 	if (!has_video_encoder)
@@ -243,6 +254,7 @@ std::vector<std::string> boot_command_line(
 		forwarded.push_back(std::move(argument));
 	constexpr std::array launcher_prefixes{
 		adb_authorization_prefix,
+		hardware_sku_prefix,
 		uml::android::lcdDensityPrefix,
 		uml::android::hwTimeoutMultiplierPrefix};
 	for (auto &argument : uml::android::readKernelCommandLine(

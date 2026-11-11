@@ -409,6 +409,18 @@ uml_add_guest_integration_test(
     TIMEOUT 600
     CPUS 2)
 
+# The Virtio GNSS receiver: /dev/gnss0 reads whole NMEA epochs of the launcher's
+# synthetic position about once a second, the host sees the power go on at the
+# first open and off at the last close, a reopen starts fresh, and a suspend the
+# guest enters by itself holds with the receiver closed and is ended by the host
+# with it open.
+uml_add_guest_integration_test(
+    NAME guest-gnss-receiver
+    SCRIPT gnss/run_guest_gnss_receiver.py
+    LABELS guest;gnss;kernel
+    TIMEOUT 600
+    CPUS 2)
+
 add_subdirectory(aarch32)
 add_subdirectory(android)
 add_subdirectory(exclusive)
@@ -593,6 +605,17 @@ uml_add_guest_integration_test(
     LABELS guest;kernel;video;smoke
     TIMEOUT 600
     CPUS 4)
+
+# A host suspend and the guest's own suspend, with the Virtio video decoder and
+# encoder idle, leave both devices as they were: a descriptor opened before the
+# suspend decodes and encodes after it, a new decode session gets its source
+# change and a picture, and the host resets neither device.
+uml_add_guest_integration_test(
+    NAME guest-video-suspend
+    SCRIPT kernel/run_guest_video_suspend.py
+    LABELS guest;kernel;video
+    TIMEOUT 900
+    CPUS 2)
 
 # Files of an LZ4 EROFS image with 4 KiB clusters, which EROFS decompresses
 # through vm_map_ram() aliases of page-cache folios, read back exactly, again

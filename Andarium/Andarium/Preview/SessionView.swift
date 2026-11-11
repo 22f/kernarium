@@ -42,7 +42,7 @@ struct SessionView: View {
             }
         }
         .overlay(alignment: .top) {
-            GraphicsNoticeOverlay()
+            SessionNoticesOverlay()
         }
         .overlay {
             SideKeysOverlay(

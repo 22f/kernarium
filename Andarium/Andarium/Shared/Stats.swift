@@ -138,21 +138,21 @@ enum StatsTint {
     }
 }
 
-/// Where the statistics capsule sits over a running session, and the graphics
-/// notice that makes room for it. Distances are in points from the top
+/// Where the statistics capsule sits over a running session, and the notices
+/// that make room for it. Distances are in points from the top
 /// safe-area edge.
 enum StatsPlacement {
     /// The capsule's distance below the top safe-area edge.
     static let top: CGFloat = 24
     /// The capsule's height.
     static let height: CGFloat = 40
-    /// The graphics notice's distance below the capsule.
+    /// A notice's distance below the capsule, and below another notice.
     static let noticeGap: CGFloat = 8
-    /// The graphics notice's distance below the top safe-area edge while the
+    /// The first notice's distance below the top safe-area edge while the
     /// capsule is hidden.
     static let noticeTopAlone: CGFloat = 36
 
-    /// The graphics notice's distance below the top safe-area edge.
+    /// The first notice's distance below the top safe-area edge.
     static func noticeTop(statsShowing: Bool) -> CGFloat {
         statsShowing ? top + height + noticeGap : noticeTopAlone
     }

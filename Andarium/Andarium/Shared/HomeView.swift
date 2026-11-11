@@ -73,6 +73,7 @@ struct HomeView: View {
             .environment(model)
         }
         .microphoneAccessAlert()
+        .locationAccessAlert()
         .alert("Erase guest?", isPresented: $model.confirmingErase) {
             Button("Erase guest", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
@@ -450,7 +451,7 @@ struct UnfinishedUpdateCard: View {
                 }
             }
             if canRestore {
-                Button("Restore") { model.restoreUpdate() }
+                Button("Restore") { Task { await model.restoreUpdate() } }
                     .buttonStyle(.glass)
                     .controlSize(.regular)
                     .accessibilityIdentifier("home-update-restore")

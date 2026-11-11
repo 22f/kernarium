@@ -25,6 +25,11 @@ LAUNCH_KNOB = (
     "#include <stdlib.h>\n"
     'const char *fixture(void) { return getenv("ANDARIUM_START"); }\n'
 )
+# The thermal state a harness launch states in place of iOS's.
+THERMAL_KNOB = (
+    "#include <stdlib.h>\n"
+    'const char *fixture(void) { return getenv("ANDARIUM_THERMAL_STATE"); }\n'
+)
 # The harness's console lines (ConsoleReport), which the configuration
 # compiles out: what the check reports for each, and a full line.
 REPORT_LINES = (
@@ -59,6 +64,18 @@ DEBUG_SUPPORT = (
     ("automation", 'const char *fixture(void) { return "removed the boot payload"; }\n'),
     ("test tooling", "int _rfbGetScreen(void) { return 1; }\n"),
     ("launch harness", "int _s8Andarium8AppEntryV13applyDeferred2toyyF(void) { return 1; }\n"),
+    ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
+    # The synthetic camera: its class, its entries and its profiles' names.
+    ("synthetic camera", "int _ZN3uml8platform15SyntheticCamera13sessionsOpenedEv(void) { return 1; }\n"),
+    ("synthetic camera", "int _ZN3uml8platform19makeSyntheticCameraERKNS0_22SyntheticCameraOptionsE(void) { return 1; }\n"),
+    ("synthetic camera", "int _ZN3uml8platform17decodeChartMarkerEPKhmjj(void) { return 1; }\n"),
+    ("synthetic camera", 'const char *fixture(void) { return "SyntheticPhone1,1"; }\n'),
+    ("synthetic camera", 'const char *fixture(void) { return "synthetic-back-wide"; }\n'),
+    # The simulated controllers: the scripted input, the guest end of the wire
+    # and the test-support module that holds them.
+    ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),
+    ("synthetic controllers", "int _s23AndariumCoreTestSupport13GamepadScriptV7controllerSayAA0A10ControllerVGvgZ(void) { return 1; }\n"),
+    ("synthetic controllers", "int _s12AndariumCore22GamepadHostFrameReaderV4feedyAC6OutputVxSlRzs5UInt8V7ElementRtzlF(void) { return 1; }\n"),
     # The arm64 JIT: its owner of executable memory, its engine and its
     # entries, the runtime's and the loader's, the options that select it, and
     # the instruction that asks a debugger for JIT memory.
@@ -259,6 +276,7 @@ def main() -> int:
         clean = build(root, "clean", CLEAN)
         knob = build(root, "knob", KNOB)
         launch = build(root, "launch", LAUNCH_KNOB)
+        thermal = build(root, "thermal", THERMAL_KNOB)
         reports = {
             index: build(root, f"report{index}", f'const char *fixture(void) {{ return "{line}"; }}\n')
             for index, (_name, line) in enumerate(REPORT_LINES)
@@ -296,6 +314,8 @@ def main() -> int:
               passes=False, expect="KERNARIUM_HOST_FORWARD")
         check(make_app(root, "launch-knob", launch, app_info()),
               passes=False, expect="ANDARIUM_START")
+        check(make_app(root, "thermal-knob", thermal, app_info()),
+              passes=False, expect="ANDARIUM_THERMAL_STATE")
         knob_app = make_app(root, "framework-knob", clean, app_info(), framework=knob)
         check(knob_app, passes=False, expect="Runtime.framework/Runtime")
 

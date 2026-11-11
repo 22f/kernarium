@@ -383,6 +383,14 @@ PRODUCT_PACKAGES=" $(get_build_var PRODUCT_PACKAGES) "
 	fail "the Android motion sensor service is absent"
 [[ "$PRODUCT_PACKAGES" == *" android.hardware.sensors@2.1-impl.andarium "* ]] ||
 	fail "the Andarium motion sensor backend is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.vibrator-service.andarium "* ]] ||
+	fail "the Andarium vibrator service is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.gnss-service.andarium "* ]] ||
+	fail "the Andarium GNSS service is absent"
+[[ "$PRODUCT_PACKAGES" == *" android.hardware.thermal-service.andarium "* ]] ||
+	fail "the Andarium thermal service is absent"
+[[ "$(get_build_var ODM_MANIFEST_SKUS)" == haptics ]] ||
+	fail "ODM_MANIFEST_SKUS must be exactly haptics: the vibrator HAL exists only in that SKU's manifest"
 for package in \
 	android.hardware.health-service.example \
 	android.hardware.health-service.example_recovery \
@@ -451,12 +459,16 @@ fi
 	fail "the suspend blocker that holds the guest awake for an adb host is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_net_setup "* ]] ||
 	fail "the network setup tool that configures eth0 and the virtual Wi-Fi is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_gamepad "* ]] ||
+	fail "the gamepad relay that turns the host's game controllers into HID devices is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_wifi_network_script "* ]] ||
 	fail "the script that saves the virtual Wi-Fi network is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_reclaim_boot_apps_script "* ]] ||
 	fail "the script that reclaims the cached boot-started apps is absent"
 [[ "$PRODUCT_PACKAGES" == *" kernarium_time_zone_script "* ]] ||
 	fail "the script that applies the host's time zone is absent"
+[[ "$PRODUCT_PACKAGES" == *" kernarium_keyboard_default_script "* ]] ||
+	fail "the script that moves an older guest to the on-screen keyboard default is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.wifi "* ]] ||
 	fail "the Wi-Fi HAL that the virtual Wi-Fi needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.google.cf.wpa_supplicant "* ]] ||
@@ -469,8 +481,6 @@ fi
 	fail "the OMAPI service that SEService clients bind on demand is absent"
 [[ "$PRODUCT_PACKAGES" == *" EasterEgg "* ]] ||
 	fail "the easter egg that the platform logo screen opens is absent"
-[[ "$PRODUCT_PACKAGES" == *" com.android.hardware.thermal "* ]] ||
-	fail "the example thermal HAL that the thermal manager needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" com.android.hardware.cas "* ]] ||
 	fail "the default CAS HAL that MediaCas needs is absent"
 [[ "$PRODUCT_PACKAGES" == *" libclearkeycasplugin "* ]] ||
@@ -497,13 +507,16 @@ for package in \
 	com.android.hardware.graphics.composer.ranchu \
 	android.hardware.health-service.cuttlefish_recovery \
 	com.android.hardware.contexthub \
+	com.android.hardware.gnss \
 	com.android.hardware.input.processor \
 	com.android.hardware.net.nlinterceptor \
 	com.android.hardware.rebootescrow \
 	com.android.hardware.security.authgraph \
 	com.android.hardware.security.secretkeeper \
 	com.android.hardware.tetheroffload \
+	com.android.hardware.thermal \
 	com.android.hardware.usb \
+	com.android.hardware.vibrator \
 	com.android.vndk.v31 \
 	com.android.vndk.v32 \
 	com.android.vndk.v33 \

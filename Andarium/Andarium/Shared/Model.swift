@@ -90,6 +90,7 @@ final class AppModel {
             if lifecycle.phase != oldValue.phase {
                 refreshStatistics()
                 refreshGraphicsNotice()
+                showThermalNoticeIfWaiting()
             }
         }
     }
@@ -312,8 +313,21 @@ final class AppModel {
 
     /// The runtime and storage behind the screens; nil plays mock data.
     var driver: (any RuntimeDriver)?
+    /// The guest's data snapshots behind the screens: the runtime's, or the
+    /// preview's seeded ones (`SnapshotDriver`).
+    var snapshotDriver: (any SnapshotDriver)? {
+        didSet {
+            snapshotDriver?.activityChanged = { [weak self] in self?.snapshotActivity = $0 }
+            snapshotActivity = snapshotDriver?.activity ?? SnapshotActivity()
+        }
+    }
+    /// What the snapshot driver is doing, which it sets around each
+    /// operation: the controls of a screen follow `snapshotGate`.
+    var snapshotActivity = SnapshotActivity()
     /// A long task the screens wait for.
     var busy: BusyState?
+    /// The update's Restore is under way (waiting for a snapshot operation, or running).
+    private var restoringUpdate = false
     /// The guest is paused because the device is nearly out of space; the
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
@@ -335,6 +349,19 @@ final class AppModel {
     /// application and the Simulator preview's system mode have one; a preview
     /// without it takes the access as given.
     @ObservationIgnored var microphone: MicrophoneController?
+    var locationAuthorization = LocationAuthorization.notDetermined
+    /// The person went to Settings to allow the location: when Andarium is
+    /// active again with access, the switch they tapped turns on.
+    var locationAwaitsSettings = false
+    /// The Location switch is on and iOS's question about it is on screen, or
+    /// about to be. A switch that is on while iOS has not been asked and no
+    /// question is under way is a choice made under access that has ended
+    /// (iOS's "Allow Once"), and it goes off.
+    private var locationAsking = false
+    /// Asks iOS about the location and sets the guest's session to match. The
+    /// device application and the Simulator preview's system mode have one; a
+    /// preview without it takes the access as given.
+    @ObservationIgnored var location: LocationController?
     /// Opens Andarium's page in the system's Settings. A test puts its own here.
     @ObservationIgnored var openSettings: @MainActor () -> Void = {
         if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -403,6 +430,19 @@ final class AppModel {
     /// When to end the cached app that holds the most graphics memory, from
     /// the same readings; nothing of it shows.
     @ObservationIgnored private(set) var graphicsReclaim = GraphicsReclaim()
+
+    // MARK: Thermal notice state
+
+    /// Whether the session says the frame rate is lowered while the device is
+    /// hot, once in a run, from the runtime's thermal policy.
+    private(set) var thermalNotice = ThermalNotice()
+    /// The policy has announced the cap and the session screen is not up yet.
+    @ObservationIgnored private var thermalCapWaiting = false
+    /// Waits out the notice's time; a test paces it by hand.
+    @ObservationIgnored var thermalNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
 
     init(
         guest: Guest?, host: HostDevice, system: SystemInfo, capabilities: Capabilities,
@@ -513,14 +553,17 @@ final class AppModel {
 
     /// Restore: the data goes back to what the update that did not finish
     /// started from, and the guest does not start. Home then shows the
-    /// ordinary pending update.
-    func restoreUpdate() {
+    /// ordinary pending update. A snapshot operation under way finishes first.
+    func restoreUpdate() async {
         guard let driver else {
             if let planAfterRestore { plan = planAfterRestore }
             return
         }
+        guard !restoringUpdate else { return }
+        restoringUpdate = true
+        defer { restoringUpdate = false }
         do {
-            try driver.restoreUpdate()
+            try await driver.restoreUpdate()
         } catch {
             alert = AppAlert(title: "The guest could not be restored", message: error.localizedDescription)
         }
@@ -916,11 +959,13 @@ final class AppModel {
                 } else {
                     try await Self.playBugReport(update)
                 }
-                // The host's records travel inside Android's own report.
+                // The host's records and the guest's counters travel inside
+                // Android's own report.
                 if let diagnosticsDirectory {
+                    let guest = await driver?.guestStallFiles() ?? []
                     _ = await Task.detached(priority: .userInitiated) {
                         BugReportAttachments.attach(
-                            to: file, from: diagnosticsDirectory, containers: diagnosticsContainers)
+                            to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
                     }.value
                 }
                 return file
@@ -1018,8 +1063,11 @@ final class AppModel {
     /// tries the update again. The start carries any storage growth the
     /// person chose: the lifecycle applies it as the start begins, and the
     /// guest is saved with the new capacity before the runtime, which grows
-    /// the data disk in every kind of start, is handed it.
+    /// the data disk in every kind of start, is handed it. A snapshot
+    /// operation under way is not a reason to say anything: the start is
+    /// ignored, as the screens offer none while one runs (`snapshotGate`).
     func start(_ mode: StartMode) {
+        guard snapshotActivity.operation == nil else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
             frozenBootStage = nil
@@ -1082,6 +1130,8 @@ final class AppModel {
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
+        thermalCapWaiting = false
+        dismissThermalNotice()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1109,6 +1159,9 @@ final class AppModel {
         spacePause = nil
         graphicsNotice = GraphicsNotice()
         graphicsReclaim.reset()
+        // The notice was for the screen that restarts, and it was announced
+        // for the run, which goes on.
+        dismissThermalNotice()
         frozenBootStage = nil
         sessionPreset = SessionPreset()
         let showStats = session.showStats
@@ -1200,6 +1253,83 @@ final class AppModel {
     /// The alert's Open Settings.
     func openMicrophoneSettings() {
         microphoneAwaitsSettings = true
+        openSettings()
+    }
+
+    /// The Location switch as the screens show it: the guest's choice is on
+    /// and iOS lets Andarium read the location, or has not been asked yet and
+    /// the question is under way. Access that was refused or taken away, or
+    /// Location Services off, shows it off, and the guest gets no position.
+    var locationShownOn: Bool {
+        guard guest?.location == true else { return false }
+        return locationAuthorization.allowsLocating || locationAuthorization == .notDetermined
+    }
+
+    /// The Location switch. Turning it on asks iOS for access at once, the
+    /// first time. Where there is nothing to ask (refused, restricted, Location
+    /// Services off) the person is told why and, where Settings has the way
+    /// out, offered Andarium's page there. It applies at once, in a run too.
+    func setLocation(_ on: Bool) {
+        guard guest != nil else { return }
+        guard on else {
+            locationAwaitsSettings = false
+            locationAsking = false
+            guest?.location = false
+            persistNow()
+            location?.setOn(false)
+            return
+        }
+        switch locationAuthorization {
+        case .servicesOff, .restricted, .denied:
+            permissionPrompt = .location
+        case .notDetermined:
+            guest?.location = true
+            locationAsking = true
+            persistNow()
+            // The controller asks iOS and reports the answer to
+            // `locationAccessChanged`. A preview without one has no system
+            // prompt to show and takes it as given.
+            if let location { location.setOn(true) } else { locationAccessChanged(.precise) }
+        case .precise, .approximate:
+            guest?.location = true
+            persistNow()
+            location?.setOn(true)
+        }
+    }
+
+    /// iOS answered the location question, or the person changed Andarium's
+    /// access, Location Services or Precise Location. A refusal takes the
+    /// choice back with it; access the person went to Settings to give turns
+    /// on the switch they tapped.
+    func locationAccessChanged(_ state: LocationAuthorization) {
+        locationAuthorization = state
+        switch state {
+        case .servicesOff, .restricted, .denied:
+            if guest?.location == true {
+                guest?.location = false
+                persistNow()
+            }
+        case .precise, .approximate:
+            if locationAwaitsSettings, guest != nil, guest?.location != true {
+                guest?.location = true
+                persistNow()
+            }
+        case .notDetermined:
+            if !locationAsking, guest?.location == true {
+                guest?.location = false
+                persistNow()
+            }
+        }
+        if state != .notDetermined {
+            locationAwaitsSettings = false
+            locationAsking = false
+        }
+    }
+
+    /// The alert's Open Settings: for a refusal, the switch the person tapped
+    /// turns on when Andarium is active again with access.
+    func openLocationSettings() {
+        locationAwaitsSettings = locationAuthorization.refuses
         openSettings()
     }
 
@@ -1344,6 +1474,40 @@ final class AppModel {
         let now = graphicsNoticeClock()
         graphicsNotice.record(refusals: 0, at: now)
         graphicsNotice.record(refusals: 1, at: now)
+    }
+
+    // MARK: Thermal notice
+
+    /// The runtime's policy says Android starts to lower the frame rate. The
+    /// notice shows once the session screen is up, and the policy says this
+    /// once in a run, so nothing here counts.
+    func thermalCapStarted() {
+        thermalCapWaiting = true
+        showThermalNoticeIfWaiting()
+    }
+
+    fileprivate func showThermalNoticeIfWaiting() {
+        guard thermalCapWaiting, case .running(.normal) = phase else { return }
+        thermalCapWaiting = false
+        thermalNotice.show()
+        thermalNoticeTask?.cancel()
+        thermalNoticeTask = Task { [weak self] in
+            await self?.thermalNoticeSleep(ThermalNotice.visibleFor)
+            guard !Task.isCancelled else { return }
+            self?.thermalNotice.dismiss()
+        }
+    }
+
+    /// The person dismisses the notice, or it has run its time.
+    func dismissThermalNotice() {
+        thermalNoticeTask?.cancel()
+        thermalNoticeTask = nil
+        thermalNotice.dismiss()
+    }
+
+    /// The Simulator preview plays the notice: it has no runtime to start a cap.
+    func previewThermalNotice() {
+        thermalNotice.show()
     }
 
     /// The debugger is preparing the JIT, which keeps the boot at its first step.

@@ -17,8 +17,9 @@
 
 # Select the UML-safe branches in the inherited Cuttlefish product before it
 # is evaluated. The Darwin machine has no nested Trusty VM, modem, NFC,
-# Bluetooth, GNSS, biometric, secure-element, or camera transport, and its
-# Wi-Fi is the kernel's virtual one (kernarium_net_setup).
+# Bluetooth, biometric, secure-element, or camera transport, and its Wi-Fi is
+# the kernel's virtual one (kernarium_net_setup). Its GNSS is the host's
+# position, behind the kernel's /dev/gnss0 (overlay/gnss).
 TRUSTY_SYSTEM_VM := disabled
 UML_ANDROID_SECURITY_HALS := nonsecure
 UML_ANDROID_BUILTIN_KERNEL := true
@@ -53,7 +54,14 @@ LOCAL_SENSOR_PRODUCT_PACKAGE := \
     android.hardware.sensors@2.1-impl.andarium
 LOCAL_ENABLE_NFC := false
 LOCAL_ENABLE_FRP := false
-LOCAL_GNSS_PRODUCT_PACKAGE :=
+# Cuttlefish's gnss fragment installs this package where it would install the
+# example HAL's APEX, which stays excluded below. The HAL reads the host's
+# receiver (/dev/gnss0) and is declared on every device.
+LOCAL_GNSS_PRODUCT_PACKAGE := android.hardware.gnss-service.andarium
+# Cuttlefish's thermal fragment installs this package where it would install the
+# example HAL's APEX, which stays excluded below. The HAL reports the host's
+# thermal state (overlay/thermal) and is declared on every device.
+LOCAL_THERMAL_HAL_PRODUCT_PACKAGE := android.hardware.thermal-service.andarium
 # Select the inherited HIDL primary HAL explicitly so Cuttlefish does not also
 # append its MMAP-capable product-property defaults.
 LOCAL_AUDIO_PRODUCT_PACKAGE := \
@@ -116,6 +124,13 @@ PRODUCT_COPY_FILES_EXCLUDE += \
 PRODUCT_EXTRA_RECOVERY_KEYS :=
 
 PRODUCT_PACKAGES_EXCLUDE += cuttlefish_sensor_injection
+
+# The vibrator is advertised only on a device with haptics. The host selects the
+# "haptics" SKU at boot (androidboot.product.hardware.sku=haptics); the ODM
+# manifest of that SKU (BoardConfig.mk) alone declares the HAL, and its init
+# script starts the service for that SKU alone. Cuttlefish's own vibrator (an
+# APEX of the AOSP example HAL that only sleeps) stays excluded below.
+PRODUCT_PACKAGES += android.hardware.vibrator-service.andarium
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/sensors/hals.conf:$(TARGET_COPY_OUT_VENDOR)/etc/sensors/hals.conf \
     frameworks/native/data/etc/android.hardware.sensor.accelerometer.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.sensor.accelerometer.xml \
@@ -300,6 +315,7 @@ KERNARIUM_REMOVED_PACKAGES := \
     com.android.hardware.security.authgraph \
     com.android.hardware.security.secretkeeper \
     com.android.hardware.tetheroffload \
+    com.android.hardware.thermal \
     com.android.hardware.usb \
     com.android.hardware.vibrator \
     com.android.vndk.v31 \
@@ -381,7 +397,6 @@ PRODUCT_COPY_FILES_EXCLUDE += \
     frameworks/native/data/etc/android.hardware.camera.raw.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.camera.raw.xml \
     frameworks/native/data/etc/android.hardware.consumerir.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.consumerir.xml \
     frameworks/native/data/etc/android.hardware.ethernet.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.ethernet.xml \
-    frameworks/native/data/etc/android.hardware.location.gps.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.location.gps.xml \
     frameworks/native/data/etc/android.hardware.usb.accessory.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.accessory.xml \
     frameworks/native/data/etc/android.hardware.usb.host.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.host.xml \
     frameworks/native/data/etc/android.hardware.uwb.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.uwb.xml \
@@ -390,6 +405,34 @@ PRODUCT_COPY_FILES_EXCLUDE += \
     frameworks/native/data/etc/android.software.verified_boot.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.verified_boot.xml
 PRODUCT_COPY_FILES += \
     device/kernarium/andarium/config/kernarium_core_hardware.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/handheld_core_hardware.xml
+
+# The default display configuration: when the thermal HAL reports SEVERE (the
+# host is hot) the display's render rate is held to 30 Hz. The framework reads
+# the map from this file for a display that has none of its own (route p0007).
+PRODUCT_COPY_FILES += \
+    device/kernarium/andarium/config/displayconfig_default.xml:$(TARGET_COPY_OUT_VENDOR)/etc/displayconfig/default.xml
+
+# The host's keyboard and mouse are virtio-input devices (1af4:0003 to 0005) that
+# exist from boot and are plugged into Android only while the host reports the
+# hardware. Android finds a device's key layout and configuration by its vendor and
+# product, and /vendor/usr is one of the places it looks (libs/input/InputDevice.cpp).
+# The side-key keyboard (1af4:0002) gets a layout of its five keys alone, so that
+# Android stops counting it as a full keyboard. The keyboard and the mouse are
+# external, as a USB keyboard and mouse are, and the absolute pointer follows the
+# display's orientation. The three new devices have no layout or character map of
+# their own: Android's keyboard layout choice is the user's.
+PRODUCT_COPY_FILES += \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0002.kl:$(TARGET_COPY_OUT_VENDOR)/usr/keylayout/Vendor_1af4_Product_0002.kl \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0003.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0003.idc \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0004.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0004.idc \
+    device/kernarium/andarium/input/Vendor_1af4_Product_0005.idc:$(TARGET_COPY_OUT_VENDOR)/usr/idc/Vendor_1af4_Product_0005.idc
+
+# Every device declares the location and GPS features, whether or not the host
+# has a position to give: the GNSS HAL (overlay/gnss) is the guest's GPS. The
+# platform's file declares both features; LocationManagerService creates the gps
+# provider only with android.hardware.location.
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.location.gps.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.location.gps.xml
 
 # The Vulkan HAL is Mesa's Venus driver built from this project's pinned guest
 # Mesa source. Its generated Soong module names are scoped with a venus_
@@ -455,6 +498,11 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += system/bin/kernarium_vk_presen
 # (init.vendor.rc runs it at post-fs-data).
 PRODUCT_PACKAGES += kernarium_net_setup
 
+# The host's game controllers become HID devices of the guest through /dev/uhid,
+# which the kernel's own drivers bind (overlay/gamepad). Every device has a host,
+# so every device runs the relay; it creates nothing until a controller connects.
+PRODUCT_PACKAGES += kernarium_gamepad
+
 # The Wi-Fi module's resources are overlaid by KernariumWifiOverlay
 # (rro/KernariumWifiOverlay): virt_wifi cannot change its MAC address, so the
 # framework must not randomize it.
@@ -483,6 +531,12 @@ PRODUCT_PACKAGES += kernarium_reclaim_boot_apps_script
 # while "Set time zone automatically" is on, and leaves a zone the user chose
 # with it off alone. It runs from system_ext in a core domain of its own.
 PRODUCT_PACKAGES += kernarium_time_zone_script
+
+# Android hides its on-screen keyboard while a hardware keyboard is attached unless
+# "Show on-screen keyboard" is on. The SettingsProvider overlay turns it off for a new
+# guest; once boot completes this script turns it off, once, for a guest whose settings
+# an older release created with it on. It runs from system_ext in a core domain of its own.
+PRODUCT_PACKAGES += kernarium_keyboard_default_script
 
 # A Vulkan hardware-buffer import check: it fills gralloc buffers of several
 # formats and widths through the CPU, imports each into Vulkan and reads it

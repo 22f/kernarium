@@ -166,6 +166,9 @@ guest set. `ctest -N -L integration` lists the guest tests, and each runner or
 probe states in its header what it checks. A contract's owning README, such as
 [`../kernel/common/README.md`](../kernel/common/README.md), names the tests
 that check it.
+A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
+devices, suspends the guest both as the host's quiesce does and as the guest does
+by itself.
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
@@ -280,19 +283,51 @@ automation host.
 `guest-host-core` (unit, macOS) runs the Swift package `GuestHost/Core`, the
 free-space thresholds, suspension check and pause both applications share, and
 `andarium-core` (unit, macOS) runs the Swift package `Andarium/AndariumCore`
-with `swift test`; `andarium-motion-protocol` (unit), `andarium-stage-system-image`
-and `andarium-capture-screens` (tooling) cover the motion wire format, system
-image staging and the screenshot script. The application builds with Xcode
-(`AndariumPreview` is the Simulator build with mock data, `Andarium` the device
-application, [targets](../Andarium/README.md#targets)); `AndariumTests` is
+with `swift test` (it includes the snapshot store on APFS clones of sparse
+files in a temporary directory, with a crash between every two file calls of
+each operation and a real error at each call in turn, the haptics session on
+fake guests and players, the haptics wire against the golden frames in
+`tests/unit/andarium/fixtures`, which the guest's vibrator, thermal and gamepad
+relay test against too; the game controllers' wire against that directory's
+gamepad frames, each family's reports read back through a test-only HID
+descriptor parser, and the stream and session on a fake relay; and the session
+record's stall slot against the golden slot there, which `runtime-stall-record`
+checks the runtime's writer against);
+`andarium-motion-protocol`, `andarium-haptics-protocol`,
+`andarium-haptics-player`, `andarium-thermal-protocol`,
+`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
+`andarium-stage-system-image` and
+`andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
+HAL's haptics wire (against those golden frames, whose path the test takes as
+its argument), timelines and state, the thermal HAL's wire and the status,
+temperature and thresholds of each severity, the gamepad relay's wire (the
+ranges of every field and the frame reader), system image staging and the
+screenshot script, and `kernarium-host-features` (unit)
+the table of host features the boot request carries to an Android guest. The
+application builds with Xcode (`AndariumPreview` is the Simulator build with
+mock data, `Andarium` the device application,
+[targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium`). The hosted tests
+an Apple silicon Mac (`xcodebuild test -scheme Andarium`). `SnapshotFileApiTests`
+checks the file calls the guest's snapshots use (clone, private size, extent
+map, backup attribute) on a small sparse file and prints their answers on a
+`SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
+fail on it. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
 (`AndariumTestBundle`) shows the side keys' tip in every session of the run,
 whatever the device's tip store says, except in an `ANDARIUM_HOLD_SECONDS`
-harness launch, which hides it.
+harness launch, which hides it. No test attaches, scans for or pairs a real
+controller: the game controller tests use software controllers and the
+system's virtual controller (which needs the host's window) against a fake
+relay, and the package's test-only `andarium-gamepad-probe` plays a script to a
+TCP port, where the macOS launcher's `--vsock-forward` reaches a guest's relay.
+The script and the guest end of the wire are the package's
+`AndariumCoreTestSupport` target, which only the package's tests, the probe
+and `AndariumTests` link, and the test bundle carries in its own Frameworks
+folder, so a device can load it; the application never does (the App Store
+bundle check refuses a build that does).
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,
@@ -304,8 +339,9 @@ parses (any guest), Retina memory, the ADB-over-vsock guest
 tests (including Android storage and the touch-cancel path), the side keys'
 pass-through of touches to Android, the ADB-over-network hold, the
 background disk locks (which also requires a guest that was allocating
-buffers when the GPU was held to suspend) and the resume after a save while
-the application is away. The storage test signs its helper
+buffers when the GPU was held to suspend), the resume after a save while
+the application is away and the real `HostLocation` against the Simulator's
+simulated location (the suite's header says how to grant access and set one). The storage test signs its helper
 APK with the AOSP test key, never a release key. When derived data is on a
 removable volume, macOS prompts once for access and the launch hangs until
 answered; build to the internal disk instead.
@@ -469,7 +505,11 @@ library and launcher over the storage layout
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
-library created.
+library created. `gnss-hal-nmea`, `gnss-hal-policy` and `gnss-hal-engine`
+(unit) compile the guest GNSS HAL's headers
+([Location](../android/lineage-24/README.md#location)) against the host
+writer's own epochs: the reading of the stream, the reporting rules and the
+session, with a pipe for the receiver and a counting wakelock.
 
 A release candidate is qualified on its image, opt-in, on every engine that
 runs Android (the Mac gadgets and JIT engines, the iPad gadgets). A `SIGILL`
@@ -507,19 +547,50 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
+  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
+  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
+  default devices and again with the option and a connected client; a result
+  that differs from the accepted release's is explained
+  ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 
-`android-oobe`, `android-adb-debugging` (integration) each register only when
-`UML_ANDROID_OOBE_RELEASE` or `UML_ANDROID_ADB_DEBUGGING_RELEASE` names the
+`android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
+each register only when `UML_ANDROID_OOBE_RELEASE`,
+`UML_ANDROID_ADB_DEBUGGING_RELEASE` or `UML_ANDROID_GUEST_PROC_RELEASE` names the
 release and the Android macOS executable is built (`UML_BUILD_ANDROID17_CLI`
 with `UML_KERNEL_PRODUCT=android-17`: the executable embeds its product's
 kernel, and the Linux default cannot start Android's init). They boot blank
-instances and check the setup wizard's flow and end state, and the product's adb
-defaults; `tests/integration/android/run_guest_android_adb_vsock.py` is the
+instances and check the setup wizard's flow and end state, the product's adb
+defaults, and that the command Andarium's bug report sends for the guest's
+`/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
+not; `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of
 [`microg/build-apks.sh`](../tests/integration/android/microg/README.md), and
 checks that only microG's own packages present Google's certificate.
+`android-keymouse` (integration) registers when `UML_ANDROID_KEYMOUSE_RELEASE`
+names the release and `UML_ANDROID_KEYMOUSE_PROBE_APK` the
+[probe application](../tests/integration/android/keymouse/README.md)'s APK: the
+runner is a VNC client of the launcher's `--hardware-input` display and checks,
+through Android's input dump and the probe's log, that the host's devices
+plug, are configured as the image says, deliver keys, the cursor, buttons and
+wheel, pass pointer capture both ways and unplug; `--instance` names the
+previous release's data disk to check the one-time on-screen keyboard change.
+`android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
+names the release: the runner plays the host application over a vsock forward
+and checks the thermal manager, the display manager's vote, SurfaceFlinger's
+render rate and the frame rates at each severity, on a fresh data disk or, with
+`--instance`, over an older release's.
+`android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
+names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
+[`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the
+runner plays the host application over a vsock forward, creates a controller of
+each driver family (generic, Xbox, DualSense), sends reports and checks what
+Android sees (devices, keys, axes), what comes back (rumble, lights, the
+drivers' feature requests), hot plug, the relay's recovery, and reports the
+guest's cost per report and the relay's memory. `android17-gamepad-runner`
+(tooling) runs its wire, controllers and parsers without a guest.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only

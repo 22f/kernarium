@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 30U
+#define KERNARIUM_RUNTIME_API_VERSION 34U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -50,6 +50,16 @@ enum {
     KERNARIUM_RUNTIME_ANDROID_BOOT_AUTO = 0,
     KERNARIUM_RUNTIME_ANDROID_BOOT_NORMAL = 1,
     KERNARIUM_RUNTIME_ANDROID_BOOT_RECOVERY = 2,
+};
+
+/* The bits of kernarium_runtime_boot.android_host_features (runtime API 31).
+ * Each is one feature of the host, and the runtime's table of them
+ * (KernariumHostFeatures.hpp) names the kernel argument it becomes. */
+enum {
+    /* The device has haptics (a Taptic Engine) and the application plays the
+     * guest's vibrator on it. The guest then finds a vibrator; without the bit
+     * it finds none. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS = 1u << 0,
 };
 
 /* A boot request. Linux guests supply rootfs_path and overlay_path. Android
@@ -102,7 +112,15 @@ enum {
  * prepare_jit for this request's guest memory and vCPU count with a result of
  * KERNARIUM_RUNTIME_JIT_READY. A boot that asks for it when that is not so
  * runs on gadgets, with a line on stderr: an engine never fails a boot. The
- * runtime reads it only from a request whose struct_size covers it. */
+ * runtime reads it only from a request whose struct_size covers it.
+ *
+ * android_host_features says what the host has that an Android guest is to
+ * find (runtime API 31): a mask of the KERNARIUM_RUNTIME_ANDROID_HOST_ bits
+ * below, zero for none. The runtime turns each bit it knows into the one kernel
+ * argument the guest's image reads for it, which the release's command-line
+ * file cannot set, and ignores a bit it does not know with a line on stderr: a
+ * feature never fails a boot. The runtime reads it only from a request whose
+ * struct_size covers it; a Linux guest ignores it. */
 typedef struct kernarium_runtime_boot {
     uint32_t struct_size;
     uint32_t width;
@@ -124,7 +142,7 @@ typedef struct kernarium_runtime_boot {
     const char* android_time_zone;
     const char* session_record_path;
     uint32_t use_jit;
-    uint32_t reserved;
+    uint32_t android_host_features;
 } kernarium_runtime_boot;
 
 /* What a launch's host GPU budget comes to, as the runtime evaluates it for
@@ -532,6 +550,186 @@ typedef int (*kernarium_runtime_connect_vsock_function)(
     uint32_t port,
     uint32_t timeout_ms);
 
+/* The host's location, offered to an Android guest as a GNSS receiver
+ * (darwin/device/gnss/README.md). A flag says which optional field is valid;
+ * a field without its flag is left out of the guest's stream, never written
+ * as zero. */
+enum {
+    /* The host knows the position only roughly (iOS's reduced accuracy). */
+    KERNARIUM_RUNTIME_LOCATION_APPROXIMATE = 1U << 0,
+    KERNARIUM_RUNTIME_LOCATION_HAS_ALTITUDE = 1U << 1,
+    KERNARIUM_RUNTIME_LOCATION_HAS_ELLIPSOIDAL_ALTITUDE = 1U << 2,
+    KERNARIUM_RUNTIME_LOCATION_HAS_HORIZONTAL_ACCURACY = 1U << 3,
+    KERNARIUM_RUNTIME_LOCATION_HAS_VERTICAL_ACCURACY = 1U << 4,
+    KERNARIUM_RUNTIME_LOCATION_HAS_SPEED = 1U << 5,
+    KERNARIUM_RUNTIME_LOCATION_HAS_SPEED_ACCURACY = 1U << 6,
+    KERNARIUM_RUNTIME_LOCATION_HAS_COURSE = 1U << 7,
+    KERNARIUM_RUNTIME_LOCATION_HAS_COURSE_ACCURACY = 1U << 8,
+};
+typedef struct kernarium_runtime_location_fix {
+    /* sizeof of this struct, set by the caller. */
+    uint32_t struct_size;
+    uint32_t flags;
+    /* The fix's own time: UTC in nanoseconds since 1970-01-01. */
+    int64_t utc_ns;
+    /* WGS 84, in degrees. */
+    double latitude;
+    double longitude;
+    /* Meters above sea level, and above the WGS 84 ellipsoid. */
+    double altitude;
+    double ellipsoidal_altitude;
+    /* Meters of radius for the horizontal accuracy, and of the vertical one. */
+    double horizontal_accuracy;
+    double vertical_accuracy;
+    /* Meters per second, and its accuracy. */
+    double speed;
+    double speed_accuracy;
+    /* Degrees clockwise from true north, and its accuracy. */
+    double course;
+    double course_accuracy;
+} kernarium_runtime_location_fix;
+
+/* `powered` is nonzero when the guest powers its GNSS receiver (an Android
+ * client wants a position) and zero when it stops, or when the guest ends or
+ * restarts with the receiver on. It runs on a runtime thread and must return
+ * promptly. */
+typedef void (*kernarium_runtime_location_receiver_callback)(
+    void* context,
+    int powered);
+/* Sets, or with a null callback clears, the one receiver of the guest's
+ * receiver-power events. A receiver that is already powered is reported to a
+ * new callback at once. Once it returns, no call to the previous callback is
+ * running or will start, so its context may be released; the callback must
+ * not call this. A runtime without a GNSS receiver keeps the entry and never
+ * calls back. */
+typedef void (*kernarium_runtime_set_location_receiver_callback_function)(
+    kernarium_runtime_location_receiver_callback callback,
+    void* context);
+
+/* Gives the guest's receiver the host's newest fix, which the receiver
+ * repeats for ten seconds (an approximate fix for twenty minutes) and then
+ * reports as no fix, and reports to the guest at once. A null `fix` drops the
+ * held fix: the guest sees no fix until the next one. Returns 0, -ENODEV when
+ * no guest with a receiver runs, or -EINVAL for a `struct_size` that does not
+ * cover the struct, a time or a position outside its range. It may be called
+ * from any thread with the receiver on or off. */
+typedef int (*kernarium_runtime_report_location_function)(
+    const kernarium_runtime_location_fix* fix);
+
+/* The hardware keyboard, mouse and pointer of an Android guest
+ * (darwin/device/input/README.md). The guest has the three devices from boot,
+ * unplugged: it sees no keyboard, mouse or cursor until the application plugs
+ * them, and unplugging takes them away again with every key and button
+ * released. What the application last asked of each device holds for the run:
+ * a guest that restarts itself has the devices plugged as the application left
+ * them, and a plug asked for between two boots is kept for the next. A plug
+ * that is asked for before the guest's driver has probed takes effect when it
+ * has. An Android guest whose kernel lacks the hot-plug topic never plugs
+ * them, and input sent to them is dropped. The Linux runtime keeps the entries
+ * and answers -ENODEV, as does a runtime with no guest running.
+ *
+ * Input for a device that is not plugged, or a key the keyboard has no code
+ * for, is dropped and returns 0, and input sent between two boots returns
+ * -ENODEV; every call may come from any thread. */
+enum {
+    /* The keyboard. */
+    KERNARIUM_RUNTIME_INPUT_KEYBOARD = 1,
+    /* The mouse, which is the relative mouse and the absolute pointer together:
+     * Android sees one mouse, with its own cursor. */
+    KERNARIUM_RUNTIME_INPUT_MOUSE = 2,
+};
+
+/* The bits of the buttons of send_pointer and send_mouse, in the order of
+ * UIKit's button numbers. Back and Forward are Android's navigation buttons. */
+enum {
+    KERNARIUM_RUNTIME_BUTTON_PRIMARY = 1U << 0,
+    KERNARIUM_RUNTIME_BUTTON_SECONDARY = 1U << 1,
+    KERNARIUM_RUNTIME_BUTTON_MIDDLE = 1U << 2,
+    KERNARIUM_RUNTIME_BUTTON_BACK = 1U << 3,
+    KERNARIUM_RUNTIME_BUTTON_FORWARD = 1U << 4,
+};
+
+/* One wheel detent, in the high-resolution units of send_mouse's wheels. */
+enum {
+    KERNARIUM_RUNTIME_WHEEL_DETENT = 120,
+};
+
+/* Plugs (`connected` nonzero) or unplugs one of the KERNARIUM_RUNTIME_INPUT_
+ * devices; plugging a plugged device or unplugging an unplugged one changes
+ * nothing. Returns 0, -EINVAL for another device, or -ENODEV when no guest
+ * run is in progress. */
+typedef int (*kernarium_runtime_set_input_connected_function)(
+    int device,
+    int connected);
+
+/* A key of the keyboard, by its position: the usage on the HID Keyboard/Keypad
+ * page (0x04 is A, 0xe3 the left Command key), which the runtime turns into
+ * the Linux key code a USB keyboard with that usage would send. Android's own
+ * key layout turns it into a character. The keyboard has no auto-repeat, as
+ * Android repeats keys itself. A key going down wakes a guest that suspended
+ * itself, at most once a second. Returns 0 or -ENODEV. */
+typedef int (*kernarium_runtime_send_keyboard_usage_function)(
+    uint32_t usage,
+    int pressed);
+
+/* The pointer at (x, y), in the touchscreen's range 0 through
+ * KERNARIUM_RUNTIME_TOUCH_MAXIMUM on both axes (see send_touch) over the guest's
+ * display, with the buttons that are down, which are the
+ * KERNARIUM_RUNTIME_BUTTON_ bits (any other bit is ignored). `in_range` zero
+ * releases the buttons and ends the pointer's contact, and Android's cursor
+ * stays where it was. A position in range before the guest has a display is
+ * dropped. A button going down wakes a guest that suspended itself; a pointer
+ * that only moves does not. Returns 0, -EINVAL for a coordinate out of range,
+ * or -ENODEV. */
+typedef int (*kernarium_runtime_send_pointer_function)(
+    uint32_t x,
+    uint32_t y,
+    uint32_t buttons,
+    int in_range);
+
+/* The mouse's relative motion in guest pixels (what an application that
+ * captured the pointer reads), the buttons that are down (the
+ * KERNARIUM_RUNTIME_BUTTON_ bits, any other ignored), and the vertical and
+ * horizontal wheels in 1/120 of a detent, positive up and to the right. A
+ * button going down or a wheel taking a whole step wakes a guest that
+ * suspended itself; motion does not. Returns 0 or -ENODEV. */
+typedef int (*kernarium_runtime_send_mouse_function)(
+    int32_t dx,
+    int32_t dy,
+    uint32_t buttons,
+    int32_t wheel,
+    int32_t horizontal_wheel);
+
+/* What Android tells the host of the keyboard and the mouse: the lock lights
+ * of its keyboard, and an application capturing or releasing the pointer. */
+enum {
+    KERNARIUM_RUNTIME_INPUT_STATUS_NUM_LOCK = 1,
+    KERNARIUM_RUNTIME_INPUT_STATUS_CAPS_LOCK = 2,
+    KERNARIUM_RUNTIME_INPUT_STATUS_SCROLL_LOCK = 3,
+    KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_CAPTURE = 4,
+};
+
+/* `on` is nonzero when the light is lit or the pointer is captured. It runs
+ * on a runtime thread and must return promptly. */
+typedef void (*kernarium_runtime_input_status_callback)(
+    void* context,
+    int status,
+    int on);
+/* Sets, or with a null callback clears, the one receiver of the input status
+ * events. Once it returns, no call to the previous callback is running or will
+ * start, so its context may be released; the callback must not call this. A
+ * runtime without the devices keeps the entry and never calls back. */
+typedef void (*kernarium_runtime_set_input_status_callback_function)(
+    kernarium_runtime_input_status_callback callback,
+    void* context);
+
+/* A button of a game controller went down: wakes a guest that suspended
+ * itself, as a key down does through send_key, and does nothing to one that is
+ * running. It shares the keyboard's limit of one wake a second, never wakes
+ * for an axis or a release, and may be called from any thread. A runtime with
+ * no guest ignores it. */
+typedef void (*kernarium_runtime_wake_for_input_function)(void);
+
 /* The application resolves only this versioned getter after loading exactly
  * one runtime framework. The table is immutable and remains valid until
  * process exit. The selected framework owns one host runtime and its
@@ -567,6 +765,16 @@ typedef struct kernarium_runtime_api {
     kernarium_runtime_quiesce_resident_function quiesce_resident;
     kernarium_runtime_read_graphics_memory_function read_graphics_memory;
     kernarium_runtime_prepare_jit_function prepare_jit;
+    kernarium_runtime_set_location_receiver_callback_function
+        set_location_receiver_callback;
+    kernarium_runtime_report_location_function report_location;
+    kernarium_runtime_set_input_connected_function set_input_connected;
+    kernarium_runtime_send_keyboard_usage_function send_keyboard_usage;
+    kernarium_runtime_send_pointer_function send_pointer;
+    kernarium_runtime_send_mouse_function send_mouse;
+    kernarium_runtime_set_input_status_callback_function
+        set_input_status_callback;
+    kernarium_runtime_wake_for_input_function wake_for_input;
 } kernarium_runtime_api;
 
 #if defined(__GNUC__)

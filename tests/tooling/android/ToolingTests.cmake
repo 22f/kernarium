@@ -113,6 +113,13 @@ uml_add_tooling_test(
     TIMEOUT 30)
 
 uml_add_tooling_test(
+    NAME android17-guest-proc-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_guest_proc_runner.py
+    LABELS android
+    TIMEOUT 60)
+
+uml_add_tooling_test(
     NAME android17-provision-helper
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_android_provision.py
@@ -123,6 +130,34 @@ uml_add_tooling_test(
     NAME android17-oobe-runner
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_oobe_runner.py
+    LABELS android
+    TIMEOUT 30)
+
+# The thermal runner's reading of the guest's dumps, and the records it sends.
+uml_add_tooling_test(
+    NAME android17-thermal-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_thermal_runner.py
+    LABELS android
+    TIMEOUT 30)
+
+# The gamepad runner without a guest: the host's end of the wire against the
+# golden frames and the C++ header, the controller families against the
+# drivers' own report structures, the parsers of what the guest prints, the
+# checks, and the reader thread against a fake relay on loopback.
+uml_add_tooling_test(
+    NAME android17-gamepad-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_gamepad_runner.py
+    LABELS android
+    TIMEOUT 60)
+
+# The keyboard and mouse runner's reading of the guest's input dump and of the
+# probe's log, its VNC client's wire, and its key table against the launcher's.
+uml_add_tooling_test(
+    NAME android17-keymouse-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_keymouse_runner.py
     LABELS android
     TIMEOUT 30)
 

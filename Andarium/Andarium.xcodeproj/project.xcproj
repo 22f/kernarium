@@ -134,6 +134,7 @@
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
         "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Apps running in Andarium use this to connect to devices on your local network, such as printers, media servers and computers, and ADB over network uses it to let a computer on your network connect to Andarium. Internet access doesn't need it.",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it.",
         "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the guest can use it.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
@@ -173,10 +174,21 @@
         "compile-sources",
         "frameworks",
         "resources",
+        {
+          "kind": "copy",
+          "name": "Embed Test Support",
+          "bundle-base-path": "frameworks-directory",
+        },
       ],
       "package-product-members": [
         {
           "product-name": "AndariumCore",
+          "build-phase": { "build-phase": "frameworks" },
+        }, {
+          "product-name": "AndariumCoreTestSupport",
+          "build-phase": { "build-phase": "copy/Embed Test Support", "code-sign-on-copy": true },
+        }, {
+          "product-name": "AndariumCoreTestSupport",
           "build-phase": { "build-phase": "frameworks" },
         }, {
           "product-name": "GuestHostCore",
@@ -234,6 +246,7 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "The Simulator preview asks for the location only when launched with -systemLocation YES, to show the permission flow.",
         "INFOPLIST_KEY_NSMicrophoneUsageDescription": "The Simulator preview asks for the microphone only when launched with -systemMicrophone YES, to show the permission flow.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",

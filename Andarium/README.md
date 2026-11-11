@@ -124,7 +124,8 @@ everything that exists for automation or only pretends:
 
 - `APP_STORE` is a Swift compilation condition that compiles out the launch
   environment (`Live/LaunchEnvironment.swift`, so no `ANDARIUM_` or
-  `KERNARIUM_` name is in the application or in `AndariumCore`), the harness's
+  `KERNARIUM_` name is in the application or in `AndariumCore`, nor the thermal
+  state a launch can state in place of iOS's), the harness's
   console lines (`Shared/ConsoleReport.swift`), the launch's deferred work
   (create, erase, start) and the isolated guest instance.
 - It defines `UML_APP_STORE_APPLICATION` for the loader it compiles, which
@@ -228,10 +229,36 @@ control out.
 - **Updates.** `InstanceRules.decide` applies the rules of the
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
-  `data.img` first, and Erase guest deletes everything the guest has stored,
-  the snapshot and the adb key included.
+  `data.img` first (the update's copy, until the updated Android has booted),
+  and Erase guest deletes everything the guest has stored, its snapshots and
+  the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
-  user turns on Back up guest data.
+  user turns on Back up guest data. Its snapshots are never backed up.
+- **Snapshots.** A snapshot is an APFS clone of `data.img` with a copy of
+  `instance.json`, in `Library/Guest/Snapshots/` (`SnapshotStore`): it costs
+  nothing when made and then the blocks the guest rewrites. It keeps the data
+  and the record of its Android, not the guest's choices, the system disk or
+  the adb key. Create, Restore and Delete run only while the guest is stopped
+  (Home, with no run active, pending or launching, since iOS takes no file lock
+  on the disk), and Create only after Android's own shut down and with no
+  update unfinished and on a volume that clones. Restore replaces the data and
+  keeps nothing of the state it replaces; a snapshot of an older Android then
+  updates at the next start, and one of a newer Android or an older layout is
+  refused. Rename runs at any time.
+  Each operation has one commit point (the snapshot's rename into place, the
+  set-aside rename of a delete, the rename of a restore's clone over
+  `data.img`): an error before it changes nothing, and one after it does not
+  fail the operation. A restore that took effect and did not finish completes
+  at the next start or launch (`TwoDiskStorage.recoverSnapshots` runs before
+  the guest is read); until then Create and Restore are refused and every
+  snapshot but that one can be deleted. The update's copy is not a snapshot.
+  The store's file calls are injected (`SnapshotFileOperations`).
+  `SnapshotDriver` is what the screens call, and a refusal is a
+  `SnapshotRefusal`. The driver reports what it does as `SnapshotActivity`,
+  which the model keeps (`AppModel.snapshotGate`, observable); no start begins
+  and the update's Restore waits while an operation runs. A listing is never
+  older than the last finished operation (`revision`), can come without its
+  figures, and names the release the data is on.
 - **Release notes.** `Shared/WhatsNew.json` bundles the notes per build,
   from build 9 (build 5, the first public release, and builds 6 to 8 have
   none).
@@ -255,6 +282,60 @@ requires reopening Andarium.
   (`GuestTimeZone`, the boot request's `android_time_zone`); the system image
   applies it unless the guest's user chose a zone
   ([Android README](../android/lineage-24/README.md#time-zone)).
+- **Haptics.** On a device with a Taptic Engine the boot request states the
+  haptics bit (`android_host_features`), which gives the guest a vibrator, and
+  the application plays the vibrator's scores on Core Haptics. It connects to
+  the guest's HAL over vsock 5557 (`HapticsSession`), plays only while it is in
+  front and holds the guest running, and lets everything go the moment it is
+  not. The HAL sends the effect or primitive and its duration, and
+  `HapticShapes` decides what fills it, so the feel is tuned in an app update.
+  There is no switch: Android's own vibration settings decide what the guest
+  asks for, and an iPad, a Mac or the Simulator, which have no Taptic Engine,
+  give the guest no vibrator. The wire is `HapticsProtocol`, whose golden frames
+  the HAL's test shares (`tests/unit/andarium/fixtures`); the
+  [Android README](../android/lineage-24/README.md) owns the HAL.
+- **Heat.** The application tells the guest's thermal HAL how hot the device is
+  over vsock 5559 (`ThermalSession`; the wire is `ThermalProtocol`, whose
+  golden frames the HAL's test shares in `tests/unit/andarium/fixtures`). The
+  severity is the hottest iOS thermal state of the last 120 s: it rises at once
+  and falls 120 s after the hotter state ended. Fair is Android's light,
+  serious its severe and critical its critical, and the host never sends a
+  level that shuts the guest down. At severe and above Android lowers the
+  guest's frame rate to 30, and the first time in a run that this starts the
+  session screen says so once. There is no switch. A system without the HAL
+  hears nothing and shows no notice; the
+  [Android README](../android/lineage-24/README.md) owns the HAL.
+- **Game controllers.** Each game controller iOS has connected is a HID
+  device in the guest, made through the guest's relay over vsock 5558
+  (`GamepadSession`; the wire is `GamepadProtocol`, whose golden frames the
+  relay's test shares in `tests/unit/andarium/fixtures`). A DualSense,
+  DualSense Edge, DualShock 4 or Xbox Wireless Controller presents as that
+  device, bound by the guest's own driver, and any other as a plain HID
+  gamepad that lists only what the controller has. Controllers are looked for
+  during a normal run, and nothing is scanned for or paired. Their input
+  reaches the guest only while Andarium is in front, and leaving the front
+  lets every button go. Home, Menu, Options and Share are taken from iOS's
+  gestures while a controller is held and reach Android as buttons (iOS's own
+  Home setting decides whether Andarium may have Home). A button going down
+  wakes a guest that suspended itself (`wake_for_input`, runtime API 34).
+  Rumble, the light and the player number follow the guest's drivers onto
+  the controller, and `Config/Info.plist` declares the extended gamepad
+  profile. There is no switch. An image without the relay is given up on
+  quietly after boot; the [Android README](../android/lineage-24/README.md)
+  owns the relay.
+- **Location.** Location is a per-guest switch under Capabilities on Home,
+  off for a new guest and for one stored before. iOS is asked, for
+  when-in-use access, only when the person turns it on; Andarium has no
+  background or Always access. The position is read only while the switch is
+  on, iOS allows it, Andarium is in front, a normal run goes on and the
+  guest's GNSS receiver is powered, and goes to the
+  [GNSS device](../darwin/device/gnss/README.md) through the runtime. A change
+  of access or of Precise Location drops the held position first. An
+  approximate position is passed as approximate; the guest owns what apps see
+  of it. The row is dimmed and off when iOS refuses, the device restricts
+  location or Location Services are off, and says Approximate, with an
+  explanation and Settings, when Precise Location is off. No test reads a real
+  location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display. A touch the system takes over reaches
   Android as a cancelled touch, not a lift, so no tap follows. Only the side
@@ -357,7 +438,15 @@ requires reopening Andarium.
   that record as the previous session's (`PreviousSession`) and, after an end
   that was neither Android's own nor a stop, Home shows a notice with its cause
   (`SessionRecord.notice`). `ExitReports` keeps the exit and diagnostic reports
-  MetricKit delivers beside the records.
+  MetricKit delivers beside the records. The record's stall slot (`StallRecord`)
+  says when the guest's vCPUs stopped running on the host and what the host was
+  doing; the bug report carries it in words, with the guest's `/proc` counters
+  (`GuestProcFiles`), which adds at most 10 s in all to a report and says per
+  file why one is missing. Everything Andarium keeps or copies of a session is
+  bounded: a record longer than the runtime writes (16 KiB at most) is not read
+  or copied, and a line says so; a report of the stalls is under 80 KiB per
+  session whatever a record claims; and MetricKit reports are 30 at most, of
+  1 MiB at most each.
 
 ## Android operations
 
@@ -429,6 +518,8 @@ they mean in Kernarium; the automation Android runtime
 (`package-ios-frameworks.sh --runtimes android --android-automation`)
 additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 ([`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+`ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
+for iOS's thermal state in the Simulator and in automation.
 `ANDARIUM_GUEST_INSTANCE=<name>` runs an isolated guest under
 `Library/TestGuests/<name>`, for tests that need a fresh guest while the
 ordinary guest or its pending update must be preserved. A file `free-space-mib`

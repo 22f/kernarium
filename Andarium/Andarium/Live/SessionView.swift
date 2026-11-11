@@ -14,6 +14,9 @@ struct SessionView: View {
     var body: some View {
         @Bindable var model = model
         Color.clear
+            // Controller events go to the Game Controller framework only, so
+            // iOS makes no focus or press event of them in these screens.
+            .background { GameControllerEventInteraction().allowsHitTesting(false) }
             .overlay(alignment: .top) {
                 if model.session.showStats {
                     StatsOverlay(memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound, recovery: mode == .recovery)
@@ -23,7 +26,7 @@ struct SessionView: View {
                 }
             }
             .overlay(alignment: .top) {
-                GraphicsNoticeOverlay()
+                SessionNoticesOverlay()
             }
             .overlay {
                 SideKeysOverlay(mode: mode, lit: true, open: $model.session.sideKeysOpen, actions: actions)

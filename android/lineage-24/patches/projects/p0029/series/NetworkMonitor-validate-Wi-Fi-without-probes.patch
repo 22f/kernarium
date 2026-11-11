@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 22:14:11 +0900
+Subject: [PATCH] NetworkMonitor: validate Wi-Fi without probes
+
+The Wi-Fi of the Darwin UML guest is virtual: its one network is a
+station on the host's own network. A probe through it reports only
+whether the host reaches the validation servers, and where they are
+blocked the network stays unvalidated for good: the status bar shows no
+internet, and applications that wait for a validated network do not run.
+
+A Wi-Fi network is now exempt from validation, as the networks that do
+not satisfy the default request are. NetworkMonitor sends no probe for
+it, runs no data stall detection, and reports it validated, with the
+skipped bit, as soon as the private DNS step passes, so the private DNS
+settings keep their effect. A VPN, which has the Wi-Fi transport of its
+underlying network but not NET_CAPABILITY_NOT_VPN, and a test network
+that replicates Wi-Fi keep the stock rules.
+
+The NetworkMonitor unit tests that take a Wi-Fi network through
+validation or data stall detection expect the stock rules.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../server/connectivity/NetworkMonitor.java   | 29 +++++++++++++++----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/src/com/android/server/connectivity/NetworkMonitor.java b/src/com/android/server/connectivity/NetworkMonitor.java
+index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..6f1d3b3d5f76a4c1ad013072bad4e28cb22f9751 100644
+--- a/src/com/android/server/connectivity/NetworkMonitor.java
++++ b/src/com/android/server/connectivity/NetworkMonitor.java
+@@ -906,7 +906,25 @@ public class NetworkMonitor extends StateMachine {
+         return 0 == mValidations ? ValidationStage.FIRST_VALIDATION : ValidationStage.REVALIDATION;
+     }
+ 
++    /**
++     * Whether this is a Wi-Fi network, which this device validates without probes.
++     *
++     * The device's Wi-Fi is virtual: its one network is a station on the host's own network, so
++     * a probe through it reports only whether the host reaches the validation servers. Where those
++     * are blocked the network would stay unvalidated for good. A VPN, which has the Wi-Fi
++     * transport of its underlying network but not NET_CAPABILITY_NOT_VPN, and a test network that
++     * replicates Wi-Fi keep the stock rules.
++     */
++    private boolean isWifiExemptFromValidation() {
++        return mNetworkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
++                && !mNetworkCapabilities.hasTransport(TRANSPORT_TEST)
++                && mNetworkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN);
++    }
++
+     private boolean isValidationRequired() {
++        if (isWifiExemptFromValidation()) {
++            return false;
++        }
+         final boolean dunValidationRequired = isAtLeastU()
+                 || mContext.getResources().getBoolean(R.bool.config_validate_dun_networks);
+         final boolean vpnValidationRequired = SdkLevel.isAtLeastT()
+@@ -1593,7 +1611,7 @@ public class NetworkMonitor extends StateMachine {
+                     //    packets over the network may be undesirable, for example an extremely
+                     //    expensive metered network, or unwanted leaking of the User Agent string.
+                     // Also don't bother validating networks that the user already said they
+-                    // wanted as-is.
++                    // wanted as-is, nor Wi-Fi (see isWifiExemptFromValidation).
+                     //
+                     // On networks that need to support private DNS in strict mode (e.g., VPNs, but
+                     // not networks that don't provide Internet access), we still need to perform
+@@ -1606,13 +1624,14 @@ public class NetworkMonitor extends StateMachine {
+                         transitionTo(mEvaluatingPrivateDnsState);
+                         return HANDLED;
+                     } else if (!isValidationRequired()) {
++                        final String reason = isWifiExemptFromValidation()
++                                ? "Wi-Fi is validated without probes"
++                                : "Network would not satisfy default request";
+                         if (isPrivateDnsValidationRequired()) {
+-                            validationLog("Network would not satisfy default request, "
+-                                    + "resolving private DNS");
++                            validationLog(reason + ", resolving private DNS");
+                             transitionTo(mEvaluatingPrivateDnsState);
+                         } else {
+-                            validationLog("Network would not satisfy default request, "
+-                                    + "not validating");
++                            validationLog(reason + ", not validating");
+                             transitionTo(mValidatedState);
+                         }
+                         return HANDLED;

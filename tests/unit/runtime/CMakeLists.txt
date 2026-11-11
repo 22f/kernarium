@@ -257,3 +257,44 @@ uml_add_unit_test(
     NAME runtime-guest-statistics
     COMMAND uml_runtime_guest_statistics_tests
     LABELS tsan)
+
+# The stall record: which vCPUs are stalled and why from synthetic samples,
+# the rings and the slot that never exceed their size, and the slot's text
+# against the golden file AndariumCore parses too.
+add_executable(uml_runtime_stall_record_tests stall_record_tests.cpp)
+target_link_libraries(uml_runtime_stall_record_tests PRIVATE
+    UML::RuntimeStallRecord)
+uml_add_unit_test(
+    NAME runtime-stall-record
+    COMMAND uml_runtime_stall_record_tests
+        ${PROJECT_SOURCE_DIR}/tests/unit/andarium/fixtures/stall-slot-golden.txt
+    LABELS tsan)
+
+# The kernel's blocking imports, marked while they block.
+add_executable(uml_runtime_kernel_waits_tests kernel_waits_tests.cpp)
+target_link_libraries(uml_runtime_kernel_waits_tests PRIVATE
+    UML::RuntimeKernelWaits
+    UML::RuntimeThreadFence)
+uml_add_unit_test(
+    NAME runtime-kernel-waits
+    COMMAND uml_runtime_kernel_waits_tests)
+
+# The watch thread against carriers that wait in marked calls and the fence
+# that holds it. The binary stops and starts threads of the process, so it
+# runs alone.
+add_executable(uml_runtime_stall_watch_tests stall_watch_tests.cpp)
+target_link_libraries(uml_runtime_stall_watch_tests PRIVATE
+    UML::RuntimeKernelWaits
+    UML::RuntimeSessionRecord
+    UML::RuntimeStallRecord
+    UML::RuntimeStallWatch
+    UML::RuntimeThreadFence
+    UML::PlatformContract
+    "-framework Foundation")
+target_sources(uml_runtime_stall_watch_tests PRIVATE
+    $<TARGET_OBJECTS:uml_host_thermal>)
+uml_add_unit_test(
+    NAME runtime-stall-watch
+    COMMAND uml_runtime_stall_watch_tests
+    TIMEOUT 120)
+set_tests_properties(runtime-stall-watch PROPERTIES RUN_SERIAL TRUE)

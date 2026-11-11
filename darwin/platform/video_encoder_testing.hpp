@@ -13,5 +13,10 @@ namespace uml::platform::testing {
 // demand. `encoder` must come from `makeVideoEncoder()` of that variant.
 void loseSession(VideoEncoder& encoder, unsigned count);
 
+// Invalidates the VideoToolbox session `encoder` has open and leaves it in
+// place, as the system does to an app that was in the background: no output
+// reports the loss, and the next frame submitted finds the session gone.
+void invalidateSession(VideoEncoder& encoder);
+
 } // namespace uml::platform::testing
 #endif

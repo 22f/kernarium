@@ -23,6 +23,8 @@ contracts every product shares:
   console PTY assertion, run by the standalone kernel build with explicit
   source and build paths (Apple product configuration consumes only bundles);
 - [`gpu/`](gpu/README.md): the private Virtio-GPU memory-report wire contract;
+- [`input/`](input/README.md): the private Virtio-input registration notice of the
+  hot-pluggable keyboard, mouse and pointer;
   and
 - [`video/`](video/README.md): the private Virtio video wire contract.
 
@@ -276,6 +278,13 @@ it. The bridge fields used below are defined by the comments in
 
 - The Darwin network receive path uses NAPI, and the display-mapped absolute
   pointer is a direct touchscreen.
+- The host's location is the guest's `/dev/gnssN` (type NMEA), behind a local
+  experimental Virtio device (ID 65534; the wire contract is
+  `darwin/device/gnss/README.md`). The host powers its receiver from the
+  node's first open to its last close and sends nothing while it is off. A
+  suspend disables the device's queues, so the host fills them after the
+  resume, and the host wakes a guest that suspended itself while the receiver
+  is powered; the driver is not a wake source. `guest-gnss-receiver` checks it.
 - A virtio-gpu PRIME export is always read-write. A device with 3D refuses a
   dma-buf another driver exported with `-ENODEV`; do not restore the stable
   change that routed it to the generic importer. Hardware video and Android's

@@ -24,6 +24,13 @@ typedef void (^KernariumConsoleOutputHandler)(NSData* data);
 typedef void (^KernariumRestartHandler)(
     uint32_t event,
     uint32_t restartCount);
+/* The guest powered its GNSS receiver on (`powered` is true) or off, delivered
+ * on the main queue. */
+typedef void (^KernariumLocationReceiverHandler)(BOOL powered);
+/* The guest's keyboard lights or an application's pointer capture changed
+ * (a KERNARIUM_RUNTIME_INPUT_STATUS_ value, and whether it is on), delivered on
+ * the main queue. */
+typedef void (^KernariumInputStatusHandler)(int status, BOOL on);
 
 #ifdef __cplusplus
 extern "C" {
@@ -241,6 +248,44 @@ void kernarium_runtime_loader_set_console_output_handler(
  * It may be set before a runtime is selected. */
 void kernarium_runtime_loader_set_restart_handler(
     KernariumRestartHandler _Nullable handler);
+/* Receives the guest's receiver-power events (see
+ * kernarium_runtime_set_location_receiver_callback_function), or none for a nil
+ * handler. It may be set before a runtime is selected. */
+void kernarium_runtime_loader_set_location_receiver_handler(
+    KernariumLocationReceiverHandler _Nullable handler);
+/* Gives the guest's GNSS receiver the host's newest fix, or with a null `fix`
+ * drops it; see kernarium_runtime_report_location_function. Returns 0, or a
+ * negated errno: -ENODEV when no runtime is loaded or no guest with a receiver
+ * runs, -EINVAL for a fix the runtime refuses. */
+int kernarium_runtime_loader_report_location(
+    const kernarium_runtime_location_fix* _Nullable fix);
+/* The Android guest's hardware keyboard, mouse and pointer
+ * (kernarium_runtime_set_input_connected_function and the entries after it).
+ * Each returns 0, or a negated errno: -ENODEV when no runtime is loaded or no
+ * guest with the devices runs, -EINVAL for an argument the runtime refuses. */
+int kernarium_runtime_loader_set_input_connected(int device, BOOL connected);
+int kernarium_runtime_loader_send_keyboard_usage(uint32_t usage, BOOL pressed);
+int kernarium_runtime_loader_send_pointer(
+    uint32_t x,
+    uint32_t y,
+    uint32_t buttons,
+    BOOL inRange);
+int kernarium_runtime_loader_send_mouse(
+    int32_t dx,
+    int32_t dy,
+    uint32_t buttons,
+    int32_t wheel,
+    int32_t horizontalWheel);
+/* Receives the keyboard lights and the pointer capture (see
+ * kernarium_runtime_set_input_status_callback_function), or none for a nil
+ * handler. It may be set before a runtime is selected. */
+void kernarium_runtime_loader_set_input_status_handler(
+    KernariumInputStatusHandler _Nullable handler);
+/* A button of a game controller went down: wakes a guest that suspended
+ * itself, as a key down does; see kernarium_runtime_wake_for_input_function.
+ * It does nothing when no runtime is loaded or the runtime has no such entry.
+ * It may be called from any thread. */
+void kernarium_runtime_loader_wake_for_input(void);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always

@@ -51,11 +51,31 @@ namespace uml::runtime {
  * Everything that runs at an end only formats into static storage and makes
  * system calls: it takes no lock and allocates nothing, so a panic, a signal
  * handler or a process whose other threads are suspended can run it.
+ *
+ * The file is text of a fixed layout and of a size it never exceeds
+ * (session_record_max_bytes), whatever the session does: the memory slot, the
+ * stall slot, then the state with the kernel output it quotes. Each part is
+ * rewritten in place by its own writer, so none grows with the session's
+ * length. The stall slot is the stall watch's (runtime/stall_record.hpp).
+ * The first line names the layout: "uml-session 4" has the stall slot between
+ * the memory slot and the state; the earlier layouts (1 to 3) have the state
+ * where the stall slot is now.
  */
 inline constexpr unsigned memory_checkpoint_interval_ms = 2000;
-/* The bytes of the memory slot at the start of the file; the session's state
- * follows it. */
+/* The bytes of the memory slot at the start of the file, of the stall slot
+ * after it, and where the session's state begins. */
 inline constexpr std::size_t session_memory_slot_bytes = 4096;
+inline constexpr std::size_t session_stall_slot_bytes = 4096;
+inline constexpr std::size_t session_state_offset =
+	session_memory_slot_bytes + session_stall_slot_bytes;
+/* The kernel output the state quotes, and the most the state ever takes: its
+ * lines, a message and that output. */
+inline constexpr std::size_t session_kernel_output_bytes = 4096;
+inline constexpr std::size_t session_state_max_bytes =
+	session_kernel_output_bytes + 1024;
+/* The most the file ever holds. */
+inline constexpr std::size_t session_record_max_bytes =
+	session_state_offset + session_state_max_bytes;
 inline constexpr unsigned memory_history_recent = 24;
 inline constexpr unsigned memory_history_older = 24;
 inline constexpr unsigned memory_history_older_stride = 15;
@@ -129,6 +149,15 @@ void record_kernel_crash() noexcept;
 
 /* Writes the memory slot now; the checkpoint thread calls it. */
 void checkpoint_session_memory() noexcept;
+
+/* Whether a session is writing to a record file. */
+[[nodiscard]] bool session_record_open() noexcept;
+
+/* Replaces the stall slot with `slot`, which must be exactly
+ * session_stall_slot_bytes of text; anything else changes nothing. Any
+ * thread; it takes no lock, allocates nothing and does nothing without an
+ * open session. */
+void write_session_stall_slot(std::string_view slot) noexcept;
 
 /* The loader's resolution of the kernel's write import. */
 ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)

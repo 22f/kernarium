@@ -5,7 +5,9 @@
 #include "KernariumConsoleInput.hpp"
 #include "KernariumConsoleOutput.hpp"
 #include "KernariumGuestTimeZone.hpp"
+#include "KernariumHostFeatures.hpp"
 #include "KernariumKeyWake.hpp"
+#include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
 #include "KernariumStatistics.hpp"
 #if KERNARIUM_AUTOMATION_HARNESS
@@ -31,11 +33,15 @@
 #include "battery/protocol.hpp"
 #include "console/in_process_service.hpp"
 #include "console/protocol.hpp"
+#include "gnss/in_process_service.hpp"
+#include "gnss/protocol.hpp"
 #ifndef UML_APP_STORE_RUNTIME
 #include "gpu/frame_tap.hpp"
 #endif
 #include "gpu/in_process_service.hpp"
 #include "gpu/protocol.hpp"
+#include "input/virtio/hardware_input.hpp"
+#include "input/virtio/hardware_input_run.hpp"
 #include "input/virtio/in_process_service.hpp"
 #include "input/virtio/touchscreen.hpp"
 #include "block/android_boot.hpp"
@@ -167,6 +173,22 @@ uml::input::virtio::InProcessInputService* activeKeyboard;
  * open their stream without the mutex, which an open can hold for seconds. */
 std::mutex activeVsockMutex;
 std::shared_ptr<uml::vsock::Endpoint> activeVsock;
+/* The way into the running guest's GNSS receiver, if its flavour has one, and
+ * the one receiver of its power events. The callback is called with its mutex
+ * held, which is what makes clearing it wait for a call in progress. */
+std::mutex activeGnssMutex;
+std::shared_ptr<uml::gnss::Endpoint> activeGnss;
+std::mutex locationCallbackMutex;
+kernarium_runtime_location_receiver_callback locationCallback;
+void* locationContext;
+/* The way into the running Android guest's hardware keyboard, mouse and
+ * pointer, if its flavour has them, with what the application asked of them
+ * across the run's boots, and the one receiver of their status. The callback
+ * is called with its mutex held, as the location receiver's is. */
+uml::input::virtio::HardwareInputRun hardwareInputRun;
+std::mutex inputStatusCallbackMutex;
+kernarium_runtime_input_status_callback inputStatusCallback;
+void* inputStatusContext;
 /* The GPU hold the application last asked for, and the GPU service it applies
  * to while a guest runs. A hold asked for before the guest's GPU exists takes
  * effect when it does. */
@@ -205,6 +227,77 @@ void publishRestart(std::uint32_t event, std::uint32_t restartCount)
     std::lock_guard lock(restartCallbackMutex);
     if (restartCallback != nullptr)
         restartCallback(restartContext, event, restartCount);
+}
+
+void publishLocationReceiver(bool powered)
+{
+    std::lock_guard lock(locationCallbackMutex);
+    if (locationCallback != nullptr)
+        locationCallback(locationContext, powered ? 1 : 0);
+}
+
+/* A guest that suspended itself, as Android does once its display is off,
+ * takes none of the receiver's output until something wakes it, as a phone's
+ * GNSS chip wakes its processor. The wake does nothing to a guest the host
+ * quiesced. It can wait on the guest's console, so it leaves the device's
+ * thread, and one wake in flight covers the periods that pass meanwhile. */
+std::atomic_bool locationWakeInFlight;
+
+void wakeGuestForLocation()
+{
+    if (locationWakeInFlight.exchange(true))
+        return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        {
+            std::lock_guard lifecycle(emulatorLifecycleMutex);
+            if (activeEmulator != nullptr)
+                uml_emulator_wake(activeEmulator);
+        }
+        locationWakeInFlight.store(false);
+    });
+}
+
+/* Android's lock lights and the pointer capture, from the guest's side of the
+ * hardware keyboard and mouse. Registrations stay inside the host. */
+void publishInputStatus(uml::input::virtio::HardwareStatus status, bool on)
+{
+    using uml::input::virtio::HardwareStatus;
+    int published;
+    switch (status) {
+    case HardwareStatus::numLock:
+        published = KERNARIUM_RUNTIME_INPUT_STATUS_NUM_LOCK;
+        break;
+    case HardwareStatus::capsLock:
+        published = KERNARIUM_RUNTIME_INPUT_STATUS_CAPS_LOCK;
+        break;
+    case HardwareStatus::scrollLock:
+        published = KERNARIUM_RUNTIME_INPUT_STATUS_SCROLL_LOCK;
+        break;
+    case HardwareStatus::pointerCapture:
+        published = KERNARIUM_RUNTIME_INPUT_STATUS_POINTER_CAPTURE;
+        break;
+    default:
+        return;
+    }
+    std::lock_guard lock(inputStatusCallbackMutex);
+    if (inputStatusCallback != nullptr)
+        inputStatusCallback(inputStatusContext, published, on ? 1 : 0);
+}
+
+/* A key or a button going down, or a wheel step, wakes a guest that suspended
+ * itself, as the keyboard and mouse of a phone with a display that is off do;
+ * the key policy admits one wake edge a second, as a held key repeats. The
+ * wake can wait on the guest's console, so it leaves the caller's thread. */
+void wakeGuestForHardwareInput()
+{
+    if (!keyWakePolicy.shouldWake(
+            false, true, std::chrono::steady_clock::now()))
+        return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        std::lock_guard lifecycle(emulatorLifecycleMutex);
+        if (activeEmulator != nullptr)
+            uml_emulator_wake(activeEmulator);
+    });
 }
 
 /* A host socket written after its peer reset it would end the process with
@@ -622,6 +715,72 @@ public:
     ActiveVsockRegistration& operator=(const ActiveVsockRegistration&) = delete;
 };
 
+class ActiveGnssRegistration final {
+public:
+    explicit ActiveGnssRegistration(std::shared_ptr<uml::gnss::Endpoint> endpoint)
+    {
+        endpoint->setPowerObserver(publishLocationReceiver);
+        endpoint->setWakeHook(wakeGuestForLocation);
+        std::lock_guard lock(activeGnssMutex);
+        activeGnss = std::move(endpoint);
+    }
+
+    ~ActiveGnssRegistration()
+    {
+        std::shared_ptr<uml::gnss::Endpoint> endpoint;
+        {
+            std::lock_guard lock(activeGnssMutex);
+            endpoint = std::move(activeGnss);
+            activeGnss.reset();
+        }
+        if (endpoint == nullptr)
+            return;
+        const bool powered = endpoint->powered();
+        endpoint->setPowerObserver({});
+        endpoint->setWakeHook({});
+        /* The guest is ending with its receiver on: the device is only reset
+         * after this, when nobody is listening. */
+        if (powered)
+            publishLocationReceiver(false);
+    }
+
+    ActiveGnssRegistration(const ActiveGnssRegistration&) = delete;
+    ActiveGnssRegistration& operator=(const ActiveGnssRegistration&) = delete;
+};
+
+/* The Android run's hardware input requests, from its first boot to its end
+ * and across the restarts between. */
+class ActiveHardwareInputRun final {
+public:
+    ActiveHardwareInputRun() { hardwareInputRun.begin(); }
+    ~ActiveHardwareInputRun() { hardwareInputRun.end(); }
+
+    ActiveHardwareInputRun(const ActiveHardwareInputRun&) = delete;
+    ActiveHardwareInputRun& operator=(const ActiveHardwareInputRun&) = delete;
+};
+
+/* One boot's hardware input, plugged as the application last asked. */
+class ActiveHardwareInputRegistration final {
+public:
+    explicit ActiveHardwareInputRegistration(
+        std::shared_ptr<uml::input::virtio::HardwareInput> input)
+    {
+        input->setStatusCallback(publishInputStatus);
+        hardwareInputRun.attach(std::move(input));
+    }
+
+    ~ActiveHardwareInputRegistration()
+    {
+        if (const auto input = hardwareInputRun.detach())
+            input->setStatusCallback({});
+    }
+
+    ActiveHardwareInputRegistration(const ActiveHardwareInputRegistration&) =
+        delete;
+    ActiveHardwareInputRegistration& operator=(
+        const ActiveHardwareInputRegistration&) = delete;
+};
+
 class ActiveGpuRegistration final {
 public:
     explicit ActiveGpuRegistration(uml::gpu::InProcessGpuService& gpu)
@@ -882,18 +1041,21 @@ void appendKernelCommandLine(
     uint32_t dotsPerInch,
     uint32_t guestProcessorCount,
     std::string_view adbPublicKey,
-    std::string_view timeZone)
+    std::string_view timeZone,
+    std::uint32_t hostFeatures)
 {
     const auto path = storage.release() / uml::android::releaseCommandLine;
     constexpr std::string_view adbAuthorizationPrefix {
         "androidboot.kernarium.adb_auth="};
-    constexpr std::array launcherPrefixes {
+    std::vector<std::string_view> launcherPrefixes {
         uml::android::lcdDensityPrefix,
         uml::android::hwTimeoutMultiplierPrefix,
         adbAuthorizationPrefix,
         kernarium::adb::keyPrefix,
         kernarium::adb::tcpPrefix,
         kernarium::timezone::prefix};
+    for (const auto prefix : kernarium::hostfeatures::launcherPrefixes())
+        launcherPrefixes.push_back(prefix);
     for (auto& argument :
          uml::android::readKernelCommandLine(path, launcherPrefixes))
         arguments.push_back(std::move(argument));
@@ -952,6 +1114,11 @@ void appendKernelCommandLine(
         arguments.emplace_back(
             std::string {kernarium::timezone::prefix} + std::string {timeZone});
     }
+    /* What the host has that the guest is to find, as the boot request states
+     * it: one argument per feature the runtime knows. */
+    for (auto& argument :
+         kernarium::hostfeatures::kernelArguments(hostFeatures))
+        arguments.push_back(std::move(argument));
 }
 
 #endif
@@ -1072,6 +1239,9 @@ struct GuestRequest final {
     /* The host's time zone an Android guest is given for the launch, empty for
      * none; a Linux guest ignores it. */
     std::string timeZone;
+    /* The host features an Android guest is told, the known bits of the boot
+     * request's android_host_features; a Linux guest ignores them. */
+    std::uint32_t hostFeatures {};
     /* Where the run records how the session ended, empty for nowhere. */
     std::string sessionRecordPath;
     /* The JIT cache budget of a run on the JIT engine, in bytes, or zero for
@@ -1278,6 +1448,10 @@ public:
 
 private:
     struct Boot final {
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* Before the devices whose threads call it, so it outlives them. */
+        std::shared_ptr<uml::input::virtio::HardwareInput> hardwareInput;
+#endif
         std::unique_ptr<uml::input::virtio::InProcessInputService> touchscreen;
         std::unique_ptr<uml::input::virtio::InProcessInputService> keyboard;
         std::unique_ptr<uml::gpu::InProcessVhostUserService> audio;
@@ -1286,8 +1460,20 @@ private:
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         std::unique_ptr<uml::gpu::InProcessVhostUserService> battery;
 #endif
-        /* The vsock device, the last Virtio device of the boot. */
+        /* The vsock device, after every device that existed before it. */
         std::optional<uml::vsock::InProcessService> vsock;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* The GNSS receiver. */
+        std::optional<uml::gnss::InProcessService> gnss;
+        /* The hardware keyboard, mouse and pointer, the last Virtio devices
+         * of the boot. */
+        std::unique_ptr<uml::input::virtio::InProcessInputService>
+            hardwareKeyboard;
+        std::unique_ptr<uml::input::virtio::InProcessInputService>
+            hardwareMouse;
+        std::unique_ptr<uml::input::virtio::InProcessInputService>
+            hardwarePointer;
+#endif
         std::optional<ConsoleBridge> console;
         std::vector<std::string> arguments;
         std::vector<const char*> pointers;
@@ -1296,6 +1482,11 @@ private:
 #endif
         std::optional<ActiveInputRegistration> inputRegistration;
         std::optional<ActiveVsockRegistration> vsockRegistration;
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        std::optional<ActiveGnssRegistration> gnssRegistration;
+        std::optional<ActiveHardwareInputRegistration>
+            hardwareInputRegistration;
+#endif
     };
 
     [[nodiscard]] std::unique_ptr<Boot> buildBoot()
@@ -1399,11 +1590,46 @@ private:
                 arguments.emplace_back(std::move(relay));
         }
 #endif
-        /* The last Virtio device, so that no other device's index moves. */
+        /* Appended after the devices that existed before it, so that no other
+         * device's index moves. */
         boot->vsock.emplace(uml::vsock::makeInProcessService());
         arguments.emplace_back(uml::gpu::virtioDeviceArgument(
             boot->vsock->service->takeConnectionName(),
             uml::vsock::protocol::deviceId));
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* Present in every Android launch, with or without a position, so the
+         * guest's /dev/gnss0 always exists; it is found by class, never by the
+         * device's index. */
+        boot->gnss.emplace(uml::gnss::makeInProcessService());
+        arguments.emplace_back(uml::gpu::virtioDeviceArgument(
+            boot->gnss->service->takeConnectionName(),
+            uml::gnss::protocol::deviceId));
+        /* The hardware keyboard, mouse and pointer come last and stay
+         * unplugged until the application plugs them; they are found by name,
+         * never by the device's index. */
+        {
+            using uml::input::virtio::DeviceKind;
+            using uml::input::virtio::InProcessInputService;
+            boot->hardwareKeyboard = std::make_unique<InProcessInputService>(
+                DeviceKind::hardwareKeyboard);
+            boot->hardwareMouse =
+                std::make_unique<InProcessInputService>(DeviceKind::mouse);
+            boot->hardwarePointer =
+                std::make_unique<InProcessInputService>(DeviceKind::pointer);
+            boot->hardwareInput =
+                std::make_shared<uml::input::virtio::HardwareInput>(
+                    boot->hardwareKeyboard->events(),
+                    boot->hardwareMouse->events(),
+                    boot->hardwarePointer->events());
+            for (auto* device :
+                 {boot->hardwareKeyboard.get(), boot->hardwareMouse.get(),
+                  boot->hardwarePointer.get()}) {
+                arguments.emplace_back(uml::gpu::virtioDeviceArgument(
+                    device->takeConnectionName(),
+                    uml::input::virtio::protocol::deviceId));
+            }
+        }
+#endif
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
         /* The release's read-only system disk and the instance's data disk are
          * the guest's only block devices. The selected ramdisk is exposed from
@@ -1417,7 +1643,8 @@ private:
             request_.dotsPerInch,
             request_.guestProcessorCount,
             request_.adbPublicKey,
-            request_.timeZone);
+            request_.timeZone,
+            request_.hostFeatures);
 #else
         /* A sealed ext4 derivative is attached read-only; the per-run /init
          * mounts either kind of image beneath the overlay. */
@@ -1435,6 +1662,10 @@ private:
 #endif
         boot->inputRegistration.emplace(*boot->touchscreen, *boot->keyboard);
         boot->vsockRegistration.emplace(boot->vsock->endpoint);
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+        boot->gnssRegistration.emplace(boot->gnss->endpoint);
+        boot->hardwareInputRegistration.emplace(boot->hardwareInput);
+#endif
         return boot;
     }
 
@@ -1595,6 +1826,14 @@ constexpr std::size_t bootSizeBeforeSessionRecord =
 constexpr std::size_t bootSizeBeforeJit =
     offsetof(kernarium_runtime_boot, use_jit);
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+/* What a request states before the host features were added to it (runtime API
+ * 31; the word was reserved, and zero, before). Only an Android guest reads
+ * them. */
+constexpr std::size_t bootSizeBeforeHostFeatures =
+    offsetof(kernarium_runtime_boot, android_host_features);
+#endif
+
 #ifndef UML_APP_STORE_RUNTIME
 /* The JIT cache budget a boot that asks for the JIT runs with, or zero when it
  * runs on gadgets. Preparing again is cheap when an earlier prepare_jit
@@ -1734,6 +1973,19 @@ int runtimeRun(
                 readyJitCacheBudget(guestMemoryMiB, guestProcessorCount);
 #endif
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
+        /* A bit the runtime has no row for is dropped, because a feature
+         * never fails a boot: the guest finds the others and not that one. */
+        if (boot->struct_size >= bootSizeBeforeHostFeatures +
+                sizeof(boot->android_host_features)) {
+            const std::uint32_t unknown = kernarium::hostfeatures::unknownBits(
+                boot->android_host_features);
+            if (unknown != 0)
+                std::fprintf(
+                    stderr,
+                    "Kernarium: ignoring unknown host features 0x%x\n",
+                    unknown);
+            request.hostFeatures = boot->android_host_features & ~unknown;
+        }
         if (boot->android_data_disk_path == nullptr ||
             boot->android_release_path == nullptr) {
             std::fputs("Kernarium: incomplete Android bundle\n", stderr);
@@ -1929,6 +2181,9 @@ int runtimeRun(
                  * next guest's GPU, and a stop reaches the loop. */
                 ActiveEmulatorRegistration registration {emulator.get()};
                 ActiveGpuRegistration gpuRegistration {gpuService};
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+                const ActiveHardwareInputRun hardwareInputRequests;
+#endif
 #ifndef UML_APP_STORE_RUNTIME
                 const FootprintReporter footprintReporter;
 #endif
@@ -2078,6 +2333,17 @@ static_assert(
     KERNARIUM_RUNTIME_TOUCH_CONTACTS ==
     uml::input::virtio::protocol::touchscreenContactCount);
 
+static_assert(
+    KERNARIUM_RUNTIME_BUTTON_PRIMARY == uml::input::virtio::buttonPrimary &&
+    KERNARIUM_RUNTIME_BUTTON_SECONDARY == uml::input::virtio::buttonSecondary &&
+    KERNARIUM_RUNTIME_BUTTON_MIDDLE == uml::input::virtio::buttonMiddle &&
+    KERNARIUM_RUNTIME_BUTTON_BACK == uml::input::virtio::buttonBack &&
+    KERNARIUM_RUNTIME_BUTTON_FORWARD == uml::input::virtio::buttonForward);
+
+static_assert(
+    KERNARIUM_RUNTIME_WHEEL_DETENT ==
+    uml::input::virtio::protocol::wheelDetent);
+
 void runtimeSendTouch(
     uint32_t slot,
     uint32_t x,
@@ -2098,6 +2364,17 @@ void runtimeCancelTouch(uint32_t slot)
         const auto report = touchscreenContacts.cancel(slot);
         activeTouchscreen->send(report.span());
     }
+}
+
+/* Wakes a guest that suspended itself. The wake can wait on the guest's
+ * console, so it leaves the caller's thread. */
+void wakeGuestAsync()
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        std::lock_guard lifecycle(emulatorLifecycleMutex);
+        if (activeEmulator != nullptr)
+            uml_emulator_wake(activeEmulator);
+    });
 }
 
 void runtimeSendKey(uint16_t code, int pressed)
@@ -2129,11 +2406,17 @@ void runtimeSendKey(uint16_t code, int pressed)
             code == input::keyPower, pressed != 0,
             std::chrono::steady_clock::now()))
         return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        std::lock_guard lifecycle(emulatorLifecycleMutex);
-        if (activeEmulator != nullptr)
-            uml_emulator_wake(activeEmulator);
-    });
+    wakeGuestAsync();
+}
+
+/* A game controller's button went down: the same wake as a key's, under the
+ * keyboard's own limit (see KeyWakePolicy). */
+void runtimeWakeForInput(void)
+{
+    if (!keyWakePolicy.shouldWakeForButtonDown(
+            std::chrono::steady_clock::now()))
+        return;
+    wakeGuestAsync();
 }
 
 int runtimeSetGpuHold(int held)
@@ -2406,6 +2689,133 @@ void runtimeSetRestartCallback(
     restartContext = context;
 }
 
+void runtimeSetLocationReceiverCallback(
+    kernarium_runtime_location_receiver_callback callback,
+    void* context)
+{
+    std::lock_guard lock(locationCallbackMutex);
+    locationCallback = callback;
+    locationContext = context;
+    if (callback == nullptr)
+        return;
+    std::shared_ptr<uml::gnss::Endpoint> endpoint;
+    {
+        std::lock_guard active(activeGnssMutex);
+        endpoint = activeGnss;
+    }
+    if (endpoint != nullptr && endpoint->powered())
+        callback(context, 1);
+}
+
+int runtimeReportLocation(const kernarium_runtime_location_fix* fix)
+{
+    std::shared_ptr<uml::gnss::Endpoint> endpoint;
+    {
+        std::lock_guard lock(activeGnssMutex);
+        endpoint = activeGnss;
+    }
+    if (endpoint == nullptr)
+        return -ENODEV;
+    if (fix == nullptr) {
+        endpoint->clear();
+        return 0;
+    }
+    uml::gnss::Fix converted;
+    if (const int error = kernarium::location::toFix(*fix, converted))
+        return error;
+    endpoint->report(converted);
+    return 0;
+}
+
+[[nodiscard]] std::shared_ptr<uml::input::virtio::HardwareInput>
+currentHardwareInput()
+{
+    return hardwareInputRun.current();
+}
+
+void runtimeSetInputStatusCallback(
+    kernarium_runtime_input_status_callback callback,
+    void* context)
+{
+    std::lock_guard lock(inputStatusCallbackMutex);
+    inputStatusCallback = callback;
+    inputStatusContext = context;
+}
+
+int runtimeSetInputConnected(int device, int connected)
+{
+    using Device = uml::input::virtio::HardwareInputRun::Device;
+    switch (device) {
+    case KERNARIUM_RUNTIME_INPUT_KEYBOARD:
+        return hardwareInputRun.request(Device::keyboard, connected != 0) ?
+            0 : -ENODEV;
+    case KERNARIUM_RUNTIME_INPUT_MOUSE:
+        return hardwareInputRun.request(Device::mouse, connected != 0) ?
+            0 : -ENODEV;
+    default:
+        return -EINVAL;
+    }
+}
+
+int runtimeSendKeyboardUsage(uint32_t usage, int pressed)
+{
+    const auto input = currentHardwareInput();
+    if (input == nullptr)
+        return -ENODEV;
+    if (input->keyUsage(usage, pressed != 0))
+        wakeGuestForHardwareInput();
+    return 0;
+}
+
+int runtimeSendPointer(
+    uint32_t x,
+    uint32_t y,
+    uint32_t buttons,
+    int inRange)
+{
+    const auto input = currentHardwareInput();
+    if (input == nullptr)
+        return -ENODEV;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (inRange != 0) {
+        if (x > KERNARIUM_RUNTIME_TOUCH_MAXIMUM ||
+            y > KERNARIUM_RUNTIME_TOUCH_MAXIMUM)
+            return -EINVAL;
+        /* The position is relative to the guest's display, which only the GPU
+         * service knows; a guest without one has nothing to point at. */
+        std::lock_guard lock(activeGpuMutex);
+        if (activeGpu != nullptr) {
+            if (const auto mode = activeGpu->guestScanoutMode()) {
+                width = mode->width;
+                height = mode->height;
+            }
+        }
+    }
+    if (input->pointer(
+            x, y, buttons & uml::input::virtio::buttonMask, inRange != 0,
+            width, height))
+        wakeGuestForHardwareInput();
+    return 0;
+}
+
+int runtimeSendMouse(
+    int32_t dx,
+    int32_t dy,
+    uint32_t buttons,
+    int32_t wheel,
+    int32_t horizontalWheel)
+{
+    const auto input = currentHardwareInput();
+    if (input == nullptr)
+        return -ENODEV;
+    if (input->mouse(
+            dx, dy, buttons & uml::input::virtio::buttonMask, wheel,
+            horizontalWheel))
+        wakeGuestForHardwareInput();
+    return 0;
+}
+
 int runtimePrepareJit(
     int enable,
     std::uint32_t guestMemoryMiB,
@@ -2471,6 +2881,14 @@ const kernarium_runtime_api runtimeApi {
     .quiesce_resident = runtimeQuiesceResident,
     .read_graphics_memory = runtimeReadGraphicsMemory,
     .prepare_jit = runtimePrepareJit,
+    .set_location_receiver_callback = runtimeSetLocationReceiverCallback,
+    .report_location = runtimeReportLocation,
+    .set_input_connected = runtimeSetInputConnected,
+    .send_keyboard_usage = runtimeSendKeyboardUsage,
+    .send_pointer = runtimeSendPointer,
+    .send_mouse = runtimeSendMouse,
+    .set_input_status_callback = runtimeSetInputStatusCallback,
+    .wake_for_input = runtimeWakeForInput,
 };
 
 } // namespace

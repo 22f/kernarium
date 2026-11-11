@@ -24,6 +24,10 @@ public struct Guest: Equatable, Codable, Sendable {
     /// (`applyPendingGrowth`).
     public var pendingCapacityGiB: Int?
     public var microphone: Bool
+    /// The person's choice to share this device's location with the guest's
+    /// GNSS receiver. Off for a new guest and for one stored before the
+    /// switch existed.
+    public var location: Bool
     /// The person's choice to share the device's accelerometer and gyroscope
     /// with the guest; nil until they choose, and then it follows the device
     /// (`motionSensorsOn(available:)`). Stored under `motionSensors`.
@@ -39,20 +43,21 @@ public struct Guest: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case cores, memoryMiB, capacityGiB, pendingCapacityGiB, microphone
-        case includeInBackups
+        case includeInBackups, location
         case motionChoice = "motionSensors"
     }
 
     public init(
         cores: Int, memoryMiB: Int, capacityGiB: Int, pendingCapacityGiB: Int? = nil,
         microphone: Bool = false, includeInBackups: Bool = false, motionChoice: Bool? = nil,
-        usedBytes: UInt64 = 0
+        location: Bool = false, usedBytes: UInt64 = 0
     ) {
         self.cores = cores
         self.memoryMiB = memoryMiB
         self.capacityGiB = capacityGiB
         self.pendingCapacityGiB = pendingCapacityGiB
         self.microphone = microphone
+        self.location = location
         self.motionChoice = motionChoice
         self.includeInBackups = includeInBackups
         self.usedBytes = usedBytes
@@ -65,6 +70,7 @@ public struct Guest: Equatable, Codable, Sendable {
         capacityGiB = try values.decode(Int.self, forKey: .capacityGiB)
         pendingCapacityGiB = try values.decodeIfPresent(Int.self, forKey: .pendingCapacityGiB)
         microphone = try values.decode(Bool.self, forKey: .microphone)
+        location = try values.decodeIfPresent(Bool.self, forKey: .location) ?? false
         includeInBackups = try values.decode(Bool.self, forKey: .includeInBackups)
         motionChoice = try values.decodeIfPresent(Bool.self, forKey: .motionChoice)
     }
