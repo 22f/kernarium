@@ -671,11 +671,11 @@ The network slot holds the guest's user network in numbers: DNS queries
 answered, refused by the system (policy denied), timed out or failed; DHCP
 discovers, requests and acknowledgements; TCP connection attempts and how many
 were established, unreachable or refused (the provider counts them,
-[`darwin/README.md`](../darwin/README.md#user-network)). They are the share
-since the session began, rewritten at each checkpoint and at the end, and hold no
-address, port or name. The slot also notes the denial of the network that the
-application's notice was up for (runtime API 36, `set_network_notice`): how many
-denials began during the session and the one in force.
+[`darwin/README.md`](../darwin/README.md)). They are the share since the session
+began, rewritten at each checkpoint and at the end, and hold no address, port or
+name. The slot also notes the denial of the network that the application's
+notice was up for (runtime API 36, `set_network_notice`): how many denials began
+during the session and the one in force.
 
 A guest that restarts itself boots again in the same process, because iOS can
 neither re-exec nor respawn an application. The macOS launchers
