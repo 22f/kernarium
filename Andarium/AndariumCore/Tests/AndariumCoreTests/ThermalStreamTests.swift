@@ -92,6 +92,35 @@ struct ThermalStreamTests {
         stream.stop()
     }
 
+    @Test func aGuestThatReadsNothingNeverHoldsTheCallerAndTheConnectionIsMadeAgain() throws {
+        let guest = FakeThermalGuest()
+        let events = Events()
+        let stream = stream(guest, events)
+        stream.start()
+        #expect(thermalEventually { events.connected == 1 })
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            // A record is a few bytes and the socket holds some thousand: more changes than it takes.
+            for round in 0..<1_500 { stream.send(round % 2 == 0 ? .light : .severe) }
+            stream.send(.critical)
+            done.signal()
+        }
+        let finished = done.wait(timeout: .now() + 5) == .success
+        #expect(finished, "a send waited for a guest that reads nothing")
+        guard finished else {
+            // Frees a send that a regression left blocked.
+            guest.dropLatest()
+            stream.stop()
+            return
+        }
+        // The record that did not fit closed the connection, and the next one starts with the latest severity.
+        #expect(thermalEventually { guest.connections == 2 && events.lost == 1 })
+        stream.send(.critical)
+        let bytes = guest.read(count: 2 * ThermalProtocol.recordSize)
+        #expect(Array(bytes.prefix(ThermalProtocol.recordSize)) == (try frame("critical")))
+        stream.stop()
+    }
+
     @Test func attemptsThatFailAreTriedAgainUntilTheGuestAccepts() throws {
         let guest = FakeThermalGuest()
         guest.accepting = false
