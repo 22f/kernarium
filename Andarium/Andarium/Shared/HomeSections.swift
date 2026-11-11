@@ -104,10 +104,11 @@ struct RowDivider: View {
 
 // MARK: System
 
-/// The guest's system in one section, as two rows of one shape: CPU and
+/// The guest's system in one section, as three rows of one shape: CPU and
 /// memory states the vCPUs and RAM, with Edit opening the sheet that changes
 /// them; Storage states what the guest holds of its capacity under a bar,
-/// with Resize.
+/// with Resize; Snapshots states how many there are and the space they use,
+/// with Manage opening them.
 struct SystemSection: View {
     @Environment(AppModel.self) private var model
 
@@ -123,6 +124,8 @@ struct SystemSection: View {
                 )
                 RowDivider()
                 StorageRow(guest: guest, stops: model.capacityStopsGiB, resize: { model.sheet = .resize })
+                RowDivider()
+                SnapshotsRow()
             }
         }
     }
@@ -144,7 +147,7 @@ struct SystemRowButton {
 
     /// The longest title: every button is as wide as this word, at any text
     /// size, so the buttons of the rows share one width and one edge.
-    static let widestTitle = "Resize"
+    static let widestTitle = "Manage"
 }
 
 extension VerticalAlignment {
@@ -250,6 +253,29 @@ struct SystemRow<Below: View>: View {
 extension SystemRow where Below == EmptyView {
     init(symbol: String, title: String, subtitle: String, button: SystemRowButton) {
         self.init(symbol: symbol, title: title, subtitle: subtitle, button: button, below: { EmptyView() })
+    }
+}
+
+/// The third row of Guest system: how many snapshots there are and the space
+/// all of them use, with Manage opening the Snapshots sheet. The reading
+/// happens each time Home appears, as the guest may have run since.
+struct SnapshotsRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let store = model.snapshots
+        SystemRow(
+            symbol: "clock.arrow.circlepath", title: SnapshotWords.title,
+            // Not yet read: the line holds its height and says nothing.
+            subtitle: store.listing == nil
+                ? "\u{00A0}" : SnapshotWords.homeSubtitle(count: store.count, total: store.total),
+            button: SystemRowButton(
+                title: SnapshotWords.manage, identifier: "home-snapshots-manage",
+                accessibilityName: SnapshotWords.manageAccessibility,
+                action: { model.sheet = .snapshots }
+            )
+        )
+        .task { await store.reload(force: true) }
     }
 }
 
@@ -477,11 +503,13 @@ struct BackupOption: View {
 }
 
 /// What the Back up guest data row does to iCloud and computer backups.
+/// Snapshots are never in a backup, which the note says once there are some.
 struct BackupNote: View {
     let host: HostDevice
+    var hasSnapshots = false
 
     var body: some View {
-        SectionNote("Puts the guest's apps and files in iCloud and computer backups of this \(host.name).")
+        SectionNote(SnapshotWords.backupNote(device: host.name, hasSnapshots: hasSnapshots))
     }
 }
 
@@ -496,7 +524,7 @@ struct BackupSection: View {
                     set: { model.guest?.includeInBackups = $0 }
                 ))
             } footer: {
-                BackupNote(host: model.host)
+                BackupNote(host: model.host, hasSnapshots: model.snapshots.count > 0)
             }
             .id("backup")
         }

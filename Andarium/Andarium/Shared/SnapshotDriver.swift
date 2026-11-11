@@ -109,6 +109,8 @@ extension AppModel {
         case .done(let restored):
             lifecycle.guest = restored
             refreshPlan()
+            // The preview reads no files: it plays the plan the restore leaves.
+            if self.driver == nil, let planAfterRestore { plan = planAfterRestore }
             return .done(())
         case .refused(let refusal):
             // A restore that took effect and did not finish changed the files.
@@ -128,5 +130,11 @@ extension AppModel {
     func renameSnapshot(_ id: SnapshotID, to name: String) async -> SnapshotResult<Void> {
         guard let snapshotDriver else { return .refused(.noData) }
         return await snapshotDriver.renameSnapshot(id, to: name)
+    }
+
+    /// The guest was erased or made anew: nothing read about its snapshots holds.
+    func forgetSnapshots() {
+        snapshots.reset()
+        restoredSnapshot = nil
     }
 }

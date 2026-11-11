@@ -13,7 +13,7 @@ enum StatisticsViewer: Hashable {
 }
 
 enum SheetKind: String, Identifiable, Hashable, CaseIterable {
-    case create, resize, info, system, whatsNew
+    case create, resize, info, system, whatsNew, snapshots
 
     var id: String { rawValue }
 }
@@ -323,7 +323,14 @@ final class AppModel {
     }
     /// What the snapshot driver is doing, which it sets around each
     /// operation: the controls of a screen follow `snapshotGate`.
-    var snapshotActivity = SnapshotActivity()
+    var snapshotActivity = SnapshotActivity() {
+        didSet { snapshots.activityChanged(from: oldValue, to: snapshotActivity) }
+    }
+    /// What the snapshot screens show and do (`SnapshotsModel`).
+    let snapshots = SnapshotsModel()
+    /// Home's notice after a snapshot was restored, until the guest starts or
+    /// the person puts it away.
+    var restoredSnapshot: RestoredSnapshotNotice?
     /// A long task the screens wait for.
     var busy: BusyState?
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
@@ -453,6 +460,7 @@ final class AppModel {
         self.system = system
         self.capabilities = capabilities
         self.createRequirementBytes = createRequirementBytes
+        snapshots.app = self
     }
 
     var guest: Guest? {
@@ -547,6 +555,7 @@ final class AppModel {
         ) { progress in
             let made = try await driver.create(guest, progress: progress)
             self.lifecycle.create(made)
+            self.forgetSnapshots()
             self.refreshPlan()
         }
     }
@@ -576,6 +585,7 @@ final class AppModel {
         guard let driver, guest != nil else {
             lifecycle.erase()
             plan = .firstStart
+            forgetSnapshots()
             return
         }
         runBusy(
@@ -587,6 +597,7 @@ final class AppModel {
             self.persistTask?.cancel()
             try await driver.erase(progress: progress)
             self.lifecycle.erase()
+            self.forgetSnapshots()
             self.resizePreset = nil
             self.sheet = nil
             self.refreshPlan()
@@ -1070,6 +1081,7 @@ final class AppModel {
         guard snapshotActivity.operation == nil else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
+            restoredSnapshot = nil
             frozenBootStage = nil
             bootTracker = BootTracker()
             preparingDisk = false
