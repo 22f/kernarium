@@ -46,13 +46,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  drivers/media/virtio/virtio_video_camera.h    |  233 +++
  .../media/virtio/virtio_video_camera_cmd.c    |  290 +++
  .../media/virtio/virtio_video_camera_ctrl.c   |  568 ++++++
- .../media/virtio/virtio_video_camera_dev.c    |  433 +++++
+ .../media/virtio/virtio_video_camera_dev.c    |  434 +++++
  drivers/media/virtio/virtio_video_caps.c      |   12 +-
  drivers/media/virtio/virtio_video_ctrls.c     |   16 +-
  drivers/media/virtio/virtio_video_device.c    |   48 +-
  drivers/media/virtio/virtio_video_driver.c    |   68 +-
  drivers/media/virtio/virtio_video_vq.c        |  132 +-
- 14 files changed, 3516 insertions(+), 39 deletions(-)
+ 14 files changed, 3517 insertions(+), 39 deletions(-)
  create mode 100644 drivers/media/virtio/virtio_video_camera.c
  create mode 100644 drivers/media/virtio/virtio_video_camera.h
  create mode 100644 drivers/media/virtio/virtio_video_camera_cmd.c
@@ -3021,10 +3021,10 @@ index 0000000000000000000000000000000000000000..ba252c4ade1471f6a6da357fbbc383fc
 +}
 diff --git a/drivers/media/virtio/virtio_video_camera_dev.c b/drivers/media/virtio/virtio_video_camera_dev.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..8228d664f5aa010ee0b638136ac10319ab763030
+index 0000000000000000000000000000000000000000..a174706a1628b94b375e0b9d11685ce5bc109acf
 --- /dev/null
 +++ b/drivers/media/virtio/virtio_video_camera_dev.c
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,434 @@
 +// SPDX-License-Identifier: GPL-2.0+
 +/*
 + * The Virtio camera device.
@@ -3256,6 +3256,7 @@ index 0000000000000000000000000000000000000000..8228d664f5aa010ee0b638136ac10319
 +	BUILD_BUG_ON(sizeof(struct virtio_video_get_stream_info) != 16);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_get_stream_info_resp) != 40);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_set_stream_info) != 40);
++	BUILD_BUG_ON(sizeof(struct virtio_video_stream_info) != 32);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_query_v4l2_controls) != 16);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_query_v4l2_controls_resp) != 16);
 +	BUILD_BUG_ON(sizeof(struct virtio_video_format_desc) != 24);
