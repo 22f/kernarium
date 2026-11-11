@@ -147,6 +147,16 @@ if(TARGET uml_third_party_kosmickrisp)
         LIBRARIES UML::ThirdPartyKosmicKrisp
         VULKAN TIMEOUT 120)
 
+    # A transfer that names an image or buffer with no Metal object, because it
+    # was never bound or its bind was refused, is refused by the command, not
+    # passed to Metal as nil, which ends the process; a refused bind logs the
+    # reason once.
+    uml_add_gpu_unit_test(gpu-kosmickrisp-unbound-transfers
+        uml_gpu_kosmickrisp_unbound_transfer_tests
+        kosmickrisp_unbound_transfer_tests.cpp
+        LIBRARIES UML::ThirdPartyKosmicKrisp
+        VULKAN TIMEOUT 120)
+
     add_library(uml_gpu_vulkan_draw_test_support STATIC
         vulkan_draw_test.cpp)
     target_link_libraries(uml_gpu_vulkan_draw_test_support PUBLIC
@@ -257,6 +267,16 @@ if(TARGET uml_gpu_service)
         LIBRARIES ${_uml_host_gl_libraries}
         VULKAN UNIT_DIRECTORY TIMEOUT 120)
 
+    # A bind the host driver refused is invisible to the guest, whose binds are
+    # asynchronous. The guest's context must end there, and a copy that names
+    # an image the driver never bound must be refused, not crash the host in
+    # Metal's copy encoder.
+    uml_add_gpu_unit_test(gpu-venus-bind-failure
+        uml_gpu_venus_bind_failure_tests
+        venus_bind_failure_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        VULKAN UNIT_DIRECTORY TIMEOUT 120)
+
     uml_add_gpu_unit_test(gpu-host-gl-provider-lifetime
         uml_gpu_host_gl_provider_tests host_gl_provider_lifetime_tests.cpp
         LIBRARIES uml_gpu_renderer UML::ThirdPartyVirglrenderer
@@ -313,6 +333,31 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY
         TIMEOUT 180)
+
+    # A context the renderer trims right after it flushed, and that another
+    # context then replaces on its thread, in a share group that holds an EGL
+    # image: the path on which the threaded context's fence check once read the
+    # driver thread's stores out of order. It keeps that path exercised under
+    # load; Mesa's util test u_queue_fence_order_test discriminates the fix.
+    uml_add_gpu_unit_test(gpu-host-gl-trim-unbind
+        uml_gpu_host_gl_trim_unbind_tests
+        host_gl_trim_unbind_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries} Threads::Threads
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY
+        TIMEOUT 120)
+
+    # A context that draws a framebuffer-fetch fragment shader another context
+    # created, and that the screen's shader cache served, must still have the
+    # descriptor binding the shader reads. The read is past the end of a heap
+    # block, so the test runs its body in a child under Guard Malloc.
+    uml_add_gpu_unit_test(gpu-host-gl-fbfetch-shader-cache
+        uml_gpu_host_gl_fbfetch_shader_cache_tests
+        host_gl_fbfetch_shader_cache_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY
+        TIMEOUT 120)
 
     # A transfer a context refuses must not leave that context refusing every
     # later transfer: Android's gralloc mapper only ever transfers.
@@ -577,6 +622,7 @@ if(TARGET uml_gpu_service)
         gpu-line-loop-statistics gpu-statistics-availability
         gpu-packed-yuv-planes gpu-texture-barrier-clear gpu-padded-row-transfer
         gpu-host-context-trim gpu-host-context-trim-concurrent
+        gpu-host-gl-trim-unbind gpu-host-gl-fbfetch-shader-cache
         gpu-host-gl-device-memory-budget gpu-host-gl-allocation-burst
         gpu-host-gl-surface-and-command-storage
         gpu-host-gl-reclaim-retry gpu-host-imported-memory
