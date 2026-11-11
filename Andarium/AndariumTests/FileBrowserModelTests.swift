@@ -34,7 +34,6 @@ struct FileBrowserModelTests {
         private(set) var sent: [Sent] = []
         private(set) var received: [String] = []
         private(set) var cancelled: [String] = []
-        private(set) var scanned: [String] = []
         private(set) var started: [String] = []
 
         func list(_ folder: String) async throws -> [GuestFile] {
@@ -91,8 +90,6 @@ struct FileBrowserModelTests {
             return url
         }
 
-        func scan(_ paths: [String]) async { scanned += paths }
-
         func importPickerStandIn(deliver: @escaping ([FilePick]) -> Void) -> AnyView? { nil }
     }
 
@@ -142,9 +139,6 @@ struct FileBrowserModelTests {
         #expect(backend.sent.map(\.path) == [GuestPath.child("new.txt", of: download)])
         #expect(backend.sent.map(\.replacing) == [false])
         #expect(browser.fresh == [GuestPath.child("new.txt", of: download)])
-        // What arrived is shown to the media index.
-        try await waitUntil { !backend.scanned.isEmpty }
-        #expect(backend.scanned == [GuestPath.child("new.txt", of: download)])
     }
 
     @Test func picksOfOneNameAreToldApartAsTheFilesAppDoes() async throws {
@@ -250,9 +244,6 @@ struct FileBrowserModelTests {
         browser.closeTransfer()
         #expect(browser.transfer == nil)
         try await waitUntil { backend.cancelled == ["held.bin"] }
-        // The file that arrived is shown to the media index, the other is not.
-        try await waitUntil { !backend.scanned.isEmpty }
-        #expect(backend.scanned == [GuestPath.child("done.txt", of: download)])
     }
 
     @Test func aFailureKeepsTheRestAndTryAgainRunsOnlyTheFailedFile() async throws {

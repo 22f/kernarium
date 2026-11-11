@@ -445,9 +445,7 @@ final class FileBrowserModel {
 
     private func importEnded(_ transfer: FileTransfer, plan: [ImportStep], rerun: @escaping ([Int]) -> Void) {
         guard self.transfer === transfer else { return }
-        let arrived = transfer.items.compactMap { $0.state == .done ? $0.path : nil }
-        fresh = Set(arrived)
-        if !arrived.isEmpty { Task { [backend] in await backend.scan(arrived) } }
+        fresh = Set(transfer.items.compactMap { $0.state == .done ? $0.path : nil })
         Task { await load(transfer.folder) }
         if transfer.items.allSatisfy({ $0.state == .done }) {
             finish(transfer)
@@ -649,14 +647,9 @@ final class FileBrowserModel {
         guard let transfer else { return }
         transfer.task?.cancel()
         Self.removeStaged(transfer)
-        let arrived = transfer.direction == .importing
-            ? transfer.items.compactMap { $0.state == .done ? $0.path : nil } : []
         self.transfer = nil
         retry = nil
-        if transfer.direction == .importing {
-            if !arrived.isEmpty { Task { [backend] in await backend.scan(arrived) } }
-            Task { await load(transfer.folder) }
-        }
+        if transfer.direction == .importing { Task { await load(transfer.folder) } }
     }
 
     // MARK: Lifetime

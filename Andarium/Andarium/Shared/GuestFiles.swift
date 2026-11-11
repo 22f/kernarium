@@ -128,10 +128,6 @@ protocol GuestFilesBackend: AnyObject {
         progress: @escaping @Sendable (_ moved: UInt64, _ total: UInt64) -> Void
     ) async throws -> URL
 
-    /// Has the guest's media index look at files just written, so its gallery
-    /// shows them. Best effort.
-    func scan(_ paths: [String]) async
-
     /// What Import opens instead of the system's document picker: the
     /// Simulator has no documents to pick. Nil on a device.
     func importPickerStandIn(deliver: @escaping ([FilePick]) -> Void) -> AnyView?
