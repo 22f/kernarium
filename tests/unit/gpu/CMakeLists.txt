@@ -306,6 +306,19 @@ if(TARGET uml_gpu_service)
         UNIT_DIRECTORY
         TIMEOUT 180)
 
+    # A context the renderer trims right after it flushed, and that another
+    # context then replaces on its thread, in a share group that holds an EGL
+    # image: the path on which the threaded context's fence check once read the
+    # driver thread's stores out of order. It keeps that path exercised under
+    # load; Mesa's util test u_queue_fence_order_test discriminates the fix.
+    uml_add_gpu_unit_test(gpu-host-gl-trim-unbind
+        uml_gpu_host_gl_trim_unbind_tests
+        host_gl_trim_unbind_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries} Threads::Threads
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY
+        TIMEOUT 120)
+
     # A transfer a context refuses must not leave that context refusing every
     # later transfer: Android's gralloc mapper only ever transfers.
     uml_add_gpu_unit_test(gpu-transfer-context-error
@@ -569,6 +582,7 @@ if(TARGET uml_gpu_service)
         gpu-line-loop-statistics gpu-statistics-availability
         gpu-packed-yuv-planes gpu-texture-barrier-clear gpu-padded-row-transfer
         gpu-host-context-trim gpu-host-context-trim-concurrent
+        gpu-host-gl-trim-unbind
         gpu-host-gl-device-memory-budget gpu-host-gl-allocation-burst
         gpu-host-gl-surface-and-command-storage
         gpu-host-gl-reclaim-retry gpu-host-imported-memory

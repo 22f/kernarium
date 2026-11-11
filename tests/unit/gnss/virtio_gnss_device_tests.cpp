@@ -133,11 +133,14 @@ struct Guest final {
             device.drainEventSource();
     }
 
+    /* What the observers write to is declared before the device, so that it
+     * outlives the device: destroying the device powers the receiver off, and
+     * that reaches the observers. */
     std::int64_t now {start};
-    std::shared_ptr<Endpoint> endpoint;
-    VirtioGnssDevice device;
     std::vector<bool> powerLog;
     int wakes {};
+    std::shared_ptr<Endpoint> endpoint;
+    VirtioGnssDevice device;
 };
 
 void describesTheDevice()
