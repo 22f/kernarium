@@ -3637,6 +3637,29 @@
         }
       }
     },
+    "Graphics" : {
+      "comment" : "Heading of the group of Acknowledgements with the graphics software.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "グラフィックス"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "图形"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "圖形"
+          }
+        }
+      }
+    },
     "graphics memory %@" : {
       "comment" : "VoiceOver: the virtual machine's graphics memory in use.",
       "localizations" : {
@@ -4232,6 +4255,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "允許同一網路上的電腦透過adb連線到虛擬機器。"
+          }
+        }
+      }
+    },
+    "Libraries" : {
+      "comment" : "Heading of the group of Acknowledgements with the software libraries Andarium uses.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ライブラリ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "库"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "程式庫"
           }
         }
       }
@@ -5231,6 +5277,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "打開電源、音量、返回、主畫面和設定"
+          }
+        }
+      }
+    },
+    "Operating system" : {
+      "comment" : "Heading of the group of Acknowledgements with Android, LineageOS and Linux.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "オペレーティングシステム"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "操作系统"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "作業系統"
           }
         }
       }

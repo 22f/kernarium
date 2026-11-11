@@ -81,6 +81,29 @@
         }
       }
     },
+    "Andarium crashed" : {
+      "comment" : "Title of Home's card after Andarium itself crashed while Android was running.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumがクラッシュしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium已崩溃"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium已當機"
+          }
+        }
+      }
+    },
     "Andarium draws the virtual machine with Metal 4, which this %@ does not have, so the virtual machine cannot start here." : {
       "comment" : "%@ is the device name: iPhone, iPad or Mac.",
       "localizations" : {
@@ -104,6 +127,98 @@
         }
       }
     },
+    "Andarium ended while Android was running." : {
+      "comment" : "Home's card after Andarium ended while Android was running, with no known cause.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの実行中にAndariumが終了しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android运行期间，Andarium已结束。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android執行期間，Andarium已結束。"
+          }
+        }
+      }
+    },
+    "Andarium stopped on an error of its own while Android was running." : {
+      "comment" : "Home's card after Andarium itself crashed while Android was running.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidの実行中に、Andarium自身のエラーで停止しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android运行期间，Andarium因自身错误而停止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android執行期間，Andarium因自身錯誤而停止。"
+          }
+        }
+      }
+    },
+    "Andarium stopped unexpectedly" : {
+      "comment" : "Title of Home's card after Andarium ended while Android was running, with no known cause.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andariumが予期せず停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium意外停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Andarium意外停止"
+          }
+        }
+      }
+    },
+    "Android could not resume" : {
+      "comment" : "Title of Home's card after a start that could not bring back the memory Android saved when it was paused.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidを再開できませんでした"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法恢复运行"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法繼續執行"
+          }
+        }
+      }
+    },
     "Android ran out of graphics memory" : {
       "localizations" : {
         "ja" : {
@@ -122,6 +237,236 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Android圖形記憶體不足"
+          }
+        }
+      }
+    },
+    "Android stopped" : {
+      "comment" : "Title of Home's card after Android's kernel ended the session by itself, or after a stop with no known cause.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidが停止しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android已停止"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android已停止"
+          }
+        }
+      }
+    },
+    "Android stopped on a kernel error." : {
+      "comment" : "Home's card after Android's kernel stopped on an error of its own.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはカーネルエラーで停止しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android因内核错误而停止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android因核心錯誤而停止。"
+          }
+        }
+      }
+    },
+    "Android stopped unexpectedly." : {
+      "comment" : "Home's card after a stop with no known cause.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidが予期せず停止しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android意外停止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android意外停止。"
+          }
+        }
+      }
+    },
+    "Android stopped with a kernel panic." : {
+      "comment" : "Home's card after a kernel panic that left no message.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはカーネルパニックで停止しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android因内核严重错误而停止。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android因核心嚴重錯誤而停止。"
+          }
+        }
+      }
+    },
+    "Android stopped with a kernel panic: %@." : {
+      "comment" : "Home's card after a kernel panic. The argument is the kernel's own message, in English, which stays as it is.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidはカーネルパニックで停止しました：%@。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android因内核严重错误而停止：%@。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android因核心嚴重錯誤而停止：%@。"
+          }
+        }
+      }
+    },
+    "Android was using almost all the memory iOS allows Andarium. A smaller memory size is safer." : {
+      "comment" : "Home's card after iOS ended Andarium because the memory it used came near the limit.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AndroidがiOSでAndariumに許可されているメモリのほぼすべてを使用していました。メモリサイズを小さくすると安全です。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android几乎用尽了iOS允许Andarium使用的全部内存。较小的内存大小更安全。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android幾乎用盡了iOS允許Andarium使用的所有記憶體。較小的記憶體大小更安全。"
+          }
+        }
+      }
+    },
+    "Android's kernel crashed" : {
+      "comment" : "Title of Home's card after Android's kernel stopped on an error of its own.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのカーネルがクラッシュしました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android内核已崩溃"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android核心已當機"
+          }
+        }
+      }
+    },
+    "Android's kernel ended Andarium." : {
+      "comment" : "Home's card after Android's kernel ended the session by itself.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "AndroidのカーネルがAndariumを終了しました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的内核结束了Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android的核心結束了Andarium。"
+          }
+        }
+      }
+    },
+    "Android's kernel panicked" : {
+      "comment" : "Title of Home's card after Android's kernel panicked, the Linux kernel's own fatal error.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのカーネルパニック"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android内核发生严重错误"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android核心發生嚴重錯誤"
+          }
+        }
+      }
+    },
+    "Android's memory could not be restored, so it starts again from boot." : {
+      "comment" : "Home's card after a start that could not bring back the memory Android saved when it was paused.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidのメモリを復元できなかったため、起動からやり直します。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法恢复Android的内存，因此将从启动开始重新运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "無法回復Android的記憶體，因此會從開機重新開始。"
           }
         }
       }
@@ -257,6 +602,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "虛擬機器執行期間，在設定中"
+          }
+        }
+      }
+    },
+    "iOS ended Andarium" : {
+      "comment" : "Title of Home's card after iOS ended Andarium because the memory it used came near the limit.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSがAndariumを終了しました"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS结束了Andarium"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS結束了Andarium"
           }
         }
       }
