@@ -9,26 +9,43 @@ text is the key. The strings live in:
   Andarium/Localization/Localizable.xcstrings   the application's screens
   Andarium/Localization/InfoPlist.xcstrings     the permission explanations
   Andarium/Localization/WhatsNew.xcstrings      the notes of Shared/WhatsNew.json
+  Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
     localization.py check [--root DIR]
-    localization.py sync --stringsdata DIR [--stringsdata DIR ...] [--check] [--root DIR]
+    localization.py sync --stringsdata DIR [--stringsdata DIR ...] [--check] [--app-store] [--root DIR]
 
 `check` fails on anything a person would see as a defect in a translation: a
 key with no value, or a value that is not marked translated, in a language; a
 stale key; a format specifier or plural category that does not fit the source
-or the language; a Google name; a value left as the English one without being
-on the explicit list in Localization/english-only.json; an Info.plist
-permission text, or a note of WhatsNew.json, without a catalog entry. A key
-is its English text, or a name with the English text as its `en` value.
+or the language; an unescaped `%`; a Google name; a leaf (a plural form and an
+Info.plist value included) left as one of the English forms of its key, or
+different from one only in case, without the key being on the list in
+Localization/english-only.json; a word the glossary retired (the guest is
+虚拟机 and 虛擬機器, never 客户机 or 客體; Chinese says 你, never 您); a space
+between Chinese or Japanese text and a Latin word or number (iOS writes none);
+a half-width question mark, exclamation mark or comma after Chinese or
+Japanese text; an Info.plist permission text, or a note of WhatsNew.json,
+without a catalog entry. A key is its English text, or a name with the English
+text as its `en` value.
+
+The list in english-only.json records decisions, not a census: `identical`
+names the keys a catalog translates to their own English text on purpose, and
+`english` names texts that stay English in the code and why. A string that is
+nowhere on it and is not translated is found by the pseudo-language run
+(Andarium/README.md#languages), which no list can replace.
 
 `sync` is Xcode's catalog update, for a build that did not run in the editor:
 it merges the strings the Swift compiler extracted (`*.stringsdata`, found
 under each DIR after a build with `SWIFT_EMIT_LOC_STRINGS`) into the
 catalogs, adding a new key in the state `new` and marking a key no code uses
 `stale`. Give it the output of every target that shares a catalog. With
-`--check` it changes nothing and fails when a catalog would change.
+`--check` it changes nothing and fails when a catalog would change. The output
+of an App Store build is checked with `--app-store --check`: that build has no
+JIT, so it must have extracted no string of the JIT table and no catalog of it
+is compared, and only a string the catalogs lack is a problem (a key of
+`#if !APP_STORE` code is not in its output).
 """
 
 from __future__ import annotations
@@ -60,6 +77,7 @@ CATALOGS = {
     "Localizable": "Andarium/Localization/Localizable.xcstrings",
     "InfoPlist": "Andarium/Localization/InfoPlist.xcstrings",
     "WhatsNew": "Andarium/Localization/WhatsNew.xcstrings",
+    "JIT": "Andarium/Localization/JIT.xcstrings",
     "AndariumCore": CORE_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
@@ -71,6 +89,7 @@ APPLICATION_TARGET = "Andarium"
 # Where the compiler-extracted strings of each source tree belong.
 SYNC_SOURCES = {
     "Localizable": ("Andarium/Andarium/", "GuestHost/Sources/"),
+    "JIT": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
 }
 
@@ -81,6 +100,18 @@ GOOGLE_NAMES = re.compile(
     r"グーグル|ググ|谷歌|古狗",
     re.IGNORECASE,
 )
+
+# Words the glossary retired, by language, and the person's pronoun: the app says 你, as iOS does.
+RETIRED_TERMS = {
+    "zh-Hans": ("客户机", "您"),
+    "zh-Hant": ("客體", "您"),
+    "ja": ("ゲスト",),
+}
+# What an Info.plist catalog may also hold: the names of the application, which no language translates.
+INFO_PLIST_NAMES = ("CFBundleName", "CFBundleDisplayName")
+CJK = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+CJK_LATIN_SPACE = re.compile(rf"[{CJK}] +[A-Za-z0-9%]|[A-Za-z0-9%@] +[{CJK}]")
+CJK_ASCII_PUNCTUATION = re.compile(rf"[{CJK}][?!,;]")
 
 SPECIFIER = re.compile(
     r"%(?:(?P<position>\d+)\$)?[-+ 0#]*(?:\d+|\*)?(?:\.\d+)?(?P<conversion>(?:hh|h|ll|l|q|L|z|t|j)?[@diuoxXfFeEgGcsSpaA])"
@@ -149,6 +180,13 @@ def plural_cases(localization: dict) -> set[str]:
     return set(localization.get("variations", {}).get("plural", {}))
 
 
+def lone_percent(text: str) -> bool:
+    """A `%` that is neither part of a format specifier nor `%%`: formatting the string would misread it."""
+    stripped = re.sub(r"%#@\w+@", "", text.replace("%%", ""))
+    stripped = SPECIFIER.sub("", stripped)
+    return "%" in stripped
+
+
 def source_text(key: str, english: dict | None) -> str:
     """The text a translation's specifiers are checked against: the key, or, for a named key, its English value."""
     if english is not None:
@@ -156,6 +194,50 @@ def source_text(key: str, english: dict | None) -> str:
         if values and not SPECIFIER.search(key):
             return values[-1]
     return key
+
+
+def english_forms(key: str, english: dict | None) -> list[str]:
+    """Every form the English text takes: the key and each leaf of its English localization."""
+    forms = [key]
+    if english is not None:
+        forms += [unit.get("value", "") for _, unit, _ in leaves(english)]
+    return [form for form in dict.fromkeys(forms) if form.strip()]
+
+
+def has_words(text: str) -> bool:
+    """Whether a text has at least one run of three Latin letters outside its format specifiers."""
+    return bool(re.search(r"[A-Za-z]{3}", SPECIFIER.sub("", text)))
+
+
+def check_value(tag: str, language: str, key: str, source: str, forms: list[str], category: str | None,
+                value: str, allowed_identical: set[str], used_identical: set[str], problems: Problems) -> None:
+    if category is not None and category not in PLURAL_CATEGORIES[language]:
+        problems.add(tag, f"uses the plural category {category!r}, which {language} does not have")
+    if GOOGLE_NAMES.search(value):
+        problems.add(tag, "names a Google product; no string of Andarium does")
+    problem = format_problem(source, value)
+    if problem:
+        problems.add(tag, problem)
+    if lone_percent(value):
+        problems.add(tag, "has a `%` that is not a format specifier; write `%%`")
+    for term in RETIRED_TERMS[language]:
+        if term in value:
+            problems.add(tag, f"says {term}, which the glossary retired")
+    if CJK_LATIN_SPACE.search(value):
+        problems.add(tag, "has a space between Chinese or Japanese text and a Latin word or number; iOS writes none")
+    if CJK_ASCII_PUNCTUATION.search(value):
+        problems.add(tag, "has a half-width ? ! , or ; after Chinese or Japanese text; use the full-width mark")
+    stripped = value.strip()
+    for form in forms:
+        if stripped == form.strip():
+            if key in allowed_identical:
+                used_identical.add(key)
+            elif has_words(form):
+                problems.add(tag, f"is an English form of the key; translate it, or list the key in {ENGLISH_ONLY}")
+            break
+        if has_words(form) and stripped.lower() == form.strip().lower():
+            problems.add(tag, f"differs from the English text {form!r} only in case")
+            break
 
 
 def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: Problems) -> set[str]:
@@ -175,8 +257,12 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
         label = f"{where}: {key!r}"
         if GOOGLE_NAMES.search(key):
             problems.add(label, "names a Google product; no string of Andarium does")
+        if lone_percent(key):
+            problems.add(label, "has a `%` that is not a format specifier; write `%%`")
         if entry.get("extractionState") == "stale":
             problems.add(label, "is stale: no code uses it")
+        if name == "InfoPlist" and key in INFO_PLIST_NAMES:
+            continue  # the application's name: no language translates it
         if entry.get("shouldTranslate") is False:
             if key not in allowed_identical:
                 problems.add(label, f"is not translated but is not on the list in {ENGLISH_ONLY}")
@@ -192,6 +278,7 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
                 if problem and SPECIFIER.search(key):
                     problems.add(f"{label} (en{place})", problem)
         source = source_text(key, english)
+        forms = english_forms(key, english)
         for language in LANGUAGES:
             localization = localizations.get(language)
             if localization is None:
@@ -208,18 +295,7 @@ def check_catalog(name: str, path: pathlib.Path, english_only: dict, problems: P
                 if not value.strip():
                     problems.add(tag, "is empty")
                     continue
-                if category is not None and category not in PLURAL_CATEGORIES[language]:
-                    problems.add(tag, f"uses the plural category {category!r}, which {language} does not have")
-                if GOOGLE_NAMES.search(value):
-                    problems.add(tag, "names a Google product; no string of Andarium does")
-                problem = format_problem(source, value)
-                if problem:
-                    problems.add(tag, problem)
-                if value == key and not english:
-                    if key in allowed_identical:
-                        used_identical.add(key)
-                    elif re.search(r"[A-Za-z]{3}", re.sub(r"%(?:\d+\$)?[-+ 0#.\d]*(?:hh|h|ll|l|q|L|z|t|j)?[@diuoxXfFeEgGcsSpaA]", "", key)):
-                        problems.add(tag, f"is the English text; translate it, or list the key in {ENGLISH_ONLY}")
+                check_value(tag, language, key, source, forms, category, value, allowed_identical, used_identical, problems)
             cases = plural_cases(localization)
             if cases and "other" not in cases:
                 problems.add(f"{label} ({language})", "has plural variations without 'other'")
@@ -294,7 +370,7 @@ def check_info_plist(root: pathlib.Path, info_keys: set[str], problems: Problems
         english = entry.get("localizations", {}).get(SOURCE_LANGUAGE, {}).get("stringUnit", {}).get("value")
         if english is not None and english != value:
             problems.add("InfoPlist.xcstrings", f"{key} differs from the project's text; the catalog's English is {english!r}")
-    for key in sorted(info_keys - set(expected)):
+    for key in sorted(info_keys - set(expected) - set(INFO_PLIST_NAMES)):
         problems.add("InfoPlist.xcstrings", f"{key} is not a permission text of the {APPLICATION_TARGET} target")
 
 
@@ -364,10 +440,27 @@ def partition(files: list[pathlib.Path], root: pathlib.Path) -> dict[str, list[p
     return parts
 
 
-def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool) -> list[str]:
+def extracted_tables(files: list[pathlib.Path]) -> set[str]:
+    """The tables the compiler extracted strings of."""
+    tables: set[str] = set()
+    for file in files:
+        try:
+            data = json.loads(file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        tables.update(name for name, entries in data.get("tables", {}).items() if entries)
+    return tables
+
+
+def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, app_store: bool = False) -> list[str]:
     files = stringsdata_files(directories)
     parts = partition(files, root)
     problems = Problems()
+    if app_store:
+        # The App Store build carries no JIT text: nothing of the JIT table may have been compiled into it.
+        if "JIT" in extracted_tables(files):
+            problems.add("JIT", "has strings in an App Store build, which carries no JIT text")
+        parts["JIT"] = []
     if not any(parts.values()):
         problems.add("sync", "no .stringsdata of the application or the package found: build with SWIFT_EMIT_LOC_STRINGS=YES first")
         return problems.items
@@ -391,6 +484,11 @@ def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool) 
                 added = sorted(set(after) - set(before))
                 removed = sorted(set(before) - set(after))
                 changed = sorted(key for key in set(before) & set(after) if before[key] != after[key])
+                if app_store:
+                    # The catalogs hold the keys of code this build compiled out: only a key it lacks is a defect.
+                    removed, changed = [], []
+                    if not added:
+                        continue
                 problems.add(
                     name,
                     f"is out of step with the code: {len(added)} to add {added[:5]}, {len(removed)} to remove {removed[:5]}, "
@@ -409,12 +507,16 @@ def main(argv: list[str] | None = None) -> int:
     sync_parser = commands.add_parser("sync", parents=[common], help="merge the compiler's extracted strings into the catalogs")
     sync_parser.add_argument("--stringsdata", type=pathlib.Path, action="append", required=True, metavar="DIR")
     sync_parser.add_argument("--check", action="store_true", help="change nothing; fail when a catalog would change")
+    sync_parser.add_argument("--app-store", action="store_true",
+                             help="the output is an App Store build's: no JIT table, and only a missing key fails (needs --check)")
     args = parser.parse_args(argv)
     if args.command == "check":
         problems = check(args.root)
         what = "the String Catalogs are complete"
     else:
-        problems = sync(args.root, args.stringsdata, args.check)
+        if args.app_store and not args.check:
+            parser.error("--app-store only checks: give --check")
+        problems = sync(args.root, args.stringsdata, args.check, args.app_store)
         what = "the String Catalogs match the code" if args.check else "the String Catalogs are updated"
     for problem in problems:
         print(f"localization.py: {problem}", file=sys.stderr)

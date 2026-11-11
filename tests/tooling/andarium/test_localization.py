@@ -13,8 +13,10 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import pathlib
 import shutil
@@ -27,7 +29,7 @@ REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
 SCRIPT = REPOSITORY / "Andarium/scripts/localization.py"
 BOUND_SECONDS = 120
 
-NOTE = "Browse the guest’s storage."
+NOTE = "Browse the virtual machine’s storage."
 PERMISSION = "Andarium records from the microphone only when you turn on Microphone."
 LANGS = ("ja", "zh-Hans", "zh-Hant")
 
@@ -60,14 +62,19 @@ class Tree:
         self.script = script
         self.files = {
             "Localizable": catalog({
-                "Guest system": entry(ja="ゲストシステム", zh_Hans="客户机系统", zh_Hant="客體系統"),
-                "%@ of %@": entry(ja="%2$@中 %1$@", zh_Hans="%1$@，共 %2$@", zh_Hant="%1$@，共 %2$@"),
+                "Virtual machine": entry(ja="仮想マシン", zh_Hans="虚拟机", zh_Hant="虛擬機器"),
+                "%@ of %@": entry(ja="%1$@ / %2$@", zh_Hans="%1$@ / %2$@", zh_Hant="%1$@ / %2$@"),
+                "storage.of": {"localizations": {
+                    "en": unit("%1$@ of %2$@"),
+                    "ja": unit("%1$@ / %2$@"), "zh-Hans": unit("%2$@中的%1$@"), "zh-Hant": unit("%2$@中的%1$@"),
+                }},
                 "%lld snapshots": {"localizations": {
                     "en": {"variations": {"plural": {"one": unit("%lld snapshot"), "other": unit("%lld snapshots")}}},
                     **{lang: {"variations": {"plural": {"other": unit("%lld X")}}} for lang in LANGS},
                 }},
                 "Retina": {"shouldTranslate": False},
             }),
+            "JIT": catalog({"Preparing JIT": entry(ja="JITを準備中", zh_Hans="正在准备JIT", zh_Hant="正在準備JIT")}),
             "AndariumCore": catalog({"Paused": entry(ja="一時停止", zh_Hans="已暂停", zh_Hant="已暫停")}),
             "InfoPlist": catalog({"NSMicrophoneUsageDescription": {"localizations": {
                 "en": unit(PERMISSION), **{lang: unit(f"{lang}: 麦克风") for lang in LANGS}}}}),
@@ -130,7 +137,7 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(self.problems(), [])
 
     def test_a_missing_language(self) -> None:
-        del self.tree.string("Localizable", "Guest system")["localizations"]["ja"]
+        del self.tree.string("Localizable", "Virtual machine")["localizations"]["ja"]
         self.assertFinds("has no ja translation")
 
     def test_a_value_not_marked_translated(self) -> None:
@@ -138,27 +145,31 @@ class CheckTests(unittest.TestCase):
         self.assertFinds("not 'translated'")
 
     def test_a_new_value(self) -> None:
-        self.tree.string("Localizable", "Guest system")["localizations"]["zh-Hans"] = unit("客户机系统", "new")
+        self.tree.string("Localizable", "Virtual machine")["localizations"]["zh-Hans"] = unit("虚拟机", "new")
         self.assertFinds("not 'translated'")
 
     def test_an_empty_value(self) -> None:
-        self.tree.string("Localizable", "Guest system")["localizations"]["ja"] = unit(" ")
+        self.tree.string("Localizable", "Virtual machine")["localizations"]["ja"] = unit(" ")
         self.assertFinds("is empty")
 
     def test_a_stale_key(self) -> None:
-        self.tree.string("Localizable", "Guest system")["extractionState"] = "stale"
+        self.tree.string("Localizable", "Virtual machine")["extractionState"] = "stale"
         self.assertFinds("is stale")
 
     def test_a_missing_format_specifier(self) -> None:
         self.tree.string("Localizable", "%@ of %@")["localizations"]["ja"] = unit("%1$@中")
         self.assertFinds("are not those of the source")
 
+    def test_a_named_key_takes_its_specifiers_from_its_english_value(self) -> None:
+        self.tree.string("Localizable", "storage.of")["localizations"]["ja"] = unit("%1$@")
+        self.assertFinds("are not those of the source")
+
     def test_reordered_specifiers_need_positions(self) -> None:
-        self.tree.string("Localizable", "%@ of %@")["localizations"]["zh-Hant"] = unit("%2$@ %@")
+        self.tree.string("Localizable", "%@ of %@")["localizations"]["zh-Hant"] = unit("%2$@/%@")
         self.assertFinds("mixes positional and plain")
 
     def test_positions_that_skip_a_number(self) -> None:
-        self.tree.string("Localizable", "%@ of %@")["localizations"]["ja"] = unit("%1$@ %3$@")
+        self.tree.string("Localizable", "%@ of %@")["localizations"]["ja"] = unit("%1$@/%3$@")
         self.assertFinds("are not 1 to 2")
 
     def test_a_plural_category_a_language_does_not_have(self) -> None:
@@ -172,7 +183,7 @@ class CheckTests(unittest.TestCase):
         self.assertFinds("plural variations without 'other'")
 
     def test_a_google_name_in_a_value(self) -> None:
-        self.tree.string("Localizable", "Guest system")["localizations"]["zh-Hans"] = unit("Google 客户机系统")
+        self.tree.string("Localizable", "Virtual machine")["localizations"]["zh-Hans"] = unit("Google 虚拟机")
         self.assertFinds("names a Google product")
 
     def test_a_google_name_in_a_key(self) -> None:
@@ -180,9 +191,91 @@ class CheckTests(unittest.TestCase):
         self.assertFinds("names a Google product")
 
     def test_english_left_untranslated(self) -> None:
-        self.tree.files["Localizable"]["strings"]["Erase guest"] = entry(
-            ja="Erase guest", zh_Hans="抹掉客户机", zh_Hant="清除客體")
-        self.assertFinds("is the English text")
+        self.tree.files["Localizable"]["strings"]["Erase virtual machine"] = entry(
+            ja="Erase virtual machine", zh_Hans="抹掉虚拟机", zh_Hant="清除虛擬機器")
+        self.assertFinds("is an English form of the key")
+
+    def test_a_plural_form_left_in_english(self) -> None:
+        plural = self.tree.string("Localizable", "%lld snapshots")["localizations"]["ja"]["variations"]["plural"]
+        plural["other"] = unit("%lld snapshots")
+        self.assertFinds("is an English form of the key")
+
+    def test_a_translation_that_is_the_singular_english_form(self) -> None:
+        plural = self.tree.string("Localizable", "%lld snapshots")["localizations"]["zh-Hans"]["variations"]["plural"]
+        plural["other"] = unit("%lld snapshot")
+        self.assertFinds("is an English form of the key")
+
+    def test_a_translation_that_differs_from_the_english_only_in_case(self) -> None:
+        self.tree.string("Localizable", "Virtual machine")["localizations"]["ja"] = unit("Virtual Machine")
+        self.assertFinds("differs from the English text")
+
+    def test_a_named_key_left_as_its_english_value(self) -> None:
+        localizations = self.tree.string("Localizable", "storage.of")["localizations"]
+        localizations["en"] = unit("%1$@ out of %2$@")
+        localizations["ja"] = unit("%1$@ out of %2$@")
+        self.assertFinds("is an English form of the key")
+
+    def test_an_info_plist_value_left_in_english(self) -> None:
+        self.tree.string("InfoPlist", "NSMicrophoneUsageDescription")["localizations"]["ja"] = unit(PERMISSION)
+        self.assertFinds("is an English form of the key")
+
+    def test_an_unescaped_percent_in_a_value(self) -> None:
+        self.tree.string("AndariumCore", "Paused")["localizations"]["ja"] = unit("100% 一時停止")
+        self.assertFinds("write `%%`")
+
+    def test_an_escaped_percent_is_fine(self) -> None:
+        self.tree.string("AndariumCore", "Paused")["localizations"]["ja"] = unit("100%%一時停止")
+        self.assertEqual(self.problems(), [])
+
+    def test_an_unescaped_percent_in_a_key(self) -> None:
+        self.tree.files["AndariumCore"]["strings"]["Up to 100%"] = entry(ja="最大100%%", zh_Hans="最多100%%", zh_Hant="最多100%%")
+        self.assertFinds("write `%%`")
+
+    def test_a_retired_word_for_the_virtual_machine(self) -> None:
+        for language, word in (("zh-Hans", "客户机"), ("zh-Hant", "客體"), ("ja", "ゲスト")):
+            with self.subTest(language=language):
+                self.setUp()
+                self.tree.string("Localizable", "Virtual machine")["localizations"][language] = unit(f"{word}の画面")
+                self.assertFinds("which the glossary retired")
+
+    def test_the_polite_pronoun_in_chinese(self) -> None:
+        for language in ("zh-Hans", "zh-Hant"):
+            with self.subTest(language=language):
+                self.setUp()
+                self.tree.string("Localizable", "Virtual machine")["localizations"][language] = unit("请您等待")
+                self.assertFinds("which the glossary retired")
+
+    def test_a_space_between_chinese_and_a_latin_word_or_a_number(self) -> None:
+        for text in ("内存 Andarium", "Andarium 内存", "内存 2.5 GiB", "共 %lld 个"):
+            with self.subTest(text=text):
+                self.setUp()
+                self.tree.string("Localizable", "Virtual machine")["localizations"]["zh-Hans"] = unit(text)
+                self.assertFinds("space between Chinese or Japanese text and a Latin word")
+
+    def test_a_number_keeps_the_space_before_its_unit(self) -> None:
+        self.tree.string("Localizable", "Virtual machine")["localizations"]["zh-Hans"] = unit("内存2.5 GiB")
+        self.assertEqual(self.problems(), [])
+
+    def test_half_width_punctuation_after_chinese_or_japanese(self) -> None:
+        for text in ("要抹掉吗?", "好!", "一,二", "仮想マシン;"):
+            with self.subTest(text=text):
+                self.setUp()
+                self.tree.string("Localizable", "Virtual machine")["localizations"]["ja"] = unit(text)
+                self.assertFinds("half-width")
+
+    def test_the_names_of_the_application_need_no_translation_in_info_plist(self) -> None:
+        self.tree.files["InfoPlist"]["strings"]["CFBundleDisplayName"] = {"shouldTranslate": False}
+        self.tree.files["InfoPlist"]["strings"]["CFBundleName"] = {"shouldTranslate": False}
+        self.assertEqual(self.problems(), [])
+
+    def test_a_missing_jit_catalog(self) -> None:
+        self.tree.write()
+        (self.tree.root / self.script.CATALOGS["JIT"]).unlink()
+        self.assertTrue(any("is missing" in problem for problem in self.script.check(self.tree.root)))
+
+    def test_a_jit_string_without_a_language(self) -> None:
+        del self.tree.string("JIT", "Preparing JIT")["localizations"]["zh-Hant"]
+        self.assertFinds("has no zh-Hant translation")
 
     def test_an_untranslated_key_off_the_list(self) -> None:
         self.tree.files["Localizable"]["strings"]["Metal"] = {"shouldTranslate": False}
@@ -245,42 +338,71 @@ class SyncTests(unittest.TestCase):
         self.root = self.tree.write()
         self.data = self.scratch / "build" / "Home.stringsdata"
 
-    def extract(self, *keys: str) -> None:
+    def extract(self, *keys: str, jit: tuple[str, ...] = ("Preparing JIT",)) -> None:
         self.data.parent.mkdir(parents=True, exist_ok=True)
-        body = {
-            "source": str(self.root / self.source),
-            "tables": {"Localizable": [{"comment": "", "key": key, "location": {"startingColumn": 1, "startingLine": 1}}
-                                       for key in keys]},
-            "version": 1,
-        }
+
+        def table(texts: tuple[str, ...]) -> list[dict]:
+            return [{"comment": "", "key": key, "location": {"startingColumn": 1, "startingLine": 1}} for key in texts]
+
+        body = {"source": str(self.root / self.source), "tables": {"Localizable": table(keys), "JIT": table(jit)}, "version": 1}
         self.data.write_text(json.dumps(body), encoding="utf-8")
 
     def sync(self, *extra: str) -> list[str]:
-        return self.script.sync(self.root, [self.data.parent], "--check" in extra)
+        return self.script.sync(self.root, [self.data.parent], "--check" in extra, "--app-store" in extra)
 
     def catalog(self) -> dict:
         return json.loads((self.root / self.script.CATALOGS["Localizable"]).read_text(encoding="utf-8"))["strings"]
 
     def test_a_new_string_is_added_untranslated_and_the_check_then_fails(self) -> None:
-        self.extract("Guest system", "%@ of %@", "%lld snapshots", "Retina", "Erase guest")
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", "Erase virtual machine")
         problems = self.sync("--check")
         self.assertEqual(len(problems), 1, problems)
-        self.assertIn("1 to add ['Erase guest']", problems[0])
-        self.assertNotIn("Erase guest", self.catalog(), "--check must change nothing")
+        self.assertIn("1 to add ['Erase virtual machine']", problems[0])
+        self.assertNotIn("Erase virtual machine", self.catalog(), "--check must change nothing")
         self.assertEqual(self.sync(), [])
-        self.assertNotIn("localizations", self.catalog()["Erase guest"])
+        self.assertNotIn("localizations", self.catalog()["Erase virtual machine"])
         self.assertEqual(self.sync("--check"), [])
         self.assertTrue(any("has no ja translation" in problem for problem in self.script.check(self.root)))
 
     def test_a_string_the_code_dropped_becomes_stale(self) -> None:
-        self.extract("Guest system", "%@ of %@", "Retina")
+        self.extract("Virtual machine", "%@ of %@", "Retina", "storage.of")
         self.assertEqual(self.sync(), [])
         self.assertEqual(self.catalog()["%lld snapshots"].get("extractionState"), "stale")
         self.assertTrue(any("is stale" in problem for problem in self.script.check(self.root)))
 
     def test_a_tree_in_step_has_nothing_to_change(self) -> None:
-        self.extract("Guest system", "%@ of %@", "%lld snapshots", "Retina")
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
         self.assertEqual(self.sync("--check"), [])
+
+    def test_a_jit_string_of_the_development_build_is_in_step(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
+        self.assertEqual(self.sync("--check"), [])
+
+    def test_a_missing_jit_string_is_found(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", jit=("Preparing JIT", "A new JIT text"))
+        problems = self.sync("--check")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("JIT: is out of step with the code: 1 to add ['A new JIT text']", problems[0])
+
+    def test_an_app_store_build_that_compiled_a_jit_string_is_refused(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
+        problems = self.sync("--check", "--app-store")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("has strings in an App Store build", problems[0])
+
+    def test_an_app_store_build_may_lack_the_keys_of_code_it_left_out(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=())
+        self.assertEqual(self.sync("--check", "--app-store"), [])
+
+    def test_an_app_store_build_with_a_key_the_catalogs_lack_is_found(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", "Brand new", jit=())
+        problems = self.sync("--check", "--app-store")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("1 to add ['Brand new']", problems[0])
+
+    def test_app_store_only_checks(self) -> None:
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.script.main(["sync", "--root", str(self.root), "--stringsdata", str(self.data.parent), "--app-store"])
 
     def test_a_build_without_extracted_strings(self) -> None:
         empty = self.scratch / "empty"
