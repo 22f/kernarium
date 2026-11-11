@@ -287,16 +287,18 @@ with `swift test` (it includes the snapshot store on APFS clones of sparse
 files in a temporary directory, with a crash between every two file calls of
 each operation and a real error at each call in turn, the haptics session on
 fake guests and players, the haptics wire against the golden frames in
-`tests/unit/andarium/fixtures`, which the guest's vibrator and thermal HALs
-test against too, and the session record's stall slot against the golden slot
-there, which `runtime-stall-record` checks the runtime's writer against);
+`tests/unit/andarium/fixtures`, which the guest's vibrator, thermal and gamepad
+relay test against too, and the session record's stall slot against the golden
+slot there, which `runtime-stall-record` checks the runtime's writer against);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
-`andarium-haptics-player`, `andarium-thermal-protocol` and
-`andarium-thermal-levels` (unit), `andarium-stage-system-image` and
+`andarium-haptics-player`, `andarium-thermal-protocol`,
+`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
+`andarium-stage-system-image` and
 `andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
-temperature and thresholds of each severity, system image staging and the
+temperature and thresholds of each severity, the gamepad relay's wire (the
+ranges of every field and the frame reader), system image staging and the
 screenshot script, and `kernarium-host-features` (unit)
 the table of host features the boot request carries to an Android guest. The
 application builds with Xcode (`AndariumPreview` is the Simulator build with
@@ -533,6 +535,12 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
+  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
+  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
+  default devices and again with the option and a connected client; a result
+  that differs from the accepted release's is explained
+  ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 
 `android-oobe`, `android-adb-debugging` and `android-guest-proc` (integration)
 each register only when `UML_ANDROID_OOBE_RELEASE`,
@@ -549,11 +557,28 @@ opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `UML_ANDROID_MICROG_PROBE_DIR`, the output of
 [`microg/build-apks.sh`](../tests/integration/android/microg/README.md), and
 checks that only microG's own packages present Google's certificate.
+`android-keymouse` (integration) registers when `UML_ANDROID_KEYMOUSE_RELEASE`
+names the release and `UML_ANDROID_KEYMOUSE_PROBE_APK` the
+[probe application](../tests/integration/android/keymouse/README.md)'s APK: the
+runner is a VNC client of the launcher's `--hardware-input` display and checks,
+through Android's input dump and the probe's log, that the host's devices
+plug, are configured as the image says, deliver keys, the cursor, buttons and
+wheel, pass pointer capture both ways and unplug; `--instance` names the
+previous release's data disk to check the one-time on-screen keyboard change.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
 render rate and the frame rates at each severity, on a fresh data disk or, with
 `--instance`, over an older release's.
+`android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
+names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
+[`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the
+runner plays the host application over a vsock forward, creates a controller of
+each driver family (generic, Xbox, DualSense), sends reports and checks what
+Android sees (devices, keys, axes), what comes back (rumble, lights, the
+drivers' feature requests), hot plug, the relay's recovery, and reports the
+guest's cost per report and the relay's memory. `android17-gamepad-runner`
+(tooling) runs its wire, controllers and parsers without a guest.
 
 Every first-party script that reaches a guest over adb uses the one shared adb
 server, names the guest with `-s 127.0.0.1:<port>` and at the end only
