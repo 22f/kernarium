@@ -343,10 +343,22 @@ struct GameControllersTests {
         controllers.update(running: false, booted: false, foreground: false)
     }
 
+    @Test func theButtonsIOSKeepsForItsGesturesAreTakenWhileTheControllerIsHeldAndGivenBack() async throws {
+        let relay = Relay()
+        let software = GCController.withExtendedGamepad()
+        let menu = try #require(software.physicalInputProfile.buttons[GamepadReading.Element.menu.name.rawValue])
+        let controllers = make(relay, center: NotificationCenter(), controllers: { [software] in [software] })
+        controllers.update(running: true, booted: false, foreground: true)
+        #expect(await eventually { !controllers.table.isEmpty })
+        #expect(menu.preferredSystemGestureState == .disabled)
+        controllers.update(running: false, booted: false, foreground: false)
+        #expect(menu.preferredSystemGestureState == .enabled)
+    }
+
     /// The system's own virtual controller, which UIKit puts on the screen of
     /// the test host: the one controller a Simulator can connect, with iOS's
     /// real notifications and its real buffered input. The host may list
-    /// other controllers too, so the test follows its own by identity.
+    /// other controllers too, so the application is told to take only this one.
     @Test func aVirtualControllerIsTakenAndLeftThroughIOSsOwnNotifications() async throws {
         let configuration = GCVirtualController.Configuration()
         configuration.elements = [GCInputLeftThumbstick, GCInputButtonA, GCInputButtonB]

@@ -221,6 +221,10 @@ nonisolated final class GameControllerEngines: HapticEngineSource, @unchecked Se
         guard let (slot, locality) = target.controller, let resolve = lock.withLock({ resolver }),
             let haptics = resolve(slot)?.haptics, let engine = haptics.createEngine(withLocality: Self.locality(locality))
         else { throw CHHapticError(.notSupported) }
+        // As the device's own engine (`DeviceHapticEngines`): haptics only, and
+        // idle between tones.
+        engine.playsHapticsOnly = true
+        engine.isAutoShutdownEnabled = true
         return engine
     }
 
@@ -293,9 +297,12 @@ nonisolated final class GameControllerIndicators: GamepadIndicators, @unchecked 
 
     init(table: ControllerTable) { self.table = table }
 
+    // Both are set on the main queue: iOS observes a controller's player
+    // index there, and the light and the number then go through one place.
     func setLight(controller id: Int, red: UInt8, green: UInt8, blue: UInt8) {
-        guard let light = table.controller(id: id)?.light else { return }
-        light.color = GCColor(red: Float(red) / 255, green: Float(green) / 255, blue: Float(blue) / 255)
+        guard let controller = table.controller(id: id) else { return }
+        let color = GCColor(red: Float(red) / 255, green: Float(green) / 255, blue: Float(blue) / 255)
+        DispatchQueue.main.async { controller.light?.color = color }
     }
 
     func setPlayerIndex(controller id: Int, index: Int?) {
@@ -322,7 +329,8 @@ nonisolated final class GameControllerIndicators: GamepadIndicators, @unchecked 
 ///
 /// Home, Menu, Options and Share are taken from iOS's gestures, so they reach
 /// the guest as buttons (iOS decides in its own settings whether it lets an
-/// application have the Home button).
+/// application have the Home button), and are given back when the controller
+/// is let go.
 nonisolated final class GameControllers: @unchecked Sendable {
     /// How often the battery is read.
     static let batteryInterval: DispatchTimeInterval = .seconds(30)
@@ -430,9 +438,7 @@ nonisolated final class GameControllers: @unchecked Sendable {
         guard let entry = table.add(controller) else { return }
 
         // The buttons iOS keeps for its own gestures come to the guest.
-        for element in [GamepadReading.Element.home, .menu, .options, .share] {
-            controller.physicalInputProfile.buttons[element.name.rawValue]?.preferredSystemGestureState = .disabled
-        }
+        Self.setSystemGestures(.disabled, on: controller)
 
         let name = controller.vendorName ?? ""
         let family = GamepadInputMapper.family(productCategory: controller.productCategory, name: name)
@@ -459,9 +465,20 @@ nonisolated final class GameControllers: @unchecked Sendable {
     func detach(_ controller: GCController) {
         guard let entry = table.remove(controller) else { return }
         controller.input.inputStateAvailableHandler = nil
+        // The buttons go back to iOS's gestures: another application may have
+        // the controller next, and so may Andarium's own screens.
+        Self.setSystemGestures(.enabled, on: controller)
         session.disconnect(id: entry.id)
         GamepadDiagnostics.note("controller \(entry.id) disconnected")
         if table.isEmpty { cancelBatteryReads() }
+    }
+
+    /// What iOS does with the buttons it keeps for its own gestures on a
+    /// controller: Home, Menu, Options and Share.
+    private static func setSystemGestures(_ state: GCControllerElement.SystemGestureState, on controller: GCController) {
+        for element in [GamepadReading.Element.home, .menu, .options, .share] {
+            controller.physicalInputProfile.buttons[element.name.rawValue]?.preferredSystemGestureState = state
+        }
     }
 
     /// Reads every buffered state in order, so that no tap between two
