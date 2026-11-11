@@ -148,13 +148,15 @@ public:
     {
         return false;
     }
-    /* Whether the transport answers a guest's kick before it runs the
-     * kicked queue rather than after. The kicking vCPU waits for that answer
-     * with its interrupts off, so a device whose requests can run long, or
-     * whose guest waits for their completions anyway, frees the vCPU for the
-     * length of the work. While such a queue runs the guest adds buffers
-     * without kicking, and the transport looks for them before it finishes.
-     */
+    /* Whether the transport runs a kicked queue with the guest's
+     * notifications off: it tells the guest not to kick
+     * (VRING_USED_F_NO_NOTIFY) while the queue runs, looks for the buffers
+     * the guest adds meanwhile before it finishes, and answers a kick that
+     * asks for an answer before it runs the queue rather than after. Only a
+     * console's kick asks for one; every other driver's asks for none, so its
+     * vCPU never waits for the backend. A device whose requests can run long,
+     * or whose guest waits for their completions anyway, sets it, so the
+     * guest's kicks do not pile up behind the work. */
     [[nodiscard]] virtual bool answersKicksBeforeRunning() const noexcept
     {
         return false;
