@@ -22,6 +22,15 @@ struct SnapshotActivity: Equatable {
     /// The snapshot operations finished so far, including a guest's setup and
     /// erase. A listing older than this count is stale: read again.
     var revision = 0
+
+    /// An operation that holds the guest's files is under way: nothing else
+    /// that changes them starts beside it, and the screens offer none. A
+    /// rename is not one; it is allowed at any time, and a start or another
+    /// operation waits for it (`SnapshotDriver.renameSnapshot`).
+    var holdsGuestFiles: Bool {
+        guard let operation else { return false }
+        return operation != .rename
+    }
 }
 
 /// What the screens call to work with the snapshots of the guest's data disk
@@ -44,7 +53,8 @@ protocol SnapshotDriver: AnyObject {
     /// it would take alone, the space they use together and what Create would
     /// say. The figures are measured off the main actor. `measured: false`
     /// leaves the figures out and returns without measuring, so the names can
-    /// show first (`SnapshotListing.isMeasured`).
+    /// show first (`SnapshotListing.isMeasured`). A caller that is cancelled
+    /// stops the measuring and gets the names, unmeasured.
     ///
     /// A listing is never older than the last finished operation: it waits for
     /// one under way and reads again if one started or finished while it read.
@@ -88,7 +98,7 @@ extension AppModel {
     var snapshotGate: SnapshotRefusal? {
         guard snapshotDriver != nil else { return .noData }
         return SnapshotRules.gate(
-            phase: phase, runtimeActive: snapshotActivity.runtimeActive, operationUnderWay: snapshotActivity.operation != nil)
+            phase: phase, runtimeActive: snapshotActivity.runtimeActive, operationUnderWay: snapshotActivity.holdsGuestFiles)
     }
 
     func takeSnapshot(named name: String) async -> SnapshotResult<SnapshotSummary> {
@@ -109,6 +119,10 @@ extension AppModel {
         case .done(let restored):
             lifecycle.guest = restored
             refreshPlan()
+            #if !APP_STORE
+            // The preview reads no files: it plays the plan the restore leaves.
+            if self.driver == nil, let planAfterRestore { plan = planAfterRestore }
+            #endif
             return .done(())
         case .refused(let refusal):
             // A restore that took effect and did not finish changed the files.
@@ -128,5 +142,16 @@ extension AppModel {
     func renameSnapshot(_ id: SnapshotID, to name: String) async -> SnapshotResult<Void> {
         guard let snapshotDriver else { return .refused(.noData) }
         return await snapshotDriver.renameSnapshot(id, to: name)
+    }
+
+    /// Home's "System image updated" card gives way to the note of a restored
+    /// older snapshot, or of a restore that did not finish, that the next start
+    /// updates it: the card would say it again.
+    var updateNoticeIsShown: Bool { restoredSnapshot?.updatesTo == nil && !snapshots.unfinishedRestoreUpdates }
+
+    /// The guest was erased or made anew: nothing read about its snapshots holds.
+    func forgetSnapshots() {
+        snapshots.reset()
+        restoredSnapshot = nil
     }
 }
