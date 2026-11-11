@@ -742,6 +742,22 @@ uml_add_guest_integration_test(
     TIMEOUT 300
     CPUS 2)
 
+# The launcher's --hardware-input offers the guest a keyboard, a mouse and a
+# pointer that the host plugs and unplugs while it runs, and the guest's
+# virtio_input driver registers and unregisters their input devices to follow:
+# the runner is a VNC client whose keys and pointer plug them and whose
+# departure unplugs them, once more for each kind, with a key and a button held
+# across the unplug, and in quick succession. A kernel without the driver's
+# configuration handling fails the first check, which wants no input device for
+# a device that reports no event.
+uml_add_guest_integration_test(
+    NAME guest-hardware-input
+    SCRIPT input/run_guest_hardware_input.py
+    LABELS guest;input;gpu
+    TIMEOUT 600
+    CPUS 2
+    GPUS 1)
+
 # The kernel describes the virtual machine in SMBIOS tables that userspace
 # reads from sysfs, and provides no /dev/mem.
 uml_add_guest_integration_test(
