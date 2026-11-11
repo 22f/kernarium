@@ -199,15 +199,71 @@ struct GamepadSessionTests {
         #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(pad, state)))
     }
 
-    @Test func aStartThatComesBeforeTheCreatedAnswerIsEnoughOnceBothHaveCome() {
+    @Test func aStartThatComesBeforeTheCreatedAnswerIsOfADeviceThatIsGone() {
         let rig = greeted()
         let pad = dualSense(1)
         rig.session.connect(pad, state: .neutral)
         _ = rig.guest.nextFrame()
+        // The relay answers a CREATE before anything of its device.
         rig.guest.send(.event(slot: 0, event: .start))
-        #expect(noFrame(rig))
         rig.guest.send(.created(slot: 0, result: 0))
-        #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(pad, .neutral)))
+        #expect(barrier(rig))
+        rig.session.submit(GamepadState(buttons: .south), for: 1)
+        #expect(noFrame(rig))
+        rig.guest.send(.event(slot: 0, event: .start))
+        #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(pad, GamepadState(buttons: .south))))
+    }
+
+    // MARK: A slot that is used again
+
+    /// Controller 1 holds slot 0 with its CREATE unanswered and leaves, and
+    /// controller 2 takes the slot: the relay's answers to the first CREATE
+    /// come before the second's.
+    private func reusedSlot() -> (rig: Rig, second: GamepadController) {
+        let rig = greeted()
+        let first = dualSense(1)
+        let second = dualSense(2)
+        rig.session.connect(first, state: .neutral)
+        #expect(rig.guest.nextFrame() == createFrame(first, slot: 0))
+        rig.session.disconnect(id: 1)
+        #expect(rig.guest.nextFrame() == .destroy(slot: 0))
+        rig.session.connect(second, state: .neutral)
+        #expect(rig.guest.nextFrame() == createFrame(second, slot: 0))
+        return (rig, second)
+    }
+
+    @Test func aSlotUsedAgainTakesNothingOfTheFirstControllersAnswers() {
+        let (rig, second) = reusedSlot()
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.event(slot: 0, event: .start))
+        rig.guest.send(rumble(strong: 255, weak: 255))
+        #expect(barrier(rig))
+        // The second controller is not ready, and does not rumble at the first's level.
+        rig.session.submit(GamepadState(buttons: .south), for: 2)
+        #expect(noFrame(rig))
+        #expect(!rig.player.calls.contains { if case .play = $0 { true } else { false } })
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.event(slot: 0, event: .start))
+        #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(second, GamepadState(buttons: .south))))
+    }
+
+    @Test func aFailedCreateOfTheFirstControllerDoesNotFailTheSecond() {
+        let (rig, second) = reusedSlot()
+        rig.guest.send(.created(slot: 0, result: -22))
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.event(slot: 0, event: .start))
+        #expect(rig.guest.nextFrame() == .input(slot: 0, report: firstReport(second, .neutral)))
+        #expect(!rig.log.lines.contains { $0.contains("could not make") })
+    }
+
+    @Test func aFailedCreateOfTheSecondControllerStillFailsIt() {
+        let (rig, _) = reusedSlot()
+        rig.guest.send(.created(slot: 0, result: 0))
+        rig.guest.send(.created(slot: 0, result: -22))
+        rig.guest.send(.event(slot: 0, event: .start))
+        rig.session.submit(GamepadState(buttons: .south), for: 2)
+        #expect(noFrame(rig))
+        #expect(rig.log.lines.contains { $0.contains("could not make") })
     }
 
     @Test func aStateGivenBeforeTheDeviceIsReadyIsHeldAndTheNewestIsSent() {

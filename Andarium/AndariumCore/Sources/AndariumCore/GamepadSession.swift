@@ -70,6 +70,14 @@ public protocol GamepadIndicators: AnyObject, Sendable {
 /// devices; returning to it sends each device its state, which the application
 /// refreshes from the controllers.
 ///
+/// **Whose reply.** The relay answers each `CREATE` once, in order, and its
+/// other frames name only a slot's number. A controller that leaves while its
+/// `CREATE` is unanswered, or while its output is in flight, may be replaced at
+/// once by another that takes the slot, so the session counts the `CREATE`s of
+/// each slot that the relay has not answered and takes nothing of the slot
+/// until the `CREATED` of the latest: what comes before it is of a device that
+/// is gone.
+///
 /// **Rumble.** An output report of the guest's driver sets a motor's level
 /// until the next one; each motor plays as a tone of the haptics' vocabulary on
 /// the controller's handle (`GamepadRumble`), which the `HapticPlayer` plays.
@@ -143,6 +151,9 @@ public final class GamepadSession: @unchecked Sendable {
     private var failedAttempts = 0
     private var gaveUp = false
     private var slots = [Slot?](repeating: nil, count: GamepadProtocol.slotCount)
+    /// The `CREATE`s of each slot that the relay has not answered, kept across
+    /// the slot being emptied and filled again.
+    private var unanswered = [Int](repeating: 0, count: GamepadProtocol.slotCount)
     private var nextIncarnation: UInt64 = 0
     private var scoreSequence: UInt32 = 0
 
@@ -333,6 +344,7 @@ public final class GamepadSession: @unchecked Sendable {
     /// Every device is gone from the guest: the controllers stay, to be made
     /// again at the next hello.
     private func forgetDevices() {
+        unanswered = [Int](repeating: 0, count: GamepadProtocol.slotCount)
         for index in slots.indices {
             guard var slot = slots[index] else { continue }
             slot.phase = .absent
@@ -417,7 +429,7 @@ public final class GamepadSession: @unchecked Sendable {
         slot.encoder = slot.profile.makeEncoder()
         slot.incarnation = newIncarnation()
         slots[index] = slot
-        stream.send(.create(slot.profile.create(slot: index)))
+        if stream.send(.create(slot.profile.create(slot: index))) { unanswered[index] += 1 }
     }
 
     private func becomeReady(_ index: Int) {
@@ -494,10 +506,16 @@ public final class GamepadSession: @unchecked Sendable {
                 return
             }
             greeted = true
+            unanswered = [Int](repeating: 0, count: GamepadProtocol.slotCount)
             slotLimit = min(Int(count), GamepadProtocol.slotCount)
             for index in slots.indices { createIfPossible(index) }
         case .created(let index, let result):
             guard greeted else { return protocolBroken() }
+            // The reply of a device that is gone does not count; the latest
+            // one's does.
+            guard unanswered[index] > 0 else { return }
+            unanswered[index] -= 1
+            guard unanswered[index] == 0 else { return }
             guard var slot = slots[index], slot.phase == .creating else { return }
             guard result == 0 else {
                 log("gamepad: the guest could not make a device for \(slot.controller.name): \(result)")
@@ -510,7 +528,7 @@ public final class GamepadSession: @unchecked Sendable {
             if slot.started { becomeReady(index) }
         case .event(let index, let event):
             guard greeted else { return protocolBroken() }
-            guard var slot = slots[index] else { return }
+            guard unanswered[index] == 0, var slot = slots[index] else { return }
             switch event {
             case .start:
                 guard slot.phase == .creating else { return }
@@ -529,7 +547,9 @@ public final class GamepadSession: @unchecked Sendable {
             }
         case .output(let index, let reportType, let data):
             guard greeted else { return protocolBroken() }
-            guard reportType == GamepadReportType.output, let slot = slots[index], slot.phase != .absent else { return }
+            guard unanswered[index] == 0, reportType == GamepadReportType.output, let slot = slots[index],
+                slot.phase != .absent
+            else { return }
             apply(slot.profile.decodeOutput(data), to: index)
         case .getReport(let index, let reportType, let number, let id):
             guard greeted else { return protocolBroken() }
