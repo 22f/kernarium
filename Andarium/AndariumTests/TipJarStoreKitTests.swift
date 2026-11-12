@@ -152,9 +152,12 @@ struct TipJarStoreKitTests {
         try await serving()
         // A purchase made outside the app, which nobody finished. The application's own launch
         // listener does not run under a test, so it is the one this test starts that finishes it.
+        // The store lists it as unfinished a moment after the purchase returns (on a Simulator that
+        // has just booted, a little more than a moment).
         try await session.buyProduct(identifier: "com.example.andarium.tip.ultra")
         #expect(
-            await unfinished() == ["com.example.andarium.tip.ultra"], "the purchase is open until a listener finishes it")
+            await eventually { await unfinished() == ["com.example.andarium.tip.ultra"] },
+            "the purchase is open until a listener finishes it")
         let listener = TipJarUpdates.listen(.live)
         defer { listener.cancel() }
         #expect(await eventually { await unfinished().isEmpty }, "the listener finished what was open at launch")
