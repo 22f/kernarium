@@ -75,6 +75,9 @@ DEBUG_SUPPORT = (
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
+    # The Simulator preview's hooks into the Buy me tokens sheet.
+    ("tip jar preview", "int _s8Andarium14TipJarServicesV16previewOpensSheetSbvg(void) { return 1; }\n"),
+    ("tip jar preview", "int _s8Andarium14TipJarServicesV12previewPlaysyyAA0aB5ModelCYaYbcvg(void) { return 1; }\n"),
     # The UI tests' probe of the guest's keyboard and mouse: its log, its launch,
     # the recording runtime, and the identifiers of its two elements.
     ("input probe", "int _s8Andarium10InputProbeC6recordyySSF(void) { return 1; }\n"),
@@ -142,7 +145,16 @@ FEEDBACK_FEATURE = (
 FEEDBACK_PARTIAL = (
     'const char *fixture(void) { return "Andarium feedback: AndariumFeedbackAddress"; }\n'
 )
-# Config/Info.plist as a fixture: the feedback block is conditional, and a value
+# Buy me tokens as a binary holds it: a type, the Info.plist key and the
+# StoreKit framework, which the build of the fixture links in.
+TIP_FEATURE = (
+    "const char *fixture(void) {\n"
+    '  return "AndariumTipProducts" "_$s8Andarium11TipJarModelC";\n'
+    "}\n"
+)
+# The same without StoreKit: a build that lost part of the feature.
+TIP_PARTIAL = 'const char *fixture(void) { return "AndariumTipProducts" "_$s8Andarium11TipJarModelC"; }\n'
+# Config/Info.plist as a fixture: the feedback and tip blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -151,6 +163,19 @@ INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 #ifdef FEEDBACK_MAIL
 \t<key>AndariumFeedbackAddress</key>
 \t<string>$(FEEDBACK_ADDRESS)</string>
+#endif
+#ifdef TIP_JAR
+\t<key>AndariumTipProducts</key>
+\t<dict>
+\t\t<key>lite</key>
+\t\t<string>$(TIP_LITE)</string>
+\t\t<key>max</key>
+\t\t<string>$(TIP_MAX)</string>
+\t\t<key>pro</key>
+\t\t<string>$(TIP_PRO)</string>
+\t\t<key>ultra</key>
+\t\t<string>$(TIP_ULTRA)</string>
+\t</dict>
 #endif
 \t<key>CFBundleName</key>
 \t<string>Fixture</string>
@@ -325,6 +350,217 @@ def make_app(
         }))
         (bundle / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(MANIFEST))
     return app
+
+
+def tip_app(root: Path, name: str, executable: Path, info: dict, *, table: bool = True,
+            framework: Path | None = None) -> Path:
+    """An application with the String Catalog table of Buy me tokens, which the build compiles
+    in with the feature, unless `table` is false."""
+    app = make_app(root, name, executable, info, framework=framework)
+    if table:
+        (app / "en.lproj").mkdir(exist_ok=True)
+        (app / "en.lproj" / "TipJar.strings").write_bytes(
+            plistlib.dumps({"Buy me tokens": "Buy me tokens"}, fmt=plistlib.FMT_BINARY))
+    return app
+
+
+def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedback_info: dict,
+                  receiver: str, feedback_appstore: list[str], feedback_local: list[str],
+                  feedback_arranged: list[str]) -> None:
+    """Buy me tokens is compiled in only where the build names its four product identifiers, in
+    either direction, alone and with Send feedback. The identifiers are made up."""
+    ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
+    named = ",".join(ids.values())
+    named_args = ["--tip-products", named, "--tip-local-products", named]
+    local_args = ["--tip-local-products", named]
+    arranged_ids = {tier: f"com.example.andarium.tip.{tier}" for tier in ids}
+    arranged = ",".join(arranged_ids.values())
+    arranged_args = ["--tip-products", arranged]
+    tip_info = app_info(AndariumTipProducts=ids)
+    feature = build(root, "tip-feature", TIP_FEATURE, ["-framework", "StoreKit"])
+    partial = build(root, "tip-partial", TIP_PARTIAL)
+
+    # With the identifiers: the code, the key and the table, and the identifiers the build named.
+    check(tip_app(root, "tip-built", feature, tip_info), passes=True,
+          expect="Buy me tokens is compiled in", args=named_args)
+    check(tip_app(root, "tip-absent", clean, app_info(), table=False), passes=True,
+          expect="Buy me tokens is not compiled in")
+    check(tip_app(root, "tip-no-key", feature, app_info()), passes=False,
+          expect="AndariumTipProducts must be the four product identifiers", args=named_args)
+    check(tip_app(root, "tip-other-key", feature, app_info(AndariumTipProducts={**ids, "pro": "com.fixture.other"})),
+          passes=False, expect="must be the four product identifiers the build names", args=named_args)
+    check(tip_app(root, "tip-short-key", feature, app_info(AndariumTipProducts={"lite": ids["lite"]})),
+          passes=False, expect="must be the four product identifiers the build names", args=named_args)
+    check(tip_app(root, "tip-empty-key", feature, app_info(AndariumTipProducts={**ids, "max": ""})),
+          passes=False, expect="must be the four product identifiers the build names", args=named_args)
+    check(tip_app(root, "tip-not-built", clean, tip_info), passes=False,
+          expect="lacks Buy me tokens", args=named_args)
+    check(tip_app(root, "tip-partial", partial, tip_info), passes=False,
+          expect="StoreKit.framework", args=named_args)
+    check(tip_app(root, "tip-no-table", feature, tip_info, table=False), passes=False,
+          expect="lacks the TipJar strings table", args=named_args)
+
+    # No identifiers, so nothing of it: not the code, the key, the table or its words.
+    check(tip_app(root, "tip-code-without", feature, app_info(), table=False), passes=False,
+          expect="carries Buy me tokens")
+    check(tip_app(root, "tip-key-without", clean, tip_info, table=False), passes=False,
+          expect="has AndariumTipProducts though the build names no product identifiers")
+    check(tip_app(root, "tip-framework-without", clean, app_info(), table=False, framework=feature),
+          passes=False, expect="Runtime.framework/Runtime: carries Buy me tokens")
+    check(tip_app(root, "tip-table-without", clean, app_info()), passes=False,
+          expect="is the TipJar strings table though the build names no product identifiers")
+    words = make_app(root, "tip-words", clean, app_info())
+    (words / "en.lproj").mkdir()
+    (words / "en.lproj" / "Localizable.strings").write_bytes(
+        plistlib.dumps({"Buy me tokens": "Buy me tokens"}, fmt=plistlib.FMT_BINARY))
+    check(words, passes=False, expect="has Buy me tokens strings")
+    # Another language's table of the feature is found by its name as well.
+    other_language = tip_app(root, "tip-table-ja", clean, app_info(), table=False)
+    (other_language / "ja.lproj").mkdir()
+    (other_language / "ja.lproj" / "TipJar.strings").write_bytes(b'"Done" = "x";\n')
+    check(other_language, passes=False, expect="ja.lproj/TipJar.strings: is the TipJar strings table")
+
+    # The four identifiers are all there is, in the App Store configuration: not three, and four
+    # that are well formed, distinct and no placeholder.
+    for name, fields in (
+            ("three", [ids["lite"], ids["pro"], "", ids["ultra"]]),
+            ("one", [ids["lite"], "", "", ""]),
+            ("last", ["", "", "", ids["ultra"]])):
+        check(tip_app(root, f"tip-{name}", feature, tip_info), passes=False, expect="of the four product identifiers",
+              args=["--tip-products", ",".join(fields)])
+    shapes = ("has space", "-lead", ".lead", "quote\"d", "semi;colon", "a/b", "\u00e9.fixture", "x" * 101, "<a.b>")
+    for index, shape in enumerate(shapes):
+        fields = [ids["lite"], ids["pro"], ids["max"], shape]
+        check(tip_app(root, f"tip-shape-{index}", feature, app_info(AndariumTipProducts={**ids, "ultra": shape})),
+              passes=False, expect="the ultra identifier in the local configuration is not a product identifier",
+              args=["--tip-products", ",".join(fields)])
+    for index, prefix in enumerate(("com.example.", "org.example.", "net.example.", "example.")):
+        placeholder = f"{prefix}pro"
+        check(tip_app(root, f"tip-placeholder-{index}", feature, app_info(AndariumTipProducts={**ids, "pro": placeholder})),
+              passes=False, expect="the pro identifier in the local configuration is a placeholder",
+              args=["--tip-products", ",".join([ids["lite"], placeholder, ids["max"], ids["ultra"]])])
+    same = [ids["lite"], ids["lite"], ids["max"], ids["ultra"]]
+    check(tip_app(root, "tip-same", feature, app_info(AndariumTipProducts=dict(zip(ids, same)))), passes=False,
+          expect="two tiers name the same product identifier", args=["--tip-products", ",".join(same)])
+    for index, good in enumerate(("a", "a.b_c-d.1", "x" * 100)):
+        fields = [good, ids["pro"], ids["max"], ids["ultra"]]
+        check(tip_app(root, f"tip-shape-ok-{index}", feature,
+                      app_info(AndariumTipProducts={**ids, "lite": good})),
+              passes=True, expect="Buy me tokens is compiled in", args=["--tip-products", ",".join(fields)])
+
+    # A build that names none still has the feature's file names in the linker's debug map of its
+    # Debug or Release product; the symbols of a function the feature defines are searched, though.
+    mapped = build_with_debug_map(root, "mapped-tip", "/Users/NAME/TipJarSheet")
+    symbol_only = build_with_debug_map(
+        root, "tip-symbol-only", "/Users/NAME/Project",
+        "__attribute__((visibility(\"hidden\"))) int plain_first(void) { return 2; }\n"
+        "__attribute__((visibility(\"hidden\"))) int _s8Andarium11TipJarModelC4openyyF(void) { return 1; }\n")
+    other = ["--tip-jar", "--configuration"]
+    for configuration in ("Debug", "Release"):
+        check(tip_app(root, f"tip-{configuration}-debug-map", mapped, app_info(), table=False), passes=True,
+              expect=f"Buy me tokens is not compiled in ({configuration})", args=[*other, configuration])
+        check(tip_app(root, f"tip-{configuration}-symbol-only", symbol_only, app_info(), table=False), passes=False,
+              expect="carries Buy me tokens (TipJar", args=[*other, configuration])
+    check(tip_app(root, "tip-appstore-debug-map", mapped, app_info(), table=False), passes=True,
+          expect="Buy me tokens is not compiled in")
+    check(tip_app(root, "tip-appstore-symbol-only", symbol_only, app_info(), table=False), passes=False,
+          expect="carries Buy me tokens (TipJar")
+    debug = tip_app(root, "tip-debug-library", clean, app_info(), table=False)
+    shutil.copyfile(feature, debug / "Fixture.debug.dylib")
+    check(debug, passes=False, expect="Fixture.debug.dylib: carries Buy me tokens")
+
+    # The other configurations: absent, or the arranged example identifiers, which Debug alone takes.
+    arranged_info = app_info(AndariumTipProducts=arranged_ids)
+    for configuration in ("Debug", "Release"):
+        check(tip_app(root, f"tip-{configuration}-absent", clean, app_info(), table=False), passes=True,
+              expect=f"Buy me tokens is not compiled in ({configuration})", args=[*other, configuration])
+        # The local configuration's identifiers never reach them.
+        check(tip_app(root, f"tip-{configuration}-ids", feature, tip_info), passes=False,
+              expect="not the arranged example ones", args=[*other, configuration, *named_args])
+        check(tip_app(root, f"tip-{configuration}-code", feature, app_info(), table=False), passes=False,
+              expect="carries Buy me tokens", args=[*other, configuration])
+        check(tip_app(root, f"tip-{configuration}-key", clean, tip_info, table=False), passes=False,
+              expect="though the build names no product identifiers", args=[*other, configuration])
+        check(tip_app(root, f"tip-{configuration}-three", feature, tip_info), passes=False,
+              expect="not the arranged example ones",
+              args=[*other, configuration, "--tip-products", f"{arranged_ids['lite']},,,"])
+    check(tip_app(root, "tip-Debug-arranged", feature, arranged_info), passes=True,
+          expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_args])
+    check(tip_app(root, "tip-Release-arranged", feature, arranged_info), passes=False,
+          expect="only Debug takes the arrangement", args=[*other, "Release", *arranged_args])
+    check(tip_app(root, "tip-Release-arranged-absent", clean, app_info(), table=False), passes=False,
+          expect="only Debug takes the arrangement", args=[*other, "Release", *arranged_args])
+    check(tip_app(root, "tip-appstore-arranged", feature, arranged_info), passes=False,
+          expect="is a placeholder", args=arranged_args)
+
+    # The local configuration's identifiers are in no file of a bundle that does not name them, and
+    # the check never prints one. Bytes anywhere count, in either case.
+    secret = ids["pro"]
+    leaky = build(root, "tip-leaky", f'const char *fixture(void) {{ return "{secret}"; }}\n')
+    data_file = tip_app(root, "tip-leak-data", clean, app_info(), table=False)
+    (data_file / "Data.bin").write_bytes(b"\0\1" + secret.upper().encode() + b"\2")
+    nested = tip_app(root, "tip-leak-nested", clean, app_info(), table=False)
+    (nested / "en.lproj").mkdir()
+    (nested / "en.lproj" / "InfoPlist.strings").write_bytes(f'"CFBundleName" = "{secret}";\n'.encode())
+    straddle = tip_app(root, "tip-leak-straddle", clean, app_info(), table=False)
+    (straddle / "Big.bin").write_bytes(b"\0" * ((8 << 20) - 5) + secret.encode() + b"\0")
+    # Only one of the four is there, which is as much of a leak.
+    last = tip_app(root, "tip-leak-last", clean, app_info(), table=False)
+    (last / "Data.bin").write_bytes(ids["ultra"].encode())
+    leaks = (
+        ("executable", tip_app(root, "tip-leak-executable", leaky, app_info(), table=False), "Fixture"),
+        ("framework", tip_app(root, "tip-leak-framework", clean, app_info(), table=False, framework=leaky),
+         "Frameworks/Runtime.framework/Runtime"),
+        ("info-plist", tip_app(root, "tip-leak-info", clean, tip_info, table=False), "Info.plist"),
+        ("data-file", data_file, "Data.bin"),
+        ("nested-file", nested, "en.lproj/InfoPlist.strings"),
+        ("straddle", straddle, "Big.bin"),
+        ("last", last, "Data.bin"),
+    )
+    for name, app, path in leaks:
+        for configuration in ("Debug", "Release"):
+            for arguments in (local_args, [*local_args, *arranged_args]):
+                check(app, passes=False, expect=f"{path}: holds a product identifier of the local configuration",
+                      never=secret, args=[*other, configuration, *arguments])
+        check(app, passes=False, expect=f"{path}: holds a product identifier of the local configuration",
+              never=secret, args=local_args)
+        check(app, passes=False, never=ids["ultra"], args=local_args)
+    check(tip_app(root, "tip-leak-none", clean, app_info(), table=False, framework=clean), passes=True,
+          expect="ready for the App Store", args=local_args)
+    check(tip_app(root, "tip-leak-none-debug", clean, app_info(), table=False), passes=True,
+          expect="Buy me tokens is not compiled in (Debug)", args=[*other, "Debug", *local_args])
+    check(tip_app(root, "tip-leak-none-arranged", feature, arranged_info), passes=True,
+          expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *local_args, *arranged_args])
+    # An App Store build that names them holds them in Info.plist, and nowhere else.
+    check(tip_app(root, "tip-leak-named", feature, tip_info), passes=True,
+          expect="Buy me tokens is compiled in", args=named_args)
+    named_leak = tip_app(root, "tip-leak-named-elsewhere", feature, tip_info)
+    (named_leak / "Data.bin").write_bytes(secret.encode())
+    check(named_leak, passes=True, expect="Buy me tokens is compiled in", args=named_args)
+
+    # Both features, alone and together: each says its own line and neither disturbs the other.
+    both_code = build(root, "both", FEEDBACK_FEATURE + TIP_FEATURE.replace("fixture", "tip_fixture"),
+                      ["-framework", "MessageUI", "-framework", "StoreKit"])
+    both_info = app_info(AndariumFeedbackAddress=receiver, AndariumTipProducts=ids)
+    together = tip_app(root, "both-named", both_code, both_info)
+    check(together, passes=True, expect="Buy me tokens is compiled in", args=[*feedback_appstore, *named_args])
+    check(together, passes=True, expect="Send feedback is compiled in", args=[*feedback_appstore, *named_args])
+    check(tip_app(root, "both-feedback-only", feedback_feature, app_info(AndariumFeedbackAddress=receiver),
+                  table=False), passes=True, expect="Buy me tokens is not compiled in",
+          args=[*feedback_appstore, *local_args])
+    check(tip_app(root, "both-tip-only", feature, tip_info), passes=True, expect="Send feedback is not compiled in",
+          args=[*feedback_local, *named_args])
+    # The one that is not named cannot ride in the other's product.
+    check(tip_app(root, "both-tip-in-feedback", both_code, app_info(AndariumFeedbackAddress=receiver),
+                  table=False), passes=False, expect="carries Buy me tokens", args=feedback_appstore)
+    check(tip_app(root, "both-feedback-in-tip", both_code, tip_info), passes=False,
+          expect="carries Send feedback", args=named_args)
+    check(tip_app(root, "both-none", clean, app_info(), table=False), passes=True, expect="ready for the App Store",
+          args=[*feedback_local, *local_args])
+    # Debug takes both arrangements together.
+    check(tip_app(root, "both-Debug-arranged", both_code,
+                  app_info(AndariumFeedbackAddress="feedback@example.com", AndariumTipProducts=arranged_ids)),
+          passes=True, expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_args])
 
 
 def main() -> int:
@@ -702,6 +938,8 @@ def main() -> int:
         named_leak = make_app(root, "leak-named-elsewhere", feature, feedback_info)
         (named_leak / "Data.bin").write_bytes(receiver.encode())
         check(named_leak, passes=True, expect="Send feedback is compiled in", args=appstore)
+
+        check_tip_jar(root, check, clean, feature, feedback_info, receiver, appstore, local, arranged)
 
         # The built Info.plist keeps every value of Config/Info.plist, whichever
         # way the feedback block went: the preprocessor changes the feedback key

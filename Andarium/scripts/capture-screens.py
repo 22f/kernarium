@@ -48,7 +48,12 @@ the local file:
         FEEDBACK_ADDRESS=feedback@example.com build
 
 Without it the Preview has no Send feedback, its shots are skipped and said
-so, and the rest is unaffected.
+so, and the rest is unaffected. The shots of Buy me tokens are the same: they
+need the four settings of its arrangement, which carry the example product
+identifiers and never read the local file:
+
+        TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro \\
+        TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard
@@ -104,6 +109,8 @@ class Shot:
     alert: bool = False
     # The screen is Send feedback's, which only a Preview built with FEEDBACK_ADDRESS has.
     feedback: bool = False
+    # The screen is Buy me tokens', which only a Preview built with the four TIP_ settings has.
+    tipjar: bool = False
 
     def launch_arguments(self) -> list[str]:
         return ["-screen", self.screen, *self.args]
@@ -116,6 +123,11 @@ def s(id: str, group: str, screen: str, description: str, *args: str, dark: bool
 def feedback(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 14.0) -> Shot:
     """A shot of Send feedback, which exists only in a Preview built with `FEEDBACK_ADDRESS=feedback@example.com`."""
     return Shot(id, "Feedback", screen, description, tuple(args), dark, wait, feedback=True)
+
+
+def tipjar(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 8.0) -> Shot:
+    """A shot of Buy me tokens, which exists only in a Preview built with the arrangement of the four `TIP_` settings."""
+    return Shot(id, "Buy me tokens", screen, description, tuple(args), dark, wait, tipjar=True)
 
 
 SYSTEM = ("-systemMicrophone", "YES")
@@ -274,7 +286,6 @@ SHOTS: list[Shot] = [
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
     s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
     # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
-    feedback("feedback-entrance-info", "info", "Info with Send feedback in a section of its own under the header, apart from the version.", dark=True, wait=3.0),
     feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
     feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
     feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
@@ -283,8 +294,20 @@ SHOTS: list[Shot] = [
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
-    feedback("feedback-info", "feedback-info", "Send feedback opened from Info, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
-    feedback("feedback-info-filled", "feedback-info-filled", "Feedback that is not a bug, from Info: a suggestion with a photo; Send is ready."),
+    feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-home-filled", "feedback-home-filled", "Feedback that is not a bug, from Home: a suggestion with a photo; Send is ready."),
+    # Buy me tokens: needs a Preview built with the four TIP_ settings (see --help)
+    tipjar("tipjar-entrance-home", "tipjar-home", "Home's toolbar after a virtual machine is set up: the one menu button where Info was, which holds Info, Send feedback and Buy me tokens (the menu itself is not captured).", dark=True, wait=3.0),
+    tipjar("tipjar", "tipjar", "Buy me tokens over Home: the chat with Andarium's developer, the plain statement and the four tiers with the store's prices.", dark=True),
+    tipjar("tipjar-loading", "tipjar-loading", "The store has not answered yet: the four tiers with a spinner for each price."),
+    tipjar("tipjar-missing", "tipjar-missing", "The store knows three of the four: the others are offered, Max is left out."),
+    tipjar("tipjar-unavailable", "tipjar-unavailable", "The store gave nothing: a note that tips are not available and Try again."),
+    tipjar("tipjar-restricted", "tipjar-restricted", "Purchases are not allowed on this device: the tiers dimmed with their prices and one line, no way to lift the restriction."),
+    tipjar("tipjar-purchasing", "tipjar-purchasing", "A purchase of Pro is under way: the person's reply with a spinner while the store's own sheet is up."),
+    tipjar("tipjar-thanks", "tipjar-thanks", "After a tip: the developer's thanks inside the sheet, and Done as the one control; the tiers are not offered again.", dark=True),
+    tipjar("tipjar-pending", "tipjar-pending", "A tip that waits for a family organiser's approval (Ask to Buy): the note says it can be closed meanwhile."),
+    tipjar("tipjar-failed", "tipjar-failed", "A purchase that failed: the store's own message under a note, the tiers still offered."),
+    tipjar("tipjar-prices", "tipjar", "The tiers with four prices of very different widths, as different storefronts format them.", "-tipPrices", "mixed"),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
 ]
@@ -386,6 +409,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
     if shot.feedback and state.get("feedback") is not True:
         return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
+    if shot.tipjar and state.get("tipjar") is not True:
+        return "this Preview has no Buy me tokens: build it with the four TIP_ settings of the arrangement on the command line"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None
@@ -626,14 +651,20 @@ def capture_all(args: argparse.Namespace) -> int:
             print(f"capture-screens.py: {name} ({udid}): the Preview does not come to the front; nothing captured", file=sys.stderr)
             status = 1
             continue
-        # The Preview reports (from the launch that preflight made) whether it was built with Send feedback.
-        has_feedback = (app_state(udid) or {}).get("feedback") is True
-        wanted = [shot for shot in selected if has_feedback or not shot.feedback]
-        if len(wanted) < len(selected):
-            print(
-                f"{name}: skipping {len(selected) - len(wanted)} shots of Send feedback: this Preview was built "
-                "without it (see --help)", file=sys.stderr,
-            )
+        # The Preview reports (from the launch that preflight made) whether it was built with Send feedback and
+        # with Buy me tokens.
+        reported = app_state(udid) or {}
+        has_feedback = reported.get("feedback") is True
+        has_tipjar = reported.get("tipjar") is True
+        wanted = [shot for shot in selected if (has_feedback or not shot.feedback) and (has_tipjar or not shot.tipjar)]
+        for label, present, flagged in (("Send feedback", has_feedback, lambda shot: shot.feedback),
+                                        ("Buy me tokens", has_tipjar, lambda shot: shot.tipjar)):
+            skipped = sum(1 for shot in selected if flagged(shot) and not present)
+            if skipped:
+                print(
+                    f"{name}: skipping {skipped} shots of {label}: this Preview was built without it (see --help)",
+                    file=sys.stderr,
+                )
         # The shot of the system's own alert runs last: the alert outlives its shot and covers whatever launches next.
         plain = [shot for shot in wanted if not shot.alert]
         passes = [("light", plain), ("dark", [shot for shot in plain if shot.dark]),

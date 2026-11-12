@@ -50,7 +50,16 @@ application that must:
     the build named. The local configuration's receiver is in no file of a
     bundle whose build does not name it, which the check finds by its bytes
     and never prints. Info.plist keeps every value of Config/Info.plist, as
-    its preprocessing is to change only the feedback key.
+    its preprocessing is to change only the feedback key; and
+  - carry Buy me tokens (Andarium/README.md#buy-me-tokens) only when the build
+    names its four product identifiers: the feature is compiled in exactly where
+    the ignored local configuration holds all four, in this configuration alone.
+    A product without them holds nothing of it: no type, StoreKit use, text,
+    strings table or Info.plist key; a product with them holds all of it and
+    the four identifiers the build named, each non-empty, well formed, distinct
+    and no placeholder. The local configuration's identifiers are in no file of
+    a bundle whose build does not name them, which the check finds by their
+    bytes and never prints.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -61,10 +70,11 @@ code still holds one fails, whether or not anything calls it.
 
 The Xcode project runs it as the last build phase of the App Store
 configuration, so a build that breaks one of these rules fails. In every other
-configuration a phase runs `--feedback`, which checks Send feedback alone: there
-the feature is absent unless a test or capture script arranged it with the
-example address, in Debug alone. Both print one line that says whether Send
-feedback is compiled in.
+configuration a phase runs `--feedback`, which checks Send feedback alone, and
+another `--tip-jar`, which checks Buy me tokens alone: there the feature is
+absent unless a test or capture script arranged it with the example address
+or identifiers, in Debug alone. Each prints one line that says whether its
+feature is compiled in.
 """
 
 from __future__ import annotations
@@ -137,6 +147,24 @@ FEEDBACK_FRAGMENTS = (
     b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
 # Words the feature puts in a String Catalog.
 FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
+# Buy me tokens. The build writes the four product identifiers to Info.plist,
+# a dictionary with one for each tier, under this key only where the feature is
+# compiled in (Andarium/Config/Andarium.xcconfig).
+TIP_KEY = "AndariumTipProducts"
+TIP_TIERS = ("lite", "pro", "max", "ultra")
+# The only identifiers a configuration other than AppStore may carry: the ones
+# the test and capture scripts arrange.
+TIP_ARRANGED = {tier: f"com.example.andarium.tip.{tier}" for tier in TIP_TIERS}
+# What the feature leaves in a binary: its types (Swift writes a name's length
+# before it, so a fragment of the name matches), the Info.plist key it reads
+# and the system framework only it uses.
+TIP_REQUIRED = (b"TipJarModel", TIP_KEY.encode(), b"StoreKit.framework")
+TIP_FRAGMENTS = (b"TipJar", *TIP_REQUIRED)
+# The feature's own strings table (Localization/TipJar.xcstrings), which a String
+# Catalog compiles to TipJar.strings in each language's directory, and a word of
+# it that no other table has.
+TIP_TABLE = "TipJar"
+TIP_WORDS = ("Buy me tokens",)
 # Domains and top-level domains that name no mailbox (RFC 2606, RFC 6761).
 PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net")
 PLACEHOLDER_TLDS = ("example", "invalid", "localhost", "test")
@@ -357,6 +385,10 @@ DEBUG_SYMBOLS = (
     # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
     # preview opens the sheet and fills a draft; the application never does.
     ("send feedback preview", (b"20previewOpensAtLaunch", b"14previewPrepare")),
+    # The Simulator preview's hooks into the Buy me tokens sheet
+    # (TipJarServices.previewOpensSheet and previewPlays): the preview opens the
+    # sheet and plays a purchase; the application never does.
+    ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.
@@ -500,10 +532,13 @@ def feedback_address_problems(configuration: str, address: str) -> list[str]:
     return []
 
 
-def receiver_leaks(app: Path, receiver: str) -> list[str]:
-    """The files of the bundle whose bytes hold the receiver of the local
-    configuration, in either case; named by path, never by the receiver."""
-    needle = receiver.lower().encode()
+def value_leaks(app: Path, values: list[str]) -> list[str]:
+    """The files of the bundle whose bytes hold any of the values of a local
+    configuration, in either case; named by path, never by the value."""
+    needles = [value.lower().encode() for value in values if value]
+    if not needles:
+        return []
+    keep = max(len(needle) for needle in needles) - 1
     found = []
     for directory, _directories, files in os.walk(app):
         for name in sorted(files):
@@ -515,20 +550,25 @@ def receiver_leaks(app: Path, receiver: str) -> list[str]:
                 with path.open("rb") as handle:
                     while chunk := handle.read(8 << 20):
                         window = (tail + chunk).lower()
-                        if needle in window:
+                        if any(needle in window for needle in needles):
                             found.append(str(path.relative_to(app)))
                             break
-                        tail = window[-(len(needle) - 1):] if len(needle) > 1 else b""
+                        tail = window[-keep:] if keep > 0 else b""
             except OSError:
                 continue
     return sorted(found)
 
 
-FEEDBACK_BLOCK = re.compile(r"^#ifdef FEEDBACK_MAIL\n.*?^#endif\n", re.S | re.M)
+def receiver_leaks(app: Path, receiver: str) -> list[str]:
+    """The files of the bundle whose bytes hold the receiver of the local configuration."""
+    return value_leaks(app, [receiver])
+
+
+FEEDBACK_BLOCK = re.compile(r"^#ifdef (?:FEEDBACK_MAIL|TIP_JAR)\n.*?^#endif\n", re.S | re.M)
 
 
 def info_source_problems(app: Path, source: Path) -> list[str]:
-    """Every key of Config/Info.plist but the feedback one, as the built
+    """Every key of Config/Info.plist but the feedback and tip ones, as the built
     Info.plist has it. The source is preprocessed (its feedback block is
     conditional), and a build adds keys of its own and fills in build
     settings, so what is compared is each source key, a value naming a build
@@ -555,7 +595,7 @@ def info_source_problems(app: Path, source: Path) -> list[str]:
 
     found = []
     for key, value in wanted.items():
-        if key == FEEDBACK_KEY:
+        if key in (FEEDBACK_KEY, TIP_KEY):
             continue
         if key not in built:
             found.append(f"Info.plist: {key} of {source.name} is missing from the built one")
@@ -640,6 +680,139 @@ def feedback_problems(
     return problems, compiled
 
 
+# One strict shape of a product identifier, the same rules as
+# TipJarProducts.isWellFormed: 1 to 100 letters, digits, `.`, `_` and `-`,
+# starting with a letter or digit.
+TIP_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
+# Reverse-DNS prefixes that name no developer (RFC 2606's example names).
+PLACEHOLDER_PREFIXES = ("com.example.", "org.example.", "net.example.", "example.")
+
+
+def split_products(text: str) -> dict[str, str]:
+    """The four identifiers a build setting list names, in tier order, as
+    `lite,pro,max,ultra` with an empty field for one that is not set."""
+    fields = text.split(",") if text else []
+    fields = (fields + [""] * len(TIP_TIERS))[:len(TIP_TIERS)]
+    return dict(zip(TIP_TIERS, fields))
+
+
+def tip_identifier_problems(configuration: str, products: dict[str, str]) -> list[str]:
+    """What is wrong with the identifiers a build names, whatever the product
+    holds. The arranged example identifiers are Debug's alone: Release, the
+    build that sideloads and forks make, never takes them."""
+    named = {tier: value for tier, value in products.items() if value}
+    if not named:
+        return []
+    if configuration != "AppStore":
+        if named != TIP_ARRANGED:
+            return [f"Buy me tokens: {configuration} names product identifiers that are not the arranged "
+                    "example ones; only the App Store configuration reads the local configuration"]
+        if configuration != "Debug":
+            return [f"Buy me tokens: {configuration} names the arranged example identifiers; "
+                    "only Debug takes the arrangement"]
+        return []
+    missing = [tier for tier in TIP_TIERS if tier not in named]
+    if missing:
+        return [f"Buy me tokens: the local configuration names {len(named)} of the four product identifiers "
+                f"(none for {', '.join(missing)})"]
+    found = []
+    for tier in TIP_TIERS:
+        value = named[tier]
+        if len(value) > 100 or TIP_ID_PATTERN.fullmatch(value) is None:
+            found.append(f"Buy me tokens: the {tier} identifier in the local configuration is not a product identifier")
+        elif value.lower().startswith(PLACEHOLDER_PREFIXES):
+            found.append(f"Buy me tokens: the {tier} identifier in the local configuration is a placeholder")
+    if len(set(named.values())) != len(named):
+        found.append("Buy me tokens: two tiers name the same product identifier")
+    return found
+
+
+def tip_tables(app: Path) -> list[Path]:
+    """The TipJar table of any language, found by its file name."""
+    return sorted(path for path in app.glob("*.lproj/*")
+                  if path.stem == TIP_TABLE and path.suffix in (".strings", ".stringsdict"))
+
+
+def tip_strings(app: Path) -> list[str]:
+    """The String Catalog tables of the application that hold a word of Buy me tokens."""
+    found = []
+    for path in sorted(app.glob("*.lproj/*.strings")):
+        try:
+            with path.open("rb") as handle:
+                table = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if isinstance(table, dict) and any(
+                word in text for key, value in table.items() for text in (str(key), str(value))
+                for word in TIP_WORDS):
+            found.append(str(path.relative_to(app)))
+    return found
+
+
+def tip_problems(
+    app: Path, configuration: str, products: dict[str, str], local: dict[str, str] | None = None,
+) -> tuple[list[str], bool]:
+    """Whether the product holds Buy me tokens as the build said it would, and
+    whether it holds it. `products` are the build settings TIP_LITE, TIP_PRO,
+    TIP_MAX and TIP_ULTRA: the local configuration's identifiers in the App
+    Store configuration, empty otherwise, or the example identifiers a test or
+    capture script arranged. `local` is the local configuration's own
+    identifiers, whatever the configuration: wherever the build does not name
+    them, no file of the bundle holds one. The identifiers are never printed."""
+    problems = tip_identifier_problems(configuration, products)
+    named = {tier: value for tier, value in products.items() if value}
+    expected = bool(named) and not problems
+    values = [value for value in (local or {}).values() if value]
+    if values and (not expected or any(local.get(tier, "") != products[tier] for tier in TIP_TIERS)):
+        problems.extend(f"{name}: holds a product identifier of the local configuration"
+                        for name in value_leaks(app, values))
+    fragments: dict[str, set[bytes]] = {}
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        # The linker's debug map names the object and source files of the
+        # build, which hold the feature's file names though it is compiled out
+        # (an excluded file is an empty one): the check blanks those paths and
+        # reads what the code and its symbols hold.
+        data = without_debug_map(*code, PATH_STABS)
+        present = {fragment for fragment in TIP_FRAGMENTS if fragment in data}
+        if present:
+            fragments[str(binary.relative_to(app))] = present
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            keyed = plistlib.load(handle).get(TIP_KEY)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        keyed = None
+    tables = tip_tables(app)
+    words = tip_strings(app)
+    compiled = bool(fragments) or keyed is not None or bool(tables) or bool(words)
+    if not expected:
+        if named:
+            problems.append("Buy me tokens: the build names product identifiers that cannot be used")
+        for name, present in fragments.items():
+            problems.append(
+                f"{name}: carries Buy me tokens ({', '.join(sorted(item.decode() for item in present))}) "
+                "though the build names no product identifiers")
+        if keyed is not None:
+            problems.append(f"Info.plist: has {TIP_KEY} though the build names no product identifiers")
+        problems.extend(f"{path.relative_to(app)}: is the TipJar strings table though the build names no "
+                        "product identifiers" for path in tables)
+        problems.extend(f"{name}: has Buy me tokens strings though the build names no product identifiers"
+                        for name in words)
+        return problems, compiled
+    if keyed != named:
+        problems.append(f"Info.plist: {TIP_KEY} must be the four product identifiers the build names")
+    code = set().union(*fragments.values()) if fragments else set()
+    missing = [item.decode() for item in TIP_REQUIRED if item not in code]
+    if missing:
+        problems.append(
+            f"the application lacks Buy me tokens ({', '.join(missing)}) though the build names the product identifiers")
+    if not tables:
+        problems.append("the application lacks the TipJar strings table though the build names the product identifiers")
+    return problems, compiled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("app", type=Path)
@@ -661,6 +834,18 @@ def main() -> int:
     parser.add_argument(
         "--feedback", action="store_true",
         help="check Send feedback alone, for a configuration other than AppStore")
+    parser.add_argument(
+        "--tip-products", default="",
+        help="the build settings TIP_LITE, TIP_PRO, TIP_MAX and TIP_ULTRA, comma separated in that "
+             "order: the product identifiers the build names, empty when it names none")
+    parser.add_argument(
+        "--tip-local-products", default="",
+        help="the build settings TIP_PRODUCT_LITE, TIP_PRODUCT_PRO, TIP_PRODUCT_MAX and TIP_PRODUCT_ULTRA, "
+             "the local configuration's own identifiers, which no file of a bundle that does not name "
+             "them may hold")
+    parser.add_argument(
+        "--tip-jar", action="store_true",
+        help="check Buy me tokens alone, for a configuration other than AppStore")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--runtime", action="store_true",
@@ -678,6 +863,15 @@ def main() -> int:
         for line in found:
             print(line, file=sys.stderr)
         print(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}"
+              f" ({options.configuration})")
+        return 1 if found else 0
+    if options.tip_jar:
+        found, compiled = tip_problems(
+            app, options.configuration, split_products(options.tip_products),
+            split_products(options.tip_local_products))
+        for line in found:
+            print(line, file=sys.stderr)
+        print(f"{app.name}: Buy me tokens is {'compiled in' if compiled else 'not compiled in'}"
               f" ({options.configuration})")
         return 1 if found else 0
     if options.runtime or options.host_traces:
@@ -727,6 +921,12 @@ def main() -> int:
         app, options.configuration, options.feedback_address, options.feedback_receiver, options.info_source)
     problems.extend(feedback)
     print(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}")
+
+    tip, tip_compiled = tip_problems(
+        app, options.configuration, split_products(options.tip_products),
+        split_products(options.tip_local_products))
+    problems.extend(tip)
+    print(f"{app.name}: Buy me tokens is {'compiled in' if tip_compiled else 'not compiled in'}")
 
     privacy = subprocess.run(
         [sys.executable, "-B", str(options.privacy_checker), str(app)],

@@ -34,7 +34,8 @@ uml_add_tooling_test(
 # The App Store configuration builds an application that passes this check as
 # its last build phase; the fixtures show it finds each problem the script's
 # header lists, and leaves the guest kernel image alone. They also show Send
-# feedback present only where the build names a receiver, in either direction.
+# feedback present only where the build names a receiver, and Buy me tokens only
+# where it names its four product identifiers, in either direction.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B
@@ -42,6 +43,20 @@ uml_add_tooling_test(
         --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-app-store-bundle.py
     LABELS andarium;package
     TIMEOUT 360)
+
+# Buy me tokens' words are held to App Store Review Guideline 3.1.1: no donation,
+# plan, subscription, unlock, upgrade, premium, credit, balance or token amount
+# in any language of the table, and the English source says a tip is a voluntary
+# one-time purchase and every feature is free either way. The fixtures show the
+# check finds each, and the application's own table passes.
+uml_add_tooling_test(
+    NAME andarium-tip-words
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_tip_words.py
+        --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-tip-words.py
+        --table ${PROJECT_SOURCE_DIR}/Andarium/Localization/TipJar.xcstrings
+    LABELS andarium
+    TIMEOUT 120)
 
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
