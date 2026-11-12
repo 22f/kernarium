@@ -32,8 +32,10 @@ The project file is the JSON format Xcode 27 reads, kept in the canonical form
 after every hand edit. Every configuration takes its base settings from
 `Config/Andarium.xcconfig`, which includes
 `../GuestHost/Config/Signing.xcconfig` and sets what decides
-[Send feedback](#send-feedback), [Buy me tokens](#buy-me-tokens) and
-[Review on the App Store](#review-on-the-app-store); the
+[Send feedback](#send-feedback), [Buy me tokens](#buy-me-tokens),
+[Review on the App Store](#review-on-the-app-store),
+[Follow developer on X](#follow-developer-on-x) and the
+[ICP filing number](#icp-filing-number); the
 signer's team is only in the ignored `Signing.local.xcconfig` beside the
 signing file ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the
 project names no team.
@@ -185,7 +187,10 @@ everything that exists for automation or only pretends:
   `Config/Review.local.xcconfig`, and
   [Follow developer on X](#follow-developer-on-x), and only when the handle is
   in the ignored `Config/Developer.local.xcconfig` and the logo in the ignored
-  `Config/Local/`. The four switches are independent.
+  `Config/Local/`, and the [ICP filing number](#icp-filing-number), and only
+  when the number is in the same file. The five switches are independent,
+  except that the pieces of the Buy me tokens sheet's header (the developer's
+  name, avatar and GitHub and X buttons) are carried only with Buy me tokens.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -888,7 +893,10 @@ feature is compiled in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfi
 the bundle check refuses a table, by its file name, in a product without its
 feature and asks for it in every language of one with it. The tip's words keep
 to its rules in each language (`scripts/check-tip-words.py`): no donation, plan
-or subscription word, the tier names untranslated. English is the key (a readout or a
+or subscription word (nor unlock, upgrade, premium, credits or balance) and no
+token amount, and the statement says in each language that a tip is voluntary,
+one-time, a purchase and free either way; the tier names are not checked.
+English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
