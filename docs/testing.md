@@ -343,16 +343,19 @@ compiler's extraction ([the gate after a build](../Andarium/README.md#languages)
 and `kernarium-host-features` (unit) the table of host features the boot
 request carries to an Android guest. `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
-fields of the boot request, the composed layout, the lens cover and the
-camera state and rotation), and `camera-layout` (unit) that the layout name
-composed from a host's cameras is one of the image's
-([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted tests
-(`CameraFlowTests`) play iOS's permission with a fake and open
-no camera; the Simulator has no camera and `simctl privacy` cannot grant or
-revoke one, so the denied, restricted and absent states are shown by the
-preview (`-systemCamera` asks the Simulator's own permission). The application builds with Xcode
-(`AndariumPreview` is the Simulator build with mock data, `Andarium` the
-device application,
+fields of the boot request, the composed layout and its recomposition at each
+boot, the lens cover, the camera state and rotation, and that an unknown
+`KERNARIUM_CAMERA_SOURCE` never reaches the host's camera), `camera-layout`
+(unit) that the layout name composed from a host's cameras is one of the
+image's layouts, and `camera-orientation` (unit) the sensor orientation of
+every interface orientation and facing
+([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
+tests (`CameraFlowTests`) play iOS's permission with a fake and open no camera;
+the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
+the denied, restricted and absent states are shown by the preview
+(`-systemCamera` asks the Simulator's own permission). The application builds
+with Xcode (`AndariumPreview` is the Simulator build with mock data, `Andarium`
+the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
