@@ -714,7 +714,8 @@ guest's cost per report and the relay's memory. `android17-gamepad-runner`
 `android-camera` (integration) registers when `UML_ANDROID_CAMERA_RELEASE`
 names the release: the runner boots it with the launcher's synthetic camera
 (`--camera=synthetic|blocked`, `--camera-profile=`) and a layout on the vendor
-SKU (`--layout auto` has the launcher compose it, as the iOS runtime does), and
+SKU (`--layout auto` has the launcher compose it, as the iOS runtime does, with
+RAW once `--calibration-dir` holds colour data from an earlier session), and
 checks what Android lists (features, media profiles, camera IDs), one preview
 frame and one still of the camera application, and, in a blocked session, that
 the same cameras give black frames and no still.
