@@ -1233,9 +1233,12 @@ class MemoryStream:
         self.lines: list[str] = []
         self.pending: list[str] = []
         self.cut = False
+        # A stream whose guest went away but which does not end of itself: its drain times out.
+        self.stuck = False
 
     def start(self) -> None:
         self.pending = list(self.guest.buffer)
+        self.guest.events.append(f"start {self.guest.streams.index(self)}")
 
     def text(self) -> str:
         # What the host has not read when the connection is cut is read only by a drain.
@@ -1248,7 +1251,10 @@ class MemoryStream:
         return self.cut
 
     def drain(self, seconds: float) -> None:
+        self.guest.events.append(f"drain {self.guest.streams.index(self)}")
         self.cut = True
+        if self.stuck:
+            raise runner.CaptureFailure(f"the log stream did not end of itself in {seconds:.0f} s")
         self.lines += self.pending
         self.pending = []
 
@@ -1264,6 +1270,7 @@ class LoggingGuest(ScriptedGuest):
         super().__init__()
         self.buffer: list[str] = []
         self.streams: list[MemoryStream] = []
+        self.events: list[str] = []
         self.lag = lag
         self.tick = 0
         self.capture = runner.LogCapture()
@@ -1488,6 +1495,7 @@ class RebootingGuest(LoggingGuest):
     def __init__(self) -> None:
         super().__init__()
         self.rebooted = False
+        self.before_reboot = lambda: None
         self.during_reboot = lambda: None
 
     def uptime(self) -> float:
@@ -1495,6 +1503,7 @@ class RebootingGuest(LoggingGuest):
 
     def adb_run(self, *arguments: str, timeout: float = 0) -> object:
         if arguments[0] == "reboot":
+            self.before_reboot()
             self.rebooted = True
             for stream in self.streams:
                 stream.cut = True
@@ -1543,10 +1552,64 @@ class CrashEvidenceAcrossARestartTests(unittest.TestCase):
         self.assertIn("com.android.settings died of signal 11", self.report.failures[0])
 
     def test_the_old_stream_is_read_to_its_end_before_the_new_boots_starts(self) -> None:
+        # The guest logs a crash as it goes down: the old stream has not carried it when the connection ends,
+        # and only its drain reads it. Without the drain the crash is lost, and the new boot's stream is not
+        # the place to look for it.
+        self.guest.before_reboot = lambda: self.guest.crash("com.android.settings")
         self.report.section("restarts", self.guest, self.guest.restart)
         self.assertEqual(len(self.guest.capture.boots), 2)
         self.assertTrue(self.guest.streams[0].cut)
         self.assertFalse(self.guest.streams[1].cut)
+        self.assertEqual(self.guest.events, ["start 0", "drain 0", "start 1"])
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertIn("com.android.settings crashed", self.report.failures[0])
+
+    def test_a_stream_that_dies_during_the_store_wait_fails_the_restart_before_the_reboot(self) -> None:
+        # The stream dies while the restart waits for the configuration store, and an old-boot crash never reaches
+        # it. The reboot that follows would clear the buffers, and the disconnect would pass for the stream's end.
+        guest = self.guest
+
+        class Clock(FakeClock):
+            def sleep(self, seconds: float) -> None:
+                super().sleep(seconds)
+                if seconds == runner.STORE_SECONDS:
+                    guest.streams[-1].cut = True
+                    guest.crash("com.android.systemui")
+
+        with mock.patch.object(runner, "time", Clock()):
+            self.report.section("restarts", guest, guest.restart)
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertIn("the log stream of this boot ended while the guest is up", self.report.failures[0])
+        self.assertFalse(guest.rebooted)
+
+    def test_a_stream_that_dies_before_a_suspend_fails_it_before_the_connection_drops(self) -> None:
+        guest = SuspendingGuest(drops=True)
+
+        def body() -> None:
+            guest.streams[-1].cut = True
+            guest.suspend_and_wake()
+
+        self.report.section("suspends", guest, body)
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertIn("the log stream of this boot ended while the guest is up", self.report.failures[0])
+
+    def test_the_stream_is_confirmed_carrying_before_the_reboot_is_asked_for(self) -> None:
+        asked: list[bool] = []
+        self.guest.before_reboot = lambda: asked.append(self.guest.streams[0].text().count("sync-") >= 2)
+        self.report.section("restarts", self.guest, self.guest.restart)
+        self.assertEqual(asked, [True])
+
+    def test_an_old_stream_that_does_not_end_is_a_failure_the_restart_does_not_retry_away(self) -> None:
+        clock = FakeClock()
+        self.guest.before_reboot = lambda: setattr(self.guest.streams[0], "stuck", True)
+        with mock.patch.object(runner, "time", clock):
+            self.report.section("restarts", self.guest, self.guest.restart)
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertIn("did not end of itself", self.report.failures[0])
+        # Not waited out as a guest that does not answer yet, and no new boot's stream starts over it.
+        self.assertLess(clock.now, 2 * runner.STORE_SECONDS)
+        self.assertEqual(len(self.guest.capture.boots), 1)
+        self.assertIn("evidence lost", " ".join(self.guest.capture.problems))
 
     def test_a_quiet_restart_passes_and_both_boots_are_read(self) -> None:
         self.report.section("restarts", self.guest, self.guest.restart)
@@ -1632,6 +1695,31 @@ class CrashEvidenceAcrossASuspendTests(unittest.TestCase):
         guest.streams[-1].cut = True
         with self.assertRaisesRegex(runner.Failure, "the log stream of this boot ended"):
             guest.alive()
+
+
+class LogStreamDrainTests(unittest.TestCase):
+    """The real LogStream's drain, with the logcat process replaced."""
+
+    def stream(self, *waits: object) -> runner.LogStream:
+        stream = runner.LogStream("unused", "unused", Path("unused"))
+        stream.process = mock.Mock()
+        stream.process.poll.return_value = None
+        stream.process.wait.side_effect = list(waits)
+        return stream
+
+    def test_a_stream_that_ends_of_itself_in_time_is_drained(self) -> None:
+        stream = self.stream(0)
+        stream.drain(60)
+        stream.process.terminate.assert_not_called()
+
+    def test_a_stream_that_does_not_end_is_stopped_and_is_a_failure(self) -> None:
+        stream = self.stream(runner.subprocess.TimeoutExpired("capture", 60), 0)
+        with self.assertRaisesRegex(runner.CaptureFailure, "did not end of itself in 60 s"):
+            stream.drain(60)
+        stream.process.terminate.assert_called_once()
+
+    def test_the_failure_is_a_failure_of_the_section_and_not_a_retry(self) -> None:
+        self.assertTrue(issubclass(runner.CaptureFailure, runner.Failure))
 
 
 class SimulatedGuest(StubbedGuest):

@@ -202,6 +202,11 @@ class Failure(RuntimeError):
     pass
 
 
+class CaptureFailure(Failure):
+    """The log capture lost evidence that cannot be read again: the run fails with it, and a retry that waits for
+    the guest does not swallow it."""
+
+
 # ---- What the guest prints, read.
 
 def script_seconds(script: str, name: str) -> int:
@@ -985,6 +990,7 @@ class Guest:
         until the guest answers again, and a stream that ended starts another segment."""
         capture = self.capture
         if capture is not None:
+            capture.confirm(self)
             capture.going_down()
         try:
             self.suspend_and_wake_guest()
@@ -1036,6 +1042,7 @@ class Guest:
         capture = self.capture
         before = self.uptime()
         if capture is not None:
+            capture.confirm(self)
             capture.going_down()
         self.adb_run("reboot", timeout=60)
         started = False
@@ -1052,6 +1059,8 @@ class Guest:
                     started = True
                 if self.shell("getprop sys.boot_completed").strip() != "1":
                     return "the guest has not booted"
+            except CaptureFailure:
+                raise
             except (Failure, subprocess.TimeoutExpired, ValueError, IndexError):
                 return "the guest does not answer"
             return None
@@ -1444,14 +1453,16 @@ class LogStream:
         return self.process is None or self.process.poll() is not None
 
     def drain(self, seconds: float) -> None:
-        """Waits for the stream to end of itself (its guest went away); one that does not is stopped, and the
-        file holds what it carried."""
+        """Waits for the stream to end of itself (its guest went away). One that does not is stopped and is a
+        failure: what the guest still held for it was not read, and the file does not say."""
         if self.process is None:
             return
         try:
             self.process.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
             self.stop()
+            raise CaptureFailure(f"the log stream did not end of itself in {seconds:.0f} s: it was stopped, and "
+                                 "what its guest still held for it was not read") from None
 
     def stop(self) -> None:
         """Stops the logcat this object started, by its own process."""
@@ -1471,8 +1482,10 @@ class LogCapture:
     restart is lost and every record is complete in the file. The scanner reads all of it each time and reports
     a record once, as a finding of the section whose time window holds it (the window is the time stamps of two
     lines that the guest logged at the section's start and end, in the log's own clock) or of no section.
-    A restart reads the old boot's stream to its end before the new boot's starts; a stream that ends while its
-    guest should be up fails the section in progress."""
+    Before the guest is taken down (a restart, a suspend) the stream is confirmed alive and carrying, so that a
+    stream that died earlier is not taken for the disconnect that follows; a restart reads the old boot's
+    stream to its end before the new boot's starts, and one that does not end is a permanent failure; a stream
+    that ends while its guest should be up fails the section in progress."""
 
     def __init__(self) -> None:
         # Each boot's segments: a suspend that drops the connection starts another segment, which reads the
@@ -1502,22 +1515,39 @@ class LogCapture:
     def current(self) -> LogStream:
         return self.boots[-1][-1]
 
+    def confirm(self, guest: "Guest") -> None:
+        """The guest is about to restart or suspend: its stream must be alive now and carry the guest's log up
+        to now. A stream that died before this fails the section in progress; a stream that is only found
+        ended after the disconnect would be taken for the disconnect's own end, and the records it never
+        received would go with the reboot."""
+        self.check_stream()
+        self.sync(guest)
+
     def going_down(self) -> None:
         """The guest is about to restart or suspend: its stream is expected to end."""
         self.expect_end = True
 
+    def drain(self, streams: list[LogStream]) -> None:
+        """Reads each of the streams to its end. One that does not end is evidence lost for good: the run
+        records it, and the failure is the caller's to let through."""
+        for stream in streams:
+            try:
+                stream.drain(DRAIN_SECONDS)
+            except CaptureFailure as lost:
+                self.problems.append(f"evidence lost: {lost}")
+                raise
+
     def new_boot(self, guest: "Guest") -> None:
         """The guest has restarted and adb answers: the old boot's stream is read to its end, then the new
         boot's starts."""
-        for stream in self.boots[-1]:
-            stream.drain(DRAIN_SECONDS)
+        self.drain(self.boots[-1])
         self.start_boot(guest)
 
     def resumed(self, guest: "Guest") -> None:
         """The guest woke from a suspend. A stream that ended with the connection is read to its end, and a
         further segment of the same boot starts."""
         if self.current.ended():
-            self.current.drain(DRAIN_SECONDS)
+            self.drain([self.current])
             self.start_segment(guest)
         self.expect_end = False
 
