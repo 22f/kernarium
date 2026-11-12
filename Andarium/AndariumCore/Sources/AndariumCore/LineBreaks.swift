@@ -3,7 +3,7 @@
 import Foundation
 
 extension String {
-    /// The text with two kinds of place marked where a line must not end.
+    /// The text with three kinds of place marked where a line must not break.
     ///
     /// A figure keeps its unit: the space between a number and a byte or
     /// vCPU unit becomes a no-break space, so `1.5` never ends one line with
@@ -11,13 +11,16 @@ extension String {
     /// keeps its characters together: a word joiner sits between them,
     /// because those scripts break between any two characters and a name of
     /// two or three would otherwise be cut in the middle. The characters on
-    /// the screen are the same; only the line breaking changes. Apply it
-    /// where text is shown, never to a string a test, a log or a report
-    /// reads.
+    /// the screen are the same; only the line breaking changes. An arrow
+    /// between two quoted names (“Settings”>“Apps”) stays with the name
+    /// before it, so no line starts with it. Apply it where text is shown,
+    /// never to a string a test, a log or a report reads.
     public var keepingTogether: String {
         var text = self
         text = Self.unitSpace.stringByReplacingMatches(
             in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "$1\u{00A0}")
+        text = Self.pathArrow.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "$1\u{2060}$2")
         for pattern in Self.quotedNames {
             let matches = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text))
             for match in matches.reversed() {
@@ -32,6 +35,11 @@ extension String {
     /// A digit, a space and a unit that is a word of its own.
     private static let unitSpace = try! NSRegularExpression(
         pattern: "([0-9]) (?=(?:[KMGT]i?B|vCPUs?)(?![A-Za-z]))")
+
+    /// An arrow between two quoted names, right after the closing quote of
+    /// the first: the greater-than sign of Chinese and the wide one of Japanese.
+    private static let pathArrow = try! NSRegularExpression(
+        pattern: "([\u{201D}\u{300D}])([>\u{FF1E}])")
 
     /// Two to four Han, Hiragana or Katakana characters between the quotes
     /// of the language: the curly pair of Simplified Chinese and Japanese,

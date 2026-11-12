@@ -29,6 +29,14 @@ import Testing
         #expect("“マイク”".keepingTogether == "“マ\u{2060}イ\u{2060}ク”")
     }
 
+    @Test func aPathArrowStaysWithTheNameBeforeIt() {
+        #expect("在“设置”>“App”中".keepingTogether == "在“设\u{2060}置”\u{2060}>“App”中")
+        #expect("「設定」>「郵件」".keepingTogether == "「設\u{2060}定」\u{2060}>「郵\u{2060}件」")
+        #expect("“設定”＞“アプリ”".keepingTogether == "“設\u{2060}定”\u{2060}＞“ア\u{2060}プ\u{2060}リ”")
+        #expect("Settings > Apps and “Files” > x".keepingTogether == "Settings > Apps and “Files” > x")
+        #expect("a > b".keepingTogether == "a > b")
+    }
+
     @Test func otherQuotedTextIsLeftAlone() {
         #expect("“Files”".keepingTogether == "“Files”")
         #expect("“iPhone储存空间”".keepingTogether == "“iPhone储存空间”")
@@ -38,7 +46,7 @@ import Testing
     }
 
     @Test func markingTwiceChangesNothingMore() {
-        let text = "请在“设置”中释放1.5 GiB，或在「設定」中。"
+        let text = "请在“设置”>“App”中释放1.5 GiB，或在「設定」中。"
         #expect(text.keepingTogether.keepingTogether == text.keepingTogether)
     }
 
