@@ -159,7 +159,9 @@ private struct LegacyInstallAlert: ViewModifier {
                     isPresented: Binding(get: { model.legacyInstallQuestion != nil }, set: { _ in }),
                     presenting: model.legacyInstallQuestion
                 ) { _ in
+                    // Cancel is the alert's default: the bold button, and what Return does.
                     Button("Cancel", role: .cancel) { model.answerLegacyInstall(installAnyway: false) }
+                        .keyboardShortcut(.defaultAction)
                     Button(LegacyInstallWords.install) { model.answerLegacyInstall(installAnyway: true) }
                 } message: { question in
                     Text(LegacyInstallWords.message(for: question.target).keepingTogether)

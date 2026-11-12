@@ -520,6 +520,8 @@ struct LegacyApkInstallAlertTests {
         let styles = Dictionary(uniqueKeysWithValues: shown.actions.map { ($0.title ?? "", $0.style) })
         #expect(styles == ["Cancel": .cancel, "Install anyway": .default])
         #expect(shown.actions.count == 2)
+        // Cancel is the default action, the one an alert shows in bold.
+        #expect(shown.preferredAction?.title == "Cancel")
         // VoiceOver finds both buttons by name.
         #expect(control(labelled: "Cancel", in: shown.view) != nil)
         #expect(control(labelled: "Install anyway", in: shown.view) != nil)
