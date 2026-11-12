@@ -11,10 +11,11 @@ namespace uml::runtime {
 /*
  * The watch that records why a guest's vCPUs stopped running.
  *
- * Every 50 ms a thread of the process, `uml-stall-watch`, at the user
- * interactive quality of service, reads each vCPU carrier's run state and CPU
- * time from the system (thread_info, on the carriers the kernel thread
- * registry lists) and the wait the carrier says it is in (platform/
+ * Every 50 ms (below, while a carrier is outside its idle wait) a thread of
+ * the process, `uml-stall-watch`, at the user interactive quality of service,
+ * reads each vCPU carrier's run state and CPU time from the system
+ * (thread_info, on the carriers the kernel thread registry lists) and the
+ * wait the carrier says it is in (platform/
  * host_wait.hpp). A carrier that is runnable and gets little of the time, or
  * sits in an uninterruptible wait or one host wait and used little of the
  * time, for 100 ms or more is stalled, and the stalls form events (runtime/
@@ -25,9 +26,10 @@ namespace uml::runtime {
  * (runtime/carrier_activity.hpp), and one that stays outside its wait for
  * 50 ms, or is due to wake from a timed wait and has not, or that the host
  * wakes, wakes the watch. It sleeps after two looks in a row with every
- * carrier idle and nothing suspected, and its first look after a sleep starts
- * the measurement over, so the sleep is nobody's starvation. A carrier that
- * does not report its idle waits keeps the watch looking every 50 ms.
+ * carrier idle and nothing suspected, counted afresh after each sleep (the
+ * first look after a wake, which starts the measurement over so that the sleep
+ * is nobody's starvation, is not one of them). While some carrier is outside
+ * its idle wait, or does not report its idle waits, it looks every 50 ms.
  *
  * Each event carries what the host looked like around it:
  * the thermal state, Low Power Mode and the active core count; the process's
@@ -85,6 +87,12 @@ private:
 /* The clock of every time in the record: the continuous clock, in
  * nanoseconds. */
 [[nodiscard]] std::uint64_t stall_clock_ns() noexcept;
+
+/* Asks the running watch, if any, for one reading of the host's state, thermal
+ * state, Low Power Mode and core count included, so that a notice the process
+ * missed (it was suspended) does not leave the published state stale. The host
+ * calls it when the app returns to the foreground. Any thread. */
+void request_host_state_reading() noexcept;
 
 /* Starts the watch of the session that is open on a record file
  * (session_record_open); null when none is. */

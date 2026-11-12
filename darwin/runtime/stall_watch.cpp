@@ -21,6 +21,7 @@
 #include <pthread/qos.h>
 #include <signal.h>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <sys/resource.h>
 #include <time.h>
@@ -169,6 +170,12 @@ void memory_pressure_changed(void *context) noexcept
 	if (changed)
 		watch_poke();
 }
+
+/* The write end of the running watch's request pipe, for a reading of the
+ * host's state asked from outside (request_host_state_reading). The lock keeps
+ * a descriptor the watch has closed from being written. */
+std::mutex request_lock;
+int request_write_descriptor = -1;
 
 /* ---- What the process's counters read at one moment. ---- */
 struct Context final {
@@ -520,12 +527,15 @@ struct StallWatch::State final {
 		event.low_power = state.lowPowerMode;
 		event.processors_start = state.activeProcessors;
 		event.pressure = ::uml::platform::publishedMemoryPressure();
-		/* The five seconds before, from the samples the ring holds; when the
-		 * sample before the newest is older (the watch slept between them),
-		 * the span since that one. */
-		if (recent_count >= 2) {
-			const Context &last = recent[recent_count - 1];
-			std::size_t first = recent_count - 2;
+		/* The five seconds before this reading: from the oldest sample the
+		 * ring holds within five seconds of it. A watch that slept took its
+		 * first sample at the wake, so the window then is the time since
+		 * the wake, and the field means what it says. */
+		if (recent_count >= 1 &&
+		    opened_at.at_ns - recent[recent_count - 1].at_ns <=
+			    before_window_ns) {
+			const Context &last = opened_at;
+			std::size_t first = recent_count - 1;
 			while (first > 0 &&
 			       last.at_ns - recent[first - 1].at_ns <= before_window_ns)
 				--first;
@@ -714,8 +724,12 @@ struct StallWatch::State final {
 			tick(now_ns, static_cast<std::uint32_t>(std::min<std::uint64_t>(
 				late_ns / nanoseconds_per_millisecond, 0xffffffffU)), rebaseline);
 			deadline_ns = continuous_ns() + period_ns;
-			if (quiet_ticks >= park_after_quiet_ticks && try_to_park())
+			if (quiet_ticks >= park_after_quiet_ticks && try_to_park()) {
 				parked = true;
+				/* Two looks again after every sleep, the one after a wake
+				 * (which measures nothing) not among them. */
+				quiet_ticks = 0;
+			}
 		}
 		/* An event in progress ends where it was last seen. */
 		Tick last;
@@ -754,6 +768,8 @@ struct StallWatch::State final {
 				(void)fcntl(descriptor, F_SETFD, FD_CLOEXEC);
 				(void)fcntl(descriptor, F_SETFL, O_NONBLOCK);
 			}
+			const std::lock_guard guard{request_lock};
+			request_write_descriptor = request_pipe[1];
 			request_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
 				static_cast<uintptr_t>(request_pipe[0]), 0, observer_queue);
 		}
@@ -796,6 +812,10 @@ struct StallWatch::State final {
 			observer_queue = nullptr;
 		}
 		if (request_pipe[1] >= 0) {
+			{
+				const std::lock_guard guard{request_lock};
+				request_write_descriptor = -1;
+			}
 			(void)close(request_pipe[1]);
 			request_pipe[1] = -1;
 		}
@@ -861,6 +881,13 @@ StallWatch::~StallWatch()
 std::uint64_t stall_clock_ns() noexcept
 {
 	return continuous_ns();
+}
+
+void request_host_state_reading() noexcept
+{
+	const std::lock_guard guard{request_lock};
+	if (request_write_descriptor >= 0)
+		(void)write(request_write_descriptor, "r", 1);
 }
 
 std::unique_ptr<StallWatch> start_stall_watch(

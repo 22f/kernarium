@@ -37,6 +37,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
@@ -268,16 +269,30 @@ std::size_t late_events(const std::string &slot, unsigned late_ms)
 	return found;
 }
 
-/* The cores the process used in the seconds before the newest event, in
- * hundredths, from its line (the field after the active core counts); -1
- * for no event. */
-long cores_before_the_newest_event(const std::string &slot)
+/* The first event line of the slot that names `cause` for vCPU `vcpu`, empty
+ * for none. The line is "stall SEQ START DUR[+] CAUSES ...", and the causes
+ * hold one letter per vCPU, a dot for one not stalled. */
+std::string event_of_carrier(const std::string &slot, std::size_t vcpu, char cause)
 {
-	const std::size_t at = slot.rfind("\nstall ");
-	if (at == std::string::npos)
-		return -1;
-	const std::size_t end = slot.find('\n', at + 1);
-	const std::string line = slot.substr(at + 1, end - at - 1);
+	std::size_t at = 0;
+	while ((at = slot.find("\nstall ", at)) != std::string::npos) {
+		++at;
+		const std::size_t end = slot.find('\n', at);
+		const std::string line = slot.substr(at, end - at);
+		std::size_t from = 0;
+		for (unsigned field = 0; field < 4; ++field)
+			from = line.find(' ', from) + 1;
+		const std::string causes = line.substr(from, line.find(' ', from) - from);
+		if (causes.size() > vcpu && causes[vcpu] == cause)
+			return line;
+	}
+	return {};
+}
+
+/* The cores the process used in the seconds before the event of this line, in
+ * hundredths (the field after the active core counts); -1 for no line. */
+long cores_before_of(const std::string &line)
+{
 	std::size_t from = 0;
 	for (unsigned field = 0; field < 11; ++field) {
 		from = line.find(' ', from);
@@ -286,6 +301,17 @@ long cores_before_the_newest_event(const std::string &slot)
 		++from;
 	}
 	return std::strtol(line.c_str() + from, nullptr, 10);
+}
+
+/* The CPU the whole process has used, in nanoseconds. */
+std::uint64_t process_cpu_ns()
+{
+	rusage usage{};
+	require(getrusage(RUSAGE_SELF, &usage) == 0);
+	return (static_cast<std::uint64_t>(usage.ru_utime.tv_sec) +
+		static_cast<std::uint64_t>(usage.ru_stime.tv_sec)) * 1'000'000'000ULL +
+		(static_cast<std::uint64_t>(usage.ru_utime.tv_usec) +
+		 static_cast<std::uint64_t>(usage.ru_stime.tv_usec)) * 1000ULL;
 }
 
 /* The longest of the events that name a vCPU, in milliseconds. On a host
@@ -574,7 +600,7 @@ void a_carrier_that_reports_nothing_keeps_the_watch_looking()
 	require(pthread_join(idle0.thread, nullptr) == 0);
 }
 
-void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
+void a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second()
 {
 	Session session{"uml-stall-wedge.XXXXXX"};
 	int wake[2];
@@ -585,9 +611,14 @@ void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
 	Carrier spinner;
 	start(idle0, 0, [&] { blink_until_stopped(idle0, 40); }, true);
 	/* A thread of the process's that is no carrier and keeps a core busy while
-	 * the watch sleeps, which the event after the wake must show. */
+	 * the watch sleeps, and stops as the host wakes the guest: the event after
+	 * the wake looks back over the time since the wake, which the spinner
+	 * did not use, and not over the sleep, which it did. */
+	std::atomic<bool> spinning{true};
 	start_other(spinner, "uml-test-spinner", [&] {
 		while (!spinner.stop.load(std::memory_order_acquire)) {
+			if (!spinning.load(std::memory_order_acquire))
+				sleep_ms(1);
 		}
 	});
 	/* Idle until the host wakes it, then waits on a device service that does not
@@ -606,35 +637,57 @@ void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr);
 	/* Longer than the five seconds an event looks back over. */
+	const std::uint64_t cpu_at_start = process_cpu_ns();
+	const auto started = std::chrono::steady_clock::now();
 	sleep_ms(5600);
-	const std::size_t events_before = vcpu_events(stall_slot(session.path));
-
+	spinning.store(false, std::memory_order_release);
+	sleep_ms(20);
+	const double slept = static_cast<double>(process_cpu_ns() - cpu_at_start) /
+		1'000'000.0 / milliseconds_since(started) * 100.0;
+	/* The wedger's own event is the one that is timed: an unrelated starvation
+	 * of the idle carrier on a loaded host is not. */
+	const std::uint64_t cpu_at_wake = process_cpu_ns();
 	const auto woken = std::chrono::steady_clock::now();
 	require(write(wake[1], "w", 1) == 1);
 	double found = -1;
 	std::string slot;
+	std::string line;
+	std::uint64_t cpu_at_found = 0;
 	while (milliseconds_since(woken) < 5000) {
 		slot = stall_slot(session.path);
-		if (vcpu_events(slot) > events_before) {
+		line = event_of_carrier(slot, 2, 'a');
+		if (!line.empty()) {
 			found = milliseconds_since(woken);
+			cpu_at_found = process_cpu_ns();
 			break;
 		}
 		sleep_ms(5);
 	}
-	require(found >= 0, "a wedge after a wake was never found");
+	require(found >= 0, "a wedge after a wake was never found:\n" + slot);
 	std::printf("a wedge after a wake was recorded %.0f ms after the wake\n", found);
 	/* The timer 50 ms after the wake, then the 100 ms a stall must last. */
-	require(found >= 100, "a wedge was recorded before it had lasted 100 ms");
-	require(found < 1000, "a wedge after a wake was found late: " +
-		std::to_string(found));
-	require(slot.find("+ ..a ") != std::string::npos,
-		"the third carrier is stalled on a device service's answer:\n" + slot);
-	/* The watch slept, yet the event says what the process was doing before:
-	 * the spinner's share of a core (how much of one a loaded host gives it
-	 * varies), not nothing. */
-	const long before = cores_before_the_newest_event(slot);
-	require(before >= 1, "the process's use before the event is lost: " +
-		std::to_string(before) + "\n" + slot);
+	require(found >= 100, "a wedge was recorded before it had lasted 100 ms: " +
+		std::to_string(found) + " ms");
+	require(found <= 250, "a wedge after a wake was found late: " +
+		std::to_string(found) + " ms");
+	require(line.find("+ ") != std::string::npos,
+		"the wedger's event is still open:\n" + line);
+	/* The watch slept, yet the event says what the process was doing in the
+	 * seconds before it: since the wake, when the watch first looked, and not
+	 * over the sleep. The spinner used a core for the sleep and stopped at the
+	 * wake, so the figure is the process's use over the span the test measures
+	 * from the wake, within a factor of two (and a few hundredths of a core
+	 * for the rounding of two small figures), and far below the sleep's. */
+	const long before = cores_before_of(line);
+	const double measured = static_cast<double>(cpu_at_found - cpu_at_wake) /
+		1'000'000.0 / found * 100.0;
+	const std::string figures = "the process's use before the event is " +
+		std::to_string(before) + " hundredths of a core; measured over the "
+		"wake to the event: " + std::to_string(measured) + "; over the sleep: " +
+		std::to_string(slept) + "\n" + line;
+	require(before >= 0 && before * 2.0 + 6.0 >= measured &&
+		before <= measured * 2.0 + 6.0, figures);
+	require(slept > 10 && before * 4.0 < slept, figures);
 
 	spinner.stop.store(true, std::memory_order_release);
 	wedger.stop.store(true, std::memory_order_release);
@@ -688,20 +741,27 @@ void a_two_second_idle_is_no_starvation()
 void a_carrier_that_is_due_and_does_not_run_wakes_the_watch()
 {
 	Session session{"uml-stall-due.XXXXXX"};
+	using Steady = std::chrono::steady_clock;
+	constexpr auto limit_ms = std::chrono::milliseconds{1500};
 	Carrier due;
 	std::atomic<bool> waiting{false};
+	std::atomic<Steady::rep> entered{0};
 	start(due, 0, [&] {
 		const uml::platform::ScopedHostWait mark{uml::platform::HostWait::idle};
 		const timespec limit{1, 500L * 1000L * 1000L};
 		const uml::runtime::CarrierIdle idle{&limit,
 			uml::runtime::CarrierIdle::Limit::relative};
+		entered = Steady::now().time_since_epoch().count();
 		waiting = true;
-		sleep_ms(3000);
+		/* Held well past the deadline: the carrier is blocked, not due and
+		 * running. */
+		sleep_ms(3500);
 	}, true);
 	/* The carrier is in its wait before the watch exists: the watch sets the
 	 * timer for it as it goes to sleep. */
 	while (!waiting.load())
 		sleep_ms(1);
+	const Steady::time_point deadline{Steady::duration{entered.load()} + limit_ms};
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr);
 	sleep_ms(600);
@@ -709,11 +769,81 @@ void a_carrier_that_is_due_and_does_not_run_wakes_the_watch()
 	sleep_ms(400);
 	const unsigned long still = looks_after(session.path, 2);
 	require(still == before, "the watch looked before the carrier was due");
-	sleep_ms(1300);
-	const unsigned long after = looks_after(session.path, 1);
-	require(after > still, "the watch did not look for a carrier past its deadline");
+
+	/* The first look past the deadline comes with the timer, 50 ms on. The
+	 * watch is poked to write its slot (each poke is a reading of the host's
+	 * state, no look), and the looks it counts are read from the slot. */
+	int level = 1;
+	unsigned long counted = still;
+	double first_look_ms = -1;
+	while (Steady::now() < deadline + std::chrono::milliseconds{1000}) {
+		counted = looks_after(session.path, level);
+		level = level == 1 ? 2 : 1;
+		if (counted > still) {
+			first_look_ms = std::chrono::duration<double, std::milli>(
+				Steady::now() - deadline).count();
+			break;
+		}
+		sleep_ms(2);
+	}
+	std::printf("the first look past the deadline was %.0f ms after it\n",
+		first_look_ms);
+	require(first_look_ms >= 0,
+		"the watch did not look for a carrier past its deadline");
+	require(first_look_ms >= 40 && first_look_ms <= 300,
+		"the first look past the deadline came " + std::to_string(first_look_ms) +
+		" ms after it, not within 40 to 300 ms");
+
+	/* And then it sleeps again: the carrier is still blocked in its wait, and a
+	 * deadline the watch has looked past must not wake it again. */
+	sleep_ms(400);
+	const unsigned long later = looks_after(session.path, level);
+	require(Steady::now() < deadline + std::chrono::milliseconds{1900},
+		"the test ran past the carrier's hold");
+	require(later - counted <= 2,
+		"the watch looked " + std::to_string(later - counted) +
+		" more times in 400 ms while the carrier stayed blocked, "
+		"first look " + std::to_string(first_look_ms) + " ms past the deadline");
+	/* Two looks after a wake, the first of which measures nothing, before it
+	 * sleeps: counted afresh, not carried over from before the sleep. */
+	require(later - still >= 2,
+		"the watch slept after " + std::to_string(later - still) +
+		" look after its wake, not two");
 	watch.reset();
 	require(pthread_join(due.thread, nullptr) == 0);
+}
+
+/* A change of the host's state that no notice announced (the process was
+ * suspended when it happened) is recorded when the host asks for a reading. */
+void a_requested_reading_records_a_change_no_notice_announced()
+{
+	Session session{"uml-stall-reading.XXXXXX"};
+	Carrier idle0;
+	start(idle0, 0, [&] { blink_until_stopped(idle0, 40); }, true);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	/* The watch sleeps, and the state moves with no notice. */
+	sleep_ms(600);
+	Thermal::level = 2;
+	sleep_ms(400);
+	require(newest_thermal_level(stall_slot(session.path)) == -1,
+		"a change nobody announced was recorded by itself");
+	uml::runtime::request_host_state_reading();
+	const auto asked = std::chrono::steady_clock::now();
+	std::string slot;
+	while (milliseconds_since(asked) < 5000) {
+		slot = stall_slot(session.path);
+		if (newest_thermal_level(slot) == 2)
+			break;
+		sleep_ms(5);
+	}
+	require(newest_thermal_level(slot) == 2,
+		"a requested reading did not record the change:\n" + slot);
+	idle0.stop.store(true, std::memory_order_release);
+	watch.reset();
+	require(pthread_join(idle0.thread, nullptr) == 0);
+	/* With no watch the request does nothing. */
+	uml::runtime::request_host_state_reading();
 }
 
 /* Wedges found among carriers that come and go. */
@@ -810,9 +940,10 @@ int main()
 	a_hold_of_the_threads_is_no_stall(true);
 	the_watch_sleeps_while_every_carrier_is_idle();
 	a_carrier_that_reports_nothing_keeps_the_watch_looking();
-	a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds();
+	a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second();
 	a_two_second_idle_is_no_starvation();
 	a_carrier_that_is_due_and_does_not_run_wakes_the_watch();
+	a_requested_reading_records_a_change_no_notice_announced();
 	every_wedge_among_waking_carriers_is_found();
 	std::puts("stall watch tests passed");
 	return 0;
