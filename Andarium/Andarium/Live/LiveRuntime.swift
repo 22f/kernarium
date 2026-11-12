@@ -58,6 +58,17 @@ final class LiveRuntime: RuntimeDriver {
     private let sessionRecord: URL?
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
+    /// What this run puts in the names of its imports' partial files, new at
+    /// every start and at every restart of the guest inside the run
+    /// (`GuestRunMark`).
+    private(set) var runMark = GuestRunMark.random()
+    /// Whether the guest's storage may hold partial files that imports left,
+    /// on disk beside the guest's other files: the sweep below is made only
+    /// when it does.
+    let partials: PartialSweepLedger
+    /// The sweep of the partial files earlier runs left in the guest, which a
+    /// normal run makes once per boot that owes it, after Android has booted.
+    private(set) var partialSweep: PartialFileSweep?
     private let motion = MotionSensors()
     /// The guest's hardware keyboard and mouse: plugged while iOS has the
     /// hardware, and fed by the display's view (`GuestLayer`).
@@ -98,7 +109,7 @@ final class LiveRuntime: RuntimeDriver {
             let result = try await operations.shell(policy.command, limit: .seconds(15))
             guard result.exitCode == 0 else {
                 print("Andarium: display rotation command failed: \(result.text)")
-                throw AdbFailure(message: "The guest’s screen could not follow this window. Close and reopen Andarium to try again.")
+                throw AdbFailure(message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
             }
         }, changed: { [weak self] in
             self?.updateMotionSensors()
@@ -106,8 +117,8 @@ final class LiveRuntime: RuntimeDriver {
             print("Andarium: display rotation unavailable: \(error)")
             guard let model = self?.model, model.alert == nil else { return }
             model.alert = AppAlert(
-                title: "Display rotation unavailable",
-                message: "The guest’s screen could not follow this window. Close and reopen Andarium to try again.")
+                title: String(localized: "Display rotation unavailable"),
+                message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
         })
     private var normalRun = false
     /// The runtime runs a guest, from its start until its run returns.
@@ -149,10 +160,10 @@ final class LiveRuntime: RuntimeDriver {
     /// What stopped the last attempt in this process to finish a restore that
     /// did not finish; the listing carries it.
     private var rollForwardFailure: SnapshotFailure?
-    private var view: GuestMetalView?
+    private(set) var view: GuestMetalView?
     private var geometry: GuestDisplayGeometry?
     private var bootStartedAt = Date()
-    private var runStartedAt: Date?
+    private(set) var runStartedAt: Date?
     private var thermalObserver: NSObjectProtocol?
     private var console: ConsoleSink?
 
@@ -168,6 +179,7 @@ final class LiveRuntime: RuntimeDriver {
         }
         self.preferences = PreferenceKeeper(model: model)
         self.storage = storage
+        partials = PartialSweepLedger(directory: storage.locations.directory)
         self.keyStore = keyStore
         self.sessionRecord = sessionRecord
         self.freeSpace = freeSpace
@@ -226,6 +238,7 @@ final class LiveRuntime: RuntimeDriver {
             storageBusy = false
         }
         try await storage.erase(progress: progress)
+        partials.diskErased()
         // The next guest is a new one: it boots with a key of its own.
         keyStore.delete()
         adbIdentity = nil
@@ -393,6 +406,15 @@ final class LiveRuntime: RuntimeDriver {
             end(startFailure: "the runtime could not be loaded")
             return
         }
+        // The runtime refuses a size this host does not admit, and the
+        // settings never offer one, so this is a safety net: say why rather
+        // than end on the runtime's bare result.
+        guard kernarium_runtime_loader_guest_memory_admitted(UInt32(clamping: run.guest.memoryMiB)) != 0 else {
+            end(startFailure: MemoryRefusal.reason(
+                memoryMiB: run.guest.memoryMiB,
+                ceilingMiB: Int(kernarium_runtime_loader_guest_memory_ceiling_mib())))
+            return
+        }
         // A denial of the network the notice is up for began before this run
         // loaded the runtime; its record notes it from the start.
         model?.reportNetworkDenial()
@@ -429,6 +451,7 @@ final class LiveRuntime: RuntimeDriver {
         let dataGiB = storage.dataGiB(for: run.guest)
         reachedBootCompleted = false
         normalRun = run.mode == .normal
+        beginPartialSweep()
         updateThermal()
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
@@ -531,13 +554,44 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What adb does for the screens, with the key this boot carries.
     private var operations: AdbGuestOperations {
-        AdbGuestOperations(identity: adbIdentity, clock: clock, device: model?.host.name ?? "device")
+        AdbGuestOperations(
+            identity: adbIdentity, clock: clock, device: model?.host.name ?? "device", hostFree: freeSpace,
+            run: runMark)
+    }
+
+    /// A new run has its own mark, and a normal one sweeps the partial files
+    /// that earlier runs left once Android is up, when the record says there
+    /// may be some (`PartialFileSweep`). A recovery boot starts no Android to
+    /// ask, and a guest that booted without the application's adb key cannot
+    /// be asked either.
+    private func beginPartialSweep() {
+        partialSweep?.runEnded()
+        runMark = GuestRunMark.random()
+        guard normalRun, adbIdentity != nil else {
+            partialSweep = nil
+            return
+        }
+        // Each step reads the operations when it runs: the mark it spares is
+        // the one current then, which a restart of the guest has renewed.
+        partialSweep = PartialFileSweep(
+            owed: { [partials] in partials.isOwed },
+            storageReady: { [weak self] in await self?.storageReady() },
+            sweep: { [weak self] in try await self?.sweepPartialFiles() ?? 0 })
+    }
+
+    /// The sweep, with the mark that is current when it runs. `walk` is what
+    /// removes the leftovers in the guest and returns how many.
+    func sweepPartialFiles(
+        using walk: @Sendable (AdbGuestOperations) async throws -> Int = { try await $0.sweepPartialFiles() }
+    ) async throws -> Int {
+        let guest = operations
+        return try await partials.sweeping(excluding: guest.run) { try await walk(guest) }
     }
 
     /// The file browser's backend: it reads the operations for each call, as
     /// the key changes with each boot.
     func makeGuestFiles(hostFree: @escaping @Sendable () -> UInt64) -> LiveGuestFiles {
-        LiveGuestFiles(operations: { [unowned self] in operations }, hostFree: hostFree)
+        LiveGuestFiles(operations: { [unowned self] in operations }, partials: partials, hostFree: hostFree)
     }
 
     func createBugReport(update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
@@ -548,8 +602,8 @@ final class LiveRuntime: RuntimeDriver {
         await operations.guestProcFiles()
     }
 
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
-        try await operations.installApk(at: url, sizeBytes: sizeBytes, update: update)
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+        try await operations.installApk(at: url, update: update)
     }
 
     func usbDebugging() async -> Bool? {
@@ -591,6 +645,7 @@ final class LiveRuntime: RuntimeDriver {
         let seconds = Int(Date().timeIntervalSince(bootStartedAt))
         if bootCompleted {
             reachedBootCompleted = true
+            partialSweep?.guestBooted()
             updateThermal()
             updateGuestRotation()
             updateSpaceWatch()
@@ -603,12 +658,19 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    private func guestRestarted(_ event: GuestRestartEvent) {
+    func guestRestarted(_ event: GuestRestartEvent) {
         print("Andarium: \(event)")
         guard case .began = event, let model else { return }
         // The boot that follows is another one: it ends an update only by
         // reaching sys.boot_completed itself.
         reachedBootCompleted = false
+        // No import outlives the restart (the browser stops its transfer
+        // below and the guest's adb connections end with it), so the files of
+        // the run so far are leftovers to the boot that follows. Only the
+        // removal of a cut-off import's own partial file waits for that boot,
+        // and it names its file.
+        runMark = GuestRunMark.random()
+        partialSweep?.guestRestarting()
         spaceAlertOpen = false
         motion.stop()
         haptics.restart()
@@ -629,6 +691,8 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     private func finished(result: Int32) {
+        partialSweep?.runEnded()
+        partialSweep = nil
         normalRun = false
         runActive = false
         inputRunReady = false
@@ -712,11 +776,12 @@ final class LiveRuntime: RuntimeDriver {
 
     private func updateGuestRotation() {
         let policy = rotationPolicy
-        // A new full-screen session mounts the virtual device to the
-        // orientation now locked by UIKit and keeps that frame until the host
-        // owns rotation; while the host does, the guest is drawn upright in
-        // the window and the mount follows the window's orientation. Never
-        // remap per sensor sample.
+        // Where the guest owns rotation (an iPhone, which is portrait-only) a
+        // new period mounts the virtual device to the orientation UIKit holds
+        // and keeps that frame; where the host does (an iPad session, in a
+        // window or full screen) the guest is drawn upright in the scene and
+        // the mount follows the scene's orientation. Never remap per sensor
+        // sample.
         if motionMount.update(policy: policy, interface: interfaceMotionAxes) { motion.restart() }
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
@@ -1098,12 +1163,12 @@ final class LiveRuntime: RuntimeDriver {
         await wakeGuest()
         guard !pause.isPausedForSpace else {
             shuttingDown = false
-            throw AdbFailure(message: "Android is still paused.")
+            throw AdbFailure(message: String(localized: "Android is still paused."))
         }
         do {
             let result = try await operations.shell("reboot -p", limit: .seconds(30))
             if let code = result.exitCode, code != 0 {
-                throw AdbFailure(message: "Android refused to power off (\(code)).")
+                throw AdbFailure(message: String(localized: "Android refused to power off (\(code))."))
             }
             // Android powers off after the command returns, which ends the
             // run; the screen goes with it. Until it has, it is going down.
@@ -1125,7 +1190,7 @@ final class LiveRuntime: RuntimeDriver {
         let deadline = ContinuousClock.now + limit
         while runActive {
             guard ContinuousClock.now < deadline else {
-                throw AdbFailure(message: "Android did not power off.")
+                throw AdbFailure(message: String(localized: "Android did not power off."))
             }
             try await Task.sleep(for: .milliseconds(250))
         }

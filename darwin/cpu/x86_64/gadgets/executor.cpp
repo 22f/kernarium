@@ -656,6 +656,8 @@ public:
 		window_.current = &state;
 		window_.bind(state);
 		touch(generation);
+		/* A switch to the address space is a run in it. */
+		state.space->account().ran(gadget_cache::epoch());
 		if (inserted) {
 			state.changes = changes;
 			/* A space another executor made may be behind the code
@@ -678,6 +680,15 @@ public:
 			code_change_context_);
 		state.changes = changes;
 		advance_epoch(state);
+	}
+
+	/* A run enters translated code in the address space last prepared, in
+	 * `epoch`: the budget asks the spaces the guest runs least to shed
+	 * first. Nothing is bound after the space was let go of. */
+	void note_run(std::uint64_t epoch) noexcept
+	{
+		if (window_.current != nullptr)
+			window_.current->space->account().ran(epoch);
 	}
 
 	/* Let go of every address space held here whose generation `live`
@@ -1043,10 +1054,11 @@ public:
 		 * outside what a sweep reads names a record it made. */
 		if (!state.space->shared() && state.space->sweep_due())
 			sweep(state, diagnostics);
-		/* Past the budget, the largest address spaces are asked to shed;
-		 * their caches let go of them at their next run. This is on the
-		 * carrier thread with no space, page or registry lock held, which
-		 * relieve(), waiting for the budget's own lock, requires. */
+		/* Past the budget, the address spaces the guest runs least are
+		 * asked to shed; their caches let go of them at their next run.
+		 * This is on the carrier thread with no space, page or registry
+		 * lock held, which relieve(), waiting for the budget's own lock,
+		 * requires. */
 		if (gadget_cache::over_budget())
 			gadget_cache::relieve();
 		return &slot.body->program;
@@ -2290,8 +2302,11 @@ void Executor::prepare(::uml::memory::GuestAddressSpace &memory,
 	storage_->programs.set_code_change_reader(
 		code_change_reader, execution_context);
 	storage_->prepared = true;
-	if (!cache_binding_changed && storage_->cache_ready)
+	if (!cache_binding_changed && storage_->cache_ready) {
+		/* Every run prepares at its first block: this is its entry. */
+		storage_->programs.note_run(gadget_cache::epoch());
 		return;
+	}
 	try {
 		storage_->programs.prepare(generation, code_changes);
 		storage_->cache_ready = true;

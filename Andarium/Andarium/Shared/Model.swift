@@ -13,7 +13,7 @@ enum StatisticsViewer: Hashable {
 }
 
 enum SheetKind: String, Identifiable, Hashable, CaseIterable {
-    case create, resize, info, system, whatsNew, snapshots
+    case create, resize, info, system, resolution, whatsNew, snapshots
 
     var id: String { rawValue }
 }
@@ -25,8 +25,8 @@ struct SessionPreset: Equatable {
     var settings = false
     /// Settings opens at full height instead of half.
     var settingsLarge = false
-    /// Settings scrolls to the section with this identifier ("stats",
-    /// "display" or "capabilities").
+    /// Settings scrolls to the section with this identifier ("stats" or
+    /// "capabilities").
     var settingsScroll: String?
     var powerMenu = false
     var leftEdge = false
@@ -125,30 +125,74 @@ final class AppModel {
     /// The preview's plan after Restore; a device reads it from the files.
     var planAfterRestore: StartPlan?
 
-    // App-wide display option, set on the home screen: the guest draws at the
-    // screen's pixel density. The guest's display always follows the window.
-    var retina = false
-    /// Whether the person has set Retina mode themselves. Until they do, it
-    /// follows the device (`DisplayOptions.defaultRetina`); once they have,
-    /// the default never replaces their choice.
-    var retinaChosen = false
-    /// The person's choice of Retina mode on Home.
-    func chooseRetina(_ on: Bool) {
-        retina = on
-        retinaChosen = true
+    // App-wide display option, set on the home screen: how densely the guest
+    // draws, from one guest pixel to a point to one to each pixel of the
+    // screen. The guest's display always follows the window.
+    /// What the person chose for the resolution; nil until they do. Until
+    /// then it follows the device (`DisplayOptions.defaultScale`), and once
+    /// they have the default never replaces it.
+    var chosenScale: GuestDisplayScale?
+    /// The resolution the launch states (automation): that run's alone, so it
+    /// is not kept and what the person chose stays stored.
+    var launchScale: GuestDisplayScale?
+    /// What the system holds this application's memory to (`MemoryLimit`),
+    /// which the default resolution follows; zero where it sets none.
+    var memoryLimitBytes: UInt64 = 0
+    /// The native scale of the screen the window is on, as last read.
+    var screenNativeScale = 1.0
+    /// The size of the display the next start gives the guest, in points: the
+    /// window less the session's safe area (`SessionDisplayArea`). Nil until
+    /// Home has laid out and read it.
+    var displayPoints: CGSize?
+    /// What this screen offers.
+    var resolutionChoices: ResolutionChoices { ResolutionChoices(nativeScale: screenNativeScale) }
+    /// The resolution the guest draws at: the launch's, else the person's
+    /// choice, else the default, as a choice of this screen (a number that is
+    /// none goes to the nearest).
+    var resolution: GuestDisplayScale {
+        let choices = resolutionChoices
+        return launchScale.map(choices.resolve)
+            ?? displayOptions.scale(memoryLimitBytes: memoryLimitBytes, choices: choices)
+    }
+    /// The guest's display as the next start lays it out at the choice at
+    /// `index` of `resolutionChoices`; nil until the display's size is known.
+    func resolutionLayout(at index: Int) -> GuestDisplayLayout? {
+        let choices = resolutionChoices
+        return displayPoints.flatMap {
+            GuestDisplayLayout(scale: choices.scale(at: index), points: $0, nativeScale: screenNativeScale)
+        }
+    }
+    /// The index of `resolution` among the choices.
+    var resolutionIndex: Int { resolutionChoices.index(nearest: resolution) }
+    /// The guest's display as the next start lays it out.
+    var resolutionLayout: GuestDisplayLayout? { resolutionLayout(at: resolutionIndex) }
+    /// A screen and a display the Simulator preview states to show other
+    /// devices; nothing in the application does.
+    var statedNativeScale: Double?
+    var statedDisplayPoints: CGSize?
+    /// What the scene reads of the screen the window is on.
+    func screenDidChange(nativeScale: Double) {
+        let scale = statedNativeScale ?? nativeScale
+        if screenNativeScale != scale { screenNativeScale = scale }
+    }
+    /// What Home reads of the window: the display's size as the guest will
+    /// get it.
+    func displayPointsDidChange(_ points: CGSize) {
+        let points = statedDisplayPoints ?? points
+        if displayPoints != points { displayPoints = points }
+    }
+    /// The person's choice of resolution on Home.
+    func chooseResolution(_ scale: GuestDisplayScale) {
+        chosenScale = scale
     }
     /// What is kept of the display options across launches.
-    var displayOptions: DisplayOptions {
-        DisplayOptions(chosenRetina: retinaChosen ? retina : nil)
-    }
-    /// The launch stated Retina mode (automation): the value belongs to that
-    /// run and is not kept.
-    var retinaStatedByLaunch = false
-    /// The display options to keep; nil where the launch stated Retina mode,
-    /// so what the person chose stays stored.
-    var displayOptionsToKeep: DisplayOptions? { retinaStatedByLaunch ? nil : displayOptions }
-    /// The host window owns display rotation until iPadOS grants the
-    /// full-screen session's orientation lock. Never a saved guest setting.
+    var displayOptions: DisplayOptions { DisplayOptions(chosenScale: chosenScale) }
+    /// The display options to keep; nil where the launch stated the
+    /// resolution, so what the person chose stays stored.
+    var displayOptionsToKeep: DisplayOptions? { launchScale != nil ? nil : displayOptions }
+    /// The host owns the guest's display rotation: in an iPad session the guest
+    /// is held at rotation zero and its display follows the scene. The scene's
+    /// root sets it (`SessionOrientationPolicy`). Never a saved guest setting.
     var hostDrivesGuestRotation = false
 
     var sessionPreset = SessionPreset()
@@ -285,7 +329,7 @@ final class AppModel {
         case .noDebugger, .failed, .otherSettings, .unsupported:
             // A fall-back is only worth a sentence to a person who asked for the JIT.
             jitLastStart = wanted ? answer : nil
-            if wanted { print("Andarium: \(answer.fallbackSentence ?? "started without JIT")") }
+            if wanted { print("Andarium: \(answer.fallbackLog ?? "started without JIT")") }
             return false
         }
     }
@@ -339,7 +383,25 @@ final class AppModel {
     /// the person puts it away.
     var restoredSnapshot: RestoredSnapshotNotice?
     /// A long task the screens wait for.
-    var busy: BusyState?
+    var busy: BusyState? {
+        didSet { if busy == nil { busyOverSheet = false } }
+    }
+    /// A sheet that stands over the screens draws the overlay of the task under
+    /// way itself, and the screens do not: set for the task a sheet starts,
+    /// and cleared with it.
+    var busyOverSheet = false
+    #if FEEDBACK_MAIL
+    /// What Send feedback asks of the system (`SendFeedbackServices`); a test
+    /// or the Simulator preview replaces it.
+    @ObservationIgnored var feedbackServices = SendFeedbackServices()
+    /// The Send feedback sheet is open, over Info or over the session's Settings.
+    var feedbackSheetOpen = false
+    #endif
+    #if FOLLOW_X
+    /// The handle Follow developer on X opens, from Info.plist, which only a
+    /// build that names one has; a test replaces it.
+    @ObservationIgnored var followXHandle: () -> String? = { FollowXProfile.handle }
+    #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
     /// The guest is paused because the device is nearly out of space; the
@@ -596,7 +658,7 @@ final class AppModel {
         do {
             try driver.save(guest)
         } catch {
-            alert = AppAlert(title: "Settings not saved", message: error.localizedDescription)
+            alert = AppAlert(title: String(localized: "Settings not saved"), message: error.localizedDescription)
         }
     }
 
@@ -609,10 +671,10 @@ final class AppModel {
         }
         runBusy(
             BusyState(
-                title: "Creating guest",
-                detail: "Setting up Andarium with \(Formats.size(gib: guest.effectiveCapacityGiB)).", progress: 0
+                title: String(localized: "Creating virtual machine"),
+                detail: String(localized: "Setting up Andarium with \(Formats.size(gib: guest.effectiveCapacityGiB))."), progress: 0
             ),
-            failure: "The guest could not be created"
+            failure: String(localized: "The virtual machine could not be created")
         ) { progress in
             let made = try await driver.create(guest, progress: progress)
             self.lifecycle.create(made)
@@ -635,7 +697,7 @@ final class AppModel {
         do {
             try await driver.restoreUpdate()
         } catch {
-            alert = AppAlert(title: "The guest could not be restored", message: error.localizedDescription)
+            alert = AppAlert(title: String(localized: "The virtual machine could not be restored"), message: error.localizedDescription)
         }
         refreshPlan()
     }
@@ -650,8 +712,8 @@ final class AppModel {
             return
         }
         runBusy(
-            BusyState(title: "Erasing guest", detail: "Deleting everything the guest stored.", progress: 0),
-            failure: "The guest could not be erased"
+            BusyState(title: String(localized: "Erasing virtual machine"), detail: String(localized: "Deleting everything the virtual machine stored."), progress: 0),
+            failure: String(localized: "The virtual machine could not be erased")
         ) { progress in
             // A choice saved a moment after the last change must not come
             // back after the files are gone.
@@ -779,8 +841,8 @@ final class AppModel {
                 // screen comes back with the new figure if it is still short.
                 self.spacePause = nil
                 self.alert = AppAlert(
-                    title: "Android could not be shut down",
-                    message: "It could not be asked to power off. Try again, or close Andarium and open it again.")
+                    title: String(localized: "Android could not be shut down"),
+                    message: String(localized: "It could not be asked to power off. Try again, or close Andarium and open it again."))
             }
         }
     }
@@ -925,9 +987,14 @@ final class AppModel {
     /// overlay stays up instead and says how the operation ended (its words
     /// on success; `failure` and the error's on failure) until the person
     /// closes it; cancelling still takes the overlay away.
-    private func runOperation<Output: Sendable>(
+    ///
+    /// `failed` says how a failure ends instead of the alert, for a task
+    /// started from a sheet, where an alert of the screens could not show.
+    /// `finished` does not run for a cancelled operation.
+    func runOperation<Output: Sendable>(
         _ state: BusyState, failure: String,
         ending: ((Output) -> (title: String, detail: String))? = nil,
+        failed: (@MainActor (String) -> Void)? = nil,
         _ work: @escaping @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> Output,
         finished: @escaping @MainActor (Output) -> Void = { _ in }
     ) {
@@ -950,7 +1017,11 @@ final class AppModel {
             } catch {
                 if operationEpoch == epoch {
                     if ending == nil {
-                        alert = AppAlert(title: failure, message: error.localizedDescription)
+                        if let failed {
+                            failed(error.localizedDescription)
+                        } else {
+                            alert = AppAlert(title: failure, message: error.localizedDescription)
+                        }
                     } else {
                         failureWords = error.localizedDescription
                     }
@@ -967,7 +1038,9 @@ final class AppModel {
             } else {
                 busy = nil
             }
-            if ending == nil, let result { finished(result) }
+            // A cancelled operation hands nothing on, even when its work
+            // finished before it saw the cancel.
+            if ending == nil, let result, !operationCancelled { finished(result) }
         }
     }
 
@@ -997,7 +1070,7 @@ final class AppModel {
         guard operation != nil, !operationCancelled else { return }
         operationCancelled = true
         busy?.cancel = nil
-        busy?.detail = "Cancelling\u{2026}"
+        busy?.detail = String(localized: "Cancelling\u{2026}")
         operation?.cancel()
     }
 
@@ -1018,32 +1091,54 @@ final class AppModel {
     /// (minutes, under emulation) and the finished zip goes to the share
     /// sheet, where Save to Files is one of the actions.
     func createBugReport() {
-        guard capabilities.bugReport, case .running(.normal) = phase, fileBrowser?.busy != true else { return }
+        guard canCreateBugReport else { return }
         runOperation(
-            BusyState(
-                title: "Creating bug report",
-                detail: "The guest is collecting its logs and state. This can take several minutes.", progress: 0
-            ),
-            failure: "Bug report not created",
-            { [driver, diagnosticsDirectory, diagnosticsContainers] update in
-                let file = if let driver {
-                    try await driver.createBugReport(update: update)
-                } else {
-                    try await Self.playBugReport(update)
-                }
-                // The host's records and the guest's counters travel inside
-                // Android's own report.
-                if let diagnosticsDirectory {
-                    let guest = await driver?.guestStallFiles() ?? []
-                    _ = await Task.detached(priority: .userInitiated) {
-                        BugReportAttachments.attach(
-                            to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
-                    }.value
-                }
-                return file
-            },
+            Self.bugReportState, failure: Self.bugReportFailure, bugReportWork(),
             finished: { [weak self] file in self?.share(file) }
         )
+    }
+
+    /// The overlay of a bug report under way, the same wherever it is asked for.
+    static let bugReportState = BusyState(
+        title: String(localized: "Creating bug report"),
+        detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."), progress: 0
+    )
+    static let bugReportFailure = String(localized: "Bug report not created")
+
+    /// A normal session of a runtime that can make a bug report, with the
+    /// guest's one adb channel free.
+    var canCreateBugReport: Bool {
+        capabilities.bugReport && fileBrowser?.busy != true && {
+            if case .running(.normal) = phase { return true }
+            return false
+        }()
+    }
+
+    /// What making a bug report does, whoever asks for it: Android's report,
+    /// and the host's records and the guest's counters inside it.
+    func bugReportWork() -> @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
+        { [driver, diagnosticsDirectory, diagnosticsContainers] update in
+            let file = if let driver {
+                try await driver.createBugReport(update: update)
+            } else {
+                try await Self.playBugReport(update)
+            }
+            // The host's records and the guest's counters travel inside
+            // Android's own report.
+            if let diagnosticsDirectory {
+                let guest = await driver?.guestStallFiles() ?? []
+                _ = await Task.detached(priority: .userInitiated) {
+                    BugReportAttachments.attach(
+                        to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
+                }.value
+            }
+            // A cancel that came as the report finished: nobody takes the file.
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: file)
+                throw CancellationError()
+            }
+            return file
+        }
     }
 
     /// Opens the share sheet on a finished report; false when there is no
@@ -1067,12 +1162,12 @@ final class AppModel {
 
     /// The preview's report: the same steps on the same overlay, ending in
     /// the share sheet with a small file.
-    private static func playBugReport(_ update: @Sendable (BusyUpdate) -> Void) async throws -> URL {
+    static func playBugReport(_ update: @Sendable (BusyUpdate) -> Void) async throws -> URL {
         for step in 1...36 {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: Double(step) / 36 * 0.9))
         }
-        update(BusyUpdate(progress: 0.9, detail: "Copying the report\u{2026}"))
+        update(BusyUpdate(progress: 0.9, detail: String(localized: "Copying the report\u{2026}")))
         for step in 1...8 {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: 0.9 + 0.1 * Double(step) / 8))
@@ -1087,13 +1182,14 @@ final class AppModel {
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
     /// end with how it went until the person closes it. A file that is not a
-    /// single .apk is refused on the same overlay, at once. The file's security
-    /// scope is held to the end of the install.
+    /// single .apk, or is one Android cannot take by its size, is refused on the
+    /// same overlay, at once. The file's security scope is held to the end of
+    /// the install.
     func installPicked(_ url: URL) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
             alert = AppAlert(
-                title: Self.installFailure, message: "Wait for the file transfer to finish, then install the app.")
+                title: Self.installFailure, message: String(localized: "Wait for the file transfer to finish, then install the app."))
             return
         }
         let name = url.lastPathComponent
@@ -1102,19 +1198,26 @@ final class AppModel {
             return
         }
         let scoped = url.startAccessingSecurityScopedResource()
-        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        let size = UInt64(max(bytes, 0))
+        // The size here is what the picker can say: an iCloud file that is not
+        // down has none yet, and the install reads the real one when it has
+        // the file.
+        let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
+        if let refusal = InstallRefusal(sizeBytes: size) {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
+            return
+        }
         runOperation(
             BusyState(
-                title: "Installing app",
-                detail: "\(name) \u{00B7} \(Formats.size(bytes: size))", progress: 0
+                title: String(localized: "Installing app"),
+                detail: size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name, progress: 0
             ),
             failure: Self.installFailure,
-            ending: { _ in (title: "App installed", detail: "\(name) is installed in the guest.") },
+            ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 if let driver {
-                    try await driver.installApk(at: url, sizeBytes: bytes, update: update)
+                    try await driver.installApk(at: url, update: update)
                 } else {
                     try await Self.playInstall(update)
                 }
@@ -1126,7 +1229,7 @@ final class AppModel {
     }
 
     /// The title of an install that did not happen.
-    static let installFailure = "App not installed"
+    static let installFailure = String(localized: "App not installed")
 
     /// The preview's install: the file goes over, the guest takes its time.
     private static func playInstall(_ update: @Sendable (BusyUpdate) -> Void) async throws {
@@ -1134,7 +1237,7 @@ final class AppModel {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: Double(step) / 20 * 0.8))
         }
-        update(BusyUpdate(detail: "The guest is installing the app\u{2026}", cancellable: false))
+        update(BusyUpdate(detail: String(localized: "The virtual machine is installing the app\u{2026}"), cancellable: false))
         try await Task.sleep(for: .milliseconds(1200))
     }
 

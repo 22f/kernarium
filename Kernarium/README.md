@@ -64,7 +64,10 @@ formulas; [graphics](../docs/graphics.md#device-memory-budget) what the budget
 bounds). The application states the parameters in the boot request, asks the
 runtime for the plan (`plan_gpu_budget`) before the run and shows a dismissible
 notice when the limit leaves the GPU less than its floor; nothing refuses a
-launch for lack of memory. The settings ask the loader
+launch for lack of memory. Only a guest RAM the runtime does not admit
+(`kernarium_runtime_loader_guest_memory_admitted`, the runtime's own rule) ends
+a start, before the run and with a notice that says why; the settings never
+offer such a size. The settings ask the loader
 (`kernarium_runtime_loader_maximum_guest_memory_mib`) for the RAM bound and a
 new configuration's guest RAM
 (`kernarium_runtime_loader_default_guest_memory_mib` at the loaded vCPU count,
@@ -148,7 +151,10 @@ none of the settings below.
   with authorization off, as the macOS launcher does. It refuses that unless
   `KERNARIUM_HOST_FORWARD` is unset or listens on loopback, because
   authorization off gives whatever reaches the forward an unauthenticated shell
-  (and `adb root` on a userdebug image).
+  (and `adb root` on a userdebug image). A loopback forward is reached by the
+  processes of the device and by no guest process: the user network gives the
+  guest no path to the host's loopback or to any address of the host
+  ([`darwin/README.md`](../darwin/README.md#user-network)).
 - Both automation runtimes also read `KERNARIUM_BACKGROUND_JOB_AT_START` and
   `KERNARIUM_BACKGROUND_HOLD_DELAY_MS`, which start a background job with the
   guest and move the GPU hold for a measurement; the packaging script refuses a
@@ -314,7 +320,9 @@ decides what the lifecycle edges do and acts only through
 
 A guest's disk grows as the guest writes (the Linux overlay in the temporary
 directory, an Android bundle's `data.img`), and a write the device cannot take
-stops the guest. The thresholds and the pause itself are
+is held, with the guest's other disk I/O, until the device has room
+([kernel contract](../kernel/common/README.md#block-devices-and-filesystems));
+the pause is the guard. The thresholds and the pause itself are
 [GuestHostCore](../GuestHost/README.md), which Andarium shares, as is the
 figure: the space a write can use (`HostStorage`), which leaves out the
 purgeable space iOS Settings counts.

@@ -35,7 +35,7 @@ struct ContentView: View {
 
                 GuestDisplayView(
                     keyboardVisible: $framebufferKeyboardVisible,
-                    retinaMode: EmulatorLauncher.shared.retinaMode
+                    scale: EmulatorLauncher.shared.displayScale
                 ) { view, geometry in
                     EmulatorLauncher.shared.start(view: view, geometry: geometry)
                 }
@@ -52,7 +52,10 @@ struct ContentView: View {
                     .allowsHitTesting(guestViewMode == .serialConsole)
                     .accessibilityHidden(guestViewMode != .serialConsole)
 
-                if let shortage = launcher.startShortage {
+                if let refusal = launcher.memoryRefusal {
+                    MemoryRefusalNotice(reason: refusal)
+                        .padding()
+                } else if let shortage = launcher.startShortage {
                     StartShortageNotice(shortage: shortage) {
                         launcher.retryStart()
                     }
@@ -443,6 +446,26 @@ private struct GuestEndedNotice: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("guestEndedNotice")
+    }
+}
+
+/// Shown over the guest views when the memory the settings or the launch state
+/// is a size the runtime refuses. Nothing started. The settings never offer
+/// such a size, so only a launch's environment, or a size stored before the
+/// host's limit shrank, brings it.
+private struct MemoryRefusalNotice: View {
+    let reason: String
+
+    var body: some View {
+        GuestNoticeCard(
+            systemName: "memorychip",
+            title: "The virtual machine can\u{2019}t start",
+            message: reason + ". Choose another size in Emulator " +
+                "settings and relaunch Kernarium.",
+            messageStyle: .primary
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("memoryRefusalNotice")
     }
 }
 
@@ -868,6 +891,9 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     /// Nothing started: the guest starts once there is room and the person
     /// asks again.
     @Published private(set) var startShortage: StartSpace?
+    /// Set when the memory this launch states is a size the runtime refuses
+    /// (`MemoryRefusal`): nothing started, and a relaunch is what starts it.
+    @Published private(set) var memoryRefusal: String?
     private var restartIndicator = GuestRestartIndicator()
     /// The name the running guest's own settings are stored under.
     private(set) var runningGuestName: String?
@@ -884,7 +910,8 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
     /// runs; the unit tests' launchers have none.
     private let space: (() -> GuestSpacePause)?
 
-    var retinaMode: Bool { configuration.retinaMode }
+    /// Kernarium's one switch: native, or one guest pixel to a point.
+    var displayScale: GuestDisplayScale { configuration.retinaMode ? .native : .points }
 
     /// The unit tests make launchers of their own, with a job of their own.
     init(
@@ -920,6 +947,23 @@ final class EmulatorLauncher: ObservableObject, SpaceRun {
         }
         guard let selection = RootfsImage.selection(named: rootfsFilename) else {
             print("Kernarium: Documents/\(rootfsFilename) is missing")
+            return
+        }
+        // The runtime refuses a size this host does not admit; the settings
+        // never offer one, so this says why rather than end on its bare result.
+        guard kernarium_runtime_loader_guest_memory_admitted(
+            UInt32(clamping: configuration.guestMemoryMiB)
+        ) != 0 else {
+            // Every layout of the guest view asks to start while the run is
+            // idle, so a refusal is said, and published, once.
+            if memoryRefusal == nil {
+                let reason = MemoryRefusal.reason(
+                    memoryMiB: configuration.guestMemoryMiB,
+                    ceilingMiB: EmulatorConfiguration.guestMemoryCeilingMiB
+                )
+                print("Kernarium: cannot start the guest: \(reason)")
+                memoryRefusal = reason
+            }
             return
         }
         if let shortage = Self.startShortage(

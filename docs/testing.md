@@ -148,6 +148,17 @@ condition on a per-frame or per-bind path reports once.
 each of 64 hand-backs nothing the test kernel left behind may remain, and the
 process must be as it was before the first run.
 
+`guest-irq-takeover` models a host that does not run a vCPU: its runner inserts
+a library into the launcher (`DYLD_INSERT_LIBRARIES`, as `runtime-restart-*` does
+its process audit) which suspends CPU0's carrier thread for a while every second,
+and the test requires a vsock echo that begins in a hold to return soon after the
+slowest echo without one, with every CPU busy, with only CPU0 busy and with
+every CPU idle. An echo already under way when a hold begins is not judged, and
+a hold that lands inside CPU0's dispatch stays with CPU0, so a few holds per
+phase may fail. A phase with too few judged holds, and a host so busy that an
+echo without a hold is already slow, fail the run. The library is test support
+and nothing in the product loads it.
+
 ## Integration prerequisites and workflows
 
 Integration needs four local inputs: the accepted kernel bundle below
@@ -170,7 +181,21 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable.
+disable. A driver path that only a misbehaving device reaches, such as a device
+that was reset during a suspend (`guest-video-camera-reset`) or is late to stop
+a stream (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is
+reached by serving the guest the production device behind the test-only shim of
+`tests/support/vhost_user`; no production target carries a switch for it.
+A test that needs what only an earlier session leaves behind boots more than
+once: `guest-v4l2-capture` first lets the host learn the synthetic camera's
+colour data into a calibration directory of the run, because Bayer stills are
+offered from the next session on.
+A guest reaches no listener on the host; the tests that need one, and the test
+that proves it, are described in [user network](../darwin/README.md#user-network).
+`guest-hardware-input` (needs a GPU slot) checks that a Linux guest started
+with `--hardware-input` registers and unregisters the keyboard, mouse and
+pointer input devices as a VNC client plugs and unplugs them
+([contract](../kernel/common/input/README.md)).
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
@@ -251,6 +276,10 @@ the run never starts, so the first build phase of each application's target
 one. The shared schemes gather no code coverage; a coverage run passes
 `-enableCodeCoverage YES`.
 
+A change to the guest memory the applications offer is proven by a start through
+the applications' runtime (`kernarium_runtime_loader_run`) at the largest offered
+size, in the Simulator or on a Mac, not by a command-line launcher.
+
 On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
@@ -303,25 +332,38 @@ the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol`,
 `andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image` and
-`andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
+`andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
-ranges of every field and the frame reader), system image staging and the
-screenshot script, and `kernarium-host-features` (unit)
-the table of host features the boot request carries to an Android guest. The
-application builds with Xcode (`AndariumPreview` is the Simulator build with
-mock data, `Andarium` the device application,
+ranges of every field and the frame reader), system image staging, the
+screenshot script, the String Catalogs' check and their sync with the
+compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
+and `kernarium-host-features` (unit) the table of host features the boot
+request carries to an Android guest. The application builds with Xcode
+(`AndariumPreview` is the Simulator build with mock data, `Andarium` the
+device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
-an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests`;
-the scheme without the filter also runs `AndariumUITests`). `SnapshotFileApiTests`
+an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
+FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle`; the scheme
+without the filter also runs `AndariumUITests`). The scheme's Test
+action pins English, so the tests that read the application's words do not
+depend on the language of the device; `LocalizationTests` names a lost pin and
+looks each language up by name, and the language a `-testLanguage` run asks
+for fails only the tests that read the English words. `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. The hosted tests
+screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
+exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
+command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback)),
+and `FollowXRowTests` only with `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
+without them does not build them. The Mail composer, the picker and the
+guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -350,7 +392,9 @@ positions, the plug order, no software keyboard, a sheet's text field taking
 the keys while it is open and a sheet without one taking none from the guest,
 the pointer's hover, clicks, drag and scroll, "Use the pointer as touch" (the
 click is a touch of the touchscreen with it on, the mouse's without it), and a
-guest that never registers its mouse, whose pointer stays the touchscreen's. The
+guest that never registers its mouse, whose pointer stays the touchscreen's.
+`InterfaceRotationUITests` turns the Simulator through the four orientations in
+a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock.
@@ -362,18 +406,19 @@ sets, its CPU time standing still), the graphics-memory notice (a real refusal
 in Chrome's WebGL under the host's GPU budget, on a guest with Chrome
 installed), the graphics-memory reading and the process list the reclaim
 parses (any guest), the session record's network slot (a real guest's DHCP
-lease, `NetworkRecordGuestTests`), Retina memory, the ADB-over-vsock guest
-tests (including Android storage and the touch-cancel path), the side keys'
-pass-through of touches to Android, the ADB-over-network hold, the
-background disk locks (which also requires a guest that was allocating
-buffers when the GPU was held to suspend), the resume after a save while
-the application is away, the real `HostLocation` against the Simulator's
-simulated location (the suite's header says how to grant access and set one)
-and the hardware keyboard and mouse against Android's input devices
-(`KeyboardMouseGuestTests`, which needs a kernel that follows configuration
-changes and its Android release). The storage test signs its helper
-APK with the AOSP test key, never a release key. When derived data is on a
-removable volume, macOS prompts once for access and the launch hangs until
+lease, `NetworkRecordGuestTests`), Retina memory, the resolution a real guest
+gets (`ResolutionGuestTests`: the size and density Android reports at a
+scale), the ADB-over-vsock guest tests (including Android storage and the
+touch-cancel path), the side keys' pass-through of touches to Android, the
+ADB-over-network hold, the background disk locks (which also requires a guest
+that was allocating buffers when the GPU was held to suspend), the resume
+after a save while the application is away, the real `HostLocation` against
+the Simulator's simulated location (the suite's header says how to grant
+access and set one) and the hardware keyboard and mouse against Android's input
+devices (`KeyboardMouseGuestTests`, which needs a kernel that follows
+configuration changes and its Android release). The storage test signs its
+helper APK with the AOSP test key, never a release key. When derived data is on
+a removable volume, macOS prompts once for access and the launch hangs until
 answered; build to the internal disk instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`
@@ -410,8 +455,11 @@ Window layout follows iPadOS windowing, which only a device has. Whenever the
 guest view's layout changes, check on an iPad in Full Screen Apps, Windowed
 Apps and Stage Manager, switching Multitasking under the running application in
 both directions: the view must move at once, resize the guest display
-(`wm size`), keep touch coordinates mapped and show no lost GPU backend.
-Restore Full Screen Apps before releasing the lease.
+(`wm size`), keep touch coordinates mapped and show no lost GPU backend. In
+each mode also turn the iPad through its four orientations in a session: the
+interface and the guest's display follow, the last frame keeps its proportions
+meanwhile, and a game that asks for one orientation is letterboxed in the
+other. Restore Full Screen Apps before releasing the lease.
 
 ### Background lifecycle (device only)
 
@@ -577,11 +625,12 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
-- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
-  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
-  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
-  default devices and again with the option and a connected client; a result
-  that differs from the accepted release's is explained
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`;
+  `guest-hardware-input` is the Linux guest's check). `android-keymouse`
+  passes, and `CtsInputTestCases`, `CtsHardwareTestCases`, `CtsViewTestCases`
+  and `CtsInputMethodTestCases` pass with the launcher's default devices and
+  again with the option and a connected client; a result that differs from the
+  accepted release's is explained
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
@@ -625,8 +674,9 @@ wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
-`screenrecord`'s encoder run across a suspend by the host's route and by the
-guest's own on one stream each, and the host closes no stream by a reset.
+`screenrecord`'s encoder run across a suspend by the host's route (asked again
+while the guest is busy, as the host does) and by the guest's own on one stream
+each, and the host closes no stream by a reset.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled and joined while the internet checks fail, joins again

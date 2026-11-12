@@ -30,6 +30,9 @@ application that must:
     code of the application or of a framework (the JIT is for the other
     configurations, which a debugger prepares; an App Store build has no
     executable memory of its own);
+  - carry no JIT text in a language: no JIT strings table in any lproj, and no
+    localized key or value that names JIT or StikDebug (the JIT texts are a
+    String Catalog of their own that the configuration excludes);
   - carry no trace of the machine that built it: no path under a user's home
     directory (/Users/<name>/), on a mounted volume (/Volumes/<name>/) or in
     the per-user temporary directories (/var/folders/) in the host code of an
@@ -41,7 +44,31 @@ application that must:
     executable when it archives, and strips nothing it embeds. A path that a
     dependency compiles in from its prefix is the dependencies' to avoid
     (dependencies/README.md, "No build-host paths"); and
-  - pass scripts/check-privacy-manifests.py.
+  - pass scripts/check-privacy-manifests.py; and
+  - carry Send feedback (Andarium/README.md#send-feedback) only when the build
+    names a receiver: the feature is compiled in exactly where the ignored
+    local configuration holds an address, in this configuration alone. A
+    product without an address holds nothing of it: no type, text, framework
+    or Info.plist key; a product with one holds all of it and the address
+    the build named. The local configuration's receiver is in no file of a
+    bundle whose build does not name it, which the check finds by its bytes
+    and never prints. Info.plist keeps every value of Config/Info.plist, as
+    its preprocessing is to change only the feedback key. The feature's
+    texts are the String Catalog table Feedback, which the build compiles in
+    with the feature and no other: a product without it has no Feedback
+    strings table, found by the file name whatever it holds, and a product
+    with it has the table in Japanese and both Chinese; and
+  - carry Follow developer on X (Andarium/README.md#follow-developer-on-x)
+    only when the build names a handle, by the same rule: compiled in exactly
+    where the ignored local configuration holds a handle and the ignored
+    Local directory holds the logo, in this configuration alone. A product
+    without a handle holds nothing of it: no type, Info.plist key, FollowX
+    strings table or logo in its asset catalog; a product with one holds all
+    of it, the handle the build named, and a logo. The local handle is in no
+    file of a bundle whose build does not name it, which the check finds as
+    a profile address or as a property list's whole string (a bare scan of
+    its bytes would match the bundle identifier, which holds the same word),
+    and never prints.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -51,7 +78,11 @@ The console lines are long enough to be text in the binary, so a build whose
 code still holds one fails, whether or not anything calls it.
 
 The Xcode project runs it as the last build phase of the App Store
-configuration, so a build that breaks one of these rules fails.
+configuration, so a build that breaks one of these rules fails. In every other
+configuration a phase runs `--feedback --follow-x`, which checks the two optional
+features alone: there each is absent unless a test or capture script arranged it
+with its example value, in Debug alone. Both print one line per feature that
+says whether it is compiled in.
 """
 
 from __future__ import annotations
@@ -102,8 +133,60 @@ CPU_TYPE_ARM64 = 0x0100000C
 LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
 N_STAB = 0xE0
+N_SO = 0x64
 N_OSO = 0x66
+N_SOL = 0x84
+# The stabs whose strings are paths: the compilation directory and source
+# file, the object file, and an included file. The others name symbols.
+PATH_STABS = frozenset({N_SO, N_OSO, N_SOL})
 CHECKER = Path(__file__).resolve().parents[2] / "scripts" / "check-privacy-manifests.py"
+
+# Send feedback. The build writes the receiver to Info.plist under this key
+# only where the feature is compiled in (Andarium/Config/Andarium.xcconfig).
+FEEDBACK_KEY = "AndariumFeedbackAddress"
+# The only address a configuration other than AppStore may carry: the one the
+# test and capture scripts arrange.
+FEEDBACK_ARRANGED = "feedback@example.com"
+# What the feature leaves in a binary: its types (Swift writes a name's length
+# before it, so a fragment of the name matches), the subject's prefix, the
+# Info.plist key it reads, and the system frameworks only it uses.
+FEEDBACK_REQUIRED = (b"Andarium feedback: ", FEEDBACK_KEY.encode(), b"MessageUI.framework")
+FEEDBACK_FRAGMENTS = (
+    b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
+# Words the feature puts in a String Catalog.
+FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
+# The feature's own table (Localization/Feedback.xcstrings), which a String
+# Catalog compiles to Feedback.strings, and to Feedback.stringsdict for a plural,
+# in each language's directory; and the languages that table has besides English.
+FEEDBACK_TABLE = "Feedback"
+FEEDBACK_LANGUAGES = ("ja", "zh-Hans", "zh-Hant")
+# Follow developer on X. The build writes the developer's handle to Info.plist
+# under this key only where the row is compiled in (Andarium/Config/Andarium.xcconfig).
+FOLLOW_X_KEY = "AndariumFollowXHandle"
+# The only handle a configuration other than AppStore may carry: the one the test
+# and capture scripts arrange, and the placeholder of Developer.local.xcconfig.example.
+FOLLOW_X_ARRANGED = "example_handle"
+# What the row leaves in a binary: its types (Swift writes a name's length before
+# it, so a fragment of the name matches), the line of its text that is too long
+# to sit in an instruction, and the Info.plist key it reads.
+FOLLOW_X_REQUIRED = (b"Follow developer on", FOLLOW_X_KEY.encode())
+FOLLOW_X_FRAGMENTS = (b"FollowX", *FOLLOW_X_REQUIRED)
+# Words the row puts in a String Catalog.
+FOLLOW_X_WORDS = ("Follow developer on",)
+# The row's own table (Localization/FollowX.xcstrings), by the same rule as Feedback.
+FOLLOW_X_TABLE = "FollowX"
+# The logo's name in the asset catalog the build compiles in with the row
+# (Assets.car keeps an asset's name as plain text), and the file names of the
+# artwork, which no bundle carries as a file.
+FOLLOW_X_ASSET = b"XLogo"
+FOLLOW_X_FILES = frozenset({"x-logo.svg", "glyph.svg"})
+# The shape of a handle of X, the same rules as FollowXProfile.isWellFormed.
+FOLLOW_X_HANDLE_PATTERN = re.compile(r"[A-Za-z0-9_]{1,15}")
+# The hosts a profile address of the developer could name.
+FOLLOW_X_HOSTS = ("x.com", "twitter.com")
+# Domains and top-level domains that name no mailbox (RFC 2606, RFC 6761).
+PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net")
+PLACEHOLDER_TLDS = ("example", "invalid", "localhost", "test")
 
 
 def thin_offset(data: bytes) -> int | None:
@@ -204,12 +287,14 @@ def debug_stabs(data: bytes, base: int) -> tuple[int, int]:
     return sum(1 for kind in kinds if kind & N_STAB), kinds.count(N_OSO)
 
 
-def without_debug_map(data: bytes, base: int) -> bytes:
+def without_debug_map(data: bytes, base: int, kinds: frozenset[int] | None = None) -> bytes:
     """The Mach-O with the strings of its debug stabs blanked: the names of
     the objects, sources and functions the linker recorded. A framework that
     carries them fails for that, and Xcode strips them from the application's
     own executable when it archives, so neither is a path the build host left
-    in the code."""
+    in the code. `kinds` limits the blanking to those stab types (PATH_STABS):
+    the linker shares a string between a symbol and its stab, so blanking a
+    function's stab would blank the symbol the code carries as well."""
     table = symbol_table(data, base)
     if table is None:
         return data
@@ -217,7 +302,7 @@ def without_debug_map(data: bytes, base: int) -> bytes:
     buffer = bytearray(data)
     for entry in range(symbols):
         string, kind = struct.unpack_from("<IB", data, offset + 16 * entry)
-        if kind & N_STAB and 0 < string < size:
+        if kind & N_STAB and (kinds is None or kind in kinds) and 0 < string < size:
             end = data.find(b"\0", strings + string, strings + size)
             if end > 0:
                 buffer[strings + string:end] = bytes(end - strings - string)
@@ -315,6 +400,10 @@ DEBUG_SYMBOLS = (
     # The Simulator preview's denied-network notice (Model.previewNetworkNotice):
     # the Simulator cannot be denied the network, so the preview plays it.
     ("network notice preview", (b"20previewNetworkNotice",)),
+    # The Simulator preview's hooks into the Send feedback sheet
+    # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
+    # preview opens the sheet and fills a draft; the application never does.
+    ("send feedback preview", (b"20previewOpensAtLaunch", b"14previewPrepare")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.
@@ -397,6 +486,44 @@ def debug_support(path: Path) -> list[str]:
     return found
 
 
+JIT_TEXT = re.compile(r"StikDebug|\bJIT\b", re.IGNORECASE)
+
+
+def strings_in(value: object) -> list[str]:
+    """Every key and string value of a property list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in (strings_in(key) + strings_in(item))]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in strings_in(item)]
+    return []
+
+
+def localized_jit_text(app: Path) -> list[str]:
+    """The JIT text carried as localized text: a JIT strings table of any
+    language, and any key or value of another table that names JIT or StikDebug."""
+    found = []
+    for table in sorted(app.rglob("*.lproj/*")):
+        if table.suffix not in (".strings", ".stringsdict"):
+            continue
+        relative = table.relative_to(app)
+        if table.stem == "JIT":
+            found.append(f"{relative}: the JIT strings table, which an App Store build does not carry")
+            continue
+        raw = table.read_bytes()
+        try:
+            texts = strings_in(plistlib.loads(raw))
+        except (plistlib.InvalidFileException, ValueError, OverflowError):
+            # An old-style text file: UTF-16 with a mark, or UTF-8.
+            texts = [raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8", errors="replace")]
+        for text in texts:
+            if JIT_TEXT.search(text):
+                found.append(f"{relative}: carries JIT text ({text[:60]!r})")
+                break
+    return found
+
+
 def test_support(app: Path) -> list[str]:
     """The test bundles and test frameworks anywhere in the application."""
     found = []
@@ -411,10 +538,405 @@ def test_support(app: Path) -> list[str]:
     return sorted(found)
 
 
+def feedback_files(app: Path) -> list[Path]:
+    """The Mach-O files that can hold the application's code: its executable,
+    the debug library a Debug build keeps the code in, and the frameworks."""
+    found = list(executables(app))
+    found.extend(path for path in sorted(app.glob("*.dylib")) if path not in found)
+    return found
+
+
+# One strict shape of an address, the same rules as SendFeedbackMail.isWellFormed:
+# a local part of 1 to 64 letters, digits and . _ % + - that starts and ends
+# with a letter or digit and has no two dots in a row, then @, then at least
+# two dot-separated labels of letters, digits and hyphens (no label starts or
+# ends with a hyphen) whose last is two or more letters. Quotes, angle
+# brackets, a trailing semicolon, spaces and a second @ make no address.
+FEEDBACK_ADDRESS_PATTERN = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._%+-]{0,62}[A-Za-z0-9])?"
+    r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+
+
+def feedback_address_shape(address: str) -> bool:
+    return (len(address) <= 254 and FEEDBACK_ADDRESS_PATTERN.fullmatch(address) is not None
+            and ".." not in address.partition("@")[0])
+
+
+def feedback_address_problems(configuration: str, address: str) -> list[str]:
+    """What is wrong with the address a build names, whatever the product holds.
+    The arranged example address is Debug's alone: Release, the build that
+    sideloads and forks make, never takes one."""
+    if not address:
+        return []
+    if configuration != "AppStore":
+        if address != FEEDBACK_ARRANGED:
+            return [f"Send feedback: {configuration} names a receiver that is not the arranged example address; "
+                    "only the App Store configuration reads the local configuration"]
+        if configuration != "Debug":
+            return [f"Send feedback: {configuration} names the arranged example address; "
+                    "only Debug takes the arrangement"]
+        return []
+    if not feedback_address_shape(address):
+        return ["Send feedback: the receiver in the local configuration is not an email address"]
+    domain = address.partition("@")[2].lower()
+    if (any(domain == name or domain.endswith("." + name) for name in PLACEHOLDER_DOMAINS)
+            or domain.rpartition(".")[2] in PLACEHOLDER_TLDS):
+        return ["Send feedback: the receiver in the local configuration is a placeholder address"]
+    return []
+
+
+def receiver_leaks(app: Path, receiver: str) -> list[str]:
+    """The files of the bundle whose bytes hold the receiver of the local
+    configuration, in either case; named by path, never by the receiver."""
+    needle = receiver.lower().encode()
+    found = []
+    for directory, _directories, files in os.walk(app):
+        for name in sorted(files):
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            tail = b""
+            try:
+                with path.open("rb") as handle:
+                    while chunk := handle.read(8 << 20):
+                        window = (tail + chunk).lower()
+                        if needle in window:
+                            found.append(str(path.relative_to(app)))
+                            break
+                        tail = window[-(len(needle) - 1):] if len(needle) > 1 else b""
+            except OSError:
+                continue
+    return sorted(found)
+
+
+# The optional features' blocks of Config/Info.plist, and the keys they write.
+OPTIONAL_BLOCKS = re.compile(r"^#ifdef (?:FEEDBACK_MAIL|FOLLOW_X)\n.*?^#endif\n", re.S | re.M)
+OPTIONAL_KEYS = frozenset({FEEDBACK_KEY, FOLLOW_X_KEY})
+
+
+def info_source_problems(app: Path, source: Path) -> list[str]:
+    """Every key of Config/Info.plist but the optional features' (feedback,
+    Follow developer on X), as the built Info.plist has it. The source is
+    preprocessed (those blocks are conditional), and a build adds keys of its own and fills in build
+    settings, so what is compared is each source key, a value naming a build
+    setting (`$(...)`) matching whatever the build made of it. A preprocessor
+    that expanded a macro in a value shows here."""
+    try:
+        text = OPTIONAL_BLOCKS.sub("", source.read_text(encoding="utf-8"))
+        wanted = plistlib.loads(text.encode())
+        with (app / "Info.plist").open("rb") as handle:
+            built = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return [f"Info.plist: cannot be compared with {source.name}"]
+
+    def same(expected: object, actual: object) -> bool:
+        if isinstance(expected, str) and "$(" in expected:
+            return isinstance(actual, str)
+        if isinstance(expected, dict):
+            return (isinstance(actual, dict)
+                    and all(key in actual and same(value, actual[key]) for key, value in expected.items()))
+        if isinstance(expected, list):
+            return (isinstance(actual, list) and len(actual) == len(expected)
+                    and all(same(left, right) for left, right in zip(expected, actual)))
+        return type(expected) is type(actual) and expected == actual
+
+    found = []
+    for key, value in wanted.items():
+        if key in OPTIONAL_KEYS:
+            continue
+        if key not in built:
+            found.append(f"Info.plist: {key} of {source.name} is missing from the built one")
+        elif not same(value, built[key]):
+            found.append(f"Info.plist: {key} differs from {source.name}")
+    return found
+
+
+def feedback_strings(app: Path) -> list[str]:
+    """The String Catalog tables of the application that mention Send feedback."""
+    found = []
+    for path in sorted(app.glob("*.lproj/*.strings")):
+        try:
+            with path.open("rb") as handle:
+                table = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if isinstance(table, dict) and any(
+                word in text for key, value in table.items() for text in (str(key), str(value))
+                for word in FEEDBACK_WORDS):
+            found.append(str(path.relative_to(app)))
+    return found
+
+
+def feedback_tables(app: Path) -> list[Path]:
+    """The Feedback table of any language, found by its file name."""
+    return sorted(path for path in app.glob("*.lproj/*")
+                  if path.stem == FEEDBACK_TABLE and path.suffix in (".strings", ".stringsdict"))
+
+
+def feedback_problems(
+    app: Path, configuration: str, address: str, receiver: str = "",
+) -> tuple[list[str], bool]:
+    """Whether the product holds Send feedback as the build said it would, and
+    whether it holds it. `address` is the build setting FEEDBACK_ADDRESS: the
+    local configuration's receiver in the App Store configuration, empty
+    otherwise, or the example address a test or capture script arranged.
+    `receiver` is the local configuration's own receiver, whatever the
+    configuration: wherever the build does not name it, no file of the
+    bundle holds it."""
+    problems = feedback_address_problems(configuration, address)
+    expected = bool(address) and not problems
+    if receiver and (not expected or receiver != address):
+        problems.extend(f"{name}: holds the receiver of the local configuration"
+                        for name in receiver_leaks(app, receiver))
+    fragments: dict[str, set[bytes]] = {}
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        # The linker's debug map names the object and source files of the
+        # build, which hold the feature's file names though it is compiled
+        # out: the check blanks those paths and reads what the code and its
+        # symbols hold, among them a symbol that a function stab shares.
+        data = without_debug_map(*code, PATH_STABS)
+        present = {fragment for fragment in FEEDBACK_FRAGMENTS if fragment in data}
+        if present:
+            fragments[str(binary.relative_to(app))] = present
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            keyed = plistlib.load(handle).get(FEEDBACK_KEY)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        keyed = None
+    words = feedback_strings(app)
+    tables = feedback_tables(app)
+    compiled = bool(fragments) or keyed is not None or bool(words) or bool(tables)
+    if not expected:
+        if address:
+            problems.append("Send feedback: the build names a receiver that cannot be used")
+        for name, present in fragments.items():
+            problems.append(
+                f"{name}: carries Send feedback ({', '.join(sorted(item.decode() for item in present))}) "
+                "though the build names no receiver")
+        if keyed is not None:
+            problems.append(f"Info.plist: has {FEEDBACK_KEY} though the build names no receiver")
+        problems.extend(f"{name}: has Send feedback strings though the build names no receiver"
+                        for name in words)
+        problems.extend(f"{path.relative_to(app)}: is the Feedback strings table though the build names no receiver"
+                        for path in tables)
+        return problems, compiled
+    if keyed != address:
+        problems.append(f"Info.plist: {FEEDBACK_KEY} must be the receiver the build names")
+    code = set().union(*fragments.values()) if fragments else set()
+    missing = [item.decode() for item in FEEDBACK_REQUIRED if item not in code]
+    if missing:
+        problems.append(
+            f"the application lacks Send feedback ({', '.join(missing)}) though the build names a receiver")
+    absent = [language for language in FEEDBACK_LANGUAGES
+              if not (app / f"{language}.lproj" / f"{FEEDBACK_TABLE}.strings").is_file()]
+    if absent:
+        problems.append(
+            f"the application lacks the Feedback strings table in {', '.join(absent)} though the build names a receiver")
+    return problems, compiled
+
+
+def follow_x_handle_problems(configuration: str, handle: str) -> list[str]:
+    """What is wrong with the handle a build names, whatever the product holds.
+    The arranged placeholder handle is Debug's alone: Release, the build that
+    sideloads and forks make, never takes one."""
+    if not handle:
+        return []
+    if configuration != "AppStore":
+        if handle != FOLLOW_X_ARRANGED:
+            return [f"Follow developer on X: {configuration} names a handle that is not the arranged placeholder; "
+                    "only the App Store configuration reads the local configuration"]
+        if configuration != "Debug":
+            return [f"Follow developer on X: {configuration} names the arranged placeholder handle; "
+                    "only Debug takes the arrangement"]
+        return []
+    if FOLLOW_X_HANDLE_PATTERN.fullmatch(handle) is None:
+        return ["Follow developer on X: the handle in the local configuration is not a handle of X"]
+    if handle.lower() == FOLLOW_X_ARRANGED:
+        return ["Follow developer on X: the handle in the local configuration is the placeholder handle"]
+    return []
+
+
+def follow_x_leaks(app: Path, handle: str) -> list[str]:
+    """The files of the bundle that hold the local configuration's handle as
+    a profile address (in either case, in any file), or as the whole of a
+    string of a property list or strings table. The bare word is no leak:
+    the bundle identifier holds the same one. Named by path, never by the
+    handle."""
+    needles = [f"{host}/{handle}".lower().encode() for host in FOLLOW_X_HOSTS]
+    longest = max(len(needle) for needle in needles)
+    wanted = handle.lower()
+    found = []
+    for directory, _directories, files in os.walk(app):
+        for name in sorted(files):
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = str(path.relative_to(app))
+            try:
+                tail = b""
+                with path.open("rb") as stream:
+                    while chunk := stream.read(8 << 20):
+                        window = (tail + chunk).lower()
+                        if any(needle in window for needle in needles):
+                            found.append(relative)
+                            break
+                        tail = window[-(longest - 1):]
+                    else:
+                        if path.suffix in (".plist", ".strings", ".stringsdict") and path.stat().st_size <= 16 << 20:
+                            try:
+                                texts = strings_in(plistlib.loads(path.read_bytes()))
+                            except (plistlib.InvalidFileException, ValueError, OverflowError):
+                                texts = []
+                            if any(text.lower() == wanted for text in texts):
+                                found.append(relative)
+            except OSError:
+                continue
+    return sorted(found)
+
+
+def follow_x_tables(app: Path) -> list[Path]:
+    """The FollowX table of any language, found by its file name."""
+    return sorted(path for path in app.glob("*.lproj/*")
+                  if path.stem == FOLLOW_X_TABLE and path.suffix in (".strings", ".stringsdict"))
+
+
+def follow_x_words(app: Path) -> list[str]:
+    """The String Catalog tables of the application that mention the row."""
+    found = []
+    for path in sorted(app.glob("*.lproj/*.strings")):
+        try:
+            with path.open("rb") as handle:
+                table = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if isinstance(table, dict) and any(
+                word in text for key, value in table.items() for text in (str(key), str(value))
+                for word in FOLLOW_X_WORDS):
+            found.append(str(path.relative_to(app)))
+    return found
+
+
+def follow_x_logo(app: Path) -> tuple[bool, list[str]]:
+    """Whether the application's asset catalog holds the logo, and the artwork
+    files lying in the bundle (the catalog is where the logo belongs)."""
+    try:
+        compiled = FOLLOW_X_ASSET in (app / "Assets.car").read_bytes()
+    except OSError:
+        compiled = False
+    loose = sorted(
+        str((Path(directory) / name).relative_to(app))
+        for directory, _directories, files in os.walk(app) for name in files if name in FOLLOW_X_FILES)
+    return compiled, loose
+
+
+def follow_x_problems(
+    app: Path, configuration: str, handle: str, local_handle: str = "",
+) -> tuple[list[str], bool]:
+    """Whether the product holds Follow developer on X as the build said it
+    would, and whether it holds it. `handle` is the build setting
+    FOLLOW_X_HANDLE: the local configuration's handle in the App Store
+    configuration, empty otherwise, or the placeholder a test or capture
+    script arranged. `local_handle` is the local configuration's own handle,
+    whatever the configuration: wherever the build does not name it, no file
+    of the bundle holds its profile address. The arranged placeholder is held
+    to the same rule, by its bytes, which only it has: it is in no product
+    that does not arrange it."""
+    problems = follow_x_handle_problems(configuration, handle)
+    expected = bool(handle) and not problems
+    if local_handle and (not expected or local_handle != handle):
+        problems.extend(f"{name}: holds the handle of the local configuration"
+                        for name in follow_x_leaks(app, local_handle))
+    if handle != FOLLOW_X_ARRANGED or not expected:
+        problems.extend(f"{name}: holds the placeholder handle of the arrangement"
+                        for name in receiver_leaks(app, FOLLOW_X_ARRANGED))
+    fragments: dict[str, set[bytes]] = {}
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        data = without_debug_map(*code, PATH_STABS)
+        present = {fragment for fragment in FOLLOW_X_FRAGMENTS if fragment in data}
+        if present:
+            fragments[str(binary.relative_to(app))] = present
+    try:
+        with (app / "Info.plist").open("rb") as stream:
+            keyed = plistlib.load(stream).get(FOLLOW_X_KEY)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        keyed = None
+    words = follow_x_words(app)
+    tables = follow_x_tables(app)
+    logo, loose = follow_x_logo(app)
+    compiled = bool(fragments) or keyed is not None or bool(words) or bool(tables) or logo
+    problems.extend(f"{name}: is artwork of the row, which belongs in the asset catalog" for name in loose)
+    if not expected:
+        if handle:
+            problems.append("Follow developer on X: the build names a handle that cannot be used")
+        for name, present in fragments.items():
+            problems.append(
+                f"{name}: carries Follow developer on X ({', '.join(sorted(item.decode() for item in present))}) "
+                "though the build names no handle")
+        if keyed is not None:
+            problems.append(f"Info.plist: has {FOLLOW_X_KEY} though the build names no handle")
+        problems.extend(f"{name}: has Follow developer on X strings though the build names no handle"
+                        for name in words)
+        problems.extend(f"{path.relative_to(app)}: is the FollowX strings table though the build names no handle"
+                        for path in tables)
+        if logo:
+            problems.append("Assets.car: holds the logo of Follow developer on X though the build names no handle")
+        return problems, compiled
+    if keyed != handle:
+        problems.append(f"Info.plist: {FOLLOW_X_KEY} must be the handle the build names")
+    code = set().union(*fragments.values()) if fragments else set()
+    missing = [item.decode() for item in FOLLOW_X_REQUIRED if item not in code]
+    if missing:
+        problems.append(
+            f"the application lacks Follow developer on X ({', '.join(missing)}) though the build names a handle")
+    absent = [language for language in FEEDBACK_LANGUAGES
+              if not (app / f"{language}.lproj" / f"{FOLLOW_X_TABLE}.strings").is_file()]
+    if absent:
+        problems.append(
+            f"the application lacks the FollowX strings table in {', '.join(absent)} though the build names a handle")
+    if not logo:
+        problems.append("Assets.car: lacks the logo of Follow developer on X though the build names a handle")
+    return problems, compiled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("app", type=Path)
     parser.add_argument("--privacy-checker", type=Path, default=CHECKER)
+    parser.add_argument(
+        "--configuration", default="AppStore",
+        help="the build configuration; Send feedback is checked against it")
+    parser.add_argument(
+        "--feedback-address", default="",
+        help="the build setting FEEDBACK_ADDRESS: the receiver the build names, "
+             "empty when it names none")
+    parser.add_argument(
+        "--feedback-receiver", default="",
+        help="the build setting FEEDBACK_RECEIVER: the local configuration's receiver, "
+             "which no file of a bundle that does not name it may hold")
+    parser.add_argument(
+        "--info-source", type=Path, default=None,
+        help="Config/Info.plist, whose values the built Info.plist keeps")
+    parser.add_argument(
+        "--follow-x-handle", default="",
+        help="the build setting FOLLOW_X_HANDLE: the handle the build names, "
+             "empty when it names none")
+    parser.add_argument(
+        "--developer-x-handle", default="",
+        help="the build setting DEVELOPER_X_HANDLE: the local configuration's handle, "
+             "whose profile address no file of a bundle that does not name it may hold")
+    parser.add_argument(
+        "--feedback", action="store_true",
+        help="check Send feedback alone, for a configuration other than AppStore")
+    parser.add_argument(
+        "--follow-x", action="store_true",
+        help="check Follow developer on X alone, for a configuration other than AppStore "
+             "(with --feedback, the two)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--runtime", action="store_true",
@@ -426,6 +948,28 @@ def main() -> int:
     options = parser.parse_args()
 
     app = options.app
+    if options.feedback or options.follow_x:
+        found = []
+        if options.info_source is not None:
+            found.extend(info_source_problems(app, options.info_source))
+        lines = []
+        if options.feedback:
+            more, compiled = feedback_problems(
+                app, options.configuration, options.feedback_address, options.feedback_receiver)
+            found.extend(more)
+            lines.append(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}"
+                         f" ({options.configuration})")
+        if options.follow_x:
+            more, compiled = follow_x_problems(
+                app, options.configuration, options.follow_x_handle, options.developer_x_handle)
+            found.extend(more)
+            lines.append(f"{app.name}: Follow developer on X is {'compiled in' if compiled else 'not compiled in'}"
+                         f" ({options.configuration})")
+        for line in found:
+            print(line, file=sys.stderr)
+        for line in lines:
+            print(line)
+        return 1 if found else 0
     if options.runtime or options.host_traces:
         found = []
         for binary in executables_of(app):
@@ -465,9 +1009,22 @@ def main() -> int:
             f"{binary.relative_to(app)}: {trace}"
             for trace in build_host_traces(binary, debug_map=binary.parent != app))
 
+    problems.extend(f"{app.name}: {text}" for text in localized_jit_text(app))
+
     problems.extend(
         f"{path}: a test bundle or test framework; build the application "
         "without its tests" for path in test_support(app))
+
+    if options.info_source is not None:
+        problems.extend(info_source_problems(app, options.info_source))
+    feedback, compiled = feedback_problems(
+        app, options.configuration, options.feedback_address, options.feedback_receiver)
+    problems.extend(feedback)
+    print(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}")
+    follow, compiled = follow_x_problems(
+        app, options.configuration, options.follow_x_handle, options.developer_x_handle)
+    problems.extend(follow)
+    print(f"{app.name}: Follow developer on X is {'compiled in' if compiled else 'not compiled in'}")
 
     privacy = subprocess.run(
         [sys.executable, "-B", str(options.privacy_checker), str(app)],

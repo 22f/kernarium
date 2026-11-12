@@ -93,10 +93,10 @@ struct AppEntry {
                 system = try SystemInfo(manifest: manifest, appVersion: version)
                 carried = try SystemFolder.release(in: systemFolder)
             } catch {
-                problem = "This copy of Andarium does not carry a usable system: \(error.localizedDescription)"
+                problem = String(localized: "This copy of Andarium does not carry a usable system: \(error.localizedDescription)")
             }
         } else {
-            problem = "This copy of Andarium does not carry a system."
+            problem = String(localized: "This copy of Andarium does not carry a system.")
         }
 
         let locations = GuestLocations(directory: Self.guestDirectory(instance: launch.instance))
@@ -122,7 +122,7 @@ struct AppEntry {
         do {
             guest = try storage.load()
         } catch {
-            problem = problem ?? "The guest\u{2019}s settings could not be read: \(error.localizedDescription)"
+            problem = problem ?? String(localized: "The virtual machine\u{2019}s settings could not be read: \(error.localizedDescription)")
         }
         // A stored memory size above the bound of its vCPU count comes down to
         // it; a size the launch states stays as stated.
@@ -141,14 +141,13 @@ struct AppEntry {
         #endif
         // The rulers offer no size the carried system's data disk would refuse.
         model.releaseMaximumGiB = storage.release.maximumGiB
-        // Retina mode is the person's choice where they made one, else on when
-        // the system lets this application use more than 4 GiB.
-        let options = DisplayOptionsStore.load()
-        model.retina = launch.retina ?? options.retina(memoryLimitBytes: MemoryLimit.bytes())
-        model.retinaChosen = options.chosenRetina != nil
-        // A value a launch states is that run's, and what the person chose
-        // stays stored.
-        model.retinaStatedByLaunch = launch.retina != nil
+        // The resolution is the person's choice where they made one, else native
+        // when the system lets this application use more than 4 GiB and the
+        // choice nearest 1.5 where it does not. A value a launch states is that
+        // run's, and what the person chose stays stored.
+        model.chosenScale = DisplayOptionsStore.load().chosenScale
+        model.launchScale = launch.displayScale
+        model.memoryLimitBytes = MemoryLimit.bytes()
         // The statistics show from the start where the person left them,
         // unless the launch is a harness's, which decides for its run alone
         // (`StatsPreference.launch`). An App Store build carries no setting.
@@ -224,7 +223,7 @@ struct AppEntry {
         }
         announceWhatsNew(
             on: model, hasGuest: guest != nil, vCPUs: guest?.cores ?? host.processorCount)
-        model.alert = problem.map { AppAlert(title: "Andarium is incomplete", message: $0) }
+        model.alert = problem.map { AppAlert(title: String(localized: "Andarium is incomplete"), message: $0) }
         return model
     }
 

@@ -79,9 +79,9 @@ struct MotionCompatibilityTests {
 
     /// Which of the guest's own users keep a sensor active: Android's
     /// auto-rotation setting, the window manager's rotation mode and the
-    /// sensor service's active connections, with host-driven rotation (as in a
-    /// window) and then with free rotation and auto-rotate on (as in a locked
-    /// full-screen scene, where Android alone rotates its display).
+    /// sensor service's active connections, with host-driven rotation (as in an
+    /// iPad session) and then with free rotation and auto-rotate on (as on an
+    /// iPhone, where Android alone rotates its display).
     private func report(_ operations: AdbGuestOperations) async throws {
         func show(_ title: String, _ command: String) async throws {
             let result = try await operations.shell(command, limit: .seconds(30))

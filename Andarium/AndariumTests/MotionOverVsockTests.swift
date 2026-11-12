@@ -61,7 +61,7 @@ struct MotionOverVsockTests {
             try #require(moved, "No physical tilt and rotation was observed within ten minutes")
             print("MOTION: real accelerometer and gyroscope movement passed")
             if ProcessInfo.processInfo.environment["ANDARIUM_ROTATION_VISUAL"] == "1" {
-                try await RotationOverVsockTests().checkSceneTransitions(model: model, operations: operations)
+                try await RotationOverVsockTests().checkInterfaceTurns(model: model, operations: operations)
             }
         }
     }
@@ -74,7 +74,7 @@ struct MotionOverVsockTests {
         defer { try? FileManager.default.removeItem(at: probeURL) }
         try await withAndroidGuest(cleanupCommand: "pm uninstall org.example.andarium.motionprobe >/dev/null 2>&1") { model, operations in
             try #require(model.motionSensorsAvailable)
-            try await operations.installApk(at: probeURL, sizeBytes: probe.count, update: { _ in })
+            try await operations.installApk(at: probeURL, update: { _ in })
             try await body(model, operations)
         }
     }

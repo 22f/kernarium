@@ -33,14 +33,16 @@ uml_add_tooling_test(
 
 # The App Store configuration builds an application that passes this check as
 # its last build phase; the fixtures show it finds each problem the script's
-# header lists, and leaves the guest kernel image alone.
+# header lists, and leaves the guest kernel image alone. They also show Send
+# feedback and Follow developer on X present only where the build names a
+# receiver or a handle, in either direction.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B
         ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_app_store_bundle.py
         --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-app-store-bundle.py
     LABELS andarium;package
-    TIMEOUT 240)
+    TIMEOUT 600)
 
 # The release build refuses an embedded artifact that is behind the commit it
 # archives; the fixtures build a repository, a staged system and an application
@@ -69,3 +71,14 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_capture_screens.py
     LABELS andarium
     TIMEOUT 60)
+
+# The String Catalogs of the application: every string translated into each
+# language in the state the editor writes, specifiers and plural categories
+# that fit, no Google name, the permission texts and What's New notes present,
+# and the catalog sync that follows the compiler's extraction.
+uml_add_tooling_test(
+    NAME andarium-localization
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_localization.py
+    LABELS andarium
+    TIMEOUT 180)

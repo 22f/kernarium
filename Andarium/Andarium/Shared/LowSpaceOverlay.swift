@@ -14,6 +14,8 @@ struct LowSpaceOverlay: View {
     let resume: () -> Void
     let shutDown: () -> Void
     let checkAgain: () -> Void
+    /// Wider where the screen is, as the other cards over the screens.
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         ZStack {
@@ -24,10 +26,10 @@ struct LowSpaceOverlay: View {
                         .font(.title3)
                         .foregroundStyle(Color.orange)
                         .accessibilityHidden(true)
-                    Text(pause.title)
+                    Text(SpacePauseWords.title(pause).keepingTogether)
                         .font(.title3.weight(.bold))
                 }
-                Text(pause.detail)
+                Text(SpacePauseWords.detail(pause).keepingTogether)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -35,7 +37,7 @@ struct LowSpaceOverlay: View {
                 buttons
             }
             .padding(20)
-            .frame(maxWidth: 380)
+            .frame(maxWidth: sizeClass == .regular ? 520 : 380)
             .glassEffect(.regular, in: .rect(cornerRadius: 26))
             .padding(24)
         }
@@ -47,11 +49,11 @@ struct LowSpaceOverlay: View {
     @ViewBuilder
     private var buttons: some View {
         if let working = pause.working {
-            progress(working == .resuming ? "Resuming\u{2026}" : "Shutting down\u{2026}")
+            progress(working == .resuming ? SpacePauseWords.resuming : SpacePauseWords.shuttingDown)
         } else {
             switch pause.stage {
             case .pausing:
-                progress("Pausing\u{2026}")
+                progress(SpacePauseWords.pausing)
             case .paused:
                 HStack(spacing: 10) {
                     Spacer()

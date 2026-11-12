@@ -12,7 +12,13 @@ Device > Rotate, or a UI driver) between runs, and the orientation is read
 from each image.
 
     capture-screens.py --out DIR --device <udid> [--device <udid> ...]
+    capture-screens.py --out DIR --device <udid> --language ja
     capture-screens.py --list
+
+`--language` runs the Preview in one of Andarium's languages (en, zh-Hans,
+zh-Hant, ja): the launch carries `-AppleLanguages` and `-AppleLocale`, the
+file names and the manifest name the language, and the Simulator's own
+language stays as it is. Without it the Simulator's language decides.
 
 One run at a time captures into a directory: the runs would share the
 screenshots' working files and read and write manifest.json. A second run into
@@ -38,6 +44,20 @@ iPad upright. A launch under such an alert leaves the app inactive, which the
 check above refuses, so the shots that raise the alert run last, and
 SpringBoard is restarted after each: rotate the iPad again before the next
 run.
+
+The shots of Send feedback exist only in a Preview built with the arrangement
+that turns the feature on, which gives it the example receiver and never reads
+the local file:
+
+    xcodebuild -project Andarium/Andarium.xcodeproj -scheme AndariumPreview \\
+        -destination 'generic/platform=iOS Simulator' \\
+        FEEDBACK_ADDRESS=feedback@example.com build
+
+Without it the Preview has no Send feedback, its shots are skipped and said
+so, and the rest is unaffected. The Info shots show Follow developer on X in a
+Preview built with `FOLLOW_X_HANDLE=example_handle` (and
+`FOLLOW_X_LOGO_SOURCE=local` for the real logo from `Config/Local/`); without
+it the row is absent from them.
 
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard
@@ -69,6 +89,8 @@ SETTLED_FRACTION = 0.003
 # How long the Preview has, after a launch, to report that it is the app in front.
 FRONT_SECONDS = 10
 STATE_FILE = "capture-state.json"
+# The languages of the application and the locale each is shown with.
+LANGUAGES = {"en": "en_US", "zh-Hans": "zh_CN", "zh-Hant": "zh_TW", "ja": "ja_JP"}
 LOCK_FILE = ".capture.lock"
 
 
@@ -91,13 +113,23 @@ class Shot:
     # The shot raises the system's own alert, which stays up over whatever launches next: it runs last, and
     # SpringBoard is restarted after it.
     alert: bool = False
+    # The screen is Send feedback's, which only a Preview built with FEEDBACK_ADDRESS has.
+    feedback: bool = False
 
-    def launch_arguments(self) -> list[str]:
-        return ["-screen", self.screen, *self.args]
+    def launch_arguments(self, language: str | None = None) -> list[str]:
+        arguments = ["-screen", self.screen, *self.args]
+        if language is not None:
+            arguments += ["-AppleLanguages", f"({language})", "-AppleLocale", LANGUAGES[language]]
+        return arguments
 
 
 def s(id: str, group: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 3.0) -> Shot:
     return Shot(id, group, screen, description, tuple(args), dark, wait)
+
+
+def feedback(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 14.0) -> Shot:
+    """A shot of Send feedback, which exists only in a Preview built with `FEEDBACK_ADDRESS=feedback@example.com`."""
+    return Shot(id, "Feedback", screen, description, tuple(args), dark, wait, feedback=True)
 
 
 SYSTEM = ("-systemMicrophone", "YES")
@@ -135,10 +167,13 @@ def boot_stages(prefix: str, screen: str, names: list[str], what: str, dark_step
 
 SHOTS: list[Shot] = [
     # Home
-    s("home", "Home", "home", "Home with a configured guest: Guest system (two matched rows: CPU and memory with Edit, then Storage with its usage bar and Resize), JIT (in the builds that have it), Display, Capabilities, Backup, Recovery and erase, and the Start bar.", dark=True),
-    s("home-welcome", "Home", "welcome", "Home before any guest exists: the welcome and Set up guest. First screen of the initial setup."),
+    s("home", "Home", "home", "Home with a configured guest: Virtual machine (matched rows: CPU and memory with Edit, Resolution with Change, then Storage with its usage bar and Resize, and Snapshots), JIT (in the builds that have it), Capabilities, Backup, Recovery and erase, and the Start bar.", dark=True),
+    s("home-welcome", "Home", "welcome", "Home before any guest exists: the welcome and Set up virtual machine. First screen of the initial setup."),
     s("home-first-start", "Home", "home-new", "A guest just created and not yet started: Home as it is before the first start."),
-    s("home-display", "Home", "home-display", "Home scrolled to Display: the Retina mode toggle.", dark=True),
+    s("home-resolution", "Home", "home-resolution", "Home scrolled to Virtual machine: the Resolution row between CPU and memory and Storage, with the guest's pixels and, where the choice is an end, its name (Native), and Change.", dark=True),
+    s("home-resolution-fastest", "Home", "home-resolution", "The Resolution row with the fastest choice (one guest pixel to a point): the line says Fastest.", "-displayScale", "1"),
+    s("home-resolution-middle", "Home", "home-resolution", "The Resolution row with a choice between the ends: the pixels alone.", "-displayScale", "1.5"),
+    s("home-resolution-one-choice", "Home", "home-resolution", "The Resolution row on a screen with one choice (native scale 1.0): the resolution without a name, and Change dimmed.", "-displayNative", "1"),
     s("home-capabilities", "Home", "home-capabilities", "Home scrolled to Capabilities: Microphone off, Gyroscope on and, on an iPhone, Haptics on (their defaults), no notes.", dark=True),
     s("home-jit", "Home", "home-jit", "Home scrolled to JIT: the toggle on and a debugger attached, so the note says it is ready for the next start.", dark=True),
     s("home-jit-no-debugger", "Home", "home-jit-no-debugger", "JIT on with no debugger attached: the note says to open Andarium from StikDebug."),
@@ -149,8 +184,8 @@ SHOTS: list[Shot] = [
     s("home-capabilities-haptics-off", "Home", "home-haptics-off", "Capabilities on an iPhone after Haptics was turned off; an iPad has no Haptics row.", dark=True),
     s("home-capabilities-gyroscope-unavailable", "Home", "home-gyroscope-unavailable", "Capabilities on a device without a gyroscope or accelerometer: Gyroscope is disabled and the footnote says why."),
     s("home-capabilities-location-on", "Home", "home-location-on", "Capabilities with Location on, iOS having allowed it with the exact position."),
-    s("home-capabilities-location-approximate", "Home", "home-location-approximate", "Location on while iOS gives only an approximate location: the line under it says Approximate, with an info mark that explains.", dark=True),
-    s("home-capabilities-location-approximate-alert", "Home", "home-location-approximate-alert", "The explanation behind Approximate: Precise Location is off for Andarium, with Open Settings."),
+    s("home-capabilities-location-approximate", "Home", "home-location-approximate", "Location on while iOS gives only an approximate location: the line under it says Approximate location, with an info mark that explains.", dark=True),
+    s("home-capabilities-location-approximate-alert", "Home", "home-location-approximate-alert", "The explanation behind Approximate location: Precise Location is off for Andarium, with Open Settings."),
     s("home-capabilities-location-denied", "Home", "home-location-denied", "Capabilities after iOS refused the location or its app permission was removed: the row is dimmed and says it is not allowed in Settings.", dark=True),
     s("home-capabilities-location-alert", "Home", "home-location-alert", "Turning Location on while iOS refuses it: the alert that offers Settings."),
     s("home-capabilities-location-restricted", "Home", "home-location-restricted", "Capabilities on a device that restricts the location (Screen Time or a profile): the row is dimmed and says it is restricted."),
@@ -159,9 +194,9 @@ SHOTS: list[Shot] = [
     s("home-capabilities-location-services-off-alert", "Home", "home-location-services-off-alert", "Turning Location on while Location Services are off: the alert explains where to turn them on."),
     s("home-backup", "Home", "home-backup", "Home scrolled to Backup: the guest-data backup toggle and a one-line note."),
     s("home-first-start-recovery", "Home", "home-new-recovery", "Home scrolled to Recovery and erase on a guest not yet started: Start in recovery is disabled until the first start.", dark=True),
-    s("home-recovery-erase", "Home", "home-recovery-erase", "Home scrolled to Recovery and erase: Start in recovery and Erase guest."),
-    s("home-storage-grow", "Home", "home-grow", "Guest system with a larger storage size chosen: the Storage row's bar outlines the new size and the note under it says the growth takes effect at the next start.", dark=True),
-    s("home-storage-max", "Home", "home-max", "Guest system with storage at its largest size (128 GiB, in 4 GiB steps): the note under the Storage bar says so and Resize is dimmed.", dark=True),
+    s("home-recovery-erase", "Home", "home-recovery-erase", "Home scrolled to Recovery and erase: Start in recovery and Erase virtual machine."),
+    s("home-storage-grow", "Home", "home-grow", "Virtual machine with a larger storage size chosen: the Storage row's bar outlines the new size and the note under it says the growth takes effect at the next start.", dark=True),
+    s("home-storage-max", "Home", "home-max", "Virtual machine with storage at its largest size (128 GiB, in 4 GiB steps): the note under the Storage bar says so and Resize is dimmed.", dark=True),
     s("home-update", "Home", "home-update", "A system update waiting: the card above the Start bar."),
     s("home-update-unfinished", "Home", "home-update-failed", "An update that did not finish: the card offers retry or restoring the saved data."),
     s("home-update-unfinished-restore-only", "Home", "home-update-failed-restore", "An unfinished update that can only be restored."),
@@ -171,7 +206,7 @@ SHOTS: list[Shot] = [
     s("home-notice-network-wifi", "Home", "home-network-wifi", "The notice that iOS denies Andarium Wi-Fi, with the way to Settings.", dark=True),
     s("home-notice-ended", "Home", "home-ended", "The notice shown at the launch after Android's previous session ended badly, here in a kernel panic."),
     s("home-notice-low-space", "Home", "home-low-space", "The low free space notice on Home."),
-    s("home-notice-memory-high", "Home", "home-memory-warning", "A guest with more memory than a new one gets (the most the device offers): the notice above Guest system says iOS is likely to close Andarium and what is safer.", dark=True),
+    s("home-notice-memory-high", "Home", "home-memory-warning", "A guest with more memory than a new one gets (the most the device offers): the notice above Virtual machine says iOS is likely to close Andarium and what is safer.", dark=True),
     s("busy-create", "Operations", "busy-create", "The overlay while the guest is created: title, detail and progress."),
     s("busy-erase", "Operations", "busy-erase", "The overlay while the guest is erased."),
     s("alert-error", "Alerts", "alert-error", "An error alert (an operation that failed with the system's message)."),
@@ -185,11 +220,19 @@ SHOTS: list[Shot] = [
     s("system-edit-vram-warning", "Sheets", "system-edit", "The System sheet on a device whose default is held below the line where iOS is likely to close Andarium (an iPhone 18 Pro Max mock) with memory between the two: the ticks past the default are orange and beyond the closing size red, the line beneath says games may run out of graphics memory and the VRAM estimate is orange. Home shows no notice at this size.", "-device", "iphone-18-pro-max", "-memoryMiB", "3584", dark=True),
     s("system-edit-ipad-mini", "Sheets", "system-edit", "The System sheet on an iPad mini 6 mock at its default memory (1.5 GiB): the two sizes coincide, so no graphics warning shows and the VRAM estimate is plain.", "-device", "ipad-mini-6"),
     s("system-edit-memory-mac-64", "Sheets", "system-edit", "The System sheet on a Mac mock with 64 GiB and a guest of 24 GiB: the memory ruler has about a thousand positions, so its labels thin out to round numbers of gibibytes that do not touch, and no short ticks are drawn.", "-device", "mac-64-gib", "-memoryMiB", "24576"),
-    s("erase-alert", "Alerts", "erase", "Erase guest: the standard destructive confirmation over Home. Confirming returns to the first-launch screen (home-welcome).", dark=True),
+    s("resolution-sheet", "Sheets", "resolution-sheet", "The Resolution sheet, opened from Change: every choice with its pixels, and under them its density and, at the ends, Native and Fastest; the current choice is ticked.", dark=True),
+    s("resolution-sheet-middle", "Sheets", "resolution-sheet", "The Resolution sheet with a choice between the ends ticked.", "-displayScale", "2"),
+    s("resolution-sheet-native-2-3", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.3: 1.0, 1.5, 2.0 and 2.3.", "-displayNative", "2.3"),
+    s("resolution-sheet-native-2-61", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.61: 2.5 is left out for being near native, so 1.0, 1.5, 2.0 and 2.61.", "-displayNative", "2.61"),
+    s("erase-alert", "Alerts", "erase", "Erase virtual machine: the standard destructive confirmation over Home. Confirming returns to the first-launch screen (home-welcome).", dark=True),
     s("info", "Info", "info", "Info: the app and version, System info (Build, Android version, Security patch, Kernel, Architecture, Supported architectures), Project on GitHub and Acknowledgements.", dark=True),
     s("info-acknowledgements", "Info", "info-acknowledgements", "Acknowledgements: projects by group; the names and marks line is at the bottom.", dark=True),
     s("info-license", "Info", "info-license", "A project's page: copyright holders, the license name and the license text (Mesa, MIT).", dark=True),
     s("info-license-long", "Info", "info-license-gpl", "A page with a long license text (Linux: syscall exception and GPL v2)."),
+    # Snapshots and What's New (more of each are in the Preview: see SnapshotPreview and WhatsNewPreview)
+    s("snapshots", "Snapshots", "snapshots", "The Snapshots sheet over Home with mock snapshots: the list newest first, the space they use and Take snapshot at the foot.", dark=True),
+    s("snapshots-detail", "Snapshots", "snapshots-detail", "One snapshot's page: its name, when it was taken, what deleting frees, Restore and Delete."),
+    s("whatsnew-open", "What's New", "whatsnew-open", "The notes of the update, opened from the ribbon above Start."),
     # Boot
     *boot_stages("boot", "boot", ["System image", "Linux kernel", "Storage", "Startup"], "Normal boot over the dimmed guest display, no progress bar"),
     s("boot-single-vcpu", "Boot", "boot-single-vcpu", "Normal boot of a guest with a single vCPU: the Linux kernel line says \"1 vCPU\"."),
@@ -248,6 +291,18 @@ SHOTS: list[Shot] = [
     s("overlay-install-failed", "Operations", "install-failed", "The install overlay at its end: App not installed, the guest's reason and OK."),
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
     s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
+    # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
+    feedback("feedback-entrance-info", "info", "Info with Send feedback in a section of its own under the header, apart from the version.", dark=True, wait=3.0),
+    feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
+    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
+    feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
+    feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
+    feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
+    feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
+    feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
+    feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
+    feedback("feedback-info", "feedback-info", "Send feedback opened from Info, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-info-filled", "feedback-info-filled", "Feedback that is not a bug, from Info: a suggestion with a photo; Send is ready."),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
 ]
@@ -347,6 +402,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app that reported is process {state.get('pid')}, not the launched {pid}"
     if state.get("screen") != shot.screen:
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
+    if shot.feedback and state.get("feedback") is not True:
+        return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None
@@ -386,7 +443,7 @@ def settled_screenshot(udid: str, shot_id: str, out: Path) -> tuple[Path | None,
     return temporary, settled
 
 
-def play_flow(udid: str, shot: Shot, pid: int) -> int | None:
+def play_flow(udid: str, shot: Shot, pid: int, language: str | None = None) -> int | None:
     """The steps that follow the launch of a shot whose state needs the app in the background; the process that
     ends them, or None. The Simulator ends an app whose permission changes, as iOS does, so the last step is a
     relaunch there; an app still running just comes forward, which is the activation."""
@@ -396,7 +453,7 @@ def play_flow(udid: str, shot: Shot, pid: int) -> int | None:
         elif step in ("grant", "revoke"):
             result = simctl("privacy", udid, step, shot.service, BUNDLE)
         elif step == "foreground":
-            result = simctl("launch", udid, BUNDLE, *shot.launch_arguments())
+            result = simctl("launch", udid, BUNDLE, *shot.launch_arguments(language))
             if result.returncode == 0:
                 again = launched_pid(result)
                 print(f"  {shot.id}: {'the app was still running' if again == pid else 'the permission change ended the app'}")
@@ -425,7 +482,10 @@ def clear_system_alert(udid: str) -> None:
     time.sleep(15.0)
 
 
-def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: float, orientation: str | None) -> dict | None:
+def capture(
+    udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: float, orientation: str | None,
+    language: str | None = None,
+) -> dict | None:
     """One shot, or None (with the reason on stderr) when the picture cannot be Andarium's: the app is not the
     launched process on the shot's screen in front, the frame is empty, or the device turned since the run began
     (`orientation`)."""
@@ -435,14 +495,14 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
         if privacy.returncode != 0:
             print(f"  {shot.id}: privacy {shot.privacy} failed: {privacy.stderr.strip()}", file=sys.stderr)
             return None
-    launched = simctl("launch", udid, BUNDLE, *shot.launch_arguments())
+    launched = simctl("launch", udid, BUNDLE, *shot.launch_arguments(language))
     pid = launched_pid(launched)
     if launched.returncode != 0 or pid is None:
         print(f"  {shot.id}: launch failed: {launched.stderr.strip()}", file=sys.stderr)
         return None
     time.sleep(max(wait, shot.wait))
     if shot.flow:
-        pid = play_flow(udid, shot, pid)
+        pid = play_flow(udid, shot, pid, language)
         if pid is None:
             return None
     reason = wait_in_front(udid, pid, shot)
@@ -465,7 +525,7 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
     if not settled:
         print(f"  {shot.id}: the screen kept changing; kept the last look", file=sys.stderr)
     idiom = "iPad" if "iPad" in name else "iPhone"
-    file = f"{idiom.lower()}-{now}-{appearance}-{shot.id}.png"
+    file = f"{idiom.lower()}-{now}-{appearance}-{shot.id}{'' if language is None else f'-{language}'}.png"
     temporary.replace(out / file)
     return {
         "file": file,
@@ -476,21 +536,22 @@ def capture(udid: str, name: str, shot: Shot, appearance: str, out: Path, wait: 
         "group": shot.group,
         "id": shot.id,
         "screen": shot.screen,
-        "launch_arguments": " ".join(shot.launch_arguments()),
+        "launch_arguments": " ".join(shot.launch_arguments(language)),
+        "language": language,
         "pixels": [width, height],
         "settled": settled,
         "description": shot.description,
     }
 
 
-def preflight(udid: str, name: str, out: Path) -> str | None:
+def preflight(udid: str, name: str, out: Path, language: str | None = None) -> str | None:
     """Before the first shot: the Preview must come to the front on a plain screen. A permission alert left up by
     an earlier use of the Simulator is cleared (which turns an iPad upright, as is said). The result is the
     orientation the run keeps, or None when the Preview cannot be brought to the front."""
     probe = Shot("preflight", "", "home", "")
     for attempt in range(2):
         simctl("terminate", udid, BUNDLE)
-        launched = simctl("launch", udid, BUNDLE, *probe.launch_arguments())
+        launched = simctl("launch", udid, BUNDLE, *probe.launch_arguments(language))
         pid = launched_pid(launched)
         if pid is not None and wait_in_front(udid, pid, probe) is None:
             temporary = out / ".preflight.png"
@@ -542,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", metavar="REGEX", help="capture only shots whose id matches")
     parser.add_argument("--appearance", choices=("light", "dark"), help="capture only this appearance")
     parser.add_argument("--wait", type=float, default=0.0, help="minimum seconds after each launch")
+    parser.add_argument("--language", choices=sorted(LANGUAGES), help="show the Preview in this language (default: the Simulator's)")
     parser.add_argument("--list", action="store_true", help="list the shots and exit")
     args = parser.parse_args(argv)
     if args.list:
@@ -582,15 +644,23 @@ def capture_all(args: argparse.Namespace) -> int:
             "status_bar", udid, "override", "--time", "9:41", "--batteryState", "charged", "--batteryLevel", "100",
             "--cellularMode", "active", "--cellularBars", "4", "--wifiBars", "3", "--dataNetwork", "wifi",
         )
-        orientation = preflight(udid, name, args.out)
+        orientation = preflight(udid, name, args.out, args.language)
         if orientation is None:
             print(f"capture-screens.py: {name} ({udid}): the Preview does not come to the front; nothing captured", file=sys.stderr)
             status = 1
             continue
+        # The Preview reports (from the launch that preflight made) whether it was built with Send feedback.
+        has_feedback = (app_state(udid) or {}).get("feedback") is True
+        wanted = [shot for shot in selected if has_feedback or not shot.feedback]
+        if len(wanted) < len(selected):
+            print(
+                f"{name}: skipping {len(selected) - len(wanted)} shots of Send feedback: this Preview was built "
+                "without it (see --help)", file=sys.stderr,
+            )
         # The shot of the system's own alert runs last: the alert outlives its shot and covers whatever launches next.
-        plain = [shot for shot in selected if not shot.alert]
+        plain = [shot for shot in wanted if not shot.alert]
         passes = [("light", plain), ("dark", [shot for shot in plain if shot.dark]),
-                  ("light", [shot for shot in selected if shot.alert])]
+                  ("light", [shot for shot in wanted if shot.alert])]
         passes = [(appearance, shots) for appearance, shots in passes if args.appearance in (None, appearance)]
         asked = False
         for appearance, shots in passes:
@@ -601,9 +671,9 @@ def capture_all(args: argparse.Namespace) -> int:
                     # upright, so the orientation of the start no longer holds.
                     clear_system_alert(udid)
                     orientation = None
-                entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation)
+                entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation, args.language)
                 if entry is None:
-                    entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation)
+                    entry = capture(udid, name, shot, appearance, args.out, args.wait, orientation, args.language)
                 asked = asked or shot.alert
                 if entry is None:
                     status = 1

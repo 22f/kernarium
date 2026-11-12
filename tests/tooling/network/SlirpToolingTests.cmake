@@ -15,7 +15,8 @@ if(UML_BUILD_NETWORK_PROVIDER)
         uml_slirp_dns_tests
         uml_slirp_dead_peer_tests
         uml_slirp_counters_tests
-        uml_slirp_full_buffer_hangup_tests)
+        uml_slirp_full_buffer_hangup_tests
+        uml_slirp_host_isolation_tests)
     set(_uml_slirp_probe_sources
         slirp_arp_probe.cpp
         slirp_forward_probe.cpp
@@ -29,7 +30,8 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp_dns_probe.cpp
         slirp_dead_peer_probe.cpp
         slirp_counters_probe.cpp
-        slirp_full_buffer_hangup_probe.cpp)
+        slirp_full_buffer_hangup_probe.cpp
+        slirp_host_isolation_probe.cpp)
     set(_uml_slirp_probe_tests
         slirp-network-arp
         slirp-network-forward-specification
@@ -43,11 +45,12 @@ if(UML_BUILD_NETWORK_PROVIDER)
         slirp-network-dns
         slirp-network-dead-peer
         slirp-network-counters
-        slirp-network-full-buffer-hangup)
+        slirp-network-full-buffer-hangup
+        slirp-network-host-isolation)
     # The dead-peer probe runs five connections one after the other. The
     # full-buffer probe runs nine scenarios, each under its own 20 s alarm
     # that names a stalled one, so its limit exceeds 9 x 20 s.
-    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 30 240)
+    set(_uml_slirp_probe_timeouts 30 30 30 30 30 30 30 30 30 30 60 30 240 60)
     foreach(_uml_slirp_target _uml_slirp_source _uml_slirp_test
             _uml_slirp_timeout IN ZIP_LISTS
             _uml_slirp_probe_targets

@@ -99,10 +99,15 @@ share:
 - **Bounded growth.** A shared space is renewed once its arena is mostly freed,
   a private cache sweeps link state nothing names, an address space the kernel
   destroyed is let go of at the executor's next entry, and a process-wide byte
-  budget (`cpu/gadget_cache_budget.hpp`) caps the whole. The emulator sets the
-  budget before the first executor, from guest memory and the process memory
-  limit or `--gadget-cache-budget=`; it is also the gadget-cache term of the
-  host GPU's budget ([architecture](../docs/architecture.md#memory-and-executable-code)).
+  budget (`cpu/gadget_cache_budget.hpp`) caps the whole. Past it, an address
+  space that alone holds more than seven eighths of the budget is asked to
+  shed, and then, only while the cache is above that, the others: those no
+  executor entered for the last 175 ms first, then the less active by band and
+  the smaller first, so the address space the guest runs most goes last. The
+  emulator sets the budget before the first executor, from guest memory and the
+  process memory limit or `--gadget-cache-budget=`; it is also the
+  gadget-cache term of the host GPU's budget
+  ([architecture](../docs/architecture.md#memory-and-executable-code)).
 - **Code writes.** In both arm64 engines, code another vCPU changed and
   synchronized takes effect at this vCPU's next context synchronization point.
   A kernel write into a guest-code page reaches arm64 code only through the
@@ -166,6 +171,30 @@ patches provide the behaviors the `slirp-network-*` tests check.
   `connect()` fails.
 - Guest IPv4 multicast is dropped on the virtual link. The Local Network
   permission is asked for only when the guest itself reaches the local network.
+- The guest cannot reach the machine the application runs on. SLiRP does not
+  map the gateway or the broadcast address to the host's loopback
+  (`disable_host_loopback`), and the provider refuses a guest's TCP connect
+  attempts and UDP datagrams to any address a host interface holds, its
+  broadcast address and `127.0.0.1` included: a TCP reset or an ICMP port
+  unreachable at once, whether or not anything listens, and silence for the
+  other protocols. The provider checks the host's current addresses when the
+  guest starts a flow: it lists them when a connect attempt or a datagram to
+  an address outside the virtual network finds the last listing a second old,
+  never otherwise, so a quiet guest costs no wake-up and no system call, and
+  the network does not open without a first listing. Addresses of the virtual
+  network are never the host's. An address the host answers that no interface
+  holds, such as a service a VPN client runs inside its tunnel, is not
+  covered. What the guest reaches through the gateway is SLiRP's own (DHCP,
+  ICMP echo, the name server's DNS); other machines on the local network are
+  reached as before. A host forward is the one listener the guest shares with
+  the host, and it leads into the guest, also when the host's own client comes
+  through one of the host's addresses (TCP; a UDP forward used that way from a
+  non-loopback address of the host stays unreachable). A test that needs a host
+  listener names a guest forward to a Unix socket, which only the provider's
+  test build offers (`UML_TEST_SLIRP_GUEST_FORWARD`, read by
+  `uml-darwin-network-test`, which no preset installs or packages); no product
+  links that build (`network-host-isolation-rules`,
+  `slirp-network-host-isolation`, `guest-slirp-host-isolation`).
 - The guest network driver has no transmit flow control, so a guest transmit
   into a full ring waits briefly for the SLiRP loop (`guest-slirp-network-transfer`).
 

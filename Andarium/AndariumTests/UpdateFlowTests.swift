@@ -134,7 +134,7 @@ final class StubDriver: RuntimeDriver {
     }
     var install: (@Sendable (@Sendable (BusyUpdate) -> Void) async throws -> Void) = { _ in }
     private(set) var installed = 0
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
         installed += 1
         try await install(update)
     }
@@ -256,7 +256,7 @@ struct UpdateFlowTests {
         let (model, driver) = model(plan: .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))
         driver.restoreFails = true
         await model.restoreUpdate()
-        #expect(model.alert?.title == "The guest could not be restored")
+        #expect(model.alert?.title == "The virtual machine could not be restored")
         #expect(model.phase == .home)
         #expect(model.plan == .unfinishedUpdate(to: "r2", canRetry: true, canRestore: true))
     }
@@ -316,7 +316,7 @@ struct UpdateFlowTests {
         model.notice = .closedInBackground
         model.resizePreset = 24
         model.erase()
-        #expect(model.busy?.title == "Erasing guest")
+        #expect(model.busy?.title == "Erasing virtual machine")
         #expect(await eventually { model.busy == nil })
         #expect(driver.erased == 1)
         // No guest: Home shows the first-launch screen, with no notice that
@@ -334,7 +334,7 @@ struct UpdateFlowTests {
         driver.eraseFails = true
         model.erase()
         #expect(await eventually { model.alert != nil })
-        #expect(model.alert?.title == "The guest could not be erased")
+        #expect(model.alert?.title == "The virtual machine could not be erased")
         #expect(model.guest != nil)
         #expect(await eventually { model.busy == nil })
     }

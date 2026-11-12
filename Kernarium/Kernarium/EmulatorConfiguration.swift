@@ -71,9 +71,12 @@ struct EmulatorConfiguration: Equatable {
     }
     static let gpuBudgetParameterRangeMiB = 0...16384
     // The sizes the stepper steps through: from 512 MiB in 64 MiB steps, through
-    // the top of any range, 1 TiB (`guest_memory_range_maximum_mib`). The most
-    // it offers at a vCPU count is the runtime's budget answer
-    // (`systemGuestMemoryBound`), which the host's ceiling bounds.
+    // the top of any range, 1 TiB (`guest_memory_range_maximum_mib`), which is
+    // the shape of the runtime's own test (`guest_memory_admitted`); the hosted
+    // tests hold these figures to the loader's answers. The most it offers at
+    // a vCPU count is the runtime's budget answer (`systemGuestMemoryBound`),
+    // which the host's ceiling bounds, and every size it offers is one the
+    // runtime starts.
     static let guestMemoryRangeMiB = 512...(1 << 20)
     static let guestMemoryStepMiB = 64
     /// The most guest RAM this host admits whatever the memory limit says: the

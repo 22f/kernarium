@@ -18,7 +18,8 @@ AndariumCore/         Swift package: the model and the adb client, no UIKit; it
                       re-exports GuestHostCore (../GuestHost/Core)
 AndariumTests/        hosted tests of the device app
 AndariumUITests/      UI tests of the device app in the Simulator
-Config/               entitlements, Info.plist, privacy manifest, bridging header
+Config/               entitlements, Info.plist, privacy manifest, bridging header,
+                      build settings (Andarium.xcconfig)
 scripts/              system staging, the App Store bundle check,
                       acknowledgements, screen capture
 Andarium.xcodeproj/   JSON project (project.xcproj) and its shared schemes
@@ -29,8 +30,10 @@ Andarium.xcodeproj/   JSON project (project.xcproj) and its shared schemes
 The project file is the JSON format Xcode 27 reads, kept in the canonical form
 `xcrun xcprojformatter --update Andarium/Andarium.xcodeproj` produces: format
 after every hand edit. Every configuration takes its base settings from
-`../GuestHost/Config/Signing.xcconfig`; the signer's team is only in the
-ignored `Signing.local.xcconfig` beside it
+`Config/Andarium.xcconfig`, which includes
+`../GuestHost/Config/Signing.xcconfig` and sets what decides
+[Send feedback](#send-feedback); the signer's team is only in the ignored
+`Signing.local.xcconfig` beside the signing file
 ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the project names
 no team.
 
@@ -72,14 +75,16 @@ App Store offer the application to Macs, and every configuration sets
 destination and adds nothing to the built application.
 `ITSAppUsesNonExemptEncryption` is NO in `Config/Info.plist`.
 
-The iPhone interface is portrait-only. On iPad, a guest session whose scene
-fills its screen locks the interface orientation, so Android alone rotates its
-display and the sensor axes stay fixed. A window, or a full-screen scene whose
-lock iPadOS releases, uses host-driven rotation: the guest is held at display
-rotation zero and its display follows the window, and the sensor axes follow
-the window's interface orientation (`MotionMount`). Returning to a locked
-scene restores the guest's previous rotation preferences
-(`SessionOrientationPolicy`).
+The iPhone interface is portrait-only and the guest owns its rotation:
+Android turns its own display and the sensor axes stay fixed. On iPad the
+interface turns with the device in a session as it does at Home, full screen
+or in a window, and the host drives the guest: it is held at display rotation
+zero, its display follows the scene, and the sensor axes follow the scene's
+interface orientation (`MotionMount`, `SessionOrientationPolicy`). An
+application that asks for one fixed orientation is letterboxed in the other
+one, as in a window. The guest's own rotation preferences are restored when
+the host stops driving it. The display keeps the last frame's proportions
+while it turns, until Android draws the new layout.
 
 While the guest's display is shown (the boot and the run) everything behind it
 is black, in the light appearance too: the scene's root view and its window
@@ -170,6 +175,11 @@ everything that exists for automation or only pretends:
   does not cover a binary
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
+- It alone can carry [Send feedback](#send-feedback), and only when the
+  receiver's address is in the ignored `Config/Feedback.local.xcconfig`, and
+  [Follow developer on X](#follow-developer-on-x), and only when the handle is
+  in the ignored `Config/Developer.local.xcconfig` and the logo in the ignored
+  `Config/Local/`.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -185,6 +195,59 @@ of the frameworks (`Kernarium/PrivacyManifests`) declare exactly what the App
 Store build and the runtimes use. A release or harness build also reads the
 system uptime for its thermal report, which the application's manifest does
 not declare because only an App Store build is uploaded.
+
+### Send feedback
+
+Info and a running session's Settings open a sheet that writes an email to the
+developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
+compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
+ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
+names the receiver, so a fork, a sideload or a Debug or Release build holds none
+of it, and every configuration's bundle check says whether it does: it also
+fails on the local receiver's bytes in any file of a bundle that does not name
+it (never printing it), and on an `Info.plist` whose values differ from
+`Config/Info.plist` (the preprocessing changes the feedback key alone).
+Tests and captures turn it on in a Debug build with
+`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
+bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
+only, never the local receiver, and its hooks into the sheet are not in the
+AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
+tested, by AndariumCore's tests through a symlinked target no product links.
+The feature's words are looked up in the `Feedback` string table (zh-Hans,
+zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
+its information block are English whatever the interface language, and the bug
+report's overlay text is the app's own.
+
+### Follow developer on X
+
+Info has one passive outward link more: Follow developer on X, a row in the
+section of Project on GitHub, which opens the developer's profile through the
+system (`openURL`: the X app when it is installed, the browser otherwise;
+`Shared/FollowX/`). It has no badge, prompt or counter, and nothing is
+remembered about a tap. The name X in its text is the service's logo, drawn
+inline at the text's size and colour as a template image, and the same logo is
+the row's leading icon; VoiceOver reads "Follow developer on X" with the link
+trait. The profile and the logo belong to the developer and are tracked
+nowhere: the row is compiled in, under the `FOLLOW_X` condition, only in an
+AppStore build whose ignored `Config/Developer.local.xcconfig` (from
+`Developer.local.xcconfig.example`) names the handle (`DEVELOPER_X_HANDLE`: a
+handle, never an address, as `//` starts an xcconfig comment; the code builds
+the address) and whose ignored `Config/Local/` directory holds `x-logo.svg`, a
+single-colour vector that `XLogoLocal.xcassets` links to. A build with the
+handle and without the logo fails its first build phase. A fork, a sideload
+or a Debug or Release build holds none of it (no row, handle, logo or
+`FollowX` strings table), and the bundle check asserts both directions as it
+does for Send feedback: it also fails on the local handle as a profile
+address, or as a whole string of a property list, in any file of a bundle that
+does not name it (never printing it), and on the arranged handle in any
+product that does not arrange it. Tests and captures turn the row on in a
+Debug build with `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line,
+with a glyph drawn for them (`XLogoGlyph.xcassets`) in place of the logo;
+adding `FOLLOW_X_LOGO_SOURCE=local` takes the logo from `Config/Local/`.
+`AndariumPreview` takes the arrangement only, never the local handle. The
+handle's shape and the address are in `Shared/FollowX/Logic`, which
+AndariumCore's tests build through a symlinked target no product links, and
+the words are in the `FollowX` string table.
 
 ## Model and storage
 
@@ -205,7 +268,10 @@ control out.
   from 1.5 GiB, so a guest has at least that (`Limits.minimumMemoryMiB`,
   Andarium's own: the runtime still accepts less for Kernarium's guests); a
   stored smaller size is raised to it on load, and a device whose bound is
-  lower offers the bound alone. `MemoryPolicy` holds those bounds, defaults
+  lower offers the bound alone. The runtime starts every size the picker
+  offers: a start whose memory the loader refuses
+  (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
+  that reason. `MemoryPolicy` holds those bounds, defaults
   and the estimates and no formula of its own. A guest with more than the
   runtime's conservative size for its vCPU count (`safeMemoryMiB`) is likely
   to be closed by iOS: Home shows a notice and the memory ruler a line and red
@@ -241,7 +307,7 @@ control out.
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
-  and Erase guest deletes everything the guest has stored, its snapshots and
+  and Erase virtual machine deletes everything the guest has stored, its snapshots and
   the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Back up guest data. Its snapshots are never backed up.
@@ -273,7 +339,7 @@ control out.
   nothing and is waited for. A listing is never older than the last finished
   operation (`revision`), can come without its figures, and names the release
   the data is on; a cancelled one stops measuring.
-  Home's Guest system section has a Snapshots row (how many, the space they
+  Home's Virtual machine section has a Snapshots row (how many, the space they
   use, Manage) that opens the Snapshots sheet: the list newest first, a page
   per snapshot (Restore, its name, Delete) and a page on the space they use,
   with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds
@@ -364,7 +430,7 @@ requires reopening Andarium.
   of access or of Precise Location drops the held position first. An
   approximate position is passed as approximate; the guest owns what apps see
   of it. The row is dimmed and off when iOS refuses, the device restricts
-  location or Location Services are off, and says Approximate, with an
+  location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
@@ -418,9 +484,23 @@ requires reopening Andarium.
   a key when iOS's state differs from the light Android reports
   (`CapsLockReconciler`). Android hides its on-screen keyboard while it has a
   hardware keyboard.
-- **Retina.** Retina mode applies at the next start and uses the screen's
-  native pixels, whose host allocations count against the same iOS process
-  limit as guest RAM (`DisplayOptions`).
+- **Resolution.** Home's Guest system section has a Resolution row: the pixels
+  the guest's display will have, and the end's name where the choice is an
+  end (Native, Fastest), with Change opening the list of every choice with its
+  pixels and density. The choices (`ResolutionChoices`) are 1.0, every 0.5 step
+  that is at least a quarter below the screen's native scale, then native. The
+  guest's pixels are the display's points times the choice, rounded down, and
+  its density is 160 dpi a point of choice (`GuestDisplayLayout`), so
+  Android's interface keeps its size at every choice. The row states what the
+  next start gives: the display is the window less the session's safe area
+  (`SessionDisplayArea`, read by `DisplayAreaProbe`), and follows a window as it
+  resizes. A choice applies at the next start. Native is stored as the symbol
+  and follows the screen, and a stored number that is no choice of this screen
+  goes to the nearest one. A person who never chose gets native where the
+  system lets the application use more than 4 GiB of memory, else the choice
+  nearest 1.5 (`DisplayOptions`). Native's host allocations count against the
+  same iOS process limit as guest RAM; neither the graphics-memory estimate
+  nor the memory default counts the display's pixels.
 - **JIT.** A development build on a device has a JIT row on Home, off until
   the person turns it on and kept for the install (`JitPreference`). An iOS
   device gives the JIT its executable memory only through a debugger attached to
@@ -462,8 +542,10 @@ requires reopening Andarium.
   Settings may show more. Once Android has booted a normal start, the
   application reads it (`RunSpace.nextCheck`: every 2 s near the limit, every
   30 s on a roomy device) and pauses the guest below 1 GiB
-  (`RunSpace.pauseBelowBytes`), before the data disk, which Android mounts so
-  that a failed write panics, can fail to grow. The pause is the runtime's
+  (`RunSpace.pauseBelowBytes`), before the data disk can fail to grow. A full
+  volume holds the guest's disk I/O until it has room instead of
+  failing it ([kernel contract](../kernel/common/README.md#block-devices-and-filesystems)),
+  and the pause stays the guard. The pause is the runtime's
   suspension with the storage written back first and the RAM kept in the
   process: no image of it goes to the device that is short of space
   ([lifecycle](../docs/architecture.md#guest-lifecycle)). The suspension is
@@ -496,7 +578,7 @@ requires reopening Andarium.
   with any launch setting is a harness's and starts with them off, so a
   measured run never inherits the overlay; `ANDARIUM_STATS` (`1` or `0`) states
   the value. Such a launch keeps nothing, and neither does one that states
-  Retina mode, so what the person stored stays (`PreferenceKeeper`).
+  the resolution, so what the person stored stays (`PreferenceKeeper`).
 - **Graphics memory.** The runtime counts the graphics allocations the host
   refused the guest ([`docs/graphics.md`](../docs/graphics.md#device-memory-budget)).
   While a normal session runs in the foreground the model reads the count every
@@ -555,7 +637,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   session. A bug report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
-  shared as Android made it.
+  shared as Android made it. An install streams the file to the package
+  manager in pieces that never outlive their read (`FileChunkReader`). It
+  reads the file's size once the coordinated read has the file, and refuses
+  before the first byte when the device (`TransferRoom`) or the virtual
+  machine's data partition lacks room for the app and its reserve
+  (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
+  Android cannot install (`InstallRefusal.tooLarge`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
@@ -564,7 +652,14 @@ is on. `AndariumCore/Adb` speaks the protocol.
   at a time; Install APK and Create bug report wait for it. An import is
   written to a hidden `.andarium-*.part` name beside its destination and moved
   into place, so a stopped or failed one leaves nothing and a Replace keeps the
-  original until the new file is whole. The move's own shell command then has
+  original until the new file is whole. A partial file that the guest's abrupt
+  end or iOS ending the application left behind is removed by the next boot
+  that may find one, whatever its folder and with no import or open Settings
+  needed: the boot looks when an import did not end cleanly, when an older data
+  disk was put in place (a snapshot or update restore), and on the first boot
+  of a guest an earlier version made, and an ordinary boot does not
+  (`PartialFileSweep`, `PartialSweepLedger`). An import in progress is never
+  touched. The move's own shell command then has
   the guest's media index complete the file's row (a file the shell user
   writes has only a pending one, which MediaStore keeps from other apps).
   A transfer stops when the application leaves the foreground, and its files
@@ -578,8 +673,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   available only while the guest's USB debugging is on. `AdbNetworkBridge`
   listens on TCP 5555 and relays each computer to a fresh vsock stream, serving
   at most 8 at once; it understands no byte of adb, so the guest's adbd
-  authenticates the computer. iOS asks for Local Network access once, through
-  `NSLocalNetworkUsageDescription`. Nothing listens before the toggle.
+  authenticates the computer. A connection whose peer address is one of the
+  device's own, loopback included, is closed at once, so no process of the
+  device (another application, or adb on the same Mac when Andarium runs on
+  that Mac) reaches the guest's adbd through the bridge; a computer on the
+  network, another Mac included, is served. iOS asks for Local Network access
+  once, through `NSLocalNetworkUsageDescription`. Nothing listens before the
+  toggle.
 - **Privacy.** The adb features add no required-reason API beyond the
   disk-space API with reason E174.1 (the start's own space check already uses
   it) and, for the file browser, the file-timestamp API: an import reads the
@@ -599,6 +699,38 @@ iOS device prefix contract declares a component, that no entry covers
 ([`docs/testing.md`](../docs/testing.md#andarium)). Adding a library therefore
 means adding its entry to the script's table and running it.
 
+## Languages
+
+Andarium is in English, Simplified Chinese, Traditional Chinese (Taiwan usage)
+and Japanese, and follows the language of iOS and the per-app language setting.
+The strings are String Catalogs in `Localization/` (screens, permission texts,
+What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
+catalog, table `JIT`, which the App Store configuration leaves out of the
+bundle and its check asserts is absent. The Send feedback texts are another,
+table `Feedback`, built only where Send feedback is compiled in
+(`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle check
+refuses the table, by its file name, in a product without the feature and
+asks for it in every language of one with it. The text of Follow developer on X
+is the same, table `FollowX`. English is the key (a readout or a
+joined list has a named key whose comment says which readout it serves), and
+the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
+and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
+number keeps its space before its unit. Bug report and session record text, log
+lines and technical names stay English. Text shown on a card, an alert or an
+overlay passes `String.keepingTogether`, so a number stays with its unit and a
+short quoted Chinese or Japanese name is not cut across two lines.
+
+`scripts/localization.py check` is the catalogs' gate. After a build with
+`SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
+--stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
+or the reverse. It runs on a development build made with
+`FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle` (the
+output of `Andarium` and `AndariumPreview` together; one without Send feedback
+or the row has no `Feedback` or `FollowX` strings and fails) and on an App Store build with `--app-store`. A
+string no catalog reaches (a `String` built in code) shows as English under
+Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
+screen.
+
 ## Automation
 
 A harness launch (`xcrun devicectl device process launch`, environment given
@@ -610,6 +742,9 @@ they mean in Kernarium; the automation Android runtime
 (`package-ios-frameworks.sh --runtimes android --android-automation`)
 additionally reads `KERNARIUM_ANDROID_ADB_AUTH`
 ([`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+`KERNARIUM_DISPLAY_SCALE` (`native` or a number of guest pixels to a point)
+states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
+one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once

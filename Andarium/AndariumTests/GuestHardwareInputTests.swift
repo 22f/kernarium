@@ -256,6 +256,22 @@ struct GuestHardwareInputTests {
         #expect(!view.interactions.contains { $0 is UIPointerInteraction })
     }
 
+    @Test func theViewKeepsTheLastFramesProportionsAndBlackBarsWhileItResizes() {
+        // A turn or a window resize changes the layer's bounds before the guest
+        // draws for them, and the layer's default would stretch the frame; the
+        // bars beside the aspect-fit frame are the layer's own background.
+        let frame = CGRect(x: 0, y: 0, width: 200, height: 100)
+        for view in [GuestMetalView(frame: frame, device: nil), TextGuestMetalView(frame: frame, device: nil)] {
+            #expect(view.layer.contentsGravity == .resizeAspect)
+            var white: CGFloat = 1
+            var alpha: CGFloat = 0
+            let background = view.layer.backgroundColor.map { UIColor(cgColor: $0) }
+            #expect(
+                background?.getWhite(&white, alpha: &alpha) == true && white == 0 && alpha == 1,
+                "the layer's background is \(String(describing: view.layer.backgroundColor)), the view's \(String(describing: view.backgroundColor))")
+        }
+    }
+
     @Test func theViewHidesTheSystemPointerOnlyWhileTheMouseIsTheGuests() throws {
         let view = GuestMetalView(frame: CGRect(x: 0, y: 0, width: 200, height: 100), device: nil)
         let input = GuestHardwareInput()

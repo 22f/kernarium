@@ -42,6 +42,9 @@ final class AndariumProcess {
         // sweep the folder a running test stages its files in.
         BugReportStaging.sweep()
         GuestFileStaging.sweep()
+        #if FEEDBACK_MAIL
+        SendFeedbackStaging().sweep()
+        #endif
         model = entry.makeModel()
     }
 }
@@ -66,6 +69,7 @@ final class AndariumSceneDelegate: UIResponder, UIWindowSceneDelegate {
         let entry = process.entry
         let model = process.model
         self.model = model
+        model.screenDidChange(nativeScale: Double(scene.screen.nativeScale))
         let window = UIWindow(windowScene: scene)
         window.rootViewController = AndariumHostingController(
             rootView: RootView(entry: entry).environment(model), model: model)
@@ -99,7 +103,7 @@ struct RootView: View {
                 }
             }
             .transition(.opacity)
-            if let busy = model.busy {
+            if let busy = model.busy, !model.busyOverSheet {
                 BusyOverlay(state: busy)
             }
             // Over everything the session shows, a Settings sheet aside: the
@@ -123,7 +127,7 @@ struct RootView: View {
         ) { _ in
             Button("OK", role: .cancel) {}
         } message: { alert in
-            Text(alert.message)
+            Text(alert.message.keepingTogether)
         }
         #if !APP_STORE
         .task {

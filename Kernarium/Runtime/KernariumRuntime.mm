@@ -22,6 +22,7 @@
 
 #include "audio/in_process_service.hpp"
 #include "audio/microphone_switch.hpp"
+#include "platform/host_environment.hpp"
 #include "platform/microphone_authorization.hpp"
 #include "video/in_process_service.hpp"
 #include "video/virtio_video_device.hpp"
@@ -51,6 +52,7 @@
 #include "gpu_budget_plan.hpp"
 #include "options.hpp"
 #include "runtime/execution_engine.hpp"
+#include "runtime/guest_memory_budget.hpp"
 #include "runtime/session_record.hpp"
 #include "uml/emulator.h"
 #include "uml_slirp_net.h"
@@ -1169,7 +1171,7 @@ void appendKernelCommandLine(
     /* Android init imports this as ro.boot.lcd_density. The product's vendor
      * init then publishes the same value as ro.sf.lcd_density, keeping the
      * framework's logical density aligned with the per-launch EDID. Swift has
-     * already scaled dotsPerInch by nativeScale when Retina mode is active. */
+     * already scaled dotsPerInch by the display's scale. */
     arguments.emplace_back(
         std::string {uml::android::lcdDensityPrefix} +
         std::to_string(dotsPerInch));
@@ -2044,13 +2046,24 @@ int runtimeRun(
             [NSProcessInfo processInfo].processorCount;
         const uint32_t maximumGuestProcessorCount = hostProcessorCount == 0
             ? 1U : static_cast<uint32_t>(hostProcessorCount);
+        /* The sizes the settings offer, by the rule the loader answers them
+         * with, and no others. */
+        const uint32_t guestMemoryCeilingMiB =
+            uml::runtime::guest_memory::process_guest_memory_ceiling_mib(
+                uml::platform::running_ios_app_on_macos(),
+                [NSProcessInfo processInfo].physicalMemory);
         if (guestProcessorCount == 0 ||
             guestProcessorCount > maximumGuestProcessorCount ||
-            guestMemoryMiB < 512U || guestMemoryMiB > 4096U ||
-            guestMemoryMiB % 64U != 0) {
-            std::fputs(
-                "Kernarium: invalid guest CPU or memory configuration\n",
-                stderr);
+            !uml::runtime::guest_memory::guest_memory_admitted(
+                guestMemoryMiB, guestMemoryCeilingMiB)) {
+            std::fprintf(stderr,
+                "Kernarium: invalid guest CPU or memory configuration: "
+                "%u vCPUs (1 to %u), %u MiB (%u to %u in %u MiB steps)\n",
+                guestProcessorCount, maximumGuestProcessorCount,
+                guestMemoryMiB,
+                uml::runtime::guest_memory::guest_memory_minimum_mib,
+                guestMemoryCeilingMiB,
+                uml::runtime::guest_memory::guest_memory_step_mib);
             return -UML_EMULATOR_INVALID_ARGUMENT;
         }
         GuestRequest request;

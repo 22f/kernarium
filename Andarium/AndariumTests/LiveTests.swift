@@ -94,7 +94,10 @@ struct DisplayOptionsStoreTests {
     @Test func optionsSurviveTheStore() {
         let saved = DisplayOptionsStore.load()
         defer { DisplayOptionsStore.save(saved) }
-        for options in [DisplayOptions(chosenRetina: true), DisplayOptions(chosenRetina: false), DisplayOptions()] {
+        for options in [
+            DisplayOptions(chosenScale: .native), DisplayOptions(chosenScale: .points),
+            DisplayOptions(chosenScale: .factor(1.5)), DisplayOptions(),
+        ] {
             DisplayOptionsStore.save(options)
             #expect(DisplayOptionsStore.load() == options)
         }
@@ -187,6 +190,55 @@ struct HostDeviceTests {
             })
         }
         #expect(AppEntry.freeStorageBytes() > 0)
+    }
+}
+
+/// The run starts what the picker offers. The runtime refuses a guest's memory
+/// by the rule the loader answers (`guest_memory_admitted` of
+/// `runtime/guest_memory_budget.hpp`), so a size the picker offers that the
+/// loader refuses would be a start that fails at once.
+struct RuntimeMemoryRuleTests {
+    private func admitted(_ mib: Int) -> Bool {
+        kernarium_runtime_loader_guest_memory_admitted(UInt32(clamping: mib)) != 0
+    }
+
+    @Test func theRuntimeStartsEverySizeThePickerOffersAtEveryCount() {
+        let host = AppEntry.hostDevice()
+        let ceiling = Int(kernarium_runtime_loader_guest_memory_ceiling_mib())
+        for count in 1...host.processorCount {
+            let maximum = host.memory.maximumMiB(vCPUs: count)
+            #expect(admitted(maximum), "\(maximum) MiB at \(count) vCPUs, ceiling \(ceiling)")
+            #expect(admitted(host.memory.defaultMemoryMiB(vCPUs: count)))
+            #expect(admitted(host.memory.safeMemoryMiB(vCPUs: count)))
+            #expect(host.memory.stops(vCPUs: count).allSatisfy(admitted))
+        }
+        // A new guest takes the default of the host's vCPU count.
+        #expect(admitted(Guest.fresh(on: host).memoryMiB))
+        // The ceiling is the most it starts: the next step is refused.
+        #expect(admitted(ceiling))
+        #expect(!admitted(ceiling + Limits.runtimeMemoryStepMiB))
+    }
+
+    @Test func aStoredSizeNoLongerAdmittedComesDownToOneThatIs() {
+        let host = AppEntry.hostDevice()
+        let ceiling = Int(kernarium_runtime_loader_guest_memory_ceiling_mib())
+        for stored in [ceiling + Limits.runtimeMemoryStepMiB, ceiling + 4096, 1 << 20, 100, 1537] {
+            let guest = Guest(cores: host.processorCount, memoryMiB: stored, capacityGiB: 8)
+            #expect(admitted(guest.memoryWithinBound(on: host).memoryMiB), "stored \(stored) MiB")
+        }
+    }
+
+    @Test func theRestatedRangeIsTheLoadersRule() {
+        let range = kernarium_runtime_loader_guest_memory_range()
+        #expect(Limits.runtimeMemoryRangeMiB == Int(range.minimum_mib)...Int(range.largest_mib))
+        #expect(Limits.runtimeMemoryStepMiB == Int(range.step_mib))
+        let ceiling = Int(kernarium_runtime_loader_guest_memory_ceiling_mib())
+        #expect(ceiling <= Limits.runtimeMemoryRangeMiB.upperBound)
+        // The restatement is the loader's rule below the ceiling and past it
+        // only the ceiling differs.
+        let sizes = Array(0...20_000) + Array(max(ceiling - 130, 0)...(ceiling + 130))
+        let differing = sizes.filter { admitted($0) != (MemoryPolicy.runtimeAccepts($0) && $0 <= ceiling) }
+        #expect(differing.isEmpty, "differs at \(differing.prefix(5)) MiB, ceiling \(ceiling)")
     }
 }
 
@@ -364,7 +416,7 @@ private final class GuestFrameCapture: @unchecked Sendable {
 }
 
 /// Opt-in physical display check. Saves the guest's rendered frame with each
-/// KERNARIUM_RETINA_MODE value so their displayed text size can be compared.
+/// KERNARIUM_DISPLAY_SCALE value so their displayed text size can be compared.
 @MainActor
 struct RecoveryDisplayTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["ANDARIUM_RECOVERY_TESTS"] == "1"), .timeLimit(.minutes(5)))
@@ -395,19 +447,19 @@ struct RecoveryDisplayTests {
         // does not mean Recovery can read it under its SELinux policy.
         do {
             let identity = try AppEntry.fromArguments().adbKeyStore.loadOrCreate()
-            let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device")
+            let operations = AdbGuestOperations(identity: identity, clock: GuestRunClock(), device: "device", run: GuestRunMark.random())
             let density = try await operations.shell("getprop ro.sf.lcd_density", limit: .seconds(5))
-            let scale = model.retina ? scene.screen.nativeScale : 1
-            #expect(density.text.trimmingCharacters(in: .whitespacesAndNewlines) == String(Int((160 * scale).rounded())))
+            let scale = model.resolution.resolved(nativeScale: Double(scene.screen.nativeScale)) ?? 1
+            #expect(density.text.trimmingCharacters(in: .whitespacesAndNewlines) == String(GuestDisplayLayout.dotsPerInch(factor: scale)))
         } catch {
             Issue.record("Recovery display density could not be read: \(error)")
         }
         do {
-            try await captureGuestFrame(named: model.retina ? "recovery-retina.png" : "recovery-points.png")
+            try await captureGuestFrame(named: model.resolution == .native ? "recovery-native.png" : "recovery-points.png")
         } catch {
             Issue.record("Recovery frame could not be captured: \(error)")
         }
-        print("RECOVERY_DISPLAY: ready retina=\(model.retina); capture the screen within 30 seconds")
+        print("RECOVERY_DISPLAY: ready scale=\(model.resolution.text); capture the screen within 30 seconds")
         try await Task.sleep(for: .seconds(30))
         // End selects Advanced, then End selects Power off. Use Recovery's
         // own menu so the run must report a clean guest power-off.

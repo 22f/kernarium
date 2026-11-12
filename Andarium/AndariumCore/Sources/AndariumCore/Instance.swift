@@ -18,7 +18,7 @@ public enum InstanceError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .release(let message), .state(let message), .refused(let message): message
-        case .cannotClone(let message): "The guest's data cannot be snapshotted (it needs an APFS volume): \(message)"
+        case .cannotClone(let message): "The virtual machine's data cannot be snapshotted (it needs an APFS volume): \(message)"
         }
     }
 }
@@ -207,11 +207,11 @@ extension InstanceState: Codable {
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         guard try values.decode(Int.self, forKey: .schema) == 1 else {
-            throw InstanceError.state("This guest's instance.json is of a schema Andarium does not know.")
+            throw InstanceError.state("This virtual machine's instance.json is of a schema Andarium does not know.")
         }
         let build = try values.decode(String.self, forKey: .buildIncremental)
         guard build.range(of: "^[1-9][0-9]{0,9}$", options: .regularExpression) != nil else {
-            throw InstanceError.state("This guest's instance.json has an invalid build number.")
+            throw InstanceError.state("This virtual machine's instance.json has an invalid build number.")
         }
         self.init(
             dataLayout: try values.decode(Int.self, forKey: .dataLayout),
@@ -293,7 +293,7 @@ public enum InstanceRules {
         }
         guard let state else {
             if dataDiskExists {
-                return InstanceDecision(.refuseConflict, "The guest's data has no record of which system wrote it.")
+                return InstanceDecision(.refuseConflict, "The virtual machine's data has no record of which system wrote it.")
             }
             return InstanceDecision(.create, "A new guest.")
         }
@@ -324,7 +324,7 @@ public enum InstanceRules {
             }
             return InstanceDecision(
                 .refusePending,
-                "The start of \(pending.toReleaseID) never finished: retry it, restore its snapshot, or erase the guest."
+                "The start of \(pending.toReleaseID) never finished: retry it, restore its snapshot, or erase the virtual machine."
             )
         }
         if flags.retry || flags.restoreSnapshot {
@@ -342,7 +342,7 @@ public enum InstanceRules {
         if release.buildNumber < state.buildNumber {
             return InstanceDecision(
                 .refuseDowngrade,
-                "Build \(release.buildNumber) is older than build \(state.buildNumber), which the data was started with: update the system, or erase the guest."
+                "Build \(release.buildNumber) is older than build \(state.buildNumber), which the data was started with: update the system, or erase the virtual machine."
             )
         }
         if release.buildNumber == state.buildNumber {
@@ -408,7 +408,7 @@ public struct InstanceFiles: Sendable {
         } catch let error as InstanceError {
             throw error
         } catch {
-            throw InstanceError.state("This guest's instance.json cannot be read: \(error.localizedDescription)")
+            throw InstanceError.state("This virtual machine's instance.json cannot be read: \(error.localizedDescription)")
         }
     }
 
@@ -467,6 +467,9 @@ public struct InstanceFiles: Sendable {
             doomed.append(directory.appendingPathComponent(entry))
         }
         doomed.append(snapshots)
+        // The record of the walk the guest owes (`PartialSweepLedger`) is the
+        // disk's: a guest made after this one starts with a record of its own.
+        doomed.append(PartialSweepLedger.url(in: directory))
         var failure: Error?
         for url in doomed where manager.fileExists(atPath: url.path) {
             do { try manager.removeItem(at: url) } catch { failure = failure ?? error }
@@ -492,6 +495,8 @@ public struct InstanceFiles: Sendable {
                 throw InstanceError.refused("No update is pending.")
             }
             let snapshot = directory.appendingPathComponent(pending.snapshot)
+            // The data it puts back may hold partial files of earlier runs.
+            try PartialSweepLedger.markOwed(in: directory)
             try Self.clone(snapshot, to: data)
             var restored = InstanceState(
                 dataLayout: pending.from.dataLayout, releaseID: pending.from.releaseID,
@@ -510,11 +515,13 @@ public struct InstanceFiles: Sendable {
         if action == .create {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             try? manager.removeItem(at: data)
+            // A data disk that is made at the next start holds nothing.
+            if !manager.fileExists(atPath: data.path) { try PartialSweepLedger.markSettled(in: directory) }
             let created = InstanceState(creating: release, at: when)
             try write(created)
             return created
         }
-        guard var current = try readState() else { throw InstanceError.state("This guest has no instance.json.") }
+        guard var current = try readState() else { throw InstanceError.state("This virtual machine has no instance.json.") }
         if action == .boot || action == .retry {
             current.lastBooted = when
             try write(current)
@@ -527,7 +534,7 @@ public struct InstanceFiles: Sendable {
         }
         if action == .migrate {
             // No data layout other than 1 exists, so there is no migration.
-            throw InstanceError.refused("This system needs a newer data layout than Andarium can migrate to; erase the guest.")
+            throw InstanceError.refused("This system needs a newer data layout than Andarium can migrate to; erase the virtual machine.")
         }
         let name = Self.snapshotPrefix + release.releaseID
         try Self.clone(data, to: directory.appendingPathComponent(name))
@@ -558,7 +565,7 @@ public struct InstanceFiles: Sendable {
     @discardableResult
     public func booted(release: ReleaseIdentity) throws -> InstanceState {
         guard var current = try readState(), current.releaseID == release.releaseID else {
-            throw InstanceError.state("The guest was not started with this system.")
+            throw InstanceError.state("The virtual machine was not started with this system.")
         }
         guard let snapshot = current.pendingUpdate?.snapshot else { return current }
         current.pendingUpdate = nil
@@ -573,7 +580,7 @@ public struct InstanceFiles: Sendable {
     @discardableResult
     public func complete(release: ReleaseIdentity, now: Date = Date()) throws -> InstanceState {
         guard var current = try readState(), current.releaseID == release.releaseID else {
-            throw InstanceError.state("The guest was not started with this system.")
+            throw InstanceError.state("The virtual machine was not started with this system.")
         }
         let snapshot = current.pendingUpdate?.snapshot
         current.lastCompleted = InstanceState.Completed(

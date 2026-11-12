@@ -6,13 +6,26 @@ import SwiftUI
 /// A titled section of Home: rows in one glass panel under a small heading,
 /// and a note beneath.
 struct HomeSection<Content: View, Footer: View>: View {
-    let title: String
-    @ViewBuilder var content: Content
-    @ViewBuilder var footer: Footer
+    private let title: Text
+    private let content: Content
+    private let footer: Footer
+
+    init(title: LocalizedStringKey, @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.title = Text(title)
+        self.content = content()
+        self.footer = footer()
+    }
+
+    /// A title that is not translated: a section only the development builds have.
+    init(verbatim title: String, @ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.title = Text(verbatim: title)
+        self.content = content()
+        self.footer = footer()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
+            title
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 18)
@@ -24,7 +37,7 @@ struct HomeSection<Content: View, Footer: View>: View {
 }
 
 extension HomeSection where Footer == EmptyView {
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(title: LocalizedStringKey, @ViewBuilder content: () -> Content) {
         self.init(title: title, content: content, footer: { EmptyView() })
     }
 }
@@ -62,9 +75,10 @@ struct OptionRow<Control: View>: View {
             IconTile(symbol: symbol, color: dimmed ? .gray : .accentColor)
                 .opacity(dimmed ? 0.55 : 1)
             VStack(alignment: .leading, spacing: 1) {
+                // A long title wraps (a translation, or a large text size) rather
+                // than being cut.
                 Text(title)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .fixedSize(horizontal: false, vertical: true)
                     .opacity(dimmed ? 0.55 : 1)
                 if let detail {
                     if let detailAction {
@@ -104,24 +118,28 @@ struct RowDivider: View {
 
 // MARK: System
 
-/// The guest's system in one section, as three rows of one shape: CPU and
+/// The guest's system in one section, as four rows of one shape: CPU and
 /// memory states the vCPUs and RAM, with Edit opening the sheet that changes
-/// them; Storage states what the guest holds of its capacity under a bar,
-/// with Resize; Snapshots states how many there are and the space they use,
-/// with Manage opening them.
+/// them; Resolution states the guest's display, with Change opening its
+/// choices (`ResolutionRow`); Storage states what the guest holds of its
+/// capacity under a bar, with Resize; Snapshots states how many there are and
+/// the space they use, with Manage opening them.
 struct SystemSection: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         if let guest = model.guest {
-            HomeSection(title: "Guest system") {
+            HomeSection(title: "Virtual machine") {
                 SystemRow(
-                    symbol: "cpu", title: "CPU and memory", subtitle: Self.summary(of: guest),
+                    symbol: "cpu", title: String(localized: "CPU and memory"), subtitle: Self.summary(of: guest),
                     button: SystemRowButton(
-                        title: "Edit", identifier: "home-system-edit", accessibilityName: "Edit system",
+                        title: SystemRowButton.edit, identifier: "home-system-edit",
+                        accessibilityName: String(localized: "Edit system"),
                         action: { model.sheet = .system }
                     )
                 )
+                RowDivider()
+                ResolutionRow()
                 RowDivider()
                 StorageRow(guest: guest, stops: model.capacityStopsGiB, resize: { model.sheet = .resize })
                 RowDivider()
@@ -132,11 +150,11 @@ struct SystemSection: View {
 
     /// "6 vCPUs · 2.5 GiB".
     static func summary(of guest: Guest) -> String {
-        "\(Formats.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB))"
+        "\(CountWords.vcpus(guest.cores)) · \(Formats.size(mib: guest.memoryMiB))"
     }
 }
 
-/// The button at the end of a Guest system row.
+/// The button at the end of a Virtual machine row.
 struct SystemRowButton {
     let title: String
     let identifier: String
@@ -145,9 +163,14 @@ struct SystemRowButton {
     var isEnabled = true
     let action: () -> Void
 
-    /// The longest title: every button is as wide as this word, at any text
-    /// size, so the buttons of the rows share one width and one edge.
-    static let widestTitle = "Manage"
+    static let edit = String(localized: "Edit")
+    static let resize = String(localized: "Resize")
+    static let manage = SnapshotWords.manage
+
+    /// Every title a button of the section has: each button is as wide as the
+    /// widest of them, at any text size, so the buttons of the rows share one
+    /// width and one edge in every language.
+    static let allTitles = [edit, resize, manage]
 }
 
 extension VerticalAlignment {
@@ -161,7 +184,7 @@ extension VerticalAlignment {
     fileprivate static let headerCenter = VerticalAlignment(HeaderCenterID.self)
 }
 
-/// One row of the Guest system section: the icon tile, the title with one
+/// One row of the Virtual machine section: the icon tile, the title with one
 /// line under it, anything further under that line in the same column (a bar,
 /// a note), and the row's button at the end. The text column reads as one
 /// accessibility element; the button is the other. At accessibility text
@@ -173,6 +196,9 @@ struct SystemRow<Below: View>: View {
     let title: String
     let subtitle: String
     let button: SystemRowButton
+    /// What VoiceOver reads for the title and the line under it, where
+    /// the written line does not read well.
+    var spoken: String?
     @ViewBuilder var below: Below
 
     var body: some View {
@@ -224,12 +250,13 @@ struct SystemRow<Below: View>: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
+        .modifier(SpokenLine(text: spoken))
     }
 
     private var capsule: some View {
         Button(action: button.action) {
             ZStack {
-                Text(SystemRowButton.widestTitle).hidden()
+                ForEach(SystemRowButton.allTitles, id: \.self) { Text($0).hidden() }
                 Text(button.title)
             }
             .font(.subheadline.weight(.semibold))
@@ -251,12 +278,28 @@ struct SystemRow<Below: View>: View {
 }
 
 extension SystemRow where Below == EmptyView {
-    init(symbol: String, title: String, subtitle: String, button: SystemRowButton) {
-        self.init(symbol: symbol, title: title, subtitle: subtitle, button: button, below: { EmptyView() })
+    init(symbol: String, title: String, subtitle: String, spoken: String? = nil, button: SystemRowButton) {
+        self.init(
+            symbol: symbol, title: title, subtitle: subtitle, button: button, spoken: spoken,
+            below: { EmptyView() })
     }
 }
 
-/// The third row of Guest system: how many snapshots there are and the space
+/// A row's title and line as one element that VoiceOver reads as `text`;
+/// without `text` the words are read as they are written.
+private struct SpokenLine: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text {
+            content.accessibilityElement(children: .ignore).accessibilityLabel(text)
+        } else {
+            content
+        }
+    }
+}
+
+/// The third row of Virtual machine: how many snapshots there are and the space
 /// all of them use, with Manage opening the Snapshots sheet. Home reads them
 /// when none was read, after an operation and when a run ends, not each time
 /// it appears (`SnapshotsModel.reload`).
@@ -277,27 +320,6 @@ struct SnapshotsRow: View {
             )
         )
         .task { await store.reload() }
-    }
-}
-
-// MARK: Display
-
-/// Retina mode: the guest draws at the screen's own pixel density instead of
-/// at points. It applies when the guest next starts.
-struct DisplaySection: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        HomeSection(title: "Display") {
-            OptionRow(title: "Retina mode", symbol: "rectangle.inset.filled") {
-                Toggle("Retina mode", isOn: Binding(
-                    get: { model.retina },
-                    set: { model.chooseRetina($0) }
-                ))
-                .labelsHidden()
-            }
-        }
-        .id("display")
     }
 }
 
@@ -344,13 +366,13 @@ struct CapabilitiesSection: View {
 
     /// Why Gyroscope cannot be turned on; nil when it can, which needs no note.
     static func gyroscopeUnavailable(available: Bool) -> String? {
-        available ? nil : "This device has no gyroscope or accelerometer to share."
+        available ? nil : String(localized: "This device has no gyroscope or accelerometer to share.")
     }
 }
 
 /// The words under Microphone while iOS refuses access.
 enum CapabilityWords {
-    static let microphoneDenied = "Not allowed in Settings"
+    static let microphoneDenied = String(localized: "Not allowed in Settings")
 }
 
 struct MicrophoneRow: View {
@@ -359,7 +381,7 @@ struct MicrophoneRow: View {
     var body: some View {
         let denied = model.microphoneState == .denied
         OptionRow(
-            title: "Microphone", symbol: "mic.fill",
+            title: String(localized: "Microphone"), symbol: "mic.fill",
             detail: denied ? CapabilityWords.microphoneDenied : nil, dimmed: denied
         ) {
             Toggle("Microphone", isOn: Binding(
@@ -368,7 +390,7 @@ struct MicrophoneRow: View {
             ))
             .labelsHidden()
         }
-        .accessibilityHint(denied ? "Andarium is not allowed to use the microphone. Turning this on offers to open Settings." : "")
+        .accessibilityHint(denied ? String(localized: "Andarium is not allowed to use the microphone. Turning this on offers to open Settings.") : "")
     }
 }
 
@@ -376,7 +398,7 @@ struct GyroscopeRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        OptionRow(title: "Gyroscope", symbol: "gyroscope") {
+        OptionRow(title: String(localized: "Gyroscope"), symbol: "gyroscope") {
             Toggle("Gyroscope", isOn: Binding(
                 get: { model.motionSensorsOn },
                 set: { model.setMotionSensors($0) }
@@ -398,7 +420,7 @@ struct HapticsRow: View {
     static let symbol = "iphone.radiowaves.left.and.right"
 
     var body: some View {
-        OptionRow(title: "Haptics", symbol: Self.symbol) {
+        OptionRow(title: String(localized: "Haptics"), symbol: Self.symbol) {
             Toggle("Haptics", isOn: Binding(
                 get: { model.hapticsOn },
                 set: { model.setHaptics($0) }
@@ -449,7 +471,7 @@ struct MicrophoneAccessAlert: ViewModifier {
             Button("Open Settings") { model.openMicrophoneSettings() }
             Button("Not now", role: .cancel) {}
         } message: {
-            Text("iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it.")
+            Text(String(localized: "iOS is not allowing Andarium to use the microphone. Turn on Microphone for Andarium in Settings, then come back to use it.").keepingTogether)
         }
     }
 }
@@ -480,7 +502,7 @@ struct LocationAccessAlert: ViewModifier {
                 Button("OK", role: .cancel) {}
             }
         } message: {
-            Text(words?.message ?? "")
+            Text((words?.message ?? "").keepingTogether)
         }
     }
 }
@@ -502,12 +524,12 @@ struct JitSection: View {
 
     var body: some View {
         if model.jitAvailable, model.guest != nil {
-            HomeSection(title: "JIT") {
+            HomeSection(verbatim: "JIT") {
                 OptionRow(title: "JIT", symbol: "bolt.fill") {
-                    Toggle("JIT", isOn: Binding(
+                    Toggle(isOn: Binding(
                         get: { model.jitOn },
                         set: { model.setJit($0) }
-                    ))
+                    )) { Text(verbatim: "JIT") }
                     .labelsHidden()
                 }
             } footer: {
@@ -528,8 +550,8 @@ struct BackupOption: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        OptionRow(title: "Back up guest data", symbol: "icloud.fill") {
-            Toggle("Back up guest data", isOn: $isOn).labelsHidden()
+        OptionRow(title: String(localized: "Back up virtual machine data"), symbol: "icloud.fill") {
+            Toggle("Back up virtual machine data", isOn: $isOn).labelsHidden()
         }
     }
 }

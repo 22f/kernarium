@@ -171,5 +171,66 @@ class CaptureLockTests(unittest.TestCase):
         self.assertIn("home\tHome", listing.getvalue())
 
 
+class CaptureLanguageTests(unittest.TestCase):
+    """`--language` launches the Preview in one of Andarium's languages and names it in the shot."""
+
+    def setUp(self):
+        self.script = load_script()
+        self.shot = next(shot for shot in self.script.SHOTS if shot.id == "home")
+
+    def test_without_a_language_the_launch_is_the_simulators_own(self):
+        self.assertEqual(self.shot.launch_arguments(), ["-screen", "home"])
+
+    def test_a_language_adds_its_locale_to_the_launch(self):
+        self.assertEqual(
+            self.shot.launch_arguments("zh-Hant"),
+            ["-screen", "home", "-AppleLanguages", "(zh-Hant)", "-AppleLocale", "zh_TW"])
+
+    def test_every_language_of_the_application_is_offered(self):
+        self.assertEqual(sorted(self.script.LANGUAGES), ["en", "ja", "zh-Hans", "zh-Hant"])
+
+    def test_an_unknown_language_is_refused_by_the_command_line(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.script.main(["--language", "fr", "--list"])
+
+    def test_the_new_shots_of_the_localization_are_listed(self):
+        listing = io.StringIO()
+        with contextlib.redirect_stdout(listing):
+            self.assertEqual(self.script.main(["--list"]), 0)
+        for shot in ("snapshots", "snapshots-detail", "whatsnew-open"):
+            self.assertIn(f"{shot}\t", listing.getvalue())
+
+
+class FeedbackShotTests(unittest.TestCase):
+    """The shots of Send feedback need a Preview built with it; any other Preview skips them."""
+
+    def setUp(self):
+        self.script = load_script()
+        self.shots = [shot for shot in self.script.SHOTS if shot.feedback]
+
+    def test_the_feedback_shots_are_listed_and_named_apart(self):
+        self.assertGreaterEqual(len(self.shots), 10)
+        self.assertTrue(all(shot.id.startswith("feedback-") for shot in self.shots))
+        self.assertEqual({shot.group for shot in self.shots}, {"Feedback"})
+        ids = [shot.id for shot in self.script.SHOTS]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_a_preview_without_the_feature_is_no_reason_to_wait_and_is_named(self):
+        shot = self.shots[0]
+        state = {"pid": 7, "screen": shot.screen, "state": "active"}
+        with mock.patch.object(self.script, "alive", return_value=True), \
+                mock.patch.object(self.script, "app_state", return_value=state):
+            self.assertIn("FEEDBACK_ADDRESS", self.script.not_in_front("UDID", 7, shot))
+            state["feedback"] = True
+            self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
+
+    def test_the_other_shots_ask_nothing_of_the_build(self):
+        shot = next(shot for shot in self.script.SHOTS if not shot.feedback)
+        state = {"pid": 7, "screen": shot.screen, "state": "active"}
+        with mock.patch.object(self.script, "alive", return_value=True), \
+                mock.patch.object(self.script, "app_state", return_value=state):
+            self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
+
+
 if __name__ == "__main__":
     unittest.main()

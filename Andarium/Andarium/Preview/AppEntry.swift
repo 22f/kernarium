@@ -41,6 +41,12 @@ struct AppEntry {
     /// "light" or "dark" draws the preview in that appearance whatever the
     /// Simulator's own, so a capture leaves the device's setting alone.
     var colorScheme: String?
+    /// The resolution chosen, "native" or a number, instead of the default.
+    var displayScale: String?
+    /// The screen's native scale and the display's size in points, "402x778",
+    /// instead of the Simulator's own, to show another device's choices.
+    var displayNative: String?
+    var displayPoints: String?
 
     static func fromArguments() -> AppEntry {
         let defaults = UserDefaults.standard
@@ -56,7 +62,10 @@ struct AppEntry {
             statsVramMiB: defaults.string(forKey: "statsVramMiB").flatMap { Int($0) },
             device: defaults.string(forKey: "device"),
             memoryMiB: defaults.string(forKey: "memoryMiB").flatMap { Int($0) },
-            colorScheme: defaults.string(forKey: "colorScheme")
+            colorScheme: defaults.string(forKey: "colorScheme"),
+            displayScale: defaults.string(forKey: "displayScale"),
+            displayNative: defaults.string(forKey: "displayNative"),
+            displayPoints: defaults.string(forKey: "displayPoints")
         )
     }
 
@@ -64,7 +73,7 @@ struct AppEntry {
     private static let scrollTargets: [String: String] = [
         "home-options": "erase", "home-recovery-erase": "erase", "start-recovery": "erase", "erase": "erase",
         "home-new-recovery": "erase",
-        "home-display": "display",
+        "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
         "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
@@ -80,6 +89,7 @@ struct AppEntry {
     /// Where Settings scrolls to for a screen that shows a lower section.
     private static let settingsScrolls: [String: String] = [
         "settings-stats": "stats",
+        "settings-feedback": "diagnostics",
     ]
 
     /// The page of Info a screen opens on.
@@ -124,6 +134,7 @@ struct AppEntry {
             guest: guest, host: host, system: PreviewData.system, capabilities: .preview,
             createRequirementBytes: PreviewData.createRequirementBytes
         )
+        applyDisplay(to: model)
         let files = MockGuestFiles()
         let browser = FileBrowserModel(backend: files)
         MockFolderProbe.browser = browser
@@ -167,9 +178,18 @@ struct AppEntry {
         case "home-network-wifi":
             model.previewNetworkNotice(.wifi)
         case "home-ended":
-            model.notice = .sessionEnded(SessionEndNotice(
-                title: "Android's kernel panicked",
-                text: "Android stopped with a kernel panic: Attempted to kill init! exitcode=0x0000000b."))
+            // The card's own words, from the runtime's record of a kernel panic.
+            if let notice = SessionRecord(text: """
+                uml-session 1
+                state ended
+                end guest-panic
+                status 6
+                pid 1
+                message Attempted to kill init! exitcode=0x0000000b
+
+                """)?.notice(endedOutOfForeground: false) {
+                model.notice = .sessionEnded(notice)
+            }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
         case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask":
@@ -205,9 +225,9 @@ struct AppEntry {
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
         case "busy-create":
-            model.busy = BusyState(title: "Creating guest", detail: "Setting up Andarium with 16 GiB.", progress: 0.42)
+            model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with \(Formats.size(gib: 16))."), progress: 0.42)
         case "busy-erase":
-            model.busy = BusyState(title: "Erasing guest", detail: "Deleting everything the guest stored.", progress: 0.65)
+            model.busy = BusyState(title: String(localized: "Erasing virtual machine"), detail: String(localized: "Deleting everything the virtual machine stored."), progress: 0.65)
         case "boot":
             // The start applied the growth as it began.
             model.guest?.setCapacity(24)
@@ -259,7 +279,7 @@ struct AppEntry {
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
+             "settings-feedback", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -310,6 +330,9 @@ struct AppEntry {
             break
         }
         WhatsNewPreview.apply(screen: screen, to: model)
+        #if FEEDBACK_MAIL
+        FeedbackPreview.configure(screen: screen, model: model)
+        #endif
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -340,19 +363,19 @@ struct AppEntry {
         switch screen {
         case "bug-report":
             return BusyState(
-                title: "Creating bug report",
-                detail: "The guest is collecting its logs and state. This can take several minutes.",
+                title: String(localized: "Creating bug report"),
+                detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."),
                 progress: 0.6, cancel: cancel
             )
         case "install-done":
             return BusyState(
-                title: "App installed", detail: "\(file) is installed in the guest.",
+                title: String(localized: "App installed"), detail: String(localized: "\(file) is installed in the virtual machine."),
                 result: BusyResult(failed: false, dismiss: dismiss)
             )
         case "install-failed":
             return BusyState(
                 title: AppModel.installFailure,
-                detail: "The guest couldn\u{2019}t install it: this app has no version for arm64 devices.",
+                detail: PackageInstallMessages.message(forCode: "FAILED_NO_MATCHING_ABIS"),
                 result: BusyResult(failed: true, dismiss: dismiss)
             )
         case "install-not-apk":
@@ -367,7 +390,7 @@ struct AppEntry {
             )
         default:
             return BusyState(
-                title: "Installing app",
+                title: String(localized: "Installing app"),
                 detail: "\(file) \u{00B7} \(Formats.size(bytes: PreviewData.sampleApkSizeBytes))",
                 progress: 0.45, cancel: cancel
             )
@@ -417,6 +440,21 @@ struct AppEntry {
         }
     }
 
+    /// The resolution the launch chooses and the screen it states: the preview
+    /// shows a 2.3 screen on any Simulator.
+    @MainActor
+    private func applyDisplay(to model: AppModel) {
+        model.chosenScale = displayScale.flatMap { GuestDisplayScale(text: $0) }
+        if let native = displayNative.flatMap({ Double($0) }) {
+            model.statedNativeScale = native
+            model.screenDidChange(nativeScale: native)
+        }
+        if let displayPoints {
+            let parts = displayPoints.lowercased().split(separator: "x").compactMap { Double($0) }
+            if parts.count == 2 { model.statedDisplayPoints = CGSize(width: parts[0], height: parts[1]) }
+        }
+    }
+
     /// Sheets and dialogs open after the first frame so SwiftUI presents them
     /// the way a tap would.
     @MainActor
@@ -429,6 +467,8 @@ struct AppEntry {
             model.sheet = .resize
         case "system-edit", "system-memory-warning":
             model.sheet = .system
+        case "resolution-sheet":
+            model.sheet = .resolution
         case "home-mic-alert":
             model.setMicrophone(true)
         case "home-location-alert", "home-location-restricted-alert", "home-location-services-off-alert",
@@ -439,7 +479,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history":
+             "whatsnew-history", "feedback-info", "feedback-info-filled":
             model.sheet = .info
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew
@@ -453,8 +493,8 @@ struct AppEntry {
             if let browser = model.fileBrowser, let transfer = browser.transfer { browser.share(transfer) }
         case "alert-error":
             model.alert = AppAlert(
-                title: "Settings not saved",
-                message: "The file couldn\u{2019}t be saved because there is no space left on the device."
+                title: String(localized: "Settings not saved"),
+                message: CocoaError(.fileWriteOutOfSpace).localizedDescription
             )
         case "bug-report" where play:
             try? await Task.sleep(for: .milliseconds(450))

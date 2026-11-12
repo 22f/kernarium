@@ -80,14 +80,19 @@ if(UML_TEST_APPLE_AUDIO)
 endif()
 
 # uml_add_guest_integration_test(NAME <test> SCRIPT <runner> [ARGS <arg>...]
-#     CPUS <n> [GPUS <n>] [LABELS <label>...] [TIMEOUT <seconds>])
+#     CPUS <n> [GPUS <n>] [LABELS <label>...] [TIMEOUT <seconds>]
+#     [EMULATOR <target>])
 #
 # Registers a rootfs integration test that runs the Python <runner>, relative
-# to the calling directory, with uml-darwin and the integration rootfs and then
-# ARGS. It reserves CPUS processors, and GPUS GPUs, from the resource spec.
+# to the calling directory, with uml-darwin (or the EMULATOR target) and the
+# integration rootfs and then ARGS. It reserves CPUS processors, and GPUS GPUs,
+# from the resource spec.
 function(uml_add_guest_integration_test)
-    cmake_parse_arguments(_guest "" "NAME;SCRIPT;CPUS;GPUS;TIMEOUT"
+    cmake_parse_arguments(_guest "" "NAME;SCRIPT;CPUS;GPUS;TIMEOUT;EMULATOR"
         "ARGS;LABELS" ${ARGN})
+    if(NOT _guest_EMULATOR)
+        set(_guest_EMULATOR uml-darwin)
+    endif()
     if(NOT _guest_SCRIPT OR NOT _guest_CPUS)
         message(FATAL_ERROR
             "${_guest_NAME}: guest integration tests require SCRIPT and CPUS")
@@ -100,7 +105,7 @@ function(uml_add_guest_integration_test)
         NAME "${_guest_NAME}"
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/${_guest_SCRIPT}"
-            --emulator "$<TARGET_FILE:uml-darwin>"
+            --emulator "$<TARGET_FILE:${_guest_EMULATOR}>"
             --rootfs "${UML_INTEGRATION_ROOTFS}"
             ${_guest_ARGS}
         LABELS ${_guest_LABELS}
@@ -171,6 +176,83 @@ if(UML_V4L2_MMAP_CAPTURE_PROBE_BINARY)
         TIMEOUT 300
         CPUS 2
         GPUS 1)
+endif()
+
+# The Virtio camera's capture and metadata nodes, on the synthetic camera's
+# tablet profile: live, where frames carry the chart and stills are taken, and
+# started blocked, where frames are black and a still fails. The probe builds
+# in the guest; a live session boots twice, because Bayer stills are offered
+# once the host has learned the camera's colour data.
+foreach(_camera IN ITEMS synthetic blocked)
+    if(_camera STREQUAL synthetic)
+        set(_camera_suffix "")
+        set(_camera_timeout 1500)
+    else()
+        set(_camera_suffix "-${_camera}")
+        set(_camera_timeout 900)
+    endif()
+    uml_add_guest_integration_test(
+        NAME guest-v4l2-capture${_camera_suffix}
+        SCRIPT video/run_camera_capture.py
+        ARGS --mode ${_camera}
+        LABELS guest;video
+        TIMEOUT ${_camera_timeout}
+        CPUS 2)
+endforeach()
+
+# A camera stream carries on across the guest's system suspend, by the host's
+# route and by the guest's own: the driver stops its streams first, so the
+# device holds nothing and is not reset.
+uml_add_guest_integration_test(
+    NAME guest-v4l2-capture-suspend
+    SCRIPT video/run_camera_suspend.py
+    LABELS guest;video
+    TIMEOUT 900
+    CPUS 2)
+
+# The Virtio camera driver against a device that is reset during a suspend
+# (the stream carries on, the zoom is written again, the sequences keep
+# rising) and against one that is late to stop a stream (the driver destroys
+# the stream, so the buffers it gives back are never written again, and the
+# late clears fall due with the rings disabled and are not lost), and against
+# one that is late to both the clear and the destroy (the buffers stay with the
+# device, and the stop waits for it). No switch in a production target can do
+# any of these, so the device is the production one behind the delayed-answer
+# shim, which resets it or holds its requests.
+if(TARGET UML::CameraSource AND TARGET UML::SyntheticCamera)
+    uml_add_freestanding_cxx_payload(UML_GUEST_CAMERA_RESET_INIT
+        guest-video-camera-reset-init
+        video/camera_reset_init.cpp
+        COMMENT "Building the freestanding arm64 init of the camera reset tests"
+        ARCH_OPTIONS -march=armv8-a)
+    add_executable(uml_camera_reset_tests video/camera_reset_tests.cpp)
+    target_link_libraries(uml_camera_reset_tests PRIVATE
+        UML::BootInitramfs
+        UML::CameraDevice
+        UML::CameraSource
+        UML::DelayedAnswerDevice
+        UML::Emulator)
+    target_link_options(uml_camera_reset_tests PRIVATE
+        "LINKER:-export_dynamic"
+        "LINKER:-force_load,$<TARGET_FILE:uml_emulator>")
+    add_dependencies(uml_camera_reset_tests
+        "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}")
+    add_dependencies(integration-test-binaries uml_camera_reset_tests)
+    get_target_property(_uml_camera_reset_kernel
+        "${UML_ACTIVE_KERNEL_ARTIFACT_TARGET}" UML_KERNEL_IMAGE)
+    foreach(_case IN ITEMS reset slow-clear slow-stop)
+        uml_add_integration_test(
+            NAME guest-video-camera-${_case}
+            COMMAND uml_camera_reset_tests
+                ${_uml_camera_reset_kernel}
+                ${UML_GUEST_CAMERA_RESET_INIT}
+                ${CMAKE_CURRENT_BINARY_DIR}/video-camera-${_case}
+                ${_case}
+            LABELS guest;kernel;video
+            TIMEOUT 600
+            PROCESSORS 2
+            RESOURCE_GROUPS cpus:2)
+    endforeach()
 endif()
 
 set(UML_FUTEX_PROBE_BINARY "" CACHE FILEPATH
@@ -391,9 +473,30 @@ uml_add_guest_integration_test(
     TIMEOUT 240
     CPUS 2)
 
+# The guest cannot reach the host's loopback through the gateway, so the
+# host half of the transfer test listens on a Unix socket behind a guest
+# forward that only the provider's test build offers, in the test launcher.
+if(TARGET uml-darwin-network-test)
+    uml_add_guest_integration_test(
+        NAME guest-slirp-network-transfer
+        SCRIPT network/run_guest_network_transfer.py
+        EMULATOR uml-darwin-network-test
+        LABELS guest;network;slirp
+        TIMEOUT 300
+        CPUS 2)
+else()
+    message(FATAL_ERROR
+        "guest-slirp-network-transfer needs the test launcher, which links "
+        "the provider's test build (UML_BUILD_TOOLING_TESTS)")
+endif()
+
+# What a guest process reaches of the host through the user network: nothing,
+# at the gateway, the broadcast address, the host's own addresses or its
+# loopback, where the probe has listeners of its own. This is the product
+# launcher.
 uml_add_guest_integration_test(
-    NAME guest-slirp-network-transfer
-    SCRIPT network/run_guest_network_transfer.py
+    NAME guest-slirp-host-isolation
+    SCRIPT network/run_guest_host_isolation.py
     LABELS guest;network;slirp
     TIMEOUT 300
     CPUS 2)
@@ -673,6 +776,29 @@ uml_add_guest_integration_test(
     TIMEOUT 300
     CPUS 2)
 
+# Test support only: a library the runner inserts into the launcher
+# (DYLD_INSERT_LIBRARIES), which suspends one vCPU's carrier thread for a while
+# again and again, as a loaded host does.
+add_library(uml_cpu_hold SHARED kernel/cpu_hold.cpp)
+set_target_properties(uml_cpu_hold PROPERTIES
+    PREFIX ""
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_options(uml_cpu_hold PRIVATE -Wall -Wextra -Werror)
+target_compile_features(uml_cpu_hold PRIVATE cxx_std_20)
+add_dependencies(integration-test-binaries uml_cpu_hold)
+
+# A host that does not run CPU0's carrier for 300 ms every second delays no
+# host event by more than a few ticks: the IRQ dispatch passes to a CPU whose
+# clock ticks, or that the IRQ notification thread wakes, with every CPU busy,
+# CPU0 only busy, and every CPU idle. A vsock echo every 20 ms is the load.
+uml_add_guest_integration_test(
+    NAME guest-irq-takeover
+    SCRIPT kernel/run_guest_irq_takeover.py
+    ARGS --hold-library $<TARGET_FILE:uml_cpu_hold>
+    LABELS guest;kernel;smoke
+    TIMEOUT 300
+    CPUS 2)
+
 # A Virtio sound stream starts afresh after a system suspend the guest enters
 # by itself: the position of a stream suspended while playing, a prepare after
 # a half-filled period, and a stream paused across a suspend, which recovers
@@ -742,6 +868,22 @@ uml_add_guest_integration_test(
     LABELS guest;input;smoke
     TIMEOUT 300
     CPUS 2)
+
+# The launcher's --hardware-input offers the guest a keyboard, a mouse and a
+# pointer that the host plugs and unplugs while it runs, and the guest's
+# virtio_input driver registers and unregisters their input devices to follow:
+# the runner is a VNC client whose keys and pointer plug them and whose
+# departure unplugs them, once more for each kind, with a key and a button held
+# across the unplug, and in quick succession. A kernel without the driver's
+# configuration handling fails the first check, which wants no input device for
+# a device that reports no event.
+uml_add_guest_integration_test(
+    NAME guest-hardware-input
+    SCRIPT input/run_guest_hardware_input.py
+    LABELS guest;input;gpu
+    TIMEOUT 600
+    CPUS 2
+    GPUS 1)
 
 # The kernel describes the virtual machine in SMBIOS tables that userspace
 # reads from sysfs, and provides no /dev/mem.
