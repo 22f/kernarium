@@ -100,7 +100,7 @@ struct TipJarStoreKitTests {
         jar.purchase(.pro)
         #expect(await eventually { jar.outcome != nil })
         #expect(jar.outcome == .thanks(.pro) && jar.thanked && jar.shownTiers.isEmpty)
-        #expect(await unfinished().isEmpty, "the transaction was finished")
+        #expect(await eventually { await unfinished().isEmpty }, "the transaction was finished")
         // A consumable can be bought again in the next visit.
         let next = TipJarModel(products: products, store: .live)
         next.start()
@@ -108,7 +108,7 @@ struct TipJarStoreKitTests {
         next.purchase(.pro)
         #expect(await eventually { next.outcome != nil })
         #expect(next.outcome == .thanks(.pro))
-        #expect(await unfinished().isEmpty)
+        #expect(await eventually { await unfinished().isEmpty }, "the second transaction was finished")
     }
 
     @Test func aPurchaseThatTheStoreFailsShowsTheStoresMessageAndLeavesTheTiers() async throws {
