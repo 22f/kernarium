@@ -98,6 +98,11 @@ public enum FoldPose: Equatable, Sendable {
 
     public var folds: Bool { self != .plain }
 
+    /// Whether the file browser's Import is a round button of its own in the
+    /// toolbar, in the column the strip beside the cover's camera gives the
+    /// toolbar's buttons, and not a labelled button in the bar at the foot.
+    public var importIsInToolbar: Bool { self == .cover }
+
     public var isInner: Bool {
         switch self {
         case .upright, .turned: true
@@ -123,7 +128,7 @@ public enum FoldPose: Equatable, Sendable {
 /// - Inner, upright, bent or flat: the guest fills the safe area across both
 ///   halves, so the hinge never resizes Android. The keys stay on its edge,
 ///   closed until tapped. The statistics and the notices hang from the top of
-///   the half the keys are on.
+///   the trailing half.
 /// - Inner, turned, flat: the guest fills the safe area; the keys stay on its
 ///   edge and never rest on the fold.
 /// - Inner, turned, bent (standing like a laptop): the guest takes the upper
@@ -241,12 +246,28 @@ public struct SessionPlan: Equatable, Sendable {
     }
 }
 
+/// A screen outside the session that sits on the inner display of a folding
+/// iPhone, and so on one side of the fold or across it.
+public enum FoldScreen: Equatable, Sendable {
+    /// A card, an overlay or a step that has no rule of its own: it sits where
+    /// the system puts its alerts.
+    case card
+    /// The screen before a virtual machine exists.
+    case welcome
+    /// The boot's steps.
+    case boot
+}
+
 /// The halves of the safe area on either side of the fold, for the screens that
 /// sit on one of them.
 public struct FoldHalves: Equatable, Sendable {
     public var first: CGRect
     public var second: CGRect
     public var upright: Bool
+    /// The device is bent at the fold, not flat.
+    public var bent: Bool
+    /// The safe area the halves divide.
+    public var safe: CGRect
 
     /// Nil where the display has no fold band.
     public init?(_ reading: FoldReading) {
@@ -254,12 +275,28 @@ public struct FoldHalves: Equatable, Sendable {
         first = halves.first
         second = halves.second
         if case .upright = reading.pose { upright = true } else { upright = false }
+        bent = reading.division?.isActive ?? false
+        safe = reading.safeArea
     }
 
     /// Where Andarium's cards, the boot's steps and its overlays go: the half
     /// where the system puts its own alerts, the leading one upright and the
     /// lower one turned.
     public var card: CGRect { upright ? first : second }
+
+    /// Where `screen` goes.
+    /// - Welcome: on the whole display, across the fold, while the device is
+    ///   flat, as on an iPad; on a half, as a card, while it is bent.
+    /// - Boot: on the upper half when the device stands turned and bent, the
+    ///   half that faces the person; as a card in every other pose.
+    /// - Anything else: as a card.
+    public func area(for screen: FoldScreen) -> CGRect {
+        switch screen {
+        case .card: card
+        case .welcome: bent ? card : safe
+        case .boot: !upright && bent ? first : card
+        }
+    }
 }
 
 /// Home's two pages on the inner display: one each side of the fold, each
