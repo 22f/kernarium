@@ -74,6 +74,11 @@ enum FeedbackPreview {
             overlay.progress = 0.6
             overlay.cancel = BusyCancel {}
             app.busy = overlay
+        case "feedback-sent":
+            feedback.form.problem = words.problem
+            feedback.form.details = words.details
+            await attachAll(feedback, report: 8.6, photo: 2.4)
+            feedback.mailFinished(.sent)
         case "feedback-info-filled":
             feedback.form.problem = words.suggestion
             feedback.form.details = words.suggestionDetails

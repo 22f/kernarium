@@ -299,6 +299,7 @@ SHOTS: list[Shot] = [
     feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
     feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
+    feedback("feedback-sent", "feedback-sent", "Send feedback once the mail was sent: the Feedback sent card with Done over the whole sheet."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
     feedback("feedback-info", "feedback-info", "Send feedback opened from Info, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
