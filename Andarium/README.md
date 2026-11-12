@@ -76,8 +76,17 @@ destination and adds nothing to the built application.
 `ITSAppUsesNonExemptEncryption` is NO in `Config/Info.plist`.
 
 The iPhone interface is portrait-only and the guest owns its rotation:
-Android turns its own display and the sensor axes stay fixed. On iPad the
-interface turns with the device in a session as it does at Home, full screen
+Android turns its own display and the sensor axes stay fixed. A guest whose
+image has a device-orientation sensor (the boot request's `orientation` host
+feature, [Kernarium](../Kernarium/README.md#automation-runs)) follows the
+device's orientation as iOS reports it, which already includes the person's
+Portrait Orientation Lock: while a session is in front the application
+observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
+over the motion connection (`MotionOrientation.swift`), which Android treats as
+a rotation proposal that its own policy still decides on. The Gyroscope switch
+governs only the accelerometer and gyroscope data apps may read, not this. A
+guest whose image has no such sensor judges the accelerometer as before. On iPad
+the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
 interface orientation (`MotionMount`, `SessionOrientationPolicy`). An
@@ -790,6 +799,9 @@ states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
+`ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
+device's orientation, where the device's idiom (an iPhone follows) would
+otherwise decide.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element

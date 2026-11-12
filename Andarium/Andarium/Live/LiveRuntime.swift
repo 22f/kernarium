@@ -103,6 +103,12 @@ final class LiveRuntime: RuntimeDriver {
     private lazy var location = LocationSession(updates: hostLocation, sink: RuntimeLocationSink())
     /// The interface orientation the sensors' axes are mounted to.
     private var motionMount = MotionMount()
+    /// The device's orientation, observed while a session is in front on a
+    /// device whose guest follows it (an iPhone), and given to the guest's
+    /// device-orientation sensor over the motion connection.
+    private lazy var deviceOrientation = DeviceOrientationObserver { [weak self] in
+        self?.deviceOrientationChanged($0)
+    }
     private lazy var rotation = GuestRotationController(
         apply: { [weak self] policy in
             guard let self else { throw CancellationError() }
@@ -460,7 +466,8 @@ final class LiveRuntime: RuntimeDriver {
         updateLocation()
         inputRunReady = false
         updateKeyboardMouse()
-        let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
+        let hostFeatures = Self.hostFeatures(
+            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -545,9 +552,11 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     /// What the boot request tells the guest the host has
-    /// (`android_host_features`): a vibrator, on a device with haptics.
-    nonisolated static func hostFeatures(hapticsAvailable: Bool) -> UInt32 {
-        hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0
+    /// (`android_host_features`): a vibrator, on a device with haptics, and a
+    /// device orientation to follow, where the guest follows it.
+    nonisolated static func hostFeatures(hapticsAvailable: Bool, followsDeviceOrientation: Bool = false) -> UInt32 {
+        (hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0)
+            | (followsDeviceOrientation ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) : 0)
     }
 
     // MARK: Android operations
@@ -812,12 +821,26 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     private func updateMotionSensors() {
+        let foreground = normalRun && reachedBootCompleted && active && !holdsGuestStill
+            && rotation.applied == rotationPolicy
+        // Where the interface does not turn and the guest owns rotation, Android
+        // follows the device's orientation as iOS reports it, which already
+        // includes the person's Portrait Orientation Lock. The Gyroscope switch
+        // is about the readings applications take, so it does not decide this.
+        let follows = model?.followsDeviceOrientation == true && rotationPolicy == .guest
         motion.update(
             enabled: model?.motionSensorsOn == true,
-            foreground: normalRun && reachedBootCompleted && active && !holdsGuestStill
-                && rotation.applied == rotationPolicy,
-            axes: motionMount.axes
+            foreground: foreground,
+            axes: motionMount.axes,
+            followsOrientation: follows
         )
+        deviceOrientation.observe(follows && foreground)
+    }
+
+    /// The device's orientation changed, or nil once it is no longer observed.
+    /// The guest is given it if its image takes orientations.
+    func deviceOrientationChanged(_ orientation: GuestOrientation?) {
+        motion.setOrientation(orientation)
     }
 
     // MARK: Keyboard and mouse

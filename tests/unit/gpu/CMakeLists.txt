@@ -419,6 +419,17 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY)
 
+    # A gralloc BLOB buffer no GPU unit uses, such as a camera's JPEG output,
+    # is created at any size within the renderer's bound without host storage,
+    # keeps the bytes the guest wrote through the transfers, and is no resource
+    # a command can name.
+    uml_add_gpu_unit_test(gpu-hostless-buffer
+        uml_gpu_hostless_buffer_tests
+        host_gl_hostless_buffer_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY)
+
     # The OpenGL path stays within the host GPU's fixed budget: a texture past
     # it is refused at creation with ENOMEM, the host never holds more than the
     # budget, and the renderer stores new textures once the guest has released
@@ -647,7 +658,7 @@ if(TARGET uml_gpu_service)
     set_tests_properties(
         gpu-transfer-context-error gpu-blob-copy-transfer
         gpu-texture-zero-fill gpu-texture-zero-fill-special
-        gpu-compressed-zero-refusal gpu-scanout-caps
+        gpu-compressed-zero-refusal gpu-hostless-buffer gpu-scanout-caps
         gpu-import-bounds
         gpu-resource-metal-texture gpu-cross-context-readback
         gpu-depth-format-advertisement gpu-stencil-only-target

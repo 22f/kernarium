@@ -1,0 +1,82 @@
+# Golden frames of the device-orientation part of the motion wire (vsock
+# 5556), the contract between the guest's motion sub-HAL
+# (android/lineage-24/overlay/sensors) and the host (Andarium/AndariumCore,
+# whose MotionOrientationFixture.swift reads this file).
+#
+# One frame per line: `name: <hex bytes>`. A line that starts with `#` is a
+# comment, and the comment above a frame says what it means.
+#
+# An `orientation-` frame is a host-to-guest record of 20 bytes, little endian:
+# "ANS1" (41 4e 53 31), the Android sensor type 27 (DEVICE_ORIENTATION, 1b 00 00
+# 00) and three float32 values. The first is the orientation, exactly 0.0, 1.0,
+# 2.0 or 3.0 (Surface.ROTATION_*: the device in its default orientation, turned
+# 90 degrees counter-clockwise, turned 180 degrees, turned 90 degrees
+# clockwise); the other two are 0.0. The host sends one only after an "ANC2"
+# frame arrived on the connection. The guest ends the connection on every
+# `reject-orientation-` frame; the host never encodes one.
+#
+# A `control-` frame is a guest-to-host frame of 16 bytes: "ANC1" or "ANC2", a
+# uint32 mask of the active sensors (bit 0 accelerometer, bit 1 gyroscope, bit
+# 2 device orientation, ANC2 only), then the uint32 period in microseconds of
+# the accelerometer and of the gyroscope. "ANC1" is what an image without the
+# orientation sensor sends; "ANC2" says the image takes orientation records.
+# The guest encodes every `control-` frame for the state its comment gives; the
+# host reads each of them, and ends the connection on every `reject-control-`
+# frame, which the guest never encodes.
+
+# The default orientation.
+orientation-0: 41 4e 53 31 1b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+# Turned 90 degrees counter-clockwise (iOS landscapeLeft).
+orientation-1: 41 4e 53 31 1b 00 00 00 00 00 80 3f 00 00 00 00 00 00 00 00
+
+# Turned 180 degrees (iOS portraitUpsideDown).
+orientation-2: 41 4e 53 31 1b 00 00 00 00 00 00 40 00 00 00 00 00 00 00 00
+
+# Turned 90 degrees clockwise (iOS landscapeRight).
+orientation-3: 41 4e 53 31 1b 00 00 00 00 00 40 40 00 00 00 00 00 00 00 00
+
+# 4.0 is no orientation.
+reject-orientation-high: 41 4e 53 31 1b 00 00 00 00 00 80 40 00 00 00 00 00 00 00 00
+
+# -1.0 is no orientation.
+reject-orientation-negative: 41 4e 53 31 1b 00 00 00 00 00 80 bf 00 00 00 00 00 00 00 00
+
+# 1.5 is between two orientations.
+reject-orientation-fraction: 41 4e 53 31 1b 00 00 00 00 00 c0 3f 00 00 00 00 00 00 00 00
+
+# The second value is not zero.
+reject-orientation-second: 41 4e 53 31 1b 00 00 00 00 00 80 3f 00 00 80 3f 00 00 00 00
+
+# The third value is not zero.
+reject-orientation-third: 41 4e 53 31 1b 00 00 00 00 00 80 3f 00 00 00 00 00 00 80 3f
+
+# NaN is never a measurement.
+reject-orientation-nan: 41 4e 53 31 1b 00 00 00 00 00 c0 7f 00 00 00 00 00 00 00 00
+
+# An image without the orientation sensor, nothing in use: both periods 10 ms.
+control-v1-idle: 41 4e 43 31 00 00 00 00 10 27 00 00 10 27 00 00
+
+# An image without the sensor, the accelerometer at 20 ms and the gyroscope at 1 s.
+control-v1-motion: 41 4e 43 31 03 00 00 00 20 4e 00 00 40 42 0f 00
+
+# An image with the orientation sensor, nothing in use. The first frame of a
+# connection carries the state at that moment, so it can be any of the frames
+# below.
+control-v2-idle: 41 4e 43 32 00 00 00 00 10 27 00 00 10 27 00 00
+
+# An image with the sensor, the window manager using it.
+control-v2-orientation: 41 4e 43 32 04 00 00 00 10 27 00 00 10 27 00 00
+
+# An image with the sensor, all three in use, the accelerometer at 20 ms and
+# the gyroscope at 1 s.
+control-v2-all: 41 4e 43 32 07 00 00 00 20 4e 00 00 40 42 0f 00
+
+# "ANC1" has no bit 2: an image without the sensor never sets it.
+reject-control-v1-orientation: 41 4e 43 31 04 00 00 00 10 27 00 00 10 27 00 00
+
+# Bit 3 is reserved.
+reject-control-reserved: 41 4e 43 32 08 00 00 00 10 27 00 00 10 27 00 00
+
+# The magic's last byte is 3, not a version this protocol has.
+reject-control-magic: 41 4e 43 33 00 00 00 00 10 27 00 00 10 27 00 00

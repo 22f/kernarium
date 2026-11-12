@@ -32,6 +32,12 @@ public enum MotionProblem: Equatable, Sendable {
 /// begins and never change per sample; a new mounting is a new run
 /// (`MotionMount` decides when). No samples are retained across a run.
 ///
+/// Where the guest follows the device's orientation (an iPhone), the same
+/// connection also gives a guest that has the device-orientation sensor the
+/// orientation the device reports (`setOrientation`), with the switch on or
+/// off. It is sent when it changes and, once, on each connection and each
+/// time the guest enables the sensor; nothing runs for it between changes.
+///
 /// Every call returns at once; the work is in order on one queue, and the
 /// device and the stream are only touched there.
 public final class MotionSession: @unchecked Sendable {
@@ -64,11 +70,16 @@ public final class MotionSession: @unchecked Sendable {
 
     deinit { stream?.stop() }
 
-    /// What is wanted now. A run begins when the switch is on and the guest
-    /// is in front, and ends when either stops being true or the axes change.
-    public func update(enabled: Bool, foreground: Bool, axes: MotionSample.Axes) {
+    /// What is wanted now. A run begins when the switch is on, or the guest
+    /// follows the device's orientation, and the guest is in front. It ends
+    /// when either stops being true or the axes change.
+    public func update(
+        enabled: Bool, foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false
+    ) {
         queue.async { [self] in
             sampling.enabled = enabled && (device.hasAccelerometer || device.hasGyroscope)
+            sampling.followsOrientation = followsOrientation
+            if !followsOrientation { sampling.orientation = nil }
             sampling.foreground = foreground
             if axes != self.axes, stream != nil { endRun() }
             self.axes = axes
@@ -78,6 +89,16 @@ public final class MotionSession: @unchecked Sendable {
             } else if stream != nil {
                 endRun()
             }
+        }
+    }
+
+    /// The device's orientation now, or nil once it is not being reported (the
+    /// next report is then the first of a new period). The guest is given it
+    /// at once if it takes orientations and has not had this one.
+    public func setOrientation(_ orientation: GuestOrientation?) {
+        queue.async { [self] in
+            sampling.orientation = orientation
+            if stream != nil { reconcile() }
         }
     }
 
@@ -120,7 +141,9 @@ public final class MotionSession: @unchecked Sendable {
                     if connected {
                         answered = true
                         problem(nil)
-                    } else if !answered {
+                    } else if !answered, sampling.enabled {
+                        // The Gyroscope switch's note: a connection held only
+                        // for the orientation says nothing about the sensors.
                         problem(.guestUnavailable)
                     }
                     reconcile()
@@ -177,6 +200,9 @@ public final class MotionSession: @unchecked Sendable {
             case .accelerometer: applied.accelerometer = wanted
             case .gyroscope: applied.gyroscope = wanted
             }
+        }
+        if let orientation = sampling.orientationToSend() {
+            stream.submit(orientation, epoch: epoch)
         }
     }
 

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include "device_orientation.hpp"
 #include "motion_protocol.hpp"
 #include <V2_1/SubHal.h>
+#include <android-base/properties.h>
 #include <android-base/unique_fd.h>
 #include <log/log.h>
 #include <linux/vm_sockets.h>
@@ -14,6 +16,7 @@
 #include <cerrno>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <thread>
 
@@ -23,6 +26,7 @@ using namespace android::hardware::sensors;
 using V1_0::Result;
 using V1_0::OperationMode;
 using V1_0::RateLevel;
+using V1_0::SensorFlagBits;
 using V1_0::SharedMemInfo;
 using V2_1::Event;
 using V2_1::SensorType;
@@ -34,6 +38,9 @@ int64_t nowNs() {
     clock_gettime(CLOCK_BOOTTIME, &time);
     return int64_t(time.tv_sec) * 1'000'000'000 + time.tv_nsec;
 }
+// The device-orientation sensor's handle. The accelerometer and the gyroscope
+// are 1 and 2, in `states_`.
+constexpr int32_t orientation_handle = 3;
 struct SensorState {
     bool active = false;
     int64_t period = 10'000'000;
@@ -48,8 +55,8 @@ public:
 
     Return<void> getSensorsList_2_1(getSensorsList_2_1_cb callback) override {
         hidl_vec<V2_1::SensorInfo> sensors;
-        sensors.resize(2);
-        for (size_t i = 0; i < sensors.size(); ++i) {
+        sensors.resize(sensor_count());
+        for (size_t i = 0; i < 2; ++i) {
             auto& sensor = sensors[i];
             sensor.sensorHandle = i + 1;
             sensor.name = i == 0 ? "Host Accelerometer" : "Host Gyroscope";
@@ -64,6 +71,25 @@ public:
             // Continuous, non-wake-up, no FIFO, injection or direct channel.
             sensor.flags = 0;
         }
+        if (orientation_enabled_) {
+            auto& sensor = sensors[orientation_handle - 1];
+            sensor.sensorHandle = orientation_handle;
+            sensor.name = "Host Device Orientation";
+            sensor.vendor = "Andarium";
+            sensor.version = 1;
+            sensor.type = SensorType::DEVICE_ORIENTATION;
+            sensor.maxRange = andarium::motion::orientation_count - 1;
+            sensor.resolution = 1.0f;
+            sensor.power = 0.001f;
+            sensor.minDelay = 0;
+            sensor.maxDelay = 0;
+            // On-change, non-wake-up, no FIFO, injection or direct channel.
+            sensor.flags = static_cast<uint32_t>(SensorFlagBits::ON_CHANGE_MODE);
+        }
+        // The line also says, to anyone who reads the log or the library, which
+        // property decides the list.
+        ALOGI("Andarium motion: ro.boot.kernarium.orientation=%d, %zu sensors", orientation_enabled_,
+              sensors.size());
         callback(sensors);
         return Void();
     }
@@ -71,6 +97,7 @@ public:
         std::lock_guard lock(mutex_);
         callback_ = callback;
         states_ = {};
+        orientation_.reset();
         // Every subscription ended with the framework's restart.
         sendControl();
         return Result::OK;
@@ -80,8 +107,15 @@ public:
         return mode == OperationMode::NORMAL ? Result::OK : Result::BAD_VALUE;
     }
     Return<Result> activate(int32_t handle, bool enabled) override {
-        if (handle < 1 || handle > 2) return Result::BAD_VALUE;
+        if (!valid(handle)) return Result::BAD_VALUE;
         std::lock_guard lock(mutex_);
+        if (handle == orientation_handle) {
+            const bool changed = orientation_.active() != enabled;
+            // The framework is given the host's last value at once.
+            if (const auto value = orientation_.activate(enabled)) postOrientation(*value);
+            if (changed) sendControl();
+            return Result::OK;
+        }
         auto& state = states_[handle - 1];
         const bool changed = state.active != enabled;
         state.active = enabled;
@@ -90,7 +124,9 @@ public:
         return Result::OK;
     }
     Return<Result> batch(int32_t handle, int64_t period, int64_t latency) override {
-        if (handle < 1 || handle > 2 || period < 0 || latency < 0) return Result::BAD_VALUE;
+        if (!valid(handle) || period < 0 || latency < 0) return Result::BAD_VALUE;
+        // An on-change sensor has no period, and the host does not pace it.
+        if (handle == orientation_handle) return Result::OK;
         std::lock_guard lock(mutex_);
         auto& state = states_[handle - 1];
         const auto previous = state.period;
@@ -102,9 +138,10 @@ public:
         return Result::OK;
     }
     Return<Result> flush(int32_t handle) override {
-        if (handle < 1 || handle > 2) return Result::BAD_VALUE;
+        if (!valid(handle)) return Result::BAD_VALUE;
         std::lock_guard lock(mutex_);
-        if (!states_[handle - 1].active || !callback_) return Result::BAD_VALUE;
+        const bool active = handle == orientation_handle ? orientation_.active() : states_[handle - 1].active;
+        if (!active || !callback_) return Result::BAD_VALUE;
         Event event{};
         event.sensorHandle = handle;
         event.sensorType = SensorType::META_DATA;
@@ -128,21 +165,33 @@ public:
             std::lock_guard lock(mutex_);
             dprintf(fd->data[0], "Andarium motion: accelerometer=%d gyroscope=%d\n",
                     states_[0].active, states_[1].active);
+            if (orientation_enabled_) {
+                dprintf(fd->data[0], "Andarium motion: orientation=%d host=%d\n",
+                        orientation_.active(), orientation_.latest().value_or(-1));
+            }
         }
         return Void();
     }
 
 private:
+    // The sensors listed: the accelerometer and the gyroscope, and the
+    // device-orientation sensor for a host that asked for it at boot.
+    size_t sensor_count() const { return orientation_enabled_ ? 3 : 2; }
+    bool valid(int32_t handle) const { return handle >= 1 && handle <= static_cast<int32_t>(sensor_count()); }
     // Tells the host which sensors applications use and how often, on the
     // connection it made. The frame is the whole state, so a later frame
     // replaces an earlier one. Called with mutex_ held. A frame that cannot
     // be sent whole would leave the host with a stale picture, so the
     // connection is shut down: the receiving loop ends, the host connects
-    // again and the state is sent on that connection.
+    // again and the state is sent on that connection. A guest with the
+    // orientation sensor says so in the frame, which is also how a host learns
+    // that it may send orientations.
     void sendControl() {
         if (peer_ < 0) return;
+        std::optional<bool> orientation;
+        if (orientation_enabled_) orientation = orientation_.active();
         const auto frame = andarium::motion::encode_control(
-            {states_[0].active, states_[1].active}, {states_[0].period, states_[1].period});
+            {states_[0].active, states_[1].active}, {states_[0].period, states_[1].period}, orientation);
         const auto sent = send(peer_, frame.data(), frame.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
         if (sent != static_cast<ssize_t>(frame.size())) {
             ALOGW("Andarium motion: control frame not sent (%zd): %s", sent, strerror(errno));
@@ -164,15 +213,34 @@ private:
     void post(const Event& event) {
         callback_->postEvents({event}, callback_->createScopedWakelock(false));
     }
-    void consume(const andarium::motion::Sample& sample) {
-        const auto index = sample.type == 1 ? 0 : 1;
+    // Posts the orientation the framework is to see. Called with mutex_ held.
+    void postOrientation(int value) {
+        if (!callback_) return;
+        Event event{};
+        event.sensorHandle = orientation_handle;
+        event.sensorType = SensorType::DEVICE_ORIENTATION;
+        event.timestamp = nowNs();
+        event.u.scalar = static_cast<float>(value);
+        post(event);
+    }
+    // Answers false for a record that ends the connection: an orientation from
+    // a host that the guest did not tell that it takes them.
+    bool consume(const andarium::motion::Sample& sample) {
         std::lock_guard lock(mutex_);
+        if (sample.type == andarium::motion::orientation_type) {
+            if (!orientation_enabled_) return false;
+            if (const auto value = orientation_.host_value(static_cast<int>(sample.values[0]))) {
+                postOrientation(*value);
+            }
+            return true;
+        }
+        const auto index = sample.type == 1 ? 0 : 1;
         auto& state = states_[index];
-        if (!callback_ || !state.active) return;
+        if (!callback_ || !state.active) return true;
         const auto timestamp = nowNs();
         // Keep a sampling deadline instead of rounding every jittered host
         // interval up to two periods. Late samples never cause a catch-up burst.
-        if (timestamp + state.period / 10 < state.next) return;
+        if (timestamp + state.period / 10 < state.next) return true;
         state.next = state.next == 0 || timestamp > state.next + state.period
             ? timestamp + state.period : state.next + state.period;
         Event event{};
@@ -184,6 +252,7 @@ private:
         event.u.vec3.z = sample.values[2];
         event.u.vec3.status = V1_0::SensorStatus::ACCURACY_HIGH;
         post(event);
+        return true;
     }
     // Blocks until fd is readable, with no timeout: the service is started at
     // boot whether or not a host ever connects, so it must not wake to poll.
@@ -209,8 +278,7 @@ private:
             used += count;
             if (used != record.size()) continue;
             const auto sample = andarium::motion::decode(record);
-            if (!sample) return;
-            consume(*sample);
+            if (!sample || !consume(*sample)) return;
             used = 0;
         }
     }
@@ -244,9 +312,16 @@ private:
             detach();
         }
     }
+    // Whether the host asked at boot for the device-orientation sensor
+    // (androidboot.kernarium.orientation=1). Read once: the framework picks the
+    // way it follows rotation from the list, as it starts. Declared before the
+    // worker, which uses it.
+    const bool orientation_enabled_ =
+        android::base::GetBoolProperty(andarium::motion::orientation_property, false);
     std::mutex mutex_;
     android::sp<IHalProxyCallback> callback_;
     std::array<SensorState, 2> states_{};
+    andarium::motion::DeviceOrientation orientation_;
     int peer_ = -1;
     // Declared before the worker, so it outlives the join in the worker's
     // destructor, which requests a stop and so writes to it.

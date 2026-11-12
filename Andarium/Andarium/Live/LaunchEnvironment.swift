@@ -22,6 +22,7 @@ extension LaunchOverrides {
         case .erase: "ANDARIUM_ERASE"
         case .stats: "ANDARIUM_STATS"
         case .instance: "ANDARIUM_GUEST_INSTANCE"
+        case .followsOrientation: "ANDARIUM_FOLLOW_ORIENTATION"
         }
     }
 

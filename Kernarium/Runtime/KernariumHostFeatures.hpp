@@ -36,6 +36,12 @@ inline constexpr Feature features[] = {
      * vibrator. */
     {"haptics", KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS,
      "androidboot.product.hardware.sku=", "haptics"},
+    /* The guest's motion sub-HAL lists its device-orientation sensor only when
+     * ro.boot.kernarium.orientation is true, because Android's window manager
+     * follows such a sensor instead of judging the accelerometer and so must
+     * not find one that nothing feeds. */
+    {"orientation", KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION,
+     "androidboot.kernarium.orientation=", "1"},
 };
 
 [[nodiscard]] constexpr bool singleBit(std::uint32_t value) noexcept
