@@ -81,6 +81,10 @@ struct SideKeysTouchTests {
             model.driver = StubDriver(plan: nil)
             let lease = try await HostWindow.take()
             let controller = AndariumHostingController(rootView: RootView(entry: entry).environment(model), model: model)
+            // These are the phone's edge keys. A display that folds lays the
+            // session out by its pose instead (`FoldSessionHostingTests`), so
+            // here the scene reads as one that does not fold.
+            controller.foldReader.stub = { nil }
             lease.window.rootViewController = controller
             model.phase = .running(.normal)
             let root = controller.view!
@@ -94,6 +98,14 @@ struct SideKeysTouchTests {
                 lease.give()
                 throw Failure.noDisplay
             }
+            // The session hides the status bar. Where the bar has an inset of
+            // its own (the iPhone Duo's inner display, an iPad) the safe area
+            // changes with it, so it is read once the bar is hidden.
+            _ = await test.eventually {
+                root.layoutIfNeeded()
+                return lease.scene.statusBarManager?.isStatusBarHidden ?? true
+            }
+            root.layoutIfNeeded()
             let safe = root.safeAreaInsets
             let height = root.bounds.height - safe.top - safe.bottom
             self.model = model

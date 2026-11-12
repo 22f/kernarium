@@ -208,6 +208,22 @@ struct FolderPage: View {
             }
             .disabled(!model.filesAvailable)
         }
+        // On the folding iPhone's cover the buttons stand in a column beside
+        // the camera, and Import joins them as a round button after More and
+        // before Done. It is the bar's Import (`FilesBar`) moved: the same
+        // action, the same disabled states, and it gives way to Export, which
+        // stays in the bar, while something is selected.
+        if model.foldPose.importIsInToolbar, model.filesAvailable, browser.selection.isEmpty {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    browser.picking = true
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(browser.busy || !browser.canImport(into: browser.current))
+            }
+        }
         ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .confirmationAction) {
             Button("Done", systemImage: "checkmark", action: close)

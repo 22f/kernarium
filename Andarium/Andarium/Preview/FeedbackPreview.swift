@@ -32,6 +32,7 @@ enum FeedbackPreview {
         services.runningSeconds = { _ in 2520 }
         services.previewOpensAtLaunch = opensSheet(screen)
         services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
+        services.previewKeepsConfirmation = screen == "feedback-sent"
         model.feedbackServices = services
         guard opensSheet(screen) else { return }
         if overHome(screen) {
@@ -75,6 +76,11 @@ enum FeedbackPreview {
             overlay.progress = 0.6
             overlay.cancel = BusyCancel {}
             app.busy = overlay
+        case "feedback-sent":
+            feedback.form.problem = words.problem
+            feedback.form.details = words.details
+            await attachAll(feedback, report: 8.6, photo: 2.4)
+            feedback.mailFinished(.sent)
         case "feedback-home-filled":
             feedback.form.problem = words.suggestion
             feedback.form.details = words.suggestionDetails
