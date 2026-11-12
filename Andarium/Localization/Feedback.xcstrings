@@ -1117,13 +1117,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "点按侧边按键，然后点按“设置”>“发送反馈”。"
+            "value" : "轻点侧边按键，然后轻点“设置”>“发送反馈”。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "點按側邊按鍵，然後點按「設定」>「傳送使用者意見」。"
+            "value" : "點一下側邊按鍵，然後點一下「設定」>「傳送使用者意見」。"
           }
         }
       }
