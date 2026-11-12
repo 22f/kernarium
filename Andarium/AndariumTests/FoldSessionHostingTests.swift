@@ -858,6 +858,7 @@ struct FoldSessionHostingTests {
         removeSelected()
         browser.selection = []
     }
+}
 
 /// The Simulator's own display, in the pose the harness put it in
 /// (`TEST_RUNNER_ANDARIUM_FOLD_POSE`: `cover`, `upright-book`, `upright-flat`,
