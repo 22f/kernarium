@@ -398,6 +398,15 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY)
 
+    # The kinds a plain clear skips read as zeros too: a new multisampled
+    # texture and a new compressed texture show nothing a released one held.
+    uml_add_gpu_unit_test(gpu-texture-zero-fill-special
+        uml_gpu_texture_zero_fill_special_tests
+        host_gl_texture_zero_fill_special_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY)
+
     # The OpenGL path stays within the host GPU's fixed budget: a texture past
     # it is refused at creation with ENOMEM, the host never holds more than the
     # budget, and the renderer stores new textures once the guest has released
@@ -616,7 +625,8 @@ if(TARGET uml_gpu_service)
     # A host without a usable GL stack or renderer skips these with status 77.
     set_tests_properties(
         gpu-transfer-context-error gpu-blob-copy-transfer
-        gpu-texture-zero-fill gpu-scanout-caps gpu-import-bounds
+        gpu-texture-zero-fill gpu-texture-zero-fill-special gpu-scanout-caps
+        gpu-import-bounds
         gpu-resource-metal-texture gpu-cross-context-readback
         gpu-depth-format-advertisement gpu-stencil-only-target
         gpu-line-loop-statistics gpu-statistics-availability

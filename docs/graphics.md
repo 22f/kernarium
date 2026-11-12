@@ -65,8 +65,13 @@ Guest-visible guarantees:
 
 - A texture the renderer creates reads as zeros until the guest writes it,
   because the host driver hands out a released resource's memory with its old
-  pixels, which may have belonged to another guest process. Imported and
-  compressed-format textures keep their content.
+  pixels, which may have belonged to another guest process. That holds for
+  every level and layer of every format, multisampled and compressed ones
+  included (a compressed texture is written zero blocks); only an imported
+  texture keeps the content it was imported with. While the device memory
+  budget is full the host driver can refuse the staging buffer of a later
+  upload, which is then dropped without an error, so a texture can keep its
+  older pixels until it is written again.
 - Images shared through native Metal heaps keep tiled storage but disable
   lossless compression, so a compositor can sample a render target. A Virgl
   import of such a blob is bounded by what backs it; an import that does not

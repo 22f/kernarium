@@ -28,7 +28,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  1 file changed, 22 insertions(+), 2 deletions(-)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 3e2d06cd1bc78eae59de5fddb26afba880d79e07..b929846e131e97b7136c584d8113509c8ac494c4 100644
+index 5a1df7d81e74e7282c6ba4ee434d15a5479c0b16..e1767786273f677e1e3fee72094def63b36056ed 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -971,6 +971,27 @@ static inline bool vrend_format_is_ds(enum virgl_formats format)

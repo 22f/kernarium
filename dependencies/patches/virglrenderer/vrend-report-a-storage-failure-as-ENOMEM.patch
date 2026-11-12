@@ -48,7 +48,7 @@ index 168cd8a1755ded1861f0e4a3042d4e2f3f5799d2..8f7cc928f1656969b6c6f6b50574678d
     map_info = vrend_renderer_resource_get_map_info(pipe_res);
     res = virgl_resource_create_from_pipe(args->handle, pipe_res, iov, num_iovs);
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 4c12d45e31d84cc7aa4c15c702c0ab905a949263..0c841a82dc050cd57d1420d1633aed9c18dc5b73 100644
+index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9c845e655 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -474,6 +474,43 @@ static bool vrend_pin_host_pages(GLuint buffer, void *ptr, uint64_t size)
@@ -244,7 +244,7 @@ index 4c12d45e31d84cc7aa4c15c702c0ab905a949263..0c841a82dc050cd57d1420d1633aed9c
     if (!format_can_texture_storage) {
        glTexParameteri(gr->target, GL_TEXTURE_BASE_LEVEL, 0);
        glTexParameteri(gr->target, GL_TEXTURE_MAX_LEVEL, pr->last_level);
-@@ -9632,11 +9699,15 @@ static void vrend_resource_zero_texture(struct vrend_resource *gr)
+@@ -9708,11 +9775,15 @@ static void vrend_resource_zero_texture(struct vrend_resource *gr)
  
  struct pipe_resource *
  vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args *args,
@@ -261,7 +261,7 @@ index 4c12d45e31d84cc7aa4c15c702c0ab905a949263..0c841a82dc050cd57d1420d1633aed9c
     gr = vrend_resource_create(args);
     if (!gr)
        return NULL;
-@@ -9674,6 +9745,10 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
+@@ -9750,6 +9821,10 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
     }
  
     if (ret) {
@@ -272,7 +272,7 @@ index 4c12d45e31d84cc7aa4c15c702c0ab905a949263..0c841a82dc050cd57d1420d1633aed9c
        FREE(gr->packed_yuv);
        FREE(gr);
        return NULL;
-@@ -9716,7 +9791,7 @@ static bool vrend_packed_yuv_make_planes(struct vrend_packed_yuv *yuv)
+@@ -9792,7 +9867,7 @@ static bool vrend_packed_yuv_make_planes(struct vrend_packed_yuv *yuv)
        };
  
        yuv->plane[plane] = (struct vrend_resource *)
@@ -281,7 +281,7 @@ index 4c12d45e31d84cc7aa4c15c702c0ab905a949263..0c841a82dc050cd57d1420d1633aed9c
        if (!yuv->plane[plane]) {
           while (plane--)
              vrend_resource_reference(&yuv->plane[plane], NULL);
-@@ -15021,9 +15096,10 @@ int vrend_renderer_pipe_resource_create(struct vrend_context *ctx, uint32_t blob
+@@ -15097,9 +15172,10 @@ int vrend_renderer_pipe_resource_create(struct vrend_context *ctx, uint32_t blob
                                          const struct vrend_renderer_resource_create_args *args)
  {
     struct vrend_resource *res;
