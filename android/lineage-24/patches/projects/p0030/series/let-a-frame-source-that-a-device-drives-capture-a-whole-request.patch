@@ -29,16 +29,23 @@ A BLOB output that is not a JFIF picture, or has no result metadata, is not queu
 not collect it, and a buffer the source cannot take back must not be handed to the device. The
 settings also carry the top of the request's AE target frame rate range (HostSettings::ae_max_fps).
 
+A request none of whose outputs was produced failed as a whole. The sensor asks the source
+(IFrameSource::FailsRequest) and, when the source says so, reports ERROR_REQUEST for the request,
+with no shutter message and no result metadata, and returns every buffer marked as failed, as it is
+done for a request that the stock request processor cannot take. Only that tells an application that
+its capture failed (onCaptureFailed); an ERROR_BUFFER alone does not, and a request that lost only
+some of its outputs still reports ERROR_BUFFER for those.
+
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
  devices/EmulatedCamera/hwl/Android.bp         |   1 +
- .../hwl/EmulatedRequestState.cpp              |  44 +++++
- devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  56 +++++--
- devices/EmulatedCamera/hwl/EmulatedSensor.h   |  10 ++
- .../EmulatedCamera/hwl/EmulatedSensorHost.cpp | 150 ++++++++++++++++++
- devices/EmulatedCamera/hwl/IFrameSource.h     |  51 ++++++
+ .../hwl/EmulatedRequestState.cpp              |  44 ++++
+ devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  56 +++++-
+ devices/EmulatedCamera/hwl/EmulatedSensor.h   |  10 +
+ .../EmulatedCamera/hwl/EmulatedSensorHost.cpp | 189 ++++++++++++++++++
+ devices/EmulatedCamera/hwl/IFrameSource.h     |  61 ++++++
  .../hwl/SensorCharacteristics.h               |  26 +++
- 7 files changed, 328 insertions(+), 10 deletions(-)
+ 7 files changed, 377 insertions(+), 10 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
 
 diff --git a/devices/EmulatedCamera/hwl/Android.bp b/devices/EmulatedCamera/hwl/Android.bp
@@ -263,10 +270,10 @@ index 8fa8954ed4cc310bf5efef77229df5b9f5385946..b7f8e622257551764d1b850a42176f3b
                       std::unique_ptr<HwlPipelineResult> result,
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp b/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..659714e9858820eb7e82b0165881217a3015714f
+index 0000000000000000000000000000000000000000..d2105c09f0f31cfa7a0c73f1c423c0756df17431
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,189 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -297,6 +304,8 @@ index 0000000000000000000000000000000000000000..659714e9858820eb7e82b0165881217a
 +namespace android {
 +
 +using google_camera_hal::BufferStatus;
++using google_camera_hal::ErrorCode;
++using google_camera_hal::ErrorMessage;
 +using google_camera_hal::HalCameraMetadata;
 +using google_camera_hal::NotifyMessage;
 +using google_camera_hal::ShutterMessage;
@@ -385,6 +394,43 @@ index 0000000000000000000000000000000000000000..659714e9858820eb7e82b0165881217a
 +    }
 +  }
 +
++  // A request that produced none of its outputs failed as a whole. The
++  // framework is told by an error for the request, with no shutter and no
++  // results (an application hears of that as a failed capture and may shoot
++  // again), and the buffers go back marked as failed, so that none of them
++  // sends a buffer error of its own.
++  size_t outputs = 0;
++  size_t failed = 0;
++  for (auto& buffer : *buffers) {
++    if (buffer->is_input) {
++      continue;
++    }
++    ++outputs;
++    if (buffer->stream_buffer.status == BufferStatus::kError) {
++      ++failed;
++    }
++  }
++  if (frame_source_->FailsRequest(outputs, failed)) {
++    ALOGW("%s: frame %u failed: none of its %zu outputs was produced",
++          __FUNCTION__, frame_number, outputs);
++    for (auto& buffer : *buffers) {
++      buffer->is_failed_request = true;
++    }
++    next_capture_time_ = getSystemTimeWithSource(timestamp_source);
++    next_readout_time_ = next_capture_time_ + exposure_time;
++    if (callback.notify != nullptr) {
++      NotifyMessage msg = ErrorMessage{.frame_number = frame_number,
++                                       .error_stream_id = -1,
++                                       .error_code = ErrorCode::kErrorRequest};
++      callback.notify(pipeline_id, msg);
++    }
++    if (result != nullptr) {
++      result->result_metadata.reset();
++    }
++    buffers->clear();
++    return;
++  }
++
 +  // The frame time and the exposure's own values come from the device; without
 +  // them (every buffer failed) the time is now.
 +  nsecs_t frame_time = getSystemTimeWithSource(timestamp_source);
@@ -418,10 +464,19 @@ index 0000000000000000000000000000000000000000..659714e9858820eb7e82b0165881217a
 +
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/IFrameSource.h b/devices/EmulatedCamera/hwl/IFrameSource.h
-index a0f4d30206ae132f8594375203a44b50e66d1b73..fa47c4f89328e87554a46970a13ff2c59c54d716 100644
+index a0f4d30206ae132f8594375203a44b50e66d1b73..cea72f2711ef850a568d7fc8830a4414dc430326 100644
 --- a/devices/EmulatedCamera/hwl/IFrameSource.h
 +++ b/devices/EmulatedCamera/hwl/IFrameSource.h
-@@ -54,6 +54,57 @@ class IFrameSource {
+@@ -21,6 +21,8 @@
+ #include <utils/Errors.h>
+ #include <utils/Timers.h>
+ 
++#include <cstddef>
++
+ #include "Base.h"
+ #include "SensorCharacteristics.h"
+ 
+@@ -54,6 +56,65 @@ class IFrameSource {
    virtual void CalculateAndAppendNoiseProfile(
        float gain /*in ISO*/, float max_raw_value,
        HalCameraMetadata* result /*out*/) = 0;
@@ -439,6 +494,14 @@ index a0f4d30206ae132f8594375203a44b50e66d1b73..fa47c4f89328e87554a46970a13ff2c5
 +  virtual status_t BeginRequest(const LogicalCameraSettings& /*settings*/,
 +                                Buffers* /*buffers*/) {
 +    return INVALID_OPERATION;
++  }
++
++  // Whether a request, of which `failed` of its `outputs` output buffers could
++  // not be produced, failed as a whole. The sensor then reports an error for
++  // the request, with no shutter and no results, instead of an error for each
++  // buffer: only that tells an application that its capture failed.
++  virtual bool FailsRequest(size_t /*outputs*/, size_t /*failed*/) const {
++    return false;
 +  }
 +
 +  // Collects a JPEG into `buffer`: the picture, its Exif data built from the

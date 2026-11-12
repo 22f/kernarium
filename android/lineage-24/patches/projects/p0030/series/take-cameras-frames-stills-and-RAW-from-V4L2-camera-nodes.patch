@@ -43,6 +43,11 @@ thumbnail from the result and writes them into the gap in place, then the blob h
 the buffer. RAW16 is copied from the still node. Discovery opens only /dev/video10 and above, where
 the driver registers the camera's nodes; the codec nodes are below.
 
+The source reports a request whose outputs all failed (the host refused them, or the deadline
+passed) as failed as a whole, by the rules of camera_request.hpp, which also holds the request's
+deadline: 3 seconds, or 15 with a still (the host gives a started still 10 and the rest of its group
+2 more).
+
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
  devices/EmulatedCamera/hwl/Android.bp         |   8 +
@@ -53,8 +58,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/JpegCompressor.h   |  30 +-
  .../hwl/V4l2Characteristics.cpp               | 403 ++++++++
  .../EmulatedCamera/hwl/V4l2Characteristics.h  |  37 +
- .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 959 ++++++++++++++++++
- devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 167 +++
+ .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 960 ++++++++++++++++++
+ devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 169 +++
  devices/EmulatedCamera/hwl/V4l2Stream.cpp     | 468 +++++++++
  devices/EmulatedCamera/hwl/V4l2Stream.h       | 179 ++++
  devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  | 180 ++++
@@ -64,7 +69,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/configs/Android.bp |   6 +
  .../hwl/configs/emu_camera_v4l2.json          | 592 +++++++++++
  .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   6 +-
- 19 files changed, 3732 insertions(+), 15 deletions(-)
+ 19 files changed, 3735 insertions(+), 15 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -742,10 +747,10 @@ index 0000000000000000000000000000000000000000..413d37e1691516ce3b8346be27a98014
 +#endif  // HW_EMULATOR_CAMERA_V4L2_CHARACTERISTICS_H
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039ae6df0ae
+index 0000000000000000000000000000000000000000..ae37c40c430db644ecb18c97091daf502bf93aa4
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
-@@ -0,0 +1,959 @@
+@@ -0,0 +1,960 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -834,10 +839,6 @@ index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039
 +
 +namespace {
 +
-+constexpr nsecs_t kFrameTimeout = 3000000000LL;
-+// The device gives a still ten seconds once its capture has started, and two
-+// more for the rest of a group to arrive.
-+constexpr nsecs_t kStillTimeout = 15000000000LL;
 +constexpr nsecs_t kMetaTimeout = 200000000LL;
 +constexpr nsecs_t kIdleStreamLimit = 5000000000LL;
 +// The platform runs at the largest size of the streams that are open, and a
@@ -1168,7 +1169,7 @@ index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039
 +      ++still_count[buffer->camera_id];
 +    }
 +  }
-+  request_deadline_ = systemTime(SYSTEM_TIME_MONOTONIC) + (any_still ? kStillTimeout : kFrameTimeout);
++  request_clock_.begin(systemTime(SYSTEM_TIME_MONOTONIC), any_still);
 +
 +  for (auto& entry : cameras_) {
 +    CloseIdleStreams(&entry.second);
@@ -1252,6 +1253,11 @@ index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039
 +  return result;
 +}
 +
++bool V4l2FrameSource::FailsRequest(size_t outputs, size_t failed) const {
++  return andarium::camera::request_end(outputs, failed) ==
++         andarium::camera::RequestEnd::request_error;
++}
++
 +bool V4l2FrameSource::MetaOf(Camera* camera, uint64_t sequence, abi::Meta* meta) {
 +  if (camera->meta->WaitFor(sequence, kMetaTimeout, meta)) {
 +    return true;
@@ -1272,7 +1278,7 @@ index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039
 +  pending_.erase(found);
 +  // What is left of the request's deadline; a wait that ends without the buffer
 +  // takes the stream's buffers back, so the rest of the request fails at once.
-+  const nsecs_t remaining = std::max<nsecs_t>(request_deadline_ - systemTime(SYSTEM_TIME_MONOTONIC), 0);
++  const nsecs_t remaining = request_clock_.remaining(systemTime(SYSTEM_TIME_MONOTONIC));
 +  status_t status = pending->stream->Wait(pending->slot, remaining, &interrupted_, completion);
 +  if (status != OK) {
 +    ALOGE("%s: the camera did not deliver a buffer (%d)", __FUNCTION__, status);
@@ -1707,10 +1713,10 @@ index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.h b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..69d9a28818bbaa9c9913d3845140be0a0eb24cc9
+index 0000000000000000000000000000000000000000..729ef50a5bb4f2cba45cc2d8635415473e87be70
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,169 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -1741,6 +1747,7 @@ index 0000000000000000000000000000000000000000..69d9a28818bbaa9c9913d3845140be0a
 +#include "V4l2Stream.h"
 +#include "V4l2Utils.h"
 +#include "camera_controls.hpp"
++#include "camera_request.hpp"
 +
 +namespace android {
 +namespace framesource {
@@ -1774,6 +1781,7 @@ index 0000000000000000000000000000000000000000..69d9a28818bbaa9c9913d3845140be0a
 +    return true;
 +  }
 +  status_t BeginRequest(const LogicalCameraSettings& settings, Buffers* buffers) override;
++  bool FailsRequest(size_t outputs, size_t failed) const override;
 +  status_t ProduceBlob(uint32_t camera_id, const SensorSettings& settings,
 +                       SensorBuffer* buffer, HalCameraMetadata* result_metadata,
 +                       const SensorCharacteristics& chars) override;
@@ -1871,7 +1879,7 @@ index 0000000000000000000000000000000000000000..69d9a28818bbaa9c9913d3845140be0a
 +  std::atomic<bool> interrupted_{false};
 +  // When the request being collected has to be complete, whatever its buffers
 +  // wait for: one deadline for the whole request.
-+  nsecs_t request_deadline_ = 0;
++  andarium::camera::RequestClock request_clock_;
 +};
 +
 +}  // namespace framesource
