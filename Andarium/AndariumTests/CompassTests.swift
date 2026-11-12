@@ -35,41 +35,79 @@ struct CompassHostTests {
         }
     }
 
+    /// Counts what an assessment reads, in order.
+    private final class Reads: @unchecked Sendable {
+        var order: [String] = []
+    }
+
+    private func assessed(
+        _ magnetometer: Bool = true, _ deviceMotion: Bool = true, _ northFrame: Bool = true,
+        _ authorization: CMAuthorizationStatus? = nil, reads: Reads = Reads()
+    ) -> CompassSource.Assessment {
+        CompassSource.assess(
+            magnetometer: magnetometer, deviceMotion: deviceMotion,
+            northFrame: {
+                reads.order.append("frames")
+                return northFrame
+            },
+            authorization: {
+                reads.order.append("permission")
+                return authorization
+            })
+    }
+
     @Test func theGuestIsOfferedAMagnetometerOnlyWhereEverythingItNeedsIsThere() {
-        func offered(
-            _ magnetometer: Bool = true, _ deviceMotion: Bool = true, _ northFrame: Bool = true,
-            _ authorization: CMAuthorizationStatus? = nil
-        ) -> Bool {
-            CompassSource.isAvailable(
-                magnetometer: magnetometer, deviceMotion: deviceMotion, northFrame: northFrame,
-                authorization: authorization)
-        }
-        #expect(offered())
+        #expect(assessed().available)
         // The sensor, device motion and the magnetic-north frame are each needed.
-        #expect(!offered(false))
-        #expect(!offered(true, false))
-        #expect(!offered(true, true, false))
+        #expect(!assessed(false).available)
+        #expect(!assessed(true, false).available)
+        #expect(!assessed(true, true, false).available)
         // Before iOS 27.2 there is no permission to ask about.
-        #expect(offered(true, true, true, nil))
+        #expect(assessed(true, true, true, nil).available)
+        #expect(assessed().permission == .notStated)
         // From 27.2: refused by the person or the system ends the offer; not yet
         // asked, or allowed, leaves it. Nothing is requested here either way.
-        #expect(offered(true, true, true, .notDetermined))
-        #expect(offered(true, true, true, .authorized))
-        #expect(!offered(true, true, true, .denied))
-        #expect(!offered(true, true, true, .restricted))
+        #expect(assessed(true, true, true, .notDetermined).available)
+        #expect(assessed(true, true, true, .authorized).available)
+        #expect(!assessed(true, true, true, .denied).available)
+        #expect(!assessed(true, true, true, .restricted).available)
+        #expect(assessed(true, true, true, .denied).permission == .status(.denied))
         // A refusal does not matter to a device that could not give a field anyway.
-        #expect(!offered(false, true, true, .authorized))
+        #expect(!assessed(false, true, true, .authorized).available)
         for status in [CMAuthorizationStatus.notDetermined, .restricted, .denied, .authorized] {
             #expect(CompassSource.permits(status) == (status == .notDetermined || status == .authorized))
         }
     }
 
+    @Test func aDeviceThatCannotHaveAFieldIsNotAskedAboutTheFramesOrThePermission() {
+        // iOS on a Mac does not state either (the permission status is marked
+        // unavailable on macOS): the question ends at the first two answers.
+        for (magnetometer, deviceMotion) in [(false, false), (false, true), (true, false)] {
+            let reads = Reads()
+            let assessment = assessed(magnetometer, deviceMotion, reads: reads)
+            #expect(reads.order.isEmpty, "magnetometer \(magnetometer), device motion \(deviceMotion)")
+            #expect(assessment == CompassSource.Assessment())
+            #expect(assessment.permission == .notRead && assessment.northFrame == nil)
+        }
+    }
+
+    @Test func thePermissionIsReadOnlyAfterTheFramesAndOnlyIfTheyAreThere() {
+        let reads = Reads()
+        _ = assessed(true, true, true, .authorized, reads: reads)
+        #expect(reads.order == ["frames", "permission"])
+        let withoutFrame = Reads()
+        let assessment = assessed(true, true, false, .authorized, reads: withoutFrame)
+        #expect(withoutFrame.order == ["frames"])
+        #expect(!assessment.available && assessment.northFrame == false && assessment.permission == .notRead)
+    }
+
     @Test func theStatusHasWordsForALog() {
-        #expect(CompassSource.name(nil) == "not stated before iOS 27.2")
-        #expect(CompassSource.name(.notDetermined) == "notDetermined")
-        #expect(CompassSource.name(.restricted) == "restricted")
-        #expect(CompassSource.name(.denied) == "denied")
-        #expect(CompassSource.name(.authorized) == "authorized")
+        #expect(CompassSource.name(.notRead) == "not read")
+        #expect(CompassSource.name(.notStated) == "not stated before iOS 27.2")
+        #expect(CompassSource.name(.status(.notDetermined)) == "notDetermined")
+        #expect(CompassSource.name(.status(.restricted)) == "restricted")
+        #expect(CompassSource.name(.status(.denied)) == "denied")
+        #expect(CompassSource.name(.status(.authorized)) == "authorized")
     }
 
     @Test func onlyTheMovementNoticeIsNotAFailure() {

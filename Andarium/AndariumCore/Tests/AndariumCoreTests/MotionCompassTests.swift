@@ -635,6 +635,33 @@ struct MotionCompassTests {
         #expect(!stream.submit(field, epoch: epoch))
     }
 
+    // MARK: The device is asked once for a run
+
+    @Test func theDevicesMagnetometerIsAskedAboutOncePerRunAndNotOnEveryUpdate() {
+        let guest = Guest()
+        let device = Device(magnetometer: true)
+        let session = session(guest, device)
+        session.update(foreground: true, axes: .portrait)
+        #expect(eventually { guest.connections == 1 })
+        guest.sayCompass(MotionDemand(magnetometer: 20_000))
+        #expect(eventually { device.magnetometerInterval == 0.01 })
+        for _ in 0..<5 { session.update(foreground: true, axes: .portrait) }
+        guest.sayCompass(MotionDemand(magnetometer: 40_000))
+        #expect(eventually { device.magnetometerInterval == 0.02 })
+        session.settle()
+        #expect(device.magnetometerReads == 1)
+        // A guest in the background is not asked about either.
+        session.update(foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait)
+        session.settle()
+        #expect(device.magnetometerReads == 1)
+        // The next run asks again.
+        session.update(foreground: true, axes: .portrait)
+        session.settle()
+        #expect(device.magnetometerReads == 2)
+        session.update(foreground: false, axes: .portrait)
+    }
+
     // MARK: The orientation sensor in the same frame
 
     @Test func anAnc3FrameThatListsTheOrientationSensorLetsTheDeviceOrientationFlow() {

@@ -92,6 +92,9 @@ public final class MotionSession: @unchecked Sendable {
     private var deviceFailed = false
     /// The magnetometer failed in this run: it is not read again in this run.
     private var magnetometerFailed = false
+    /// The device has a magnetometer to share, read when a run is about to
+    /// begin and kept for the run.
+    private var offersMagnetometer = false
     /// This run's hand-off of the magnetic field, and the subscription now
     /// running on it.
     private var delivery = MagneticDelivery()
@@ -114,7 +117,8 @@ public final class MotionSession: @unchecked Sendable {
     public func update(foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false) {
         queue.async { [self] in
             deviceFailed = false
-            sampling.hasSensors = device.hasAccelerometer || device.hasGyroscope || device.hasMagnetometer
+            if stream == nil, foreground { offersMagnetometer = device.hasMagnetometer }
+            sampling.hasSensors = device.hasAccelerometer || device.hasGyroscope || offersMagnetometer
             sampling.followsOrientation = followsOrientation
             if !followsOrientation { sampling.orientation = nil }
             sampling.foreground = foreground
@@ -245,7 +249,7 @@ public final class MotionSession: @unchecked Sendable {
     private func reconcileMagnetometer(
         plan: MotionPlan, stream: MotionStream, epoch: UInt64, current: UInt64, axes: MotionSample.Axes
     ) {
-        let wanted = device.hasMagnetometer && !magnetometerFailed ? plan.magnetometer : nil
+        let wanted = offersMagnetometer && !magnetometerFailed ? plan.magnetometer : nil
         guard wanted != applied.magnetometer else { return }
         if let wanted {
             // A retime goes on under the subscription it began; a start is a new one.
@@ -277,7 +281,7 @@ public final class MotionSession: @unchecked Sendable {
         switch sensor {
         case .accelerometer: device.hasAccelerometer
         case .gyroscope: device.hasGyroscope
-        case .magnetometer: device.hasMagnetometer
+        case .magnetometer: offersMagnetometer
         }
     }
 }

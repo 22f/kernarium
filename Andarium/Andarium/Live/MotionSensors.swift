@@ -33,26 +33,55 @@ nonisolated enum CompassSource {
         status != .denied && status != .restricted
     }
 
+    /// What the offer was decided on. A reading is nil when the answers before it
+    /// made it needless: a Mac has no magnetometer, and iOS asks nothing more
+    /// there (the frames and the permission status are not read on a Mac).
+    struct Assessment: Equatable {
+        var available = false
+        var northFrame: Bool?
+        /// `.notStated` before iOS 27.2, `.notRead` when an earlier answer ended the question.
+        var permission = Permission.notRead
+    }
+
+    enum Permission: Equatable {
+        case notRead
+        case notStated
+        case status(CMAuthorizationStatus)
+    }
+
     /// The guest is offered a magnetometer only where the device has one, can
     /// run device motion in the magnetic-north frame (the field is taken from
     /// it, calibrated, never from the raw magnetometer), and the permission,
-    /// where the system states one (`authorization` is nil before iOS 27.2),
-    /// does not refuse it.
-    static func isAvailable(
-        magnetometer: Bool, deviceMotion: Bool, northFrame: Bool, authorization: CMAuthorizationStatus?
-    ) -> Bool {
-        guard magnetometer, deviceMotion, northFrame else { return false }
-        return authorization.map(permits) ?? true
+    /// where the system states one, does not refuse it. The two answers that
+    /// every device can give come first; the frames and the permission status,
+    /// which the system layer of an iPad app on a Mac may not implement, are
+    /// read only when a magnetometer and device motion exist.
+    static func assess(
+        magnetometer: Bool, deviceMotion: Bool, northFrame: () -> Bool, authorization: () -> CMAuthorizationStatus?
+    ) -> Assessment {
+        guard magnetometer, deviceMotion else { return Assessment() }
+        var assessment = Assessment()
+        let frame = northFrame()
+        assessment.northFrame = frame
+        guard frame else { return assessment }
+        let status = authorization()
+        assessment.permission = status.map(Permission.status) ?? .notStated
+        assessment.available = status.map(permits) ?? true
+        return assessment
     }
 
-    static func name(_ status: CMAuthorizationStatus?) -> String {
-        guard let status else { return "not stated before iOS 27.2" }
-        switch status {
-        case .notDetermined: return "notDetermined"
-        case .restricted: return "restricted"
-        case .denied: return "denied"
-        case .authorized: return "authorized"
-        @unknown default: return "unknown(\(status.rawValue))"
+    static func name(_ permission: Permission) -> String {
+        switch permission {
+        case .notRead: return "not read"
+        case .notStated: return "not stated before iOS 27.2"
+        case .status(let status):
+            switch status {
+            case .notDetermined: return "notDetermined"
+            case .restricted: return "restricted"
+            case .denied: return "denied"
+            case .authorized: return "authorized"
+            @unknown default: return "unknown(\(status.rawValue))"
+            }
         }
     }
 }
@@ -115,22 +144,22 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
     var hasGyroscope: Bool { manager.isGyroAvailable }
 
     var hasMagnetometer: Bool {
-        var authorization: CMAuthorizationStatus?
-        if #available(iOS 27.2, *) { authorization = CMMotionManager.authorizationStatus }
-        let northFrame = CMMotionManager.availableAttitudeReferenceFrames().contains(.xMagneticNorthZVertical)
-        let available = CompassSource.isAvailable(
+        let assessment = CompassSource.assess(
             magnetometer: manager.isMagnetometerAvailable, deviceMotion: manager.isDeviceMotionAvailable,
-            northFrame: northFrame, authorization: authorization)
+            northFrame: { CMMotionManager.availableAttitudeReferenceFrames().contains(.xMagneticNorthZVertical) },
+            authorization: {
+                if #available(iOS 27.2, *) { return CMMotionManager.authorizationStatus }
+                return nil
+            })
         #if !APP_STORE
         // Once, so that a tester's log says whether this iOS states a motion
         // permission and what it was.
         if Self.reported.withLock({ let first = !$0; $0 = true; return first }) {
-            print("Andarium: compass: magnetometer \(manager.isMagnetometerAvailable), device motion "
-                + "\(manager.isDeviceMotionAvailable), magnetic-north frame \(northFrame), motion permission "
-                + "\(CompassSource.name(authorization)): offered \(available)")
+            print("Andarium: compass: magnetic-north frame \(assessment.northFrame.map(String.init) ?? "not read"), "
+                + "motion permission \(CompassSource.name(assessment.permission)): offered \(assessment.available)")
         }
         #endif
-        return available
+        return assessment.available
     }
 
     func start(
