@@ -53,7 +53,11 @@ application that must:
     the build named. The local configuration's receiver is in no file of a
     bundle whose build does not name it, which the check finds by its bytes
     and never prints. Info.plist keeps every value of Config/Info.plist, as
-    its preprocessing is to change only the feedback key.
+    its preprocessing is to change only the feedback key. The feature's
+    texts are the String Catalog table Feedback, which the build compiles in
+    with the feature and no other: a product without it has no Feedback
+    strings table, found by the file name whatever it holds, and a product
+    with it has the table in Japanese and both Chinese.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -140,6 +144,11 @@ FEEDBACK_FRAGMENTS = (
     b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
 # Words the feature puts in a String Catalog.
 FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
+# The feature's own table (Localization/Feedback.xcstrings), which a String
+# Catalog compiles to Feedback.strings, and to Feedback.stringsdict for a plural,
+# in each language's directory; and the languages that table has besides English.
+FEEDBACK_TABLE = "Feedback"
+FEEDBACK_LANGUAGES = ("ja", "zh-Hans", "zh-Hant")
 # Domains and top-level domains that name no mailbox (RFC 2606, RFC 6761).
 PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net")
 PLACEHOLDER_TLDS = ("example", "invalid", "localhost", "test")
@@ -621,6 +630,12 @@ def feedback_strings(app: Path) -> list[str]:
     return found
 
 
+def feedback_tables(app: Path) -> list[Path]:
+    """The Feedback table of any language, found by its file name."""
+    return sorted(path for path in app.glob("*.lproj/*")
+                  if path.stem == FEEDBACK_TABLE and path.suffix in (".strings", ".stringsdict"))
+
+
 def feedback_problems(
     app: Path, configuration: str, address: str, receiver: str = "", info_source: Path | None = None,
 ) -> tuple[list[str], bool]:
@@ -658,7 +673,8 @@ def feedback_problems(
     except (OSError, plistlib.InvalidFileException, ValueError):
         keyed = None
     words = feedback_strings(app)
-    compiled = bool(fragments) or keyed is not None or bool(words)
+    tables = feedback_tables(app)
+    compiled = bool(fragments) or keyed is not None or bool(words) or bool(tables)
     if not expected:
         if address:
             problems.append("Send feedback: the build names a receiver that cannot be used")
@@ -670,6 +686,8 @@ def feedback_problems(
             problems.append(f"Info.plist: has {FEEDBACK_KEY} though the build names no receiver")
         problems.extend(f"{name}: has Send feedback strings though the build names no receiver"
                         for name in words)
+        problems.extend(f"{path.relative_to(app)}: is the Feedback strings table though the build names no receiver"
+                        for path in tables)
         return problems, compiled
     if keyed != address:
         problems.append(f"Info.plist: {FEEDBACK_KEY} must be the receiver the build names")
@@ -678,6 +696,11 @@ def feedback_problems(
     if missing:
         problems.append(
             f"the application lacks Send feedback ({', '.join(missing)}) though the build names a receiver")
+    absent = [language for language in FEEDBACK_LANGUAGES
+              if not (app / f"{language}.lproj" / f"{FEEDBACK_TABLE}.strings").is_file()]
+    if absent:
+        problems.append(
+            f"the application lacks the Feedback strings table in {', '.join(absent)} though the build names a receiver")
     return problems, compiled
 
 

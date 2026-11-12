@@ -208,9 +208,10 @@ bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
 only, never the local receiver, and its hooks into the sheet are not in the
 AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
 tested, by AndariumCore's tests through a symlinked target no product links.
-The feature's words are looked up in the `Feedback` string table; the mail's
-subject prefix and its information block are English whatever the interface
-language, and the bug report's overlay text is the app's own.
+The feature's words are looked up in the `Feedback` string table (zh-Hans,
+zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
+its information block are English whatever the interface language, and the bug
+report's overlay text is the app's own.
 
 ## Model and storage
 
@@ -653,7 +654,11 @@ and Japanese, and follows the language of iOS and the per-app language setting.
 The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
 catalog, table `JIT`, which the App Store configuration leaves out of the
-bundle and its check asserts is absent. English is the key (a readout or a
+bundle and its check asserts is absent. The Send feedback texts are another,
+table `Feedback`, built only where Send feedback is compiled in
+(`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle check
+refuses the table, by its file name, in a product without the feature and
+asks for it in every language of one with it. English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
@@ -665,8 +670,10 @@ short quoted Chinese or Japanese name is not cut across two lines.
 `scripts/localization.py check` is the catalogs' gate. After a build with
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
-or the reverse. It runs on a development build (the output of `Andarium` and
-`AndariumPreview` together) and on an App Store build with `--app-store`. A
+or the reverse. It runs on a development build made with
+`FEEDBACK_ADDRESS=feedback@example.com` (the output of `Andarium` and
+`AndariumPreview` together; one without Send feedback has no `Feedback` strings
+and fails) and on an App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.

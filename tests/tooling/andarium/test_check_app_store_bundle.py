@@ -300,14 +300,29 @@ def app_info(**overrides: object) -> dict:
     return {key: value for key, value in keys.items() if value is not None}
 
 
+def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
+    """The Feedback strings table the build compiles in with the feature, in each language."""
+    for language in languages:
+        lproj = app / f"{language}.lproj"
+        lproj.mkdir(exist_ok=True)
+        (lproj / "Feedback.strings").write_bytes(
+            plistlib.dumps({"Send feedback": "Feedback fixture"}, fmt=plistlib.FMT_BINARY))
+
+
 def make_app(
     root: Path, name: str, executable: Path, info: dict,
-    framework: Path | None = None, manifest: bool = True,
+    framework: Path | None = None, manifest: bool = True, feedback_tables: bool | None = None,
 ) -> Path:
+    """A fixture application. A product whose Info.plist names a receiver holds the
+    Feedback strings table too (`feedback_tables` says otherwise)."""
     app = root / name / "Fixture.app"
     app.mkdir(parents=True)
     shutil.copyfile(executable, app / "Fixture")
     (app / "Info.plist").write_bytes(plistlib.dumps(info))
+    if feedback_tables is None:
+        feedback_tables = "AndariumFeedbackAddress" in info
+    if feedback_tables:
+        write_feedback_tables(app)
     if manifest:
         (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(MANIFEST))
     if framework is not None:
@@ -595,6 +610,33 @@ def main() -> int:
         (words / "en.lproj" / "Localizable.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
         check(words, passes=False, expect="has Send feedback strings")
+        # The feature's own strings table (Feedback.strings, and the stringsdict of
+        # its plurals) is the feature's: a product without the receiver holds none,
+        # found by the file name though the table says nothing of the feature.
+        for name, suffix, content in (
+                ("strings", "strings", {"Hello": "Hello"}), ("stringsdict", "stringsdict", {})):
+            table = make_app(root, f"feedback-table-{name}", clean, app_info())
+            (table / "en.lproj").mkdir()
+            (table / "en.lproj" / f"Feedback.{suffix}").write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+            expect = f"en.lproj/Feedback.{suffix}: is the Feedback strings table though the build names no receiver"
+            check(table, passes=False, expect=expect)
+            for configuration in ("Debug", "Release"):
+                check(table, passes=False, expect=expect, args=["--feedback", "--configuration", configuration])
+        # A product with the receiver holds the table in every language, or the sheet
+        # reads English in a language the product claims.
+        check(make_app(root, "feedback-table-missing", feature, feedback_info, feedback_tables=False),
+              passes=False, expect="lacks the Feedback strings table in ja, zh-Hans, zh-Hant", args=appstore)
+        partly = make_app(root, "feedback-table-partial", feature, feedback_info, feedback_tables=False)
+        write_feedback_tables(partly, ("ja", "zh-Hans"))
+        check(partly, passes=False, expect="lacks the Feedback strings table in zh-Hant", args=appstore)
+        check(make_app(root, "feedback-table-dict-only", feature, feedback_info, feedback_tables=False),
+              passes=False, expect="lacks the Feedback strings table in", args=appstore)
+        with_dict = make_app(root, "feedback-table-with-dict", feature, feedback_info)
+        (with_dict / "ja.lproj" / "Feedback.stringsdict").write_bytes(plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+        check(with_dict, passes=True, expect="Send feedback is compiled in", args=appstore)
+        check(make_app(root, "feedback-table-arranged", feature, app_info(AndariumFeedbackAddress="feedback@example.com")),
+              passes=True, expect="Send feedback is compiled in (Debug)",
+              args=["--feedback", "--configuration", "Debug", "--feedback-address", "feedback@example.com"])
         # The receiver of the local configuration is one strict address, and a
         # real one: no quotes, angle brackets, trailing semicolon or second @,
         # no placeholder domain. (SendFeedbackMail.isWellFormed holds the same
