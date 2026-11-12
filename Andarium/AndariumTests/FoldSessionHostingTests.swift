@@ -618,16 +618,20 @@ struct FoldSessionHostingTests {
     }
 
     /// The frame of `popup` on `pose`, or on a display that reports no hinge
-    /// when `plain`: the union of what its words name.
-    private func frame(of popup: Popup, on pose: Pose, plain: Bool = false) async throws -> CGRect {
+    /// when `plain`: the union of what its words name, and the space the root
+    /// is given. The space is the pose's safe area on a display as large as
+    /// the pose; a smaller window cannot give the root less than its own safe
+    /// area.
+    private func frame(of popup: Popup, on pose: Pose, plain: Bool = false) async throws -> (frame: CGRect, space: CGRect) {
         let rig = try await Rig(pose, phase: popup.phase, plain: plain, test: self)
         defer { rig.end() }
         popup.show(on: rig.model)
         try await Task.sleep(for: .milliseconds(900))
         rig.controller.view.layoutIfNeeded()
         let shown = rig.labelled().filter { element in popup.words.contains { element.label.contains($0) } }
-        return try #require(
+        let frame = try #require(
             shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "\(pose): no \(popup) in \(rig.labelled())")
+        return (frame, rig.controller.view.bounds.inset(by: rig.controller.view.safeAreaInsets))
     }
 
     /// Flat, every popup is where it is on a display that does not fold, as on
@@ -639,12 +643,13 @@ struct FoldSessionHostingTests {
     func everyPopupIsCentredOnTheDisplayWhenFlatAndKeepsToAHalfWhenBent(_ pose: Pose, _ popup: Popup) async throws {
         let halves = try #require(FoldHalves(pose.reading))
         let band = try #require(pose.reading.division).frame
-        let shown = try await frame(of: popup, on: pose)
+        let (shown, _) = try await frame(of: popup, on: pose)
         if pose == .uprightFlat || pose == .turnedFlat {
-            let plain = try await frame(of: popup, on: pose, plain: true)
-            let area = halves.area(for: .card)
-            let safe = pose.reading.safeArea
-            let expected = CGPoint(x: plain.midX + area.midX - safe.midX, y: plain.midY + area.midY - safe.midY)
+            let (plain, space) = try await frame(of: popup, on: pose, plain: true)
+            // The popup moves from the middle of its space to the middle of
+            // what the display's centred area shares with it.
+            let target = halves.area(for: .card).intersection(space)
+            let expected = CGPoint(x: plain.midX + target.midX - space.midX, y: plain.midY + target.midY - space.midY)
             #expect(abs(shown.midX - expected.x) < 1 && abs(shown.midY - expected.y) < 1,
                     "\(pose): the \(popup) is at \(shown), not centred as without a fold, \(plain), moved to \(expected)")
         } else {
