@@ -16,6 +16,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import json
@@ -25,7 +26,9 @@ import socket
 import struct
 import sys
 import threading
+import types
 import unittest
+from unittest import mock
 
 TESTS = Path(__file__).resolve().parents[2]
 REPOSITORY = TESTS.parent
@@ -580,6 +583,120 @@ u:r:untrusted_app_34:s0:c122,c256,c512,c768 u0_a122 2182 419 17367492 165132 0  
         samples = runner.latency_samples([1000.0, 1020.0], events)
         self.assertEqual([(s.host_to_kernel_ms, s.kernel_to_app_ms, s.total_ms) for s in samples],
                          [(5.0, 4, 9.0), (10.0, 1, 11.0)])
+
+    def test_a_guest_clock_ahead_of_the_host_is_removed(self) -> None:
+        # The guest's clock runs 322 ms ahead: its events are stamped that much later than the host's sends.
+        events = [runner.ProbeEvent("motion", 1, kernel_ms=1005 + 322, received_ms=1009 + 322),
+                  runner.ProbeEvent("motion", 1, kernel_ms=1030 + 322, received_ms=1031 + 322)]
+        samples = runner.latency_samples([1000.0, 1020.0], events, 322.0)
+        self.assertEqual([(s.host_to_kernel_ms, s.kernel_to_app_ms) for s in samples], [(5.0, 4), (10.0, 1)])
+        behind = runner.latency_samples([1000.0], [runner.ProbeEvent("motion", 1, kernel_ms=1005 - 300, received_ms=1009 - 300)], -300.0)
+        self.assertEqual(behind[0].host_to_kernel_ms, 5.0)
+
+    def test_the_clock_offset_comes_from_the_shortest_round_trip(self) -> None:
+        # (host before, guest reading, host after): the second pair has the 10 ms trip, so its midpoint 5005 decides.
+        readings = [(1000.0, 1522.0, 1400.0), (5000.0, 5327.0, 5010.0), (9000.0, 9600.0, 9100.0)]
+        self.assertEqual(runner.clock_offset_ms(readings), 5327.0 - 5005.0)
+        self.assertEqual(runner.clock_offset_ms([(10.0, 10.0, 10.0)]), 0.0)
+
+    def test_the_guest_reads_its_clock_in_nanoseconds(self) -> None:
+        class Shell:
+            def __init__(self, answers: list[str]) -> None:
+                self.answers, self.commands = answers, []
+
+            def shell(self, command: str, timeout: float = 0) -> str:
+                self.commands.append(command)
+                return self.answers.pop(0)
+
+        guest = Shell(["1700000000123456789\n"] * runner.CLOCK_READINGS)
+        with mock.patch.object(runner.time, "time", side_effect=[1700000000.100 + 0.001 * i for i in range(2 * runner.CLOCK_READINGS)]):
+            offset = runner.Guest.clock_offset_ms(guest)  # type: ignore[arg-type]
+        self.assertEqual(set(guest.commands), {"date +%s%N"})
+        self.assertAlmostEqual(offset, 1700000000123.456789 - (1700000000100.0 + 1700000000101.0) / 2, delta=1.0)
+        with self.assertRaisesRegex(runner.Failure, "printed"):
+            runner.Guest.clock_offset_ms(Shell(["date: bad"]))  # type: ignore[arg-type]
+
+
+class LateArrivalTests(unittest.TestCase):
+    """The identity and the events of a controller are read again until they are right; a controller that never is
+    still fails, with the last problem."""
+
+    class Link:
+        def __init__(self) -> None:
+            self.driven = []
+
+        def drive(self, slot, family, steps) -> None:
+            self.driven.append(steps)
+
+    class Guest:
+        def __init__(self, states: list) -> None:
+            self.states, self.reads, self.broadcasts = states, 0, []
+
+        def alive(self) -> None:
+            pass
+
+        def probe_state(self):
+            self.reads += 1
+            return self.states[min(self.reads, len(self.states)) - 1]
+
+        def broadcast(self, **fields) -> None:
+            self.broadcasts.append(fields)
+
+    def session(self, states: list):
+        family = families.DualSenseFamily()
+        return types.SimpleNamespace(families={"dualsense": family}, guest=self.Guest(states), link=self.Link()), family
+
+    def key_state(self, family, names, device_id=7):
+        events = [runner.ProbeEvent("key", device_id, code=families.KEYCODES[name], action=action, repeat=0)
+                  for name in names for action in ("down", "up")]
+        base = probe_state()
+        return dataclasses.replace(base, events=events, devices=[dataclasses.replace(base.devices[0], id=device_id)])
+
+    def test_the_identity_is_read_again_until_it_is_right(self) -> None:
+        session, family = self.session([probe_state(), probe_state()])
+        wrong = device(battery_capacity=1.0)
+        stale = dataclasses.replace(probe_state(), devices=[wrong])
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            runner.check_identities(session, stale)
+        self.assertEqual(session.guest.reads, 1)
+
+    def test_an_identity_that_stays_wrong_fails_with_the_last_problem(self) -> None:
+        session, family = self.session([dataclasses.replace(probe_state(), devices=[device(battery_capacity=1.0)])])
+        stale = dataclasses.replace(probe_state(), devices=[device(battery_capacity=1.0)])
+        clock = iter(range(0, 1000))
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                mock.patch.object(runner.time, "monotonic", lambda: float(next(clock))), \
+                self.assertRaisesRegex(runner.Failure, r"the controllers' identities: dualsense: battery capacity 1.0, not about 0.85"):
+            runner.check_identities(session, stale)
+
+    def test_a_right_identity_is_not_read_again(self) -> None:
+        session, family = self.session([probe_state()])
+        runner.check_identities(session, probe_state())
+        self.assertEqual(session.guest.reads, 0)
+
+    def test_the_buttons_of_a_slow_guest_are_read_again(self) -> None:
+        family = families.DualSenseFamily()
+        names = list(family.buttons)
+        partial, whole = self.key_state(family, names[:3]), self.key_state(family, names)
+        session, _ = self.session([])
+        # The device lookup reads once, the first read after the drive is partial, the next ones whole.
+        reads = [whole, partial, whole]
+        session.guest.probe_state = lambda: reads.pop(0) if len(reads) > 1 else reads[0]
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                mock.patch.object(runner, "axis_steps", lambda family: []):
+            runner.check_events(session, "dualsense", 0)
+        self.assertEqual(reads, [whole])
+
+    def test_buttons_that_never_arrive_fail_with_the_sequence_problem(self) -> None:
+        family = families.DualSenseFamily()
+        partial = self.key_state(family, list(family.buttons)[:2])
+        session, _ = self.session([partial])
+        clock = iter(range(0, 1000))
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), \
+                mock.patch.object(runner.time, "monotonic", lambda: float(next(clock))), \
+                mock.patch.object(runner, "axis_steps", lambda family: []), \
+                self.assertRaisesRegex(runner.Failure, r"buttons: buttons: only \d+ of \d+ key events arrived"):
+            runner.check_events(session, "dualsense", 0)
 
 
 def device(**changes) -> "runner.ProbeDevice":

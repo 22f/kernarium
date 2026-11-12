@@ -104,6 +104,9 @@ LATENCY_MEDIAN_CEILING_MS = 250.0
 LATENCY_MAXIMUM_CEILING_MS = 2000.0
 LOSS_CEILING = 0.01
 CLOCK_TICK_SECONDS = 0.01  # the kernel's USER_HZ is 100 whatever its own tick rate
+CLOCK_READINGS = 7  # reads of the guest's wall clock for its offset from the host's
+IDENTITY_SECONDS = 20  # how long a controller's identity is read again before it fails
+EVENT_SECONDS = 15  # how long the events of one step are read again before the sequence fails
 
 
 class Failure(RuntimeError):
@@ -342,11 +345,20 @@ class LatencySample:
         return self.host_to_kernel_ms + self.kernel_to_app_ms
 
 
-def latency_samples(sent_ms: list[float], samples: list[ProbeEvent]) -> list[LatencySample]:
+def latency_samples(sent_ms: list[float], samples: list[ProbeEvent], clock_offset_ms: float = 0.0) -> list[LatencySample]:
     """The i-th report is the i-th motion sample: every report moves the left stick to the other end, so none
-    merges with its neighbour."""
-    return [LatencySample(sample.kernel_ms - sent, sample.received_ms - sample.kernel_ms)
+    merges with its neighbour. `clock_offset_ms` is the guest's wall clock minus the host's: the guest takes its
+    time from a one-second clock at boot, so the two differ by up to a second and the host's send times are
+    moved onto the guest's clock first."""
+    return [LatencySample(sample.kernel_ms - (sent + clock_offset_ms), sample.received_ms - sample.kernel_ms)
             for sent, sample in zip(sent_ms, samples)]
+
+
+def clock_offset_ms(readings: list[tuple[float, float, float]]) -> float:
+    """The guest's clock minus the host's, in milliseconds, from (host before, guest reading, host after)
+    triples: the reading with the shortest round trip decides, and is wrong by at most half of it."""
+    before, guest, after = min(readings, key=lambda reading: reading[2] - reading[0])
+    return guest - (before + after) / 2
 
 
 def per_report_microseconds(idle: tuple[CpuSample, CpuSample], loaded: tuple[CpuSample, CpuSample],
@@ -684,6 +696,18 @@ class Guest:
     def input_dump(self) -> list[InputDumpDevice]:
         return parse_input_dump(self.shell("dumpsys input", timeout=COMMAND_SECONDS))
 
+    def clock_offset_ms(self) -> float:
+        """The guest's wall clock minus the host's (see `clock_offset_ms`), read CLOCK_READINGS times."""
+        readings = []
+        for _ in range(CLOCK_READINGS):
+            before = time.time() * 1000
+            text = self.shell("date +%s%N").strip()
+            after = time.time() * 1000
+            if not text.isdigit():
+                raise Failure(f"the guest's `date +%s%N` printed {text!r}")
+            readings.append((before, int(text) / 1e6, after))
+        return clock_offset_ms(readings)
+
     def cpu_sample(self, pid: int) -> tuple[CpuSample, float]:
         """The CPU ticks now, and the monotonic time at the middle of the call that read them."""
         begun = time.monotonic()
@@ -855,7 +879,7 @@ def check_creation(session: Session) -> ProbeState:
     return state
 
 
-def check_identities(session: Session, state: ProbeState) -> None:
+def identity_problem_text(session: Session, state: ProbeState) -> str | None:
     problems = []
     for family in session.families.values():
         device = state.device_named(family.identity.name)
@@ -864,7 +888,17 @@ def check_identities(session: Session, state: ProbeState) -> None:
                             f"{[item.name for item in state.devices]}")
             continue
         problems += [f"{family.key}: {problem}" for problem in identity_problems(device, family)]
-    raise_problems(problems)
+    return "; ".join(problems) if problems else None
+
+
+def check_identities(session: Session, state: ProbeState) -> None:
+    """A controller's battery level and the like arrive with the driver's first reports, which a starved guest
+    processes late: what Android reports is read again until it is right, for IDENTITY_SECONDS."""
+    first = identity_problem_text(session, state)
+    if first is None:
+        return
+    wait_until("the controllers' identities", IDENTITY_SECONDS,
+               lambda: identity_problem_text(session, session.guest.probe_state()), session.guest)
 
 
 def check_key_layouts(session: Session) -> None:
@@ -901,10 +935,14 @@ def check_events(session: Session, key: str, slot: int) -> None:
         link.drive(slot, family, [("neutral", families_module.NEUTRAL)])
         link.drive(slot, family, steps)
         time.sleep(1.0)
-        state = guest.probe_state()
-        problem = check(state.events)
+        problem = check(guest.probe_state().events)
         if problem:
-            problems.append(f"{label}: {problem}")
+            # The events of a starved guest arrive late, not out of order: the sequence is read again until it is
+            # whole, for EVENT_SECONDS, and the last problem is what fails.
+            try:
+                wait_until(label, EVENT_SECONDS, lambda check=check: check(guest.probe_state().events), guest)
+            except Failure as failure:
+                problems.append(f"{label}: {failure}")
     raise_problems(problems)
 
 
@@ -1146,6 +1184,7 @@ def measure_cost(session: Session, options: argparse.Namespace) -> None:
     session.link.send(family.input_frame(0, families_module.NEUTRAL))
     time.sleep(1)
     guest.broadcast(cmd="reset")
+    offset = guest.clock_offset_ms()
     sent = []
     for sequence in range(200):
         sent.append(time.time() * 1000)
@@ -1156,14 +1195,14 @@ def measure_cost(session: Session, options: argparse.Namespace) -> None:
     if len(events) != len(sent):
         problems.append(f"{len(events)} motion samples for {len(sent)} reports in the latency burst")
     else:
-        latencies = latency_samples(sent, events)
+        latencies = latency_samples(sent, events, offset)
         totals = [sample.total_ms for sample in latencies]
         early = [sample.host_to_kernel_ms for sample in latencies]
         print(f"    latency from the host's send to the app: median {percentile(totals, 0.5):.0f} ms, "
               f"95th {percentile(totals, 0.95):.0f}, max {max(totals):.0f}; "
               f"to the kernel's timestamp: median {percentile(early, 0.5):.0f} ms, "
               f"from there to the app: median {percentile([s.kernel_to_app_ms for s in latencies], 0.5):.0f} ms "
-              "(one wall clock is assumed for both ends)")
+              f"(the guest's clock is {offset:+.0f} ms from the host's, measured and removed)")
         if percentile(totals, 0.5) > LATENCY_MEDIAN_CEILING_MS or max(totals) > LATENCY_MAXIMUM_CEILING_MS:
             problems.append(f"latency median {percentile(totals, 0.5):.0f} ms, max {max(totals):.0f} ms")
         if min(early) < -50:
