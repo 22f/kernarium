@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Qualify the guest's one Wi-Fi network: never disabled, rejoined after a suspend and a boot.
+"""Qualify the guest's one Wi-Fi network: never disabled, a failed check only warns, rejoined after a suspend and a boot.
 
 The platform disables a saved network at its first failed internet check, and a
 disabled network is never joined again, so a guest whose first check failed has
@@ -8,25 +8,37 @@ no network from then on (android/lineage-24/README.md, "Networking"). The image
 overlays the thresholds that disable it (rro/KernariumWifiOverlay) and a boot
 script saves the network again, until the station has joined it once, when a
 boot finds Wi-Fi on and nothing joined (overlay/tools/kernarium_wifi_network.sh).
-The runner shows both:
+The platform validates the network before it checks it (routes p0029 and p0033):
+a failed check, and a sign-in or block page in place of the expected answer, only
+show Android's own Wi-Fi mark. The runner shows all of it:
 
 - fresh: the module's overlay is applied (`cmd overlay list`) and holds the
   largest threshold for both no-internet reasons; the script ran without
-  SELinux denials; with the validation probes pointed at a black hole, a strict
-  private DNS name that does not resolve, and VirtWifi forgotten and saved
-  again, the network stays enabled and joined for a minute and a half, and is
-  joined again after a guest suspend and wake (the host's route, `suspend` and
-  `wake` on the management console) and after a restart; a network the user
-  marked metered, or turned Auto-connect off for, keeps that after a restart
-  (the script has nothing to save once the station has joined); a forgotten
-  network is still forgotten after a restart; and Wi-Fi that was turned off is
-  still off;
-- upgrade (only with --previous-release): the data disk of that release, on
-  which the probes and a forgotten and saved network disable VirtWifi as the
-  stock platform does and which holds the network disabled, with the station
-  away from it, after a restart of its own guest, boots the release under test:
-  the first boot saves the network again, the station joins it, and the next
-  boot leaves it alone.
+  SELinux denials; with the validation probes at a black hole, the network stays
+  validated and joined while Settings says "Limited connection", the status bar's
+  Wi-Fi icon says "No internet", the validation log says the check failed and no
+  notification or sign-in activity follows, also after a guest suspend and wake;
+  a sign-in page (a redirect) and a block page (a 200 answer) that the host's
+  server gives the probes through `adb reverse` show the same and nothing more;
+  a passing check, by the host's server and by the stock servers, takes the
+  warning away; with the probes at a black hole and a strict private DNS name that
+  does not resolve, and VirtWifi forgotten and saved again, the network stays
+  enabled and joined for a minute and a half, and is joined again after a guest
+  suspend and wake (the host's route, `suspend` and `wake` on the management
+  console) and after a restart; a network the user marked metered, or turned
+  Auto-connect off for, keeps that after a restart (the script has nothing to
+  save once the station has joined); a forgotten network is still forgotten
+  after a restart; and Wi-Fi that was turned off is still off;
+- upgrade (only with --previous-release, once for each release): the data disk
+  of a release whose platform disables the network for lack of internet (the
+  stock rules), on which the probes and a forgotten and saved network disable
+  VirtWifi and which holds the network disabled, with the station away from it,
+  after a restart of its own guest, boots the release under test: the first boot
+  saves the network again, the station joins it, the next boot leaves it alone,
+  and a failed check warns. The data disk of a release that never disables the
+  network, with the network joined, the user's metered setting and the probes at
+  a black hole, boots the release under test: nothing saves the network again,
+  the setting and the join are kept, and a failed check warns.
 
 The checks of one section do not stop the others, so a release that lacks the
 overlay shows every symptom; the run passes only if none failed. Every wait has a
@@ -36,7 +48,7 @@ deadline. The guest is reached through the shared adb server, always named with
 The runner is opt-in: it needs the macos-android17 executable, an installed
 release, and an adb client.
 usage: run_android_wifi_network.py --emulator uml-darwin-android17 [--release DIR]
-       [--previous-release DIR]
+       [--previous-release DIR]...
 """
 
 from __future__ import annotations
@@ -44,6 +56,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import http.server
 import importlib.util
 import io
 import os
@@ -55,10 +68,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from xml.etree import ElementTree
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPOSITORY = HERE.parents[2]
@@ -105,6 +120,27 @@ PROBE_SETTINGS = {
     "private_dns_mode": "hostname",
     "private_dns_specifier": UNRESOLVED_NAME,
 }
+# What fails the check alone, leaving the network itself alone: a strict private DNS name that does not resolve
+# fails the network (the platform reports it invalid), so the warning sections leave the private DNS settings out.
+CHECK_SETTINGS = {key: value for key, value in PROBE_SETTINGS.items() if not key.startswith("private_dns")}
+PRIVATE_DNS_SETTINGS = ("private_dns_mode", "private_dns_specifier")
+USE_HTTPS_SETTING = "captive_portal_use_https"
+ALL_CHECK_SETTINGS = (*PROBE_SETTINGS, USE_HTTPS_SETTING)
+MARKER_PROPERTY = "persist.sys.kernarium.virtwifi_saved"
+# The validation log lines of the NetworkMonitor topic of route p0029 (the verifier requires them in the image).
+CHECK_FAILED_LINE = "Wi-Fi internet check failed, the network stays validated"
+CHECK_PASSED_LINE = "Wi-Fi internet check passed"
+# Android's own words: the Wi-Fi list's summary and the status bar icon's spoken description.
+LIMITED_CONNECTION = "Limited connection"
+NO_INTERNET = "No internet"
+SYSTEMUI_PACKAGE = "com.android.systemui"
+UI_DUMP = "/data/local/tmp/wifi-network-ui.xml"
+# From the join to the mark: a blocked check takes about 10 to 25 s, and Settings redraws on the report.
+WARNING_SECONDS = 90
+# How long a warning is held against a disabled, disconnected, unvalidated or notified network.
+WARNING_HOLD_SECONDS = 60
+SHORT_HOLD_SECONDS = 30
+PAGE_BYTES = 2048
 MAGIC, VERSION, DATA = 0xCAFEBABE, 2, 512
 
 
@@ -226,6 +262,146 @@ def repair_logged(log: str) -> bool:
     return SCRIPT_LOG_LINE in log
 
 
+def wifi_networks(dump: str) -> dict[int, frozenset[str]]:
+    """The capabilities of each Wi-Fi network `dumpsys connectivity` lists, by network ID."""
+    found: dict[int, frozenset[str]] = {}
+    for line in dump.splitlines():
+        match = re.match(r"\s*NetworkAgentInfo\{network\{(\d+)\}.*?\bni\{WIFI\b.*?"
+                         r"\bnc\{\[ Transports: WIFI Capabilities: ([A-Z_&]+)", line)
+        if match:
+            found[int(match[1])] = frozenset(match[2].split("&"))
+    return found
+
+
+def newest_wifi_network(dump: str) -> int | None:
+    """The ID of the Wi-Fi network `dumpsys connectivity` lists with the highest ID (the one the station
+    joined last), or None."""
+    return max(wifi_networks(dump), default=None)
+
+
+def validation_problems(capabilities: frozenset[str] | None) -> list[str]:
+    """What is wrong with a Wi-Fi network that must stay validated: not listed, not validated, partial, or
+    behind a sign-in page."""
+    if capabilities is None:
+        return ["dumpsys connectivity lists no Wi-Fi network"]
+    problems = []
+    if "VALIDATED" not in capabilities:
+        problems.append("the network is not validated")
+    for name in ("PARTIAL_CONNECTIVITY", "CAPTIVE_PORTAL"):
+        if name in capabilities:
+            problems.append(f"the network has {name}")
+    return problems
+
+
+def validation_logs(dump: str) -> dict[int, list[str]]:
+    """The messages of each network's validation log in `dumpsys network_stack`, by network ID."""
+    logs: dict[int, list[str]] = {}
+    current: list[str] | None = None
+    in_section = False
+    for line in dump.splitlines():
+        if line.startswith("Validation logs"):
+            in_section = True
+            continue
+        if not in_section:
+            continue
+        header = re.fullmatch(r'(\d+) - ".*"\s*', line)
+        if header:
+            current = logs.setdefault(int(header[1]), [])
+            continue
+        entry = re.fullmatch(r"\s+\d{4}-\d\d-\d\dT[\d:.]+ - (.*)", line)
+        if entry and current is not None:
+            current.append(entry[1])
+        elif line.strip():
+            current = None
+            if not line.startswith(" "):
+                in_section = False
+    return logs
+
+
+def check_log_problems(messages: list[str], expected: str, probes_failed: bool = False) -> list[str]:
+    """What the validation log of the network lacks: the line of the check's result, and with `probes_failed`
+    a failed HTTP and a failed HTTPS probe (a page answer ends the probing before the HTTPS probe fails)."""
+    problems = []
+    if not any(expected in message for message in messages):
+        problems.append(f"the validation log has no line {expected!r}")
+    if probes_failed:
+        for probe in ("PROBE_HTTP", "PROBE_HTTPS"):
+            if not any(message.startswith(f"{probe} ") and "Probe failed" in message for message in messages):
+                problems.append(f"the validation log shows no failed {probe}")
+    return problems
+
+
+def connectivity_notifications(dump: str) -> list[str]:
+    """The records `dumpsys notification` lists that ConnectivityService posted (no Internet, partial
+    connectivity, lost Internet, Sign in to network all carry the tag ConnectivityNotification:<netId>)."""
+    return [line.strip()[:200] for line in dump.splitlines()
+            if re.search(r"\btag=ConnectivityNotification:\d+", line)]
+
+
+def captive_portal_activities(dump: str) -> list[str]:
+    """The lines of `dumpsys activity activities` that name the captive portal login activity."""
+    return [line.strip()[:200] for line in dump.splitlines()
+            if re.search(r"captiveportallogin|CaptivePortalLogin", line)]
+
+
+@dataclass(frozen=True)
+class UiNode:
+    text: str
+    description: str
+    package: str
+
+
+def ui_nodes(hierarchy: str) -> list[UiNode]:
+    """The nodes of a `uiautomator dump --windows` (the status bar is a window of its own)."""
+    start = hierarchy.find("<?xml")
+    if start < 0:
+        start = hierarchy.find("<")
+    if start < 0:
+        raise Failure(f"the UI dump is not XML: {hierarchy[:200]!r}")
+    # What the tool prints after the document ("UI hierarchy dumped to: ...") is not part of it.
+    end = max(hierarchy.rfind("</displays>"), hierarchy.rfind("</hierarchy>"))
+    try:
+        root = ElementTree.fromstring(hierarchy[start:end + len("</displays>")] if end >= 0 else hierarchy[start:])
+    except ElementTree.ParseError as error:
+        raise Failure(f"the UI dump is not XML: {error}") from error
+    return [UiNode(node.get("text", ""), node.get("content-desc", ""), node.get("package", ""))
+            for node in root.iter("node")]
+
+
+def summary_limited(nodes: list[UiNode]) -> bool:
+    """Whether the Wi-Fi list says "Limited connection" (its summary reads "Connected / Limited connection")."""
+    return any(LIMITED_CONNECTION in node.text for node in nodes)
+
+
+def summary_connected(nodes: list[UiNode]) -> bool:
+    """Whether the Wi-Fi list shows the network as plain "Connected"."""
+    return any(node.text == "Connected" for node in nodes)
+
+
+def status_bar_no_internet(nodes: list[UiNode]) -> bool:
+    """Whether the status bar's Wi-Fi icon speaks "No internet" (its description is the signal and "No internet")."""
+    return any(node.package == SYSTEMUI_PACKAGE and NO_INTERNET in node.description for node in nodes)
+
+
+def mark_problems(nodes: list[UiNode], shown: bool) -> list[str]:
+    """What the screen shows against what Android's Wi-Fi mark must say: with `shown`, the list's "Limited
+    connection" and the status bar's "No internet"; without, plain "Connected" and no "No internet"."""
+    problems = []
+    if shown:
+        if not summary_limited(nodes):
+            problems.append(f"the Wi-Fi list does not say {LIMITED_CONNECTION!r}")
+        if not status_bar_no_internet(nodes):
+            problems.append(f"the status bar's Wi-Fi icon does not say {NO_INTERNET!r}")
+    else:
+        if summary_limited(nodes):
+            problems.append(f"the Wi-Fi list still says {LIMITED_CONNECTION!r}")
+        if not summary_connected(nodes):
+            problems.append("the Wi-Fi list does not say 'Connected'")
+        if status_bar_no_internet(nodes):
+            problems.append(f"the status bar's Wi-Fi icon still says {NO_INTERNET!r}")
+    return problems
+
+
 def overlay_enabled(listing: str) -> bool:
     """Whether `cmd overlay list` shows the Wi-Fi module's overlay enabled."""
     return f"[x] {OVERLAY_PACKAGE}" in listing.splitlines()
@@ -259,6 +435,80 @@ def wait_for(description: str, seconds: float, check: Callable[[], str | None],
             return
         time.sleep(interval)
     raise Failure(f"{description}: {message} (after {seconds:.0f} s)")
+
+
+class ProbeServer:
+    """The host's answer to the guest's probes: a sign-in page (a redirect), a block page (a 200 answer with a
+    body) or the expected 204. The guest cannot reach the machine the runner runs on (the provider refuses
+    its connections to every address of a host interface, darwin/README.md), so the guest reaches the server
+    through `adb reverse` on its own loopback, as any host page server is reached."""
+
+    MODES = ("redirect", "page", "expected")
+
+    def __init__(self) -> None:
+        self.mode = "expected"
+        self.paths: list[str] = []
+        self.lock = threading.Lock()
+        server = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:  # noqa: N802
+                server.record(self.path)
+                mode = server.mode
+                if mode == "redirect":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{server.port}/login")
+                    self.send_header("Content-Length", "0")
+                    body = b""
+                elif mode == "page":
+                    body = server.page()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body)))
+                else:
+                    self.send_response(204)
+                    body = b""
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_HEAD = do_GET  # noqa: N815
+
+            def log_message(self, *arguments: object) -> None:
+                pass
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def page() -> bytes:
+        """A page that is not the expected answer: 2 KiB of HTML."""
+        head = b"<html><head><title>Terms of use</title></head><body><p>Sign in to continue.</p><!--"
+        tail = b"--></body></html>"
+        return head + b"x" * (PAGE_BYTES - len(head) - len(tail)) + tail
+
+    def record(self, path: str) -> None:
+        with self.lock:
+            self.paths.append(path)
+
+    def probes(self) -> list[str]:
+        """The paths the guest's probes asked for, in order."""
+        with self.lock:
+            return list(self.paths)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.paths.clear()
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=10)
 
 
 class Console:
@@ -365,12 +615,79 @@ class Guest:
                 parts.append(f"{title}: unavailable ({problem})")
         return "\n".join(parts)
 
+    def connectivity(self) -> str:
+        return self.shell("dumpsys connectivity", timeout=180)
+
+    def network_stack(self) -> str:
+        return self.shell("dumpsys network_stack", timeout=180)
+
+    def notifications(self) -> str:
+        return self.shell("dumpsys notification --noredact", timeout=180)
+
+    def activities(self) -> str:
+        return self.shell("dumpsys activity activities", timeout=180)
+
+    def ui(self) -> str:
+        """The windows on the screen: Settings, and the status bar as a window of its own."""
+        return self.shell(f"uiautomator dump --windows {UI_DUMP} >/dev/null 2>&1; cat {UI_DUMP} 2>/dev/null; "
+                          f"rm -f {UI_DUMP}", timeout=90)
+
+    def marker(self) -> str:
+        """The boot script's marker: 1 once the network is saved, 2 once the station has joined it."""
+        return self.shell(f"getprop {MARKER_PROPERTY}").strip()
+
+    def reevaluate(self) -> None:
+        """Asks the platform to check the network again. Not every build lets the shell do it, and the join
+        has already started a check, so a refusal is not a failure."""
+        net_id = newest_wifi_network(self.connectivity())
+        if net_id is not None:
+            self.adb_run("shell", f"cmd connectivity reevaluate {net_id}", timeout=60)
+
+    def reverse(self, port: int) -> None:
+        """The guest's loopback port to the host's server (the shared adb server, named with -s)."""
+        result = self.adb_run("reverse", f"tcp:{port}", f"tcp:{port}", timeout=60)
+        if result.returncode != 0:
+            raise Failure(f"adb reverse tcp:{port}: {result.stdout.decode(errors='replace').strip()[-300:]}")
+
+    def unreverse(self, port: int) -> None:
+        self.adb_run("reverse", "--remove", f"tcp:{port}", timeout=60)
+
+    def show_internet_page(self) -> None:
+        """Settings' Internet page, in front, on a lit screen."""
+        for command in ("svc power stayon true", "input keyevent KEYCODE_WAKEUP", "wm dismiss-keyguard"):
+            self.shell(f"{command} >/dev/null 2>&1; true")
+        started = self.shell("am start -W -a android.settings.WIFI_SETTINGS")
+        if "Error" in started:
+            raise Failure(f"starting the Internet page of Settings: {started.strip()[-300:]}")
+
+    def leave_internet_page(self) -> None:
+        self.shell("input keyevent KEYCODE_HOME >/dev/null 2>&1; true")
+
     # What the runner does to the guest.
     def inject_failing_checks(self) -> None:
         """Probes at a black hole, and a strict private DNS name that does not resolve: either fails the
         platform's internet check, so the stock platform disables a network it has not validated."""
         for key, value in PROBE_SETTINGS.items():
             self.shell(f"settings put global {key} {value}")
+
+    def put_settings(self, settings: dict[str, str]) -> None:
+        for key, value in settings.items():
+            self.shell(f"settings put global {key} {value}")
+
+    def delete_settings(self, keys: tuple[str, ...] | list[str]) -> None:
+        for key in keys:
+            self.shell(f"settings delete global {key}")
+
+    def read_setting(self, key: str) -> str:
+        return self.shell(f"settings get global {key}").strip()
+
+    def rejoin_with_settings(self, settings: dict[str, str], clear: tuple[str, ...]) -> None:
+        """Sets the probe settings and deletes `clear`, then joins the network again: the platform reads them
+        when the network's monitor starts, so they take effect only for a network that is joined after."""
+        self.delete_settings(clear)
+        self.put_settings(settings)
+        self.forget_and_save()
+        self.wait_joined(JOIN_SECONDS, "the station joins the network saved again")
 
     def forget_and_save(self) -> None:
         identifier = network_id(self.listing())
@@ -658,13 +975,192 @@ def check_no_denials(guest: Guest) -> str | None:
     return f"{logged} denials logged in all, none for {SCRIPT_DOMAIN} in {guest.denial_reads} reads of the log"
 
 
+def wait_problems(description: str, seconds: float, guest: Guest, problems: Callable[[], list[str]],
+                  interval: float = 5.0) -> None:
+    """Waits until `problems` returns none; the last ones are the failure."""
+    wait_for(description, seconds, lambda: "; ".join(problems()) or None, guest, interval=interval)
+
+
+def sign_in_problems(guest: Guest) -> list[str]:
+    """Whether anything asks to sign in: a notification of ConnectivityService (Sign in to network, and the
+    no Internet, partial connectivity and lost Internet notices that tap through to a dialog whose answer
+    tears the network down), or the captive portal login activity."""
+    problems = [f"a notification of ConnectivityService: {line}"
+                for line in connectivity_notifications(guest.notifications())]
+    problems += [f"the captive portal login activity: {line}" for line in captive_portal_activities(guest.activities())]
+    return problems
+
+
+def warning_problems(guest: Guest, probes_failed: bool) -> list[str]:
+    """What differs from a validated network that shows only the warning of a failed check: the capabilities
+    (validated, not partial, not behind a sign-in page), the validation log, the notifications and the
+    activities (no sign-in), and the screen (Settings' "Limited connection", the status bar's "No internet")."""
+    dump = guest.connectivity()
+    net_id = newest_wifi_network(dump)
+    if net_id is None:
+        return validation_problems(None)
+    problems = validation_problems(wifi_networks(dump)[net_id])
+    logs = validation_logs(guest.network_stack()).get(net_id, [])
+    problems += check_log_problems(logs, CHECK_FAILED_LINE, probes_failed)
+    problems += sign_in_problems(guest)
+    problems += mark_problems(ui_nodes(guest.ui()), shown=True)
+    return problems
+
+
+def cleared_problems(guest: Guest) -> list[str]:
+    """What differs from a validated network whose check passed: the same, with the check's passing line and
+    without the mark."""
+    dump = guest.connectivity()
+    net_id = newest_wifi_network(dump)
+    if net_id is None:
+        return validation_problems(None)
+    problems = validation_problems(wifi_networks(dump)[net_id])
+    logs = validation_logs(guest.network_stack()).get(net_id, [])
+    problems += check_log_problems(logs, CHECK_PASSED_LINE)
+    problems += sign_in_problems(guest)
+    problems += mark_problems(ui_nodes(guest.ui()), shown=False)
+    return problems
+
+
+def hold_validated(guest: Guest, seconds: float) -> None:
+    """For `seconds`, the network stays enabled and joined with Auto-connect on, validated (not partial, not
+    behind a sign-in page), and nothing asks to sign in."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        guest.alive()
+        dump = guest.dump()
+        status = selection_status(dump)
+        if status != "NETWORK_SELECTION_ENABLED":
+            raise Failure(f"the network became {status} ({selection_disable_reason(dump)}) while the check failed")
+        values = autojoin_values(dump)
+        if not values or not all(values):
+            raise Failure("Auto-connect is off")
+        if not guest.joined():
+            raise Failure("the station left the network")
+        connectivity = guest.connectivity()
+        net_id = newest_wifi_network(connectivity)
+        problems = validation_problems(None if net_id is None else wifi_networks(connectivity)[net_id])
+        problems += sign_in_problems(guest)
+        if problems:
+            raise Failure("; ".join(problems))
+        time.sleep(POLL_SECONDS)
+
+
+def warning_shown(guest: Guest, probes_failed: bool, seconds: float, what: str) -> None:
+    """The warning shows within WARNING_SECONDS, and is held for `seconds`, with the Internet page in front."""
+    guest.show_internet_page()
+    try:
+        wait_problems(what, WARNING_SECONDS, guest, lambda: warning_problems(guest, probes_failed))
+        hold_validated(guest, seconds)
+        problems = warning_problems(guest, probes_failed)
+        if problems:
+            raise Failure("after the hold: " + "; ".join(problems))
+    finally:
+        guest.leave_internet_page()
+
+
+def check_failed_check_warns(guest: Guest) -> str | None:
+    """The validation probes at a black hole fail the check, and nothing else: the network stays validated
+    (as on a host that reaches no validation server) while Android's Wi-Fi mark shows the failed check."""
+    guest.rejoin_with_settings(CHECK_SETTINGS, clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
+    guest.reevaluate()
+    warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning")
+    return f"validated, joined and enabled for {WARNING_HOLD_SECONDS} s with the mark shown"
+
+
+def check_warning_after_wake(guest: Guest) -> str | None:
+    """Every wake drops the station and joins it again, as a new network with a new check."""
+    guest.suspend_and_wake()
+    guest.wait_joined(RESUME_SECONDS, "the station joins again after the wake")
+    warning_shown(guest, True, SHORT_HOLD_SECONDS, "the failed check shows only the warning after the wake")
+    return None
+
+
+def page_settings(port: int) -> dict[str, str]:
+    """The probes' HTTP and fallback URLs at the host's server (through `adb reverse` on the guest's loopback),
+    and the HTTPS URL at the black hole, so a page answer is all the check gets."""
+    return {"captive_portal_http_url": f"http://127.0.0.1:{port}/generate_204",
+            "captive_portal_fallback_url": f"http://127.0.0.1:{port}/gen_204",
+            "captive_portal_https_url": f"https://{BLACKHOLE}/generate_204"}
+
+
+def check_page_answer_warns(guest: Guest, server: ProbeServer, mode: str) -> str | None:
+    """A sign-in page or a block page answers the probe in place of the expected answer: the platform stays
+    validated, no captive portal state, notification or login activity follows, and only the warning shows."""
+    server.mode = mode
+    server.clear()
+    guest.reverse(server.port)
+    guest.rejoin_with_settings(page_settings(server.port), clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
+    wait_for("a probe reaches the host's server", WARNING_SECONDS,
+             lambda: None if server.probes() else "the server has seen no request", guest)
+    warning_shown(guest, False, WARNING_HOLD_SECONDS, f"the {mode} answer shows only the warning")
+    return f"{len(server.probes())} probe requests answered"
+
+
+def check_passing_check_clears(guest: Guest, server: ProbeServer) -> str | None:
+    """The expected answer (the host's server with the HTTPS probe off) passes the check: the warning goes
+    and the network is still validated."""
+    server.mode = "expected"
+    server.clear()
+    guest.reverse(server.port)
+    guest.rejoin_with_settings({**page_settings(server.port), USE_HTTPS_SETTING: "0"},
+                               clear=PRIVATE_DNS_SETTINGS)
+    guest.show_internet_page()
+    try:
+        wait_problems("the warning clears when the check passes", WARNING_SECONDS, guest,
+                      lambda: cleared_problems(guest))
+        hold_validated(guest, SHORT_HOLD_SECONDS)
+    finally:
+        guest.leave_internet_page()
+    return None
+
+
+def check_stock_servers_clear(guest: Guest) -> str | None:
+    """With every setting deleted the probes go to the stock servers through the host's network: the check
+    passes and the warning is gone. A host that reaches no stock server cannot show this."""
+    guest.rejoin_with_settings({}, clear=ALL_CHECK_SETTINGS)
+    guest.show_internet_page()
+    try:
+        wait_problems("the stock servers take the warning away (the host must reach them)", WARNING_SECONDS, guest,
+                      lambda: cleared_problems(guest))
+    finally:
+        guest.leave_internet_page()
+    return None
+
+
+def warning_sections(guest: Guest, server: ProbeServer, report: "Report") -> None:
+    """A failed check, and a page in place of the answer, show only the warning; a passing check takes it
+    away. The settings are deleted after, so the sections that follow start from the stock ones."""
+    try:
+        report.section("a failed internet check shows only the warning, and the network stays validated", guest,
+                       lambda: check_failed_check_warns(guest))
+        report.section("the warning shows again after a suspend and wake", guest,
+                       lambda: check_warning_after_wake(guest))
+        report.section("a sign-in page in place of the expected answer shows only the warning", guest,
+                       lambda: check_page_answer_warns(guest, server, "redirect"))
+        report.section("a block page in place of the expected answer shows only the warning", guest,
+                       lambda: check_page_answer_warns(guest, server, "page"))
+        report.section("a passing check takes the warning away", guest,
+                       lambda: check_passing_check_clears(guest, server))
+        report.section("the stock servers take the warning away", guest,
+                       lambda: check_stock_servers_clear(guest))
+    finally:
+        try:
+            guest.delete_settings(ALL_CHECK_SETTINGS)
+            guest.unreverse(server.port)
+        except (Failure, subprocess.TimeoutExpired, OSError) as problem:
+            print(f"     the probe settings were not deleted: {problem}", file=sys.stderr)
+
+
 def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
     print("fresh data disk")
     guest = start_guest(options, adb, private, options.release, private / "fresh", provision=True)
+    server = ProbeServer()
     try:
         report.section("overlay is applied", guest, lambda: check_overlay(guest))
         report.section("VirtWifi is saved and joined at the first boot", guest, lambda: check_saved_and_joined(guest))
         report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
+        warning_sections(guest, server, report)
         report.section("a failed internet check does not disable the network", guest,
                        lambda: check_not_disabled(guest))
         report.section("the station joins again after a suspend and wake", guest, lambda: check_suspend(guest))
@@ -677,6 +1173,7 @@ def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: 
                        lambda: check_forgotten_stays_forgotten(guest, waits))
         report.section("Wi-Fi that is off stays off", guest, lambda: check_wifi_off_stays_off(guest, waits))
     finally:
+        server.close()
         stop(guest)
 
 
@@ -733,19 +1230,86 @@ def check_disabled_on_disk(guest: Guest) -> None:
         raise Failure("the station joined the network after a restart of the previous release")
 
 
-def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
-    previous = boot_android.release_path(options.previous_release)
-    current = boot_android.release_path(options.release)
-    if previous == current:
-        print("upgrade: the previous release is the release under test; nothing to upgrade from")
-        return
-    print(f"upgrade: a data disk of {previous.name} booted by {current.name}")
-    instance = private / "upgrade"
-    guest = start_guest(options, adb, private, previous, instance, provision=True)
-    disabled = False
+def previous_never_disables(guest: Guest) -> bool:
+    """Whether the previous release's platform keeps the network enabled for lack of internet: its overlay
+    holds the largest thresholds. A platform without the overlay has the stock ones and disables it."""
     try:
+        check_overlay(guest)
+    except Failure:
+        return False
+    return True
+
+
+def prepare_kept(guest: Guest, waits: Waits) -> str | None:
+    """On the disk of a release that never disables the network: the station has joined it (the marker is 2),
+    the user marked it metered (saving it again would reset that), and the probes fail the check; a restart
+    of this guest shows what the disk holds."""
+    wait_for("VirtWifi is saved", 60, lambda: None if network_id(guest.listing()) is not None else "not saved", guest)
+    guest.wait_joined(JOIN_SECONDS, "the previous release joins VirtWifi")
+    wait_for("the boot script marks the network joined", waits.repair,
+             lambda: None if guest.marker() == "2" else f"the marker is {guest.marker()!r}", guest,
+             interval=POLL_SECONDS)
+    guest.shell(f"cmd wifi add-network {SSID} open -m")
+    guest.wait_joined(JOIN_SECONDS, "the metered network is joined")
+    if metered_override(guest.dump()) != 1:
+        raise Failure("the network is not marked metered")
+    guest.delete_settings(PRIVATE_DNS_SETTINGS)
+    guest.put_settings(CHECK_SETTINGS)
+    guest.restart()
+    guest.wait_joined(JOIN_SECONDS, "the station joins after the restart")
+    if guest.marker() != "2" or metered_override(guest.dump()) != 1:
+        raise Failure(f"the disk holds marker {guest.marker()!r} and metered {metered_override(guest.dump())}, "
+                      "not marker '2' and metered 1")
+    if selection_status(guest.dump()) != "NETWORK_SELECTION_ENABLED":
+        raise Failure("the previous release's network is not enabled")
+    return None
+
+
+def check_left_alone(guest: Guest) -> str | None:
+    """The first boot of the release under test finds the station joined once (marker 2), so the script saves
+    nothing again: the marker, the metered setting and the join are the disk's."""
+    guest.wait_joined(JOIN_SECONDS, "the station joins after the first boot of the release")
+    time.sleep(MARGIN_SECONDS)
+    if guest.marker() != "2":
+        raise Failure(f"the marker is {guest.marker()!r}, not '2'")
+    if metered_override(guest.dump()) != 1:
+        raise Failure("the boot script saved a joined network again and reset its metered setting")
+    status = selection_status(guest.dump())
+    if status != "NETWORK_SELECTION_ENABLED":
+        raise Failure(f"the network is {status}")
+    check_no_repair_logged(guest, "although the station had joined")
+    return None
+
+
+def check_warning_on_disk(guest: Guest) -> str | None:
+    """The probe settings the disk holds fail the check of the network the station joined at this boot."""
+    lost = [key for key, value in CHECK_SETTINGS.items() if guest.read_setting(key) != value]
+    if lost:
+        raise Failure(f"the data disk lost the probe settings {lost}")
+    warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning on the upgraded disk")
+    return None
+
+
+def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
+    current = boot_android.release_path(options.release)
+    for index, release in enumerate(options.previous_release):
+        previous = boot_android.release_path(release)
+        if previous == current:
+            print("upgrade: the previous release is the release under test; nothing to upgrade from")
+            continue
+        upgrade_from(options, adb, private, report, waits, previous, current, private / f"upgrade-{index}")
+
+
+def upgrade_from(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits,
+                 previous: pathlib.Path, current: pathlib.Path, instance: pathlib.Path) -> None:
+    print(f"upgrade: a data disk of {previous.name} booted by {current.name}")
+    guest = start_guest(options, adb, private, previous, instance, provision=True)
+    prepared = False
+    try:
+        kept = previous_never_disables(guest)
+
         def disable() -> str | None:
-            nonlocal disabled
+            nonlocal prepared
             wait_for("VirtWifi is saved", 60, lambda: None if network_id(guest.listing()) is not None
                      else "not saved", guest)
             guest.inject_failing_checks()
@@ -757,23 +1321,42 @@ def upgrade(options: argparse.Namespace, adb: str, private: pathlib.Path, report
             # The Wi-Fi service stores the change a few seconds later, and the disk the release under test
             # boots holds only what was stored: a restart of this guest shows what that is.
             check_disabled_on_disk(guest)
-            disabled = True
+            prepared = True
             return None
 
-        report.section("the previous release leaves VirtWifi disabled on its disk", guest, disable)
+        def keep() -> str | None:
+            nonlocal prepared
+            note = prepare_kept(guest, waits)
+            prepared = True
+            return note
+
+        if kept:
+            report.section(f"{previous.name} leaves VirtWifi joined and metered on its disk, with the probes failing",
+                           guest, keep)
+        else:
+            report.section(f"{previous.name} leaves VirtWifi disabled on its disk", guest, disable)
     finally:
         stop(guest)
-    if not disabled:
+    if not prepared:
         return
     guest = start_guest(options, adb, private, options.release, instance, provision=False)
     try:
-        report.section("the first boot of the release repairs the network", guest,
-                       lambda: check_repaired(guest, waits))
-        report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
-        report.section("the repaired network joins again after a suspend and wake", guest,
-                       lambda: check_suspend(guest))
-        report.section("the next boot leaves the repaired network alone", guest,
-                       lambda: check_autojoin_kept(guest, waits))
+        if kept:
+            report.section("the first boot of the release leaves the joined network alone", guest,
+                           lambda: check_left_alone(guest))
+            report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
+            report.section("a failed internet check shows only the warning on the upgraded disk", guest,
+                           lambda: check_warning_on_disk(guest))
+        else:
+            report.section("the first boot of the release repairs the network", guest,
+                           lambda: check_repaired(guest, waits))
+            report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
+            report.section("the repaired network joins again after a suspend and wake", guest,
+                           lambda: check_suspend(guest))
+            report.section("a failed internet check shows only the warning after the repair", guest,
+                           lambda: check_failed_check_warns(guest))
+            report.section("the next boot leaves the repaired network alone", guest,
+                           lambda: check_autojoin_kept(guest, waits))
     finally:
         stop(guest)
 
@@ -784,9 +1367,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--emulator", type=pathlib.Path,
                         help="the macos-android17 uml-darwin-android17 (the launcher's default)")
     parser.add_argument("--release", type=pathlib.Path, help="installed Android release under test (default: accepted)")
-    parser.add_argument("--previous-release", type=pathlib.Path,
+    parser.add_argument("--previous-release", type=pathlib.Path, action="append",
                         help="installed release whose data disk the upgrade section boots first (the section "
-                        "runs only when this is given)")
+                        "runs only when this is given; give the option once for each release)")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
@@ -811,7 +1394,7 @@ def main() -> int:
     report = Report()
     try:
         fresh(options, adb, private, report, waits)
-        if options.previous_release is not None:
+        if options.previous_release:
             upgrade(options, adb, private, report, waits)
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
         print(f"FAIL: {problem}", file=sys.stderr)
