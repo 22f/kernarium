@@ -234,7 +234,8 @@ public struct MemoryPolicy: Equatable, Sendable {
         min(max(Self.nearestStep(mib), Limits.minimumMemoryMiB), maximumMiB(vCPUs: vCPUs))
     }
 
-    /// Whether the runtime accepts `mib` (a value of its own step in range).
+    /// Whether `mib` has the shape the runtime admits (a value of its own step
+    /// in its range); a host's ceiling is below the top of that range.
     public static func runtimeAccepts(_ mib: Int) -> Bool {
         Limits.runtimeMemoryRangeMiB.contains(mib)
             && (mib - Limits.runtimeMemoryRangeMiB.lowerBound) % Limits.runtimeMemoryStepMiB == 0

@@ -406,6 +406,15 @@ final class LiveRuntime: RuntimeDriver {
             end(startFailure: "the runtime could not be loaded")
             return
         }
+        // The runtime refuses a size this host does not admit, and the
+        // settings never offer one, so this is a safety net: say why rather
+        // than end on the runtime's bare result.
+        guard kernarium_runtime_loader_guest_memory_admitted(UInt32(clamping: run.guest.memoryMiB)) != 0 else {
+            end(startFailure: MemoryRefusal.reason(
+                memoryMiB: run.guest.memoryMiB,
+                ceilingMiB: Int(kernarium_runtime_loader_guest_memory_ceiling_mib())))
+            return
+        }
         // A denial of the network the notice is up for began before this run
         // loaded the runtime; its record notes it from the start.
         model?.reportNetworkDenial()
