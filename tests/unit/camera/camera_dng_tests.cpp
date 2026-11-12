@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,16 @@ public:
         scratch.u16(v);
         return scratch.bytes_;
     }
+    std::vector<std::uint8_t> doubles(const std::vector<double>& values)
+    {
+        Builder scratch(little_);
+        for (const double value : values) {
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, &value, sizeof bits);
+            for (std::size_t byte = 0; byte < 8; ++byte) scratch.u8(std::uint8_t(bits >> (little_ ? byte * 8 : (7 - byte) * 8)));
+        }
+        return scratch.bytes_;
+    }
     std::vector<std::uint8_t> srationals(const std::vector<std::pair<int, int>>& values)
     {
         Builder scratch(little_);
@@ -88,7 +99,15 @@ private:
     bool little_;
 };
 
-std::vector<std::uint8_t> makeDng(bool little, bool withColor = true)
+// The exposure tags a platform DNG carries besides the colour data.
+struct ExposureTags {
+    bool neutral {};
+    std::vector<double> neutralValues {0.5, 1.0, 0.75};
+    bool noise {};
+    std::vector<double> noiseValues;
+};
+
+std::vector<std::uint8_t> makeDng(bool little, bool withColor = true, const ExposureTags& exposure = {})
 {
     Builder b(little);
     // Header.
@@ -138,6 +157,13 @@ std::vector<std::uint8_t> makeDng(bool little, bool withColor = true)
         tags.push_back({50964, 10, 9, children.srationals(f1)});
         tags.push_back({50965, 10, 9, children.srationals(f2)});
     }
+    if (exposure.neutral) {
+        // Rationals with a denominator of 1000, as a platform writes them.
+        std::vector<std::pair<int, int>> values;
+        for (const double value : exposure.neutralValues) values.push_back({int(std::lround(value * 1000.0)), 1000});
+        tags.push_back({50728, 5, std::uint32_t(values.size()), children.srationals(values)});
+    }
+    if (exposure.noise) tags.push_back({51041, 12, std::uint32_t(exposure.noiseValues.size()), children.doubles(exposure.noiseValues)});
     // IFD0 must list its tags in ascending order.
     std::sort(tags.begin(), tags.end(), [](const auto& a, const auto& c) { return a.tag < c.tag; });
     Builder top(little);
@@ -170,6 +196,66 @@ void parses(bool little)
     require(std::abs(data->focalLengthMillimetres - 5.7) < 1e-9);
 }
 
+void readsTheExposuresOwnNeutralAndNoise(bool little)
+{
+    // Three pairs (red, green, blue) are spread to red, green, green, blue.
+    ExposureTags tags;
+    tags.neutral = tags.noise = true;
+    tags.noiseValues = {1e-3, 2e-6, 2e-3, 3e-6, 4e-3, 5e-6};
+    const auto data = parseDngExposureData(makeDng(little, true, tags));
+    require(data.neutralPoint.has_value() && data.noiseProfile.has_value());
+    require(std::abs((*data.neutralPoint)[0] - 0.5f) < 1e-6f && std::abs((*data.neutralPoint)[1] - 1.0f) < 1e-6f &&
+        std::abs((*data.neutralPoint)[2] - 0.75f) < 1e-6f, "the as-shot neutral");
+    const auto& noise = *data.noiseProfile;
+    const float expected[8] = {1e-3f, 2e-6f, 2e-3f, 3e-6f, 2e-3f, 3e-6f, 4e-3f, 5e-6f};
+    for (std::size_t index = 0; index < 8; ++index) require(std::abs(noise[index] - expected[index]) < 1e-9f, "the noise profile");
+
+    // One pair covers every position; four are taken as they are.
+    tags.noiseValues = {7e-4, 9e-7};
+    const auto one = parseDngExposureData(makeDng(little, true, tags));
+    require(one.noiseProfile.has_value());
+    for (std::size_t index = 0; index < 8; index += 2)
+        require(std::abs((*one.noiseProfile)[index] - 7e-4f) < 1e-9f && std::abs((*one.noiseProfile)[index + 1] - 9e-7f) < 1e-12f);
+    tags.noiseValues = {1e-3, 1e-6, 2e-3, 2e-6, 3e-3, 3e-6, 4e-3, 4e-6};
+    const auto four = parseDngExposureData(makeDng(little, true, tags));
+    require(four.noiseProfile.has_value() && std::abs((*four.noiseProfile)[4] - 3e-3f) < 1e-9f &&
+        std::abs((*four.noiseProfile)[7] - 4e-6f) < 1e-12f);
+}
+
+void absentIsNotZero()
+{
+    // No exposure tags: nothing is reported, and the colour data is still read.
+    const auto without = makeDng(true);
+    const auto none = parseDngExposureData(without);
+    require(!none.neutralPoint.has_value() && !none.noiseProfile.has_value(), "no tags, no values");
+    require(parseDngColorData(without).has_value());
+
+    // A value that is not finite and positive is not a measurement.
+    const double nan = std::nan("");
+    const double inf = std::numeric_limits<double>::infinity();
+    for (const std::vector<double>& bad : {std::vector<double> {0.5, 0.0, 0.75}, {0.5, -1.0, 0.75}, {0.5, nan, 0.75}, {inf, 1.0, 0.75}}) {
+        ExposureTags tags;
+        tags.neutral = true;
+        tags.neutralValues = bad;
+        require(!parseDngExposureData(makeDng(true, true, tags)).neutralPoint.has_value(), "a neutral point that cannot be real");
+    }
+    for (const std::vector<double>& bad : {std::vector<double> {0.0, 1e-6}, {-1e-3, 1e-6}, {1e-3, -1e-6}, {nan, 1e-6}, {1e-3, inf},
+                                           {1e-3, 1e-6, 2e-3}, {1e-3, 1e-6, 2e-3, 2e-6}}) {
+        ExposureTags tags;
+        tags.noise = true;
+        tags.noiseValues = bad;
+        require(!parseDngExposureData(makeDng(true, true, tags)).noiseProfile.has_value(), "a noise profile that cannot be real");
+    }
+    // Not a TIFF, or cut short: nothing, and no read past the end.
+    require(!parseDngExposureData({}).neutralPoint.has_value());
+    ExposureTags tags;
+    tags.neutral = tags.noise = true;
+    tags.noiseValues = {1e-3, 1e-6};
+    const auto whole = makeDng(true, true, tags);
+    for (std::size_t length = 0; length < whole.size(); length += 5)
+        (void)parseDngExposureData(std::vector<std::uint8_t>(whole.begin(), whole.begin() + std::ptrdiff_t(length)));
+}
+
 void refuses()
 {
     require(!parseDngColorData({}).has_value());
@@ -197,6 +283,9 @@ int main()
 {
     parses(true);
     parses(false);
+    readsTheExposuresOwnNeutralAndNoise(true);
+    readsTheExposuresOwnNeutralAndNoise(false);
+    absentIsNotZero();
     refuses();
     return 0;
 }
