@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // How a request of the camera HAL ends (android/lineage-24/overlay/camera/hal):
-// one deadline for all the buffers of a request, and the notify the framework
-// gets when some or all of the outputs failed. The model below collects a
-// request's buffers the way the sensor does, against the request's clock, and
-// reads the end off the rule the HAL uses.
+// one budget that the buffer waits of a request share, and the notify the
+// framework gets when some or all of the outputs failed. The model below
+// collects a request's buffers the way the sensor does, each wait against what
+// is left of the request's clock, and reads the end off the rule the HAL uses.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -27,10 +27,13 @@ enum class Fate { arrives, refused, never };
 
 // A buffer's fate: the device completes it at `at` (nanoseconds after the
 // request began), with the error flag for a refusal, or does not complete it.
+// `work` is what the HAL spends on the buffer once it was dequeued (the wait for
+// its metadata, at most 200 ms); it is outside the clock's budget.
 struct Output {
     Kind kind;
     Fate fate;
     std::int64_t at;
+    std::int64_t work = 0;
 };
 
 struct Told {
@@ -46,10 +49,12 @@ struct Told {
 };
 
 // The sensor's loop over a request: every buffer waits for what is left of the
-// one deadline and takes what the device did by then.
-Told collect(const std::vector<Output>& outputs)
+// request's budget. A wait takes a buffer that completed before it began, even
+// when the budget is spent (V4l2Stream::Wait dequeues before it looks at the
+// time), and a wait under way at the deadline gives up and takes the stream's
+// buffers back.
+Told collect(const std::vector<Output>& outputs, bool with_still = false)
 {
-    bool with_still = false;
     for (const auto& output : outputs) with_still = with_still || output.kind == Kind::jpeg || output.kind == Kind::raw;
     RequestClock clock;
     clock.begin(0, with_still);
@@ -61,7 +66,7 @@ Told collect(const std::vector<Output>& outputs)
         if (output.fate == Fate::never || output.at > limit) {
             now = limit; // the wait ends at the deadline and the stream starts over
         } else {
-            now = std::max(now, output.at);
+            now = std::max(now, output.at) + output.work;
             filled = output.fate == Fate::arrives;
         }
         told.filled.push_back(filled);
@@ -122,7 +127,7 @@ void check_refused_still()
     require(next.end == RequestEnd::complete && next.shutter() && next.results(), "the next still is a request of its own");
 }
 
-// The device says nothing: the deadline ends the request, and it is one limit
+// The device says nothing: the budget ends the waits, and it is one limit
 // whatever the number of buffers.
 void check_deadline()
 {
@@ -134,11 +139,19 @@ void check_deadline()
     require(frame.end == RequestEnd::request_error && frame.elapsed == frame_timeout_ns, "a frame ends at the frame deadline");
 
     const auto many = collect({{Kind::jpeg, Fate::never, 0}, {Kind::raw, Fate::never, 0}, {Kind::preview, Fate::never, 0}});
-    require(many.elapsed == still_timeout_ns, "three buffers share one deadline");
+    require(many.elapsed == still_timeout_ns, "three buffers share one budget");
     require(many.end == RequestEnd::request_error, "and fail together");
 
+    // A wait under way at the deadline gives up: a picture that comes after it is too late.
     const auto late = collect({{Kind::jpeg, Fate::arrives, still_timeout_ns + 1}});
-    require(late.end == RequestEnd::request_error, "a picture after the deadline is too late");
+    require(late.end == RequestEnd::request_error, "a picture that arrives after the budget, during its wait, is too late");
+
+    // A buffer that completed before its wait began is taken even when the budget is spent, and what the HAL does
+    // with a buffer after it was dequeued is outside the budget: the request can end after the limit.
+    const auto taken = collect({{Kind::preview, Fate::arrives, 14'950 * ms, 200 * ms}, {Kind::record, Fate::arrives, 15'050 * ms}},
+                               true);
+    require(taken.end == RequestEnd::complete && taken.filled[1], "a buffer that completed before its wait is taken after the budget");
+    require(taken.elapsed == 15'150 * ms, "and the request ends after the limit, by what the first buffer's collecting took");
 
     RequestClock clock;
     clock.begin(5 * second, true);

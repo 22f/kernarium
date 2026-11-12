@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // How a capture request of the camera HAL ends. The HAL collects the output
-// buffers of a request one after another against one deadline, and the
+// buffers of a request one after another, their waits sharing one budget, and the
 // framework learns of the end by the camera HAL's notify contract: a request
 // whose outputs all failed is an ERROR_REQUEST (the application gets
 // onCaptureFailed and may shoot again), while ERROR_BUFFER, which Camera2 hands
@@ -42,9 +42,11 @@ enum class RequestEnd {
     return failed >= outputs ? RequestEnd::request_error : RequestEnd::buffer_errors;
 }
 
-// The one deadline of a request. Every buffer waits for what is left of it, so
-// a request of any number of outputs ends within one limit, and a wait that
-// starts after the deadline ends at once.
+// The one budget that the buffer waits of a request share. Every buffer waits
+// for what is left of it, so the waits of any number of outputs add up to one
+// limit, and a wait that starts after the budget is spent ends at once, taking
+// a buffer that has completed by then. The time the HAL spends on a buffer after
+// it was dequeued (its metadata wait, scaling, encoding) is outside the budget.
 class RequestClock {
 public:
     void begin(std::int64_t now_ns, bool with_still) noexcept

@@ -356,8 +356,9 @@ JPEG, encoded there. A request whose outputs the host refuses or does not
 deliver within the HAL's deadline (3 s, 15 s for a request with a still) is a
 failed request (`ERROR_REQUEST`, which Camera2 and CameraX report as a failed
 capture); a request that loses only some of its outputs reports
-`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's smoke
-test is `tests/integration/android/run_android_camera.py` (`android-camera`).
+`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's
+smoke test is `tests/integration/android/run_android_camera.py`
+(`android-camera`).
 
 ### Networking
 
