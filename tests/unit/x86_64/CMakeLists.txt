@@ -77,7 +77,8 @@ uml_add_unit_test(
 # Executors that share an address space's translations: what sharing does,
 # the writer's protocol, and executors on their own threads.
 uml_add_x86_64_test_binary(uml_x86_64_gadget_shared_tests
-    x86_64_gadget_shared_tests.cpp GADGETS)
+    x86_64_gadget_shared_tests.cpp
+    GADGETS LIBRARIES uml_test_allocation_failure)
 uml_add_unit_test(
     NAME x86-64-gadget-shared-bodies
     COMMAND uml_x86_64_gadget_shared_tests bodies

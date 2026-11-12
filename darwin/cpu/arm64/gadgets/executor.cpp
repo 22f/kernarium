@@ -2120,6 +2120,16 @@ public:
 		return left_current;
 	}
 
+	/* Whether an address space held here is closed or being shed, which
+	 * leave_gone() would let go of. */
+	[[nodiscard]] bool holds_gone() const noexcept
+	{
+		for (const auto &[generation, state] : window_.generations)
+			if (state.space->closed() || state.space->shedding())
+				return true;
+		return false;
+	}
+
 private:
 	static constexpr std::size_t ways = ::uml::cpu::gadget_cache::ways;
 	static constexpr std::size_t slot_count = uml_gadget_cache_slots;
@@ -2886,6 +2896,8 @@ GadgetExecutor::GadgetExecutor(arm64::gadgets::BuildOptions build_options)
 	 * a reclaimer can see whether this executor is running translated
 	 * code. */
 	announcement_ = acquire_announcement();
+	if (announcement_ != nullptr)
+		renew_ = &announcement_->renew;
 	share_translations_ = announcement_ != nullptr &&
 		build_options_.host_capabilities.has(ArmFeature::lse2) &&
 		shared_bodies_enabled();
@@ -2935,7 +2947,8 @@ constexpr std::uint64_t unprepared_changes = ~std::uint64_t{};
 } // namespace
 
 /* Let go of the address spaces another executor closed because they held
- * mostly freed arena (Space::renewal_due), and, when the MMU has destroyed a
+ * mostly freed arena (Space::renewal_due) or the budget asked to shed
+ * (Account::start_shedding), and, when the MMU has destroyed a
  * generation since this executor last looked, of those whose generation it
  * destroyed, which no vCPU can enter again. This executor runs no translated
  * code here, and its return ring empties at the first select_cpu() of the
@@ -2950,6 +2963,7 @@ void GadgetExecutor::leave_gone_spaces(std::uint64_t retirements) noexcept
 		announcement_->renew.exchange(false, std::memory_order_acquire);
 	if (!dead && !closed)
 		return;
+	renewal_stuck_ = false;
 	retirements_seen_ = retirements;
 	try {
 		if (programs_->leave_gone(dead)) {
@@ -2961,12 +2975,34 @@ void GadgetExecutor::leave_gone_spaces(std::uint64_t retirements) noexcept
 				mode.generation = no_generation;
 				mode.changes = unprepared_changes;
 			}
+		/* The closes above asked every executor attached to a space, this
+		 * one among them, to let go of it, though it has. The ask is
+		 * cleared and made again only if a space held here is still closed
+		 * or being shed, as another executor's close may have made it since:
+		 * it closes the space before it asks, so the check after the clear
+		 * finds it. Otherwise the next run would end at its first block for
+		 * an ask this run answered (renewal_pending()). */
+		if (announcement_ != nullptr) {
+			(void)announcement_->renew.exchange(false,
+				std::memory_order_acq_rel);
+			bool again = programs_->holds_gone();
+			for (const auto &mode : sme_caches_)
+				again = again || (mode.programs &&
+					mode.programs->holds_gone());
+			if (again)
+				announcement_->renew.store(true,
+					std::memory_order_relaxed);
+		}
 	} catch (...) {
 		/* Out of memory part way, so some may still be held: ask again at
 		 * the next entry, and prepare afresh meanwhile, since the one last
-		 * prepared may be among those let go of. */
-		if (announcement_ != nullptr)
+		 * prepared may be among those let go of. The ask stands, so the
+		 * runs do not end early for it (renewal_pending()) until a let-go
+		 * succeeds. */
+		if (announcement_ != nullptr) {
 			announcement_->renew.store(true, std::memory_order_relaxed);
+			renewal_stuck_ = true;
+		}
 		retirements_seen_ = retirements - 1U;
 		cache_generation_ = no_generation;
 		cache_changes_ = unprepared_changes;

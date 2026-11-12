@@ -27,6 +27,7 @@
  *               space it asks to shed, and executors on their own threads
  *               keep running while spaces are shed and renewed under them.
  */
+#include "allocation_failure.hpp"
 #include "cpu/gadget_cache_budget.hpp"
 #include "cpu/x86_64/cpu_state.hpp"
 #include "cpu/x86_64/gadgets/exception_checks.hpp"
@@ -1037,6 +1038,105 @@ void test_the_budget_sheds_the_address_space_a_window_keeps()
 		"executors that went kept their charges");
 }
 
+/* The blocks of the chain a run translates one after another until the
+ * budget, fallen under what is held, has asked the executor's address space
+ * to shed, which is when the run loop is told to end the run
+ * (Executor::renewal_pending()): how many it ran, with the budget fallen
+ * until it asked. */
+[[nodiscard]] std::size_t run_blocks_until_asked_to_end(World &world,
+	gadgets::Executor &holder, std::size_t blocks)
+{
+	budget::set_budget(512 * 1024);
+	std::size_t ran = 0;
+	for (; ran < blocks && !holder.renewal_pending(); ++ran) {
+		const auto selected =
+			select(holder, world.memory, ran * block_stride);
+		const auto result = run(holder, world.memory, *selected.program);
+		require(result.event == EngineEvent::system_call &&
+			result.rax == ran + 1,
+			"a block ran wrongly under a budget");
+	}
+	budget::set_budget(budget::fallback_budget);
+	return ran;
+}
+
+/* A holder in the middle of a run is asked to end it at its next block once
+ * the budget has asked its address space to shed, and lets go of the space at
+ * the start of the next run, as the last holder. The run loop
+ * (run_x86_gadgets) ends the run, as a spent budget does, when the executor
+ * says so after a block; without it the run goes on translating into the space
+ * it was asked to shed until its budget is spent. */
+void test_a_running_holder_is_asked_to_end_its_run_after_a_shed()
+{
+	constexpr std::size_t blocks = 3000;
+	const auto base = budget::ledger_state();
+	World world{1, blocks * block_stride + 4096};
+	load_blocks(world.memory, blocks);
+	auto &holder = world.add();
+	require(!holder.renewal_pending(), "a new executor was asked to let go");
+	holder.begin_run();
+	const auto ran = run_blocks_until_asked_to_end(world, holder, blocks);
+	require(ran > 0 && ran < blocks && holder.renewal_pending(),
+		"a store past the budget did not ask the running executor to "
+		"end its run");
+	require(budget::ledger_state().shedding > base.shedding,
+		"the budget did not ask the running space to shed");
+	/* The run ends; the next one lets go. */
+	holder.end_run();
+	holder.leave_gone_generations(0, &alive);
+	require(!holder.renewal_pending(),
+		"the executor still asks to end runs after it let go");
+	require(budget::ledger_state().shedding == base.shedding,
+		"the last holder did not free the space");
+	world.executors.clear();
+	require(budget::ledger_state().total == base.total,
+		"executors that went kept their charges");
+}
+
+/* A let-go that runs out of memory leaves the ask standing, and the runs go
+ * on as they did: the executor does not ask every run to end at its first
+ * block because a flag it cannot clear is set. Whichever allocation of the
+ * let-go fails, it asks for none afterwards, and the first let-go that
+ * succeeds frees the space. */
+void test_a_failed_let_go_does_not_end_runs_early()
+{
+	constexpr std::size_t blocks = 3000;
+	bool stood = false;
+	for (std::size_t allowed = 0;; ++allowed) {
+		require(allowed < 256, "the failure point never moved past the "
+			"end of letting go of a shed space");
+		const auto base = budget::ledger_state();
+		World world{1, blocks * block_stride + 4096};
+		load_blocks(world.memory, blocks);
+		auto &holder = world.add();
+		holder.begin_run();
+		const auto ran = run_blocks_until_asked_to_end(world, holder, blocks);
+		require(ran > 0 && ran < blocks && holder.renewal_pending(),
+			"the running executor was not asked to end its run");
+		holder.end_run();
+
+		uml::testing::fail_after_allocations(allowed);
+		holder.leave_gone_generations(0, &alive);
+		/* True once the let-go made fewer allocations than allowed. */
+		const bool done =
+			uml::testing::cancel_pending_allocation_failure();
+		require(!holder.renewal_pending(),
+			"an executor that could not let go asks every run to end");
+		stood = stood || budget::ledger_state().shedding > base.shedding;
+		/* Whichever way it went, the next run lets go. */
+		holder.leave_gone_generations(0, &alive);
+		require(budget::ledger_state().shedding == base.shedding,
+			"the space was not let go of at the next run");
+		world.executors.clear();
+		require(budget::ledger_state().total == base.total,
+			"executors that went kept their charges");
+		if (done) {
+			require(stood, "no allocation of the let-go failed");
+			return;
+		}
+	}
+}
+
 /* Executors on their own threads select and run blocks of one address space
  * while the budget has the space shed and the arena has it renewed. */
 void test_executors_on_threads_keep_running_while_spaces_are_replaced()
@@ -1121,6 +1221,8 @@ int main(int argc, char **argv)
 		test_a_space_under_the_floor_is_left_alone();
 		test_the_budget_reaches_every_executor_of_a_space();
 		test_the_budget_sheds_the_address_space_a_window_keeps();
+		test_a_running_holder_is_asked_to_end_its_run_after_a_shed();
+		test_a_failed_let_go_does_not_end_runs_early();
 		test_executors_on_threads_keep_running_while_spaces_are_replaced();
 	} else {
 		std::fprintf(stderr, "x86 gadget shared: unknown mode %s\n", argv[1]);

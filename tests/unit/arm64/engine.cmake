@@ -488,6 +488,8 @@
         LABELS tsan)
     target_compile_definitions(uml_arm64_gadget_shared_bound_tests PRIVATE
         UML_GADGET_SWEEP_STRESS=1)
+    target_link_libraries(uml_arm64_gadget_shared_bound_tests PRIVATE
+        uml_test_allocation_failure)
 
     # Executors let go of the spaces of generations the MMU destroyed.
     uml_add_arm64_unit_test(gadget_dead_space WITHOUT_HARNESS

@@ -9,11 +9,14 @@
  * These tests run against the unit-test variant of the gadget executor
  * (uml_arm64_gadget_sweep_stress_executor), which renews on a schedule and lets
  * a test lower the floor and read what a space holds. */
+#include "allocation_failure.hpp"
 #include "arm64_gadget_runtime_test_support.hpp"
 #include "jit_test_support.hpp"
 #include "runtime_test_route.hpp"
 
+#include "cpu/arm64/engine_execution.hpp"
 #include "cpu/arm64/gadgets/executor.hpp"
+#include "cpu/engine.hpp"
 #include "cpu/gadget_cache_budget.hpp"
 #include "static_mmu_test_support.hpp"
 
@@ -425,6 +428,136 @@ void relief_sheds_a_space_the_window_leaves(unsigned long generation)
 	cache::set_budget(cache::fallback_budget);
 }
 
+/* The returns from translated code a run has seen, and the one after which
+ * the budget is told to shed, as a store that passed it would. */
+struct Returns final {
+	std::size_t seen{};
+	std::size_t shed_at{};
+};
+
+[[nodiscard]] bool shed_at_return(arm64::CpuState &, void *context) noexcept
+{
+	auto &returns = *static_cast<Returns *>(context);
+	if (++returns.seen == returns.shed_at) {
+		cache::set_budget(1);
+		cache::relieve();
+	}
+	return false;
+}
+
+/* A holder in the middle of a run lets go of a space the budget has shed at
+ * its next return from translated code, not a dispatch later. The program is
+ * a long chain of blocks the executor translates one after another, each
+ * return to the run loop is a boundary, and the budget falls under what is
+ * held and relieves it after the fifth. The run ends there, as a spent
+ * budget ends one: the executor, which still holds the space, is not asked to
+ * grow it, and the next run starts by letting go of it, as the last holder,
+ * and goes on in a new space. Without the exit the run translates the rest of
+ * the chain into the space it was asked to shed and ends at the system call. */
+void a_running_holder_leaves_a_shed_space_at_its_next_return(
+	unsigned long generation)
+{
+	constexpr std::size_t blocks = 400;
+	constexpr std::size_t shed_at = 5;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{pages_for((blocks + 1) * 4)};
+	put_chain(backing, blocks);
+	JitMapping mapping{generation, code_base, backing,
+		pages_for((blocks + 1) * 4)};
+	const auto vcpu = std::make_unique<Vcpu>();
+	auto &executor = vcpu->executor;
+	auto &memory = vcpu->memory;
+	auto &cpu = vcpu->cpu;
+	const auto base = cache::ledger_state();
+	Returns returns{.shed_at = shed_at};
+	cpu = {};
+	cpu.pc = code_base;
+	uml::cpu::ExecutionRequest request{
+		.cpu = cpu,
+		.memory = memory,
+		.translated_memory = &memory,
+		.generation = generation,
+		.instruction_budget = 100000,
+		.boundary = &shed_at_return,
+		.boundary_context = &returns,
+	};
+	const auto first = arm64::detail::run_translated(executor, request);
+	cache::set_budget(cache::fallback_budget);
+	require(first.reason == uml::cpu::ExitReason::instruction_budget &&
+		returns.seen == shed_at,
+		"a run did not end at the first return after its space was shed");
+	require(first.retired_instructions < blocks);
+	const auto held = cache::ledger_state();
+	require(held.shedding > base.shedding,
+		"the budget did not ask the running space to shed");
+
+	/* The next run lets go of it, as the last holder, and finishes the
+	 * chain in a space of its own. */
+	request.boundary = nullptr;
+	request.boundary_context = nullptr;
+	const auto second = arm64::detail::run_translated(executor, request);
+	require(second.reason == uml::cpu::ExitReason::system_call,
+		"the run after a shed space was let go of did not finish");
+	require(cache::ledger_state().shedding == base.shedding,
+		"the next run did not free the space it was asked to let go of");
+}
+
+/* A let-go that runs out of memory leaves the ask standing, and the runs go
+ * on as they did: the executor does not end every run at its first block
+ * because a flag it cannot clear is set. Whichever allocation of the let-go
+ * fails, no run is asked to end early afterwards, and the first let-go that
+ * succeeds frees the space. */
+void a_failed_let_go_does_not_end_runs_early(unsigned long generation)
+{
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{1};
+	put_program(backing, 1, 2);
+	JitMapping mapping{generation, code_base, backing, 1};
+	bool stood = false;
+	for (std::size_t allowed = 0;; ++allowed) {
+		require(allowed < 256, "the failure point never moved past the "
+			"end of letting go of a shed space");
+		const auto vcpu = std::make_unique<Vcpu>();
+		auto &executor = vcpu->executor;
+		auto &memory = vcpu->memory;
+		auto &cpu = vcpu->cpu;
+		const auto base = cache::ledger_state();
+		require(run_to_system_call(executor, memory, generation, cpu,
+			code_base) == 4);
+		cache::set_budget(1);
+		cache::relieve();
+		cache::set_budget(cache::fallback_budget);
+		require(executor.renewal_pending(),
+			"the budget did not ask the executor to let go");
+		require(cache::ledger_state().shedding > base.shedding);
+
+		cpu = {};
+		cpu.pc = code_base;
+		uml::testing::fail_after_allocations(allowed);
+		require(executor.begin_execution(generation, cpu.pc));
+		executor.end_execution();
+		/* True once the let-go made fewer allocations than allowed. */
+		const bool done =
+			uml::testing::cancel_pending_allocation_failure();
+		require(!executor.renewal_pending(),
+			"an executor that could not let go asks every run to end");
+		const bool held =
+			cache::ledger_state().shedding > base.shedding;
+		stood = stood || held;
+		/* Whichever way it went, the next entry lets go. */
+		require(executor.begin_execution(generation, cpu.pc));
+		executor.end_execution();
+		require(cache::ledger_state().shedding == base.shedding,
+			"the space was not let go of at the next entry");
+		if (done) {
+			require(stood, "no allocation of the let-go failed");
+			return;
+		}
+	}
+}
+
 /* An address space only one executor holds is retired in its turn, however
  * lately that executor ran it: nobody else could be in the code it frees. */
 void a_window_retires_a_space_no_other_executor_holds()
@@ -625,6 +758,8 @@ int main()
 	a_mostly_free_space_is_renewed_and_a_busy_one_is_not();
 	a_window_leaves_a_space_another_executor_is_running(1120);
 	relief_sheds_a_space_the_window_leaves(1200);
+	a_running_holder_leaves_a_shed_space_at_its_next_return(1210);
+	a_failed_let_go_does_not_end_runs_early(1220);
 	a_window_retires_a_space_no_other_executor_holds();
 	a_private_cache_is_never_renewed();
 	renewal_reaches_every_executor();
