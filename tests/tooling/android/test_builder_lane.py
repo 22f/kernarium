@@ -293,6 +293,39 @@ def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, 
     return package.getvalue()
 
 
+def synthetic_overlay_manifest(target_package: str | None, static: bool | None, *, utf8: bool = False) -> bytes:
+    """A compiled manifest of a runtime resource overlay: an <overlay> element that carries
+    android:targetPackage (a string) when given and android:isStatic (a literal boolean) when given,
+    as the build's auto-generated overlays do."""
+    strings = ["targetPackage", "isStatic", "overlay", target_package or ""]
+    pool_strings = b""
+    offsets = []
+    for text in strings:
+        offsets.append(len(pool_strings))
+        if utf8:
+            pool_strings += bytes([len(text), len(text)]) + text.encode() + b"\0"
+        else:
+            pool_strings += struct.pack("<H", len(text)) + text.encode("utf-16-le") + b"\0\0"
+    pool_strings += b"\0" * (-len(pool_strings) % 4)
+    strings_start = 28 + 4 * len(strings)
+    pool = struct.pack(
+        "<HHIIIIII", 0x0001, 28, strings_start + len(pool_strings), len(strings),
+        0, 0x100 if utf8 else 0, strings_start, 0,
+    ) + b"".join(struct.pack("<I", offset) for offset in offsets) + pool_strings
+    ids = [0x01010021, 0x0101055A, 0, 0]
+    resource_map = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(ids)) + b"".join(
+        struct.pack("<I", value) for value in ids)
+    attributes = b""
+    if target_package is not None:
+        attributes += struct.pack("<IIIHBBI", 0xFFFFFFFF, 0, 3, 8, 0, 0x03, 3)
+    if static is not None:
+        attributes += struct.pack("<IIIHBBI", 0xFFFFFFFF, 1, 0xFFFFFFFF, 8, 0, 0x12, 0xFFFFFFFF if static else 0)
+    body = struct.pack("<IIHHHHHH", 0xFFFFFFFF, 2, 20, 20, len(attributes) // 20, 0, 0, 0) + attributes
+    element = struct.pack("<HHIII", 0x0102, 16, 16 + len(body), 1, 0xFFFFFFFF) + body
+    payload = pool + resource_map + element
+    return struct.pack("<HHI", 0x0003, 8, 8 + len(payload)) + payload
+
+
 def run_in_process(module, *arguments: object) -> subprocess.CompletedProcess[str]:
     """Run a loaded tool's main() as `run_tool` would run its script.
 
@@ -375,11 +408,12 @@ def tracked_erofs_parameters(android_root: Path) -> tuple[str, str]:
 def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
-    integers: list[tuple[str, int]] = (),
+    integers: list[tuple[str, int]] = (), overlayable: bool = False, qualified: frozenset[str] = frozenset(),
 ) -> bytes:
     """A compiled resource table whose one package holds the given string-array resources, bool
     resources and integer resources (the latter two as compact entries when `compact` is set, as a
-    recent aapt2 writes them)."""
+    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set. The resources
+    named in `qualified` are defined under a resource configuration (portrait), not by default."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -399,9 +433,10 @@ def synthetic_resource_table(
     values = sorted({item for _, items in arrays for item in items})
     names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
     configuration = struct.pack("<I", 64) + b"\x00" * 60
+    portrait = struct.pack("<I", 64) + b"\x00" * 8 + b"\x01" + b"\x00" * 51  # the orientation qualifier
     type_header = 20 + len(configuration)
 
-    def type_chunk(type_id: int, entries: list[bytes]) -> bytes:
+    def type_chunk(type_id: int, entries: list[bytes], configuration: bytes = configuration) -> bytes:
         offsets, body = [], b""
         for entry in entries:
             offsets.append(len(body))
@@ -431,12 +466,23 @@ def synthetic_resource_table(
             integer_entries.append(struct.pack("<HHI", index, 0x1000 | 0x08, data))
         else:
             integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
-    chunks = type_chunk(1, array_entries)
+
+    def configured(type_id: int, entries: list[bytes], entry_names: list[str], *, always: bool) -> bytes:
+        """The type's chunk of default definitions and, when some are qualified, a chunk of those."""
+        plain = [entry for entry, name in zip(entries, entry_names) if name not in qualified]
+        under = [entry for entry, name in zip(entries, entry_names) if name in qualified]
+        chunks = type_chunk(type_id, plain) if plain or (always and not under) else b""
+        return chunks + (type_chunk(type_id, under, portrait) if under else b"")
+
+    chunks = configured(1, array_entries, [name for name, _ in arrays], always=True)
+    if overlayable:  # the <overlayable> section: its name and actor (256 UTF-16 units each) and no policy
+        chunks += struct.pack("<HHI", 0x0204, 1032, 1032) + b"\x00" * 1024
     type_names = ["array"]
-    for type_name, typed in (("bool", bool_entries), ("integer", integer_entries)):
+    for type_name, typed, typed_names in (("bool", bool_entries, [name for name, _ in booleans]),
+                                          ("integer", integer_entries, [name for name, _ in integers])):
         if typed:
             type_names.append(type_name)
-            chunks += type_chunk(len(type_names), typed)
+            chunks += configured(len(type_names), typed, typed_names, always=False)
     type_pool, key_pool = pool(type_names), pool(names)
     package_header = 288
     package = (struct.pack("<HHII", 0x0200, package_header,
@@ -613,6 +659,56 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 fail(f"the resource integer reader misreads {'compact' if compact else 'full'} entries")
             if tool.resource_arrays(table) != expected_arrays:
                 fail("the resource array reader misreads a table that also holds integers")
+    # ... and an <overlayable> section is seen in a table that holds the other resource types, however they are stored.
+    for compact in (False, True):
+        for declared in (False, True):
+            table = synthetic_resource_table(tables, booleans=flags, integers=numbers, compact=compact, overlayable=declared)
+            if tool.resource_table_defines_overlayable(table) != declared:
+                fail(f"the overlayable reader misreads a {'compact' if compact else 'full'} table "
+                     f"{'with' if declared else 'without'} the section")
+    # ... and which resources a table defines by default: the ones outside a resource configuration only.
+    for compact in (False, True):
+        table = synthetic_resource_table(
+            tables, booleans=flags + [("only_portrait", True)], integers=numbers, compact=compact,
+            qualified=frozenset({"only_portrait", "config_threshold", "config_ntpServers"}))
+        if (tool.resource_default_names(table, "bool"), tool.resource_default_names(table, "integer"),
+                tool.resource_default_names(table, "array")) != (
+                {"config_flipToScreenOffEnabled", "other"}, {"config_low", "config_negative"},
+                {"config_autoTimeSourcesPriority", "empty"}):
+            fail(f"the resource reader misreads which {'compact' if compact else 'full'} entries are in the default configuration")
+        if tool.resource_booleans(table)["only_portrait"] != [True]:
+            fail("the resource bool reader drops a definition under a resource configuration")
+    # A table that does not hold together is no table without the section: the header, the declared size and
+    # every chunk's bounds are checked.
+    good = synthetic_resource_table(tables, booleans=flags, overlayable=False)
+    package_at = struct.unpack_from("<H", good, 2)[0] + struct.unpack_from("<I", good, struct.unpack_from("<H", good, 2)[0] + 4)[0]
+    broken_tables = {
+        "empty": b"",
+        "text": b"not a resource table",
+        "wrong type": struct.pack("<H", 3) + good[2:],
+        "short header": struct.pack("<HHI", 2, 4, len(good)) + good[8:],
+        "declared size beyond the data": good[:-4],
+        "declared size below the header": good[:4] + struct.pack("<I", 8) + good[8:],
+        "chunk without a header": good[:12] + struct.pack("<HHI", 1, 4, 100) + good[20:],
+        "chunk past the table": good[:package_at] + struct.pack("<HHI", 0x0200, 288, len(good)) + good[package_at + 8:],
+    }
+    for label, broken in broken_tables.items():
+        try:
+            found = tool.resource_table_defines_overlayable(broken)
+        except ValueError:
+            continue
+        fail(f"the overlayable reader reads a table with a {label} as one {'with' if found else 'without'} the section")
+    if tool.resource_table_defines_overlayable(good):
+        fail("the overlayable reader finds a section in the good table")
+    # The attributes of a compiled manifest's <overlay> element, through either string pool: a string, a boolean, or none.
+    for utf8 in (True, False):
+        for target, static in (("org.example.app", True), ("org.example.app", False), (None, True), ("org.example.app", None)):
+            expected = {key: value for key, value in (("targetPackage", target), ("isStatic", static)) if value is not None}
+            found = tool.manifest_element_attributes(synthetic_overlay_manifest(target, static, utf8=utf8), "overlay")
+            if found != expected:
+                fail(f"the overlay manifest reader reads {found} for {expected}")
+    if tool.manifest_element_attributes(synthetic_compiled_manifest(None), "overlay") is not None:
+        fail("the overlay manifest reader finds an <overlay> element in a manifest without one")
     release_manifest = synthetic_compiled_manifest(None, debuggable=False)
     release_apk = synthetic_apk(debuggable=False)
     preopt_apks = sorted(tool.REQUIRED_PREOPT_APKS)
@@ -743,7 +839,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         )
         gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
         gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
-        # The host's cameras: the lazy provider (a service that init starts when a client asks), its one
+        # The host's cameras: the lazy provider (a service that the layouts' init file starts when cameraserver runs), its one
         # declaration, the HWL library that holds the V4L2 source (the names only route p0030 puts in
         # it), the characteristics template, and the layouts' files (the generator's own).
         camera_provider = "android.hardware.camera.provider@2.7-service-google-lazy"
@@ -752,7 +848,16 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         camera_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.camera.provider@2.7-service-google.xml"
         camera_library_path = "VENDOR/lib64/libgooglecamerahwl_impl.so"
         camera_template_path = "VENDOR/etc/config/emu_camera_v4l2.json"
+        camera_init_path = f"VENDOR/etc/init/{camera_layouts.INIT_FILE}"
+        camera_provider_init_path = f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE}"
+        camera_init = camera_layouts.installed()[camera_provider_init_path].decode()
+        camera_service = camera_layouts.PROVIDER_SERVICE
+        camera_with_cameras = [layout.name for layout in camera_layouts.all_layouts() if layout.has_front]
+        camera_start_action = (f"\non {camera_layouts.provider_trigger(camera_with_cameras[0])}\n"
+                               f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n")
         camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
+        camera_overlay_path = tool.CAMERA_APP_OVERLAY
+        camera_app_package = tool.CAMERA_APP_PACKAGE
         good_camera_rc = (
             f"service vendor.camera-provider-2-7-google /vendor/bin/hw/{camera_provider}\n"
             "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n"
@@ -1775,7 +1880,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "ro.boot.              u:object_r:bootloader_prop:s0\n"
                     "persist.sys.usb.config  u:object_r:system_prop:s0 exact string\n"
                     "persist.adb.tls_server.enable  u:object_r:system_adbd_prop:s0 exact bool\n"
-                    "init.svc.  u:object_r:init_service_status_prop:s0\n"
+                    # As the platform types them: every status is private (coredomain reads it) but a few.
+                    "init.svc.  u:object_r:init_service_status_private_prop:s0\n"
+                    "init.svc.adbd  u:object_r:init_service_status_prop:s0 exact string\n"
+                    "init.svc.zygote  u:object_r:init_service_status_prop:s0 exact string\n"
                     "debug.  u:object_r:debug_prop:s0\n"
                     "ro.hardware.  u:object_r:vendor_default_prop:s0\n"
                     "ro.hardware.audio.primary  u:object_r:exported_default_prop:s0 exact string\n"
@@ -2477,13 +2585,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     toggle_values = {
                         "toggle-off": [False],
                         "toggle-missing": [],
-                        "toggle-qualified": [True, False],
+                        "toggle-duplicate": [True, False],
                     }.get(camera_variant, [True])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
                         booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
                         + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
+                        qualified=frozenset({"config_supportsHardwareCamToggle"})
+                        if camera_variant == "toggle-only-qualified" else frozenset(),
                     )
                     framework_apk = io.BytesIO()
                     with zipfile.ZipFile(framework_apk, "w") as overlay:
@@ -2526,28 +2636,67 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr(camera_fragment_path, good_camera_manifest)
                 archive.writestr(camera_library_path, camera_library(*good_camera_markers))
                 archive.writestr(camera_template_path, good_camera_template)
-                # Aperture's resources as the build leaves them with the product's static overlay: each
-                # lens of the host is its own camera device, and the wide lens is the zoom camera's 1x.
+                # Aperture as the build leaves it: its own resources keep the defaults (the lens settings
+                # off, no ignored ID) and declare no overlayable section; the product's values are in the
+                # static overlay beside the other auto-generated ones. With the values on, each lens of the
+                # host is its own camera device, and the wide lens is the zoom camera's 1x.
                 aux_booleans = {
                     None: [("config_enableAuxCameras", True)],
                     "aux-off": [("config_enableAuxCameras", False)],
                     "aux-missing": [],
-                    "aux-qualified": [("config_enableAuxCameras", True), ("config_enableAuxCameras", False)],
-                }[camera_variant if camera_variant in {"aux-off", "aux-missing", "aux-qualified"} else None]
+                    "aux-duplicate": [("config_enableAuxCameras", True), ("config_enableAuxCameras", False)],
+                }[camera_variant if camera_variant in {"aux-off", "aux-missing", "aux-duplicate"} else None]
                 ignored_ids = {
                     "ignored-extra": [["2", "3"]],
                     "ignored-none": [[]],
                     "ignored-missing": [],
                 }.get(camera_variant, [["2"]])
-                aperture_table = synthetic_resource_table(
+                # "...-only-qualified": the one definition sits under a resource configuration (portrait), so
+                # it applies on a device in that orientation alone, whatever its value says.
+                overlay_qualified = {
+                    "aux-only-qualified": frozenset({"config_enableAuxCameras"}),
+                    "ignored-only-qualified": frozenset({"config_ignoredAuxCameraIds"}),
+                }.get(camera_variant, frozenset())
+                overlay_table = synthetic_resource_table(
                     [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
-                    booleans=aux_booleans, compact=camera_variant == "compact",
+                    booleans=aux_booleans, compact=camera_variant == "compact", qualified=overlay_qualified,
                 )
+                # "app-values": the old assumption, the values in the application's own table and no overlay
+                # "app-no-aux", "app-no-ignored": the application lost a name the overlay replaces (an uprev renamed
+                # it), so the overlay applies to nothing; "app-aux-qualified": it keeps one under a qualifier only.
+                aperture_table = synthetic_resource_table(
+                    [] if camera_variant == "app-no-ignored" else
+                    [("config_ignoredAuxCameraIds", ["2"] if camera_variant == "app-values" else [])],
+                    booleans=[] if camera_variant == "app-no-aux" else
+                    [("config_enableAuxCameras", camera_variant == "app-values")],
+                    compact=camera_variant == "compact", overlayable=camera_variant == "app-overlayable",
+                    qualified=frozenset({"config_enableAuxCameras"}) if camera_variant == "app-aux-qualified"
+                    else frozenset(),
+                )
+                # ... and a file that is no resource table, or one cut short, must not read as a table
+                # without an overlayable section.
+                if camera_variant == "app-not-a-table":
+                    aperture_table = b"not a resource table"
+                elif camera_variant == "app-truncated-table":
+                    aperture_table = aperture_table[:len(aperture_table) // 2]
                 aperture_apk = io.BytesIO()
                 with zipfile.ZipFile(aperture_apk, "w") as apk:
                     apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
                     apk.writestr("resources.arsc", aperture_table)
                 archive.writestr(camera_app_path, aperture_apk.getvalue())
+                overlay_apk = io.BytesIO()
+                overlay_target, overlay_static = {
+                    "overlay-target": ("com.example.other", True),
+                    "overlay-not-static": (camera_app_package, False),
+                    "overlay-static-missing": (camera_app_package, None),
+                    "overlay-target-missing": (None, True),
+                }.get(camera_variant, (camera_app_package, True))
+                with zipfile.ZipFile(overlay_apk, "w") as apk:
+                    apk.writestr("AndroidManifest.xml", synthetic_overlay_manifest(
+                        overlay_target, overlay_static, utf8=camera_variant == "compact"))
+                    apk.writestr("resources.arsc", overlay_table)
+                if camera_variant not in {"app-values", "overlay-missing"}:
+                    archive.writestr(camera_overlay_path, overlay_apk.getvalue())
                 archive.writestr("VENDOR/bin/hw/android.hardware.thermal-service.andarium", synthetic_aarch64_elf())
                 archive.writestr(thermal_rc_path, good_thermal_rc)
                 archive.writestr(thermal_fragment_path, good_thermal_manifest)
@@ -5243,6 +5392,58 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("camera-provider-triggered", {"entries": {
                 camera_rc_path: (good_camera_rc + "\non boot\n    start vendor.camera-provider-2-7-google\n").encode()}},
              "may have no trigger"),
+            ("camera-provider-service-renamed", {"entries": {
+                camera_rc_path: good_camera_rc.replace("vendor.camera-provider-2-7-google", "vendor.camera-provider").encode()}},
+             "which the init file of the camera layouts starts"),
+            # The contract in the form that catches the defects of the launches that listed no camera: a start only at
+            # boot, a start only in the profile action, a layout with cameras that lacks its action, an action on another
+            # property than cameraserver's state, and a start anywhere else.
+            ("camera-provider-started-at-boot-only", {"entries": {
+                camera_provider_init_path: camera_init.replace("on property:init.svc.cameraserver=running && ", "on ").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-started-in-the-profile-action", {"entries": {
+                camera_init_path: camera_layout_files[camera_init_path].decode().replace(
+                    f"on property:{camera_layouts.SKU_PROPERTY}=front\n",
+                    f"on property:{camera_layouts.SKU_PROPERTY}=front\n    start {camera_service}\n", 1).encode()}},
+             "init reads a vendor script in the vendor_init context"),
+            ("camera-layout-without-its-provider-action", {"entries": {
+                camera_provider_init_path: camera_init.replace(camera_start_action, "").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-action-on-another-property", {"entries": {
+                camera_provider_init_path: camera_init.replace(f"property:{camera_layouts.SERVER_PROPERTY}=running",
+                                                      "property:sys.boot_completed=1").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-action-without-the-sku", {"entries": {
+                camera_provider_init_path: camera_init.replace(
+                    f"on {camera_layouts.provider_trigger(camera_with_cameras[0])}\n",
+                    f"on property:{camera_layouts.SERVER_PROPERTY}=running\n").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-started-for-a-layout-without-cameras", {"entries": {
+                camera_provider_init_path: (camera_init + f"\non {camera_layouts.provider_trigger('none')}\n"
+                                   f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-started-twice", {"entries": {
+                camera_provider_init_path: camera_init.replace(
+                    camera_start_action, camera_start_action + f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n", 1).encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-started-not-restarted", {"entries": {
+                camera_provider_init_path: camera_init.replace(
+                    f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n", f"    start {camera_service}\n").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-init-file-missing", {"entries": {camera_provider_init_path: None}},
+             "kernarium_camera_provider.rc is missing"),
+            ("camera-provider-started-in-the-vendor-file", {"entries": {
+                camera_init_path: (camera_layout_files[camera_init_path].decode() + camera_start_action).encode()}},
+             "init reads a vendor script in the vendor_init context"),
+            ("camera-provider-trigger-in-another-vendor-file", {"entries": {
+                "VENDOR/etc/init/other.rc": camera_start_action.encode()}},
+             "other.rc: the trigger 'on property:init.svc.cameraserver=running"),
+            ("camera-provider-trigger-in-an-odm-file", {"entries": {
+                "ODM/etc/init/other.rc": camera_start_action.encode()}},
+             "other.rc: the trigger 'on property:init.svc.cameraserver=running"),
+            ("vendor-trigger-on-a-private-service-status", {"entries": {
+                "VENDOR/etc/init/other.rc": b"on property:init.svc.cameraserver=running\n    setprop a b\n"}},
+             "labelled init_service_status_private_prop, which vendor_init may not read"),
             ("camera-provider-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                 good_video_contexts.replace("hal_camera_default_exec", "vendor_file").encode()}},
              "hal_camera_default_exec label"),
@@ -5291,6 +5492,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "unneeded built-in application payload is forbidden"),
             ("stock-camera-application", {"entries": {"PRODUCT/app/Camera2/Camera2.apk": synthetic_apk()}},
              "unneeded built-in application payload is forbidden"),
+            # The lens settings are the product overlay's: the application's own table holds the defaults.
+            ("camera-values-only-in-the-application", {"camera_variant": "app-values"},
+             "Aperture__lineage_andarium__auto_generated_rro_product.apk is missing"),
+            ("camera-overlay-missing", {"camera_variant": "overlay-missing"},
+             "Aperture__lineage_andarium__auto_generated_rro_product.apk is missing"),
+            ("camera-overlay-other-target", {"camera_variant": "overlay-target"}, "must be a static overlay of"),
+            ("camera-overlay-not-static", {"camera_variant": "overlay-not-static"}, "must be a static overlay of"),
+            ("camera-overlay-static-missing", {"camera_variant": "overlay-static-missing"},
+             "must be a static overlay of"),
+            ("camera-overlay-target-missing", {"camera_variant": "overlay-target-missing"},
+             "must be a static overlay of"),
+            ("camera-application-overlayable", {"camera_variant": "app-overlayable"},
+             "declares an overlayable section"),
             ("motion-backend-without-orientation", {"entries": {
                 "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": synthetic_aarch64_elf()}},
              "lacks the device-orientation sensor"),
@@ -5313,8 +5527,22 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
             ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
              "must set config_enableAuxCameras to true"),
-            ("camera-aux-cameras-qualified", {"camera_variant": "aux-qualified"},
+            ("camera-aux-cameras-defined-twice", {"camera_variant": "aux-duplicate"},
              "must set config_enableAuxCameras to true"),
+            ("camera-aux-cameras-only-qualified", {"camera_variant": "aux-only-qualified"},
+             "defines config_enableAuxCameras only under a resource configuration"),
+            ("camera-ignored-ids-only-qualified", {"camera_variant": "ignored-only-qualified"},
+             "defines config_ignoredAuxCameraIds only under a resource configuration"),
+            ("camera-application-lost-aux-cameras", {"camera_variant": "app-no-aux"},
+             "does not define the bool resource config_enableAuxCameras in its default configuration"),
+            ("camera-application-lost-ignored-ids", {"camera_variant": "app-no-ignored"},
+             "does not define the array resource config_ignoredAuxCameraIds in its default configuration"),
+            ("camera-application-aux-cameras-only-qualified", {"camera_variant": "app-aux-qualified"},
+             "does not define the bool resource config_enableAuxCameras in its default configuration"),
+            ("camera-application-not-a-resource-table", {"camera_variant": "app-not-a-table"},
+             "Aperture.apk has no readable resource table: not a resource table"),
+            ("camera-application-truncated-resource-table", {"camera_variant": "app-truncated-table"},
+             "Aperture.apk has no readable resource table: not a resource table"),
             ("camera-ignored-ids-extra", {"camera_variant": "ignored-extra"},
              "must list the camera IDs"),
             ("camera-ignored-ids-empty", {"camera_variant": "ignored-none"}, "must list the camera IDs"),
@@ -5323,8 +5551,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must set config_supportsHardwareCamToggle to true"),
             ("camera-toggle-missing", {"camera_variant": "toggle-missing"},
              "must set config_supportsHardwareCamToggle to true"),
-            ("camera-toggle-qualified", {"camera_variant": "toggle-qualified"},
+            ("camera-toggle-defined-twice", {"camera_variant": "toggle-duplicate"},
              "must set config_supportsHardwareCamToggle to true"),
+            ("camera-toggle-only-qualified", {"camera_variant": "toggle-only-qualified"},
+             "defines config_supportsHardwareCamToggle only under a resource configuration"),
         ):
             reject(label, options, reason)
 
@@ -7027,6 +7257,42 @@ def network_stack_topic_problems(patch: str, markers: list[str]) -> list[str]:
     return problems
 
 
+def verify_camerax_denylist_assertion(android_root: Path) -> None:
+    """build-aosp.sh requires the inherited CameraX extensions switch in the vendor property denylist.
+
+    The switch stays in PRODUCT_VENDOR_PROPERTIES, which the product cannot edit: the denylist drops it
+    when the build writes the vendor property file, and the target-files verifier requires its absence
+    there. The statement is run on its own, with a stubbed get_build_var, against the cases that decide
+    it: the entry present beside others, absent, empty and a near match."""
+    script = (android_root / "build/build-aosp.sh").read_text()
+    property_name = "ro.camerax.extensions.enabled"
+    statement = re.search(
+        r'^\[\[ " \$\(get_build_var PRODUCT_VENDOR_PROPERTY_BLACKLIST\) " == \*" '
+        + re.escape(property_name) + r' "\* \]\] \|\|\n\tfail "[^"\n]*"$',
+        script, re.MULTILINE)
+    if statement is None:
+        fail("build-aosp.sh no longer requires the CameraX extensions switch in the vendor property denylist")
+    if re.search(r'PRODUCT_VENDOR_PROPERTIES" != \*" ' + re.escape(property_name), script):
+        fail("build-aosp.sh requires the inherited CameraX extensions switch to be absent from "
+             "PRODUCT_VENDOR_PROPERTIES, which an inherited property never is")
+    for denylist, accepted in (
+        (property_name, True),
+        (f"ro.a {property_name} ro.b", True),
+        ("", False),
+        ("ro.a ro.b", False),
+        (f"{property_name}2", False),
+        (f"x{property_name}", False),
+        ("ro.camerax.extensions", False),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", 'get_build_var() { [[ $1 == PRODUCT_VENDOR_PROPERTY_BLACKLIST ]] && printf %s "$DENYLIST"; }\n'
+             'fail() { echo "failed: $*"; exit 1; }\n' + statement.group(0)],
+            env={**os.environ, "DENYLIST": denylist}, capture_output=True, text=True, check=False)
+        if (result.returncode == 0) != accepted:
+            fail(f"build-aosp.sh's CameraX denylist assertion answers {result.returncode} for the denylist "
+                 f"{denylist!r}, not {'0' if accepted else '1'}: {result.stdout}{result.stderr}")
+
+
 def verify_network_stack_topic(android_root: Path) -> None:
     """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi check.
 
@@ -8621,6 +8887,7 @@ def main() -> None:
     verify_lmkd_gpu_reclaim(android_root)
     verify_network_stack_topic(android_root)
     verify_wifi_tracker_topic(android_root)
+    verify_camerax_denylist_assertion(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)
     verify_debugging_defaults(android_root)
