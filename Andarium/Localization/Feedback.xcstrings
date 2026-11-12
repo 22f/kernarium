@@ -364,7 +364,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要捨棄此使用者意見嗎？"
+            "value" : "要捨棄此回饋嗎？"
           }
         }
       }
@@ -410,7 +410,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "使用者意見會透過「郵件」App傳送。請在「設定」>「App」>「郵件」>「郵件帳號」中加入郵件帳號，然後再回到這裡。"
+            "value" : "回饋會透過「郵件」App傳送。請在「設定」>「App」>「郵件」>「郵件帳號」中加入郵件帳號，然後再回到這裡。"
           }
         }
       }
@@ -433,7 +433,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未傳送使用者意見"
+            "value" : "未傳送回饋"
           }
         }
       }
@@ -456,7 +456,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已傳送使用者意見"
+            "value" : "已傳送回饋"
           }
         }
       }
@@ -1008,7 +1008,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "傳送使用者意見"
+            "value" : "傳送回饋"
           }
         }
       }
@@ -1031,7 +1031,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "傳送使用者意見…"
+            "value" : "傳送回饋…"
           }
         }
       }
@@ -1123,7 +1123,7 @@
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "點一下側邊按鍵，然後點一下「設定」>「傳送使用者意見」。"
+            "value" : "點一下側邊按鍵，然後點一下「設定」>「傳送回饋」。"
           }
         }
       }
