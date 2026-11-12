@@ -38,7 +38,7 @@ constexpr Ipv4Address name_server{10, 0, 2, 3};
 constexpr Ipv4Address virtual_host{10, 0, 2, 77};
 constexpr dns::MacAddress guest_mac{0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 constexpr dns::MacAddress slirp_mac{0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
-/* What the provider serves itself; the IPv6 pair is the IPv6 test's. */
+/* What the provider serves itself. */
 constexpr dns::Servers servers{name_server, gateway, true, true};
 
 constexpr std::uint8_t protocol_icmp = 1;
