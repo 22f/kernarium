@@ -329,13 +329,14 @@ record's stall and network slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against; and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
-`andarium-motion-protocol`, `andarium-device-orientation`, `andarium-haptics-protocol`,
-`andarium-haptics-player`, `andarium-thermal-protocol`,
-`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image`,
-`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format (its
-device-orientation records and control frames against the golden frames in `tests/unit/andarium/fixtures`,
-which `andarium-core` reads too) and what the orientation sensor reports and when, the vibrator
+`andarium-motion-protocol`, `andarium-device-orientation`,
+`andarium-haptics-protocol`, `andarium-haptics-player`,
+`andarium-thermal-protocol`, `andarium-thermal-levels` and
+`andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the
+motion wire format (its device-orientation records and control frames against
+the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
+too) and what the orientation sensor reports and when, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
@@ -709,11 +710,14 @@ application over a vsock forward to the motion port with the
 listed and used by the window manager, that Android's rotation follows each
 value with auto-rotate on, stays and offers the rotation suggestion with it off,
 follows or keeps to what an application that asks for an orientation allows,
-and behaves at the lock screen, in the setup wizard, for a value sent before
-the sensor was registered, for a value said again, for a turn made with a
-finger down, for a value sent while the screen is off and for a host that
-connects late or reconnects. Restarting the framework or the sensors HAL needs
-root, which a user build does not give, so the runner does not.
+that the setup wizard turns to a value sent before the sensor was registered
+(the first frame says the sensor is not yet in use), that the lock screen stays
+upright and the newest value turns the display at unlock, that a value said
+again changes nothing, that a turn made with a finger down waits for the finger,
+that a value sent while the screen is off turns the display once it is on (the
+sensor idle while off and in use again), and how a host that connects late or
+reconnects is served. Restarting the framework or the sensors HAL needs root,
+which a user build does not give, so the runner does not.
 `--launch-only` stops after the launch's state (the property, the sensors the
 service lists and their flags, the judge the window manager picked and what it
 holds, no SELinux denial about the property), which is what to run first on a

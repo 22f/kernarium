@@ -85,8 +85,8 @@ observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
 over the motion connection (`MotionOrientation.swift`), which Android treats as
 a rotation proposal that its own policy still decides on. The Gyroscope switch
 governs only the accelerometer and gyroscope data apps may read, not this. A
-guest whose image has no such sensor judges the accelerometer as before. On iPad the
-interface turns with the device in a session as it does at Home, full screen
+guest whose image has no such sensor judges the accelerometer as before. On iPad
+the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
 interface orientation (`MotionMount`, `SessionOrientationPolicy`). An
