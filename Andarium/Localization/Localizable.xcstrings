@@ -7503,29 +7503,6 @@
         }
       }
     },
-    "The app was built for API level %lld. This virtual machine installs apps built for API level %lld or later." : {
-      "comment" : "API level is Android's number for a version; both are plain numbers (7, 24).",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアプリはAPIレベル%1$lldを対象に作られています。この仮想マシンでは、APIレベル%2$lld以降を対象としたアプリをインストールできます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此应用是为API级别%1$lld开发的。此虚拟机可安装为API级别%2$lld或更高版本开发的应用。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此應用程式是為API級別%1$lld所開發。此虛擬機器可安裝為API級別%2$lld或更新版本所開發的應用程式。"
-          }
-        }
-      }
-    },
     "The file changed while it was being copied." : {
       "localizations" : {
         "ja" : {
@@ -8926,13 +8903,36 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此应用是为早得多的Android版本开发的。Android会阻止这类应用，因为它们早于Android较新的隐私和安全保护。如果仍要安装，它可能无法正常运行。"
+            "value" : "此应用是为非常旧的Android版本开发的。Android会阻止安装这类应用，因为它们是在Android推出较新的隐私和安全保护之前开发的。如果仍要安装，此应用可能无法正常运行。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此應用程式是為更早許多的Android版本所開發。Android會阻擋這類應用程式，因為它們早於Android較新的隱私權與安全性保護。若仍要安裝，它可能無法正常運作。"
+            "value" : "此應用程式是為非常舊的Android版本所開發。Android會阻擋安裝這類應用程式，因為它們是在Android推出較新的隱私權與安全性保護之前開發的。若仍要安裝，此應用程式可能無法正常運作。"
+          }
+        }
+      }
+    },
+    "This app was built for API level %lld. Android in this virtual machine normally installs only apps built for API level %lld or later." : {
+      "comment" : "API level is Android's number for a version; both are plain numbers (7, 24).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリはAPIレベル%1$lld向けに作られています。この仮想マシンのAndroidは、通常、APIレベル%2$lld以降向けに作られたアプリのみをインストールします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为API级别%1$lld开发的。此虚拟机中的Android通常只安装为API级别%2$lld或更高级别开发的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為API級別%1$lld所開發。此虛擬機器中的Android通常只會安裝為API級別%2$lld或更高級別所開發的應用程式。"
           }
         }
       }
