@@ -123,8 +123,10 @@ struct WhatsNewTests {
             "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "Location", "Haptics",
             "Send feedback", "More fixes",
         ])
-        #expect(WhatsNewRibbon.summary(titles, naming: 8) == titles.joined(separator: " \u{00B7} "))
-        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "Snapshots \u{00B7} Resolution \u{00B7} 6 more")
+        // The dot keeps to the end of its line: a no-break space before it.
+        let separator = "\u{00A0}\u{00B7} "
+        #expect(WhatsNewRibbon.summary(titles, naming: 8) == titles.joined(separator: separator))
+        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "Snapshots\(separator)Resolution\(separator)6 more")
         #expect(WhatsNewRibbon.summary(titles, naming: 0) == "8 new features")
     }
 
@@ -139,7 +141,7 @@ struct WhatsNewTests {
                 return WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: named)
             }
         }
-        let separator = " \u{00B7} "
+        let separator = "\u{00A0}\u{00B7} "
         #expect(ribbon(on: host(maximumMiB: 4096), naming: 4) == [
             "Snapshots", "Resolution", "Keyboard, mouse and controllers", "Location", "3 more",
         ].joined(separator: separator))
