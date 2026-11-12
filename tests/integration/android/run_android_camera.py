@@ -827,8 +827,14 @@ def check_preview(guest: Guest, plan: Plan) -> None:
             statistics.append(luma_statistics(guest.screenshot()))
             return statistics[-1]
 
+        def bring_back() -> None:
+            # The application left the camera on its own: what the platform logged about it goes out before it is
+            # started again, since a restart is also a teardown of that evidence.
+            print_application_events(guest, sys.stdout)
+            start_camera_application(guest)
+
         sample = BlockedSampler(lambda: parse_foreground(guest.shell(FOREGROUND_COMMAND, timeout=60)), take,
-                                lambda: start_camera_application(guest), time.sleep)
+                                bring_back, time.sleep)
         message = blocked_preview(sample, time.sleep)
         if message:
             raise Failure(f"a blocked session {message}")
@@ -1124,12 +1130,18 @@ def print_camera_log(guest: Guest) -> None:
         print("in front at the failure:\n" + foreground.rstrip(), file=sys.stderr)
     except Exception as problem:
         print(f"(no foreground state: {problem})", file=sys.stderr)
+    print_application_events(guest, sys.stderr)
+
+
+def print_application_events(guest: Guest, stream) -> None:
+    """The camera application's own log lines: its crashes, ANRs, process deaths and the windows (dialogs) that
+    came in front of it. A guest that is gone is said, not raised."""
     try:
         events = guest.shell(f"logcat -d -b all | grep -a -E '{APP_EVENTS_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
                              f"| tail -n {APP_EVENTS_LINES}", timeout=120)
-        print("events of the camera application and its windows:\n" + events.rstrip(), file=sys.stderr)
+        print("events of the camera application and its windows:\n" + events.rstrip(), file=stream)
     except Exception as problem:
-        print(f"(no application events: {problem})", file=sys.stderr)
+        print(f"(no application events: {problem})", file=stream)
 
 
 def main() -> int:

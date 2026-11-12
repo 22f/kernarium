@@ -767,6 +767,12 @@ class BlockedSamplerTests(unittest.TestCase):
         starts = [command for command in guest.commands if command.startswith("am start")]
         self.assertEqual(len(starts), 2)
         self.assertIn("bringing it back", out.getvalue())
+        # The application's own events are read before the second start, and printed with the line that says it left.
+        events = [index for index, command in enumerate(guest.commands) if "FATAL EXCEPTION" in command]
+        second_start = [index for index, command in enumerate(guest.commands) if command.startswith("am start")][1]
+        self.assertEqual(len(events), 1)
+        self.assertLess(events[0], second_start)
+        self.assertIn("events of the camera application and its windows:", out.getvalue())
         self.assertIn("blocked preview (2 samples): mean 0.0, deviation 0.0", out.getvalue())
 
 
