@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import CryptoKit
 import Foundation
 import SwiftUI
 import Testing
@@ -23,6 +24,24 @@ private func patternedApk(bytes: Int = 600_001, name: String = "Gears.apk") thro
     for index in 0..<bytes { data[index] = UInt8(truncatingIfNeeded: index &* 31 &+ index >> 8) }
     try data.write(to: url)
     return url
+}
+
+/// The SHA-256 of the file's bytes as the fake adbd writes one (hex).
+private func fileDigest(_ url: URL) -> String? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+/// An adb identity for the production path; the fake adbd never asks it to sign.
+private func throwawayIdentity() throws -> AdbKeyStore.Identity {
+    var failure: Unmanaged<CFError>?
+    let attributes: [CFString: Any] = [
+        kSecAttrKeyType: kSecAttrKeyTypeRSA, kSecAttrKeySizeInBits: 2048, kSecAttrIsPermanent: false,
+    ]
+    guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &failure) else {
+        throw failure?.takeRetainedValue() ?? CocoaError(.coderInvalidValue)
+    }
+    return AdbKeyStore.Identity(privateKey: key, publicKeyLine: "AAAA")
 }
 
 @Suite(.serialized)
@@ -79,6 +98,7 @@ struct LegacyApkInstallOperationTests {
         #expect(flagged.filter { $0 != "--bypass-low-target-sdk-block" } == plain)
         let digests = adbd.installDigests
         #expect(digests.count == 2 && digests[0] == digests[1])
+        #expect(digests.last == fileDigest(url))
         #expect(adbd.installBytes == 2 * 600_001)
     }
 
@@ -138,9 +158,43 @@ struct LegacyApkInstallOperationTests {
         adbd.failsAtOnce = false
         adbd.installOutputs = ["Success\n"]
         try await install(url, on: adbd, bypass: true)
+        // The retry sent the whole file, byte for byte; the refused attempt
+        // gave up after its first write.
         #expect(adbd.installDigests.count == 2)
+        #expect(adbd.installDigests.last == fileDigest(url))
         #expect(adbd.installBytes >= UInt64(bytes))
         #expect(adbd.servicesOpened.last == PackageInstallCommand.service(size: bytes, bypassLowTargetSdkBlock: true))
+    }
+
+    /// What the model gets from the production call, `presented` and all: the refusal reaches it
+    /// as itself, and with the flag it does not.
+    @Test func theRefusalReachesTheModelThroughTheProductionInstallCall() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        adbd.installOutputs = [refusalLine, refusalLine]
+        let url = try patternedApk()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let operations = AdbGuestOperations(
+            identity: try throwawayIdentity(), clock: GuestRunClock(), device: "iPad", connector: adbd,
+            hostFree: { .max }, run: GuestRunMark.random())
+        let first = await outcome { try await operations.installApk(at: url, update: { _ in }) }
+        guard case let .failure(plain) = first, let refused = plain as? LegacyApkRefused else {
+            Issue.record("expected the too-old refusal, got \(first)")
+            return
+        }
+        #expect(refused.target == LegacyTarget(appLevel: 7, requiredLevel: 24))
+        let second = await outcome { try await operations.installApk(at: url, bypassLowTargetSdkBlock: true, update: { _ in }) }
+        guard case let .failure(flagged) = second else {
+            Issue.record("expected a failure with the flag")
+            return
+        }
+        #expect(!(flagged is LegacyApkRefused))
+        #expect((flagged as? AdbFailure)?.message == PackageInstallMessages.message(forCode: "FAILED_DEPRECATED_SDK_VERSION"))
+        let services = adbd.servicesOpened.filter { $0.hasPrefix("abb_exec:") }
+        #expect(services == [
+            PackageInstallCommand.service(size: 600_001),
+            PackageInstallCommand.service(size: 600_001, bypassLowTargetSdkBlock: true),
+        ])
     }
 
     @Test func theRoomChecksRunAgainOnTheRetry() async throws {
@@ -260,9 +314,10 @@ struct LegacyApkInstallModelTests {
         defer { try? FileManager.default.removeItem(at: url) }
         model.installPicked(url)
         #expect(await eventually { model.legacyInstallQuestion != nil })
-        // The question: the versions, no error code, and the overlay waits behind it without a Cancel.
+        // The question: the versions, no error code, and the overlay waits behind it, with the
+        // Cancel that the alert covers.
         #expect(model.legacyInstallQuestion?.target == target)
-        #expect(model.busy?.title == "Installing app" && model.busy?.cancel == nil && model.busy?.result == nil)
+        #expect(model.busy?.title == "Installing app" && model.busy?.cancel != nil && model.busy?.result == nil)
         #expect(model.busy?.detail.hasSuffix("Gears.apk \u{00B7} 3 MiB") == true)
         #expect(model.alert == nil && !model.guestHasKeys)
         #expect(driver.installAttempts == [false])
@@ -323,6 +378,26 @@ struct LegacyApkInstallModelTests {
         model.answerLegacyInstall(installAnyway: true)
         try await Task.sleep(for: .milliseconds(50))
         #expect(driver.installAttempts == [false] && model.busy == nil)
+    }
+
+    /// An alert that cannot present (another presentation is in its way) must not leave the
+    /// person with an overlay they cannot close: the overlay's Cancel ends the install.
+    @Test func theOverlaysCancelWhileTheQuestionIsUpEndsTheInstallWithNoBannerAndNoSecondAttempt() async throws {
+        let (model, driver) = running()
+        refusing(driver)
+        let url = try apk()
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(await eventually { model.legacyInstallQuestion != nil })
+        let cancel = try #require(model.busy?.cancel)
+        cancel.action()
+        #expect(await eventually { model.busy == nil })
+        #expect(model.alert == nil && model.legacyInstallQuestion == nil)
+        #expect(driver.installAttempts == [false])
+        // The answer that never came has nothing left to resume.
+        model.answerLegacyInstall(installAnyway: true)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(driver.installAttempts == [false] && model.busy == nil && model.alert == nil)
     }
 
     @Test func aSecondAttemptThatFailsShowsTheOrdinaryWordsAndAsksNothingMore() async throws {
@@ -397,20 +472,55 @@ struct LegacyApkInstallModelTests {
         #expect(driver.installAttempts == [false])
     }
 
-    @Test func theFileStaysReadableAcrossTheQuestion() async throws {
-        // The scope the picker gave is held to the end of the install: the file is read for the
-        // second attempt exactly as for the first.
+    /// What the model does with the access a picked file carries: it is taken once, before
+    /// anything is read, held while the person decides, and ended once, with the install.
+    @Test func thePickedFilesAccessIsHeldAcrossTheQuestionAndEndsOnceWithTheInstall() async throws {
         let (model, driver) = running()
-        refusing(driver)
+        let events = EventLog()
+        model.accessPickedFile = { _ in
+            events.add("start")
+            return { events.add("end") }
+        }
+        driver.installAttempt = { bypass, _ in
+            events.add(bypass ? "second attempt" : "first attempt")
+            if !bypass { throw LegacyApkRefused(target: LegacyTarget(appLevel: 7, requiredLevel: 24)) }
+        }
         let url = try apk()
         defer { try? FileManager.default.removeItem(at: url) }
         model.installPicked(url)
         #expect(await eventually { model.legacyInstallQuestion != nil })
+        // The person takes a while: the access is still held.
         try await Task.sleep(for: .milliseconds(100))
-        #expect(FileManager.default.isReadableFile(atPath: url.path))
+        #expect(events.all == ["start", "first attempt"])
         model.answerLegacyInstall(installAnyway: true)
         #expect(await eventually { model.busy?.result != nil })
+        #expect(events.all == ["start", "first attempt", "second attempt", "end"])
         #expect(driver.installURLs == [url, url])
+    }
+
+    @Test func theAccessEndsOnceWhenTheQuestionIsCancelledAndWhenTheGuestEnds() async throws {
+        for ending in ["Cancel", "the guest ends"] {
+            let (model, driver) = running()
+            refusing(driver)
+            let events = EventLog()
+            model.accessPickedFile = { _ in
+                events.add("start")
+                return { events.add("end") }
+            }
+            let url = try apk()
+            defer { try? FileManager.default.removeItem(at: url) }
+            model.installPicked(url)
+            #expect(await eventually { model.legacyInstallQuestion != nil }, "\(ending)")
+            #expect(events.all == ["start"], "\(ending)")
+            if ending == "Cancel" {
+                model.answerLegacyInstall(installAnyway: false)
+            } else {
+                model.runEnded(RunEnd(result: 0), uptimeSeconds: 60)
+            }
+            #expect(await eventually { model.busy == nil && events.all.count == 2 }, "\(ending)")
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(events.all == ["start", "end"], "\(ending)")
+        }
     }
 
     @Test func noOtherOperationRaisesTheQuestion() async throws {
@@ -426,6 +536,13 @@ struct LegacyApkInstallModelTests {
         model.installPicked(notApk)
         #expect(model.legacyInstallQuestion == nil && driver.installAttempts.isEmpty)
     }
+}
+
+private nonisolated final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+    func add(_ event: String) { lock.withLock { events.append(event) } }
+    var all: [String] { lock.withLock { events } }
 }
 
 private nonisolated final class AttemptGate: @unchecked Sendable {
@@ -446,7 +563,10 @@ struct LegacyApkInstallAlertTests {
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000
     )
 
-    private func running() -> (AppModel, StubDriver) {
+    /// A running guest. The person normally reached Settings through the side keys, which ends
+    /// their tip, so the tests leave the keys open; `leavingTheTip` keeps them closed, as on a
+    /// folding iPhone's cover or standing deck, where the tip can be up.
+    private func running(leavingTheTip: Bool = false) -> (AppModel, StubDriver) {
         let system = SystemInfo(
             version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KB pages", appVersion: "1")
         let model = AppModel(
@@ -455,9 +575,7 @@ struct LegacyApkInstallAlertTests {
         let driver = StubDriver(plan: .normal)
         model.driver = driver
         model.phase = .running(.normal)
-        // The person reached Settings through the side keys, which ends their tip: the test
-        // bundle shows the tip in every session, and a popover would stand in the alert's way.
-        model.session.sideKeysOpen = true
+        if !leavingTheTip { model.session.sideKeysOpen = true }
         return (model, driver)
     }
 
@@ -558,6 +676,61 @@ struct LegacyApkInstallAlertTests {
             }
             try #require(await eventually { alert(over: controller) == nil })
         }
+    }
+
+    /// The side keys' tip is a popover over the screens, up whenever the keys are closed. It
+    /// is not for the test to close: the question has to come up whatever else is on screen.
+    @Test func theQuestionPresentsWhileTheSideKeysTipIsUp() async throws {
+        let (model, driver) = running(leavingTheTip: true)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = AndariumHostingController(
+            rootView: RootView(entry: AppEntry(overrides: LaunchOverrides())).environment(model), model: model)
+        lease.window.rootViewController = controller
+        try #require(await eventually { controller.presentedViewController != nil }, "the tip never came up")
+        #expect(alert(over: controller) == nil)
+        let target = LegacyTarget(appLevel: 7, requiredLevel: 24)
+        driver.installAttempt = { bypass, _ in if !bypass { throw LegacyApkRefused(target: target) } }
+        let url = try patternedApk(bytes: 3 << 20)
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        try #require(await eventually { model.legacyInstallQuestion != nil })
+        try #require(await eventually { alert(over: controller) != nil }, "the question never presented")
+        model.answerLegacyInstall(installAnyway: false)
+        try #require(await eventually { alert(over: controller) == nil && model.busy == nil })
+    }
+
+    /// An alert of the screens (a failure, a notice) can be up when the answer arrives. The
+    /// question presents once it is gone, and the overlay's Cancel serves meanwhile.
+    @Test func theQuestionPresentsOnceAnotherAlertIsGone() async throws {
+        let (model, driver) = running()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = AndariumHostingController(
+            rootView: RootView(entry: AppEntry(overrides: LaunchOverrides())).environment(model), model: model)
+        lease.window.rootViewController = controller
+        let target = LegacyTarget(appLevel: 7, requiredLevel: 24)
+        driver.installAttempt = { bypass, _ in
+            if !bypass {
+                try await Task.sleep(for: .milliseconds(600))
+                throw LegacyApkRefused(target: target)
+            }
+        }
+        let url = try patternedApk(bytes: 3 << 20)
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        model.alert = AppAlert(title: "Display rotation unavailable", message: "Rotate the device.")
+        try #require(await eventually { alert(over: controller)?.title == "Display rotation unavailable" })
+        try #require(await eventually { model.legacyInstallQuestion != nil })
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(alert(over: controller)?.title == "Display rotation unavailable")
+        model.alert = nil
+        try #require(await eventually { alert(over: controller)?.title == LegacyInstallWords.title }, "the question never presented")
+        let shown = try #require(alert(over: controller))
+        let cancel = try #require(control(labelled: "Cancel", in: shown.view))
+        if !cancel.accessibilityActivate(), let control = cancel as? UIControl { control.sendActions(for: .touchUpInside) }
+        try #require(await eventually { alert(over: controller) == nil && model.busy == nil })
+        #expect(driver.installAttempts == [false])
     }
 
     @Test func theNumbersAreLeftOutWhenTheAnswerNamesNone() {
