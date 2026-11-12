@@ -19,8 +19,11 @@ answers in place of the expected answer, only reports what it found. The
 network stays validated, no sign-in notification or captive portal state
 follows, and the next report carries the probes' bits with the HTTPS
 probe attempted and not succeeded, which is how a client tells a failed
-check from a passing one. A forced evaluation checks the network again,
-once the network has been validated. Data stall detection stays off.
+check from a passing one. A forced evaluation checks a network that is
+validated. One that is not, because private DNS failed or the first
+validation is not done, is evaluated as the stock rules say, so a check
+never reports validated a network whose strict private DNS has failed.
+Data stall detection stays off.
 
 A completed check returns to the validated state without evaluating
 private DNS again, and keeps the last private DNS probe's result in its
@@ -28,8 +31,11 @@ report. A failed check therefore costs the network nothing: strict
 private DNS is not probed once for each check, and one failed probe of
 that kind does not report the network invalid. Private DNS keeps its own
 triggers: the first validation, a settings change and its own failures.
-A check that is already waiting keeps its time when ValidatedState is
-entered again.
+A request to evaluate it that comes while a check starts is deferred to
+ValidatedState, which handles it as the stock rules do. A check that is
+already waiting keeps its time when ValidatedState is entered again. One
+that falls due while private DNS is evaluated is dropped there, and
+ValidatedState posts the next one afresh, late by at most one back-off.
 
 A VPN, which has the Wi-Fi transport of its underlying network but not
 NET_CAPABILITY_NOT_VPN, a test network that replicates Wi-Fi, a network
@@ -42,11 +48,11 @@ validation or data stall detection expect the stock rules.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../server/connectivity/NetworkMonitor.java   | 151 +++++++++++++++++-
- 1 file changed, 145 insertions(+), 6 deletions(-)
+ .../server/connectivity/NetworkMonitor.java   | 163 +++++++++++++++++-
+ 1 file changed, 157 insertions(+), 6 deletions(-)
 
 diff --git a/src/com/android/server/connectivity/NetworkMonitor.java b/src/com/android/server/connectivity/NetworkMonitor.java
-index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5aed7c553e1 100644
+index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..40568dbb90678ca552802f307452d04b4d00df6e 100644
 --- a/src/com/android/server/connectivity/NetworkMonitor.java
 +++ b/src/com/android/server/connectivity/NetworkMonitor.java
 @@ -443,6 +443,12 @@ public class NetworkMonitor extends StateMachine {
@@ -161,15 +167,16 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
          final boolean dunValidationRequired = isAtLeastU()
                  || mContext.getResources().getBoolean(R.bool.config_validate_dun_networks);
          final boolean vpnValidationRequired = SdkLevel.isAtLeastT()
-@@ -1098,6 +1188,15 @@ public class NetworkMonitor extends StateMachine {
+@@ -1098,6 +1188,16 @@ public class NetworkMonitor extends StateMachine {
                      }
                      validationLog(msg);
                      mUidResponsibleForReeval = message.arg1;
-+                    if (isWifiExemptFromValidation() && mValidations > 0) {
-+                        // A validated Wi-Fi network is checked again whenever an evaluation is
-+                        // forced, and that check takes the place of one that was waiting. One that
-+                        // is not validated yet is validated first, and ValidatedState then posts
-+                        // its first check.
++                    if (isWifiExemptFromValidation() && getCurrentState() == mValidatedState) {
++                        // A Wi-Fi network that is validated is checked again whenever an
++                        // evaluation is forced, and that check takes the place of one that was
++                        // waiting. One that is not validated is evaluated as the stock rules say
++                        // (private DNS, then validated), and ValidatedState posts its check: a
++                        // check never reports a network validated that private DNS has failed.
 +                        removeMessages(CMD_WIFI_CHECK);
 +                        mWifiCheckStarted = true;
 +                        mWifiCheckDue = true;
@@ -177,7 +184,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
                      transitionTo(mEvaluatingState);
                      return HANDLED;
                  case CMD_CAPTIVE_PORTAL_APP_FINISHED:
-@@ -1331,6 +1430,10 @@ public class NetworkMonitor extends StateMachine {
+@@ -1331,6 +1431,10 @@ public class NetworkMonitor extends StateMachine {
              // start periodical polling.
              sendTcpPollingEvent();
              maybeStopCollectionAndSendMetrics();
@@ -188,7 +195,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
          }
  
          private void initSocketTrackingIfRequired() {
-@@ -1355,6 +1458,12 @@ public class NetworkMonitor extends StateMachine {
+@@ -1355,6 +1459,12 @@ public class NetworkMonitor extends StateMachine {
                      // separately.
                      transitionTo(mEvaluatingPrivateDnsState);
                      break;
@@ -201,7 +208,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
                  case EVENT_DNS_NOTIFICATION:
                      final DnsStallDetector dsd = getDnsStallDetector();
                      if (dsd == null) break;
-@@ -1543,8 +1652,10 @@ public class NetworkMonitor extends StateMachine {
+@@ -1543,8 +1653,10 @@ public class NetworkMonitor extends StateMachine {
              // Check if the network is captive with Terms & Conditions page. The first network
              // evaluation for captive networks with T&Cs returns early but NetworkMonitor will then
              // keep checking for connectivity to determine when the T&Cs are cleared.
@@ -213,7 +220,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
                  mLastPortalProbeResult = new CaptivePortalProbeResult(
                          CaptivePortalProbeResult.PORTAL_CODE,
                          mLinkProperties.getCaptivePortalData().getUserPortalUrl()
-@@ -1565,7 +1676,17 @@ public class NetworkMonitor extends StateMachine {
+@@ -1565,7 +1677,17 @@ public class NetworkMonitor extends StateMachine {
              mEvaluatingCapportUrl = mLinkProperties.getCaptivePortalApiUrl();
              // Reset all current probe results to zero, but retain current validation state until
              // validation succeeds or fails.
@@ -231,7 +238,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
          }
  
          @Override
-@@ -1593,7 +1714,8 @@ public class NetworkMonitor extends StateMachine {
+@@ -1593,7 +1715,8 @@ public class NetworkMonitor extends StateMachine {
                      //    packets over the network may be undesirable, for example an extremely
                      //    expensive metered network, or unwanted leaking of the User Agent string.
                      // Also don't bother validating networks that the user already said they
@@ -241,7 +248,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
                      //
                      // On networks that need to support private DNS in strict mode (e.g., VPNs, but
                      // not networks that don't provide Internet access), we still need to perform
-@@ -1605,14 +1727,19 @@ public class NetworkMonitor extends StateMachine {
+@@ -1605,14 +1728,19 @@ public class NetworkMonitor extends StateMachine {
                          validationLog("Captive portal is used as is, resolving private DNS");
                          transitionTo(mEvaluatingPrivateDnsState);
                          return HANDLED;
@@ -265,7 +272,32 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
                              transitionTo(mValidatedState);
                          }
                          return HANDLED;
-@@ -2199,6 +2326,15 @@ public class NetworkMonitor extends StateMachine {
+@@ -1621,6 +1749,15 @@ public class NetworkMonitor extends StateMachine {
+ 
+                     transitionTo(mProbingState);
+                     return HANDLED;
++                case CMD_EVALUATE_PRIVATE_DNS:
++                    // A check does not evaluate private DNS, so a request that reaches the check
++                    // here would be dropped. ProbingState defers it to ValidatedState, which
++                    // evaluates it as the stock states do.
++                    if (isWifiExemptFromValidation() && mWifiCheckDue) {
++                        deferMessage(message);
++                        return HANDLED;
++                    }
++                    return NOT_HANDLED;
+                 case CMD_FORCE_REEVALUATION:
+                     // The evaluation process restarts via EvaluatingState#enter.
+                     final boolean forceAccept = (message.arg2 != 0);
+@@ -1719,6 +1856,8 @@ public class NetworkMonitor extends StateMachine {
+ 
+         @Override
+         public void enter() {
++            // An evaluation that reaches private DNS is not a check of a validated network.
++            mWifiCheckDue = false;
+             mPrivateDnsReevalDelayMs = INITIAL_REEVALUATE_DELAY_MS;
+             mSyncOnlyPrivateDnsConfig = null;
+             if (mDdrEnabled) {
+@@ -2199,6 +2338,15 @@ public class NetworkMonitor extends StateMachine {
  
                      maybeWriteDataStallStats(probeResult);
  
@@ -281,7 +313,7 @@ index 39981a7b6b7120ec04b9f5cefcfeeaa2c12cb958..a0ffbb70ce4b036de53010721c46f5ae
                      if (probeResult.isSuccessful()) {
                          // Transit EvaluatingPrivateDnsState to get to Validated
                          // state (even if no Private DNS validation required).
-@@ -2238,6 +2374,9 @@ public class NetworkMonitor extends StateMachine {
+@@ -2238,6 +2386,9 @@ public class NetworkMonitor extends StateMachine {
                  case EVENT_ACCEPT_PARTIAL_CONNECTIVITY:
                      // Leave the event to DefaultState.
                      return NOT_HANDLED;
