@@ -12,13 +12,13 @@
       {
         "id": "resolution",
         "title": "Resolution",
-        "text": "Choose the resolution of the virtual machine’s display on Home, up to your screen’s native resolution.",
+        "text": "On Home, choose the resolution of the virtual machine’s display, up to your screen’s native resolution.",
         "symbol": "squareshape.split.3x3"
       },
       {
         "id": "ipad-rotation",
         "title": "Rotation on iPad",
-        "text": "On iPad, the whole app now turns with the device, also while the virtual machine runs.",
+        "text": "On iPad, the whole app now turns with the device, even while the virtual machine runs.",
         "symbol": "rotate.right",
         "requirement": {
           "device": "pad"
@@ -27,7 +27,7 @@
       {
         "id": "keyboard-mouse-controllers",
         "title": "Keyboard, mouse and controllers",
-        "text": "Use a hardware keyboard, a mouse or trackpad and game controllers with the virtual machine.",
+        "text": "Use a hardware keyboard and game controllers with the virtual machine, and on iPad a mouse or trackpad too.",
         "symbol": "keyboard.fill"
       },
       {
@@ -39,7 +39,7 @@
       {
         "id": "haptics",
         "title": "Haptics",
-        "text": "On iPhone, the virtual machine’s vibration now plays on the Taptic Engine. Turn it off under Capabilities on Home.",
+        "text": "On iPhone, the virtual machine’s vibration now plays on the Taptic Engine. You can turn it off in Capabilities on Home.",
         "symbol": "iphone.radiowaves.left.and.right",
         "requirement": {
           "device": "haptics"
@@ -48,7 +48,7 @@
       {
         "id": "send-feedback",
         "title": "Send feedback",
-        "text": "Email the developer from Info or Settings, with screenshots and a bug report if you like.",
+        "text": "Email the developer from Info, or from Settings while the virtual machine runs, with screenshots and a bug report if you like.",
         "symbol": "envelope.fill"
       },
       {
@@ -60,7 +60,7 @@
           "Fixed the virtual machine’s Wi-Fi not reconnecting after it drops",
           "Fixed a crash when a network connection closes suddenly",
           "Fixed more crashes in 3D games and apps",
-          "Fixed apps installed with Install APK missing from the home screen"
+          "Fixed apps installed with Install APK not appearing on Android’s home screen"
         ],
         "symbol": "wrench.and.screwdriver.fill"
       }

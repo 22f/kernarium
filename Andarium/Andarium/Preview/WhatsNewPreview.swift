@@ -9,7 +9,7 @@ import UIKit
 /// application bundles notes from build 9 on). A device keeps the record in its
 /// defaults.
 enum WhatsNewPreview {
-    /// The build the preview's What's New screens run, the first with notes.
+    /// The build the preview's What's New screens run.
     static let currentBuild = 10
     static let appVersion = "1.0 (10)"
 

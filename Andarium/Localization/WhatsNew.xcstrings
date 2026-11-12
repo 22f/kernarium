@@ -24,48 +24,25 @@
         }
       }
     },
-    "Choose the resolution of the virtual machine’s display on Home, up to your screen’s native resolution." : {
+    "Email the developer from Info, or from Settings while the virtual machine runs, with screenshots and a bug report if you like." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "“ホーム”で仮想マシンの画面の解像度を選べます。画面のネイティブ解像度まで選択できます。"
+            "value" : "“情報”、または仮想マシンの実行中に“設定”から、デベロッパにメールを送信できます。スクリーンショットやバグレポートも添付できます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在“主页”中选择虚拟机屏幕的分辨率，最高可选屏幕的原生分辨率。"
+            "value" : "在“信息”中或虚拟机运行时的“设置”中向开发者发送电子邮件，还可以附上截屏和错误报告。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在「首頁」中選擇虛擬機器螢幕的解析度，最高可選螢幕的原生解析度。"
-          }
-        }
-      }
-    },
-    "Email the developer from Info or Settings, with screenshots and a bug report if you like." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "“情報”または“設定”からデベロッパにメールを送信できます。スクリーンショットやバグレポートも添付できます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在“信息”或“设置”中向开发者发送电子邮件，还可以附上截屏和错误报告。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "在「資訊」或「設定」中傳送電子郵件給開發者，還可以附上截圖和錯誤報告。"
+            "value" : "在「資訊」中或虛擬機器執行時的「設定」中傳送電子郵件給開發者，還可以附上截圖和錯誤報告。"
           }
         }
       }
@@ -185,25 +162,25 @@
         }
       }
     },
-    "Fixed apps installed with Install APK missing from the home screen" : {
+    "Fixed apps installed with Install APK not appearing on Android’s home screen" : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "“APKをインストール”でインストールしたアプリがホーム画面に表示されない問題を修正しました"
+            "value" : "“APKをインストール”でインストールしたアプリがAndroidのホーム画面に表示されない問題を修正しました"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修复了通过“安装APK”安装的应用不显示在主屏幕上的问题"
+            "value" : "修复了通过“安装APK”安装的应用未出现在Android主屏幕上的问题"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "修正透過「安裝APK」安裝的應用程式未顯示在主畫面的問題"
+            "value" : "修正透過「安裝APK」安裝的應用程式未出現在Android主畫面的問題"
           }
         }
       }
@@ -461,6 +438,29 @@
         }
       }
     },
+    "On Home, choose the resolution of the virtual machine’s display, up to your screen’s native resolution." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“ホーム”で仮想マシンの画面の解像度を、画面のネイティブ解像度まで選べます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在“主页”中选择虚拟机屏幕的分辨率，最高可选屏幕的原生分辨率。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在「首頁」中選擇虛擬機器螢幕的解析度，最高可選螢幕的原生解析度。"
+          }
+        }
+      }
+    },
     "On devices that allow it, the virtual machine’s RAM can now go above 4 GiB." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -484,7 +484,7 @@
         }
       }
     },
-    "On iPad, the whole app now turns with the device, also while the virtual machine runs." : {
+    "On iPad, the whole app now turns with the device, even while the virtual machine runs." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -507,7 +507,7 @@
         }
       }
     },
-    "On iPhone, the virtual machine’s vibration now plays on the Taptic Engine. Turn it off under Capabilities on Home." : {
+    "On iPhone, the virtual machine’s vibration now plays on the Taptic Engine. You can turn it off in Capabilities on Home." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
@@ -651,7 +651,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このデバイスの位置情報を仮想マシンと共有します。初期状態ではオフで、“ホーム”の“デバイス機能”でオンにできます。"
+            "value" : "このデバイスの位置情報を仮想マシンと共有できます。初期状態ではオフで、“ホーム”の“デバイス機能”でオンにできます。"
           }
         },
         "zh-Hans" : {
@@ -714,25 +714,25 @@
         }
       }
     },
-    "Use a hardware keyboard, a mouse or trackpad and game controllers with the virtual machine." : {
+    "Use a hardware keyboard and game controllers with the virtual machine, and on iPad a mouse or trackpad too." : {
       "extractionState" : "manual",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仮想マシンでハードウェアキーボード、マウスやトラックパッド、ゲームコントローラを使えます。"
+            "value" : "仮想マシンでハードウェアキーボードやゲームコントローラを使えます。iPadではマウスやトラックパッドも使えます。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在虚拟机中使用实体键盘、鼠标或触控板，以及游戏控制器。"
+            "value" : "在虚拟机中使用实体键盘和游戏控制器；在iPad上还可以使用鼠标或触控板。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在虛擬機器中使用硬體鍵盤、滑鼠或觸控式軌跡板，以及遊戲控制器。"
+            "value" : "在虛擬機器中使用硬體鍵盤和遊戲控制器；在iPad上還可以使用滑鼠或觸控式軌跡板。"
           }
         }
       }
