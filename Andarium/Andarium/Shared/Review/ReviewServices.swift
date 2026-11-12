@@ -13,6 +13,8 @@ struct ReviewServices {
     /// Hands the address to the system, which opens the App Store's page (the
     /// call SwiftUI's `openURL` ends in). No in-app review prompt, no web view.
     var open: @MainActor (URL) -> Void = { UIApplication.shared.open($0, options: [:], completionHandler: nil) }
+    /// What the rating prompt asks (`ReviewAsk`).
+    var ask = ReviewAskServices()
 }
 
 extension AppModel {
@@ -20,9 +22,11 @@ extension AppModel {
     /// is set up.
     var reviewOffered: Bool { guest != nil && reviewServices.link() != nil }
 
-    /// Opens the application's write-review page in the App Store.
+    /// Opens the application's write-review page in the App Store. Someone who
+    /// went to write a review is not asked for a rating afterwards.
     func openReview() {
         guard let link = reviewServices.link() else { return }
+        reviewAsk?.openedReview()
         reviewServices.open(link.url)
     }
 }

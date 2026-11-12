@@ -366,7 +366,13 @@ identifiers only) in StoreKit's test session, never the App Store.
 two links and what a tap hands to `openURL`) with the `SHEET_DEVELOPER_*`
 placeholders and the drawn artwork of `Andarium/Config/DeveloperExample`, and
 `ReviewScreenTests` ([Review on the App Store](../Andarium/README.md#review-on-the-app-store))
-needs `REVIEW_ID`. `HomeMenuTests` checks the content of Home's toolbar menu in
+needs `REVIEW_ID`, as do `ReviewAskFlowTests`, `ReviewAskStoreTests` and
+`ReviewPromptWatcherTests` ([Rating prompt](../Andarium/README.md#rating-prompt)):
+they drive the coordinator through Home, a running session, a normal stop, an
+abnormal end, a stop in the background and a pending sheet with an injected
+request, detector and clocks (the system's prompt is never asked for), and
+read the Keychain item under a service of their own. `AndariumCoreTests` holds the
+rule, the counter and the attempts as pure logic. `HomeMenuTests` checks the content of Home's toolbar menu in
 every combination of the features the build holds, and `HomePlainInfoTests`
 that a build with none keeps the plain Info button ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests

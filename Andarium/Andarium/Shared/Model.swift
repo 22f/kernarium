@@ -409,6 +409,9 @@ final class AppModel {
     /// What Review on the App Store asks of the build and of the system
     /// (`ReviewServices`); a test replaces it.
     @ObservationIgnored var reviewServices = ReviewServices()
+    /// The rating prompt (`ReviewAsk`): made by the application's own launch,
+    /// so a model built any other way (a test, the preview) never asks.
+    @ObservationIgnored var reviewAsk: ReviewAsk?
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
@@ -627,6 +630,11 @@ final class AppModel {
         else { return }
         print("Andarium: \(previous.record.summary)")
         if guest != nil, let notice = previous.notice { self.notice = notice }
+        #if APP_REVIEW
+        // The record is the run's end as the runtime wrote it, also when the
+        // application was not running to say so.
+        reviewAsk?.previousRunEnded(normally: previous.record.orderly)
+        #endif
     }
 
     var canCreate: Bool { host.hasRoom(for: createRequirementBytes) }
@@ -1253,6 +1261,9 @@ final class AppModel {
         guard !snapshotActivity.holdsGuestFiles else { return }
         switch lifecycle.start(mode, host: host, plan: plan) {
         case let .allowed(kind):
+            #if APP_REVIEW
+            reviewAsk?.runBegan()
+            #endif
             restoredSnapshot = nil
             snapshots.cancelReads()
             frozenBootStage = nil
@@ -1304,6 +1315,9 @@ final class AppModel {
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         lifecycle.fail()
+        #if APP_REVIEW
+        reviewAsk?.runEnded(normally: false)
+        #endif
     }
 
     /// The runtime's run returned: the guest powered off, or stopped for a
@@ -1333,6 +1347,9 @@ final class AppModel {
         if let driver { lifecycle.guest?.usedBytes = driver.measuredUsedBytes() }
         persistNow()
         refreshPlan()
+        #if APP_REVIEW
+        reviewAsk?.runEnded(normally: end.poweredOff)
+        #endif
     }
 
     /// Android's own Restart boots the guest again in place. ADB and the

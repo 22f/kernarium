@@ -81,6 +81,9 @@ DEBUG_SUPPORT = (
     ("tip jar preview", "int _s8Andarium14TipJarServicesV19previewScrollsToTopSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV8openLinkySo17OpenURLActionResult(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium21TipJarScrollsToTopKeyV12defaultValueSbvgZ(void) { return 1; }\n"),
+    # A Debug build's own check of the rating prompt.
+    ("rating prompt debug", "int _s8Andarium16ReviewAskTrackerV8debugSet13activeSeconds12clearHistoryySdSg_SbtF(void) { return 1; }\n"),
+    ("rating prompt debug", "int _s8Andarium9ReviewAskC16applyDebugLaunch11environmentySDyS2SG_tF(void) { return 1; }\n"),
     # The UI tests' probe of the guest's keyboard and mouse: its log, its launch,
     # the recording runtime, and the identifiers of its two elements.
     ("input probe", "int _s8Andarium10InputProbeC6recordyySSF(void) { return 1; }\n"),
@@ -160,11 +163,19 @@ TIP_PARTIAL = 'const char *fixture(void) { return "AndariumTipProducts" "_$s8And
 # Review on the App Store: the code that builds the write-review address, and the key.
 REVIEW_FEATURE = (
     "const char *fixture(void) {\n"
-    '  return "AndariumReviewID" "_$s8Andarium10ReviewLinkV" "action=write-review";\n'
+    '  return "AndariumReviewID" "_$s8Andarium10ReviewLinkV" "action=write-review" '
+    '"_$s8Andarium16ReviewAskTrackerV" "_$s8StoreKit8AppStoreO13requestReview2inySo13UIWindowSceneC_tFZ";\n'
     "}\n"
 )
 # The same without the query that makes the address: a build that lost part of the feature.
-REVIEW_PARTIAL = 'const char *fixture(void) { return "AndariumReviewID" "_$s8Andarium10ReviewLinkV"; }\n'
+REVIEW_PARTIAL = (
+    'const char *fixture(void) { return "AndariumReviewID" "_$s8Andarium10ReviewLinkV" '
+    '"_$s8Andarium16ReviewAskTrackerV" "_$s8StoreKit8AppStoreO13requestReview2inySo13UIWindowSceneC_tFZ"; }\n'
+)
+# The same without the rating prompt: the counter and the StoreKit request.
+REVIEW_NO_ASK = (
+    'const char *fixture(void) { return "AndariumReviewID" "_$s8Andarium10ReviewLinkV" "action=write-review"; }\n'
+)
 # Config/Info.plist as a fixture: the feedback, tip, review and developer blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -635,6 +646,7 @@ def check_review(root: Path, check, clean: Path, feedback_info: dict, tip_info: 
     review_info = app_info(AndariumReviewID=identifier)
     feature = build(root, "review-feature", REVIEW_FEATURE)
     partial = build(root, "review-partial", REVIEW_PARTIAL)
+    no_ask = build(root, "review-no-ask", REVIEW_NO_ASK)
 
     # With the identifier: the code, the key and the table in each language, and the identifier named.
     check(review_app(root, "review-built", feature, review_info), passes=True,
@@ -649,6 +661,13 @@ def check_review(root: Path, check, clean: Path, feedback_info: dict, tip_info: 
           expect="lacks Review on the App Store", args=named_args)
     check(review_app(root, "review-partial", partial, review_info), passes=False,
           expect="action=write-review", args=named_args)
+    # The rating prompt is part of it: the counter and the StoreKit request.
+    check(review_app(root, "review-no-ask", no_ask, review_info), passes=False,
+          expect="ReviewAskTracker, requestReview", args=named_args)
+    # StoreKit is what the rating prompt links, so it says nothing about the tip sheet.
+    storekit = build(root, "review-storekit", REVIEW_FEATURE, ["-framework", "StoreKit"])
+    check(tip_app(root, "tip-absent-review-storekit", storekit, app_info(), table=False), passes=True,
+          expect="Buy me tokens is not compiled in", args=["--tip-jar", "--configuration", "Debug"])
     check(review_app(root, "review-no-table", feature, review_info, table=False), passes=False,
           expect="lacks the Review strings table", args=named_args)
     no_chinese = review_app(root, "review-no-zh-hant", feature, review_info)

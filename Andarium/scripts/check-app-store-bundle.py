@@ -85,6 +85,10 @@ application that must:
     Chinese, and the identifier the build named (well formed, no placeholder).
     The local configuration's identifier is in no file of a bundle whose build
     does not name it, which the check finds by its digits and never prints.
+    The rating prompt is part of the same feature: its counter, its attempts
+    and the StoreKit request are in the product exactly where the item is, and
+    its Debug knobs (a launch's way to set the counter) are in no AppStore
+    product.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -192,6 +196,10 @@ TIP_ARRANGED = {tier: f"com.example.andarium.tip.{tier}" for tier in TIP_TIERS}
 # and the system framework only it uses.
 TIP_REQUIRED = (b"TipJarModel", TIP_KEY.encode(), b"StoreKit.framework")
 TIP_FRAGMENTS = (b"TipJar", *TIP_REQUIRED)
+# StoreKit is also what the rating prompt of Review on the App Store uses, so a
+# product with that and no tip sheet links it too: the framework is required
+# of a product with the sheet and says nothing about a product without.
+TIP_SHARED = frozenset({b"StoreKit.framework"})
 # The feature's own strings table (Localization/TipJar.xcstrings), which a String
 # Catalog compiles to TipJar.strings in each language's directory, and a word of
 # it that no other table has.
@@ -206,8 +214,12 @@ REVIEW_KEY = "AndariumReviewID"
 REVIEW_ARRANGED = "id0000000000"
 # What the feature leaves in a binary: its types, the Info.plist key it reads
 # and the query that makes the address the write-review page.
-REVIEW_REQUIRED = (b"ReviewLink", REVIEW_KEY.encode(), b"action=write-review")
-REVIEW_FRAGMENTS = (b"ReviewServices", b"ReviewConfiguration", *REVIEW_REQUIRED)
+# The rating prompt (Andarium/README.md#rating-prompt) is part of it: its
+# counter and the StoreKit call that asks, whose symbol name is in the binary
+# wherever the call is.
+REVIEW_REQUIRED = (
+    b"ReviewLink", REVIEW_KEY.encode(), b"action=write-review", b"ReviewAskTracker", b"requestReview")
+REVIEW_FRAGMENTS = (b"ReviewServices", b"ReviewConfiguration", b"ReviewAsk", *REVIEW_REQUIRED)
 # The feature's own strings table (Localization/Review.xcstrings), and a word of
 # it that no other table has.
 REVIEW_TABLE = "Review"
@@ -456,6 +468,9 @@ DEBUG_SYMBOLS = (
     # opens; the application never does.
     ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays", b"19previewScrollsToTop",
                          b"14TipJarServicesV8openLink", b"21TipJarScrollsToTopKey")),
+    # A Debug build's own check of the rating prompt (ReviewAskTracker.debugSet,
+    # ReviewAsk.applyDebugLaunch): it sets the counter and clears the attempts.
+    ("rating prompt debug", (b"8debugSet", b"16applyDebugLaunch")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.
@@ -941,11 +956,12 @@ def tip_problems(
         keyed = None
     tables = tip_tables(app)
     words = tip_strings(app)
-    compiled = bool(fragments) or keyed is not None or bool(tables) or bool(words)
+    own = {name: present - TIP_SHARED for name, present in fragments.items() if present - TIP_SHARED}
+    compiled = bool(own) or keyed is not None or bool(tables) or bool(words)
     if not expected:
         if named:
             problems.append("Buy me tokens: the build names product identifiers that cannot be used")
-        for name, present in fragments.items():
+        for name, present in own.items():
             problems.append(
                 f"{name}: carries Buy me tokens ({', '.join(sorted(item.decode() for item in present))}) "
                 "though the build names no product identifiers")
