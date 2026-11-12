@@ -38,9 +38,11 @@ import java.util.Set;
  *
  * The order is that of the registrations. locations_first requests the fixes and then registers
  * the status and NMEA listeners while the HAL's first session starts, an order that races the
- * HAL's first callbacks. The framework tells a status listener onStarted and onFirstFix only for
- * a session that begins after it registered, and does not replay them, so only status_first
- * expects them.
+ * HAL's first callbacks. The framework tells a status listener onStarted only for a session that
+ * begins after it registered, and onFirstFix only if it registered before the session's first
+ * fix; it replays neither. So only status_first expects them, and only when its session is the
+ * first one on the device: another client already holding the gps provider means no session
+ * begins for this probe.
  */
 public final class LocationActivity extends Activity implements LocationListener {
     private static final String TAG = "LocationProbe";
@@ -160,9 +162,14 @@ public final class LocationActivity extends Activity implements LocationListener
         }
     }
 
-    // onStarted is owed only to a listener that registered before the session began.
+    // onStarted is owed only to a listener that registered before the session began, and
+    // onFirstFix to one that registered before the first fix.
     private boolean startReported() {
         return started || !statusFirst;
+    }
+
+    private boolean firstFixReported() {
+        return firstFixes >= 1 || !statusFirst;
     }
 
     @Override public void onLocationChanged(Location location) {
@@ -195,7 +202,8 @@ public final class LocationActivity extends Activity implements LocationListener
         switch (expect) {
             case "fine":
                 return fixes >= 3 && maxDistance <= 10 && maxAccuracySeen <= maxAccuracy && onlyGps && !anyMock
-                    && startReported() && satelliteCallbacks >= 1 && maxSatellites == 0 && !gnssDenied && !nmeaDenied
+                    && startReported() && firstFixReported() && satelliteCallbacks >= 1 && maxSatellites == 0
+                    && !gnssDenied && !nmeaDenied
                     && ggaQualities.contains("1") && newestAgeMs < 30_000;
             case "approximate":
                 // The host source reports an approximate fix; this application holds the precise

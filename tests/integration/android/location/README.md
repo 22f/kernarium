@@ -20,7 +20,10 @@ the matching `--location` source, and launches the probe with
 fine --ed lat 35.6895 --ed lon 139.6917 --ei seconds 15`. The extras are
 documented on the activity. The default order registers the satellite status
 and NMEA listeners after requesting fixes, while the HAL's first session starts;
-`--es order status_first` registers them first and so also expects `onStarted`.
+`--es order status_first` registers them first and so also expects `onStarted`
+and, for `fine`, `onFirstFix`: the framework replays neither to a listener that
+registers later, and no session begins for the probe if another client already
+holds the gps provider.
 The tests never read a real location: the sources are the launcher's synthetic
 ones.
 
