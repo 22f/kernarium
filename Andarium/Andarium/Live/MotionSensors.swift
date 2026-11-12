@@ -90,7 +90,7 @@ final class MotionSensors {
         let text: String? = switch problem {
         case nil: nil
         case .guestUnavailable?:
-            "The guest’s motion sensor service is unavailable. Use a system image with motion sensor support."
+            "The virtual machine’s motion sensor service is unavailable. Use a system image with motion sensor support."
         case .deviceFailed?:
             "The device’s motion sensors could not be read. Turn Gyroscope off and on to try again."
         }

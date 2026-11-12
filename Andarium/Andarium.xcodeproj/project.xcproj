@@ -9,6 +9,9 @@
     "development": "en",
     "supported": [
       "Base",
+      "ja",
+      "zh-Hans",
+      "zh-Hant",
     ],
   },
   "packages": [
@@ -37,6 +40,42 @@
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
         { "path": "Andarium.xcconfig" },
         { "path": "Feedback.local.xcconfig.example" },
+      ],
+    }, {
+      "kind": "group",
+      "path": "Localization",
+      "children": [
+        {
+          "path": "Localizable.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "InfoPlist.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "WhatsNew.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "JIT.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        }, {
+          "path": "Feedback.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        },
       ],
     }, {
       "kind": "group",
@@ -155,8 +194,8 @@
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
         "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Apps running in Andarium use this to connect to devices on your local network, such as printers, media servers and computers, and ADB over network uses it to let a computer on your network connect to Andarium. Internet access doesn't need it.",
-        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the guest can use it.",
-        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the guest can use it.",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the virtual machine can use it.",
+        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the virtual machine can use it.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
@@ -298,8 +337,8 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
-        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "The Simulator preview asks for the location only when launched with -systemLocation YES, to show the permission flow.",
-        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "The Simulator preview asks for the microphone only when launched with -systemMicrophone YES, to show the permission flow.",
+        "INFOPLIST_KEY_NSLocationWhenInUseUsageDescription": "Andarium shares this device's location only when you turn on Location, so that apps in the virtual machine can use it.",
+        "INFOPLIST_KEY_NSMicrophoneUsageDescription": "Andarium records from the microphone only when you turn on Microphone, so that apps in the virtual machine can use it.",
         "INFOPLIST_KEY_UIApplicationSceneManifest_Generation": "NO",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
@@ -342,6 +381,10 @@
     "ENABLE_TESTABILITY[config=Debug]": "YES",
     "ENABLE_USER_SCRIPT_SANDBOXING": "YES",
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": "x86_64",
+    "EXCLUDED_SOURCE_FILE_NAMES[config=AppStore]": [
+      "JIT.xcstrings",
+      "$(inherited)",
+    ],
     "GCC_OPTIMIZATION_LEVEL[config=Debug]": "0",
     "GCC_PREPROCESSOR_DEFINITIONS[config=AppStore]": [
       "UML_APP_STORE_APPLICATION=1",

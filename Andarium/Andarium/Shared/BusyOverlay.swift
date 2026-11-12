@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AndariumCore
 import SwiftUI
 
 /// Covers the screens while a long task runs, so nothing else is asked of the
@@ -8,6 +9,9 @@ import SwiftUI
 /// ended until the person closes it.
 struct BusyOverlay: View {
     let state: BusyState
+    /// The card is wider where the screen is, so a longer text in another
+    /// language wraps no more than the English does.
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         ZStack {
@@ -20,7 +24,7 @@ struct BusyOverlay: View {
                 }
             }
             .padding(20)
-            .frame(maxWidth: 360)
+            .frame(maxWidth: sizeClass == .regular ? 520 : 360)
             .glassEffect(.regular, in: .rect(cornerRadius: 26))
             .padding(24)
         }
@@ -32,7 +36,7 @@ struct BusyOverlay: View {
     @ViewBuilder
     private var running: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(state.title)
+            Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))
             Spacer()
             if let progress = state.progress {
@@ -44,7 +48,7 @@ struct BusyOverlay: View {
             }
         }
         ProgressBar(value: state.progress ?? 0)
-        Text(state.detail)
+        Text(state.detail.keepingTogether)
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -63,10 +67,10 @@ struct BusyOverlay: View {
                 .font(.title3)
                 .foregroundStyle(result.failed ? Color.red : Color.accentColor)
                 .accessibilityHidden(true)
-            Text(state.title)
+            Text(state.title.keepingTogether)
                 .font(.title3.weight(.bold))
         }
-        Text(state.detail)
+        Text(state.detail.keepingTogether)
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

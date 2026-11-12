@@ -47,9 +47,9 @@ struct FolderPage: View {
         guard model.filesAvailable else { return "" }
         if !browser.selection.isEmpty { return browser.selectionSummary }
         guard case let .loaded(files) = browser.listing(path) else { return "" }
-        let items = "\(files.count) \(files.count == 1 ? "item" : "items")"
+        let items = String(localized: "\(files.count) items")
         guard let free = browser.freeBytes else { return items }
-        return "\(items) \u{00B7} \(Formats.size(bytes: free)) free"
+        return String(localized: "\(items) \u{00B7} \(Formats.size(bytes: free)) free")
     }
 
     @ViewBuilder private var content: some View {
@@ -140,11 +140,11 @@ struct FolderPage: View {
     private var columnHeader: some View {
         HStack(spacing: 12) {
             Color.clear.frame(width: FileRow.tileSize, height: 1)
-            columnButton(.name, title: "Name")
+            columnButton(.name, title: String(localized: "Name"))
                 .frame(maxWidth: .infinity, alignment: .leading)
-            columnButton(.date, title: "Modified")
+            columnButton(.date, title: String(localized: "Modified"))
                 .frame(width: FileRow.dateWidth, alignment: .leading)
-            columnButton(.size, title: "Size")
+            columnButton(.size, title: String(localized: "Size"))
                 .frame(width: FileRow.sizeWidth, alignment: .trailing)
             Color.clear.frame(width: FileRow.chevronWidth, height: 1)
         }
@@ -288,7 +288,7 @@ struct FileRow: View {
         if file.isFolder {
             Button(action: toggle) { glyph }
                 .buttonStyle(.borderless)
-                .accessibilityLabel(selected ? "Deselect \(file.name)" : "Select \(file.name)")
+                .accessibilityLabel(selected ? String(localized: "Deselect \(file.name)") : String(localized: "Select \(file.name)"))
         } else {
             glyph
         }

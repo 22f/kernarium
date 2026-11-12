@@ -130,7 +130,7 @@ nonisolated enum BugReportOperation {
                     alive: { watchdog.touch() }
                 )
                 trail.remotePath = path
-                update(BusyUpdate(progress: generatingShare, detail: "Copying the report\u{2026}"))
+                update(BusyUpdate(progress: generatingShare, detail: String(localized: "Copying the report\u{2026}")))
                 watchdog.arm(idle: pullIdleLimit)
                 var hooks = BugReport.Hooks()
                 hooks.alive = { watchdog.touch() }

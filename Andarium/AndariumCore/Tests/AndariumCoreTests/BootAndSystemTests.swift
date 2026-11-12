@@ -101,8 +101,10 @@ struct SystemInfoTests {
         }
         """
 
+    private let britishEnglish = Locale(identifier: "en_GB")
+
     @Test func readsTheReleaseManifest() throws {
-        let info = try SystemInfo(manifest: Data(manifest.utf8), appVersion: "1.0 (1)")
+        let info = try SystemInfo(manifest: Data(manifest.utf8), appVersion: "1.0 (1)", locale: britishEnglish)
         #expect(info.version == "17")
         #expect(info.release == "20261031-los24-r4")
         #expect(info.buildLabel == "r4 (2026-10-31)")
@@ -131,7 +133,20 @@ struct SystemInfoTests {
         let odd = manifest.replacingOccurrences(of: "2026-10-01", with: "October")
         #expect(try SystemInfo(manifest: Data(odd.utf8), appVersion: "1").securityPatch == nil)
         let december = manifest.replacingOccurrences(of: "2026-10-01", with: "2026-12-05")
-        #expect(try SystemInfo(manifest: Data(december.utf8), appVersion: "1").securityPatch == "5 December 2026")
+        #expect(try SystemInfo(manifest: Data(december.utf8), appVersion: "1", locale: britishEnglish).securityPatch == "5 December 2026")
+        // A day the month does not have is no date.
+        let impossible = manifest.replacingOccurrences(of: "2026-10-01", with: "2026-02-31")
+        #expect(try SystemInfo(manifest: Data(impossible.utf8), appVersion: "1").securityPatch == nil)
+    }
+
+    @Test func theSecurityPatchIsWrittenAsThePersonsLanguageWritesADay() throws {
+        for (identifier, written) in [
+            ("en_US", "October 1, 2026"), ("ja_JP", "2026年10月1日"), ("zh_CN", "2026年10月1日"),
+            ("zh_TW", "2026年10月1日"),
+        ] {
+            let info = try SystemInfo(manifest: Data(manifest.utf8), appVersion: "1", locale: Locale(identifier: identifier))
+            #expect(info.securityPatch == written, "\(identifier)")
+        }
     }
 
     @Test func aMissingFieldNamesItself() {

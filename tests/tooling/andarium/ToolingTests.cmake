@@ -70,3 +70,14 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_capture_screens.py
     LABELS andarium
     TIMEOUT 60)
+
+# The String Catalogs of the application: every string translated into each
+# language in the state the editor writes, specifiers and plural categories
+# that fit, no Google name, the permission texts and What's New notes present,
+# and the catalog sync that follows the compiler's extraction.
+uml_add_tooling_test(
+    NAME andarium-localization
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_localization.py
+    LABELS andarium
+    TIMEOUT 180)

@@ -19,7 +19,7 @@ struct GraphicsNoticeBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(GraphicsNotice.title)
                     .font(.subheadline.weight(.semibold))
-                Text(GraphicsNotice.detail)
+                Text(GraphicsNotice.detail.keepingTogether)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
