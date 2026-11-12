@@ -598,10 +598,12 @@ requires reopening Andarium.
   The magnetometer, for an image that lists it (the `compass` host feature),
   is Core Motion's calibrated device-motion field with Core Motion's accuracy
   as Android's, read while an application uses it, with no setting and no
-  permission. A Core Motion error other than the request for device movement
-  (which is no failure) turns it off for the rest of the run, where the
-  accelerometer and gyroscope are tried again as above. From iOS 27.2 a
-  motion status of denied or restricted hides it from the guest; nothing is
+  permission. Core Motion's request to move the device for calibration is no
+  failure; a start that delivers nothing in 5 s although none was made, or any
+  other Core Motion error, turns it off for the rest of the run, where the
+  accelerometer and gyroscope are tried again as above. A run ends with the
+  foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
+  a motion status of denied or restricted hides it from the guest; nothing is
   requested.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
