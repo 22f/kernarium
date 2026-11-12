@@ -19,40 +19,102 @@ mapping of the backing pages and brackets the access with transfers
 to and from the host; another process reads it through a mapping of
 the same pages. The backing is the only storage anyone looks at, so
 the renderer registers the resource and keeps none: no texture, no
-fill, no host memory to bound or to charge to the device memory pool.
+fill, no host memory to charge to the device memory pool.
+
+Only the classic creation, the virtio-gpu request, can make one
+(hostless_ok on the creation arguments, false unless a caller sets
+it). A blob a context creates by PIPE_RESOURCE_CREATE, an untyped blob
+that PIPE_RESOURCE_SET_TYPE describes, an image import and the planes
+of a YUV image hold storage the renderer reads, so they keep every
+check they had and never take this path.
 
 The resource is R8, one level, one sample, one row and one layer, with
-no YUV flag, and its bind flags are a subset of shared, linear and the
-allocator's sub-flags. A guest names its size, which is refused above
-1 GiB, and a width of zero is refused as for any texture. Any other
-resource, a texture a GPU unit samples or renders included, keeps every
-check it had.
+no YUV flag, and its bind flags are a subset of shared, linear and
+the allocator's sub-flags. A guest names its size, which is refused
+above 1 GiB, and a width of zero is refused as for any texture. Any
+other resource, a texture a GPU unit samples or renders included,
+keeps every check it had.
+
+At most 16,384 such resources are alive at once. Each costs the
+renderer a few hundred bytes and nothing in the device memory pool,
+so nothing else bounds them. A creation past that is refused like any
+refused creation, and releasing one frees a place; a context that goes
+away does not release the ones it had attached.
 
   - A transfer in either direction keeps the checks of every transfer
     (the box lies inside the resource, the named pages hold it) and
     then moves nothing; copying the backing onto itself shifted by the
     box offset would damage it. A resource without backing is refused
-    as before.
-  - No command can name it. The lookup that commands use does not find
-    it, so a view, a surface, a vertex, index or constant buffer, a
-    copy, a blit and an inline write report an illegal resource, as
-    for an id that does not exist. The transfer path alone looks it up.
+    as before. This holds for the virtio-gpu request and for a
+    TRANSFER3D in a command buffer, which succeeds: the allocator
+    sends a buffer whose size is not a multiple of 16 that way, with
+    its padded row pitch. A transfer into pages other than the
+    backing, which only a caller of the host API can name, leaves
+    them as they were.
+  - Every other command that names it reports an illegal resource, as
+    for an id that does not exist. The lookup that commands use does
+    not find it, so a view, a surface, a vertex, index or constant
+    buffer, a copy, a blit and an inline write are refused. The
+    transfer path alone looks it up.
   - It has no texture to describe or to present, no storage size, no
     cursor image, and no shared-memory segment to export: the export
     of a texture already requires GL storage.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/virglrenderer.c        |  4 ++
- src/vrend/vrend_renderer.c | 80 ++++++++++++++++++++++++++++++++++++--
- src/vrend/vrend_renderer.h |  8 ++++
- 3 files changed, 89 insertions(+), 3 deletions(-)
+ src/virglrenderer.c        |  14 ++++--
+ src/vrend/vrend_renderer.c | 100 +++++++++++++++++++++++++++++++++++--
+ src/vrend/vrend_renderer.h |  12 +++++
+ 3 files changed, 120 insertions(+), 6 deletions(-)
 
 diff --git a/src/virglrenderer.c b/src/virglrenderer.c
-index 4e612c56f7b4bad89c13a43a1dc54fbc91f6beb5..e147c89fc625dd9cab95df521fce5e8b46c8186d 100644
+index 4e612c56f7b4bad89c13a43a1dc54fbc91f6beb5..c5446b243f11394b2827ad4dcb1b991295da81e1 100644
 --- a/src/virglrenderer.c
 +++ b/src/virglrenderer.c
-@@ -567,6 +567,10 @@ static int virgl_renderer_resource_get_info_common(int res_handle,
+@@ -89,7 +89,7 @@ static struct global_state state;
+ 
+ static int virgl_renderer_resource_create_internal(struct virgl_renderer_resource_create_args *args,
+                                                    UNUSED struct iovec *iov, UNUSED uint32_t num_iovs,
+-                                                   void *image)
++                                                   void *image, bool hostless_ok)
+ {
+ #ifdef ENABLE_VREND
+    struct virgl_resource *res;
+@@ -117,6 +117,7 @@ static int virgl_renderer_resource_create_internal(struct virgl_renderer_resourc
+    vrend_args.nr_samples = args->nr_samples;
+    vrend_args.last_level = args->last_level;
+    vrend_args.flags = args->flags;
++   vrend_args.hostless_ok = hostless_ok;
+ 
+    int error;
+    pipe_res = vrend_renderer_resource_create(&vrend_args, image, &error);
+@@ -136,6 +137,7 @@ static int virgl_renderer_resource_create_internal(struct virgl_renderer_resourc
+    (void)iov;
+    (void)num_iovs;
+    (void)image;
++   (void)hostless_ok;
+    return -EINVAL;
+ #endif
+ }
+@@ -144,13 +146,15 @@ int virgl_renderer_resource_create(struct virgl_renderer_resource_create_args *a
+                                    struct iovec *iov, uint32_t num_iovs)
+ {
+    TRACE_FUNC();
+-   return virgl_renderer_resource_create_internal(args, iov, num_iovs, NULL);
++   /* The classic creation the guest asks for: the one that may make a
++    * resource the renderer keeps no storage for. */
++   return virgl_renderer_resource_create_internal(args, iov, num_iovs, NULL, true);
+ }
+ 
+ int virgl_renderer_resource_import_eglimage(struct virgl_renderer_resource_create_args *args, void *image)
+ {
+    TRACE_FUNC();
+-   return virgl_renderer_resource_create_internal(args, NULL, 0, image);
++   return virgl_renderer_resource_create_internal(args, NULL, 0, image, false);
+ }
+ 
+ void virgl_renderer_resource_set_priv(uint32_t res_handle, void *priv)
+@@ -567,6 +571,10 @@ static int virgl_renderer_resource_get_info_common(int res_handle,
        return 0;
  
  #ifdef ENABLE_VREND
@@ -64,10 +126,19 @@ index 4e612c56f7b4bad89c13a43a1dc54fbc91f6beb5..e147c89fc625dd9cab95df521fce5e8b
                                      (struct vrend_renderer_resource_info *)info);
  
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e31e8717c4 100644
+index 0630ff3ca27502045c43c144a0a9001df121ea12..c2feae32a0ebbe9b8f0cc414159a7fba9d60da9d 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -3773,7 +3773,10 @@ void vrend_set_index_buffer(struct vrend_context *ctx,
+@@ -367,6 +367,8 @@ struct global_renderer_state {
+     * for a refused resource without that helping; zero time if it helped or
+     * has not been tried */
+    uint64_t resources_destroyed;
++   /* resources alive that have no storage (vrend_args_hostless) */
++   uint32_t hostless_count;
+    uint64_t reclaim_futile_destroyed;
+    uint64_t reclaim_futile_ns;
+ 
+@@ -3773,7 +3775,10 @@ void vrend_set_index_buffer(struct vrend_context *ctx,
     ctx->sub->ib.offset = offset;
     if (res_handle) {
        res = vrend_renderer_ctx_res_lookup(ctx, res_handle);
@@ -79,7 +150,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
           if (!res || !res->gl_id) {
              vrend_resource_reference((struct vrend_resource **)&ctx->sub->ib.buffer, NULL);
              vrend_report_context_error(ctx, VIRGL_ERROR_CTX_ILLEGAL_RESOURCE, res_handle);
-@@ -8819,6 +8822,36 @@ static int vrend_packed_yuv_describe(const struct vrend_renderer_resource_create
+@@ -8819,6 +8824,43 @@ static int vrend_packed_yuv_describe(const struct vrend_renderer_resource_create
     return 0;
  }
  
@@ -96,15 +167,22 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
 + * largest JPEG is tens of MiB. */
 +#define VREND_HOSTLESS_MAX_BYTES (1u << 30)
 +
++/* The most such buffers alive at once. Each costs the renderer a few hundred
++ * bytes and nothing in the device memory pool, so the count is what bounds
++ * them. The camera framework holds a handful at a time. */
++#define VREND_HOSTLESS_MAX_COUNT 16384u
++
 +/* A gralloc BLOB buffer: R8, one row as wide as the buffer is long, that no
 + * GPU unit uses. The guest allocates it as a classic 2D resource of that
 + * width, writes it through its own mapping of the backing pages and brackets
 + * the access with transfers; the bytes are never read by the host, so the
 + * renderer keeps no storage for the resource, and a texture limit of the GL
-+ * driver does not apply to it. */
++ * driver does not apply to it. Only the classic creation can make one
++ * (hostless_ok): a typed blob, a blob a context creates and an imported image
++ * hold storage the renderer reads, so they keep every check. */
 +static bool vrend_args_hostless(const struct vrend_renderer_resource_create_args *args)
 +{
-+   return args->target == PIPE_TEXTURE_2D &&
++   return args->hostless_ok && args->target == PIPE_TEXTURE_2D &&
 +          args->format == VIRGL_FORMAT_R8_UNORM &&
 +          args->height == 1 && args->depth <= 1 && args->array_size <= 1 &&
 +          args->last_level == 0 && args->nr_samples <= 1 &&
@@ -116,7 +194,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
  static int check_resource_valid(const struct vrend_renderer_resource_create_args *args,
                                  char errmsg[256])
  {
-@@ -8980,6 +9013,16 @@ static int check_resource_valid(const struct vrend_renderer_resource_create_args
+@@ -8980,6 +9022,21 @@ static int check_resource_valid(const struct vrend_renderer_resource_create_args
        }
  #endif
  
@@ -127,13 +205,18 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
 +                     args->width, VREND_HOSTLESS_MAX_BYTES);
 +            return -1;
 +         }
++         if (vrend_state.hostless_count >= VREND_HOSTLESS_MAX_COUNT) {
++            snprintf(errmsg, 256, "%u buffers no GPU unit uses are alive, "
++                     "the most accepted", vrend_state.hostless_count);
++            return -1;
++         }
 +         return 0;
 +      }
 +
        if (args->target == PIPE_TEXTURE_2D ||
            args->target == PIPE_TEXTURE_RECT ||
            args->target == PIPE_TEXTURE_CUBE ||
-@@ -9718,6 +9761,7 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)
+@@ -9718,6 +9775,7 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)
  
     vrend_renderer_resource_copy_args(args, gr);
     gr->storage_bits = VREND_STORAGE_GUEST_MEMORY;
@@ -141,31 +224,44 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
  
     if (args->flags & VIRGL_RESOURCE_Y_0_TOP)
        gr->y_0_top = true;
-@@ -9955,7 +9999,10 @@ vrend_renderer_resource_create_once(const struct vrend_renderer_resource_create_
+@@ -9955,7 +10013,11 @@ vrend_renderer_resource_create_once(const struct vrend_renderer_resource_create_
     if (gr->packed_yuv && gr->packed_yuv->biplanar && !image_oes)
        gr->packed_yuv->planes_only = true;
  
 -   if (args->target == PIPE_BUFFER) {
 +   if (gr->hostless) {
 +      /* The guest's backing pages are all the storage it has. */
++      vrend_state.hostless_count++;
 +      ret = 0;
 +   } else if (args->target == PIPE_BUFFER) {
        ret = vrend_resource_alloc_buffer(gr, args->flags);
     } else if (gr->packed_yuv && gr->packed_yuv->planes_only) {
        ret = vrend_packed_yuv_alloc_name(gr);
-@@ -11920,6 +11967,11 @@ static int vrend_renderer_transfer_internal(struct vrend_context *ctx,
+@@ -10446,6 +10508,8 @@ void vrend_resource_sync_shm_import(struct vrend_resource *res)
+ void vrend_renderer_resource_destroy(struct vrend_resource *res)
+ {
+    vrend_state.resources_destroyed++;
++   if (res->hostless)
++      vrend_state.hostless_count--;
+    if (res->packed_yuv) {
+       for (unsigned i = 0; i < ARRAY_SIZE(res->packed_yuv->plane); i++)
+          vrend_resource_reference(&res->packed_yuv->plane[i], NULL);
+@@ -11920,6 +11984,14 @@ static int vrend_renderer_transfer_internal(struct vrend_context *ctx,
        return EINVAL;
     }
  
-+   /* The pages the transfer names are the resource's only storage: what the
-+    * guest wrote there is what it reads back. */
++   /* The guest's backing pages are the resource's only storage: what it wrote
++    * there is what it reads back. A transfer, also one in a command buffer,
++    * therefore moves nothing. A transfer from the host into pages other than
++    * the backing, which only a caller of the host API can name, leaves them
++    * as they were. */
 +   if (res->hostless)
 +      return 0;
 +
     switch (transfer_mode) {
     case VIRGL_TRANSFER_TO_HOST:
        return vrend_renderer_transfer_write_iov(ctx, res, iov, num_iovs, info);
-@@ -11939,7 +11991,7 @@ int vrend_renderer_transfer_iov(struct vrend_context *ctx,
+@@ -11939,7 +12011,7 @@ int vrend_renderer_transfer_iov(struct vrend_context *ctx,
  {
     struct vrend_resource *res;
  
@@ -174,7 +270,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
     if (!res) {
        vrend_report_context_error(ctx, VIRGL_ERROR_CTX_ILLEGAL_RESOURCE, dst_handle);
        return EINVAL;
-@@ -15029,6 +15081,9 @@ void *vrend_renderer_get_cursor_contents(struct pipe_resource *pres,
+@@ -15029,6 +15101,9 @@ void *vrend_renderer_get_cursor_contents(struct pipe_resource *pres,
     int size;
     unsigned h;
  
@@ -184,7 +280,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
     if (res->base.width0 > 128 || res->base.height0 > 128)
        return NULL;
  
-@@ -15181,7 +15236,18 @@ void vrend_renderer_detach_res_ctx(struct vrend_context *ctx,
+@@ -15181,7 +15256,18 @@ void vrend_renderer_detach_res_ctx(struct vrend_context *ctx,
     vrend_ctx_resource_remove(ctx->res_hash, res->res_id);
  }
  
@@ -203,7 +299,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
  {
     return vrend_ctx_resource_lookup(ctx->res_hash, res_handle);
  }
-@@ -15195,6 +15261,11 @@ void vrend_context_set_debug_flags(struct vrend_context *ctx, const char *flagst
+@@ -15195,6 +15281,11 @@ void vrend_context_set_debug_flags(struct vrend_context *ctx, const char *flagst
     }
  }
  
@@ -215,7 +311,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
  void vrend_renderer_resource_get_info(struct pipe_resource *pres,
                                        struct vrend_renderer_resource_info *info)
  {
-@@ -15215,6 +15286,9 @@ void vrend_renderer_resource_get_info(struct pipe_resource *pres,
+@@ -15215,6 +15306,9 @@ void vrend_renderer_resource_get_info(struct pipe_resource *pres,
  uint64_t
  vrend_renderer_resource_storage_size(struct pipe_resource *pres)
  {
@@ -226,7 +322,7 @@ index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e3
        return pres->width0;
  
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index 31496144de44ddd935b198eab280724404aee6fd..5db9442d5df8cf3a7af92df5820d23699a88855f 100644
+index 31496144de44ddd935b198eab280724404aee6fd..4bc6a9bb55ac45484f3555dbc9a3298e65aab6e6 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -93,6 +93,11 @@ struct vrend_resource {
@@ -241,7 +337,18 @@ index 31496144de44ddd935b198eab280724404aee6fd..5db9442d5df8cf3a7af92df5820d2369
     /* used for keeping track of multisampled renderbuffer for
      * GL_EXT_multisampled_render_to_texture. */
     GLuint rbo_id;
-@@ -580,6 +585,9 @@ void vrend_check_texture_storage(struct vrend_format_table *table);
+@@ -346,6 +351,10 @@ struct vrend_renderer_resource_create_args {
+    uint32_t last_level;
+    uint32_t nr_samples;
+    uint32_t flags;
++   /* The resource may be one that has no storage in the renderer (see
++    * vrend_args_hostless). Only the classic creation a guest asks for sets
++    * it; every other constructor leaves it false and keeps every check. */
++   bool hostless_ok;
+ };
+ 
+ /* set the type info of an untyped blob resource */
+@@ -580,6 +589,9 @@ void vrend_check_texture_storage(struct vrend_format_table *table);
  void vrend_check_texture_multisample(struct vrend_format_table *table,
                                       bool enable_storage);
  

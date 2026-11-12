@@ -14,14 +14,25 @@
 //    a 12 megapixel camera) and one it could (100 and 16,385 bytes);
 //  - the renderer holds no storage for it, and the bytes the guest wrote into
 //    the backing are the bytes it reads back after a transfer in either
-//    direction;
+//    direction, whether the transfer is the virtio-gpu request or a
+//    TRANSFER3D in a command buffer that names the padded row pitch the
+//    allocator gives a buffer whose size is not a multiple of 16;
+//  - a transfer whose pages are not the backing, which only a caller of the
+//    host API can ask for, leaves both them and the backing as they were;
 //  - a transfer that names bytes outside the buffer is refused;
-//  - no command can name it: a view, a surface, a vertex or index buffer, a
-//    copy and an inline write fail the command cleanly, and the presenter
-//    gets no texture;
+//  - no other command can name it: a view, a surface, a vertex or index
+//    buffer, a copy and an inline write fail the command cleanly, and the
+//    presenter gets no texture;
+//  - only the classic creation makes one: a blob a context creates, a blob
+//    that is typed afterwards and an image import keep every check, and a
+//    texture the host cannot make is refused for those exactly as it was
+//    before the renderer knew this buffer (this test passes the checks of
+//    those paths on the library without the change);
 //  - a size the renderer does not accept is refused at creation, and every
 //    other resource keeps its checks: the same size with a bind flag a GPU
-//    unit uses is refused, and so is a buffer taller than one row.
+//    unit uses is refused, and so is a buffer taller than one row;
+//  - no more than 16,384 such buffers are alive at once: a context that goes
+//    does not free the ones it had, and a buffer that is released does.
 
 #include "host_gl_stream_support.hpp"
 #include "host_gl_test_support.hpp"
@@ -30,11 +41,17 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+extern "C" {
+#include <virgl_hw.h>
+#include <virglrenderer.h>
+}
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <initializer_list>
@@ -58,6 +75,14 @@ constexpr std::uint32_t virglBindSwWriteOften = 1U << 30U;
 constexpr std::uint32_t blobBind = virglBindShared | virglBindLinear |
     virglBindCameraWrite | virglBindSwReadOften | virglBindSwWriteOften;
 constexpr std::uint32_t commandInlineWrite = 9;
+constexpr std::uint32_t commandTransfer3d = 43;
+constexpr std::uint32_t commandPipeResourceCreate = 48;
+constexpr std::uint32_t commandPipeResourceSetType = 49;
+constexpr std::uint32_t blobMemoryHost3d = 2;
+constexpr std::uint32_t transferToHost = 1;
+constexpr std::uint32_t transferFromHost = 2;
+// The most such buffers the renderer keeps alive at once.
+constexpr std::uint32_t hostlessLimit = 16384;
 constexpr std::uint32_t commandSetIndexBuffer = 11;
 constexpr std::uint32_t commandResourceCopyRegion = 17;
 
@@ -335,6 +360,288 @@ void sizesRefused(VirglRenderer& renderer, std::uint32_t id)
     renderer.unrefResource(id);
 }
 
+// A transfer in a command buffer is a transfer: it names the row pitch, which
+// the allocator pads to 16 bytes for a buffer whose size is not a multiple of
+// it, and succeeds like the virtio-gpu request and moves nothing.
+void paddedTransfer3d(VirglRenderer& renderer, std::uint32_t id,
+    std::uint32_t context)
+{
+    constexpr std::uint32_t size = 100001;
+    constexpr std::uint32_t pitch = 100016;
+    check(create(renderer, id, blobBind, size, 1) == 0, "TRANSFER3D",
+        "the buffer was not created");
+    std::vector<std::uint8_t> backing(pitch);
+    pattern(backing);
+    const std::vector<std::uint8_t> written = backing;
+    std::array<iovec, 1> vectors {
+        iovec {.iov_base = backing.data(), .iov_len = backing.size()}};
+    check(renderer.attachBacking(id, vectors) == 0, "TRANSFER3D",
+        "its backing was not attached");
+    check(renderer.createContext(context, virgl2CapsetId, "hostless") == 0,
+        "TRANSFER3D", "the context was not created");
+    check(renderer.attachResource(context, id) == 0, "TRANSFER3D",
+        "the buffer was not attached to the context");
+
+    struct Box {
+        const char* name;
+        std::uint32_t direction;
+        std::uint32_t x;
+        std::uint32_t width;
+    };
+    for (const Box& box : {Box {"whole to the host", transferToHost, 0, size},
+             Box {"whole from the host", transferFromHost, 0, size},
+             Box {"part to the host", transferToHost, 1000, 5000},
+             Box {"part from the host", transferFromHost, 99000, 1001}}) {
+        Commands commands;
+        commands.add(commandTransfer3d, 0,
+            {id, 0, 0, pitch, 0, box.x, 0, 0, box.width, 1, 1, box.x,
+                box.direction});
+        check(commands.submit(renderer, context) == 0, box.name,
+            "the transfer in the command buffer failed");
+        check(backing == written, box.name,
+            "the transfer in the command buffer changed the bytes");
+    }
+
+    // A box past the end of the buffer is refused, as for any transfer.
+    Commands past;
+    past.add(commandTransfer3d, 0,
+        {id, 0, 0, pitch, 0, size - 1, 0, 0, 2, 1, 1, size - 1,
+            transferFromHost});
+    check(past.submit(renderer, context) != 0, "TRANSFER3D",
+        "a box past the end of the buffer was accepted");
+
+    renderer.destroyContext(context);
+    renderer.detachBacking(id);
+    renderer.unrefResource(id);
+}
+
+// The renderer's own readback and the host API's explicit-iov transfers name
+// pages that are not the backing. They are accepted and leave those pages and
+// the backing as they were: the backing is all the resource holds.
+void explicitPages(VirglRenderer& renderer, std::uint32_t id,
+    std::uint32_t context)
+{
+    constexpr std::uint32_t size = 100;
+    check(create(renderer, id, blobBind, size, 1) == 0, "explicit pages",
+        "the buffer was not created");
+    std::vector<std::uint8_t> backing(size);
+    pattern(backing);
+    const std::vector<std::uint8_t> written = backing;
+    std::array<iovec, 1> vectors {
+        iovec {.iov_base = backing.data(), .iov_len = backing.size()}};
+    check(renderer.attachBacking(id, vectors) == 0, "explicit pages",
+        "its backing was not attached");
+    check(renderer.createContext(context, virgl2CapsetId, "hostless") == 0,
+        "explicit pages", "the context was not created");
+    check(renderer.attachResource(context, id) == 0, "explicit pages",
+        "the buffer was not attached to the context");
+
+    virgl_box box {.x = 0, .y = 0, .z = 0, .w = size, .h = 1, .d = 1};
+    std::vector<std::uint8_t> pages(size, 0xcc);
+    iovec other {.iov_base = pages.data(), .iov_len = pages.size()};
+    check(virgl_renderer_transfer_read_iov(
+              id, context, 0, 0, 0, &box, 0, &other, 1) == 0,
+        "explicit pages", "a read into other pages failed");
+    check(std::all_of(pages.begin(), pages.end(),
+              [](std::uint8_t byte) { return byte == 0xcc; }),
+        "explicit pages", "a read wrote the other pages");
+    check(backing == written, "explicit pages", "a read changed the backing");
+
+    std::fill(pages.begin(), pages.end(), std::uint8_t {0xee});
+    check(virgl_renderer_transfer_write_iov(
+              id, context, 0, 0, 0, &box, 0, &other, 1) == 0,
+        "explicit pages", "a write from other pages failed");
+    check(backing == written, "explicit pages",
+        "a write from other pages reached the backing");
+
+    // The renderer's own readback, which names the caller's pages and no
+    // context.
+    std::vector<std::uint8_t> readback(size * 4U, 0xcc);
+    check(renderer.readResourceRectangle(id, readback, 0, 0, size, 1) == 0,
+        "explicit pages", "the readback failed");
+    check(std::all_of(readback.begin(), readback.end(),
+              [](std::uint8_t byte) { return byte == 0xcc; }),
+        "explicit pages", "the readback wrote the caller's pages");
+    check(backing == written, "explicit pages",
+        "the readback changed the backing");
+
+    renderer.destroyContext(context);
+    renderer.detachBacking(id);
+    renderer.unrefResource(id);
+}
+
+// What the renderer logged while `action` ran names why it refused.
+[[nodiscard]] bool refusedAsTexture(const std::string& log, std::uint32_t width)
+{
+    return log.find("2D Texture size components (" + std::to_string(width) +
+               ", 1) exceeds supported value") != std::string::npos;
+}
+
+// Only the classic creation makes a buffer without storage. The other
+// constructors of a resource keep every check they had: with the shape of
+// such a buffer but one bind flag, a width a GL texture cannot have is
+// refused and one it can have gets its texture, exactly as on the library
+// without the change.
+void otherPathsKeepTheirChecks(VirglRenderer& renderer, std::uint32_t id)
+{
+    constexpr std::uint32_t tooWide = 16385;
+    constexpr std::uint32_t narrow = 100;
+
+    // A PIPE_RESOURCE_CREATE in a command buffer, and the blob that names it.
+    for (const std::uint32_t width : {tooWide, narrow}) {
+        const std::uint32_t blobId = 900 + width % 7U;
+        char name[64];
+        std::snprintf(name, sizeof(name), "pipe resource of %u", width);
+        Commands commands;
+        commands.add(commandPipeResourceCreate, 0,
+            {pipeTexture2d, virglFormatR8Unorm, virglBindShared, width, 1, 1,
+                1, 0, 0, 0, blobId});
+        int submitted = 0;
+        const std::string log = logOf([&] {
+            submitted = commands.submit(renderer, contextId);
+        });
+        if (width == tooWide) {
+            check(submitted != 0 && refusedAsTexture(log, width), name,
+                "it was not refused as a texture past the limit");
+            continue;
+        }
+        check(submitted == 0, name, "it was not created");
+        const int blob = renderer.createResourceBlob(
+            VirglRenderer::ResourceBlob {.resourceId = id,
+                .contextId = contextId,
+                .memory = blobMemoryHost3d,
+                .flags = 0,
+                .blobId = blobId,
+                .size = width});
+        check(blob == 0, name, "the blob that names it was not created");
+        check(renderer.resourceStorageBytes(id) != 0, name,
+            "it holds no texture");
+        renderer.unrefResource(id);
+    }
+
+    // The type of an untyped blob: a shared-memory segment another context
+    // exported, which the guest then describes as an R8 image.
+    const std::uint32_t segmentBytes = 64 * 1024;
+    char segmentName[] = "/tmp/uml-hostless.XXXXXX";
+    const int segment = ::mkstemp(segmentName);
+    require(segment >= 0 && ::unlink(segmentName) == 0 &&
+            ::ftruncate(segment, segmentBytes) == 0,
+        "the segment could not be made");
+    for (const std::uint32_t width : {tooWide, narrow}) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "typed blob of %u", width);
+        const int descriptor = ::dup(segment);
+        require(descriptor >= 0, "the segment could not be duplicated");
+        virgl_renderer_resource_import_blob_args arguments {};
+        arguments.res_handle = id;
+        arguments.blob_mem = VIRGL_RENDERER_BLOB_MEM_HOST3D;
+        arguments.fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_SHM;
+        arguments.fd = descriptor;
+        arguments.size = segmentBytes;
+        require(virgl_renderer_resource_import_blob(&arguments) == 0,
+            "the segment could not be imported as a blob");
+        require(renderer.attachResource(contextId, id) == 0,
+            "the blob could not be attached to the guest context");
+        Commands commands;
+        commands.add(commandPipeResourceSetType, 0,
+            {id, virglFormatR8Unorm, virglBindShared, width, 1, 0, 0, 0,
+                (width + 15U) & ~15U, 0});
+        int submitted = 0;
+        const std::string log = logOf([&] {
+            submitted = commands.submit(renderer, contextId);
+        });
+        if (width == tooWide) {
+            check(submitted != 0 && refusedAsTexture(log, width), name,
+                "it was not refused as a texture past the limit");
+        } else {
+            check(submitted == 0, name, "it was not typed");
+            check(renderer.resourceStorageBytes(id) != 0, name,
+                "it holds no texture");
+        }
+        (void)renderer.detachResource(contextId, id);
+        renderer.unrefResource(id);
+    }
+    ::close(segment);
+
+    // An imported image, here with the host API's call and no image.
+    for (const std::uint32_t width : {tooWide, narrow}) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "imported image of %u", width);
+        virgl_renderer_resource_create_args arguments {
+            .handle = id,
+            .target = pipeTexture2dTarget,
+            .format = virglFormatR8Unorm,
+            .bind = virglBindShared,
+            .width = width,
+            .height = 1,
+            .depth = 1,
+            .array_size = 1,
+        };
+        int result = 0;
+        const std::string log = logOf([&] {
+            result = virgl_renderer_resource_import_eglimage(
+                &arguments, nullptr);
+        });
+        if (width == tooWide) {
+            check(result != 0 && refusedAsTexture(log, width), name,
+                "it was not refused as a texture past the limit");
+            if (result == 0)
+                renderer.unrefResource(id);
+            continue;
+        }
+        check(result == 0, name, "it was not created");
+        check(renderer.resourceStorageBytes(id) != 0, name,
+            "it holds no texture");
+        renderer.unrefResource(id);
+    }
+}
+
+// No more than hostlessLimit such buffers are alive at once, whoever holds
+// them: a context that goes away does not release the ones it had, and
+// releasing one makes room for one.
+void countBounded(VirglRenderer& renderer, std::uint32_t firstId,
+    std::uint32_t context)
+{
+    std::uint32_t created = 0;
+    for (; created <= hostlessLimit + 1U; ++created) {
+        std::string log;
+        int result = 0;
+        log = logOf([&] {
+            result = create(renderer, firstId + created, blobBind, 4096, 1);
+        });
+        if (result != 0) {
+            check(log.find("the most accepted") != std::string::npos,
+                "count", "the refusal did not say why");
+            break;
+        }
+    }
+    check(created == hostlessLimit, "count",
+        "the number of buffers made before a refusal is not the limit");
+
+    // Some of them are attached to a context that then goes away.
+    check(renderer.createContext(context, virgl2CapsetId, "hostless") == 0,
+        "count", "the context was not created");
+    for (std::uint32_t index = 0; index < 4; ++index)
+        check(renderer.attachResource(context, firstId + index) == 0, "count",
+            "a buffer was not attached to the context");
+    renderer.destroyContext(context);
+    check(create(renderer, firstId + created, blobBind, 4096, 1) != 0,
+        "count", "a buffer was made after the context went");
+
+    // Releasing one makes room for exactly one.
+    renderer.unrefResource(firstId);
+    check(create(renderer, firstId + created, blobBind, 4096, 1) == 0, "count",
+        "a buffer was refused after one was released");
+    check(create(renderer, firstId + created + 1U, blobBind, 4096, 1) != 0,
+        "count", "two buffers were made for one released");
+
+    for (std::uint32_t index = 1; index <= created; ++index)
+        renderer.unrefResource(firstId + index);
+    check(create(renderer, firstId, blobBind, 4096, 1) == 0, "count",
+        "a buffer was refused with none alive");
+    renderer.unrefResource(firstId);
+}
+
 } // namespace
 
 int main()
@@ -359,6 +666,10 @@ int main()
     transferRefused(*renderer, id++, 40);
     transferWithoutBacking(*renderer, id++, 41);
     sizesRefused(*renderer, id++);
+    paddedTransfer3d(*renderer, id++, 42);
+    explicitPages(*renderer, id++, 43);
+    otherPathsKeepTheirChecks(*renderer, id++);
+    countBounded(*renderer, 1000, 44);
 
     if (failures != 0)
         return 1;
