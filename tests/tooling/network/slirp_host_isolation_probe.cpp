@@ -556,6 +556,104 @@ void check_host_addresses_are_closed()
 	}
 }
 
+/* A segment from the guest to `destination`:`destination_port` that carries
+ * `payload`. */
+Bytes tcp_data_frame(const Address &destination, std::uint16_t source_port,
+		     std::uint16_t destination_port, std::uint32_t seq,
+		     std::uint32_t ack, const Bytes &payload)
+{
+	auto frame = tcp_frame(guest_ip, destination, source_port,
+			       destination_port, seq, ack, tcp_ack | tcp_psh,
+			       65535, payload.size());
+	std::copy(payload.begin(), payload.end(), frame.begin() + 54);
+	put16(frame, 50, 0);
+	std::uint32_t sum = checksum_add(0, &frame[26], 8);
+	sum += IPPROTO_TCP;
+	sum += static_cast<std::uint32_t>(frame.size() - 34);
+	sum = checksum_add(sum, &frame[34], frame.size() - 34);
+	put16(frame, 50, checksum_fold(sum));
+	return frame;
+}
+
+/* Whether a DNS message has the A record 127.0.0.1 among its answers: type A,
+ * class IN, any TTL, RDLENGTH 4, the address. */
+bool has_loopback_answer(const Bytes &message)
+{
+	const std::uint8_t record[] = {0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 127, 0, 0, 1};
+	for (std::size_t at = 0; at + sizeof(record) <= message.size(); ++at) {
+		bool match = true;
+		for (std::size_t byte = 0; byte < sizeof(record) && match; ++byte)
+			match = (byte >= 4 && byte < 8) ||
+				message[at + byte] == record[byte];
+		if (match)
+			return true;
+	}
+	return false;
+}
+
+/* One complete DNS exchange over TCP with `server`:53, from the handshake to
+ * the answer: the answer must be for the query sent (the transaction id) and
+ * hold localhost's address. Returns what went wrong, if anything. */
+std::optional<std::string> dns_over_tcp(Rig &rig, const Address &server,
+					std::uint16_t source_port,
+					std::uint16_t id)
+{
+	const auto from_server = [&](const Bytes &frame) {
+		const auto segment = parse_tcp(frame);
+		return segment && segment->source == server &&
+			segment->source_port == 53 &&
+			segment->destination_port == source_port;
+	};
+	std::uint32_t seq = 1000;
+	rig.syn(server, 53, source_port);
+	const auto synack = rig.guest.receive(from_server);
+	const auto handshake = synack ? parse_tcp(*synack) : std::nullopt;
+	if (!handshake ||
+	    (handshake->flags & (tcp_syn | tcp_ack | tcp_rst)) !=
+		    (tcp_syn | tcp_ack))
+		return "no SYN-ACK";
+	++seq;
+	std::uint32_t ack = handshake->seq + 1;
+
+	const Bytes query = dns_query(id);
+	Bytes framed{static_cast<std::uint8_t>(query.size() >> 8),
+		     static_cast<std::uint8_t>(query.size())};
+	framed.insert(framed.end(), query.begin(), query.end());
+	(void)rig.guest.send(
+		tcp_data_frame(server, source_port, 53, seq, ack, framed));
+	seq += static_cast<std::uint32_t>(framed.size());
+
+	Bytes stream;
+	while (stream.size() < 2 || stream.size() < 2U + get16(stream, 0)) {
+		const auto frame = rig.guest.receive(from_server);
+		if (!frame)
+			return "no answer";
+		const auto segment = *parse_tcp(*frame);
+		if ((segment.flags & tcp_rst) != 0)
+			return "the connection was reset";
+		if (segment.payload == 0)
+			continue;
+		stream.insert(stream.end(), frame->end() - segment.payload,
+			      frame->end());
+		ack = segment.seq + static_cast<std::uint32_t>(segment.payload);
+		(void)rig.guest.send(tcp_frame(guest_ip, server, source_port, 53,
+					       seq, ack, tcp_ack, 65535));
+	}
+	(void)rig.guest.send(tcp_frame(guest_ip, server, source_port, 53, seq,
+				       ack, tcp_fin | tcp_ack, 65535));
+
+	const Bytes message(stream.begin() + 2, stream.end());
+	if (message.size() < 12 || (message[2] & 0x80) == 0)
+		return "the answer is not a DNS response";
+	if (get16(message, 0) != id)
+		return "the answer is for another transaction";
+	if ((message[3] & 0x0f) != 0)
+		return "the answer carries an error";
+	if (!has_loopback_answer(message))
+		return "localhost has no 127.0.0.1 answer";
+	return std::nullopt;
+}
+
 /* What the guest is meant to reach, with the loopback closed: `before` is how
  * the scenario sets the provider up (a host that holds the gateway's and the
  * name server's addresses, for one). */
@@ -597,20 +695,15 @@ void check_what_still_works(
 			failed("DNS over UDP", "no answer from " + text(server));
 	}
 
-	/* DNS over TCP, through SLiRP's guest forward. */
-	for (const auto &[server, port] :
-	     {std::pair<Address, std::uint16_t>{name_server, 43002},
-	      std::pair<Address, std::uint16_t>{gateway, 43003}}) {
-		rig.syn(server, 53, port);
-		const auto answer = rig.guest.receive([&](const Bytes &frame) {
-			const auto segment = parse_tcp(frame);
-			return segment && segment->source_port == 53 &&
-				segment->destination_port == port;
-		});
-		if (!answer ||
-		    (parse_tcp(*answer)->flags & (tcp_syn | tcp_ack)) !=
-			    (tcp_syn | tcp_ack))
-			failed("DNS over TCP", "no SYN-ACK from " + text(server));
+	/* DNS over TCP, through SLiRP's guest forward: a whole exchange, since
+	 * the forward reaches the provider's resolver only after the guest's ACK,
+	 * and a SYN-ACK alone would pass with a forward that leads nowhere. */
+	std::uint16_t tcp_source = 43002;
+	std::uint16_t transaction = 0x7a00;
+	for (const auto &server : {name_server, gateway}) {
+		if (const auto error =
+			    dns_over_tcp(rig, server, tcp_source++, transaction++))
+			failed("DNS over TCP", text(server) + ": " + *error);
 	}
 
 	/* An echo to the gateway and to the name server is answered by SLiRP
