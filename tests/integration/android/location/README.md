@@ -18,8 +18,11 @@ The harness sets the permission state before each launch (`pm grant` and
 the matching `--location` source, and launches the probe with
 `am start -n org.example.andarium.locationprobe/.LocationActivity --es expect
 fine --ed lat 35.6895 --ed lon 139.6917 --ei seconds 15`. The extras are
-documented on the activity. The tests never read a real location: the sources
-are the launcher's synthetic ones.
+documented on the activity. The default order registers the satellite status
+and NMEA listeners after requesting fixes, while the HAL's first session starts;
+`--es order status_first` registers them first and so also expects `onStarted`.
+The tests never read a real location: the sources are the launcher's synthetic
+ones.
 
 Build this directory as an explicit Soong module in the Android workspace
 (`m AndariumLocationProbe`), with a temporary source copy at
