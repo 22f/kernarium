@@ -383,7 +383,20 @@ final class AppModel {
     /// the person puts it away.
     var restoredSnapshot: RestoredSnapshotNotice?
     /// A long task the screens wait for.
-    var busy: BusyState?
+    var busy: BusyState? {
+        didSet { if busy == nil { busyOverSheet = false } }
+    }
+    /// A sheet that stands over the screens draws the overlay of the task under
+    /// way itself, and the screens do not: set for the task a sheet starts,
+    /// and cleared with it.
+    var busyOverSheet = false
+    #if FEEDBACK_MAIL
+    /// What Send feedback asks of the system (`SendFeedbackServices`); a test
+    /// or the Simulator preview replaces it.
+    @ObservationIgnored var feedbackServices = SendFeedbackServices()
+    /// The Send feedback sheet is open, over Info or over the session's Settings.
+    var feedbackSheetOpen = false
+    #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
     /// The guest is paused because the device is nearly out of space; the
@@ -969,9 +982,14 @@ final class AppModel {
     /// overlay stays up instead and says how the operation ended (its words
     /// on success; `failure` and the error's on failure) until the person
     /// closes it; cancelling still takes the overlay away.
-    private func runOperation<Output: Sendable>(
+    ///
+    /// `failed` says how a failure ends instead of the alert, for a task
+    /// started from a sheet, where an alert of the screens could not show.
+    /// `finished` does not run for a cancelled operation.
+    func runOperation<Output: Sendable>(
         _ state: BusyState, failure: String,
         ending: ((Output) -> (title: String, detail: String))? = nil,
+        failed: (@MainActor (String) -> Void)? = nil,
         _ work: @escaping @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> Output,
         finished: @escaping @MainActor (Output) -> Void = { _ in }
     ) {
@@ -994,7 +1012,11 @@ final class AppModel {
             } catch {
                 if operationEpoch == epoch {
                     if ending == nil {
-                        alert = AppAlert(title: failure, message: error.localizedDescription)
+                        if let failed {
+                            failed(error.localizedDescription)
+                        } else {
+                            alert = AppAlert(title: failure, message: error.localizedDescription)
+                        }
                     } else {
                         failureWords = error.localizedDescription
                     }
@@ -1011,7 +1033,9 @@ final class AppModel {
             } else {
                 busy = nil
             }
-            if ending == nil, let result { finished(result) }
+            // A cancelled operation hands nothing on, even when its work
+            // finished before it saw the cancel.
+            if ending == nil, let result, !operationCancelled { finished(result) }
         }
     }
 
@@ -1062,32 +1086,54 @@ final class AppModel {
     /// (minutes, under emulation) and the finished zip goes to the share
     /// sheet, where Save to Files is one of the actions.
     func createBugReport() {
-        guard capabilities.bugReport, case .running(.normal) = phase, fileBrowser?.busy != true else { return }
+        guard canCreateBugReport else { return }
         runOperation(
-            BusyState(
-                title: "Creating bug report",
-                detail: "The guest is collecting its logs and state. This can take several minutes.", progress: 0
-            ),
-            failure: "Bug report not created",
-            { [driver, diagnosticsDirectory, diagnosticsContainers] update in
-                let file = if let driver {
-                    try await driver.createBugReport(update: update)
-                } else {
-                    try await Self.playBugReport(update)
-                }
-                // The host's records and the guest's counters travel inside
-                // Android's own report.
-                if let diagnosticsDirectory {
-                    let guest = await driver?.guestStallFiles() ?? []
-                    _ = await Task.detached(priority: .userInitiated) {
-                        BugReportAttachments.attach(
-                            to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
-                    }.value
-                }
-                return file
-            },
+            Self.bugReportState, failure: Self.bugReportFailure, bugReportWork(),
             finished: { [weak self] file in self?.share(file) }
         )
+    }
+
+    /// The overlay of a bug report under way, the same wherever it is asked for.
+    static let bugReportState = BusyState(
+        title: "Creating bug report",
+        detail: "The guest is collecting its logs and state. This can take several minutes.", progress: 0
+    )
+    static let bugReportFailure = "Bug report not created"
+
+    /// A normal session of a runtime that can make a bug report, with the
+    /// guest's one adb channel free.
+    var canCreateBugReport: Bool {
+        capabilities.bugReport && fileBrowser?.busy != true && {
+            if case .running(.normal) = phase { return true }
+            return false
+        }()
+    }
+
+    /// What making a bug report does, whoever asks for it: Android's report,
+    /// and the host's records and the guest's counters inside it.
+    func bugReportWork() -> @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> URL {
+        { [driver, diagnosticsDirectory, diagnosticsContainers] update in
+            let file = if let driver {
+                try await driver.createBugReport(update: update)
+            } else {
+                try await Self.playBugReport(update)
+            }
+            // The host's records and the guest's counters travel inside
+            // Android's own report.
+            if let diagnosticsDirectory {
+                let guest = await driver?.guestStallFiles() ?? []
+                _ = await Task.detached(priority: .userInitiated) {
+                    BugReportAttachments.attach(
+                        to: file, from: diagnosticsDirectory, containers: diagnosticsContainers, guest: guest)
+                }.value
+            }
+            // A cancel that came as the report finished: nobody takes the file.
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: file)
+                throw CancellationError()
+            }
+            return file
+        }
     }
 
     /// Opens the share sheet on a finished report; false when there is no
@@ -1111,7 +1157,7 @@ final class AppModel {
 
     /// The preview's report: the same steps on the same overlay, ending in
     /// the share sheet with a small file.
-    private static func playBugReport(_ update: @Sendable (BusyUpdate) -> Void) async throws -> URL {
+    static func playBugReport(_ update: @Sendable (BusyUpdate) -> Void) async throws -> URL {
         for step in 1...36 {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: Double(step) / 36 * 0.9))

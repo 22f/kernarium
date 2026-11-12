@@ -155,6 +155,11 @@ struct InfoSheet: View {
                         .accessibilityIdentifier("info-whats-new")
                     }
                 }
+                #if FEEDBACK_MAIL
+                if model.feedbackAddress != nil {
+                    Section { SendFeedbackEntrance(place: .info) }
+                }
+                #endif
                 Section("System info") {
                     LabeledContent("Build", value: model.system.buildLabel)
                     LabeledContent("Android version", value: model.system.version)
@@ -204,5 +209,8 @@ struct InfoSheet: View {
                 }
             }
         }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model)
+        #endif
     }
 }

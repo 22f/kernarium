@@ -1,9 +1,9 @@
 {
   "default-configuration": "Release",
   "configurations": [
-    { "name": "AppStore", "file": "Config/Signing.xcconfig" },
-    { "name": "Debug", "file": "Config/Signing.xcconfig" },
-    { "name": "Release", "file": "Config/Signing.xcconfig" },
+    { "name": "AppStore", "file": "Config/Andarium.xcconfig" },
+    { "name": "Debug", "file": "Config/Andarium.xcconfig" },
+    { "name": "Release", "file": "Config/Andarium.xcconfig" },
   ],
   "localizations": {
     "development": "en",
@@ -35,7 +35,8 @@
         { "path": "Andarium-Bridging-Header.h" },
         { "path": "Info.plist" },
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
-        { "path": "../../GuestHost/Config/Signing.xcconfig" },
+        { "path": "Andarium.xcconfig" },
+        { "path": "Feedback.local.xcconfig.example" },
       ],
     }, {
       "kind": "group",
@@ -102,11 +103,29 @@
         }, {
           "kind": "script",
           "name": "Check App Store bundle",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
             "[ \"$CONFIGURATION\" = AppStore ] || exit 0",
-            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
+            "",
+          ],
+        }, {
+          "kind": "script",
+          "name": "Check Send feedback",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
+          "run-on-every-build": true,
+          "shell": "/bin/sh",
+          "script": [
+            "[ \"$CONFIGURATION\" != AppStore ] || exit 0",
+            "/usr/bin/env python3 -B \"$SRCROOT/scripts/check-app-store-bundle.py\" --feedback --configuration \"$CONFIGURATION\" --feedback-address \"$FEEDBACK_ADDRESS\" --feedback-receiver \"$FEEDBACK_RECEIVER\" --info-source \"$SRCROOT/Config/Info.plist\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"",
             "",
           ],
         },
@@ -143,6 +162,9 @@
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
+        "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
+        "INFOPLIST_PREPROCESS": "YES",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -272,6 +294,7 @@
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
         "ENABLE_PREVIEWS": "YES",
+        "FEEDBACK_ADDRESS": "",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Config/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Andarium",
@@ -282,6 +305,9 @@
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad": "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
+        "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
+        "INFOPLIST_PREPROCESS": "YES",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
