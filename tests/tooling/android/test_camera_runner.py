@@ -239,6 +239,9 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-large-flash", "phone", "live")),
                          ["--camera=synthetic", "--camera-profile=phone",
                           "androidboot.product.vendor.sku=bf-large-flash"])
+        # With auto the launcher composes the layout and no SKU is passed.
+        self.assertEqual(runner.launcher_arguments(runner.make_plan("bf-large-flash", "phone", "live"), auto=True),
+                         ["--camera=synthetic", "--camera-profile=phone", "--camera-layout=auto"])
         self.assertEqual(runner.launcher_arguments(runner.make_plan("front", "laptop", "blocked"))[0],
                          "--camera=blocked")
         self.assertEqual(runner.launcher_arguments(runner.make_plan("none", "tablet", "none"))[0],
@@ -252,6 +255,7 @@ class LauncherTests(unittest.TestCase):
             self.assertRegex(source, rf'value == "{profile}"', profile)
         self.assertIn('valued("--camera=")', source)
         self.assertIn('valued("--camera-profile=")', source)
+        self.assertIn('valued("--camera-layout=")', source)
 
     def test_the_sku_argument_becomes_the_property_the_trigger_reads(self) -> None:
         self.assertEqual(layouts.SKU_BOOT_ARGUMENT, "androidboot." + layouts.SKU_PROPERTY.removeprefix("ro.boot.") + "=")

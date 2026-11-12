@@ -25,7 +25,7 @@ Every wait has a deadline. The guest's launcher is stopped through its own proce
 guest is reached through the shared adb server, always named with ``-s``.
 
 The runner is opt-in: it needs the macos-android17 executable, an installed release and an adb client.
-usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME]
+usage: run_android_camera.py --emulator uml-darwin-android17 [--release DIR] [--layout NAME|auto]
        [--camera-profile phone|tablet|laptop] [--mode live|blocked|none]
 """
 
@@ -643,14 +643,18 @@ def run_checks(guest: Guest, plan: Plan) -> None:
 CAMERA_SOURCES = {"live": "synthetic", "blocked": "blocked", "none": "none"}
 
 
-def launcher_arguments(plan: Plan) -> list[str]:
+AUTO_LAYOUT = "auto"
+
+
+def launcher_arguments(plan: Plan, auto: bool = False) -> list[str]:
     """What the plan adds to the launcher's command: the camera source and profile, and the layout,
     which the launcher forwards to the kernel as given, as the host's application states the layout it
-    composed."""
+    composed. With ``auto`` the launcher composes it from the cameras the source presents, through the
+    function the iOS runtime uses, and the run checks that Android booted with the plan's."""
     return [
         f"--camera={CAMERA_SOURCES[plan.mode]}",
         f"--camera-profile={plan.profile}",
-        f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
+        "--camera-layout=auto" if auto else f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
     ]
 
 
@@ -678,7 +682,7 @@ def start_guest(options: argparse.Namespace, plan: Plan, adb: str, private: path
         *boot_android.emulator_command(
             boot_options, release, instance / boot_android.android_instance.DATA_DISK, emulator,
             boot_android.data_capacity(boot_options, identity)),
-        *launcher_arguments(plan),
+        *launcher_arguments(plan, options.layout == AUTO_LAYOUT),
     ]
     log = private / "emulator.log"
     stream = log.open("wb")
@@ -709,7 +713,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-profile", choices=sorted(PROFILE_CAMERAS), default="phone",
                         help="the cameras the synthetic source presents")
     parser.add_argument("--layout", help="the camera layout to state on the vendor SKU "
-                        "(default: the profile's, or none for --mode none)")
+                        "(default: the profile's, or none for --mode none); `auto` has the launcher compose it "
+                        "from the cameras, as the iOS runtime does, and expects the profile's")
     parser.add_argument("--mode", choices=MODES, default="live",
                         help="live: the synthetic chart; blocked: a session started with Camera off; "
                         "none: no camera device")
@@ -730,6 +735,11 @@ def main() -> int:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
     layout = options.layout or ("none" if options.mode == "none" else DEFAULT_LAYOUTS[options.camera_profile])
+    if layout == AUTO_LAYOUT:
+        if options.mode == "none":
+            print("--layout auto needs a camera to compose it from", file=sys.stderr)
+            return 2
+        layout = DEFAULT_LAYOUTS[options.camera_profile]
     try:
         plan = make_plan(layout, options.camera_profile, options.mode)
     except ValueError as problem:
