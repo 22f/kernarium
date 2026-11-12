@@ -599,7 +599,7 @@ requires reopening Andarium.
   is Core Motion's calibrated device-motion field with Core Motion's accuracy
   as Android's, read while an application uses it, with no setting and no
   permission. Core Motion's request to move the device for calibration is no
-  failure; a start that delivers nothing in 5 s although none was made, or any
+  failure; a start that delivers nothing in 5 s without that request, or any
   other Core Motion error, turns it off for the rest of the run, where the
   accelerometer and gyroscope are tried again as above. A run ends with the
   foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2

@@ -10,7 +10,7 @@ public enum MagneticFieldEvent: Sendable, Equatable {
     case reading(x: Double, y: Double, z: Double, status: UInt8)
     /// Core Motion's one report that the device must be moved for the field
     /// to be calibrated (`CMErrorDeviceRequiresMovement`). It is no failure:
-    /// the readings go on, and wait for the movement.
+    /// the readings follow once the device is moved.
     case needsMovement
     /// Any other error: device motion cannot be read. `reason` is for a log.
     case failed(reason: String)

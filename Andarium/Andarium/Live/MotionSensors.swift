@@ -18,7 +18,8 @@ private nonisolated struct MotionConnector: GuestStreamOpener {
 nonisolated enum CompassSource {
     /// Core Motion reports once, in the handler, that the device must move for
     /// its field to be calibrated (`CMErrorDeviceRequiresMovement`, 101). The
-    /// readings go on, with status 0 until it is, so it is no failure.
+    /// readings follow once the device is moved, so it is no failure. (The
+    /// probe never saw it, so what Core Motion delivers meanwhile is not known.)
     static func isCalibrationNotice(_ error: any Error) -> Bool {
         let error = error as NSError
         return error.domain == CMErrorDomain && error.code == Int(CMErrorDeviceRequiresMovement.rawValue)
@@ -159,10 +160,10 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
         log: { note in
             switch note {
             case .needsMovement:
-                // Not a failure: once, and the readings go on.
+                // Not a failure: once, and the readings are waited for.
                 #if !APP_STORE
                 print("Andarium: compass: Core Motion asks the device to be moved to calibrate the field; "
-                    + "readings go on with status 0 until it is")
+                    + "the readings follow once it is")
                 #endif
                 break
             case .silent:
