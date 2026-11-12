@@ -371,11 +371,12 @@ struct AppEntry {
                 progress: 0.6, cancel: cancel
             )
         case "install-legacy":
-            // The first attempt is over and the question is up: no Cancel here.
+            // The first attempt is over and the question is up: the overlay
+            // keeps its Cancel, which the alert covers.
             return BusyState(
                 title: String(localized: "Installing app"),
                 detail: "\(file) \u{00B7} \(Formats.size(bytes: PreviewData.sampleApkSizeBytes))",
-                progress: 0.8
+                progress: 0.8, cancel: cancel
             )
         case "install-done":
             return BusyState(
