@@ -97,10 +97,10 @@ struct VideoRequest {
 
 // The size a video output delivers frames at, for a stream of `width` by
 // `height` running in a format of `formatWidth` by `formatHeight`: the
-// format's aspect ratio scaled down to just cover the stream, in even
-// dimensions, and never above the format's own size. The platform scales the
-// frames itself, so a format larger than the stream (one chosen for the photos
-// it lists) costs the host no more than the smaller format would.
+// smallest even multiple of the format's reduced aspect ratio that covers the
+// stream, or the format's own size when no smaller one does. The ratio is
+// kept exactly (the platform refuses a scaled size of another aspect), so a
+// stream of another aspect is delivered larger than it asks in one dimension.
 struct FrameSize {
     std::uint32_t width {};
     std::uint32_t height {};

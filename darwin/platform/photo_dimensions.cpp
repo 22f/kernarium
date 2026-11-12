@@ -2,7 +2,7 @@
 #include "photo_dimensions.hpp"
 
 #include <algorithm>
-#include <cmath>
+#include <numeric>
 
 namespace uml::platform {
 namespace {
@@ -115,12 +115,17 @@ FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeig
                             std::uint32_t height) noexcept
 {
     if (formatWidth == 0 || formatHeight == 0 || width == 0 || height == 0) return {formatWidth, formatHeight};
-    const double scale = std::min(1.0, std::max(double(width) / formatWidth, double(height) / formatHeight));
-    const auto even = [](double value, std::uint32_t limit) {
-        const auto rounded = (std::uint32_t(std::ceil(value - 1e-9)) + 1u) & ~1u;
-        return std::min(rounded, limit);
-    };
-    return {even(formatWidth * scale, formatWidth), even(formatHeight * scale, formatHeight)};
+    // Sizes of the format's aspect are the multiples of its reduced ratio, and
+    // an exact ratio is the only scaling the platform accepts.
+    const std::uint32_t common = std::gcd(formatWidth, formatHeight);
+    const std::uint32_t ratioWidth = formatWidth / common, ratioHeight = formatHeight / common;
+    std::uint64_t multiple = std::max((std::uint64_t(width) + ratioWidth - 1) / ratioWidth,
+                                      (std::uint64_t(height) + ratioHeight - 1) / ratioHeight);
+    // Both sides stay even (a video frame has chroma pairs): a ratio with an
+    // odd side wants an even multiple.
+    if (((ratioWidth | ratioHeight) & 1u) != 0 && (multiple & 1u) != 0) ++multiple;
+    if (multiple >= common) return {formatWidth, formatHeight};
+    return {std::uint32_t(multiple * ratioWidth), std::uint32_t(multiple * ratioHeight)};
 }
 
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept

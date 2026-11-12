@@ -269,12 +269,52 @@ void aCameraWithoutRequestsOffersNothing()
     require(photoSizesOfEveryRun(tabletFormats, {}, twelveMegapixels).empty(), "no stream, no run");
 }
 
+// The platform raises for a scaled size of another aspect, so the delivered
+// size is compared with the format's by cross multiplication.
+bool keepsAspect(FrameSize delivered, std::uint32_t formatWidth, std::uint32_t formatHeight)
+{
+    return std::uint64_t(delivered.width) * formatHeight == std::uint64_t(delivered.height) * formatWidth;
+}
+
 void aStreamSmallerThanItsFormatIsDeliveredScaled()
 {
     require(deliveredFrameSize(1920, 1440, 1440, 1080) == FrameSize({1440, 1080}), "the preview of a 12 MP format is 1440x1080");
     require(deliveredFrameSize(1920, 1440, 1280, 720) == FrameSize({1280, 960}), "a wider stream keeps the format's aspect ratio");
     require(deliveredFrameSize(4032, 3024, 1920, 1080) == FrameSize({1920, 1440}), "and covers the stream's longer side");
-    require(deliveredFrameSize(1920, 1440, 1000, 1000) == FrameSize({1334, 1000}), "an odd size rounds up to even");
+}
+
+void aStreamOfAnotherAspectIsDeliveredAtTheFormatsAspect()
+{
+    // 640x480 from a 16:9 format: a multiple of 16:9 that covers 480 lines.
+    require(deliveredFrameSize(1920, 1080, 640, 480) == FrameSize({864, 486}), "an even multiple of 16:9, not 854x480");
+    require(deliveredFrameSize(1920, 1440, 1000, 1000) == FrameSize({1336, 1002}), "a square stream from 4:3");
+    // The old rule rounded each side on its own: 1334x1000 is not 4:3.
+    require(!keepsAspect({1334, 1000}, 1920, 1440), "independent rounding does not keep the ratio");
+    require(keepsAspect(deliveredFrameSize(1920, 1440, 1000, 1000), 1920, 1440), "the delivered size does");
+}
+
+void everyStandardSizeIsDeliveredAtEveryFormatsAspect()
+{
+    const std::pair<std::uint32_t, std::uint32_t> standard[] {{176, 144}, {320, 240}, {640, 480}, {1280, 720}, {1920, 1080}, {3840, 2160}};
+    const std::pair<std::uint32_t, std::uint32_t> formats[] {{1440, 1080}, {1920, 1440}, {4032, 3024}, {1920, 1080}, {3840, 2160}, {4224, 2376}, {1088, 1088}};
+    for (const auto& [formatWidth, formatHeight] : formats)
+        for (const auto& [width, height] : standard) {
+            if (formatWidth < width || formatHeight < height) continue;  // no format of this size takes the stream
+            const auto delivered = deliveredFrameSize(formatWidth, formatHeight, width, height);
+            require(keepsAspect(delivered, formatWidth, formatHeight), "the format's aspect, by cross multiplication");
+            require(delivered.width >= width && delivered.height >= height, "covers the stream");
+            require(delivered.width <= formatWidth && delivered.height <= formatHeight, "never above the format");
+            require(delivered.width % 2 == 0 && delivered.height % 2 == 0, "even sides");
+        }
+}
+
+void aRatioWithAnOddSideTakesAnEvenMultiple()
+{
+    // A 3:2 ratio has an odd side, so its multiple is even: 427 would give
+    // the odd width 1281.
+    require(deliveredFrameSize(1088, 1088, 640, 480) == FrameSize({640, 640}), "the multiple of a 1:1 format");
+    require(deliveredFrameSize(3000, 2000, 1280, 720) == FrameSize({1284, 856}), "3:2 at 1280x720 is the multiple 428");
+    require(keepsAspect(deliveredFrameSize(3000, 2000, 1280, 720), 3000, 2000), "of 3:2");
 }
 
 void aStreamTheFormatJustCoversIsDeliveredAsItIs()
@@ -310,6 +350,9 @@ int main()
     aCameraWithoutTheLargestStillOffersWhatItsFormatMakes();
     aCameraWithoutRequestsOffersNothing();
     aStreamSmallerThanItsFormatIsDeliveredScaled();
+    aStreamOfAnotherAspectIsDeliveredAtTheFormatsAspect();
+    everyStandardSizeIsDeliveredAtEveryFormatsAspect();
+    aRatioWithAnOddSideTakesAnEvenMultiple();
     aStreamTheFormatJustCoversIsDeliveredAsItIs();
     return 0;
 }
