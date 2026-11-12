@@ -103,8 +103,8 @@ public enum FoldPose: Equatable, Sendable {
     /// turned, every screen outside the cover is laid out as on an iPad of the
     /// same size and shape: nothing is placed relative to the hinge, nothing
     /// avoids it, nothing is split around it. Home's pages, the session's
-    /// statistics and notices, the keys' keep-out and a sheet's detent all ask
-    /// it, and the popups' place follows it.
+    /// statistics and notices and keys, a sheet's detent and the halves the
+    /// popups keep to all ask it.
     public var spreads: Bool {
         switch self {
         case .upright(let bent), .turned(let bent): bent
