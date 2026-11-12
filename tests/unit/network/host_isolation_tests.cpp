@@ -33,9 +33,13 @@ constexpr Ipv4Address lan_broadcast{192, 0, 2, 255};
 constexpr Ipv4Address loopback{127, 0, 0, 1};
 constexpr Ipv4Address other_machine{192, 0, 2, 77};
 constexpr Ipv4Address gateway{10, 0, 2, 2};
+constexpr Ipv4Address name_server{10, 0, 2, 3};
+/* An address of the virtual network that SLiRP serves nothing at. */
+constexpr Ipv4Address virtual_host{10, 0, 2, 77};
 constexpr dns::MacAddress guest_mac{0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 constexpr dns::MacAddress slirp_mac{0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
-constexpr dns::Subnet virtual_network{{10, 0, 2, 0}, {255, 255, 255, 0}};
+/* What the provider serves itself. */
+constexpr dns::Servers servers{name_server, gateway, true, true};
 
 constexpr std::uint8_t protocol_icmp = 1;
 constexpr std::uint8_t protocol_tcp = 6;
@@ -160,7 +164,12 @@ HostAddresses the_host()
 
 dns::Classified classify(const Bytes &frame, const HostAddresses &host)
 {
-	return dns::classify_host_bound_frame(view(frame), host, virtual_network);
+	return dns::classify_host_bound_frame(view(frame), host, servers);
+}
+
+bool needs_check(const Bytes &frame)
+{
+	return dns::needs_host_check(view(frame), servers);
 }
 
 void theTableHoldsEachAddressOnceAndAnswersByLookup()
@@ -363,20 +372,90 @@ void everyOtherAddressGoesToSlirp()
 			 HostAddresses{}).action == FrameAction::pass);
 }
 
-void theVirtualNetworkIsNeverTheHost()
+/* SLiRP connects a flow to any address of the virtual network but the
+ * gateway as given (with its DNS proxy off, to the name server too), so a host
+ * address in 10.0.2.0/24 is the host's like any other, the gateway's and the
+ * name server's included. */
+void aHostAddressInTheVirtualNetworkIsTheHosts()
 {
-	/* A host whose own interface sits in 10.0.2.0/24 is no reason to refuse
-	 * the guest its gateway and its name server. */
-	const auto host = host_with({value(gateway), value({10, 0, 2, 3}),
-				     value({10, 0, 2, 77})});
-	for (const auto &address : {gateway, Ipv4Address{10, 0, 2, 3},
-				    Ipv4Address{10, 0, 2, 77}}) {
+	const auto host = host_with({value(gateway), value(name_server),
+				     value(virtual_host)});
+	for (const auto &address : {gateway, name_server, virtual_host}) {
+		const auto syn = classify(
+			ip_frame(address, protocol_tcp,
+				 tcp_segment(40000, 80, 1, 0, tcp_syn)), host);
+		require(syn.action == FrameAction::reset);
+		require(syn.endpoints.server_address == address);
+		const auto datagram = classify(
+			ip_frame(address, protocol_udp, udp_datagram(40000, 9)), host);
+		require(datagram.action == FrameAction::unreachable);
+		require(datagram.endpoints.server_address == address);
+		/* Everything else is dropped, as for any host address. */
+		require(classify(ip_frame(address, 47, Bytes(16, 0)), host).action ==
+			FrameAction::drop);
+		/* A segment of a flow is SLiRP's. */
 		require(classify(ip_frame(address, protocol_tcp,
-					  tcp_segment(40000, 80, 1, 0, tcp_syn)),
-				 host).action == FrameAction::pass);
-		require(classify(ip_frame(address, protocol_udp, udp_datagram(1, 2)),
+					  tcp_segment(40000, 80, 1, 2, tcp_ack)),
 				 host).action == FrameAction::pass);
 	}
+	/* An address the host does not hold is SLiRP's whatever the network. */
+	const auto neighbour = host_with({value(virtual_host)});
+	for (const auto &address : {gateway, name_server, Ipv4Address{10, 0, 2, 78}}) {
+		require(classify(ip_frame(address, protocol_tcp,
+					  tcp_segment(40000, 80, 1, 0, tcp_syn)),
+				 neighbour).action == FrameAction::pass);
+		require(classify(ip_frame(address, protocol_udp,
+					  udp_datagram(40000, 9)),
+				 neighbour).action == FrameAction::pass);
+	}
+}
+
+/* What SLiRP and the provider give at the gateway and the name server needs
+ * no host socket, so it is theirs even when the host holds the address. */
+void whatTheProviderServesAtItsOwnAddressesIsNotRefused()
+{
+	const auto host = host_with({value(gateway), value(name_server),
+				     value(virtual_host)});
+	const auto passes = [&](const Bytes &frame) {
+		return classify(frame, host).action == FrameAction::pass &&
+			!needs_check(frame);
+	};
+	const auto refused = [&](const Bytes &frame) {
+		return classify(frame, host).action != FrameAction::pass &&
+			needs_check(frame);
+	};
+	for (const auto &address : {gateway, name_server}) {
+		/* An echo, also when it arrives in fragments. */
+		require(passes(ip_frame(address, protocol_icmp, Bytes(8, 0))));
+		require(passes(ip_frame(address, protocol_icmp, Bytes(8, 0), 0x2000)));
+		require(passes(ip_frame(address, protocol_icmp, Bytes(8, 0), 0x00b9)));
+		/* DNS over both transports. */
+		require(passes(ip_frame(address, protocol_udp, udp_datagram(40000, 53))));
+		require(passes(ip_frame(address, protocol_tcp,
+					tcp_segment(40000, 53, 1, 0, tcp_syn))));
+		/* A fragment shows no port. */
+		require(refused(ip_frame(address, protocol_udp, udp_datagram(40000, 53),
+					 0x2000)));
+		require(refused(ip_frame(address, protocol_udp, udp_datagram(40000, 53),
+					 0x00b9)));
+		/* Neither is DNS by any other port, nor another protocol. */
+		require(refused(ip_frame(address, protocol_udp, udp_datagram(53, 40000))));
+		require(refused(ip_frame(address, protocol_tcp,
+					 tcp_segment(53, 40000, 1, 0, tcp_syn))));
+		require(refused(ip_frame(address, 47, Bytes(16, 0))));
+	}
+	/* DHCP is the gateway's. */
+	require(passes(ip_frame(gateway, protocol_udp, udp_datagram(68, 67))));
+	require(refused(ip_frame(name_server, protocol_udp, udp_datagram(68, 67))));
+	require(refused(ip_frame(gateway, protocol_tcp,
+				 tcp_segment(40000, 67, 1, 0, tcp_syn))));
+	require(refused(ip_frame(gateway, protocol_udp, udp_datagram(67, 68))));
+	/* The other address of the virtual network serves nothing. */
+	require(refused(ip_frame(virtual_host, protocol_icmp, Bytes(8, 0))));
+	require(refused(ip_frame(virtual_host, protocol_udp, udp_datagram(40000, 53))));
+	require(refused(ip_frame(virtual_host, protocol_tcp,
+				 tcp_segment(40000, 53, 1, 0, tcp_syn))));
+	require(refused(ip_frame(virtual_host, protocol_udp, udp_datagram(68, 67))));
 }
 
 void framesThatAreNotIpv4AreLeftToSlirp()
@@ -389,16 +468,13 @@ void framesThatAreNotIpv4AreLeftToSlirp()
 	require(classify(Bytes(10, 0), the_host()).action == FrameAction::pass);
 }
 
-bool needs_check(const Bytes &frame)
-{
-	return dns::needs_host_check(view(frame), virtual_network);
-}
-
 void onlyAFrameJudgedByTheTableMakesTheProviderLookItUp()
 {
-	/* A connect attempt, and a datagram, to anything outside the virtual
-	 * network, whatever the destination is. */
+	/* A connect attempt, and a datagram, to anything, whatever the
+	 * destination is: an address of the virtual network that serves nothing
+	 * included. */
 	for (const auto &destination : {lan_host, other_machine, loopback,
+					virtual_host, Ipv4Address{10, 0, 2, 255},
 					Ipv4Address{255, 255, 255, 255},
 					Ipv4Address{224, 0, 0, 251}}) {
 		require(needs_check(ip_frame(destination, protocol_tcp,
@@ -409,14 +485,22 @@ void onlyAFrameJudgedByTheTableMakesTheProviderLookItUp()
 		require(needs_check(ip_frame(destination, protocol_udp,
 					     udp_datagram(1, 2))));
 	}
-	/* The virtual network is never judged by the table. */
-	for (const auto &destination : {gateway, Ipv4Address{10, 0, 2, 3},
-					Ipv4Address{10, 0, 2, 255}}) {
+	/* What the provider serves at its own addresses is not: DNS at the
+	 * gateway and the name server, DHCP at the gateway, an echo to either. */
+	for (const auto &destination : {gateway, name_server}) {
 		require(!needs_check(ip_frame(destination, protocol_tcp,
-					      tcp_segment(1, 2, 3, 0, tcp_syn))));
+					      tcp_segment(1, 53, 3, 0, tcp_syn))));
 		require(!needs_check(ip_frame(destination, protocol_udp,
-					      udp_datagram(1, 2))));
+					      udp_datagram(1, 53))));
+		require(!needs_check(ip_frame(destination, protocol_icmp,
+					      Bytes(8, 0))));
+		require(needs_check(ip_frame(destination, protocol_tcp,
+					     tcp_segment(1, 2, 3, 0, tcp_syn))));
+		require(needs_check(ip_frame(destination, protocol_udp,
+					     udp_datagram(1, 2))));
 	}
+	require(!needs_check(ip_frame(gateway, protocol_udp, udp_datagram(68, 67))));
+	require(needs_check(ip_frame(name_server, protocol_udp, udp_datagram(68, 67))));
 	/* A segment of a flow passes whatever the table holds. */
 	for (const std::uint8_t flags :
 	     {static_cast<std::uint8_t>(tcp_syn | tcp_ack), tcp_ack, tcp_rst,
@@ -440,9 +524,12 @@ void onlyAFrameJudgedByTheTableMakesTheProviderLookItUp()
 					     udp_datagram(1, 2), fragment)));
 		require(needs_check(ip_frame(lan_host, protocol_icmp, Bytes(8, 0),
 					     fragment)));
-		/* A fragment to the virtual network is not judged by the table. */
-		require(!needs_check(ip_frame(gateway, protocol_tcp,
-					      tcp_segment(1, 2, 3, 4, tcp_syn),
+		/* A fragment to the gateway shows no port, so it is judged by the
+		 * table unless it is ICMP. */
+		require(needs_check(ip_frame(gateway, protocol_tcp,
+					     tcp_segment(1, 53, 3, 4, tcp_syn),
+					     fragment)));
+		require(!needs_check(ip_frame(gateway, protocol_icmp, Bytes(8, 0),
 					      fragment)));
 	}
 	/* The Don't Fragment bit is not a fragment. */
@@ -498,6 +585,59 @@ void aFrameThatNeedsNoLookUpIsJudgedAlikeWhateverTheTableHolds()
 	require(unjudged > frames.size() / 3);
 }
 
+void aTableThatHoldsEveryAddressRefusesWhatTheTableJudges()
+{
+	/* The provider judges by this table when it has not been able to read the
+	 * host's addresses for a while: everything that would open a flow to
+	 * another machine is refused, and what it serves at its own addresses
+	 * still is not. */
+	const auto &all = HostAddresses::everything();
+	require(!all.empty() && all.contains(other_machine) &&
+		all.contains(lan_host) && all.contains(virtual_host));
+	/* An ordinary table is not affected, and tables compare apart. */
+	require(!the_host().contains(other_machine));
+	require(all != HostAddresses{});
+	require(classify(ip_frame(other_machine, protocol_tcp,
+				  tcp_segment(40000, 80, 1000, 0, tcp_syn)),
+			 all).action == FrameAction::reset);
+	require(classify(ip_frame(other_machine, protocol_udp, udp_datagram(1, 2)),
+			 all).action == FrameAction::unreachable);
+	require(classify(ip_frame(other_machine, protocol_icmp, Bytes(8, 0)),
+			 all).action == FrameAction::drop);
+	require(classify(ip_frame(gateway, protocol_icmp, Bytes(8, 0)), all).action ==
+		FrameAction::pass);
+	require(classify(ip_frame(name_server, protocol_udp, udp_datagram(40000, 53)),
+			 all).action == FrameAction::pass);
+	require(classify(ip_frame(gateway, protocol_udp, udp_datagram(68, 67)), all).action ==
+		FrameAction::pass);
+}
+
+void aTableThatHoldsEveryAddressLeavesWhatNoTableHoldsAlone()
+{
+	/* A guest's DHCP discover is a broadcast from 0.0.0.0, and its group
+	 * traffic goes to a multicast address: no interface holds either, so
+	 * they are no more the host's under this table than under any other. */
+	const auto &all = HostAddresses::everything();
+	for (const auto &address : {Ipv4Address{255, 255, 255, 255},
+				    Ipv4Address{0, 0, 0, 0},
+				    Ipv4Address{224, 0, 0, 0},
+				    Ipv4Address{224, 0, 0, 251},
+				    Ipv4Address{239, 255, 255, 255}}) {
+		require(!all.contains(address));
+		require(classify(ip_frame(address, protocol_udp, udp_datagram(68, 67)),
+				 all).action == FrameAction::pass);
+		require(classify(ip_frame(address, protocol_tcp,
+					  tcp_segment(40000, 80, 1, 0, tcp_syn)),
+				 all).action == FrameAction::pass);
+	}
+	/* The addresses beside them are the host's. */
+	for (const auto &address : {Ipv4Address{223, 255, 255, 255},
+				    Ipv4Address{240, 0, 0, 1},
+				    Ipv4Address{0, 0, 0, 1},
+				    Ipv4Address{255, 255, 255, 254}})
+		require(all.contains(address));
+}
+
 } // namespace
 
 int main()
@@ -512,9 +652,12 @@ int main()
 	aDatagramToAHostAddressGetsAPortUnreachable();
 	whateverElseIsAddressedToTheHostIsDropped();
 	everyOtherAddressGoesToSlirp();
-	theVirtualNetworkIsNeverTheHost();
+	aHostAddressInTheVirtualNetworkIsTheHosts();
+	whatTheProviderServesAtItsOwnAddressesIsNotRefused();
 	framesThatAreNotIpv4AreLeftToSlirp();
 	onlyAFrameJudgedByTheTableMakesTheProviderLookItUp();
 	aFrameThatNeedsNoLookUpIsJudgedAlikeWhateverTheTableHolds();
+	aTableThatHoldsEveryAddressRefusesWhatTheTableJudges();
+	aTableThatHoldsEveryAddressLeavesWhatNoTableHoldsAlone();
 	return EXIT_SUCCESS;
 }

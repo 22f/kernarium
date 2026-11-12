@@ -296,7 +296,13 @@ nonisolated struct AdbGuestOperations: Sendable {
 
     /// Installs the APK at `url` (readable by the caller), cancellable while
     /// the file is being sent. The file's size is read when it is in hand.
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    /// `bypassLowTargetSdkBlock` sends the package manager's flag that lifts its
+    /// refusal of an app built for a much older Android; only Settings' Install
+    /// APK sets it, once, after the person's answer (`LegacyInstallFlow`). An
+    /// app refused for that reason without it throws `LegacyApkRefused`.
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool = false, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws {
         guard let identity else { throw AdbFailure(.keyRejected, activity: .installApp) }
         let coordinator = FileCoordinatorBox()
         let device = device
@@ -306,8 +312,8 @@ nonisolated struct AdbGuestOperations: Sendable {
                 identity: identity, clock: clock, connector: connector, onCancel: { coordinator.cancel() }
             ) { session in
                 try ApkInstallOperation.run(
-                    session: session, coordinator: coordinator, url: url, device: device, hostFree: hostFree,
-                    update: update)
+                    session: session, coordinator: coordinator, url: url, device: device,
+                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
             }
         } catch {
             throw AdbOperationRunner.presented(error, activity: .installApp)
