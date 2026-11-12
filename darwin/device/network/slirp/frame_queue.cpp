@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <utility>
@@ -125,19 +126,35 @@ bool SlirpProvider::read_host_addresses_now() noexcept
 #endif
 	} catch (...) {
 	}
-	/* A failed read is counted as a read, so it is not retried for every
-	 * frame; it keeps the table the last good read left. */
-	host_addresses_read_at_ = host_clock_now();
-	if (!addresses)
+	const auto now = host_clock_now();
+	if (!addresses) {
+		/* The table stays as it was, and as old: the next frame that needs
+		 * it tries again, not before the retry interval. */
+		host_address_retry_at_ = now + host_address_retry_interval;
 		return false;
+	}
 	host_addresses_ = std::move(*addresses);
+	host_addresses_read_at_ = now;
+	host_address_retry_at_ = {};
+	if (host_addresses_distrust_logged_)
+		std::fprintf(stderr, "Darwin user network: the host's addresses "
+				     "can be read again\n");
+	host_addresses_distrust_logged_ = false;
 	return true;
 }
 
 void SlirpProvider::refresh_host_addresses_if_stale() noexcept
 {
-	if (host_clock_now() - host_addresses_read_at_ >= host_address_max_age)
+	const auto now = host_clock_now();
+	if (now - host_addresses_read_at_ >= host_address_max_age &&
+	    now >= host_address_retry_at_)
 		(void)read_host_addresses_now();
+}
+
+bool SlirpProvider::host_addresses_trusted() const noexcept
+{
+	return host_clock_now() - host_addresses_read_at_ <
+		host_address_max_age + host_address_failure_grace;
 }
 
 bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
@@ -145,18 +162,33 @@ bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 	const auto bytes = std::span<const std::uint8_t>{
 		reinterpret_cast<const std::uint8_t *>(frame.data()),
 		frame.size()};
-	auto classified = dns::classify_guest_frame(
-		bytes, {nameserver_ipv4, host_alias_ipv4, name_server_stream_,
-			gateway_stream_});
+	const dns::Servers servers{nameserver_ipv4, host_alias_ipv4,
+				   name_server_stream_, gateway_stream_};
+	auto classified = dns::classify_guest_frame(bytes, servers);
 	/* What SLiRP would connect to the machine the application runs on is
 	 * refused here instead: the guest gets the answer a closed port gives.
 	 * The host's addresses are looked up again only for a frame that is
 	 * judged by them, and not more than once in host_address_max_age. */
 	if (classified.action == dns::FrameAction::pass) {
-		if (dns::needs_host_check(bytes, virtual_network_ipv4))
+		const bool needs_table = dns::needs_host_check(bytes, servers);
+		if (needs_table)
 			refresh_host_addresses_if_stale();
+		/* A table the system has not let the provider refresh for a few
+		 * seconds judges nothing: until a read succeeds, whatever the
+		 * table decides is refused as if every address were the host's,
+		 * the datagrams of a flow already open with the rest. */
+		const bool trusted = !needs_table || host_addresses_trusted();
+		if (!trusted && !host_addresses_distrust_logged_) {
+			host_addresses_distrust_logged_ = true;
+			std::fprintf(stderr, "Darwin user network: the host's "
+					     "addresses cannot be read; "
+					     "connection attempts, datagrams "
+					     "and ICMP are refused\n");
+		}
 		classified = dns::classify_host_bound_frame(
-			bytes, host_addresses_, virtual_network_ipv4);
+			bytes, trusted ? host_addresses_ :
+					 HostAddresses::everything(),
+			servers);
 	}
 	switch (classified.action) {
 	case dns::FrameAction::pass:

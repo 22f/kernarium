@@ -138,6 +138,9 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		/* The guest may not address the host itself (answer_locally), so
 		 * the network does not come up without the host's addresses to
 		 * refuse. */
+		host_addresses_read_at_ = {};
+		host_address_retry_at_ = {};
+		host_addresses_distrust_logged_ = false;
 		if (!read_host_addresses_now())
 			return -EIO;
 
