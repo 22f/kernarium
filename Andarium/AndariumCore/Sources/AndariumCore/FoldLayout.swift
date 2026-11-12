@@ -266,25 +266,26 @@ public enum FoldScreen: Equatable, Sendable {
 }
 
 /// The halves of the safe area on either side of the fold, for the screens that
-/// sit on one of them.
+/// sit on one of them while the device is bent. Flat there are none: every
+/// screen lays out as it does with no hinge.
 public struct FoldHalves: Equatable, Sendable {
     public var first: CGRect
     public var second: CGRect
     public var upright: Bool
-    /// The device is bent at the fold, not flat (`FoldPose.spreads`).
-    public var bent: Bool
     /// The safe area the halves divide.
     public var safe: CGRect
     /// The fold band between the halves.
     public var band: CGRect
 
-    /// Nil where the display has no fold band.
+    /// Nil unless the device is bent at the fold (`FoldPose.spreads`): flat,
+    /// on the cover and on a display with no hinge nothing sits on a half.
     public init?(_ reading: FoldReading) {
-        guard let halves = SessionPlan.halves(of: reading.safeArea, reading: reading) else { return nil }
+        guard reading.pose.spreads, let halves = SessionPlan.halves(of: reading.safeArea, reading: reading) else {
+            return nil
+        }
         first = halves.first
         second = halves.second
         if case .upright = reading.pose { upright = true } else { upright = false }
-        bent = reading.pose.spreads
         safe = reading.safeArea
         band = reading.division?.frame ?? .zero
     }
@@ -294,33 +295,11 @@ public struct FoldHalves: Equatable, Sendable {
     /// lower one turned.
     public var card: CGRect { upright ? first : second }
 
-    /// The safe area cut to the most of it that is centred on the fold along
-    /// the axis the fold crosses, so that content centred in it is centred on
-    /// the display and the fold runs through its middle. The status bar's
-    /// strip leaves the safe area off the display's centre; this is not.
-    public var centred: CGRect {
-        var area = safe
-        if upright {
-            let half = max(0, min(band.midX - safe.minX, safe.maxX - band.midX))
-            area.origin.x = band.midX - half
-            area.size.width = 2 * half
-        } else {
-            let half = max(0, min(band.midY - safe.minY, safe.maxY - band.midY))
-            area.origin.y = band.midY - half
-            area.size.height = 2 * half
-        }
-        return area
-    }
-
-    /// Where `screen` goes. While the device is flat every screen is placed
-    /// as it is on an iPad: the popups (the boot, a card, an overlay) and
-    /// Welcome span the display, centred on the fold and across it (`centred`).
-    /// While it is bent they keep to a half, so the fold never crosses them:
+    /// Where `screen` goes, so that the fold never crosses it:
     /// - Welcome and a card: on the half where the system puts its own alerts.
     /// - Boot: on the upper half when the device stands turned, the half that
     ///   faces the person; on the alerts' half upright.
     public func area(for screen: FoldScreen) -> CGRect {
-        guard bent else { return centred }
         switch screen {
         case .card, .welcome: return card
         case .boot: return upright ? card : first
@@ -328,22 +307,16 @@ public struct FoldHalves: Equatable, Sendable {
     }
 
     /// How far in from each edge of `space`, the space a view is given, the
-    /// view is kept to the area of `screen`. A half is never padded
-    /// outward. The area centred on the display is: a navigation bar, or the
-    /// strip the status bar and the toolbar take beside the camera, leaves a
-    /// screen less than the display, and content centred on the display
-    /// reaches past that space (a negative inset) to centre on the fold.
+    /// view is kept to the area of `screen`. A half is never padded outward.
     public func insets(for screen: FoldScreen, in space: CGRect) -> FoldInsets {
         let area = area(for: screen)
-        let reaches = screen == .welcome && !bent
-        func kept(_ inset: CGFloat) -> CGFloat { reaches ? inset : max(0, inset) }
         return FoldInsets(
-            top: kept(area.minY - space.minY), leading: kept(area.minX - space.minX),
-            bottom: kept(space.maxY - area.maxY), trailing: kept(space.maxX - area.maxX))
+            top: max(0, area.minY - space.minY), leading: max(0, area.minX - space.minX),
+            bottom: max(0, space.maxY - area.maxY), trailing: max(0, space.maxX - area.maxX))
     }
 }
 
-/// Distances from the edges of a space, in points; negative reaches past it.
+/// Distances from the edges of a space, in points.
 public struct FoldInsets: Equatable, Sendable {
     public var top: CGFloat
     public var leading: CGFloat

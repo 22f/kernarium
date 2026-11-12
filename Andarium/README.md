@@ -107,15 +107,16 @@ every screen is laid out as on an iPad of the same size and shape.
   deck with the keys in one row and the statistics and notices above them.
 - **Other screens.** Bent, Home is one page each side of the fold; flat it is
   Home as on an iPad, one scrolling list with Start at the foot of the screen.
-  While the device is flat every popup is placed as on an iPad, centred across
-  the whole display: Welcome, the boot, the busy, low-space and end cards, and
-  the cards inside a sheet, which is the system's. While it is bent they keep
-  to the half where the system puts its alerts, and the boot of a standing
-  device to the upper half. On a folding device, Welcome and the end screen
-  scroll when taller than their place. System alerts stay where iOS puts them,
-  inside the device's own safe area. A sheet turned and bent rises to a little
-  below the fold; a sheet keeps the placement it opened with, and what has been
-  typed in it, until it closes, whatever the hinge or the turn does meanwhile.
+  Flat, Welcome, the boot, the busy, low-space and end cards, and the cards
+  inside a sheet (the system's) are laid out as on a display with no hinge,
+  centred in the safe area as the Start bar and the system's alerts are. While
+  the device is bent they keep to the half where the system puts its alerts,
+  and the boot of a standing device to the upper half. On a folding device,
+  Welcome and the end screen scroll when taller than their place. System
+  alerts stay where iOS puts them, inside the device's own safe area. A sheet
+  turned and bent rises to a little below the fold; a sheet keeps the
+  placement it opened with, and what has been typed in it, until it closes,
+  whatever the hinge or the turn does meanwhile.
   On the cover the file browser's Import is a round button in the toolbar's
   column beside the camera, between More and Done, and the bar keeps Export.
 

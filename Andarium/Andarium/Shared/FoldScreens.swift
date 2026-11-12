@@ -8,17 +8,15 @@ import SwiftUI
 // does nothing where the display has no fold band.
 
 extension View {
-    /// Keeps the view to the place of `screen` on the inner display (see
-    /// `FoldHalves.area(for:)`). While the device is bent that is the half
-    /// where the system puts its own alerts, the leading one upright and the
-    /// lower one turned, so a card or a boot step never straddles the fold;
-    /// while it is flat the view spans the display, centred on the fold, as on
-    /// an iPad. The view is padded away from the rest of the space it has, or
-    /// reaches past that space to the whole display (Welcome, flat);
-    /// elsewhere there is no padding, so it lays out as it always did. It
-    /// measures the space it is given and not the window's safe area, so it
-    /// holds in a sheet and under a navigation bar. Apply it to a view that
-    /// fills the space it is shown in.
+    /// Keeps the view to the place of `screen` on the inner display while the
+    /// device is bent (see `FoldHalves.area(for:)`): the half where the system
+    /// puts its own alerts, the leading one upright and the lower one turned,
+    /// so a card or a boot step never straddles the fold. Flat, on the cover
+    /// and on a display with no hinge there is no padding and nothing is
+    /// measured, so it lays out as it always did. It measures the space it is
+    /// given and not the window's safe area, so it holds in a sheet and under
+    /// a navigation bar. Apply it to a view that fills the space it is shown
+    /// in.
     func onCardHalf(_ screen: FoldScreen = .card) -> some View { modifier(OnCardHalf(screen: screen)) }
 
     /// A sheet's presentation on the turned inner display while the device
@@ -51,8 +49,9 @@ private struct OnCardHalf: ViewModifier {
 
     func body(content: Content) -> some View {
         let fold = model?.fold
+        // Only while the device is bent: flat is the no-hinge path.
         let halves = fold.flatMap(FoldHalves.init)
-        let folds = halves != nil
+        let bent = halves != nil
         // The reader takes the space it is given whatever its content does,
         // so the space is measured on it: a view taller than its place
         // overflows, and never grows the space it is measured in (which its
@@ -60,18 +59,17 @@ private struct OnCardHalf: ViewModifier {
         // then keeps to the place of its screen: a card in a stack centres on
         // its place and not on that space. Until the space is measured the
         // window's safe area stands for it. A view taller than its place
-        // overflows from the top of a half while the device is bent, so that
-        // what a person reads first stays on it; everywhere else (flat, the
-        // cover, a display with no hinge) it overflows both ends equally, as
-        // it always did.
+        // overflows from the top of a half, so that what a person reads first
+        // stays on it; everywhere else (flat, the cover, a display with no
+        // hinge) it overflows both ends equally, as it always did.
         GeometryReader { geo in
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(Self.padding(halves?.insets(for: screen, in: (measured ?? fold?.safeArea) ?? .zero)))
-                .frame(width: geo.size.width, height: geo.size.height, alignment: halves?.bent == true ? .topLeading : .center)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: bent ? .topLeading : .center)
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-            if folds, measured != frame { measured = frame }
+            if bent, measured != frame { measured = frame }
         }
     }
 

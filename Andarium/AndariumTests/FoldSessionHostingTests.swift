@@ -531,18 +531,18 @@ struct FoldSessionHostingTests {
 
     // MARK: The other screens
 
-    /// Welcome's place, measured in the space it is given: Welcome is the view
-    /// alone in a view the size of the pose, with the pose's safe area: the
-    /// navigation stack Home puts it in lays out by the window the system has,
-    /// which is not the pose's here, and its bar and strip are the captures'.
-    /// Flat, its area is centred on the fold; bent, it is on the alerts' half.
-    @Test(arguments: Pose.allCases.filter(\.inner))
-    func welcomeIsCentredOnTheFoldWhenFlatAndOnAHalfWhenBent(_ pose: Pose) async throws {
+    /// Welcome as `pose` lays it out, or as a display with no hinge does in
+    /// the same window when `plain`: its column and its footer, and whether it
+    /// is in a scroll view. Welcome is the view alone in a view the size of the
+    /// pose, with the pose's safe area: the navigation stack Home puts it in
+    /// lays out by the window the system has, which is not the pose's here, and
+    /// its bar and strip are the captures'.
+    private func welcome(on pose: Pose, plain: Bool = false) async throws -> (column: CGRect, footer: CGRect, scrolls: Bool) {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let model = AppEntry.fromArguments().makeModel()
         model.guest = nil
-        model.fold = pose.reading
+        model.fold = plain ? nil : pose.reading
         let container = UIViewController()
         lease.window.rootViewController = container
         let holder = UIView(frame: pose.reading.window)
@@ -574,23 +574,26 @@ struct FoldSessionHostingTests {
         let shown = elements.filter {
             $0.label.contains("No virtual machine yet") || $0.label.contains("Set up virtual machine")
         }
-        let welcome = try #require(shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
+        let column = try #require(shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
         let footer = try #require(elements.first { $0.label.contains("free on this") }?.frame, "no footer")
+        return (column, footer, elements.contains { $0.label.hasPrefix("Vertical scroll bar") })
+    }
+
+    /// Flat, Welcome is where it is on a display that does not fold, as on an
+    /// iPad, in the same window; bent, it is on the half where the system puts
+    /// its alerts, off the fold.
+    @Test(arguments: Pose.allCases.filter(\.inner))
+    func welcomeIsTheIPadsWhenFlatAndOnAHalfWhenBent(_ pose: Pose) async throws {
+        let shown = try await welcome(on: pose)
         let band = try #require(pose.reading.division).frame
-        let halves = try #require(FoldHalves(pose.reading))
-        let area = halves.area(for: .welcome)
         if pose == .uprightFlat || pose == .turnedFlat {
-            // Centred on the fold, across it: the column is on the middle of the
-            // area, and the footer sits at its foot.
-            #expect(abs(welcome.midX - area.midX) < 2, "\(pose): Welcome \(welcome) is not centred on \(area)")
-            #expect(abs(footer.midX - area.midX) < 3, "\(pose): the footer \(footer) is not centred on \(area)")
-            #expect(abs(footer.maxY - (area.maxY - 12)) < 4, "\(pose): the footer \(footer) is not at the foot of \(area)")
-            #expect(area.intersects(band) && area != halves.card, "\(pose): the area \(area) is a half")
-            let along = pose == .uprightFlat ? (area.midX, band.midX) : (area.midY, band.midY)
-            #expect(abs(along.0 - along.1) < 0.5, "\(pose): the area \(area) is not centred on the fold \(band)")
+            let expected = try await welcome(on: pose, plain: true)
+            #expect(near(shown.column, expected.column), "\(pose): Welcome is at \(shown.column), not as with no hinge at \(expected.column)")
+            #expect(near(shown.footer, expected.footer), "\(pose): the footer is at \(shown.footer), not as with no hinge at \(expected.footer)")
         } else {
-            #expect(!welcome.intersects(band), "\(pose): Welcome is on the fold at \(welcome)")
-            #expect(halves.card.insetBy(dx: -1, dy: -1).contains(welcome), "\(pose): Welcome \(welcome) is not on \(halves.card)")
+            let card = try #require(FoldHalves(pose.reading)).card
+            #expect(!shown.column.intersects(band), "\(pose): Welcome is on the fold at \(shown.column)")
+            #expect(card.insetBy(dx: -1, dy: -1).contains(shown.column), "\(pose): Welcome \(shown.column) is not on \(card)")
         }
     }
 
@@ -687,36 +690,17 @@ struct FoldSessionHostingTests {
     }
 
     /// Flat, every popup is where it is on a display that does not fold, as on
-    /// an iPad, moved only to the fold's centre (the status bar's strip and
-    /// the safe area's edges leave the safe area off the display's centre);
-    /// bent, it keeps to a half, the boot of a standing device to the upper
-    /// one.
+    /// an iPad, in the same window; bent, it keeps to a half, the boot of a
+    /// standing device to the upper one.
     @Test(arguments: Pose.allCases.filter(\.inner), Popup.allCases)
-    func everyPopupIsCentredOnTheDisplayWhenFlatAndKeepsToAHalfWhenBent(_ pose: Pose, _ popup: Popup) async throws {
-        let halves = try #require(FoldHalves(pose.reading))
+    func everyPopupIsTheIPadsWhenFlatAndKeepsToAHalfWhenBent(_ pose: Pose, _ popup: Popup) async throws {
         let band = try #require(pose.reading.division).frame
         let (shown, _) = try await frame(of: popup, on: pose)
         if pose == .uprightFlat || pose == .turnedFlat {
-            let (plain, space) = try await frame(of: popup, on: pose, plain: true)
-            let safe = pose.reading.safeArea
-            let given = abs(space.minX - safe.minX) < 1 && abs(space.minY - safe.minY) < 1
-                && abs(space.maxX - safe.maxX) < 1 && abs(space.maxY - safe.maxY) < 1
-            if given {
-                // The popup moves from the middle of its space to the middle of
-                // what the display's centred area shares with it.
-                let target = halves.area(for: .card).intersection(space)
-                let expected = CGPoint(x: plain.midX + target.midX - space.midX, y: plain.midY + target.midY - space.midY)
-                #expect(abs(shown.midX - expected.x) < 1 && abs(shown.midY - expected.y) < 1,
-                        "\(pose): the \(popup) is at \(shown), not centred as without a fold, \(plain), moved to \(expected)")
-            } else {
-                // A window with safe-area insets of its own, an iPhone's or an
-                // iPad's, cannot be given the pose's: the popup is where it is
-                // without a fold, moved at most by half of what the fold's
-                // centring cuts off (a status strip, an inset).
-                #expect(abs(shown.midX - plain.midX) <= 60 && abs(shown.midY - plain.midY) <= 60,
-                        "\(pose): the \(popup) is at \(shown), far from where it is without a fold, \(plain)")
-            }
+            let (plain, _) = try await frame(of: popup, on: pose, plain: true)
+            #expect(near(shown, plain), "\(pose): the \(popup) is at \(shown), not as with no hinge at \(plain)")
         } else {
+            let halves = try #require(FoldHalves(pose.reading))
             let place = popup == .boot && pose == .turnedBook ? halves.first : halves.card
             #expect(!shown.intersects(band), "\(pose): the \(popup) is on the fold at \(shown)")
             #expect(place.insetBy(dx: -1, dy: -1).contains(shown), "\(pose): the \(popup) \(shown) is not on \(place)")
@@ -802,13 +786,8 @@ struct FoldSessionHostingTests {
             let top = try #require(FoldHalves(pose.reading)).insets(for: .card, in: holder.bounds).top
             #expect(abs(card.minY - top) < 1, "\(name): the card \(card) does not start at the half's top, \(top)")
         } else {
-            // Centred on its place: the whole space with no hinge or on the
-            // cover, and the display's centre, which a flat inner display's
-            // card keeps to, where that is less than the space (the window
-            // here is smaller than the display).
-            let insets = pose.flatMap { FoldHalves($0.reading) }?.insets(for: .card, in: holder.bounds) ?? FoldInsets()
-            let middle = (insets.top + holder.bounds.height - insets.bottom) / 2
-            #expect(abs(card.midY - middle) < 1, "\(name): the card \(card) is not centred on \(middle) in \(holder.bounds)")
+            // Centred on the space: with no hinge, on the cover and flat.
+            #expect(abs(card.midY - holder.bounds.midY) < 1, "\(name): the card \(card) is not centred on \(holder.bounds)")
         }
     }
 
