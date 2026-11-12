@@ -125,9 +125,22 @@ struct WhatsNewTests {
         ])
         // The dot keeps to the end of its line: a no-break space before it.
         let separator = "\u{00A0}\u{00B7} "
-        #expect(WhatsNewRibbon.summary(titles, naming: 8) == titles.joined(separator: separator))
-        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "Snapshots\(separator)Resolution\(separator)6 more")
+        #expect(WhatsNewRibbon.summary(titles, naming: 8, language: "en") == titles.joined(separator: separator))
+        #expect(
+            WhatsNewRibbon.summary(titles, naming: 2, language: "en")
+                == "Snapshots\(separator)Resolution\(separator)6 more")
         #expect(WhatsNewRibbon.summary(titles, naming: 0) == "8 new features")
+    }
+
+    /// A language that breaks between any two characters gets plain spaces: a
+    /// no-break space would pull the last character of a name onto the next
+    /// line with its dot.
+    @Test func theSeparatorIsNoBreakWhereALanguageBreaksAtSpaces() {
+        #expect(WhatsNewRibbon.separator(inLanguage: "en") == "\u{00A0}\u{00B7} ")
+        for language in ["zh-Hans", "zh-Hant", "ja", "zh-Hant-TW"] {
+            #expect(WhatsNewRibbon.separator(inLanguage: language) == " \u{00B7} ", "\(language)")
+        }
+        #expect(WhatsNewRibbon.summary(["A", "B", "C"], naming: 1, language: "ja") == "A \u{00B7} 2 more")
     }
 
     /// The ribbon lists what the device is told, in the order written: seven

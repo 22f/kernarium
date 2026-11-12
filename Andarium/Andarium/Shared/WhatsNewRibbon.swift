@@ -132,15 +132,27 @@ struct WhatsNewRibbon: View {
 
     /// "File browser · More memory", "File browser · More memory · 5 more",
     /// or "7 new features" when none is named.
-    static func summary(_ titles: [String], naming named: Int) -> String {
+    static func summary(_ titles: [String], naming named: Int, language: String = appLanguage) -> String {
         guard named > 0 else {
             return String(localized: "\(titles.count) new features")
         }
         let rest = titles.count - named
-        // A no-break space before the dot keeps it at the end of its line,
-        // never at the start of the next.
         return (titles.prefix(named) + (rest > 0 ? [String(localized: "\(rest) more")] : []))
-            .joined(separator: "\u{00A0}\u{00B7} ")
+            .joined(separator: separator(inLanguage: language))
+    }
+
+    /// The language the application's own words are in.
+    static var appLanguage: String { Bundle.main.preferredLocalizations.first ?? "en" }
+
+    /// What stands between two names: a dot. Where a language breaks lines at
+    /// spaces, a no-break space before the dot keeps it at the end of its line
+    /// and never at the start of the next. Chinese and Japanese break between
+    /// any two characters, so a no-break space there only drags the last
+    /// character of a name onto the next line with the dot; they take plain
+    /// spaces, and a name is cut only where the line is full.
+    static func separator(inLanguage language: String) -> String {
+        let breaksBetweenCharacters = language.hasPrefix("zh") || language.hasPrefix("ja")
+        return (breaksBetweenCharacters ? " " : "\u{00A0}") + "\u{00B7} "
     }
 
     /// A pull down that follows the finger, against some resistance, and
