@@ -80,6 +80,7 @@ EVENT_SECONDS = 30
 PLUG_SECONDS = 45
 QUIET_SECONDS = 3
 CONNECT_SECONDS = 60
+SETTINGS_WRITE_SECONDS = 3
 REBOOT_SECONDS = 600
 
 SIDE_KEYS = "Kernarium Keyboard"
@@ -877,12 +878,16 @@ def check_unplug(guest: Guest, vnc: VncClient) -> None:
 def check_choice_survives_a_boot(guest: Guest, reboot_guest: Callable[[], None]) -> None:
     """A person's later choice of the on-screen keyboard survives a reboot: the script has its marker."""
     guest.shell(f"cmd settings put secure {KEYBOARD_SETTING} 1")
+    # SettingsProvider writes a changed setting to its file after a short delay; a reboot that came sooner would
+    # lose the choice for a reason that has nothing to do with the script's marker, which is what this checks.
+    time.sleep(SETTINGS_WRITE_SECONDS)
     reboot_guest()
     value = guest.shell(f"cmd settings get secure {KEYBOARD_SETTING}").strip()
     logged = guest.shell(f"logcat -d -s {KEYBOARD_DEFAULT_TAG}:I").strip()
     guest.shell(f"cmd settings put secure {KEYBOARD_SETTING} 0")
     if value != "1":
-        raise Failure(f"a reboot changed a person's choice of the on-screen keyboard to {value!r}")
+        raise Failure(f"a reboot changed a person's choice of the on-screen keyboard to {value!r}; "
+                      f"the one-time script's log after the reboot: {logged[-300:]!r}")
     if "now hides" in logged or "already the product" in logged:
         raise Failure(f"the one-time script ran again after a reboot: {logged[-300:]!r}")
     print("on-screen keyboard: a later choice of 1 survives a reboot; the one-time change does not run again")

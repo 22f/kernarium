@@ -24,6 +24,7 @@ import struct
 import sys
 import threading
 import unittest
+from unittest import mock
 
 TESTS = Path(__file__).resolve().parents[2]
 REPOSITORY = TESTS.parent
@@ -222,6 +223,45 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(runner.can_inject_relative(writable, "/dev/input/event3"))
         self.assertFalse(runner.can_inject_relative(denied, "/dev/input/event3"))
         self.assertIn("test -w /dev/input/event3", writable.commands[0])
+
+
+class ChoiceSurvivesABootTests(unittest.TestCase):
+    """A person's later choice of the on-screen keyboard survives a reboot; a failure says what the script logged."""
+
+    class Guest:
+        def __init__(self, after_reboot: str, log: str) -> None:
+            self.after_reboot, self.log, self.commands = after_reboot, log, []
+
+        def shell(self, command: str) -> str:
+            self.commands.append(command)
+            if command.startswith("cmd settings get"):
+                return self.after_reboot + "\n"
+            if command.startswith("logcat"):
+                return self.log
+            return ""
+
+    def test_a_kept_choice_passes(self) -> None:
+        guest, rebooted, slept = self.Guest("1", ""), [], []
+        with mock.patch.object(runner.time, "sleep", slept.append):
+            runner.check_choice_survives_a_boot(guest, lambda: rebooted.append(True))
+        self.assertEqual(rebooted, [True])
+        self.assertEqual(slept, [runner.SETTINGS_WRITE_SECONDS])  # the write is given its time before the reboot
+        self.assertIn(f"cmd settings put secure {runner.KEYBOARD_SETTING} 1", guest.commands)
+        self.assertEqual(guest.commands[-1], f"cmd settings put secure {runner.KEYBOARD_SETTING} 0")
+
+    def test_a_lost_choice_fails_with_the_script_log(self) -> None:
+        log = "I kernarium_keyboard_default: the on-screen keyboard now hides while a hardware keyboard is attached (was 1)"
+        with self.assertRaises(runner.Failure) as raised:
+            runner.check_choice_survives_a_boot(self.Guest("0", log), lambda: None)
+        message = str(raised.exception)
+        self.assertIn("changed a person's choice of the on-screen keyboard to '0'", message)
+        self.assertIn("(was 1)", message)
+
+    def test_a_script_that_ran_again_fails_even_with_the_choice_kept(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "ran again after a reboot"):
+            runner.check_choice_survives_a_boot(
+                self.Guest("1", "I kernarium_keyboard_default: the on-screen keyboard setting is already the product's default (1)"),
+                lambda: None)
 
 
 PROBE_LOG = """\
