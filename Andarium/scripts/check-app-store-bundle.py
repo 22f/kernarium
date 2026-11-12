@@ -410,6 +410,9 @@ DEBUG_SYMBOLS = (
     ("input probe", (b"10InputProbe", b"16InputProbeLaunch", b"29RecordingHardwareInputRuntime",
                      b"15beginInputProbe", b"17InputProbeReadout", b"19makeInputProbeModel",
                      b"10inputProbe")),
+    # The reading a test puts in place of the system's hinge and regions
+    # (Andarium/Shared/FoldSceneReader.swift), compiled out by APP_STORE.
+    ("fold reader stub", (b"15FoldSceneReaderC4stub",)),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.
