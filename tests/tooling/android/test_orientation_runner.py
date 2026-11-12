@@ -47,7 +47,7 @@ def golden() -> dict[str, bytes]:
     return frames
 
 
-# A fresh r22 guest in the setup wizard, then the same display after the window manager chose the orientation sensor.
+# A fresh guest in the setup wizard, then the same display after the window manager chose the orientation sensor.
 ROTATION_DUMP = """\
   DisplayRotation
     mCurrentAppOrientation=SCREEN_ORIENTATION_UNSPECIFIED

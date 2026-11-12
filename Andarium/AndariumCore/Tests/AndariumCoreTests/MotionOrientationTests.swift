@@ -31,9 +31,9 @@ struct MotionOrientationTests {
     }
 
     @Test func eachIOSOrientationMapsToTheNumberAndroidsDefinitionGivesItsGravity() {
-        // The gravity of each orientation is the device check's own: -x is
-        // reported landscapeLeft (ROTCHECK, iPhone 15 Pro Max, iOS 27.0.1), and
-        // the others follow from the device's turn.
+        // The gravity of each orientation is a device check's own (on an
+        // iPhone, iOS 27): -x is reported landscapeLeft, and the others follow
+        // from the device's turn.
         let table: [(DeviceOrientationReading, gravityX: Int, gravityY: Int)] = [
             (.portrait, 0, -1),
             (.landscapeLeft, -1, 0),
