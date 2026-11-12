@@ -24,6 +24,10 @@ public struct Guest: Equatable, Codable, Sendable {
     /// (`applyPendingGrowth`).
     public var pendingCapacityGiB: Int?
     public var microphone: Bool
+    /// The person's choice to share this device's cameras with the guest, read
+    /// when the guest starts and never during a run (`CameraSession`). Off for
+    /// a new guest and for one stored before the switch existed.
+    public var camera: Bool
     /// The person's choice to share this device's location with the guest's
     /// GNSS receiver. Off for a new guest and for one stored before the
     /// switch existed.
@@ -48,14 +52,14 @@ public struct Guest: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case cores, memoryMiB, capacityGiB, pendingCapacityGiB, microphone
-        case includeInBackups, location, haptics
+        case includeInBackups, location, haptics, camera
         case motionChoice = "motionSensors"
     }
 
     public init(
         cores: Int, memoryMiB: Int, capacityGiB: Int, pendingCapacityGiB: Int? = nil,
         microphone: Bool = false, includeInBackups: Bool = false, motionChoice: Bool? = nil,
-        location: Bool = false, haptics: Bool = true, usedBytes: UInt64 = 0
+        location: Bool = false, haptics: Bool = true, camera: Bool = false, usedBytes: UInt64 = 0
     ) {
         self.cores = cores
         self.memoryMiB = memoryMiB
@@ -65,6 +69,7 @@ public struct Guest: Equatable, Codable, Sendable {
         self.location = location
         self.motionChoice = motionChoice
         self.haptics = haptics
+        self.camera = camera
         self.includeInBackups = includeInBackups
         self.usedBytes = usedBytes
     }
@@ -80,6 +85,7 @@ public struct Guest: Equatable, Codable, Sendable {
         includeInBackups = try values.decode(Bool.self, forKey: .includeInBackups)
         motionChoice = try values.decodeIfPresent(Bool.self, forKey: .motionChoice)
         haptics = try values.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
+        camera = try values.decodeIfPresent(Bool.self, forKey: .camera) ?? false
     }
 
     /// Whether the guest gets the device's motion: the person's choice, else
