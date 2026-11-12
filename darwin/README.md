@@ -201,11 +201,9 @@ patches provide the behaviors the `slirp-network-*` tests check.
   network are reached as before. A host forward is the one listener the guest
   shares with the host, and it leads into the guest, also when the host's own
   client comes through one of the host's addresses (TCP; a UDP forward used that
-  way from a non-loopback address of the host stays unreachable, as does a UDP
-  reply to a forwarded peer SLiRP presents as the gateway when the host holds
-  that address on a 10.0.2.0/24 network of its own). A test that needs a host
-  listener names a guest forward to a Unix socket, which only the provider's
-  test build offers (`UML_TEST_SLIRP_GUEST_FORWARD`, read by
+  way from a non-loopback address of the host stays unreachable). A test that
+  needs a host listener names a guest forward to a Unix socket, which only the
+  provider's test build offers (`UML_TEST_SLIRP_GUEST_FORWARD`, read by
   `uml-darwin-network-test`, which no preset installs or packages); no product
   links that build (`network-host-isolation-rules`,
   `slirp-network-host-isolation`, `guest-slirp-host-isolation`).
