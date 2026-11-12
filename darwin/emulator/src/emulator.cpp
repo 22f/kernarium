@@ -703,7 +703,6 @@ public:
 		if (!lock.owns_lock() ||
 			guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return -UML_EMULATOR_UNSUPPORTED;
-		::uml::runtime::note_host_wake();
 		auto query = ::uml::device::GuestMemoryQuery::start();
 		lock.unlock();
 		if (!query)
