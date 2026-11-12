@@ -446,6 +446,57 @@ Input Reader State:
         self.assertEqual(devices[3].product, 0x0B13)
         self.assertEqual(runner.parse_input_dump("nothing here"), [])
 
+    ANDROID_17_DUMP = """\
+Event Hub State:
+  BuiltInKeyboardId: -2
+  Devices:
+    -1: Virtual
+      Classes: KEYBOARD | ALPHAKEY | DPAD | EXTERNAL
+      Path: <virtual>
+      Identifier: bus=0x0000, vendor=0x0000, product=0x0000, version=0x0000, bluetoothAddress=<not set>
+      KeyLayoutFile: /system/usr/keylayout/Generic.kl
+    3: DualSense Wireless Controller
+      Classes: KEYBOARD | GAMEPAD | JOYSTICK | VIBRATOR | EXTERNAL
+      Path: /dev/input/event2
+      Identifier: bus=0x0003, vendor=0x054c, product=0x0ce6, version=0x8100, bluetoothAddress=<not set>
+      KeyLayoutFile: /system/usr/keylayout/Vendor_054c_Product_0ce6.kl
+    4: DualSense Wireless Controller Motion Sensors
+      Classes: SENSOR | BATTERY | LIGHT | EXTERNAL
+      Path: /dev/input/event4
+    7: Xbox Wireless Controller
+      Classes: KEYBOARD | GAMEPAD | JOYSTICK | VIBRATOR | EXTERNAL
+      Path: /dev/input/event6
+      Identifier: bus=0x0005, vendor=0x045e, product=0x0b13, version=0x0100, bluetoothAddress=<not set>
+      KeyLayoutFile: /system/usr/keylayout/Generic.kl
+"""
+
+    def test_the_input_dump_of_android_17_names_the_classes(self) -> None:
+        devices = runner.parse_input_dump(self.ANDROID_17_DUMP)
+        self.assertEqual([(device.id, device.name) for device in devices],
+                         [(-1, "Virtual"), (3, "DualSense Wireless Controller"),
+                          (4, "DualSense Wireless Controller Motion Sensors"), (7, "Xbox Wireless Controller")])
+        self.assertTrue(devices[1].key_layout.endswith("/Vendor_054c_Product_0ce6.kl"))
+        self.assertEqual((devices[3].vendor, devices[3].product), (0x045E, 0x0B13))
+        self.assertIsNone(devices[2].key_layout)
+
+    PS = """\
+LABEL                          USER           PID  PPID        VSZ    RSS WCHAN            ADDR S NAME
+u:r:kernarium_gamepad:s0       nobody         502     1   10809792   4212 0                   0 S kernarium_gamepad
+u:r:untrusted_app_34:s0:c122,c256,c512,c768 u0_a122 2182 419 17367492 165132 0                0 S org.example.andarium.gamepadprobe
+"""
+
+    def test_the_process_listing_gives_the_user_and_the_label(self) -> None:
+        self.assertEqual(runner.parse_ps_label(self.PS, "kernarium_gamepad"), ("nobody", "u:r:kernarium_gamepad:s0"))
+        self.assertIsNone(runner.parse_ps_label(self.PS, "absent"))
+        self.assertIsNone(runner.parse_ps_label("", "kernarium_gamepad"))
+        # a name that only ends with the wanted one is another process
+        self.assertIsNone(runner.parse_ps_label(self.PS, "gamepad"))
+
+    def test_the_total_pss(self) -> None:
+        text = "Applications Memory Usage (in Kilobytes):\n\n           TOTAL PSS:     1234            TOTAL RSS:     4321       TOTAL SWAP PSS:        0\n"
+        self.assertEqual(runner.parse_meminfo_pss(text), 1234)
+        self.assertIsNone(runner.parse_meminfo_pss("No process found for: 502\n"))
+
     def test_the_focus(self) -> None:
         text = "  mCurrentFocus=Window{1a2b3c u0 org.example.andarium.gamepadprobe/org.example.andarium.gamepadprobe.GamepadActivity}\n"
         self.assertEqual(runner.parse_focus(text), runner.PROBE_FOCUS)
@@ -772,6 +823,34 @@ class ReportTests(unittest.TestCase):
                 pass
         self.assertEqual(report.results, [("first", "broken"), ("second", None)])
         self.assertEqual(report.failures(), [("first", "broken")])
+
+    def test_a_check_that_a_user_build_cannot_run_is_said_and_is_not_a_failure(self) -> None:
+        report = runner.Report()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            report.skip("killing the relay", "no su")
+        self.assertEqual(report.not_run, [("killing the relay", "no su")])
+        self.assertEqual(report.failures(), [])
+        self.assertIn("not run on a user build", output.getvalue())
+
+    def test_root_is_refused_on_a_user_build_and_the_shell_reads_are_not(self) -> None:
+        class Shell(runner.Guest):
+            def __init__(self, debuggable: str) -> None:
+                super().__init__("adb", "serial", None, Path("log"), 0)  # type: ignore[arg-type]
+                self.answer, self.commands = debuggable, []
+
+            def shell(self, command: str, timeout: float = 0) -> str:
+                self.commands.append(command)
+                return self.answer if command == "getprop ro.debuggable" else "out"
+
+        user = Shell("0\n")
+        with self.assertRaises(runner.Failure):
+            user.root("kill -9 1")
+        self.assertEqual(user.shell("ps -A -Z"), "out")
+        self.assertNotIn("su 0 sh -c 'kill -9 1'", user.commands)
+        debuggable = Shell("1\n")
+        debuggable.root("kill -9 1")
+        self.assertIn("su 0 sh -c 'kill -9 1'", debuggable.commands)
 
     def test_a_programming_error_is_not_a_failed_check(self) -> None:
         with self.assertRaises(KeyError):

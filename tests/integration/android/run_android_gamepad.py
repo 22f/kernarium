@@ -199,7 +199,8 @@ class InputDumpDevice:
 
 
 DEVICE_HEADER = re.compile(r"^\s+(-?\d+): (.+?)\s*$")
-CLASSES_LINE = re.compile(r"^\s+Classes: 0x[0-9a-fA-F]+")
+# The Event Hub prints a device's classes as hex on older releases and as names (KEYBOARD | GAMEPAD) on Android 17.
+CLASSES_LINE = re.compile(r"^\s+Classes: (?:0x[0-9a-fA-F]+|[A-Z][A-Z0-9_]*(?: \| [A-Z][A-Z0-9_]*)*)\s*$")
 PROPERTY = re.compile(r"^\s+(\w+): ?(.*?)\s*$")
 IDENTIFIER = re.compile(
     r"bus=0x([0-9a-fA-F]+), vendor=0x([0-9a-fA-F]+), product=0x([0-9a-fA-F]+), version=0x([0-9a-fA-F]+)")
@@ -247,6 +248,27 @@ def parse_pid(text: str) -> int | None:
     """`pidof`: the first pid, or None when it prints none."""
     words = text.split()
     return int(words[0]) if words and words[0].isdecimal() else None
+
+
+def parse_ps_label(text: str, name: str) -> tuple[str, str] | None:
+    """`ps -A -Z`: the user and the SELinux label of the process called `name` (the columns come from the header)."""
+    columns: list[str] = []
+    for line in text.splitlines():
+        words = line.split()
+        if not words:
+            continue
+        if "LABEL" in words and "USER" in words and "NAME" in words:
+            columns = words
+            continue
+        if columns and len(words) >= len(columns) and words[-1] == name:
+            return words[columns.index("USER")], words[columns.index("LABEL")]
+    return None
+
+
+def parse_meminfo_pss(text: str) -> int | None:
+    """`dumpsys meminfo PID`: the total PSS in kB, or None when it prints none."""
+    found = re.search(r"TOTAL PSS:\s+(\d+)", text)
+    return int(found[1]) if found else None
 
 
 def parse_smaps_rollup(text: str) -> dict[str, int]:
@@ -586,6 +608,7 @@ class Guest:
         self.process = process
         self.log = log
         self.forward_port = forward_port
+        self._debuggable: bool | None = None
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -598,8 +621,22 @@ class Guest:
             raise Failure(f"'{command}' exited {result.returncode}: {result.stdout.strip()[-500:]}")
         return result.stdout
 
+    def debuggable(self) -> bool:
+        """Only a debuggable build has `su`. A user build (what the product ships) is reached through the shell alone."""
+        if self._debuggable is None:
+            self._debuggable = self.shell("getprop ro.debuggable").strip() == "1"
+        return self._debuggable
+
     def root(self, command: str, timeout: float = COMMAND_SECONDS) -> str:
+        if not self.debuggable():
+            raise Failure(f"'{command}' needs root and this is a user build")
         return self.shell("su 0 sh -c " + shlex.quote(command), timeout)
+
+    def pss_kb(self, pid: int) -> int | None:
+        """The process's PSS: smaps_rollup as root on a debuggable build, `dumpsys meminfo` on a user build (None when it prints none)."""
+        if self.debuggable():
+            return parse_smaps_rollup(self.root(f"cat /proc/{pid}/smaps_rollup")).get("Pss", 0)
+        return parse_meminfo_pss(self.shell(f"dumpsys meminfo {pid}"))
 
     def alive(self) -> None:
         if self.process.poll() is not None:
@@ -650,7 +687,7 @@ class Guest:
     def cpu_sample(self, pid: int) -> tuple[CpuSample, float]:
         """The CPU ticks now, and the monotonic time at the middle of the call that read them."""
         begun = time.monotonic()
-        sample = parse_cpu_sample(self.root(f"head -n 1 /proc/stat; cat /proc/{pid}/stat"))
+        sample = parse_cpu_sample(self.shell(f"head -n 1 /proc/stat; cat /proc/{pid}/stat"))
         return sample, (begun + time.monotonic()) / 2
 
 
@@ -688,6 +725,12 @@ def vsock_forward_port(log: pathlib.Path, process: subprocess.Popen, guest_port:
 class Report:
     def __init__(self) -> None:
         self.results: list[tuple[str, str | None]] = []
+        self.not_run: list[tuple[str, str]] = []
+
+    def skip(self, name: str, reason: str) -> None:
+        """A check (or part of one) that this build cannot run, said in the output and the summary, never dropped."""
+        self.not_run.append((name, reason))
+        print(f"  skip {name}: not run on a user build ({reason})", flush=True)
 
     @contextlib.contextmanager
     def check(self, name: str) -> Iterator[None]:
@@ -750,14 +793,17 @@ def check_static(session: Session) -> int:
     pid = guest.relay_pid()
     if pid is None:
         raise Failure(f"no {RELAY_NAME} process: init did not start the relay")
-    user = guest.root(f"stat -c %U /proc/{pid}").strip()
-    label = guest.root(f"cat /proc/{pid}/attr/current").strip().rstrip("\0")
+    found = parse_ps_label(guest.shell("ps -A -Z"), RELAY_NAME)
+    if found is None:
+        raise Failure(f"`ps -A -Z` lists no {RELAY_NAME} process")
+    user, label = found
     problems = []
     if user != "nobody":
         problems.append(f"runs as {user}, not nobody")
     if not label.startswith(f"u:r:{RELAY_NAME}:"):
         problems.append(f"domain {label}, not {RELAY_NAME}")
-    if guest.root("test -c /dev/uhid && echo present || echo missing").strip() != "present":
+    # The shell may list /dev but not stat the node.
+    if "uhid" not in guest.shell("ls /dev").split():
         problems.append("no /dev/uhid")
     raise_problems(problems)
     return pid
@@ -773,6 +819,7 @@ def check_creation(session: Session) -> ProbeState:
     """Creates the three families; the DualSense's driver asks for feature reports while it probes."""
     link = session.link
     mark = link.mark()
+    created_at = time.time()
     session.create_all([(0, "dualsense"), (1, "xbox"), (2, "generic")])
     session.guest.broadcast(cmd="reset")
     state = session.guest.wait_devices("after the creates", 3)
@@ -786,6 +833,13 @@ def check_creation(session: Session) -> ProbeState:
     with contextlib.suppress(Failure):
         link.wait_for("the DualSense's start-up output", OUTPUT_SECONDS, lambda frames: started(), mark)
     outputs = link.outputs(0, mark)
+    # The bound is a deadline, not a measurement: say how long the start-up output took and what the host was doing.
+    lightbar_at = next((at for at, out in outputs if getattr(out, "lightbar_valid", False)), None)
+    leds_at = next((at for at, out in outputs if getattr(out, "player_leds_valid", False)), None)
+    print("    the DualSense's start-up output after the create: "
+          + ", ".join(f"{what} {at - created_at:.1f} s" if at is not None else f"{what} never"
+                      for what, at in (("lightbar", lightbar_at), ("player LEDs", leds_at)))
+          + f" (bound {OUTPUT_SECONDS} s after the devices are listed; host load {os.getloadavg()[0]:.1f})")
     requests = {frame.number for _, frame in link.frames_since(mark)
                 if isinstance(frame, wire.GetReport) and frame.slot == 0}
     problems = []
@@ -869,7 +923,8 @@ def check_rumble(session: Session, key: str, slot: int) -> None:
     family = session.families[key]
     guest, link = session.guest, session.link
     device = guest.probe_state().device_named(family.identity.name)
-    assert device is not None
+    if device is None:
+        raise Failure(f"the probe lists no device named {family.identity.name!r}")
     tolerance = RUMBLE_TOLERANCE[key]
     scale = 100 if key == "xbox" else 255
     strong, weak, milliseconds = 255, 100, 600
@@ -913,7 +968,8 @@ def check_lights(session: Session, slot: int) -> None:
     family = session.families["dualsense"]
     guest, link = session.guest, session.link
     device = guest.probe_state().device_named(family.identity.name)
-    assert device is not None
+    if device is None:
+        raise Failure(f"the probe lists no device named {family.identity.name!r}")
     mark = link.mark()
     guest.broadcast(cmd="light", device=device.id, which="rgb", color=0xFF2040C0 - (1 << 32))
     _, output = await_rumble(link, slot, mark, lambda out: getattr(out, "lightbar_valid", False)
@@ -1013,6 +1069,7 @@ def check_protocol_breaks(session: Session) -> None:
 
 
 def check_recovery(session: Session) -> None:
+    """Kills the relay (as root: a debuggable build only) and waits for init to restart it."""
     guest = session.guest
     session.create_all([(0, "dualsense")])
     guest.wait_devices("before the relay is killed", 1)
@@ -1060,24 +1117,26 @@ def measure_cost(session: Session, options: argparse.Namespace) -> None:
     idle_before, idle_start = guest.cpu_sample(pid)
     time.sleep(reports * interval)
     idle_after, idle_end = guest.cpu_sample(pid)
-    pss_before = parse_smaps_rollup(guest.root(f"cat /proc/{pid}/smaps_rollup")).get("Pss", 0)
+    pss_before = guest.pss_kb(pid)
     loaded_before, loaded_start = guest.cpu_sample(pid)
     for sequence in range(reports):
         session.link.send(family.input_frame(0, State(left=(255 if sequence % 2 else 0, 128)), sequence))
         time.sleep(interval)
     loaded_after, loaded_end = guest.cpu_sample(pid)
     time.sleep(2)
-    pss_after = parse_smaps_rollup(guest.root(f"cat /proc/{pid}/smaps_rollup")).get("Pss", 0)
+    pss_after = guest.pss_kb(pid)
     seen = guest.probe_state()
     guest_us, relay_us = per_report_microseconds(
         (idle_before, idle_after), (loaded_before, loaded_after), idle_end - idle_start, loaded_end - loaded_start,
         reports)
     print(f"    {reports} reports at {options.report_interval_ms} ms: the guest spent {guest_us:.0f} us beyond idle "
           f"for each, the relay {relay_us:.0f} us; its PSS {pss_before} kB before and {pss_after} kB after")
+    if pss_after is None:
+        session.report.skip("the relay's PSS", "smaps_rollup needs root and `dumpsys meminfo` printed no total")
     lost = 1 - seen.motion_samples / reports
     print(f"    the app saw {seen.motion_samples} of {reports} motion samples")
     problems = []
-    if pss_after > PSS_CEILING_KB:
+    if pss_after is not None and pss_after > PSS_CEILING_KB:
         problems.append(f"the relay's PSS is {pss_after} kB")
     if lost > LOSS_CEILING:
         problems.append(f"{lost:.1%} of the reports never reached the app")
@@ -1112,7 +1171,7 @@ def measure_cost(session: Session, options: argparse.Namespace) -> None:
     # The relay's own books close with the connection.
     session.link.close()
     time.sleep(2)
-    counters = parse_relay_disconnects(guest.root(f"logcat -d -s {RELAY_LOG_TAG}:I"))
+    counters = parse_relay_disconnects(guest.shell(f"logcat -d -s {RELAY_LOG_TAG}:I"))
     if not counters:
         problems.append("the relay logged no disconnect line")
     else:
@@ -1124,7 +1183,13 @@ def measure_cost(session: Session, options: argparse.Namespace) -> None:
 
 
 def check_denials(session: Session) -> None:
-    text = session.guest.root("dmesg; logcat -d -b all")
+    guest = session.guest
+    if guest.debuggable():
+        text = guest.root("dmesg; logcat -d -b all")
+    else:
+        # The kernel log is not readable on a user build; auditd copies each denial into logcat.
+        session.report.skip("the kernel log for SELinux denials", "dmesg needs root; the denials are read from logcat")
+        text = guest.shell("logcat -d -b all")
     denials = selinux_denials(text)
     if denials:
         raise Failure(f"{len(denials)} SELinux denials of the relay's domain: {denials[:3]}")
@@ -1177,8 +1242,12 @@ def run_checks(guest: Guest, options: argparse.Namespace) -> Report:
             check_host_drop(session)
         with step("frames that break the protocol close the connection"):
             check_protocol_breaks(session)
-        with step("killing the relay: restart, reconnect, controllers work again"):
-            check_recovery(session)
+        if guest.debuggable():
+            with step("killing the relay: restart, reconnect, controllers work again"):
+                check_recovery(session)
+        else:
+            report.skip("killing the relay: restart, reconnect, controllers work again",
+                        "the shell cannot signal the relay, which runs as nobody, and there is no su")
         print("cost and health")
         with step("cost per report, PSS, loss, latency and the relay's counters"):
             measure_cost(session, options)
@@ -1291,7 +1360,8 @@ def main() -> int:
         install_and_start_probe(guest, options.probe_apk)
         report = run_checks(guest, options)
         failures = report.failures()
-        print(f"{len(report.results) - len(failures)} of {len(report.results)} checks passed")
+        print(f"{len(report.results) - len(failures)} of {len(report.results)} checks passed"
+              + (f"; not run on a user build: {', '.join(name for name, _ in report.not_run)}" if report.not_run else ""))
         if failures:
             print("FAIL: " + "; ".join(name for name, _ in failures), file=sys.stderr)
             return 1
