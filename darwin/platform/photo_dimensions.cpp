@@ -345,13 +345,15 @@ bool mayJoin(bool otherInputsInSession, bool ownAnchorMultiCamera, std::span<con
 
 Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
 {
-    bool inputAdded = false, videoTried = false, photoTried = false;
+    bool inputAdded = false, videoTried = false, photoTried = false, durationsTaken = false;
     steps.begin();
-    // What this call added leaves again, the newest first. A step that added
-    // nothing (it refused before it added) leaves nothing to remove.
+    // What this call added leaves again, and the durations it changed come back,
+    // the newest first. A step that added nothing (it refused before it added)
+    // leaves nothing to remove.
     const auto undo = [&] {
         if (photoTried) steps.removePhoto();
         if (videoTried) steps.removeVideo();
+        if (durationsTaken && steps.restoreDurations) steps.restoreDurations();
         if (inputAdded) steps.removeInput();
     };
     const auto refuse = [&](Admission reason) {
@@ -363,7 +365,13 @@ Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
         if (!steps.addInput()) return refuse(Admission::inputRefused);
         inputAdded = true;
     }
-    if (plan.activate && !steps.activate()) return refuse(Admission::formatRefused);
+    if (plan.activate) {
+        if (steps.snapshotDurations) {
+            steps.snapshotDurations();
+            durationsTaken = true;
+        }
+        if (!steps.activate()) return refuse(Admission::formatRefused);
+    }
     if (plan.addVideo) {
         videoTried = true;
         if (!steps.addVideo()) return refuse(Admission::videoRefused);
@@ -385,13 +393,14 @@ Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
 Resizing resizeStream(const ResizeSteps& steps)
 {
     steps.begin();
+    if (steps.setDurations && steps.snapshotDurations) steps.snapshotDurations();
     if (steps.setDurations && !steps.setDurations()) {
-        steps.restoreDurations();
+        if (steps.restoreDurations) steps.restoreDurations();
         steps.commit();
         return Resizing::durationsRefused;
     }
     if (steps.setVideoSize && !steps.setVideoSize()) {
-        if (steps.setDurations) steps.restoreDurations();
+        if (steps.setDurations && steps.restoreDurations) steps.restoreDurations();
         steps.commit();
         return Resizing::sizeRefused;
     }

@@ -459,13 +459,59 @@ struct Programmed {
     RateSetting setting;
 };
 
-std::optional<Programmed> programmedFor(const Anchor& anchor, const PressureThrottle& throttle)
+std::optional<Programmed> programmedFor(const Anchor& anchor, std::uint32_t requested, std::uint32_t pressureCap)
 {
-    const std::uint32_t rate = throttledRate(anchor.rates, throttle.requestedRate, throttle.cap);
+    const std::uint32_t rate = throttledRate(anchor.rates, requested, pressureCap);
     if (rate == 0) return std::nullopt;
     const auto setting = rateSettingFor(anchor.facts, rate);
     if (!setting) return std::nullopt;
     return Programmed {rate, *setting};
+}
+
+[[maybe_unused]] std::optional<Programmed> programmedFor(const Anchor& anchor, const PressureThrottle& throttle)
+{
+    return programmedFor(anchor, throttle.requestedRate, throttle.cap);
+}
+
+// What a device holds of its frame durations and the format they belong to, as
+// the device reports them: a long manual exposure lengthens the maximum beyond
+// what the rate asked for, so a refused change is undone with these, not with a
+// duration recomputed from a rate.
+struct HeldDurations {
+    AVCaptureDeviceFormat* format {};
+    CMTime minimum {};
+    CMTime maximum {};
+};
+
+HeldDurations durationsHeldBy(AVCaptureDevice* device)
+{
+    return {device.activeFormat, device.activeVideoMinFrameDuration, device.activeVideoMaxFrameDuration};
+}
+
+// Puts durations back on the device that held them. Another format's durations
+// are not this one's, so a device that has changed format keeps what it has.
+// The one that moves out of the other's way goes first, so the minimum never
+// exceeds the maximum.
+bool putBackDurations(AVCaptureDevice* device, const HeldDurations& held)
+{
+    NSError* error = nil;
+    if (![device lockForConfiguration:&error]) return false;
+    bool ok = true;
+    @try {
+        if (device.activeFormat != held.format) {
+            ok = false;
+        } else if (CMTimeCompare(held.minimum, device.activeVideoMaxFrameDuration) > 0) {
+            device.activeVideoMaxFrameDuration = held.maximum;
+            device.activeVideoMinFrameDuration = held.minimum;
+        } else {
+            device.activeVideoMinFrameDuration = held.minimum;
+            device.activeVideoMaxFrameDuration = held.maximum;
+        }
+    } @catch (NSException*) {
+        ok = false;
+    }
+    [device unlockForConfiguration];
+    return ok;
 }
 
 // Puts a device in its anchor: the format only when it is not the active one
@@ -1091,14 +1137,14 @@ private:
         }
         std::optional<Programmed> rate;
         if (video) {
-            running.throttle->requestedRate = frameRate;
-            rate = programmedFor(*anchor, *running.throttle);
+            rate = programmedFor(*anchor, frameRate, running.throttle->cap);
             if (!rate) {
                 refuse(camera, Refusal::raised, "the anchor takes no rate near " + std::to_string(frameRate));
                 return false;
             }
         }
         AVCaptureDeviceFormat* const activeBefore = entry.device.activeFormat;
+        std::optional<HeldDurations> held;
         AVCaptureVideoDataOutput* newVideo = nil;
         UMLCameraOutputDelegate* newDelegate = nil;
         AVCaptureConnection* newConnection = nil;
@@ -1112,6 +1158,10 @@ private:
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] { [session_ commitConfiguration]; };
         steps.addInput = [&] { return guarded(camera, [&] { return addInput(entry, running); }); };
+        steps.snapshotDurations = [&] { held = durationsHeldBy(entry.device); };
+        steps.restoreDurations = [&] {
+            if (held) (void)guarded(camera, [&] { return putBackDurations(entry.device, *held); });
+        };
         steps.activate = [&] { return guarded(camera, [&] { return activate(entry.device, *anchor, rate); }); };
         steps.addVideo = [&] {
             return guarded(camera, [&] {
@@ -1253,6 +1303,7 @@ private:
             running.width = width;
             running.height = height;
             running.frameRate = frameRate;
+            running.throttle->requestedRate = frameRate;
             beginPressureWatch(entry, running, anchors_[camera]);
         }
         refusals_.reset(camera);
@@ -1274,18 +1325,20 @@ private:
             refuse(camera, Refusal::noAnchor);
             return false;
         }
-        const std::uint32_t previousRate = running.frameRate;
         const bool rateChanges = frameRate != running.frameRate;
         const bool sizeChanges = width != running.width || height != running.height;
-        const auto reprogram = [&](std::uint32_t asked) {
-            running.throttle->requestedRate = asked;
-            const auto rate = programmedFor(*anchor, *running.throttle);
-            return rate && activate(entry.device, *anchor, rate);
-        };
+        std::optional<HeldDurations> held;
         ResizeSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] { [session_ commitConfiguration]; };
-        if (rateChanges) steps.setDurations = [&] { return guarded(camera, [&] { return reprogram(frameRate); }); };
+        steps.snapshotDurations = [&] { held = durationsHeldBy(entry.device); };
+        if (rateChanges)
+            steps.setDurations = [&] {
+                return guarded(camera, [&] {
+                    const auto rate = programmedFor(*anchor, frameRate, running.throttle->cap);
+                    return rate && activate(entry.device, *anchor, rate);
+                });
+            };
         if (sizeChanges)
             steps.setVideoSize = [&] {
                 return guarded(camera, [&] {
@@ -1293,7 +1346,9 @@ private:
                     return true;
                 });
             };
-        steps.restoreDurations = [&] { (void)guarded(camera, [&] { return reprogram(previousRate); }); };
+        steps.restoreDurations = [&] {
+            if (held) (void)guarded(camera, [&] { return putBackDurations(entry.device, *held); });
+        };
         const Resizing result = resizeStream(steps);
         if (result != Resizing::resized) {
             refuse(camera, result == Resizing::durationsRefused ? Refusal::raised : Refusal::outputRefused,
@@ -1303,6 +1358,7 @@ private:
         running.width = width;
         running.height = height;
         running.frameRate = frameRate;
+        running.throttle->requestedRate = frameRate;
         refusals_.reset(camera);
         return true;
     }
@@ -1329,8 +1385,8 @@ private:
             const Entry& entry = entries_[camera];
             [session_ beginConfiguration];
             const bool ok = guarded(camera, [&] {
-                running.throttle->requestedRate = running.video ? running.frameRate : 0;
-                if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, *running.throttle) : std::nullopt)) return false;
+                if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, running.throttle->cap) : std::nullopt))
+                    return false;
                 if (running.videoOutput != nil) running.videoOutput.videoSettings = videoSettingsOf(anchor->facts, running.width, running.height);
                 if (running.photoOutput != nil)
                     if (const auto maximum = photoMaximum(anchor->facts, limits_.maximumStillPixels))

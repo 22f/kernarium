@@ -449,6 +449,13 @@ void aCameraJoinsAMultiCameraSessionOnlyWhenEveryAnchorIsAFormatItTakes()
 // was removed
 // ---------------------------------------------------------------------------
 
+// The device's frame durations: what it actually holds, which a long manual exposure may make
+// longer at the maximum than the rate asks for.
+struct Durations {
+    double minimum {1.0 / 30}, maximum {1.0 / 30};
+    friend bool operator==(const Durations&, const Durations&) = default;
+};
+
 struct FakeSession {
     bool input {}, video {}, photo {};
     std::vector<std::string> log;
@@ -456,6 +463,7 @@ struct FakeSession {
     bool refuseInput {}, refuseActivate {}, refuseVideo {}, refusePhoto {}, overBudget {};
     // The format and the durations the device holds, which a refused change must not lose.
     int format {7};
+    Durations durations, saved;
 
     AdmitSteps steps(const AdmitPlan& plan)
     {
@@ -468,9 +476,16 @@ struct FakeSession {
             input = true;
             return true;
         };
+        s.snapshotDurations = [this] {
+            log.push_back("snapshot");
+            saved = durations;
+        };
         s.activate = [this] {
             log.push_back("activate");
+            // The minimum is set first; a refusal can come between the two.
+            durations.minimum = 1.0 / 15;
             if (refuseActivate) return false;
+            durations.maximum = 1.0 / 15;
             format = 1;
             return true;
         };
@@ -499,6 +514,10 @@ struct FakeSession {
             log.push_back("removeInput");
             input = false;
         };
+        s.restoreDurations = [this] {
+            log.push_back("restoreDurations");
+            durations = saved;
+        };
         (void)plan;
         return s;
     }
@@ -515,8 +534,9 @@ void aRefusedStreamRemovesOnlyTheOutputItAdded()
     const AdmitPlan plan {.addInput = false, .activate = true, .addVideo = true, .addPhoto = false};
     require(admit(plan, session.steps(plan)) == Admission::videoRefused, "refused");
     require(session.input && session.photo && !session.video, "the input and the photo output of the still in flight stay");
-    require(session.log == std::vector<std::string> {"begin", "activate", "addVideo", "removeVideo", "commit"},
-            "begin, the rate, the refused video output, its removal, commit: no removal of the photo output or the input");
+    require(session.log == std::vector<std::string> {"begin", "snapshot", "activate", "addVideo", "removeVideo", "restoreDurations", "commit"},
+            "begin, the durations taken, the rate, the refused video output, its removal, the durations back, commit: no removal of the photo "
+            "output or the input");
     require(session.begins == session.commits, "one configuration, closed");
 }
 
@@ -527,7 +547,8 @@ void aRefusedStreamBeforeItsInputLeavesTheSessionAsItWas()
     const AdmitPlan plan {.addInput = true, .activate = true, .addVideo = true, .addPhoto = false};
     require(admit(plan, session.steps(plan)) == Admission::videoRefused, "refused");
     require(!session.input && !session.video && !session.photo, "the input this call added left again");
-    require(session.log == std::vector<std::string> {"begin", "addInput", "activate", "addVideo", "removeVideo", "removeInput", "commit"},
+    require(session.log == std::vector<std::string> {"begin", "addInput", "snapshot", "activate", "addVideo", "removeVideo", "restoreDurations",
+                                                      "removeInput", "commit"},
             "the newest first");
 }
 
@@ -542,12 +563,14 @@ void aRefusedInputOrFormatAddsNothingElse()
     format.refuseActivate = true;
     require(admit(plan, format.steps(plan)) == Admission::formatRefused && !format.input && !format.video && !format.photo,
             "a refused format takes the input it added out");
-    require(format.log == std::vector<std::string> {"begin", "addInput", "activate", "removeInput", "commit"}, "and nothing else");
+    require(format.log == std::vector<std::string> {"begin", "addInput", "snapshot", "activate", "restoreDurations", "removeInput", "commit"},
+            "and nothing else");
     FakeSession kept;
     kept.input = true;
     kept.refuseActivate = true;
     const AdmitPlan existing {.addInput = false, .activate = true, .addVideo = true, .addPhoto = false};
-    require(admit(existing, kept.steps(existing)) == Admission::formatRefused && kept.input && kept.log.size() == 3,
+    require(admit(existing, kept.steps(existing)) == Admission::formatRefused && kept.input &&
+                kept.log == std::vector<std::string> {"begin", "snapshot", "activate", "restoreDurations", "commit"},
             "a camera that was in the session stays in it");
 }
 
@@ -558,8 +581,8 @@ void aRefusedPhotoOutputRemovesTheVideoAndInputItAdded()
     const AdmitPlan plan {.addInput = true, .activate = true, .addVideo = true, .addPhoto = true};
     require(admit(plan, session.steps(plan)) == Admission::photoRefused, "refused");
     require(!session.input && !session.video && !session.photo, "everything this call added left");
-    require(session.log == std::vector<std::string> {"begin", "addInput", "activate", "addVideo", "addPhoto", "removePhoto", "removeVideo", "removeInput",
-                                                      "commit"},
+    require(session.log == std::vector<std::string> {"begin", "addInput", "snapshot", "activate", "addVideo", "addPhoto", "removePhoto", "removeVideo",
+                                                      "restoreDurations", "removeInput", "commit"},
             "the newest first, inside the one configuration");
     // A photo output refused for a camera that streams leaves the stream alone.
     FakeSession streaming;
@@ -568,6 +591,8 @@ void aRefusedPhotoOutputRemovesTheVideoAndInputItAdded()
     const AdmitPlan still {.addInput = false, .activate = false, .addVideo = false, .addPhoto = true};
     require(admit(still, streaming.steps(still)) == Admission::photoRefused && streaming.input && streaming.video,
             "a refused still leaves the stream as it was");
+    require(streaming.log == std::vector<std::string> {"begin", "addPhoto", "removePhoto", "commit"},
+            "and, as it changes no durations, takes and puts back none");
 }
 
 void aSessionOverItsBudgetRemovesWhatTheJoinAdded()
@@ -578,15 +603,58 @@ void aSessionOverItsBudgetRemovesWhatTheJoinAdded()
     require(admit(plan, session.steps(plan)) == Admission::overBudget, "refused after the commit");
     require(!session.input && !session.video, "the join is undone");
     require(session.begins == 2 && session.commits == 2, "inside a configuration of its own");
-    require(session.log == std::vector<std::string> {"begin", "addInput", "activate", "addVideo", "commit", "begin", "removeVideo", "removeInput", "commit"},
+    require(session.log == std::vector<std::string> {"begin", "addInput", "snapshot", "activate", "addVideo", "commit", "begin", "removeVideo",
+                                                      "restoreDurations", "removeInput", "commit"},
             "the first configuration commits, the second undoes it");
     FakeSession admitted;
     require(admit(plan, admitted.steps(plan)) == Admission::admitted && admitted.input && admitted.video && admitted.begins == 1,
             "a join within budget stays");
 }
 
+// R4 (recheck5): a still-only camera is in the session at 1/30 s, a long manual exposure having made the maximum 1/10 s,
+// and a 15 fps stream is asked for. Whatever refuses it (the video output, the photo output, a hardware budget, or the
+// device partway through its durations), the device holds the very durations it held before, not the 1/15 s the
+// request programmed and not the 1/30 s a rate would recompute.
+void aRefusedStreamOnACameraInTheSessionPutsItsDurationsBack()
+{
+    const Durations before {1.0 / 30, 1.0 / 10};
+    const AdmitPlan plan {.addInput = false, .activate = true, .addVideo = true, .addPhoto = false};
+    FakeSession video;
+    video.input = video.photo = true;
+    video.durations = before;
+    video.refuseVideo = true;
+    require(admit(plan, video.steps(plan)) == Admission::videoRefused && video.durations == before, "a refused video output");
+    FakeSession photo;
+    photo.input = true;
+    photo.durations = before;
+    photo.refusePhoto = true;
+    const AdmitPlan both {.addInput = false, .activate = true, .addVideo = true, .addPhoto = true};
+    require(admit(both, photo.steps(both)) == Admission::photoRefused && photo.durations == before && photo.input && !photo.video,
+            "a refused photo output, the video output it added removed");
+    FakeSession budget;
+    budget.input = true;
+    budget.durations = before;
+    budget.overBudget = true;
+    require(admit(plan, budget.steps(plan)) == Admission::overBudget && budget.durations == before && budget.input && !budget.video,
+            "a session over its hardware budget");
+    FakeSession partway;
+    partway.input = true;
+    partway.durations = before;
+    partway.refuseActivate = true;
+    require(admit(plan, partway.steps(plan)) == Admission::formatRefused && partway.durations == before &&
+                partway.durations.minimum != 1.0 / 15,
+            "a device that took the minimum duration and refused the maximum");
+    // A join that succeeds keeps what it programmed.
+    FakeSession admitted;
+    admitted.input = true;
+    admitted.durations = before;
+    require(admit(plan, admitted.steps(plan)) == Admission::admitted && admitted.durations == Durations {1.0 / 15, 1.0 / 15},
+            "a stream that is admitted runs at its rate");
+}
+
 struct FakeStream {
-    int durations {30}, size {640};
+    Durations durations {1.0 / 30, 1.0 / 10}, saved;
+    int size {640};
     bool refuseDurations {}, refuseSize {};
     std::vector<std::string> log;
     ResizeSteps steps(bool rate, bool dimension)
@@ -595,10 +663,16 @@ struct FakeStream {
         s.begin = [this] { log.push_back("begin"); };
         s.commit = [this] { log.push_back("commit"); };
         if (rate)
+            s.snapshotDurations = [this] {
+                log.push_back("snapshot");
+                saved = durations;
+            };
+        if (rate)
             s.setDurations = [this] {
                 log.push_back("durations");
+                durations.minimum = 1.0 / 15;
                 if (refuseDurations) return false;
-                durations = 15;
+                durations.maximum = 1.0 / 15;
                 return true;
             };
         if (dimension)
@@ -610,7 +684,7 @@ struct FakeStream {
             };
         s.restoreDurations = [this] {
             log.push_back("restore");
-            durations = 30;
+            durations = saved;
         };
         return s;
     }
@@ -618,19 +692,21 @@ struct FakeStream {
 
 void aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldDurationsOnARefusal()
 {
+    const Durations before {1.0 / 30, 1.0 / 10};  // a long manual exposure made the maximum longer than the rate asks
     FakeStream ok;
-    require(resizeStream(ok.steps(true, true)) == Resizing::resized && ok.durations == 15 && ok.size == 1280, "both change");
-    require(ok.log == std::vector<std::string> {"begin", "durations", "size", "commit"}, "the durations first");
+    require(resizeStream(ok.steps(true, true)) == Resizing::resized && ok.durations == Durations {1.0 / 15, 1.0 / 15} && ok.size == 1280, "both change");
+    require(ok.log == std::vector<std::string> {"begin", "snapshot", "durations", "size", "commit"}, "the durations first");
     FakeStream sizeRefused;
     sizeRefused.refuseSize = true;
-    require(resizeStream(sizeRefused.steps(true, true)) == Resizing::sizeRefused && sizeRefused.durations == 30,
-            "a refused size programs the old durations again");
-    require(sizeRefused.log == std::vector<std::string> {"begin", "durations", "size", "restore", "commit"}, "in the same configuration");
+    require(resizeStream(sizeRefused.steps(true, true)) == Resizing::sizeRefused && sizeRefused.durations == before,
+            "a refused size puts the device's own durations back, not what a rate would program");
+    require(sizeRefused.log == std::vector<std::string> {"begin", "snapshot", "durations", "size", "restore", "commit"}, "in the same configuration");
     FakeStream durationsRefused;
     durationsRefused.refuseDurations = true;
     require(resizeStream(durationsRefused.steps(true, true)) == Resizing::durationsRefused && durationsRefused.size == 640 &&
-                durationsRefused.log == std::vector<std::string> {"begin", "durations", "restore", "commit"},
-            "a refused rate leaves the size alone");
+                durationsRefused.durations == before &&
+                durationsRefused.log == std::vector<std::string> {"begin", "snapshot", "durations", "restore", "commit"},
+            "a refused rate leaves the size alone, and the durations as they were after the minimum had changed");
     FakeStream sizeOnly;
     sizeOnly.refuseSize = true;
     require(resizeStream(sizeOnly.steps(false, true)) == Resizing::sizeRefused &&
@@ -975,6 +1051,7 @@ int main()
     aRefusedInputOrFormatAddsNothingElse();
     aRefusedPhotoOutputRemovesTheVideoAndInputItAdded();
     aSessionOverItsBudgetRemovesWhatTheJoinAdded();
+    aRefusedStreamOnACameraInTheSessionPutsItsDurationsBack();
     aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldDurationsOnARefusal();
     aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges();
     everyGeneratedTableHoldsTheInvariants();

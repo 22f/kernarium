@@ -276,7 +276,10 @@ struct AnchorKey {
 // a still or both, and the platform's calls that do it. The platform's calls
 // report a refusal (an exception included) as false. Anything a call added when
 // it refuses is removed by its `remove` step, which does nothing for what was
-// never added.
+// never added. The device's frame durations, which `activate` changes, are
+// taken before it runs (`snapshotDurations`, the device's own values, not what
+// a rate would program: a long manual exposure lengthens the maximum) and put
+// back by `restoreDurations` when the call refuses.
 struct AdmitPlan {
     bool addInput {};  // the camera has no input in the session
     bool activate {};  // the anchor and the rate are set on the device
@@ -287,6 +290,7 @@ struct AdmitSteps {
     std::function<void()> begin;   // beginConfiguration
     std::function<void()> commit;  // commitConfiguration
     std::function<bool()> addInput;
+    std::function<void()> snapshotDurations;  // empty: nothing to take
     std::function<bool()> activate;
     std::function<bool()> addVideo;
     // Attaches the photo output and sets its maximum (preparePhotoOutput).
@@ -296,22 +300,26 @@ struct AdmitSteps {
     std::function<void()> removeVideo;
     std::function<void()> removePhoto;
     std::function<void()> removeInput;
+    std::function<void()> restoreDurations;  // empty: nothing to put back
 };
 enum class Admission : std::uint8_t { admitted, inputRefused, formatRefused, videoRefused, photoRefused, overBudget };
 
 // Runs the plan inside one configuration. A refusal, or a session over budget
 // once the configuration is committed, removes exactly what this call added and
-// nothing else: the format and outputs of a camera that was already in the
-// session stay as they were.
+// puts the device's frame durations back as they were before `activate`, and
+// nothing else changes: the format and outputs of a camera that was already in
+// the session stay as they were.
 [[nodiscard]] Admission admit(const AdmitPlan& plan, const AdmitSteps& steps);
 
 // A running stream changes size or rate: the durations first, then the video
-// output's size; a refusal programs the old durations again.
+// output's size; a refusal puts the durations back as `snapshotDurations` took
+// them before `setDurations` ran (the device's own values, as for AdmitSteps).
 struct ResizeSteps {
     std::function<void()> begin;
     std::function<void()> commit;
-    std::function<bool()> setDurations;  // empty: the rate does not change
-    std::function<bool()> setVideoSize;  // empty: the size does not change
+    std::function<void()> snapshotDurations;  // empty: nothing to take
+    std::function<bool()> setDurations;       // empty: the rate does not change
+    std::function<bool()> setVideoSize;       // empty: the size does not change
     std::function<void()> restoreDurations;
 };
 enum class Resizing : std::uint8_t { resized, durationsRefused, sizeRefused };
