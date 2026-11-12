@@ -377,6 +377,36 @@ struct TipJarHeaderTests {
         #expect(await eventually { !model.tipJarSheetOpen })
     }
 
+    /// The sheet takes the shared presentation: turned and bent, it rises to a little below the fold (its
+    /// own detent, a height fitted to the conversation, gives way); in every other pose, flat, upright or
+    /// on the cover, it keeps its own. The device here is a phone's window, and the shared presentation's
+    /// height comes from the reading, so the sheet's height tells which presentation it has.
+    @Test(arguments: [FoldSessionHostingTests.Pose.turnedBook, .turnedFlat, .uprightBook, .uprightFlat, .cover])
+    func turnedAndBentTheSheetRisesToTheFoldAndElsewhereKeepsItsOwnHeight(_ pose: FoldSessionHostingTests.Pose) async throws {
+        let model = app()
+        model.tipJarServices.sender = { Self.content() }
+        model.fold = pose.reading
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let host = UIHostingController(rootView: Color.clear.tipJarSheet(model).environment(model))
+        lease.window.rootViewController = host
+        try #require(await eventually { host.viewIfLoaded?.window != nil })
+        model.tipJarSheetOpen = true
+        try #require(await eventually { host.presentedViewController?.view.window != nil })
+        try await Task.sleep(for: .seconds(1.5))
+        let sheet = try #require(host.presentedViewController?.presentationController?.presentedView, "the sheet")
+        // The detent is the height below the fold; the sheet's frame adds the system's margin to it.
+        let below = FoldSheet.detentHeight(pose.reading)
+        if let below {
+            #expect(abs(sheet.frame.height - below) < 20, "\(pose): the sheet is \(sheet.frame.height) tall, not \(below)")
+        } else {
+            #expect(sheet.frame.height > 450, "\(pose): the sheet is \(sheet.frame.height) tall, its own height")
+        }
+        model.tipJarSheetOpen = false
+        #expect(await eventually { host.presentedViewController == nil })
+        lease.window.rootViewController = nil
+    }
+
     /// Where purchases are not allowed the sheet says so once, in the title, over the dimmed tiers: no
     /// second line says it again, and VoiceOver reads the title one time.
     @Test func whereTipsAreNotAllowedTheTitleAloneSaysSo() async throws {
