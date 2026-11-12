@@ -136,8 +136,10 @@ protocol RuntimeDriver: AnyObject {
     /// entries for the bug report; empty when the guest cannot be read now.
     func guestStallFiles() async -> [BugReportArchive.Entry]
     /// Installs the APK at `url`, which the caller can read, into the guest.
-    /// Cancelling the task stops it while the file is still being sent.
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws
+    /// Its size is read once the file is in hand, since an iCloud file has
+    /// none before. Cancelling the task stops it while the file is still being
+    /// sent.
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws
     /// Whether the guest's USB debugging setting is on; nil when it cannot be
     /// read now.
     func usbDebugging() async -> Bool?

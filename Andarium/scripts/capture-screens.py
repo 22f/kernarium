@@ -54,7 +54,10 @@ the local file:
         FEEDBACK_ADDRESS=feedback@example.com build
 
 Without it the Preview has no Send feedback, its shots are skipped and said
-so, and the rest is unaffected.
+so, and the rest is unaffected. The Info shots show Follow developer on X in a
+Preview built with `FOLLOW_X_HANDLE=example_handle` (and
+`FOLLOW_X_LOGO_SOURCE=local` for the real logo from `Config/Local/`); without
+it the row is absent from them.
 
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard
@@ -289,7 +292,8 @@ SHOTS: list[Shot] = [
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
     s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
     # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
-    feedback("feedback-entrance-info", "info", "Info with Send feedback in a section of its own under the header, apart from the version.", dark=True, wait=3.0),
+    feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
+    feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
     feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
     feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
     feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
@@ -298,8 +302,8 @@ SHOTS: list[Shot] = [
     feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
     feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
     feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
-    feedback("feedback-info", "feedback-info", "Send feedback opened from Info, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
-    feedback("feedback-info-filled", "feedback-info-filled", "Feedback that is not a bug, from Info: a suggestion with a photo; Send is ready."),
+    feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-home-filled", "feedback-home-filled", "Feedback that is not a bug, from Home: a suggestion with a photo; Send is ready."),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
 ]

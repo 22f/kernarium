@@ -80,14 +80,19 @@ if(UML_TEST_APPLE_AUDIO)
 endif()
 
 # uml_add_guest_integration_test(NAME <test> SCRIPT <runner> [ARGS <arg>...]
-#     CPUS <n> [GPUS <n>] [LABELS <label>...] [TIMEOUT <seconds>])
+#     CPUS <n> [GPUS <n>] [LABELS <label>...] [TIMEOUT <seconds>]
+#     [EMULATOR <target>])
 #
 # Registers a rootfs integration test that runs the Python <runner>, relative
-# to the calling directory, with uml-darwin and the integration rootfs and then
-# ARGS. It reserves CPUS processors, and GPUS GPUs, from the resource spec.
+# to the calling directory, with uml-darwin (or the EMULATOR target) and the
+# integration rootfs and then ARGS. It reserves CPUS processors, and GPUS GPUs,
+# from the resource spec.
 function(uml_add_guest_integration_test)
-    cmake_parse_arguments(_guest "" "NAME;SCRIPT;CPUS;GPUS;TIMEOUT"
+    cmake_parse_arguments(_guest "" "NAME;SCRIPT;CPUS;GPUS;TIMEOUT;EMULATOR"
         "ARGS;LABELS" ${ARGN})
+    if(NOT _guest_EMULATOR)
+        set(_guest_EMULATOR uml-darwin)
+    endif()
     if(NOT _guest_SCRIPT OR NOT _guest_CPUS)
         message(FATAL_ERROR
             "${_guest_NAME}: guest integration tests require SCRIPT and CPUS")
@@ -100,7 +105,7 @@ function(uml_add_guest_integration_test)
         NAME "${_guest_NAME}"
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/${_guest_SCRIPT}"
-            --emulator "$<TARGET_FILE:uml-darwin>"
+            --emulator "$<TARGET_FILE:${_guest_EMULATOR}>"
             --rootfs "${UML_INTEGRATION_ROOTFS}"
             ${_guest_ARGS}
         LABELS ${_guest_LABELS}
@@ -468,9 +473,30 @@ uml_add_guest_integration_test(
     TIMEOUT 240
     CPUS 2)
 
+# The guest cannot reach the host's loopback through the gateway, so the
+# host half of the transfer test listens on a Unix socket behind a guest
+# forward that only the provider's test build offers, in the test launcher.
+if(TARGET uml-darwin-network-test)
+    uml_add_guest_integration_test(
+        NAME guest-slirp-network-transfer
+        SCRIPT network/run_guest_network_transfer.py
+        EMULATOR uml-darwin-network-test
+        LABELS guest;network;slirp
+        TIMEOUT 300
+        CPUS 2)
+else()
+    message(FATAL_ERROR
+        "guest-slirp-network-transfer needs the test launcher, which links "
+        "the provider's test build (UML_BUILD_TOOLING_TESTS)")
+endif()
+
+# What a guest process reaches of the host through the user network: nothing,
+# at the gateway, the broadcast address, the host's own addresses or its
+# loopback, where the probe has listeners of its own. This is the product
+# launcher.
 uml_add_guest_integration_test(
-    NAME guest-slirp-network-transfer
-    SCRIPT network/run_guest_network_transfer.py
+    NAME guest-slirp-host-isolation
+    SCRIPT network/run_guest_host_isolation.py
     LABELS guest;network;slirp
     TIMEOUT 300
     CPUS 2)

@@ -363,7 +363,7 @@ index 5d687f40a3ab7ff0ace370f94882993923730d88..58a668b71f8b99b3814283dfae078a3e
 +          poly_u32_checked_add(tcs_B, patch_B, size_B);
 +}
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c6393f397 100644
+index 17d22754b16d26f9b1f2cabca9bb3733be9ed57d..1360a8a8b8cf670ce68b5d72c77d451e716197e8 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 @@ -1461,11 +1461,10 @@ kk_upload_geometry_params(struct kk_cmd_buffer *cmd,
@@ -465,7 +465,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
        mtl_set_front_face_winding(enc, front_face_ccw
                                           ? MTL_WINDING_COUNTER_CLOCKWISE
                                           : MTL_WINDING_CLOCKWISE);
-@@ -2509,8 +2518,9 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
+@@ -2513,8 +2522,9 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
     }
  
     if (transform_feedback) {
@@ -476,7 +476,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
                                     &vs->info.vs.transform_feedback, false);
        if (!gfx->per_draw_data.geometry_params)
           return false;
-@@ -2539,9 +2549,8 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
+@@ -2543,9 +2553,8 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
        struct kk_ptr tess_args =
           kk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
        gfx->per_draw_data.tess_params = tess_args.gpu;
@@ -487,7 +487,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
     }
  
     if (polygon_points || line_raster) {
-@@ -2556,10 +2565,6 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
+@@ -2560,10 +2569,6 @@ kk_upload_per_draw_data(struct kk_cmd_buffer *cmd, uint32_t upload_mask,
        gfx->per_draw_data.polygon_point_clip_flags =
           (vk_rasterization_state_depth_clip_enable(&dyn->rs) ? 1u : 0u) |
           (dyn->vp.depth_clip_negative_one_to_one ? 2u : 0u) |
@@ -498,7 +498,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
           (dyn->rs.depth_bias.enable ? 8u : 0u) |
           (dyn->rs.depth_clamp_enable ? 16u : 0u);
        gfx->per_draw_data.polygon_depth_bias_constant =
-@@ -2648,8 +2653,7 @@ kk_dispatch_compute(mtl_compute_encoder *enc, struct kk_grid grid,
+@@ -2652,8 +2657,7 @@ kk_dispatch_compute(mtl_compute_encoder *enc, struct kk_grid grid,
     if (grid.mode == KK_GRID_DIRECT)
        mtl_dispatch_threads(enc, grid.size, local_size);
     else
@@ -508,7 +508,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
  }
  
  static struct kk_draw_data
-@@ -2675,6 +2679,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+@@ -2679,6 +2683,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
        &gfx->descriptors, VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT);
  
     if (vs->info.vs.geometry_shader_emulation ||
@@ -516,7 +516,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
         dyn->rs.rasterizer_discard_enable) {
        c_primitives = 0;
        c_invocations = 0;
-@@ -2700,7 +2705,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+@@ -2704,7 +2709,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
  
        libkk_tess_setup_indirect_struct(cmd, kk_grid_1d(1), true, args);
  
@@ -525,7 +525,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
        grid_vs = kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 0u * grid_stride);
        grid_tcs =
           kk_grid_indirect(gfx->tess.indirect_ptr.gpu + 1u * grid_stride);
-@@ -3053,6 +3058,7 @@ kk_launch_transform_feedback(struct kk_cmd_buffer *cmd,
+@@ -3057,6 +3062,7 @@ kk_launch_transform_feedback(struct kk_cmd_buffer *cmd,
                               struct kk_draw_data draw, enum mesa_prim prim)
  {
     struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
@@ -533,7 +533,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
     struct kk_graphics_state *gfx = &cmd->state.gfx;
     const struct poly_gs_info *gsi = &vs->info.vs.transform_feedback;
     bool indirect = kk_grid_is_indirect(draw.grid);
-@@ -3073,7 +3079,8 @@ kk_launch_transform_feedback(struct kk_cmd_buffer *cmd,
+@@ -3077,7 +3083,8 @@ kk_launch_transform_feedback(struct kk_cmd_buffer *cmd,
           .vp = gfx->per_draw_data.vertex_params,
           .p = gfx->per_draw_data.geometry_params,
           .heap = kk_heap(cmd),
@@ -543,7 +543,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
           .index_size_B = draw.index.el_size_B,
           .index_buffer_range_el = kk_draw_index_range_el(&draw),
           .prim = prim,
-@@ -3085,7 +3092,11 @@ kk_launch_transform_feedback(struct kk_cmd_buffer *cmd,
+@@ -3089,7 +3096,11 @@ kk_launch_transform_feedback(struct kk_cmd_buffer *cmd,
     }
  
     mtl_compute_encoder *enc = cs_get_compute(cmd, true);
@@ -556,7 +556,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
     struct mtl_size vs_local_size = {64, 1, 1};
  
     mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
-@@ -3415,15 +3426,24 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -3419,15 +3430,24 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
                                     data->prim))
           return;
  
@@ -584,7 +584,7 @@ index b4f1fd1472e047301106f66a9b364383a974bee2..32d7e34c0823568e72a22aba14c2740c
  
        const enum mesa_prim source_raster_prim =
           emulate_geometry ? vs->info.vs.geometry.mode
-@@ -3447,7 +3467,8 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -3451,7 +3471,8 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
         * requested provoking vertex itself.  Keep its non-indexed vertex IDs
         * intact: they also address the generated XFB records. */
        if (rasterize && provoking_last && !emulate_line_raster &&

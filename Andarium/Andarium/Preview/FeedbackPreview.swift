@@ -14,15 +14,16 @@ import UIKit
 /// build made without the preview's `FEEDBACK_ADDRESS`.
 enum FeedbackPreview {
     /// The screens that open the sheet, over Settings of a running session
-    /// (`feedback`…) or over Info, where nothing runs (`feedback-info`…).
+    /// (`feedback`…) or over Home, where nothing runs (`feedback-home`…).
     static func opensSheet(_ screen: String) -> Bool { screen.hasPrefix("feedback") }
 
-    static func overInfo(_ screen: String) -> Bool { screen.hasPrefix("feedback-info") }
+    static func overHome(_ screen: String) -> Bool { screen.hasPrefix("feedback-home") }
 
     /// Readies the model for `screen`: its phase, the sheet that stays beneath,
     /// and the services the sheet asks.
     static func configure(screen: String, model: AppModel) {
-        guard opensSheet(screen) || screen == "settings-feedback" || screen == "info" else { return }
+        guard opensSheet(screen) || screen == "settings-feedback"
+            || ["home", "home-menu", "welcome", "welcome-menu", "info"].contains(screen) else { return }
         var services = SendFeedbackServices()
         services.address = { "feedback@example.com" }
         services.canSendMail = { screen != "feedback-nomail" }
@@ -33,7 +34,7 @@ enum FeedbackPreview {
         services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
         model.feedbackServices = services
         guard opensSheet(screen) else { return }
-        if overInfo(screen) {
+        if overHome(screen) {
             model.phase = .home
         } else {
             model.phase = .running(.normal)
@@ -47,7 +48,7 @@ enum FeedbackPreview {
     private static func prepare(screen: String, feedback: SendFeedbackModel) async {
         let words = Words()
         switch screen {
-        case "feedback", "feedback-info", "feedback-nomail":
+        case "feedback", "feedback-home", "feedback-nomail":
             break
         case "feedback-filled", "feedback-details", "feedback-discard":
             feedback.form.problem = words.problem
@@ -74,7 +75,7 @@ enum FeedbackPreview {
             overlay.progress = 0.6
             overlay.cancel = BusyCancel {}
             app.busy = overlay
-        case "feedback-info-filled":
+        case "feedback-home-filled":
             feedback.form.problem = words.suggestion
             feedback.form.details = words.suggestionDetails
             await attachAll(feedback, report: nil, screenshot: false, photo: 2.4)

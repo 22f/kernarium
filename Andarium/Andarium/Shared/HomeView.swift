@@ -47,11 +47,11 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        model.sheet = .info
-                    } label: {
-                        Label("Info", systemImage: "info")
-                    }
+                    #if FEEDBACK_MAIL
+                    HomeToolbarMenu()
+                    #else
+                    HomeInfoButton()
+                    #endif
                 }
             }
         }
@@ -74,6 +74,9 @@ struct HomeView: View {
             }
             .environment(model)
         }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model)
+        #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
         .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
@@ -336,9 +339,22 @@ struct StartButton: View {
     }
 }
 
+/// Home's Info button, the toolbar's trailing item.
+struct HomeInfoButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button {
+            model.sheet = .info
+        } label: {
+            Label("Info", systemImage: "info")
+        }
+    }
+}
+
 /// The rounded square that marks every row: a white glyph on the accent. The
 /// glyph is an SF Symbol, or an image of the asset catalog that is already
-/// white (it is shown as it is, never tinted).
+/// white (it is shown as it is) or a template image (drawn white).
 struct IconTile: View {
     private enum Glyph {
         case symbol(String)
@@ -375,6 +391,7 @@ struct IconTile: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 16, height: 16)
+                .foregroundStyle(.white)
         }
     }
 }

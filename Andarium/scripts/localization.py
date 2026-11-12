@@ -11,6 +11,7 @@ text is the key. The strings live in:
   Andarium/Localization/WhatsNew.xcstrings      the notes of Shared/WhatsNew.json
   Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
   Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
+  Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that have it only
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
@@ -54,7 +55,9 @@ development check needs that build (`FEEDBACK_ADDRESS=feedback@example.com` on
 the `xcodebuild` line) and fails on one that extracted no string of the
 Feedback table, as the keys of code compiled out would read as stale. An App
 Store build with no receiver has none, and its Feedback catalog is not
-compared; one with a receiver is checked like the rest.
+compared; one with a receiver is checked like the rest. Follow developer on X
+(Andarium/README.md#follow-developer-on-x) is the same with its FollowX table
+and `FOLLOW_X_HANDLE=example_handle`.
 """
 
 from __future__ import annotations
@@ -88,7 +91,13 @@ CATALOGS = {
     "WhatsNew": "Andarium/Localization/WhatsNew.xcstrings",
     "JIT": "Andarium/Localization/JIT.xcstrings",
     "Feedback": "Andarium/Localization/Feedback.xcstrings",
+    "FollowX": "Andarium/Localization/FollowX.xcstrings",
     "AndariumCore": CORE_CATALOG,
+}
+# The catalogs only some builds carry, and the arrangement that compiles each in.
+OPTIONAL_CATALOGS = {
+    "Feedback": "FEEDBACK_ADDRESS=feedback@example.com",
+    "FollowX": "FOLLOW_X_HANDLE=example_handle",
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
 WHATS_NEW = "Andarium/Andarium/Shared/WhatsNew.json"
@@ -101,6 +110,7 @@ SYNC_SOURCES = {
     "Localizable": ("Andarium/Andarium/", "GuestHost/Sources/"),
     "JIT": ("Andarium/Andarium/",),
     "Feedback": ("Andarium/Andarium/",),
+    "FollowX": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
 }
 
@@ -475,13 +485,16 @@ def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, 
     if not any(parts.values()):
         problems.add("sync", "no .stringsdata of the application or the package found: build with SWIFT_EMIT_LOC_STRINGS=YES first")
         return problems.items
-    # Send feedback is compiled in where the build names a receiver: without its strings the catalog cannot be compared.
-    if "Feedback" not in extracted_tables(files):
-        parts["Feedback"] = []
-        if not app_store:
-            problems.add(
-                "Feedback",
-                "has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in")
+    # Send feedback and Follow developer on X are compiled in where the build names a receiver or a handle:
+    # without their strings the catalog cannot be compared.
+    extracted = extracted_tables(files)
+    for table, arrangement in OPTIONAL_CATALOGS.items():
+        if table not in extracted:
+            parts[table] = []
+            if not app_store:
+                problems.add(
+                    table,
+                    f"has no extracted strings: build with {arrangement} to compile the feature in")
     with tempfile.TemporaryDirectory() as scratch:
         for name, data in parts.items():
             if not data:

@@ -193,6 +193,55 @@ struct HostDeviceTests {
     }
 }
 
+/// The run starts what the picker offers. The runtime refuses a guest's memory
+/// by the rule the loader answers (`guest_memory_admitted` of
+/// `runtime/guest_memory_budget.hpp`), so a size the picker offers that the
+/// loader refuses would be a start that fails at once.
+struct RuntimeMemoryRuleTests {
+    private func admitted(_ mib: Int) -> Bool {
+        kernarium_runtime_loader_guest_memory_admitted(UInt32(clamping: mib)) != 0
+    }
+
+    @Test func theRuntimeStartsEverySizeThePickerOffersAtEveryCount() {
+        let host = AppEntry.hostDevice()
+        let ceiling = Int(kernarium_runtime_loader_guest_memory_ceiling_mib())
+        for count in 1...host.processorCount {
+            let maximum = host.memory.maximumMiB(vCPUs: count)
+            #expect(admitted(maximum), "\(maximum) MiB at \(count) vCPUs, ceiling \(ceiling)")
+            #expect(admitted(host.memory.defaultMemoryMiB(vCPUs: count)))
+            #expect(admitted(host.memory.safeMemoryMiB(vCPUs: count)))
+            #expect(host.memory.stops(vCPUs: count).allSatisfy(admitted))
+        }
+        // A new guest takes the default of the host's vCPU count.
+        #expect(admitted(Guest.fresh(on: host).memoryMiB))
+        // The ceiling is the most it starts: the next step is refused.
+        #expect(admitted(ceiling))
+        #expect(!admitted(ceiling + Limits.runtimeMemoryStepMiB))
+    }
+
+    @Test func aStoredSizeNoLongerAdmittedComesDownToOneThatIs() {
+        let host = AppEntry.hostDevice()
+        let ceiling = Int(kernarium_runtime_loader_guest_memory_ceiling_mib())
+        for stored in [ceiling + Limits.runtimeMemoryStepMiB, ceiling + 4096, 1 << 20, 100, 1537] {
+            let guest = Guest(cores: host.processorCount, memoryMiB: stored, capacityGiB: 8)
+            #expect(admitted(guest.memoryWithinBound(on: host).memoryMiB), "stored \(stored) MiB")
+        }
+    }
+
+    @Test func theRestatedRangeIsTheLoadersRule() {
+        let range = kernarium_runtime_loader_guest_memory_range()
+        #expect(Limits.runtimeMemoryRangeMiB == Int(range.minimum_mib)...Int(range.largest_mib))
+        #expect(Limits.runtimeMemoryStepMiB == Int(range.step_mib))
+        let ceiling = Int(kernarium_runtime_loader_guest_memory_ceiling_mib())
+        #expect(ceiling <= Limits.runtimeMemoryRangeMiB.upperBound)
+        // The restatement is the loader's rule below the ceiling and past it
+        // only the ceiling differs.
+        let sizes = Array(0...20_000) + Array(max(ceiling - 130, 0)...(ceiling + 130))
+        let differing = sizes.filter { admitted($0) != (MemoryPolicy.runtimeAccepts($0) && $0 <= ceiling) }
+        #expect(differing.isEmpty, "differs at \(differing.prefix(5)) MiB, ceiling \(ceiling)")
+    }
+}
+
 /// The unit fixtures of the bounds and defaults are the shared budget rule's
 /// own answers; this asks the loader, which holds that rule, for the same
 /// rows, and for the vCPU count a device with a given number of cores offers.

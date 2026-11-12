@@ -76,6 +76,8 @@ class Tree:
             }),
             "JIT": catalog({"Preparing JIT": entry(ja="JITを準備中", zh_Hans="正在准备JIT", zh_Hant="正在準備JIT")}),
             "Feedback": catalog({"Send feedback": entry(ja="フィードバックを送信", zh_Hans="发送反馈", zh_Hant="傳送回饋")}),
+            "FollowX": catalog({"Follow developer on %@": entry(
+                ja="%@でデベロッパをフォロー", zh_Hans="在%@上关注开发者", zh_Hant="在%@上追蹤開發者")}),
             "AndariumCore": catalog({"Paused": entry(ja="一時停止", zh_Hans="已暂停", zh_Hant="已暫停")}),
             "InfoPlist": catalog({"NSMicrophoneUsageDescription": {"localizations": {
                 "en": unit(PERMISSION), **{lang: unit(f"{lang}: 麦克风") for lang in LANGS}}}}),
@@ -340,13 +342,15 @@ class SyncTests(unittest.TestCase):
         self.data = self.scratch / "build" / "Home.stringsdata"
 
     def extract(self, *keys: str, jit: tuple[str, ...] = ("Preparing JIT",),
-                feedback: tuple[str, ...] = ("Send feedback",)) -> None:
+                feedback: tuple[str, ...] = ("Send feedback",),
+                follow: tuple[str, ...] = ("Follow developer on %@",)) -> None:
         self.data.parent.mkdir(parents=True, exist_ok=True)
 
         def table(texts: tuple[str, ...]) -> list[dict]:
             return [{"comment": "", "key": key, "location": {"startingColumn": 1, "startingLine": 1}} for key in texts]
 
-        body = {"source": str(self.root / self.source), "tables": {"Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback)}, "version": 1}
+        body = {"source": str(self.root / self.source), "tables": {"Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback),
+                                    "FollowX": table(follow)}, "version": 1}
         self.data.write_text(json.dumps(body), encoding="utf-8")
 
     def sync(self, *extra: str) -> list[str]:
@@ -402,6 +406,34 @@ class SyncTests(unittest.TestCase):
         problems = self.sync("--check")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("Feedback: has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com", problems[0])
+
+    def test_a_follow_x_string_of_the_arranged_build_is_in_step(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
+        self.assertEqual(self.sync("--check"), [])
+
+    def test_a_missing_follow_x_string_is_found(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of",
+                     follow=("Follow developer on %@", "A new row text"))
+        problems = self.sync("--check")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("FollowX: is out of step with the code: 1 to add ['A new row text']", problems[0])
+
+    def test_a_development_build_without_the_row_is_refused_not_read_as_stale(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", follow=())
+        problems = self.sync("--check")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("FollowX: has no extracted strings: build with FOLLOW_X_HANDLE=example_handle", problems[0])
+
+    def test_an_app_store_build_without_a_handle_has_no_follow_x_table_to_compare(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(), follow=())
+        self.assertEqual(self.sync("--check", "--app-store"), [])
+
+    def test_an_app_store_build_with_a_handle_is_held_to_the_follow_x_keys_it_lacks(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=(),
+                     follow=("Follow developer on %@", "A new row text"))
+        problems = self.sync("--check", "--app-store")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("FollowX: is out of step with the code: 1 to add ['A new row text']", problems[0])
 
     def test_an_app_store_build_without_a_receiver_has_no_feedback_table_to_compare(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=())
