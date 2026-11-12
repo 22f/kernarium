@@ -2,6 +2,7 @@
 
 #if TIP_JAR
 
+import AndariumCore
 import SwiftUI
 
 /// What the Buy me tokens menu item looks like; the toolbar menu's glyph is
