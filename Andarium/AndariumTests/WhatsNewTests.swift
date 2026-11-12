@@ -28,11 +28,11 @@ struct WhatsNewTests {
         AppModel(
             guest: Guest.fresh(on: host), host: host,
             system: SystemInfo(
-                version: "17", release: "test", kernel: "Linux", architecture: "arm64", appVersion: "1.0 (9)"),
+                version: "17", release: "test", kernel: "Linux", architecture: "arm64", appVersion: "1.0 (10)"),
             capabilities: .device, createRequirementBytes: 1)
     }
 
-    private func entry(announces: Bool, build: Int? = 9, defaults: UserDefaults) -> AppEntry {
+    private func entry(announces: Bool, build: Int? = 10, defaults: UserDefaults) -> AppEntry {
         var entry = AppEntry(overrides: LaunchOverrides())
         entry.announcesWhatsNew = announces
         entry.build = build
@@ -42,19 +42,32 @@ struct WhatsNewTests {
 
     // MARK: The bundled notes
 
-    @Test func theBundledNotesDecodeAndStartWithBuildNine() throws {
+    private static let buildTenIDs = [
+        "snapshots", "languages", "resolution", "keyboard-mouse-controllers", "location", "send-feedback",
+        "more-fixes",
+    ]
+    private static let buildNineIDs = ["file-browser", "more-memory", "stability-fixes"]
+
+    @Test func theBundledNotesDecodeAndStartWithBuildTen() throws {
         let url = try #require(Bundle.main.url(forResource: "WhatsNew", withExtension: "json"))
         let releases = try WhatsNewCatalog.decode(Data(contentsOf: url))
-        #expect(releases.map(\.build) == [9])
-        #expect(releases.first?.version == "1.0 (9)")
+        #expect(releases.map(\.build) == [10, 9])
+        #expect(releases.map(\.version) == ["1.0 (10)", "1.0 (9)"])
         #expect(WhatsNewCatalog.load() == releases)
-        let entries = try #require(releases.first?.entries)
-        #expect(entries.map(\.id) == ["file-browser", "more-memory", "stability-fixes"])
-        #expect(entries.first?.title == "File browser")
+        let ten = try #require(releases.first?.entries)
+        #expect(ten.map(\.id) == Self.buildTenIDs)
+        #expect(ten.first?.title == "Snapshots")
         // The fixes are six points under a title, with no sentence of their own.
-        let fixes = try #require(entries.last)
-        #expect(fixes.title == "Stability fixes" && fixes.text == nil && fixes.points.count == 6)
-        #expect(fixes.place == nil && fixes.requirement == nil)
+        let tenFixes = try #require(ten.last)
+        #expect(tenFixes.title == "More fixes" && tenFixes.text == nil && tenFixes.points.count == 6)
+        #expect(tenFixes.place == nil && tenFixes.requirement == nil)
+        // Build 9's notes are kept as they were.
+        let nine = try #require(releases.last?.entries)
+        #expect(nine.map(\.id) == Self.buildNineIDs)
+        #expect(nine.first?.title == "File browser")
+        let nineFixes = try #require(nine.last)
+        #expect(nineFixes.title == "Stability fixes" && nineFixes.text == nil && nineFixes.points.count == 6)
+        #expect(nineFixes.place == nil && nineFixes.requirement == nil)
     }
 
     @Test func everyEntryHasWordsASymbolAndARequirementTheCodeKnows() throws {
@@ -74,11 +87,13 @@ struct WhatsNewTests {
 
     @Test func theRibbonNamesTheBundledEntriesAndCountsTheRest() throws {
         let titles = try #require(WhatsNewCatalog.load().first).entries.map(\.title)
-        #expect(titles == ["File browser", "More memory", "Stability fixes"])
-        #expect(WhatsNewRibbon.summary(titles, naming: 3)
-            == "File browser \u{00B7} More memory \u{00B7} Stability fixes")
-        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "File browser \u{00B7} More memory \u{00B7} 1 more")
-        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "3 new features")
+        #expect(titles == [
+            "Snapshots", "Languages", "Resolution", "Keyboard, mouse and controllers", "Location", "Send feedback",
+            "More fixes",
+        ])
+        #expect(WhatsNewRibbon.summary(titles, naming: 7) == titles.joined(separator: " \u{00B7} "))
+        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "Snapshots \u{00B7} Languages \u{00B7} 5 more")
+        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "7 new features")
     }
 
     // MARK: The person's launch
@@ -90,10 +105,26 @@ struct WhatsNewTests {
             let model = model(on: host)
             entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
             #expect(model.whatsNew.showsRibbon)
-            #expect(model.whatsNew.pendingEntries.map(\.id) == ["file-browser", "more-memory", "stability-fixes"])
+            // Build 10's notes first, then the build 9 the person skipped.
+            #expect(model.whatsNew.pending.map(\.build) == [10, 9])
+            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDs + Self.buildNineIDs)
             #expect(WhatsNewStore(defaults: defaults).record
-                == WhatsNewRecord(seenBuild: 5, ribbonBuild: 9, ribbonLaunches: 1))
-            #expect(model.whatsNew.releases.map(\.build) == [9])
+                == WhatsNewRecord(seenBuild: 5, ribbonBuild: 10, ribbonLaunches: 1))
+            #expect(model.whatsNew.releases.map(\.build) == [10, 9])
+        }
+    }
+
+    @Test func anUpdateFromBuildNineAnnouncesOnlyBuildTensNotes() {
+        withDefaults { defaults in
+            WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
+            let model = model(on: host(maximumMiB: 4096))
+            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            #expect(model.whatsNew.pending.map(\.build) == [10])
+            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDs)
+            #expect(WhatsNewStore(defaults: defaults).record
+                == WhatsNewRecord(seenBuild: 9, ribbonBuild: 10, ribbonLaunches: 1))
+            // Info lists both releases.
+            #expect(model.whatsNew.releases.map(\.build) == [10, 9])
         }
     }
 
@@ -109,9 +140,10 @@ struct WhatsNewTests {
         withDefaults { defaults in
             let model = model(on: host(maximumMiB: 4096))
             entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
-            #expect(model.whatsNew.pendingEntries.map(\.id) == ["file-browser", "stability-fixes"])
+            #expect(model.whatsNew.pendingEntries.map(\.id)
+                == Self.buildTenIDs + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.first?.entries.count == 3)
+            #expect(model.whatsNew.releases.map(\.entries.count) == [7, 3])
         }
     }
 
@@ -120,7 +152,7 @@ struct WhatsNewTests {
             let model = model(on: host(maximumMiB: 6144))
             entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: false, vCPUs: 6)
             #expect(!model.whatsNew.showsRibbon)
-            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 9))
+            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 10))
         }
     }
 
@@ -133,9 +165,10 @@ struct WhatsNewTests {
         }
     }
 
-    /// A build numbered 8 that bundles the notes written for build 9 offers
-    /// none of them and records itself, so build 9 then announces them.
-    @Test func buildEightAnnouncesNothingOfBuildNinesNotesThenBuildNineAnnouncesThem() {
+    /// A build numbered 8 that bundles the notes written for builds 9 and 10
+    /// offers none of them and records itself; build 9 then offers only its
+    /// own, and build 10 only its own after the person has read them.
+    @Test func buildEightAnnouncesNothingThenBuildNineItsOwnThenBuildTenItsOwn() {
         withDefaults { defaults in
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 5))
             let eight = model(on: host(maximumMiB: 6144))
@@ -143,13 +176,23 @@ struct WhatsNewTests {
             #expect(!eight.whatsNew.showsRibbon)
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 8))
             // Info lists the notes as bundled.
-            #expect(eight.whatsNew.releases.map(\.build) == [9])
+            #expect(eight.whatsNew.releases.map(\.build) == [10, 9])
 
             let nine = model(on: host(maximumMiB: 6144))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: nine, hasGuest: true, vCPUs: 6)
-            #expect(nine.whatsNew.pendingEntries.map(\.id) == ["file-browser", "more-memory", "stability-fixes"])
+            entry(announces: true, build: 9, defaults: defaults).announceWhatsNew(on: nine, hasGuest: true, vCPUs: 6)
+            #expect(nine.whatsNew.pending.map(\.build) == [9])
+            #expect(nine.whatsNew.pendingEntries.map(\.id) == Self.buildNineIDs)
             #expect(WhatsNewStore(defaults: defaults).record
                 == WhatsNewRecord(seenBuild: 8, ribbonBuild: 9, ribbonLaunches: 1))
+            nine.whatsNew.read()
+            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 9))
+
+            let ten = model(on: host(maximumMiB: 6144))
+            entry(announces: true, defaults: defaults).announceWhatsNew(on: ten, hasGuest: true, vCPUs: 6)
+            #expect(ten.whatsNew.pending.map(\.build) == [10])
+            #expect(ten.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDs)
+            #expect(WhatsNewStore(defaults: defaults).record
+                == WhatsNewRecord(seenBuild: 9, ribbonBuild: 10, ribbonLaunches: 1))
         }
     }
 
@@ -168,11 +211,11 @@ struct WhatsNewTests {
             let model = model(on: host(maximumMiB: 6144))
             entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
             model.whatsNew.read()
-            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 9))
+            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 10))
             #expect(model.whatsNew.showsRibbon)
             model.whatsNew.putAway()
             #expect(!model.whatsNew.showsRibbon)
-            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 9))
+            #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 10))
 
             // The next launch of the same build offers nothing.
             let next = self.model(on: host(maximumMiB: 6144))
@@ -195,7 +238,7 @@ struct WhatsNewTests {
             model.whatsNew.putAway()
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 5))
             // Info still lists the notes.
-            #expect(model.whatsNew.releases.map(\.build) == [9])
+            #expect(model.whatsNew.releases.map(\.build) == [10, 9])
 
             // The record of an install that has none stays none.
             withDefaults { fresh in
@@ -230,7 +273,7 @@ struct WhatsNewTests {
         #expect(!AppEntry.fromArguments().announcesWhatsNew)
         let model = AndariumProcess.shared.model
         #expect(!model.whatsNew.showsRibbon)
-        #expect(model.whatsNew.releases.map(\.build) == [9])
+        #expect(model.whatsNew.releases.map(\.build) == [10, 9])
     }
     #endif
 }

@@ -4,13 +4,14 @@ import AndariumCore
 import UIKit
 
 /// The release notes and the stored record of the preview's What's New
-/// screens. The notes of build 9 are the bundled ones; those of builds 5 and
-/// 4 are made up, to stand in for releases a person skipped (the application
-/// bundles notes from build 9 on). A device keeps the record in its defaults.
+/// screens. The notes of builds 10 and 9 are the bundled ones; those of builds
+/// 5 and 4 are made up, to stand in for releases a person skipped (the
+/// application bundles notes from build 9 on). A device keeps the record in its
+/// defaults.
 enum WhatsNewPreview {
     /// The build the preview's What's New screens run, the first with notes.
-    static let currentBuild = 9
-    static let appVersion = "1.0 (9)"
+    static let currentBuild = 10
+    static let appVersion = "1.0 (10)"
 
     static let releases: [WhatsNewRelease] = WhatsNewCatalog.load() + [
         WhatsNewRelease(build: 5, version: "1.0 (5)", date: "2026-11-09", entries: [
@@ -41,10 +42,10 @@ enum WhatsNewPreview {
 
     /// The screens of the design, and what each one stands for.
     static let screens: Set<String> = [
-        "whatsnew",                // first launch after the update to build 9
+        "whatsnew",                // first launch after the update to build 10
         "whatsnew-open",           // its notes, opened from the ribbon
-        "whatsnew-skipped",        // first launch after skipping builds 4 and 5
-        "whatsnew-skipped-open",   // the notes of all three
+        "whatsnew-skipped",        // first launch after skipping builds 4 to 9
+        "whatsnew-skipped-open",   // the notes of all four
         "whatsnew-update",         // the update also carries a new Android release
         "whatsnew-limited",        // a device that offers no more than 4 GiB
         "whatsnew-dismissed",      // the ribbon put away: Home as always
@@ -54,14 +55,16 @@ enum WhatsNewPreview {
     ]
 
     /// The record a screen's launch finds, and whether the install has a
-    /// guest: a record of build 5 is the update to 9, of build 3 an update
-    /// that skipped two releases.
+    /// guest: a record of build 9 is the update to 10, of build 5 the update
+    /// from the first public release, of build 3 an update that skipped
+    /// three releases.
     private static func stored(for screen: String) -> WhatsNewRecord? {
         switch screen {
         case "whatsnew-skipped", "whatsnew-skipped-open": WhatsNewRecord(seenBuild: 3)
+        case "whatsnew-limited": WhatsNewRecord(seenBuild: 5)
         case "whatsnew-dismissed", "whatsnew-info", "whatsnew-history": WhatsNewRecord(seenBuild: currentBuild)
         case "whatsnew-fresh": nil
-        default: WhatsNewRecord(seenBuild: 5)
+        default: WhatsNewRecord(seenBuild: 9)
         }
     }
 
