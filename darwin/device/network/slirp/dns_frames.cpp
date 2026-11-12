@@ -76,10 +76,11 @@ std::uint16_t fold(std::uint32_t sum)
 }
 
 /* Whether an IPv4 packet is a service that SLiRP or the provider gives at the
- * gateway's or the name server's own address without a host socket: an ICMP
- * echo (SLiRP answers it itself), DNS (the provider's, or SLiRP's guest
- * forward for TCP), and DHCP at the gateway (SLiRP's bootp). Any other flow to
- * those addresses is no service: SLiRP would connect it to the literal address
+ * gateway's or the name server's own address without a host socket: ICMP
+ * (SLiRP answers an echo itself and drops every other type, so none reaches a
+ * host socket), DNS (the provider's, or SLiRP's guest forward for TCP), and
+ * DHCP at the gateway (SLiRP's bootp). Any other flow to those addresses is no
+ * service: SLiRP would connect it to the literal address
  * on the host's network, as for any address of the virtual network but the
  * gateway (which it refuses), so the table judges it like any other. A
  * fragment shows no port, so only an ICMP one is a service. `ip` starts at the

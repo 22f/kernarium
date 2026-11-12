@@ -88,8 +88,9 @@ struct Servers final {
  * no exception: an address of it that the table holds is the host's, and
  * SLiRP would connect a flow to it as it does to any other literal address.
  * The one exception is what SLiRP and the provider give at their own
- * addresses without a host socket: an ICMP echo to the gateway or the name
- * server, DNS (port 53) at either, and DHCP (UDP port 67) at the gateway.
+ * addresses without a host socket: ICMP to the gateway or the name server
+ * (SLiRP answers an echo itself and drops every other type), DNS (port 53) at
+ * either, and DHCP (UDP port 67) at the gateway.
  * They are `pass` even when the host holds the address; every other flow to
  * those addresses is refused like one to any other address the host holds.
  * Run it after classify_guest_frame has passed the frame on.

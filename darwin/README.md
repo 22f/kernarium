@@ -191,8 +191,9 @@ patches provide the behaviors the `slirp-network-*` tests check.
   exception: SLiRP connects a flow to every address of it but the gateway as
   given, so an address of it that a host interface holds is the host's and is
   refused like any other. Only what SLiRP and the provider serve at their own
-  addresses is theirs even then: an ICMP echo to the gateway or the name
-  server, DNS at either, and DHCP at the gateway. The rule is about the host's
+  addresses is theirs even then: ICMP to the gateway or the name server, which
+  the virtual network answers or drops itself and never sends to a host
+  socket, DNS at either, and DHCP at the gateway. The rule is about the host's
   own addresses, not about what the host can route to: a destination the host
   reaches over its network is reached as before. An address the host answers
   that no interface holds, such as a service a VPN client runs inside its
