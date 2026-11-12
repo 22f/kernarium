@@ -491,7 +491,7 @@ struct AppEntry {
             // Info scrolled to its end, where the footnote of the filing number is.
             model.sheet = .info
             try? await Task.sleep(for: .milliseconds(1200))
-            PreviewScroll.toBottomOfFrontSheet()
+            await PreviewScroll.toBottomOfFrontSheet()
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew
         case "start-low-space":
