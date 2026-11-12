@@ -227,14 +227,20 @@ static bool quiet(const Cycle &c, double deadline_ms) {
 static bool one_wait(const Cycle &c) { return c.kevents == 1 && c.waits == 1 && c.selects == 0 && c.sigmasks == 0; }
 static void sleep_us(long us) { timespec t{us / 1000000, (us % 1000000) * 1000L}; nanosleep(&t, nullptr); }
 // A cycle with a clock deadline that an IPI sent 2 ms into it ends. A host that
-// stalls the sender past the deadline lets the clock end the wait, which is not
-// the case under test: the late vector is collected and the cycle is tried again.
+// stalls the sender past half the deadline lets the clock end the wait, which is
+// not the case under test: the late vector is collected and the cycle is tried
+// again. With the sender on time the clock may win only because the host held
+// this thread, and then the wait reported the pipe and made no poll; a poll
+// there means the byte, written long before, was not in the wait's result.
 static Cycle cycle_ended_by_ipi(double deadline_ms, unsigned vector) {
 	for (int attempt = 0; attempt < 20; attempt++) {
-		std::thread sender([vector] { sleep_us(2000); os_send_ipi(0, vector); });
+		std::atomic<long long> sent{0};
+		long long start = os_nsecs();
+		std::thread sender([vector, &sent] { sleep_us(2000); os_send_ipi(0, vector); sent = os_nsecs(); });
 		Cycle c = cycle(deadline_ms);
 		sender.join();
 		if (c.mask == 1u << vector && !c.timer) return c;
+		assert(c.polls == 0 || sent - start >= (long long)(deadline_ms * 5e5));
 		(void)cycle(2);
 		(void)cycle(2);
 	}
