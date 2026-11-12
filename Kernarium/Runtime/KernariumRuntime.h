@@ -844,8 +844,8 @@ typedef void (*kernarium_runtime_set_camera_state_callback_function)(
  * from it (a back camera's turned the same way, a front camera's the other
  * way, an external camera's not at all); a later change turns the picture by
  * the difference, as ROTATE_AND_CROP's automatic setting does. A guest whose
- * display the guest rotates itself (an iPhone, a full-screen iPad) keeps 0.
- * Zero until the application says otherwise. Returns 0, or -EINVAL for another
+ * display the guest rotates itself (an iPhone) keeps 0. Zero until the
+ * application says otherwise. Returns 0, or -EINVAL for another
  * value. Any thread, with or without a guest. */
 typedef int (*kernarium_runtime_set_camera_rotation_function)(
     uint32_t degrees);
