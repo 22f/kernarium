@@ -465,11 +465,25 @@ int main() {
 	// The host refuses the deadline timer: the call that added it returns at
 	// once with the error, and the waits after it time out instead, a little
 	// late, with no change list. This leaves the CPU in that state for good.
+	// A refused change ends the call before it looks at the pipe, so the exit
+	// does not take the pipe for empty: a byte left with no vector behind it,
+	// as a sender held between its vector and its byte leaves, is drained there.
 	inject_timer_error = true;
 	{
+		held = false;
+		release = false;
+		std::thread sender([] { hold_write = true; os_send_ipi(0, 6); });
+		for (int spin = 0; spin < 5000 && !held; spin++) sleep_us(1000);
+		assert(held);
+		inject_timer_error = false;
+		assert((cycle(2).mask & (1u << 6)) != 0);
+		release = true;
+		sender.join();
+		inject_timer_error = true;
 		Cycle refused = cycle(300);
-		std::printf("refused timer: first wait %.2f ms\n", refused.ms);
+		std::printf("refused timer: first wait %.2f ms, polls %d, reads %d\n", refused.ms, refused.polls, refused.reads);
 		assert(refused.ms < 150 && !refused.timer && refused.mask == 0 && one_wait(refused));
+		assert(refused.polls >= 1 && refused.reads == 1);
 		Cycle c = cycle(300);
 		std::printf("refused timer: next wait %.2f ms, kevents %d, changes %d\n", c.ms, c.kevents, c.wait.changes);
 		assert(c.timer && c.ms >= 299 && c.ms < 3000 && one_wait(c) && c.wait.changes == 0 && c.wait.timeout);

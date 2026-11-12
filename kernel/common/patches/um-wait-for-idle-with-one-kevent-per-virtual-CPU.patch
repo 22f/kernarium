@@ -52,8 +52,8 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  arch/um/os-Darwin/irq.c      |  88 +++++---
  arch/um/os-Darwin/irq.h      |   8 +-
  arch/um/os-Darwin/smp.c      |  51 ++++-
- arch/um/os-Darwin/time.c     | 408 ++++++++++++++++++++---------------
- 5 files changed, 339 insertions(+), 218 deletions(-)
+ arch/um/os-Darwin/time.c     | 413 ++++++++++++++++++++---------------
+ 5 files changed, 344 insertions(+), 218 deletions(-)
 
 diff --git a/arch/um/os-Darwin/internal.h b/arch/um/os-Darwin/internal.h
 index 4e3b7fbf5f87cfce35da0f47a577a2a9b5228a89..f8fd72858927cfb1baac0872a7787984f1b414fc 100644
@@ -364,7 +364,7 @@ index e78d9de7ac1fcd819ad68f198c5345ef649de671..1ce68154da03765b0a2ca1c3e732f9ce
  	 * SA_RESTART defeats that contract on Darwin and can leave a reschedule
  	 * IPI pending indefinitely while an idle vCPU remains asleep.
 diff --git a/arch/um/os-Darwin/time.c b/arch/um/os-Darwin/time.c
-index 8ca0eb169c4de544f081206b0a79fa912511adb5..fb126e8603f8a066b73eec9f872ce08332cfb5f6 100644
+index 8ca0eb169c4de544f081206b0a79fa912511adb5..999725588acb74fb4834a8238e1e3a8ebd70e591 100644
 --- a/arch/um/os-Darwin/time.c
 +++ b/arch/um/os-Darwin/time.c
 @@ -5,7 +5,6 @@
@@ -423,7 +423,7 @@ index 8ca0eb169c4de544f081206b0a79fa912511adb5..fb126e8603f8a066b73eec9f872ce083
  	return 0;
  }
  
-@@ -178,70 +195,221 @@ void darwin_timer_poll(struct uml_pt_regs *registers)
+@@ -178,70 +195,226 @@ void darwin_timer_poll(struct uml_pt_regs *registers)
  	}
  }
  
@@ -437,14 +437,14 @@ index 8ca0eb169c4de544f081206b0a79fa912511adb5..fb126e8603f8a066b73eec9f872ce083
 + * wake pipe, the stop descriptor and CPU0's trigger.  What does not fit is
 + * returned by the next wait, since the pipe and the stop descriptor stay
 + * readable and the timer and the trigger stay pending.
-+ */
+  */
+-static int arm_idle_deadline(struct darwin_cpu_timer *state,
+-			     unsigned long long remaining)
 +#define DARWIN_IDLE_EVENTS 4
 +
 +/* Add the registrations an idle wait watches.  A missing one is a lost wake,
 + * so a failure here is fatal, as the IPI pipes' is in os_init_smp().
-  */
--static int arm_idle_deadline(struct darwin_cpu_timer *state,
--			     unsigned long long remaining)
++ */
 +static void idle_watch(struct darwin_idle_wait *idle, int cpu, short filter,
 +		       uintptr_t ident, unsigned short flags)
  {
@@ -634,8 +634,8 @@ index 8ca0eb169c4de544f081206b0a79fa912511adb5..fb126e8603f8a066b73eec9f872ce083
 +	if (changes)
 +		idle->timer_armed = (change.flags & EV_ADD) != 0;
 +	/* A pipe the wait did not report is empty, as it is at nearly every
-+	 * wake by the deadline or the stop descriptor; after an error nothing
-+	 * is known (-1).
++	 * wake by the deadline or the stop descriptor; after an error, or a
++	 * refused change, nothing is known (-1).
 +	 */
 +	pipe_bytes = count >= 0 ? 0 : -1;
 +	for (index = 0; index < count; index++) {
@@ -644,6 +644,11 @@ index 8ca0eb169c4de544f081206b0a79fa912511adb5..fb126e8603f8a066b73eec9f872ce083
 +		if (event->filter == EVFILT_TIMER) {
 +			/* Delivered or refused, it is not in the queue now. */
 +			idle->timer_armed = 0;
++			/* A refused change ends the call before it looks at the
++			 * queue, so the pipe is not known to be empty.
++			 */
++			if (event->flags & EV_ERROR)
++				pipe_bytes = -1;
 +			if ((event->flags & EV_ERROR) && changes &&
 +			    (change.flags & EV_ADD) && !idle->timer_refused) {
 +				idle->timer_refused = 1;
@@ -698,7 +703,7 @@ index 8ca0eb169c4de544f081206b0a79fa912511adb5..fb126e8603f8a066b73eec9f872ce083
  }
  
  void os_idle_sleep(void)
-@@ -249,126 +417,8 @@ void os_idle_sleep(void)
+@@ -249,126 +422,8 @@ void os_idle_sleep(void)
  	int cpu = uml_curr_cpu();
  	struct darwin_cpu_timer *state = timer_for_cpu(cpu);
  
