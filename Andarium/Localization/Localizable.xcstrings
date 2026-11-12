@@ -3707,6 +3707,28 @@
         }
       }
     },
+    "Getting the file…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ファイルを取得中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在获取文件…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在取得檔案…"
+          }
+        }
+      }
+    },
     "Graphics" : {
       "comment" : "Heading of the group of Acknowledgements with the graphics software.",
       "localizations" : {
