@@ -7,7 +7,8 @@ import Foundation
 /// little endian: "ANS1", Android sensor type (1 or 4), three IEEE float32 SI
 /// values. The guest timestamps receipt in its own CLOCK_BOOTTIME domain. The
 /// guest answers on the same connection with `MotionDemand` frames, which say
-/// which sensors an application uses.
+/// which sensors an application uses. A guest that has the device-orientation
+/// sensor also takes records of type 27 (`OrientationRecord`).
 public struct MotionSample: Sendable {
     public enum Sensor: UInt32, Sendable { case accelerometer = 1, gyroscope = 4 }
     /// The host interface orientation the virtual device is mounted to
@@ -105,6 +106,16 @@ public final class MotionStream: @unchecked Sendable {
 
     public func submit(_ sample: MotionSample, epoch: UInt64) {
         guard let packet = sample.encoded else { return }
+        send(packet, epoch: epoch)
+    }
+
+    /// Gives the guest the device's orientation. Only for a guest whose
+    /// "ANC2" frame has arrived (`MotionDemand.acceptsOrientation`).
+    public func submit(_ orientation: GuestOrientation, epoch: UInt64) {
+        send(OrientationRecord.encoded(orientation), epoch: epoch)
+    }
+
+    private func send(_ packet: Data, epoch: UInt64) {
         let dropped = lock.withLock { () -> Bool in
             guard running, generation == epoch, descriptor >= 0 else { return false }
             let sent = packet.withUnsafeBytes { Darwin.send(descriptor, $0.baseAddress, $0.count, MSG_DONTWAIT) }
