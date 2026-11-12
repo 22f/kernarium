@@ -734,7 +734,9 @@ public:
                 started = startStill(camera, request);
                 // A capture that is refused leaves the camera as it found it.
                 if (!started) releaseStill(camera);
-            } @catch (NSException*) {
+            } @catch (NSException* exception) {
+                std::fprintf(stderr, "Camera: a still on camera %zu raised and was refused: %s\n", camera,
+                             exception.reason.UTF8String);
                 started = false;
                 {
                     std::lock_guard lock(photoMutex_);
@@ -752,7 +754,10 @@ public:
         auto& running = cameras_[camera];
         const std::optional<CameraStillSize> asked = request.jpegWidth != 0
             ? std::optional<CameraStillSize>(CameraStillSize {request.jpegWidth, request.jpegHeight}) : std::nullopt;
-        if (!prepareStill(camera, entry, running, asked)) return false;
+        if (!prepareStill(camera, entry, running, asked)) {
+            std::fprintf(stderr, "Camera: camera %zu could not be made ready for a still\n", camera);
+            return false;
+        }
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
         // The quality belongs inside the compression properties: iOS raises
@@ -770,12 +775,16 @@ public:
                     rawFormat = format.unsignedIntValue;
                     break;
                 }
-            if (rawFormat == 0) return false;
+            if (rawFormat == 0) {
+                std::fprintf(stderr, "Camera: camera %zu lists no Bayer RAW format: a RAW still is refused\n", camera);
+                return false;
+            }
             settings = request.jpegWidth != 0
                 ? [AVCapturePhotoSettings photoSettingsWithRawPixelFormatType:rawFormat processedFormat:jpeg]
                 : [AVCapturePhotoSettings photoSettingsWithRawPixelFormatType:rawFormat];
 #else
-            return false;  // macOS has no Bayer still
+            std::fprintf(stderr, "Camera: a RAW still is refused: macOS has no Bayer still\n");
+            return false;
 #endif
         } else {
             settings = [AVCapturePhotoSettings photoSettingsWithFormat:jpeg];
@@ -797,7 +806,11 @@ public:
         const uml::platform::CameraStillSize wanted {request.jpegWidth, request.jpegHeight};
         const auto chosen = request.jpegWidth != 0 ? uml::platform::exactPhotoSize(listed, wanted, outputMaximum)
                                                    : uml::platform::coveringPhotoSize(listed, {}, outputMaximum);
-        if (request.jpegWidth != 0 && !chosen) return false;
+        if (request.jpegWidth != 0 && !chosen) {
+            std::fprintf(stderr, "Camera: a JPEG of %ux%u is refused on camera %zu: the active format makes no such photo (output maximum %ux%u, %zu sizes listed)\n",
+                         wanted.width, wanted.height, camera, outputMaximum.width, outputMaximum.height, listed.size());
+            return false;
+        }
         if (chosen) settings.maxPhotoDimensions = CMVideoDimensions {std::int32_t(chosen->width), std::int32_t(chosen->height)};
         UMLPhotoDelegate* delegate = [[UMLPhotoDelegate alloc] initWithCamera:camera
                                                                          token:request.token
@@ -1136,9 +1149,17 @@ private:
         const auto peers = peersOf(camera);
         const bool several = multiCamera_ && !peers.empty();
         AVCaptureDeviceFormat* format = chooseFormat(entry, width, height, frameRate, several);
-        if (format == nil) return false;
+        if (format == nil) {
+            std::fprintf(stderr, "Camera: no format of camera %zu%s covers %ux%u at %u fps within the limits\n", camera,
+                         several ? " that a multi-camera session takes" : "", width, height, frameRate);
+            return false;
+        }
         std::vector<Move> moves;
-        if (several && !planMoves(peers, moves)) return false;
+        if (several && !planMoves(peers, moves)) {
+            std::fprintf(stderr, "Camera: the cameras in the session have no formats a multi-camera session takes for camera %zu\n",
+                         camera);
+            return false;
+        }
         std::vector<std::size_t> moved;
         bool ok = applyMoves(moves, moved);
         if (ok) ok = configureVideo(camera, entry, running, format, width, height, frameRate);
@@ -1412,15 +1433,25 @@ private:
                 (!listed.empty() && uml::platform::exactPhotoSize(listed, *wanted, *uml::platform::largestPhotoSize(listed)));
             if (!makes || (several && !formatTakenByMultiCamera(active))) {
                 own = chooseStillFormat(entry, wanted, several);
-                if (own == nil) return false;
+                if (own == nil) {
+                    std::fprintf(stderr, "Camera: no format of camera %zu%s makes a photo of %ux%u\n", camera,
+                                 several ? " that a multi-camera session takes" : "", wanted ? wanted->width : 0,
+                                 wanted ? wanted->height : 0);
+                    return false;
+                }
                 if (own == active) own = nil;
             }
         }
         std::vector<Move> moves;
-        if (several && !planMoves(peers, moves)) return false;
+        if (several && !planMoves(peers, moves)) {
+            std::fprintf(stderr, "Camera: the cameras in the session have no formats a multi-camera session takes for camera %zu's still\n",
+                         camera);
+            return false;
+        }
         std::vector<std::size_t> moved;
         bool ok = applyMoves(moves, moved);
         if (ok && own != nil) ok = setActiveFormat(entry.device, own);
+        if (!ok) std::fprintf(stderr, "Camera: a format for camera %zu's still was refused\n", camera);
         const bool newInput = running.input == nil;
         AVCapturePhotoOutput* newOutput = nil;
         if (ok) {
@@ -1482,11 +1513,16 @@ private:
                                                            {attach, setMaximum, detach}) ==
                         uml::platform::PhotoOutputPreparation::ready;
                 }
-            } @catch (NSException*) {
+            } @catch (NSException* exception) {
+                std::fprintf(stderr, "Camera: preparing camera %zu for a still raised: %s\n", camera, exception.reason.UTF8String);
                 ok = false;
             }
             [session_ commitConfiguration];
-            if (ok && overBudget()) ok = false;
+            if (ok && overBudget()) {
+                std::fprintf(stderr, "Camera: camera %zu's photo output would take the multi-camera session over its hardware budget\n",
+                             camera);
+                ok = false;
+            }
         }
         if (ok) {
             running.photoOutput = newOutput;
