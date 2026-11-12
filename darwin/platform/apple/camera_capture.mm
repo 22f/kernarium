@@ -1221,8 +1221,11 @@ private:
                         output.maxPhotoDimensions = CMVideoDimensions {std::int32_t(size.width), std::int32_t(size.height)};
                         return true;
                     } @catch (NSException* exception) {
-                        std::fprintf(stderr, "Camera: the photo output refused photos up to %ux%u: %s\n", size.width, size.height,
-                                     exception.reason.UTF8String);
+                        // The first refusal's detail is the one logged; the admission's own
+                        // refusal of the output after it is the same reason and stays quiet.
+                        refuse(camera, Refusal::outputRefused,
+                               "the photo output refused photos up to " + std::to_string(size.width) + "x" + std::to_string(size.height) +
+                                   ": " + (exception.reason != nil ? exception.reason.UTF8String : ""));
                         return false;
                     }
                 };
