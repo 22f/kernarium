@@ -148,7 +148,10 @@ none of the settings below.
   with authorization off, as the macOS launcher does. It refuses that unless
   `KERNARIUM_HOST_FORWARD` is unset or listens on loopback, because
   authorization off gives whatever reaches the forward an unauthenticated shell
-  (and `adb root` on a userdebug image).
+  (and `adb root` on a userdebug image). A loopback forward is reached by the
+  processes of the device and by no guest process: the user network gives the
+  guest no path to the host's loopback or to any address of the host
+  ([`darwin/README.md`](../darwin/README.md#user-network)).
 - Both automation runtimes also read `KERNARIUM_BACKGROUND_JOB_AT_START` and
   `KERNARIUM_BACKGROUND_HOLD_DELAY_MS`, which start a background job with the
   guest and move the GPU hold for a measurement; the packaging script refuses a

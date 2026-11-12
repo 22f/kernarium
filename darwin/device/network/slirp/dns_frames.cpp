@@ -11,6 +11,8 @@ constexpr std::uint16_t ethertype_ipv4 = 0x0800;
 constexpr std::uint8_t protocol_icmp = 1;
 constexpr std::uint8_t protocol_tcp = 6;
 constexpr std::uint8_t protocol_udp = 17;
+constexpr std::uint8_t icmp_destination_unreachable = 3;
+constexpr std::uint8_t icmp_port_unreachable = 3;
 constexpr std::uint16_t dns_port = 53;
 constexpr std::uint8_t tcp_fin = 0x01;
 constexpr std::uint8_t tcp_syn = 0x02;
@@ -60,6 +62,15 @@ std::uint16_t fold(std::uint32_t sum)
 	while ((sum >> 16) != 0)
 		sum = (sum & 0xffff) + (sum >> 16);
 	return static_cast<std::uint16_t>(~sum);
+}
+
+bool within(const Subnet &network, const Ipv4Address &address)
+{
+	for (std::size_t index = 0; index < address.size(); ++index)
+		if (((address[index] ^ network.address[index]) &
+		     network.mask[index]) != 0)
+			return false;
+	return true;
 }
 
 /* The transport checksum over the IPv4 pseudo-header and `segment`. */
@@ -213,6 +224,69 @@ Classified classify_guest_frame(std::span<const std::uint8_t> frame,
 	return result;
 }
 
+Classified classify_host_bound_frame(std::span<const std::uint8_t> frame,
+				     const HostAddresses &host,
+				     const Subnet &network)
+{
+	Classified result;
+	if (host.empty() || frame.size() < ethernet_header + 20 ||
+	    read16(frame, 12) != ethertype_ipv4)
+		return result;
+	const auto ip = frame.subspan(ethernet_header);
+	if ((ip[0] >> 4) != 4)
+		return result;
+	const Ipv4Address destination{ip[16], ip[17], ip[18], ip[19]};
+	if (!host.contains(destination) || within(network, destination))
+		return result;
+	/* From here the packet is for the host and SLiRP never sees it: what is
+	 * not refused below is dropped. */
+	result.action = FrameAction::drop;
+	const std::size_t header = (ip[0] & 0x0f) * 4U;
+	const std::size_t total = read16(ip, 2);
+	if (header < 20 || total < header || total > ip.size() ||
+	    fold(sum16(ip.first(header), 0)) != 0 ||
+	    (read16(ip, 6) & 0x3fff) != 0)
+		return result;
+	const std::uint8_t protocol = ip[9];
+	const auto transport = ip.subspan(header, total - header);
+
+	auto &endpoints = result.endpoints;
+	std::copy_n(frame.begin() + 6, 6, endpoints.guest_mac.begin());
+	std::copy_n(frame.begin(), 6, endpoints.server_mac.begin());
+	std::copy_n(ip.begin() + 12, 4, endpoints.guest_address.begin());
+	endpoints.server_address = destination;
+
+	if (protocol == protocol_udp) {
+		if (transport.size() < 8)
+			return result;
+		const std::uint16_t length = read16(transport, 4);
+		if (length < 8 || length > transport.size())
+			return result;
+		endpoints.guest_port = read16(transport, 0);
+		endpoints.server_port = read16(transport, 2);
+		result.quote = ip.first(header + 8);
+		result.action = FrameAction::unreachable;
+		return result;
+	}
+	if (protocol != protocol_tcp || transport.size() < 20)
+		return result;
+	const std::size_t offset = (transport[12] >> 4) * 4U;
+	if (offset < 20 || offset > transport.size())
+		return result;
+	endpoints.guest_port = read16(transport, 0);
+	endpoints.server_port = read16(transport, 2);
+	result.sequence = read32(transport, 4);
+	result.acknowledgement = read32(transport, 8);
+	result.tcp_flags = transport[13];
+	result.segment_length = transport.size() - offset;
+	if ((result.tcp_flags & tcp_syn) != 0)
+		++result.segment_length;
+	if ((result.tcp_flags & tcp_fin) != 0)
+		++result.segment_length;
+	result.action = FrameAction::reset;
+	return result;
+}
+
 std::vector<std::uint8_t> udp_reply_frame(const Endpoints &endpoints,
 					  std::span<const std::uint8_t> payload,
 					  std::uint16_t identification)
@@ -257,6 +331,21 @@ std::vector<std::uint8_t> tcp_reset_frame(const Classified &segment,
 		transport_checksum(segment.endpoints.server_address,
 				   segment.endpoints.guest_address,
 				   protocol_tcp, {frame.data() + tcp, 20}));
+	return frame;
+}
+
+std::vector<std::uint8_t> icmp_unreachable_frame(const Classified &datagram,
+						 std::uint16_t identification)
+{
+	const std::size_t length = 8 + datagram.quote.size();
+	auto frame = ip_frame(datagram.endpoints, protocol_icmp, length,
+			      identification);
+	const std::size_t icmp = ethernet_header + 20;
+	frame[icmp] = icmp_destination_unreachable;
+	frame[icmp + 1] = icmp_port_unreachable;
+	std::ranges::copy(datagram.quote, frame.begin() + icmp + 8);
+	write16(frame, icmp + 2,
+		fold(sum16({frame.data() + icmp, length}, 0)));
 	return frame;
 }
 

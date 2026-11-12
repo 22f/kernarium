@@ -2,7 +2,9 @@
 #pragma once
 
 #include "uml_darwin_network.h"
+#include "address_source.hpp"
 #include "dns_resolver.hpp"
+#include "host_addresses.hpp"
 #include "network_counters.hpp"
 #include "platform/descriptor.hpp"
 
@@ -15,11 +17,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stop_token>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -47,6 +52,12 @@ inline constexpr const char *guest_address = "10.0.2.15";
 inline constexpr const char *nameserver_address = "10.0.2.3";
 inline constexpr dns::Ipv4Address nameserver_ipv4{10, 0, 2, 3};
 inline constexpr dns::Ipv4Address host_alias_ipv4{10, 0, 2, 2};
+/* The addresses SLiRP answers for itself; none of them is the host. */
+inline constexpr dns::Subnet virtual_network_ipv4{
+	{10, 0, 2, 0}, {255, 255, 255, 0}};
+/* While nothing reports a change of the host's addresses, the provider reads
+ * them again after this long. */
+inline constexpr std::chrono::seconds address_poll_interval{2};
 
 /* One host listening socket forwarded into the guest. Registrations are
  * accepted while the provider is not open; the provider owns replaying them
@@ -119,6 +130,48 @@ public:
 	}
 
 #if UML_SLIRP_TESTING
+	/* A guest forward for a test: a connection the guest opens to
+	 * `guest_address:guest_port` goes to the Unix socket `path`, where the
+	 * test listens. It stands in for the host listener the guest can no
+	 * longer reach through the gateway, which the product has no way to
+	 * forward to. Applies to the next open(). The environment variable
+	 * UML_TEST_SLIRP_GUEST_FORWARD ("ADDRESS:PORT=PATH", more than one
+	 * separated by commas) adds the same forwards, for a test launcher. */
+	struct GuestForward final {
+		std::string guest_address{host_alias_address};
+		std::uint16_t guest_port{};
+		std::string path;
+	};
+	void add_guest_forward_for_testing(GuestForward forward)
+	{
+		guest_forwards_for_testing_.push_back(std::move(forward));
+	}
+	/* The host's addresses come from `reader` instead of the system. */
+	void set_host_address_reader_for_testing(
+		std::function<std::optional<HostAddresses>()> reader)
+	{
+		address_reader_for_testing_ = std::move(reader);
+	}
+	/* Acts as the routing socket's report of a change. */
+	void notify_host_addresses_changed_for_testing() noexcept;
+	/* Times the provider has read the host's addresses. */
+	[[nodiscard]] std::uint64_t host_address_reads_for_testing() const noexcept
+	{
+		return host_address_reads_for_testing_.load(
+			std::memory_order_acquire);
+	}
+	/* The next open() leaves the routing socket closed, as a system that
+	 * refuses it does, and reads the addresses every `interval`. */
+	void use_address_timer_for_testing(
+		std::chrono::milliseconds interval) noexcept
+	{
+		address_timer_for_testing_ = interval;
+	}
+	/* Whether a routing socket reports the host's address changes. */
+	[[nodiscard]] bool address_source_active_for_testing() const noexcept
+	{
+		return address_source_.active();
+	}
 	void pause_transmit_for_testing() noexcept;
 	[[nodiscard]] bool wait_for_transmit_pause_for_testing() noexcept;
 	void resume_transmit_for_testing() noexcept;
@@ -225,6 +278,15 @@ private:
 	static int get_poll_events(int index, void *opaque) noexcept;
 	/* Called with start_mutex_ held and slirp_ valid. */
 	int install_forward(const HostForward &forward) noexcept;
+	/* Reads the host's addresses into host_addresses_; false, with the table
+	 * as it was, when the system cannot list them. */
+	bool refresh_host_addresses() noexcept;
+	/* The event loop's part: reads the addresses again when the routing
+	 * socket (`readable`) or, without one, the timer says they may have
+	 * changed. */
+	void service_host_addresses(bool readable) noexcept;
+	[[nodiscard]] std::uint32_t address_timeout(
+		std::uint32_t timeout) const noexcept;
 
     slirp_ssize_t enqueue_received(std::span<const std::byte> frame);
 	/* Answers a guest frame meant for the name server; false passes it to
@@ -237,6 +299,7 @@ private:
 	void pause_write_before_commit_for_testing() noexcept;
 	void pause_read_before_notification_for_testing() noexcept;
 	void notify_receive_cleanup_for_testing() noexcept;
+	void install_guest_forwards_for_testing() noexcept;
 #endif
 	void event_loop(std::stop_token stop_token) noexcept;
 	[[nodiscard]] std::uint32_t timer_timeout(
@@ -276,6 +339,14 @@ private:
 	 * set by open() before the worker exists. */
 	bool name_server_stream_{};
 	bool gateway_stream_{};
+	/* What the guest may not address: open() fills the table before the
+	 * worker exists, and the worker alone reads and refreshes it after. */
+	HostAddresses host_addresses_;
+	AddressChangeSource address_source_;
+	/* Without a routing socket, or after a read failed, the time of the next
+	 * read. */
+	bool address_read_pending_{};
+	std::chrono::steady_clock::time_point next_address_read_{};
 	std::jthread worker_;
 	std::atomic_bool started_{false};
 	std::atomic_bool stopping_{true};
@@ -295,6 +366,11 @@ private:
 	bool read_pause_reached_for_testing_{};
 	bool release_read_for_testing_{};
 	bool receive_cleanup_reached_for_testing_{};
+	std::vector<GuestForward> guest_forwards_for_testing_;
+	std::function<std::optional<HostAddresses>()> address_reader_for_testing_;
+	std::atomic_bool address_change_for_testing_{};
+	std::atomic_uint64_t host_address_reads_for_testing_{};
+	std::chrono::milliseconds address_timer_for_testing_{};
 #endif
 };
 

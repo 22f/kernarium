@@ -135,10 +135,34 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		if (!ensure_pipe(wake_pipe_) || !ensure_pipe(receive_pipe_))
 			return errno == 0 ? -EIO : -errno;
 
+		/* The guest may not address the host itself (answer_locally), so
+		 * the network does not come up without the host's addresses to
+		 * refuse. The socket that reports a change opens first: an address
+		 * added after the read is reported. */
+		address_source_.close();
+		address_read_pending_ = false;
+#if UML_SLIRP_TESTING
+		if (address_timer_for_testing_.count() <= 0)
+			(void)address_source_.open();
+#else
+		(void)address_source_.open();
+#endif
+		if (!refresh_host_addresses()) {
+			address_source_.close();
+			return -EIO;
+		}
+
 		SlirpConfig config{};
 		config.version = 6;
 		config.in_enabled = true;
 		config.restricted = 0;
+		/* Without this SLiRP maps the gateway address, and the broadcast
+		 * address, to 127.0.0.1 of the host: a guest process would reach
+		 * every service on the application's own loopback. What the guest
+		 * reaches through the gateway is SLiRP's own: DHCP, ICMP echo, and
+		 * DNS, which the provider answers itself. The host's other addresses
+		 * are refused in answer_locally. */
+		config.disable_host_loopback = true;
 		/* SLiRP's DNS proxy sends a guest's queries to the host's first
 		 * configured server, usually a local-network router. The
 		 * provider answers the name server itself (answer_locally and
@@ -156,6 +180,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		config.if_mru = 1500;
 		slirp_.reset(slirp_new(&config, &callbacks(), this));
 		if (!slirp_) {
+			address_source_.close();
 			return -EIO;
 		}
 		/* Replay the recorded forwards onto the SLiRP instance this open
@@ -202,6 +227,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 				    },
 				    stream_paths) != 0) {
 				slirp_.reset();
+				address_source_.close();
 				return -EIO;
 			}
 			/* DNS over TCP to the name server, and to the gateway as
@@ -229,6 +255,9 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 							"over TCP at %s\n", server);
 				}
 			}
+#if UML_SLIRP_TESTING
+			install_guest_forwards_for_testing();
+#endif
 			/* A SYN to a name server whose forward carries DNS is
 			 * answered by SLiRP itself: no connection attempt. */
 			observer_.serve_dns_streams(
@@ -240,6 +269,7 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		} catch (const std::system_error &) {
 			resolver_.stop();
 			slirp_.reset();
+			address_source_.close();
 			return -EIO;
 		}
 		started_.store(true, std::memory_order_release);
@@ -338,6 +368,7 @@ void SlirpProvider::stop() noexcept
 	}
 	slirp_.reset();
 	timers_.clear();
+	address_source_.close();
 }
 
 #if UML_SLIRP_TESTING
@@ -492,6 +523,73 @@ void SlirpProvider::notify_receive_cleanup_for_testing() noexcept
 		receive_cleanup_reached_for_testing_ = true;
 	}
 	io_pause_condition_.notify_all();
+}
+
+void SlirpProvider::notify_host_addresses_changed_for_testing() noexcept
+{
+	address_change_for_testing_.store(true, std::memory_order_release);
+	wake();
+}
+
+/* "ADDRESS:PORT=PATH": the environment's form of a GuestForward. */
+static bool parse_guest_forward_for_testing(
+	std::string_view text, SlirpProvider::GuestForward &forward) noexcept
+{
+	const auto colon = text.find(':');
+	const auto equals = text.find('=');
+	if (colon == std::string_view::npos || equals == std::string_view::npos ||
+		colon > equals || equals + 1 >= text.size())
+		return false;
+	unsigned int port = 0;
+	const auto digits = text.substr(colon + 1, equals - colon - 1);
+	const auto parsed = std::from_chars(
+		digits.data(), digits.data() + digits.size(), port);
+	if (parsed.ec != std::errc{} ||
+		parsed.ptr != digits.data() + digits.size() || port == 0 ||
+		port > 65535U)
+		return false;
+	forward.guest_address = std::string{text.substr(0, colon)};
+	forward.guest_port = static_cast<std::uint16_t>(port);
+	forward.path = std::string{text.substr(equals + 1)};
+	return true;
+}
+
+void SlirpProvider::install_guest_forwards_for_testing() noexcept
+{
+	try {
+		auto forwards = guest_forwards_for_testing_;
+		if (const char *environment =
+				std::getenv("UML_TEST_SLIRP_GUEST_FORWARD");
+			environment != nullptr) {
+			std::string_view rest{environment};
+			while (!rest.empty()) {
+				const auto comma = rest.find(',');
+				GuestForward forward;
+				if (parse_guest_forward_for_testing(
+						rest.substr(0, comma), forward))
+					forwards.push_back(std::move(forward));
+				else
+					std::fprintf(stderr,
+						"UML_TEST_SLIRP_GUEST_FORWARD: bad forward\n");
+				if (comma == std::string_view::npos)
+					break;
+				rest.remove_prefix(comma + 1);
+			}
+		}
+		for (const auto &forward : forwards) {
+			in_addr address{};
+			if (inet_pton(AF_INET, forward.guest_address.c_str(),
+						  &address) != 1 ||
+				slirp_add_unix(slirp_.get(), forward.path.c_str(), &address,
+							   forward.guest_port) != 0)
+				std::fprintf(stderr,
+					"Unable to forward guest %s:%u to %s\n",
+					forward.guest_address.c_str(),
+					static_cast<unsigned int>(forward.guest_port),
+					forward.path.c_str());
+		}
+	} catch (...) {
+	}
 }
 #endif
 

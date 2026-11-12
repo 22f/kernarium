@@ -171,6 +171,24 @@ patches provide the behaviors the `slirp-network-*` tests check.
   `connect()` fails.
 - Guest IPv4 multicast is dropped on the virtual link. The Local Network
   permission is asked for only when the guest itself reaches the local network.
+- The guest cannot reach the machine the application runs on. SLiRP does not
+  map the gateway or the broadcast address to the host's loopback
+  (`disable_host_loopback`), and the provider refuses a guest's TCP and UDP to
+  any address a host interface holds, its broadcast address and `127.0.0.1`
+  included: a TCP reset or an ICMP port unreachable at once, whether or not
+  anything listens, and silence for every other protocol. The addresses are
+  read when the routing socket reports a change of an address or an interface,
+  or every 2 s where the system refuses that socket, never per frame, and the
+  network does not open without them. Addresses of the virtual network are
+  never the host's. What the guest reaches through the gateway is SLiRP's own
+  (DHCP, ICMP echo, the name server's DNS); other machines on the local
+  network are reached as before. A host forward is the one listener the guest
+  shares with the host, and it leads into the guest. A test that needs a host
+  listener names a guest forward to a Unix socket, which only the provider's
+  test build offers (`UML_TEST_SLIRP_GUEST_FORWARD`, read by
+  `uml-darwin-network-test`, which no preset installs or packages); no product
+  links that build (`network-host-isolation-rules`,
+  `slirp-network-host-isolation`, `guest-slirp-host-isolation`).
 - The guest network driver has no transmit flow control, so a guest transmit
   into a full ring waits briefly for the SLiRP loop (`guest-slirp-network-transfer`).
 

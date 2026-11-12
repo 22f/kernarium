@@ -3,10 +3,13 @@
 
 /*
  * The guest frames the provider answers itself instead of handing them to
- * SLiRP: DNS datagrams to the virtual name server or the gateway, and the
- * name server's other traffic, which SLiRP would otherwise send to that
- * literal address on the host's network once its own DNS proxy is off.
+ * SLiRP: DNS datagrams to the virtual name server or the gateway, the name
+ * server's other traffic, which SLiRP would otherwise send to that literal
+ * address on the host's network once its own DNS proxy is off, and the
+ * traffic addressed to the host itself, which it refuses.
  */
+
+#include "host_addresses.hpp"
 
 #include <array>
 #include <cstddef>
@@ -33,6 +36,7 @@ enum class FrameAction {
 	pass,      /* SLiRP handles it */
 	query,     /* a DNS datagram: `payload` goes to the resolver */
 	reset,     /* a TCP segment to a port that nothing serves */
+	unreachable, /* a UDP datagram to a port that nothing serves */
 	drop,      /* anything else addressed to the name server, and multicast */
 };
 
@@ -45,6 +49,9 @@ struct Classified final {
 	std::uint32_t acknowledgement{};
 	std::uint8_t tcp_flags{};
 	std::size_t segment_length{};
+	/* For `unreachable`: the datagram's IP header and first eight bytes,
+	 * which the ICMP error quotes. */
+	std::span<const std::uint8_t> quote;
 };
 
 /*
@@ -66,6 +73,26 @@ struct Servers final {
 [[nodiscard]] Classified classify_guest_frame(
 	std::span<const std::uint8_t> frame, const Servers &servers);
 
+/* An IPv4 network: the address bits that `mask` selects. */
+struct Subnet final {
+	Ipv4Address address{};
+	Ipv4Address mask{};
+};
+
+/*
+ * A guest frame addressed to one of the host's own addresses is refused, for
+ * SLiRP would connect it to a service of the machine the application runs
+ * on: a TCP segment is answered with a reset and a UDP datagram with an ICMP
+ * port unreachable, whether or not anything listens, so the guest learns
+ * nothing about the host's services. Everything else addressed to the host
+ * (ICMP, fragments, a malformed packet) is dropped. A frame for any other
+ * address, the addresses of the virtual network `network` included, is
+ * `pass`. Run it after classify_guest_frame has passed the frame on.
+ */
+[[nodiscard]] Classified classify_host_bound_frame(
+	std::span<const std::uint8_t> frame, const HostAddresses &host,
+	const Subnet &network);
+
 /* One Ethernet frame carrying `payload` from the server back to the guest.
  * The payload must fit one 1500-byte IP packet. */
 [[nodiscard]] std::vector<std::uint8_t> udp_reply_frame(
@@ -76,5 +103,10 @@ struct Servers final {
  * segment that carries RST itself. */
 [[nodiscard]] std::vector<std::uint8_t> tcp_reset_frame(
 	const Classified &segment, std::uint16_t identification);
+
+/* The ICMP port unreachable (RFC 792) for a classified `unreachable`
+ * datagram, from the address the datagram was sent to. */
+[[nodiscard]] std::vector<std::uint8_t> icmp_unreachable_frame(
+	const Classified &datagram, std::uint16_t identification);
 
 } // namespace uml::network::dns

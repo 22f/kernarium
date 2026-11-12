@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace uml::network {
@@ -207,11 +209,72 @@ void SlirpProvider::handle_expired_timers() noexcept
 	}
 }
 
+bool SlirpProvider::refresh_host_addresses() noexcept
+{
+	std::optional<HostAddresses> addresses;
+	try {
+#if UML_SLIRP_TESTING
+		host_address_reads_for_testing_.fetch_add(
+			1, std::memory_order_release);
+		addresses = address_reader_for_testing_ ?
+			address_reader_for_testing_() : read_host_addresses();
+#else
+		addresses = read_host_addresses();
+#endif
+	} catch (...) {
+	}
+	/* A failed read keeps the table and asks for another soon. */
+	address_read_pending_ = !addresses.has_value();
+	next_address_read_ = std::chrono::steady_clock::now() +
+		address_poll_interval;
+#if UML_SLIRP_TESTING
+	if (address_timer_for_testing_.count() > 0)
+		next_address_read_ = std::chrono::steady_clock::now() +
+			address_timer_for_testing_;
+#endif
+	if (!addresses)
+		return false;
+	host_addresses_ = std::move(*addresses);
+	return true;
+}
+
+void SlirpProvider::service_host_addresses(bool readable) noexcept
+{
+	bool stale = false;
+#if UML_SLIRP_TESTING
+	stale = address_change_for_testing_.exchange(
+		false, std::memory_order_acq_rel);
+#endif
+	if (readable && address_source_.drain())
+		stale = true;
+	/* Without the routing socket, or after a failed read, the timer asks. */
+	if (!stale && (!address_source_.active() || address_read_pending_))
+		stale = std::chrono::steady_clock::now() >= next_address_read_;
+	if (stale)
+		(void)refresh_host_addresses();
+}
+
+std::uint32_t SlirpProvider::address_timeout(
+	std::uint32_t timeout) const noexcept
+{
+	if (address_source_.active() && !address_read_pending_)
+		return timeout;
+	const auto remaining = std::chrono::duration_cast<
+		std::chrono::milliseconds>(
+		next_address_read_ - std::chrono::steady_clock::now()).count();
+	if (remaining <= 0)
+		return 0;
+	return static_cast<std::uint64_t>(remaining) < timeout ?
+		static_cast<std::uint32_t>(remaining) : timeout;
+}
+
 void SlirpProvider::event_loop(std::stop_token stop_token) noexcept
 {
 	PollState state;
-	/* The wake pipe keeps index 0, which SLiRP is never handed. Clearing
-	 * keeps the capacity, so the wake entry never allocates after this. */
+	/* The wake pipe keeps index 0 and the routing socket index 1, neither of
+	 * which SLiRP is handed (a closed socket is -1, which poll skips).
+	 * Clearing keeps the capacity, so the entries never allocate after
+	 * this. */
 	state.descriptors.reserve(64);
 	while (!stop_token.stop_requested()) {
 		std::uint32_t timeout = 1000;
@@ -222,9 +285,11 @@ void SlirpProvider::event_loop(std::stop_token stop_token) noexcept
 		process_transmit_queue();
 		state.descriptors.clear();
 		state.descriptors.push_back({wake_pipe_[0].get(), POLLIN, 0});
+		state.descriptors.push_back(
+			{address_source_.descriptor(), POLLIN, 0});
 		slirp_pollfds_fill_socket(slirp_.get(), &timeout,
 					 add_poll_descriptor, &state);
-		timeout = timer_timeout(timeout);
+		timeout = address_timeout(timer_timeout(timeout));
 		const int result = poll(state.descriptors.data(),
 					static_cast<nfds_t>(state.descriptors.size()),
 					static_cast<int>(timeout));
@@ -236,6 +301,8 @@ void SlirpProvider::event_loop(std::stop_token stop_token) noexcept
 		}
 		if (stop_token.stop_requested())
 			break;
+		service_host_addresses(
+			(state.descriptors[1].revents & (POLLIN | POLLERR | POLLHUP)) != 0);
 		slirp_pollfds_poll(slirp_.get(), result < 0,
 				  get_poll_events, &state);
 		handle_expired_timers();

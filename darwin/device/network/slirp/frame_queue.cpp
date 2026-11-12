@@ -104,9 +104,14 @@ bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 	const auto bytes = std::span<const std::uint8_t>{
 		reinterpret_cast<const std::uint8_t *>(frame.data()),
 		frame.size()};
-	const auto classified = dns::classify_guest_frame(
+	auto classified = dns::classify_guest_frame(
 		bytes, {nameserver_ipv4, host_alias_ipv4, name_server_stream_,
 			gateway_stream_});
+	/* What SLiRP would connect to the machine the application runs on is
+	 * refused here instead: the guest gets the answer a closed port gives. */
+	if (classified.action == dns::FrameAction::pass)
+		classified = dns::classify_host_bound_frame(
+			bytes, host_addresses_, virtual_network_ipv4);
 	switch (classified.action) {
 	case dns::FrameAction::pass:
 		return false;
@@ -123,6 +128,15 @@ bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 			if (!reset.empty())
 				(void)enqueue_received(std::as_bytes(
 					std::span<const std::uint8_t>{reset}));
+		} catch (...) {
+		}
+		return true;
+	case dns::FrameAction::unreachable:
+		try {
+			const auto error = dns::icmp_unreachable_frame(
+				classified, next_identification_++);
+			(void)enqueue_received(std::as_bytes(
+				std::span<const std::uint8_t>{error}));
 		} catch (...) {
 		}
 		return true;
