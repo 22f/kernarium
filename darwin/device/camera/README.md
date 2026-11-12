@@ -70,10 +70,17 @@ application's statements (the sensor orientation, the rotation that
 - **Events and reset.** The event queue never holds a buffer: with no event
   pending it returns retry, so the guest's buffer stays in its ring, and an
   event raised later signals the device's event descriptor so the server runs
-  the queue again. A guest reset (and a suspend that finds a request held, which
-  resets every device) drops every stream, group, pending event and control
-  value; the driver creates them again (see the wire's README). A suspend with
-  no stream open holds nothing and resets nothing.
+  the queue again. The device keeps the requests it deferred while its ring is
+  disabled (`keepsDeferredRequestsWhileDisabled()`), as the codecs do, so a
+  guest suspend neither resets it nor drops a held buffer or a late answer:
+  they are completed once the ring is enabled again (`camera-held-requests`
+  drives the server through a disable with a stream's buffer held). What still
+  resets the device is a new memory table, a layout message (features, ring
+  size, base or address) that finds a request held on a disabled ring, a
+  guest's release of the device (`RESET_OWNER`, or `GET_VRING_BASE` with a
+  request pending) and the end of the connection; the reset drops every stream,
+  group, pending event and control value, and the driver creates them again
+  (see the wire's README).
 - **Calibration.** RAW is offered only for a lens whose colour data is known.
   The first still of an uncalibrated lens at unit zoom also takes a Bayer still
   and keeps what its DNG reveals in the `CalibrationStore` (per host model and
@@ -106,7 +113,8 @@ factories (nothing opened, no prompt). `camera-device` drives the device
 over both queues in front of the synthetic camera, including the invariant that
 a blocked session never opens a platform session, a hostile guest, a reset with
 streams and stills in flight, an event queue that retries and wakes the server,
-a suspend with no stream open that resets nothing (its test models the
-server's rule for a disabled ring), a still on one camera while another streams,
-a join over the hardware budget, and a capture that fails to start round after
-round. The Apple backend's capture is not run by any test.
+a ring disable that resets nothing, a still on one camera while another
+streams, a join over the hardware budget, and a capture that fails to start
+round after round. `camera-held-requests` runs the vhost-user server over the
+device and holds a stream's buffer across a disable and an enable. The Apple
+backend's capture is not run by any test.

@@ -14,6 +14,11 @@ driver has posted its first event buffer, so a probe reads no events from it
 whenever the host plugged it, and the configuration change for a device that
 is plugged follows that first buffer.
 
+The driver therefore posts its event buffers at probe even when it registers no
+input device: the host answers a device as unplugged until its driver has
+posted one, so a driver that waited for an input device to post them would
+never see a plug.
+
 After the driver registers or unregisters the input device it sends one event
 on the status queue, `VIRTIO_INPUT_UML_EV_NOTICE` with code
 `VIRTIO_INPUT_UML_NOTICE_REGISTRATION` and value 1 (registered) or 0, so that

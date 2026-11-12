@@ -58,8 +58,8 @@ which the host defines and no driver here binds yet.
  drivers/media/virtio/virtio_video_enc.c     | 1536 +++++++++++++++++++
  drivers/media/virtio/virtio_video_helpers.c |   15 +-
  drivers/media/virtio/virtio_video_vq.c      |  306 +++-
- include/uapi/linux/virtio_video.h           |  492 +++++-
- 12 files changed, 3005 insertions(+), 33 deletions(-)
+ include/uapi/linux/virtio_video.h           |  496 +++++-
+ 12 files changed, 3009 insertions(+), 33 deletions(-)
  create mode 100644 drivers/media/virtio/virtio_video_ctrls.c
  create mode 100644 drivers/media/virtio/virtio_video_enc.c
 
@@ -2607,10 +2607,10 @@ index f27c516cf031dd09eccd685deb05827c748a2ab3..9baf5735cc4c00ca46cb40ef09252214
  	}
  
 diff --git a/drivers/media/virtio/virtio_video_vq.c b/drivers/media/virtio/virtio_video_vq.c
-index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc075bc523e 100644
+index 365a01dae2a209e7aa67fccf9a359b6bfea08be9..7ec70f745dd4b8dbece8515cc53bf5cbf544a02e 100644
 --- a/drivers/media/virtio/virtio_video_vq.c
 +++ b/drivers/media/virtio/virtio_video_vq.c
-@@ -320,8 +320,17 @@ virtio_video_get_vbuf(struct virtio_video_device *vvd, int size, int resp_size,
+@@ -321,8 +321,17 @@ virtio_video_get_vbuf(struct virtio_video_device *vvd, int size, int resp_size,
  
  int virtio_video_alloc_vbufs(struct virtio_video_device *vvd)
  {
@@ -2629,7 +2629,7 @@ index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc0
  				  __alignof__(struct virtio_video_vbuffer), 0,
  				  NULL);
  	if (!vvd->vbufs)
-@@ -790,16 +799,22 @@ virtio_video_cmd_resource_queue_cb(struct virtio_video_device *vvd,
+@@ -793,16 +802,22 @@ virtio_video_cmd_resource_queue_cb(struct virtio_video_device *vvd,
  	struct virtio_video_resource_queue_resp *resp =
  		(struct virtio_video_resource_queue_resp *)vbuf->resp_buf;
  
@@ -2654,7 +2654,7 @@ index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc0
  }
  
  int virtio_video_cmd_resource_queue(struct virtio_video_device *vvd,
-@@ -986,8 +1001,16 @@ virtio_video_cmd_get_params_cb(struct virtio_video_device *vvd,
+@@ -989,8 +1004,16 @@ virtio_video_cmd_get_params_cb(struct virtio_video_device *vvd,
  	format_info->frame_height = le32_to_cpu(params->frame_height);
  	format_info->min_buffers = le32_to_cpu(params->min_buffers);
  	format_info->max_buffers = le32_to_cpu(params->max_buffers);
@@ -2673,7 +2673,7 @@ index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc0
  
  	format_info->crop.top = le32_to_cpu(params->crop.top);
  	format_info->crop.left = le32_to_cpu(params->crop.left);
-@@ -1064,6 +1087,13 @@ virtio_video_cmd_set_params(struct virtio_video_device *vvd,
+@@ -1067,6 +1090,13 @@ virtio_video_cmd_set_params(struct virtio_video_device *vvd,
  	req_p->params.min_buffers = cpu_to_le32(format_info->min_buffers);
  	req_p->params.max_buffers = cpu_to_le32(format_info->max_buffers);
  	req_p->params.num_planes = cpu_to_le32(format_info->num_planes);
@@ -2687,7 +2687,7 @@ index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc0
  
  	for (i = 0; i < format_info->num_planes; i++) {
  		struct virtio_video_plane_format *plane_formats =
-@@ -1183,3 +1213,269 @@ int virtio_video_cmd_get_control(struct virtio_video_device *vvd,
+@@ -1186,3 +1216,269 @@ int virtio_video_cmd_get_control(struct virtio_video_device *vvd,
  	return ret;
  }
  
@@ -2958,7 +2958,7 @@ index 5917feb0512bf044b5dccecc520f02b2bc87d3b3..3d6e2daf4de05042c6e7e64535f5cfc0
 +	return 0;
 +}
 diff --git a/include/uapi/linux/virtio_video.h b/include/uapi/linux/virtio_video.h
-index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff25143974ee89 100644
+index 7898dd1a46feecae93407070a9315278ce70c9c7..9e9ec3e80f5e9f182a58315889c2eb608cc6426a 100644
 --- a/include/uapi/linux/virtio_video.h
 +++ b/include/uapi/linux/virtio_video.h
 @@ -66,7 +66,13 @@ enum {
@@ -3074,7 +3074,7 @@ index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff2514
  struct virtio_video_resource_queue_resp {
  	struct virtio_video_cmd_hdr hdr;
  	__le32 flags;
-@@ -524,6 +582,430 @@ struct virtio_video_set_control_resp {
+@@ -524,6 +582,434 @@ struct virtio_video_set_control_resp {
  	struct virtio_video_cmd_hdr hdr;
  };
  
@@ -3384,6 +3384,10 @@ index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff2514
 +   host application states). */
 +#define VIRTIO_VIDEO_CAMERA_CID_ROTATE_AND_CROP (VIRTIO_VIDEO_CAMERA_CID_BASE + 9)
 +#define VIRTIO_VIDEO_CAMERA_ROTATE_AUTOMATIC 4
++/* A read-only compound control (U8[328]) that the guest driver answers, not the
++   device: the struct virtio_video_camera_desc of the camera behind the node, as
++   VIRTIO_VIDEO_CMD_CAMERA_QUERY gave it. The device never lists it. */
++#define VIRTIO_VIDEO_CAMERA_CID_DESCRIPTION (VIRTIO_VIDEO_CAMERA_CID_BASE + 16)
 +
 +/* VIRTIO_VIDEO_CMD_CAMERA_QUERY_CONTROLS: the controls of one camera, in the
 +   answer of VIRTIO_VIDEO_CMD_QUERY_V4L2_CONTROLS. The values belong to the
@@ -3505,7 +3509,7 @@ index 7898dd1a46feecae93407070a9315278ce70c9c7..160284d1eadd142359f963e9f5ff2514
  /*
   * Events
   */
-@@ -534,6 +1016,12 @@ enum virtio_video_event_type {
+@@ -534,6 +1020,12 @@ enum virtio_video_event_type {
  
  	/* For decoder only */
  	VIRTIO_VIDEO_EVENT_DECODER_RESOLUTION_CHANGED = 0x0200,
