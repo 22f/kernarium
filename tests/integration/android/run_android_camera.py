@@ -663,9 +663,10 @@ def launcher_arguments(plan: Plan, auto: bool = False, calibration: pathlib.Path
     which the launcher forwards to the kernel as given, as the host's application states the layout it
     composed. With ``auto`` the launcher composes it from the cameras the source presents, through the
     function the iOS runtime uses, and the run checks that Android booted with the plan's."""
+    # A guest with no camera device has no profile to give, and the launcher refuses one.
     return [
         f"--camera={CAMERA_SOURCES[plan.mode]}",
-        f"--camera-profile={plan.profile}",
+        *([] if plan.mode == "none" else [f"--camera-profile={plan.profile}"]),
         "--camera-layout=auto" if auto else f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
         *([f"--camera-calibration-dir={calibration}"] if calibration else []),
     ]

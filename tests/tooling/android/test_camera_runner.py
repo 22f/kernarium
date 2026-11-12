@@ -249,6 +249,9 @@ class LauncherTests(unittest.TestCase):
                          "--camera=blocked")
         self.assertEqual(runner.launcher_arguments(runner.make_plan("none", "tablet", "none"))[0],
                          "--camera=none")
+        # The launcher refuses a camera profile without a camera.
+        self.assertNotIn("--camera-profile=tablet",
+                         runner.launcher_arguments(runner.make_plan("none", "tablet", "none")))
 
     def test_the_composed_layout_has_raw_only_once_a_still_taught_the_colour_data(self) -> None:
         self.assertEqual(runner.auto_layout("phone", taught=False), "bf-large-flash-manual-concurrent-front2160")
