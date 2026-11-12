@@ -51,23 +51,53 @@ private struct OnCardHalf: ViewModifier {
     func body(content: Content) -> some View {
         let fold = model?.fold
         let halves = fold.flatMap(FoldHalves.init)
-        // The view fills the space it is given, then keeps to the place of its
-        // screen: a card in a stack centres on its half and not on that space.
-        // With no fold band the frame proposes nothing and the padding is
-        // zero. Until the space is measured the window's safe area stands for
-        // it.
         let folds = halves != nil
-        content
-            .frame(maxWidth: folds ? .infinity : nil, maxHeight: folds ? .infinity : nil)
-            .padding(Self.padding(halves?.insets(for: screen, in: (measured ?? fold?.safeArea) ?? .zero)))
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
-                if folds, measured != frame { measured = frame }
-            }
+        // The reader takes the space it is given whatever its content does,
+        // so the space is measured on it: a view taller than its place
+        // overflows, and never grows the space it is measured in (which its
+        // own padding would otherwise keep changing). The view fills the space,
+        // then keeps to the place of its screen: a card in a stack centres on
+        // its place and not on that space. Until the space is measured the
+        // window's safe area stands for it.
+        GeometryReader { geo in
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(Self.padding(halves?.insets(for: screen, in: (measured ?? fold?.safeArea) ?? .zero)))
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+        }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            if folds, measured != frame { measured = frame }
+        }
     }
 
     private static func padding(_ insets: FoldInsets?) -> EdgeInsets {
         guard let insets else { return EdgeInsets() }
         return EdgeInsets(top: insets.top, leading: insets.leading, bottom: insets.bottom, trailing: insets.trailing)
+    }
+}
+
+extension View {
+    /// On a folding display, puts the view in a scroll view that scrolls only
+    /// when it is taller than the space it is given, which a half can be at an
+    /// accessibility size; the view keeps its place otherwise. A device without
+    /// a hinge keeps the view it had.
+    func scrollsWhenTall() -> some View { modifier(ScrollsWhenTall()) }
+}
+
+private struct ScrollsWhenTall: ViewModifier {
+    @Environment(AppModel.self) private var model: AppModel?
+
+    func body(content: Content) -> some View {
+        if model?.fold != nil {
+            GeometryReader { geo in
+                ScrollView {
+                    content.frame(maxWidth: .infinity, minHeight: geo.size.height)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+            }
+        } else {
+            content
+        }
     }
 }
 

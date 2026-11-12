@@ -447,22 +447,12 @@ struct WelcomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.fold != nil {
-            // On a folding display a half, or a stack that stands upright, can
-            // be shorter than the column at an accessibility size: it scrolls
-            // only then.
-            GeometryReader { geo in
-                ScrollView {
-                    column.frame(minHeight: geo.size.height)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-            }
+        // On a folding display a half can be shorter than the column at an
+        // accessibility size: it scrolls only then.
+        column
+            .scrollsWhenTall()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onCardHalf(.welcome)
-        } else {
-            column
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onCardHalf(.welcome)
-        }
     }
 
     private var column: some View {
