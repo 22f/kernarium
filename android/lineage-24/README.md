@@ -358,13 +358,13 @@ only, the open SSID `VirtWifi`, because the product declares
 `android.hardware.wifi` and not `android.hardware.ethernet`; turning Wi-Fi or
 airplane mode off takes apps offline while adb keeps working. The platform
 validates a Wi-Fi network before it checks it (route `p0029`): NetworkMonitor
-reports it validated once private DNS passes and then probes it; a failed check,
-including one that a sign-in or block page answers, shows a warning and changes
-nothing else, so a blocked validation server never leaves a no-internet state or
-a sign-in notification. The warning is Android's own Wi-Fi mark, the exclamation
-mark on the status bar's Wi-Fi icon and "Limited connection" in the Wi-Fi list
-(route `p0033`). A VPN, a test network, a network under CTS's test URLs, DNS and
-the private DNS settings keep the stock rules. The
+reports it validated once private DNS passes and then probes it, again after a
+back-off while the checks fail, and without evaluating private DNS again. A
+failed check, including one that a sign-in or block page answers, shows a warning
+in the status bar and the Wi-Fi list (route `p0033`) and changes nothing else:
+the network is never left unvalidated and no sign-in notification is posted. A
+VPN, a test network, a network under CTS's test URLs, a network the stock rules
+do not validate, DNS and the private DNS settings keep the stock rules. The
 product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
 disabled network again. Until the station has joined it once, a boot that finds

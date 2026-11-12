@@ -702,20 +702,23 @@ each, and the host closes no stream by a reset.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled, joined and validated while the internet checks fail, and
-only Android's Wi-Fi mark shows the failed check (Settings' "Limited connection"
-and the status bar's exclamation mark), also when a sign-in or block page that
-the runner's server gives the probes through `adb reverse` answers them; a
-passing check takes the mark away. The network joins again after a suspend and
-after a restart, and the boot script runs without SELinux denials; a joined
-network keeps its metered and Auto-connect settings, a forgotten one stays
-forgotten and Wi-Fi that is off stays off.
+only Android's Wi-Fi mark shows the failed check in Settings and in the status
+bar, also when a sign-in or block page that the runner's server gives the probes
+answers them. On one network that is never replaced or validated again, the
+warning shows with no other action, follows the server from a failing check to
+a passing one and back, and returns when a forced re-evaluation checks the
+network; a strict private DNS name is not probed again for each failed check.
+The network joins again after a suspend and after a restart, and the boot script
+runs without SELinux denials; a joined network keeps its metered and
+Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off
+stays off.
 `UML_ANDROID_WIFI_NETWORK_PREVIOUS_RELEASE` (a `;`-separated list) adds the
 upgrade sections: a data disk on which a release left the network disabled is
 repaired once by the first boot of the release under test and the next boot
 leaves it alone, a disk of a release that never disables the network is left
 alone, and a failed check shows only the warning on both.
 `android17-wifi-network-runner` (tooling) runs its parsers, the host's server
-and the sections' checks against scripted answers, without a guest.
+and the sections' checks against scripted and simulated answers, without a guest.
 `android-thermal` (integration) registers when `UML_ANDROID_THERMAL_RELEASE`
 names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
