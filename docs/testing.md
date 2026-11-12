@@ -329,11 +329,14 @@ record's stall and network slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against; and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
-`andarium-motion-protocol`, `andarium-haptics-protocol`,
-`andarium-haptics-player`, `andarium-thermal-protocol`,
-`andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image`,
-`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format, the vibrator
+`andarium-motion-protocol`, `andarium-device-orientation`,
+`andarium-haptics-protocol`, `andarium-haptics-player`,
+`andarium-thermal-protocol`, `andarium-thermal-levels` and
+`andarium-gamepad-protocol` (unit), `andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the
+motion wire format (its device-orientation records and control frames against
+the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
+too) and what the orientation sensor reports and when, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
@@ -381,6 +384,13 @@ The script and the guest end of the wire are the package's
 and `AndariumTests` link, and the test bundle carries in its own Frameworks
 folder, so a device can load it; the application never does (the App Store
 bundle check refuses a build that does).
+`DeviceOrientationTests` checks UIKit's orientation numbers against the
+application's readings, the mapping to Android's rotation, the observer's begin
+and end of the device's notifications, and the path from a turn to the record a
+fake guest reads with the Gyroscope switch off. The Simulator cannot turn an
+iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
+interface only), so the device is injected there; the real turns are checked on
+an iPhone.
 
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
@@ -705,6 +715,31 @@ names the release: the runner plays the host application over a vsock forward
 and checks the thermal manager, the display manager's vote, SurfaceFlinger's
 render rate and the frame rates at each severity, on a fresh data disk or, with
 `--instance`, over an older release's.
+`android-orientation` (integration) registers when
+`UML_ANDROID_ORIENTATION_RELEASE` names the release: the runner plays the host
+application over a vsock forward to the motion port with the
+`androidboot.kernarium.orientation=1` argument and checks that the sensor is
+listed and used by the window manager, that Android's rotation follows each
+value with auto-rotate on, stays and offers the rotation suggestion with it off,
+follows or keeps to what an application that asks for an orientation allows,
+that the setup wizard turns to a value sent before the sensor was registered
+(the first frame says the sensor is not yet in use), that the lock screen stays
+upright and the newest value turns the display at unlock, that a value said
+again changes nothing, that a turn made with a finger down waits for the finger,
+that a value sent while the screen is off turns the display once it is on (the
+sensor idle while off and in use again), and how a host that connects late or
+reconnects is served. Restarting the framework or the sensors HAL needs root,
+which a user build does not give, so the runner does not.
+`--launch-only` stops after the launch's state (the property, the sensors the
+service lists and their flags, the judge the window manager picked and what it
+holds, no SELinux denial about the property), which is what to run first on a
+new image. `--expect none` boots a release that does not list the sensor (or
+this release without the argument) and checks that nothing changed: `ANC1`
+frames, the accelerometer judging, and the display turning with accelerometer
+postures. The runner needs a JDK, which builds and signs the probe
+application.
+`android17-orientation-runner` (tooling) runs its wire, parsers, rotation rules,
+host and probe manifest without a guest.
 `android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
 names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
 [`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the

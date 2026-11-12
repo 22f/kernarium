@@ -86,7 +86,8 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
 @MainActor
 final class MotionSensors {
     private let device = CoreMotionDevice()
-    private lazy var session = MotionSession(opener: MotionConnector(), device: device) { [weak self] problem in
+    private let opener: any GuestStreamOpener
+    private lazy var session = MotionSession(opener: opener, device: device) { [weak self] problem in
         let text: String? = switch problem {
         case nil: nil
         case .guestUnavailable?:
@@ -99,18 +100,31 @@ final class MotionSensors {
     var problem: ((String?) -> Void)?
     private var axes = MotionSample.Axes.portrait
 
+    /// The guest's motion service is reached over the runtime's vsock; a test gives another.
+    init(opener: any GuestStreamOpener = MotionConnector()) {
+        self.opener = opener
+    }
+
     var available: Bool { device.hasAccelerometer || device.hasGyroscope }
 
-    /// What is wanted now: the person's switch, the guest being in front, and
-    /// the axes the sensors are mounted to.
-    func update(enabled: Bool, foreground: Bool, axes: MotionSample.Axes) {
+    /// What is wanted now: the person's switch, the guest being in front, the
+    /// axes the sensors are mounted to, and whether the guest follows the
+    /// device's orientation (which holds the connection with the switch off).
+    func update(enabled: Bool, foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false) {
         self.axes = axes
-        session.update(enabled: enabled, foreground: foreground, axes: axes)
+        session.update(enabled: enabled, foreground: foreground, axes: axes, followsOrientation: followsOrientation)
     }
+
+    /// The device's orientation, or nil once it is not being observed. The
+    /// guest is given it if it takes orientations.
+    func setOrientation(_ orientation: GuestOrientation?) { session.setOrientation(orientation) }
 
     /// The period the readings belong to is over (the mount or the rotation
     /// policy changed); the next update begins a new run.
     func restart() { session.restart() }
 
-    func stop() { session.update(enabled: false, foreground: false, axes: axes) }
+    func stop() {
+        session.update(enabled: false, foreground: false, axes: axes)
+        session.setOrientation(nil)
+    }
 }

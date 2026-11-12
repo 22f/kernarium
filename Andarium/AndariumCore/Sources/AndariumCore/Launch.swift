@@ -28,6 +28,10 @@ public struct LaunchOverrides: Equatable, Sendable {
         case stats
         /// A separate guest for a harness run, leaving the ordinary guest alone.
         case instance
+        /// "1" runs the guest as an iPhone's, whose orientation it follows
+        /// (the host's device is not an iPhone, as in a Mac test); "0" as an
+        /// iPad's.
+        case followsOrientation
     }
 
     public var vCPUCount: Int?
@@ -44,6 +48,9 @@ public struct LaunchOverrides: Equatable, Sendable {
     /// them off. Where the launch states neither, `StatsPreference` decides.
     public var statistics: Bool?
     public var instance: String?
+    /// Whether the guest follows the device's orientation, where the launch
+    /// states it instead of the device's idiom deciding.
+    public var followsDeviceOrientation: Bool?
 
     public init() {}
 
@@ -77,6 +84,7 @@ public struct LaunchOverrides: Equatable, Sendable {
         }
         erase = value(.erase) == "1"
         statistics = flag(.stats)
+        followsDeviceOrientation = flag(.followsOrientation)
         if let name = value(.instance), (1...64).contains(name.utf8.count),
            name.utf8.allSatisfy({
                (65...90).contains($0) || (97...122).contains($0) ||

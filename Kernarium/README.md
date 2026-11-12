@@ -189,9 +189,11 @@ no `KERNARIUM_HOST_FORWARD` has adbd listen on vsock alone. The request also
 states what the host has that the guest is to find (`android_host_features`,
 API 31): the runtime turns each bit it knows into one kernel argument, from the
 table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
-`haptics`, which declares the guest's vibrator), and ignores the others;
-Kernarium sends none. The runtime validates the values
-(`KernariumAdbChannel.hpp`, `KernariumGuestTimeZone.hpp`).
+`haptics`, which declares the guest's vibrator; the orientation bit, API 37,
+becomes `androidboot.kernarium.orientation=1`, which lists the guest's
+device-orientation sensor), and ignores the others; Kernarium sends none. The
+runtime validates the values (`KernariumAdbChannel.hpp`,
+`KernariumGuestTimeZone.hpp`).
 
 ## Devices and display
 
