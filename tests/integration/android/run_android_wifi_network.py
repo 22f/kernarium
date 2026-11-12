@@ -40,9 +40,11 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   join, and no check follows a passing one until an evaluation is forced; across all
   of it NetworkStack, SystemUI and Settings (each by the exact name it runs
   under) neither crash nor stop answering and nothing hits an illegal
-  instruction, which every section of a guest of the release under test reads
-  from the marker it wrote at its start (a section whose marker the log has
-  dropped fails); with the
+  instruction, which one continuous log stream of each boot of a guest of the
+  release under test carries (the main, system and crash buffers from their
+  start, kept in a host file), each finding belonging to the section whose time
+  window holds it or to none, and either fails the run; a stream that ends while
+  its guest is up fails the section in progress; with the
   probes at a black hole and a strict private DNS name that does not resolve,
   and VirtWifi forgotten and saved again, the network stays enabled and joined for
   a minute and a half, and is joined again after a guest suspend and wake (the
@@ -762,7 +764,7 @@ class Console:
 
 
 class Guest:
-    crash_log: "CrashLog | None" = None
+    capture: "LogCapture | None" = None
 
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
                  console: Console, private: pathlib.Path) -> None:
@@ -775,8 +777,9 @@ class Guest:
         # The boot script's denials found by every read of the log so far.
         self.denials: list[str] = []
         self.denial_reads = 0
-        # Set for a guest of the release under test: its sections read their crash evidence.
-        self.crash_log: CrashLog | None = None
+        # Set for a guest of the release under test: one log stream for each boot, read for crash evidence.
+        self.capture: LogCapture | None = None
+        self.stream_id = uuid.uuid4().hex[:8]
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -794,6 +797,11 @@ class Guest:
         if self.process.poll() is not None:
             raise Failure(f"the guest exited with status {self.process.returncode}:\n"
                           + self.log.read_text(errors="replace")[-3000:])
+        if self.capture is not None:
+            self.capture.check_stream()
+
+    def open_log_stream(self, boot: int, segment: int) -> LogStream:
+        return LogStream(self.adb, self.serial, self.private / f"logcat-{self.stream_id}-{boot}-{segment}.txt")
 
     # What the guest says about the network.
     def status(self) -> str:
@@ -933,7 +941,21 @@ class Guest:
         wait_for(what, seconds, lambda: None if self.joined() else "the station has not joined", self)
 
     def suspend_and_wake(self) -> None:
-        """The route the host's quiesce takes."""
+        """The route the host's quiesce takes. The log stream may end with the connection: that is expected
+        until the guest answers again, and a stream that ended starts another segment."""
+        capture = self.capture
+        if capture is not None:
+            capture.going_down()
+        try:
+            self.suspend_and_wake_guest()
+            if capture is not None:
+                capture.resumed(self)
+        except BaseException:
+            if capture is not None:
+                capture.expect_end = False
+            raise
+
+    def suspend_and_wake_guest(self) -> None:
         # A suspend can be refused while the guest is busy (EBUSY); it is asked for again.
         answer = ""
         for attempt in range(SUSPEND_ATTEMPTS):
@@ -967,30 +989,34 @@ class Guest:
         """A guest restart, shown by the uptime going back, then boot_completed again.
 
         The Wi-Fi service writes a change to its configuration store a little later, and a restart
-        that follows at once loses it (a forgotten network comes back), so the restart waits. A restart
-        clears the log, so the crash evidence of the section is read before it and a new marker follows it."""
+        that follows at once loses it (a forgotten network comes back), so the restart waits. The log
+        stream of the old boot ends with it and is read to its end; the new boot's stream starts as soon
+        as adb answers on it, and reads the new buffers from their start."""
         time.sleep(STORE_SECONDS)
-        watch = self.crash_log
-        watching = watch is not None and watch.active
-        if watching:
-            watch.collect(self)
+        capture = self.capture
         before = self.uptime()
+        if capture is not None:
+            capture.going_down()
         self.adb_run("reboot", timeout=60)
+        started = False
 
         def rebooted() -> str | None:
+            nonlocal started
             if self.adb_answers() is not None:
                 return "adb is down"
             try:
-                if self.uptime() >= before or self.shell("getprop sys.boot_completed").strip() != "1":
-                    return "the guest has not restarted and booted"
+                if self.uptime() >= before:
+                    return "the guest has not restarted"
+                if capture is not None and not started:
+                    capture.new_boot(self)
+                    started = True
+                if self.shell("getprop sys.boot_completed").strip() != "1":
+                    return "the guest has not booted"
             except (Failure, subprocess.TimeoutExpired, ValueError, IndexError):
                 return "the guest does not answer"
             return None
 
         wait_for("the guest restarts", BOOT_SECONDS, rebooted, self, interval=3.0)
-        # The restart cleared the log: the rest of the section is read from a new marker.
-        if watching:
-            watch.mark(self)
 
 
 # ---- Starting and stopping a guest.
@@ -1024,10 +1050,12 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, re
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
     guest = Guest(adb, serial, process, log, Console(private / f"uml-kern{process.pid}", private), private)
-    if watched:
-        guest.crash_log = CrashLog()
     try:
         boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
+        # As soon as adb answers, the boot's log is streamed, from the start of the buffers.
+        if watched:
+            guest.capture = LogCapture()
+            guest.capture.start_boot(guest)
         if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
             raise Failure("Android did not reach sys.boot_completed")
     except BaseException:
@@ -1041,6 +1069,8 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, re
 
 
 def stop(guest: Guest) -> None:
+    if guest.capture is not None:
+        guest.capture.stop()
     boot_android.disconnect_adb(guest.adb, guest.serial)
     boot_android.stop_guest(guest.process)
 
@@ -1052,20 +1082,20 @@ class Report:
         self.failures: list[str] = []
 
     def section(self, name: str, guest: Guest | None, body: Callable[[], str | None]) -> None:
-        """Runs one section. On a guest of the release under test the section's crash evidence is read at its
-        end (also when it failed, for a crash may be why) and a crash, an ANR or a lost marker fails it."""
-        watch = guest.crash_log if guest is not None else None
+        """Runs one section. On a guest of the release under test the log is read when the section ends (also
+        when it failed, for a crash may be why): a crash or an ANR in its window, or a stream that ended, fails it."""
+        capture = guest.capture if guest is not None else None
         problem: Exception | None = None
         note = None
         try:
-            if watch is not None:
-                watch.begin(guest, name)
+            if capture is not None:
+                capture.begin(guest, name)
             note = body()
         except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as failed:
             problem = failed
-        if watch is not None:
+        if capture is not None:
             try:
-                crashed = watch.end(guest)
+                crashed = capture.end(guest)
             except (Failure, subprocess.TimeoutExpired, OSError) as unread:
                 crashed = [f"the crash evidence could not be read: {unread}"]
             if crashed:
@@ -1249,7 +1279,11 @@ ANR_LINE = re.compile(r"ANR in (\S+)(?: \(\S*\))?")
 NATIVE_PROCESS_LINE = re.compile(r"pid: \d+, (?:ppid: \d+, )?tid: \d+, name: .*  >>> (\S+) <<<")
 NATIVE_SIGNAL_LINE = re.compile(r"signal (\d+) \((\S+)\)")
 SIGILL_LINE = re.compile(r"signal 4 \(SIGILL\)")
-SECTION_MARKER_TAG = "wifi-runner"
+# The line the runner has the guest log to know that the stream carries everything logged before it.
+SYNC_TAG = "wifi-runner"
+# How long the stream may take to carry a line the guest logged, and to end after its guest went away.
+SYNC_SECONDS = 60
+DRAIN_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -1265,6 +1299,13 @@ class LogLine:
     def stream(self) -> tuple[int, int, str]:
         """What binds the lines of one record: the process and thread that logged them, under one tag."""
         return self.pid, self.tid, self.tag
+
+
+@dataclass(frozen=True)
+class Finding:
+    """A crash, an ANR or an illegal instruction in a log: the time stamp of its record, and what it says."""
+    when: str
+    problem: str
 
 
 def log_lines(log: str) -> list[LogLine]:
@@ -1287,100 +1328,244 @@ def next_of_record(lines: list[LogLine], index: int, same_time: bool) -> LogLine
     return None
 
 
-def crash_problems(log: str) -> list[str]:
+def tombstone_process(lines: list[LogLine], index: int) -> str | None:
+    """The process a tombstone's signal line belongs to: the name on the header line of the same record (the same
+    logging process and thread), or None when the log holds no header for it."""
+    stream = lines[index].stream
+    for earlier in reversed(lines[:index]):
+        if earlier.stream != stream:
+            continue
+        message = earlier.message.strip()
+        header = NATIVE_PROCESS_LINE.fullmatch(message)
+        if header:
+            return header[1]
+        if NATIVE_SIGNAL_LINE.match(message) or message.startswith("*** ***"):
+            return None
+    return None
+
+
+def crash_findings(log: str) -> list[Finding]:
     """What the log says of the processes of the warning crashing or not answering, and of any illegal
     instruction (an instruction the guest's CPU lacks is a defect of the host, in whatever process). A Java
     crash, a native crash (any fatal signal) and an ANR are each read as the one process they name, by its
-    exact name; a crash that names no process is a problem too, since it may be any of them."""
+    exact name; a Java or native crash that names no process is a finding too, since it may be any of them."""
     lines = log_lines(log)
-    problems = []
+    found = []
     for index, line in enumerate(lines):
+        message = line.message.strip()
         if SIGILL_LINE.search(line.message):
-            problems.append(f"an illegal instruction: {line.text[:160]}")
+            found.append(Finding(line.when, f"an illegal instruction: {line.text[:160]}"))
         if line.message.startswith(("FATAL EXCEPTION", "*** FATAL EXCEPTION")):
             follow = next_of_record(lines, index, same_time=True)
             named = JAVA_PROCESS_LINE.fullmatch(follow.message.strip()) if follow else None
             if named is None:
-                problems.append(f"a process crashed without naming itself: {line.text[:160]}")
+                found.append(Finding(line.when, f"a process crashed without naming itself: {line.text[:160]}"))
             elif named[1] in WARNING_PROCESSES:
-                problems.append(f"{named[1]} crashed: {line.text[:160]}")
-        anr = ANR_LINE.fullmatch(line.message.strip())
+                found.append(Finding(line.when, f"{named[1]} crashed: {line.text[:160]}"))
+        anr = ANR_LINE.fullmatch(message)
         if anr and anr[1] in WARNING_PROCESSES:
-            problems.append(f"{anr[1]} did not respond: {line.text[:160]}")
-        named = NATIVE_PROCESS_LINE.fullmatch(line.message.strip())
-        if named and named[1] in WARNING_PROCESSES:
-            for after in lines[index + 1:]:
-                if after.stream != line.stream:
-                    continue
-                signal = NATIVE_SIGNAL_LINE.match(after.message.strip())
-                if signal:
-                    # Signal 4 is reported above in any process.
-                    if signal[1] != "4":
-                        problems.append(f"{named[1]} died of signal {signal[1]} ({signal[2]}): {line.text[:160]}")
-                    break
-                if NATIVE_PROCESS_LINE.fullmatch(after.message.strip()):
-                    break
-    return problems
+            found.append(Finding(line.when, f"{anr[1]} did not respond: {line.text[:160]}"))
+        signal = NATIVE_SIGNAL_LINE.match(message)
+        if signal and line.tag == "DEBUG" and signal[1] != "4":
+            # Signal 4 is reported above in any process.
+            process = tombstone_process(lines, index)
+            if process is None:
+                found.append(Finding(line.when, f"a native crash that names no process: {line.text[:160]}"))
+            elif process in WARNING_PROCESSES:
+                found.append(Finding(line.when, f"{process} died of signal {signal[1]} ({signal[2]}): "
+                                                f"{line.text[:160]}"))
+    return found
 
 
-class CrashLog:
-    """The crash and ANR evidence of one guest, read at the end of every section from a marker that the section
-    wrote at its start: the log is small and rotates, so one read at the end of a run cannot rule out what
-    the log has dropped. A section whose marker is gone fails, for the evidence it would show is gone. A guest
-    restart clears the log, so it reads what the section has logged so far first and writes a new marker."""
+def crash_problems(log: str) -> list[str]:
+    return [finding.problem for finding in crash_findings(log)]
+
+
+class LogStream:
+    """One segment of a boot's log: `adb logcat` of the main, system and crash buffers in threadtime format, which
+    reads the buffers from their start and then follows them, written to a host file for as long as it runs."""
+
+    def __init__(self, adb: str, serial: str, path: pathlib.Path) -> None:
+        self.adb, self.serial, self.path = adb, serial, path
+        self.process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        arguments = [self.adb, "-s", self.serial, "logcat", "-v", "threadtime"]
+        for buffer in ("main", "system", "crash"):
+            arguments += ["-b", buffer]
+        with self.path.open("wb") as output:
+            self.process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=output,
+                                            stderr=subprocess.STDOUT, start_new_session=True)
+
+    def text(self) -> str:
+        return self.path.read_text(errors="replace")
+
+    def ended(self) -> bool:
+        return self.process is None or self.process.poll() is not None
+
+    def drain(self, seconds: float) -> None:
+        """Waits for the stream to end of itself (its guest went away); one that does not is stopped, and the
+        file holds what it carried."""
+        if self.process is None:
+            return
+        try:
+            self.process.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            self.stop()
+
+    def stop(self) -> None:
+        """Stops the logcat this object started, by its own process."""
+        if self.process is None or self.process.poll() is not None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=10)
+
+
+class LogCapture:
+    """The crash and ANR evidence of one guest: the guest's log as one continuous stream for each boot, written
+    to host files from the start of the boot's buffers, so that nothing between two reads, two sections or a
+    restart is lost and every record is complete in the file. The scanner reads all of it each time and reports
+    a record once, as a finding of the section whose time window holds it (the window is the time stamps of two
+    lines that the guest logged at the section's start and end, in the log's own clock) or of no section.
+    A restart reads the old boot's stream to its end before the new boot's starts; a stream that ends while its
+    guest should be up fails the section in progress."""
 
     def __init__(self) -> None:
-        self.token: str | None = None
-        self.name = ""
-        # What every section found, kept for the summary at the end; and what this section has found.
+        # Each boot's segments: a suspend that drops the connection starts another segment, which reads the
+        # buffers again from their start, so a record may be in two segments of one boot.
+        self.boots: list[list[LogStream]] = []
+        self.expect_end = False
+        self.seen: set[tuple[int, str, str]] = set()
+        # Every finding, with the section it belongs to; and the findings of the section in progress.
         self.problems: list[str] = []
         self.section_problems: list[str] = []
-        self.sections = 0
+        self.name = ""
+        self.begin_at: tuple[int, str] | None = None
+        self.reads = 0
 
-    def begin(self, guest: "Guest", name: str) -> None:
-        self.name = name
-        self.section_problems = []
-        self.mark(guest)
+    # The streams.
+    def start_boot(self, guest: "Guest") -> None:
+        self.boots.append([])
+        self.start_segment(guest)
 
-    def mark(self, guest: "Guest") -> None:
-        token = uuid.uuid4().hex
-        guest.shell(f"log -t {SECTION_MARKER_TAG} section-start-{token}")
-        self.token = token
-
-    def collect(self, guest: "Guest") -> None:
-        """Reads the log from the marker on: what it holds of the section so far."""
-        if self.token is None:
-            return
-        token, self.token = self.token, None
-        lines = guest.shell("logcat -d -b all -v threadtime", timeout=180).splitlines()
-        start = next((index for index, line in enumerate(lines) if token in line), None)
-        if start is None:
-            found = ["the log no longer holds the start of the section (it rotated): a crash or an ANR in it "
-                     "cannot be ruled out"]
-        else:
-            found = crash_problems("\n".join(lines[start + 1:]))
-        self.sections += 1
-        self.section_problems += found
-        self.problems += [f"{self.name}: {problem}" for problem in found]
-
-    def end(self, guest: "Guest") -> list[str]:
-        self.collect(guest)
-        return self.section_problems
+    def start_segment(self, guest: "Guest") -> None:
+        stream = guest.open_log_stream(len(self.boots) - 1, len(self.boots[-1]))
+        stream.start()
+        self.boots[-1].append(stream)
+        self.expect_end = False
 
     @property
-    def active(self) -> bool:
-        return self.token is not None
+    def current(self) -> LogStream:
+        return self.boots[-1][-1]
+
+    def going_down(self) -> None:
+        """The guest is about to restart or suspend: its stream is expected to end."""
+        self.expect_end = True
+
+    def new_boot(self, guest: "Guest") -> None:
+        """The guest has restarted and adb answers: the old boot's stream is read to its end, then the new
+        boot's starts."""
+        for stream in self.boots[-1]:
+            stream.drain(DRAIN_SECONDS)
+        self.start_boot(guest)
+
+    def resumed(self, guest: "Guest") -> None:
+        """The guest woke from a suspend. A stream that ended with the connection is read to its end, and a
+        further segment of the same boot starts."""
+        if self.current.ended():
+            self.current.drain(DRAIN_SECONDS)
+            self.start_segment(guest)
+        self.expect_end = False
+
+    def check_stream(self) -> None:
+        if not self.expect_end and self.boots and self.current.ended():
+            raise Failure("the log stream of this boot ended while the guest is up: crashes and ANRs after "
+                          "this point cannot be seen")
+
+    def stop(self) -> None:
+        for segments in self.boots:
+            for stream in segments:
+                stream.stop()
+
+    # The reading.
+    def sync(self, guest: "Guest") -> tuple[tuple[int, str], str]:
+        """Has the guest log a line and waits for the stream to carry it: everything the guest logged before it
+        is in the file. Returns the line's position (the boot and its time stamp in the log's clock) and the
+        stream's text up to it, which is complete by construction."""
+        token = f"sync-{uuid.uuid4().hex}"
+        guest.shell(f"log -t {SYNC_TAG} {token}")
+        deadline = time.monotonic() + SYNC_SECONDS
+        while True:
+            text = self.current.text()
+            at = text.find(token)
+            if at >= 0:
+                line_end = text.find("\n", at)
+                line_start = text.rfind("\n", 0, at) + 1
+                parsed = log_lines(text[line_start:line_end if line_end >= 0 else len(text)])
+                if parsed:
+                    return (len(self.boots) - 1, parsed[0].when), text[:line_end if line_end >= 0 else len(text)]
+            if self.current.ended():
+                raise Failure("the log stream ended before it carried a line the guest logged")
+            if time.monotonic() >= deadline:
+                raise Failure(f"the log stream did not carry a line the guest logged in {SYNC_SECONDS} s")
+            time.sleep(0.5)
+
+    def scan(self, snapshot: str) -> list[tuple[tuple[int, str], str]]:
+        """Every finding of the guest's log not reported before, with its position: every earlier segment whole
+        (its stream has ended) and the current one up to the snapshot."""
+        found = []
+        for boot, segments in enumerate(self.boots):
+            for index, stream in enumerate(segments):
+                is_current = boot == len(self.boots) - 1 and index == len(segments) - 1
+                for finding in crash_findings(snapshot if is_current else stream.text()):
+                    key = (boot, finding.when, finding.problem)
+                    if key not in self.seen:
+                        self.seen.add(key)
+                        found.append(((boot, finding.when), finding.problem))
+        return found
+
+    def begin(self, guest: "Guest", name: str) -> None:
+        self.check_stream()
+        self.name = name
+        self.section_problems = []
+        self.begin_at = None
+        self.begin_at, _ = self.sync(guest)
+
+    def end(self, guest: "Guest") -> list[str]:
+        """Reads the log up to now. A finding whose position is in this section's window belongs to the section;
+        any other (found only now: between two sections, or before the first) belongs to none, and still counts
+        in the summary."""
+        if self.begin_at is None:
+            return []
+        begin, self.begin_at = self.begin_at, None
+        end, snapshot = self.sync(guest)
+        self.reads += 1
+        for position, problem in self.scan(snapshot):
+            if begin <= position <= end:
+                self.section_problems.append(problem)
+                self.problems.append(f"{self.name}: {problem}")
+            else:
+                self.problems.append(f"outside a section: {problem}")
+        return self.section_problems
 
 
 def check_no_crashes(guest: Guest) -> str | None:
-    """Across the sections of this guest, NetworkStack, SystemUI and Settings neither crashed nor stopped
-    answering, and nothing hit an illegal instruction: what every section read of the log from its own marker."""
-    watch = guest.crash_log
-    if watch is None or watch.sections == 0:
-        raise Failure("no section of this guest read its crash evidence")
-    if watch.problems:
-        raise Failure("; ".join(watch.problems[:5]))
-    return f"{watch.sections} reads of the log from a section's own marker, no crash, ANR or illegal instruction"
+    """Across the guest's boots, NetworkStack, SystemUI and Settings neither crashed nor stopped answering, and
+    nothing hit an illegal instruction: the whole log read once more, and every finding listed, those of the
+    sections and those that fall in none."""
+    capture = guest.capture
+    if capture is None or capture.reads == 0:
+        raise Failure("no section of this guest read its log")
+    _, snapshot = capture.sync(guest)
+    for _, problem in capture.scan(snapshot):
+        capture.problems.append(f"outside a section: {problem}")
+    if capture.problems:
+        raise Failure("; ".join(capture.problems[:20]))
+    return f"{capture.reads} sections read from the log of {len(capture.boots)} boot(s): no crash, ANR or illegal instruction"
 
 
 @dataclass

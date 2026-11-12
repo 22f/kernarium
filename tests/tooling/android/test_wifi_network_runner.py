@@ -946,16 +946,16 @@ def java_crash(process: str, pid: int = 1234, tid: int = 1234, when: str = "03:1
         "\tat com.example.Foo.bar(Foo.java:12)"))
 
 
-def anr(process: str, component: str | None = None) -> str:
+def anr(process: str, component: str | None = None, when: str = "03:10:01.000") -> str:
     component = component or f"{process}/.Main"
-    return "".join(log_line(500, 520, "E", "ActivityManager", message) for message in (
+    return "".join(log_line(500, 520, "E", "ActivityManager", message, when) for message in (
         f"ANR in {process} ({component})", "PID: 1234", "Reason: Input dispatching timed out"))
 
 
 def native_crash(process: str, signal: str = "signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0",
-                 dump_pid: int = 900) -> str:
+                 dump_pid: int = 900, when: str = "03:10:01.000") -> str:
     """The tombstone that crash_dump logs under the tag DEBUG, from its own process and thread."""
-    return "".join(log_line(dump_pid, dump_pid, "F", "DEBUG", message) for message in (
+    return "".join(log_line(dump_pid, dump_pid, "F", "DEBUG", message, when) for message in (
         "*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***",
         f"Cmdline: {process}",
         f"pid: 1234, tid: 1250, name: RenderThread  >>> {process} <<<",
@@ -1009,6 +1009,25 @@ class CrashReadingTests(unittest.TestCase):
     def test_a_tombstone_header_without_a_signal_is_not_a_crash(self) -> None:
         self.assertEqual(runner.crash_problems(native_crash("com.android.settings", "uid: 10001")), [])
 
+    def test_a_native_fatal_signal_that_names_no_process_is_a_problem(self) -> None:
+        for signal in ("signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0", "signal 6 (SIGABRT), code -1"):
+            with self.subTest(signal=signal):
+                problems = runner.crash_problems(log_line(900, 900, "F", "DEBUG", signal))
+                self.assertEqual(len(problems), 1)
+                self.assertIn("a native crash that names no process", problems[0])
+
+    def test_a_signal_line_whose_header_belongs_to_another_record_names_no_process(self) -> None:
+        first = native_crash("com.example.game", "signal 11 (SIGSEGV), code 1 (X), fault addr 0x0")
+        orphan = log_line(900, 900, "F", "DEBUG", "signal 6 (SIGABRT), code -1")
+        self.assertIn("names no process", runner.crash_problems(first + orphan)[0])
+
+    def test_a_line_that_only_looks_like_a_signal_line_is_not_a_native_crash(self) -> None:
+        self.assertEqual(runner.crash_problems(log_line(7, 7, "I", "other", "signal 9 (SIGKILL) sent")), [])
+
+    def test_a_finding_carries_the_time_stamp_of_its_record(self) -> None:
+        found = runner.crash_findings(java_crash("com.android.settings", when="03:11:12.345"))
+        self.assertEqual([finding.when for finding in found], ["11-13 03:11:12.345"])
+
     def test_the_signal_of_another_crash_does_not_belong_to_the_header(self) -> None:
         log = (native_crash("com.android.settings", "uid: 10001", dump_pid=900)
                + native_crash("com.example.game", dump_pid=901))
@@ -1060,41 +1079,90 @@ class CrashReadingTests(unittest.TestCase):
         self.assertEqual(runner.crash_problems(log_line(500, 500, "I", "ActivityManager", line)), [])
 
 
-class LoggingGuest(ScriptedGuest):
-    """A guest whose log is a list of lines: the marker a section writes joins it, and a fault of the guest
-    (a crash, a rotation) is made by the section's own body."""
+class MemoryStream:
+    """The log stream of one boot (or one segment of it) of a LoggingGuest: the lines of the buffers from their
+    start, then each line the guest logs, until the stream is cut. With `lag` it carries one more line of what
+    the guest has logged each time it is read."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, guest: "LoggingGuest", lag: bool) -> None:
+        self.guest, self.lag = guest, lag
         self.lines: list[str] = []
-        self.crash_log = runner.CrashLog()
+        self.pending: list[str] = []
+        self.cut = False
+
+    def start(self) -> None:
+        self.pending = list(self.guest.buffer)
+
+    def text(self) -> str:
+        # What the host has not read when the connection is cut is read only by a drain.
+        take = 0 if self.cut else 1 if self.lag else len(self.pending)
+        self.lines += self.pending[:take]
+        del self.pending[:take]
+        return "".join(self.lines)
+
+    def ended(self) -> bool:
+        return self.cut
+
+    def drain(self, seconds: float) -> None:
+        self.cut = True
+        self.lines += self.pending
+        self.pending = []
+
+    def stop(self) -> None:
+        self.cut = True
+
+
+class LoggingGuest(ScriptedGuest):
+    """A guest whose log is a list of lines that its streams carry: a line logged for the runner (its sync line)
+    joins it, and a fault of the guest (a crash, a rotation, a stream that dies) is made by a section's body."""
+
+    def __init__(self, lag: bool = False) -> None:
+        super().__init__()
+        self.buffer: list[str] = []
+        self.streams: list[MemoryStream] = []
+        self.lag = lag
         self.tick = 0
+        self.capture = runner.LogCapture()
+        self.capture.start_boot(self)
+
+    def open_log_stream(self, boot: int, segment: int) -> MemoryStream:
+        stream = MemoryStream(self, self.lag)
+        self.streams.append(stream)
+        return stream
 
     def stamp(self) -> str:
         self.tick += 1
         return f"03:{self.tick // 60:02d}:{self.tick % 60:02d}.000"
 
+    def emit(self, text: str) -> None:
+        self.buffer.append(text)
+        for stream in self.streams:
+            if not stream.cut:
+                stream.pending.append(text)
+
     def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
         if command.startswith("log -t "):
             tag, message = command[len("log -t "):].split(" ", 1)
-            self.lines.append(log_line(4000, 4000, "I", tag, message, self.stamp()))
+            self.emit(log_line(4000, 4000, "I", tag, message, self.stamp()))
             return ""
-        if command == "logcat -d -b all -v threadtime":
-            return "".join(self.lines)
         raise AssertionError(command)
+
+    def alive(self) -> None:
+        self.capture.check_stream()
 
     def diagnose(self) -> str:
         return ""
 
     def crash(self, process: str, form: str = "a Java crash") -> None:
-        self.lines.append(FORMS[form](process))
+        self.emit(FORMS[form](process, when=self.stamp()))
 
     def rotate(self) -> None:
-        del self.lines[:]
+        """The buffers wrap: what a stream has carried is in its file, what it has not yet is gone."""
+        self.buffer = []
 
 
 class CrashEvidenceTests(unittest.TestCase):
-    """What every section reads of the log, from the marker it wrote at its start."""
+    """What the log stream of a guest says, read when each section ends and once more at the end."""
 
     def setUp(self) -> None:
         output = contextlib.redirect_stdout(io.StringIO())
@@ -1103,11 +1171,17 @@ class CrashEvidenceTests(unittest.TestCase):
         errors.__enter__()
         self.addCleanup(output.__exit__, None, None, None)
         self.addCleanup(errors.__exit__, None, None, None)
+        patch = mock.patch.object(runner, "time", FakeClock())
+        patch.start()
+        self.addCleanup(patch.stop)
         self.report = runner.Report()
         self.guest = LoggingGuest()
 
     def run_section(self, name: str, body) -> None:
         self.report.section(name, self.guest, body)
+
+    def summary(self) -> None:
+        self.run_section(runner.CRASH_SECTION, lambda: runner.check_no_crashes(self.guest))
 
     def test_a_crash_during_a_section_fails_that_section_alone(self) -> None:
         for process in runner.WARNING_PROCESSES:
@@ -1116,9 +1190,11 @@ class CrashEvidenceTests(unittest.TestCase):
                     report, guest = runner.Report(), LoggingGuest()
                     report.section("first", guest, lambda: guest.crash(process, form))
                     report.section("second", guest, lambda: None)
-                    self.assertEqual(len(report.failures), 1, report.failures)
+                    report.section(runner.CRASH_SECTION, guest, lambda: runner.check_no_crashes(guest))
+                    self.assertEqual(len(report.failures), 2, report.failures)
                     self.assertTrue(report.failures[0].startswith("first: "), report.failures)
                     self.assertIn(process, report.failures[0])
+                    self.assertTrue(report.failures[1].startswith(f"{runner.CRASH_SECTION}: "), report.failures)
 
     def test_a_crash_that_a_section_fails_on_is_named_with_its_own_failure(self) -> None:
         def body() -> None:
@@ -1129,38 +1205,105 @@ class CrashEvidenceTests(unittest.TestCase):
         self.assertIn("the mark never showed", self.report.failures[0])
         self.assertIn("com.android.systemui crashed", self.report.failures[0])
 
-    def test_a_crash_before_a_section_is_not_the_sections(self) -> None:
-        self.guest.crash("com.android.settings")
-        self.run_section("a", lambda: None)
-        self.assertEqual(self.report.failures, [])
-
-    def test_a_crash_of_an_unrelated_process_passes_the_section(self) -> None:
+    def test_a_crash_of_an_unrelated_process_passes_everything(self) -> None:
         self.run_section("a", lambda: self.guest.crash("com.android.settings.other"))
+        self.summary()
         self.assertEqual(self.report.failures, [])
 
-    def test_a_section_whose_marker_rotated_out_fails(self) -> None:
-        self.run_section("a", self.guest.rotate)
-        self.assertEqual(len(self.report.failures), 1)
-        self.assertIn("no longer holds the start of the section", self.report.failures[0])
+    # The four sequences that lost a record to a boundary.
+    def test_a_tombstone_header_at_the_end_of_one_section_and_its_signal_in_the_next_is_found(self) -> None:
+        for process in runner.WARNING_PROCESSES:
+            with self.subTest(process=process):
+                report, guest = runner.Report(), LoggingGuest()
 
-    def test_an_unreadable_log_fails_the_section(self) -> None:
-        class Mute(LoggingGuest):
-            def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
-                if command.startswith("logcat"):
-                    raise runner.Failure("adb: closed")
-                return super().shell(command, timeout)
+                def record(part) -> list[str]:
+                    return part(native_crash(process, when=guest.stamp()).splitlines(keepends=True))
 
-        guest = Mute()
-        self.report.section("a", guest, lambda: None)
+                report.section("a", guest, lambda: [guest.emit(line) for line in record(lambda lines: lines[:-1])])
+                report.section("b", guest, lambda: guest.emit(record(lambda lines: lines[-1:])[0]))
+                report.section(runner.CRASH_SECTION, guest, lambda: runner.check_no_crashes(guest))
+                died = [failure for failure in report.failures if "died of signal 11" in failure]
+                self.assertEqual(len(died), 2, report.failures)
+                self.assertTrue(died[0].startswith("b: "), report.failures)
+
+    def test_a_complete_crash_during_a_restart_before_boot_completed_is_found(self) -> None:
+        guest, report = RebootingGuest(), runner.Report()
+        guest.during_reboot = lambda: guest.crash("com.android.systemui")
+        report.section("restarts", guest, guest.restart)
+        self.assertEqual(len(report.failures), 1, report.failures)
+        self.assertIn("com.android.systemui crashed", report.failures[0])
+
+    def test_a_complete_crash_between_two_sections_is_found_and_belongs_to_none(self) -> None:
+        self.run_section("one", lambda: None)
+        self.guest.crash("com.android.settings")
+        self.run_section("two", lambda: None)
+        self.summary()
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertTrue(self.report.failures[0].startswith(f"{runner.CRASH_SECTION}: "))
+        self.assertIn("outside a section: com.android.settings crashed", self.report.failures[0])
+
+    def test_a_crash_before_the_first_section_is_found_and_belongs_to_none(self) -> None:
+        self.guest.crash("com.android.networkstack.process", "an ANR")
+        self.run_section("one", lambda: None)
+        self.summary()
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertIn("outside a section: com.android.networkstack.process did not respond", self.report.failures[0])
+
+    def test_a_native_signal_that_names_no_process_fails_the_section(self) -> None:
+        self.run_section("a", lambda: self.guest.emit(log_line(
+            900, 900, "F", "DEBUG", "signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0", self.guest.stamp())))
+        self.assertIn("a native crash that names no process", self.report.failures[0])
+
+    def test_a_stream_that_dies_fails_the_section_in_progress(self) -> None:
+        def body() -> None:
+            self.guest.streams[-1].cut = True
+            self.guest.alive()
+
+        self.run_section("a", body)
+        self.assertIn("the log stream of this boot ended while the guest is up", self.report.failures[0])
+
+    def test_a_stream_that_dies_without_a_wait_fails_the_section_at_its_end(self) -> None:
+        self.run_section("a", lambda: setattr(self.guest.streams[-1], "cut", True))
         self.assertIn("could not be read", self.report.failures[0])
+        self.assertIn("the log stream ended", self.report.failures[0])
 
-    def test_the_summary_passes_after_quiet_sections_and_fails_after_a_crash(self) -> None:
+    def test_a_stream_that_carries_nothing_fails_the_section_after_its_bound(self) -> None:
+        self.guest.streams[-1].pending = []
+        self.guest.shell = lambda command, timeout=0: ""
+        self.run_section("a", lambda: None)
+        self.assertIn("did not carry a line the guest logged", self.report.failures[0])
+
+    def test_the_log_wrapping_does_not_lose_what_the_stream_carried(self) -> None:
+        self.run_section("one", lambda: None)
+        self.guest.crash("com.android.systemui")
+        self.guest.rotate()
+        self.run_section("two", lambda: None)
+        self.summary()
+        self.assertIn("outside a section: com.android.systemui crashed", self.report.failures[0] + self.report.failures[-1])
+
+    def test_a_stream_that_lags_is_waited_for(self) -> None:
+        report, guest = runner.Report(), LoggingGuest(lag=True)
+        report.section("a", guest, lambda: guest.crash("com.android.settings"))
+        self.assertEqual(len(report.failures), 1, report.failures)
+        self.assertIn("com.android.settings crashed", report.failures[0])
+
+    def test_a_record_is_reported_once(self) -> None:
+        self.run_section("a", lambda: self.guest.crash("com.android.settings"))
+        self.run_section("b", lambda: None)
+        self.summary()
+        self.assertEqual(len(self.guest.capture.problems), 1, self.guest.capture.problems)
+        self.assertEqual(len(self.report.failures), 2)
+
+    def test_the_summary_passes_after_quiet_sections_and_lists_everything_after_a_crash(self) -> None:
         self.run_section("a", lambda: None)
         self.run_section("b", lambda: None)
-        self.assertIn("2 reads", runner.check_no_crashes(self.guest))
+        self.assertIn("2 sections read", runner.check_no_crashes(self.guest))
         self.run_section("c", lambda: self.guest.crash("com.android.settings", "an ANR"))
-        with self.assertRaisesRegex(runner.Failure, "c: com.android.settings did not respond"):
+        self.guest.crash("com.android.systemui")
+        with self.assertRaises(runner.Failure) as raised:
             runner.check_no_crashes(self.guest)
+        self.assertIn("c: com.android.settings did not respond", str(raised.exception))
+        self.assertIn("outside a section: com.android.systemui crashed", str(raised.exception))
 
     def test_the_summary_fails_when_no_section_read_the_log(self) -> None:
         with self.assertRaisesRegex(runner.Failure, "no section"):
@@ -1186,15 +1329,22 @@ class CrashEvidenceTests(unittest.TestCase):
         self.assertIn("options.release, instance, provision=False, watched=True", source)
         self.assertIn("watched=True", inspect.getsource(runner.fresh))
 
+    def test_the_marker_reads_are_gone(self) -> None:
+        for name in ("CrashLog", "SECTION_MARKER_TAG"):
+            self.assertFalse(hasattr(runner, name), name)
+        self.assertNotIn("section-start", inspect.getsource(runner))
+
 
 class RebootingGuest(LoggingGuest):
-    """A guest whose restart is the real one, and whose reboot clears its log."""
+    """A guest whose restart is the real one: its reboot cuts the streams of the old boot and clears the log, and
+    `during_reboot` logs what the new boot logs before adb answers."""
 
     restart = runner.Guest.restart
 
     def __init__(self) -> None:
         super().__init__()
         self.rebooted = False
+        self.during_reboot = lambda: None
 
     def uptime(self) -> float:
         return 5.0 if self.rebooted else 900.0
@@ -1202,7 +1352,10 @@ class RebootingGuest(LoggingGuest):
     def adb_run(self, *arguments: str, timeout: float = 0) -> object:
         if arguments[0] == "reboot":
             self.rebooted = True
-            self.lines = []
+            for stream in self.streams:
+                stream.cut = True
+            self.buffer = []
+            self.during_reboot()
         return mock.Mock(returncode=0, stdout=b"")
 
     def adb_answers(self) -> str | None:
@@ -1228,7 +1381,7 @@ class CrashEvidenceAcrossARestartTests(unittest.TestCase):
         self.report = runner.Report()
         self.guest = RebootingGuest()
 
-    def test_a_crash_before_the_restart_is_read_although_the_restart_clears_the_log(self) -> None:
+    def test_a_crash_before_the_restart_is_read_from_the_old_boots_stream(self) -> None:
         def body() -> None:
             self.guest.crash("com.android.networkstack.process")
             self.guest.restart()
@@ -1237,7 +1390,7 @@ class CrashEvidenceAcrossARestartTests(unittest.TestCase):
         self.assertEqual(len(self.report.failures), 1, self.report.failures)
         self.assertIn("com.android.networkstack.process crashed", self.report.failures[0])
 
-    def test_a_crash_after_the_restart_is_read_from_the_new_marker(self) -> None:
+    def test_a_crash_after_the_restart_is_read_from_the_new_boots_stream(self) -> None:
         def body() -> None:
             self.guest.restart()
             self.guest.crash("com.android.settings", "a native crash")
@@ -1245,15 +1398,96 @@ class CrashEvidenceAcrossARestartTests(unittest.TestCase):
         self.report.section("restarts", self.guest, body)
         self.assertIn("com.android.settings died of signal 11", self.report.failures[0])
 
-    def test_a_restart_in_a_quiet_section_passes_and_both_reads_count(self) -> None:
+    def test_the_old_stream_is_read_to_its_end_before_the_new_boots_starts(self) -> None:
+        self.report.section("restarts", self.guest, self.guest.restart)
+        self.assertEqual(len(self.guest.capture.boots), 2)
+        self.assertTrue(self.guest.streams[0].cut)
+        self.assertFalse(self.guest.streams[1].cut)
+
+    def test_a_quiet_restart_passes_and_both_boots_are_read(self) -> None:
         self.report.section("restarts", self.guest, self.guest.restart)
         self.assertEqual(self.report.failures, [])
-        self.assertEqual(self.guest.crash_log.sections, 2)
+        self.assertEqual(len(self.guest.capture.boots), 2)
 
-    def test_a_restart_outside_a_section_reads_nothing(self) -> None:
+    def test_a_restart_between_sections_keeps_the_stream_going(self) -> None:
         self.guest.restart()
-        self.assertEqual(self.guest.crash_log.sections, 0)
-        self.assertFalse(self.guest.crash_log.active)
+        self.assertEqual(len(self.guest.capture.boots), 2)
+        self.report.section("after", self.guest, lambda: self.guest.crash("com.android.systemui"))
+        self.assertIn("com.android.systemui crashed", self.report.failures[0])
+
+    def test_a_restart_that_never_brings_adb_back_leaves_the_section_failed_not_passed(self) -> None:
+        self.guest.adb_answers = lambda: "no answer"
+        self.report.section("restarts", self.guest, self.guest.restart)
+        self.assertEqual(len(self.report.failures), 1)
+        self.assertIn("the guest restarts", self.report.failures[0])
+
+
+class SuspendingGuest(LoggingGuest):
+    """A guest that suspends and wakes through the real method; its suspend cuts the streams when it `drops`."""
+
+    suspend_and_wake = runner.Guest.suspend_and_wake
+    suspend_and_wake_guest = runner.Guest.suspend_and_wake_guest
+
+    def __init__(self, drops: bool) -> None:
+        super().__init__()
+        self.drops = drops
+        guest = self
+
+        class Console:
+            def request(self, command: str, seconds: float = 0) -> str:
+                if command == "suspend" and guest.drops:
+                    for stream in guest.streams:
+                        stream.cut = True
+                return "suspended" if command == "suspend" else "running"
+
+        self.console = Console()
+
+    def adb_answers(self) -> str | None:
+        return None
+
+
+class CrashEvidenceAcrossASuspendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patch = mock.patch.object(runner, "time", FakeClock())
+        patch.start()
+        self.addCleanup(patch.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        errors = contextlib.redirect_stderr(io.StringIO())
+        output.__enter__()
+        errors.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+        self.addCleanup(errors.__exit__, None, None, None)
+        self.report = runner.Report()
+
+    def test_a_stream_that_ends_with_the_connection_starts_another_segment_of_the_same_boot(self) -> None:
+        guest = SuspendingGuest(drops=True)
+        self.report.section("suspends", guest, guest.suspend_and_wake)
+        self.assertEqual(self.report.failures, [])
+        self.assertEqual([len(boot) for boot in guest.capture.boots], [2])
+
+    def test_a_stream_that_survives_the_suspend_is_kept(self) -> None:
+        guest = SuspendingGuest(drops=False)
+        self.report.section("suspends", guest, guest.suspend_and_wake)
+        self.assertEqual(self.report.failures, [])
+        self.assertEqual([len(boot) for boot in guest.capture.boots], [1])
+
+    def test_a_record_that_two_segments_carry_is_reported_once(self) -> None:
+        guest = SuspendingGuest(drops=True)
+
+        def body() -> None:
+            guest.crash("com.android.settings")
+            guest.suspend_and_wake()
+
+        self.report.section("suspends", guest, body)
+        self.assertEqual(len(guest.capture.problems), 1, guest.capture.problems)
+        self.assertEqual(len(self.report.failures), 1)
+
+    def test_a_stream_that_ends_after_the_wake_fails_the_next_wait(self) -> None:
+        guest = SuspendingGuest(drops=False)
+        guest.suspend_and_wake()
+        guest.streams[-1].cut = True
+        with self.assertRaisesRegex(runner.Failure, "the log stream of this boot ended"):
+            guest.alive()
 
 
 class SimulatedGuest(StubbedGuest):
