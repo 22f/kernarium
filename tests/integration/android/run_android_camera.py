@@ -1037,11 +1037,16 @@ FAILURE_LOG_PATTERN = ("V4l2Stream|V4l2FrameSource|EmulatedSensor|EmulatedReques
                        "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue")
 FAILURE_LOG_NOISE = "SurfaceFlinger|adbd|out of bounds transparent region"
 FAILURE_LOG_LINES = 120
+# What was on the screen: the resumed activity, the focused window and the display's power state. A screenshot
+# that shows a picture in a blocked session is the camera's only when the camera application was in front.
+FOREGROUND_COMMAND = ("dumpsys activity activities | grep -a -E 'topResumedActivity|mResumedActivity'; "
+                      "dumpsys window | grep -a -E 'mCurrentFocus|mFocusedApp'; "
+                      "dumpsys power | grep -a -E 'mWakefulness='")
 
 
 def print_camera_log(guest: Guest) -> None:
-    """At a failure, the guest's own log lines about the camera path and its buffers (nothing is asserted on them):
-    they tell a failure of the image from one of the runner."""
+    """At a failure, the guest's own log lines about the camera path and its buffers, then what was in front
+    (nothing is asserted on them): they tell a failure of the image from one of the runner."""
     try:
         text = guest.shell(f"logcat -d -b all | grep -a -E '{FAILURE_LOG_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
                            f"| tail -n {FAILURE_LOG_LINES}", timeout=120)
@@ -1049,6 +1054,12 @@ def print_camera_log(guest: Guest) -> None:
         print(f"(no camera log lines: {problem})", file=sys.stderr)
         return
     print("camera log lines of the guest:\n" + text.rstrip(), file=sys.stderr)
+    try:
+        foreground = guest.shell(FOREGROUND_COMMAND, timeout=60)
+    except Exception as problem:
+        print(f"(no foreground state: {problem})", file=sys.stderr)
+        return
+    print("in front at the failure:\n" + foreground.rstrip(), file=sys.stderr)
 
 
 def main() -> int:

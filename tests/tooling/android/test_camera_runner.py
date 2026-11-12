@@ -654,6 +654,39 @@ class FailureLogTests(unittest.TestCase):
             runner.print_camera_log(guest)
         self.assertIn("no camera log lines: adb: device offline", err.getvalue())
 
+    def test_what_was_in_front_is_printed_after_the_log(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        commands: list[str] = []
+        answers = ["E CameraService: a line\n", "topResumedActivity=ActivityRecord{x u0 org.lineageos.aperture/.CameraActivity}\n"]
+        guest.shell = lambda command, timeout=0: (commands.append(command), answers[len(commands) - 1])[1]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        text = err.getvalue()
+        self.assertLess(text.index("camera log lines of the guest"), text.index("in front at the failure"))
+        self.assertIn("in front at the failure:\ntopResumedActivity=ActivityRecord{x u0 org.lineageos.aperture", text)
+        self.assertIn("dumpsys activity activities", commands[1])
+        self.assertIn("mCurrentFocus", commands[1])
+
+    def test_a_guest_lost_after_the_log_keeps_the_log(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        calls: list[str] = []
+
+        def second_fails(command: str, timeout: float = 0) -> str:
+            calls.append(command)
+            if len(calls) == 2:
+                raise OSError("adb: device offline")
+            return "E CameraService: a line\n"
+
+        guest.shell = second_fails
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        self.assertIn("E CameraService: a line", err.getvalue())
+        self.assertIn("no foreground state: adb: device offline", err.getvalue())
+
 
 class VideoAndFrontFlowTests(unittest.TestCase):
     def run_step(self, step, plan, guest) -> None:
