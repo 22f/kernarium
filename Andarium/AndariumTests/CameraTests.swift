@@ -313,7 +313,7 @@ struct CameraFlowTests {
     @Test func theWordsAreThoseOfTheDesign() {
         #expect(CameraWords.title == "Camera")
         #expect(CameraWords.noCamera == "This device has no camera to share.")
-        #expect(CameraWords.noticeTitle == "Camera paused while other apps share the screen")
+        #expect(CameraWords.noticeTitle == "Camera paused while other apps are on screen")
         #expect(CameraWords.gyroscopeFootnote == "Turn on Gyroscope so that photos taken sideways are saved the right way up.")
     }
 }

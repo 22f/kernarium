@@ -59,7 +59,7 @@ enum CameraWords {
     static let noCamera = String(localized: "This device has no camera to share.")
     static let gyroscopeFootnote = String(
         localized: "Turn on Gyroscope so that photos taken sideways are saved the right way up.")
-    static let noticeTitle = String(localized: "Camera paused while other apps share the screen")
+    static let noticeTitle = String(localized: "Camera paused while other apps are on screen")
 
     /// The line under Camera: why it cannot be used; none otherwise.
     static func detail(for access: CameraAccess) -> String? {

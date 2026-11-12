@@ -2175,24 +2175,24 @@
         }
       }
     },
-    "Camera paused while other apps share the screen" : {
+    "Camera paused while other apps are on screen" : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "他のアプリと画面を共有している間、カメラは一時停止中です"
+            "value" : "ほかのアプリと同時に表示している間は、カメラが一時停止します"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "与其他App同屏显示时，相机已暂停"
+            "value" : "同时显示其他App时，相机会暂停"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "與其他App同螢幕顯示時，相機已暫停"
+            "value" : "同時顯示其他App時，相機會暫停"
           }
         }
       }
@@ -9437,13 +9437,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "打开“陀螺仪”，横向拍摄的照片才会以正确方向保存。"
+            "value" : "打开“陀螺仪”后，横向拍摄的照片会以正确的方向保存。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開啟「陀螺儀」，橫向拍攝的照片才會以正確方向儲存。"
+            "value" : "開啟「陀螺儀」後，橫向拍攝的照片會以正確的方向儲存。"
           }
         }
       }
