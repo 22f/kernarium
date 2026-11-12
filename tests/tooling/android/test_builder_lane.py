@@ -293,6 +293,39 @@ def synthetic_apk(debuggable: bool | str | None = None, permissions: tuple[str, 
     return package.getvalue()
 
 
+def synthetic_overlay_manifest(target_package: str | None, static: bool | None, *, utf8: bool = False) -> bytes:
+    """A compiled manifest of a runtime resource overlay: an <overlay> element that carries
+    android:targetPackage (a string) when given and android:isStatic (a literal boolean) when given,
+    as the build's auto-generated overlays do."""
+    strings = ["targetPackage", "isStatic", "overlay", target_package or ""]
+    pool_strings = b""
+    offsets = []
+    for text in strings:
+        offsets.append(len(pool_strings))
+        if utf8:
+            pool_strings += bytes([len(text), len(text)]) + text.encode() + b"\0"
+        else:
+            pool_strings += struct.pack("<H", len(text)) + text.encode("utf-16-le") + b"\0\0"
+    pool_strings += b"\0" * (-len(pool_strings) % 4)
+    strings_start = 28 + 4 * len(strings)
+    pool = struct.pack(
+        "<HHIIIIII", 0x0001, 28, strings_start + len(pool_strings), len(strings),
+        0, 0x100 if utf8 else 0, strings_start, 0,
+    ) + b"".join(struct.pack("<I", offset) for offset in offsets) + pool_strings
+    ids = [0x01010021, 0x0101055A, 0, 0]
+    resource_map = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(ids)) + b"".join(
+        struct.pack("<I", value) for value in ids)
+    attributes = b""
+    if target_package is not None:
+        attributes += struct.pack("<IIIHBBI", 0xFFFFFFFF, 0, 3, 8, 0, 0x03, 3)
+    if static is not None:
+        attributes += struct.pack("<IIIHBBI", 0xFFFFFFFF, 1, 0xFFFFFFFF, 8, 0, 0x12, 0xFFFFFFFF if static else 0)
+    body = struct.pack("<IIHHHHHH", 0xFFFFFFFF, 2, 20, 20, len(attributes) // 20, 0, 0, 0) + attributes
+    element = struct.pack("<HHIII", 0x0102, 16, 16 + len(body), 1, 0xFFFFFFFF) + body
+    payload = pool + resource_map + element
+    return struct.pack("<HHI", 0x0003, 8, 8 + len(payload)) + payload
+
+
 def run_in_process(module, *arguments: object) -> subprocess.CompletedProcess[str]:
     """Run a loaded tool's main() as `run_tool` would run its script.
 
@@ -375,11 +408,11 @@ def tracked_erofs_parameters(android_root: Path) -> tuple[str, str]:
 def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
-    integers: list[tuple[str, int]] = (),
+    integers: list[tuple[str, int]] = (), overlayable: bool = False,
 ) -> bytes:
     """A compiled resource table whose one package holds the given string-array resources, bool
     resources and integer resources (the latter two as compact entries when `compact` is set, as a
-    recent aapt2 writes them)."""
+    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -432,6 +465,8 @@ def synthetic_resource_table(
         else:
             integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
     chunks = type_chunk(1, array_entries)
+    if overlayable:  # the <overlayable> section: its name and actor (256 UTF-16 units each) and no policy
+        chunks += struct.pack("<HHI", 0x0204, 1032, 1032) + b"\x00" * 1024
     type_names = ["array"]
     for type_name, typed in (("bool", bool_entries), ("integer", integer_entries)):
         if typed:
@@ -600,6 +635,22 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 fail(f"the resource integer reader misreads {'compact' if compact else 'full'} entries")
             if tool.resource_arrays(table) != expected_arrays:
                 fail("the resource array reader misreads a table that also holds integers")
+    # ... and an <overlayable> section is seen in a table that holds the other resource types, however they are stored.
+    for compact in (False, True):
+        for declared in (False, True):
+            table = synthetic_resource_table(tables, booleans=flags, integers=numbers, compact=compact, overlayable=declared)
+            if tool.resource_table_defines_overlayable(table) != declared:
+                fail(f"the overlayable reader misreads a {'compact' if compact else 'full'} table "
+                     f"{'with' if declared else 'without'} the section")
+    # The attributes of a compiled manifest's <overlay> element, through either string pool: a string, a boolean, or none.
+    for utf8 in (True, False):
+        for target, static in (("org.example.app", True), ("org.example.app", False), (None, True), ("org.example.app", None)):
+            expected = {key: value for key, value in (("targetPackage", target), ("isStatic", static)) if value is not None}
+            found = tool.manifest_element_attributes(synthetic_overlay_manifest(target, static, utf8=utf8), "overlay")
+            if found != expected:
+                fail(f"the overlay manifest reader reads {found} for {expected}")
+    if tool.manifest_element_attributes(synthetic_compiled_manifest(None), "overlay") is not None:
+        fail("the overlay manifest reader finds an <overlay> element in a manifest without one")
     release_manifest = synthetic_compiled_manifest(None, debuggable=False)
     release_apk = synthetic_apk(debuggable=False)
     preopt_apks = sorted(tool.REQUIRED_PREOPT_APKS)
@@ -740,6 +791,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         camera_library_path = "VENDOR/lib64/libgooglecamerahwl_impl.so"
         camera_template_path = "VENDOR/etc/config/emu_camera_v4l2.json"
         camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
+        camera_overlay_path = tool.CAMERA_APP_OVERLAY
+        camera_app_package = tool.CAMERA_APP_PACKAGE
         good_camera_rc = (
             f"service vendor.camera-provider-2-7-google /vendor/bin/hw/{camera_provider}\n"
             "    interface aidl android.hardware.camera.provider.ICameraProvider/internal/0\n"
@@ -2497,8 +2550,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                 archive.writestr(camera_fragment_path, good_camera_manifest)
                 archive.writestr(camera_library_path, camera_library(*good_camera_markers))
                 archive.writestr(camera_template_path, good_camera_template)
-                # Aperture's resources as the build leaves them with the product's static overlay: each
-                # lens of the host is its own camera device, and the wide lens is the zoom camera's 1x.
+                # Aperture as the build leaves it: its own resources keep the defaults (the lens settings
+                # off, no ignored ID) and declare no overlayable section; the product's values are in the
+                # static overlay beside the other auto-generated ones. With the values on, each lens of the
+                # host is its own camera device, and the wide lens is the zoom camera's 1x.
                 aux_booleans = {
                     None: [("config_enableAuxCameras", True)],
                     "aux-off": [("config_enableAuxCameras", False)],
@@ -2510,15 +2565,34 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "ignored-none": [[]],
                     "ignored-missing": [],
                 }.get(camera_variant, [["2"]])
-                aperture_table = synthetic_resource_table(
+                overlay_table = synthetic_resource_table(
                     [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
                     booleans=aux_booleans, compact=camera_variant == "compact",
+                )
+                # "app-values": the old assumption, the values in the application's own table and no overlay
+                aperture_table = synthetic_resource_table(
+                    [("config_ignoredAuxCameraIds", ["2"] if camera_variant == "app-values" else [])],
+                    booleans=[("config_enableAuxCameras", camera_variant == "app-values")],
+                    compact=camera_variant == "compact", overlayable=camera_variant == "app-overlayable",
                 )
                 aperture_apk = io.BytesIO()
                 with zipfile.ZipFile(aperture_apk, "w") as apk:
                     apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
                     apk.writestr("resources.arsc", aperture_table)
                 archive.writestr(camera_app_path, aperture_apk.getvalue())
+                overlay_apk = io.BytesIO()
+                overlay_target, overlay_static = {
+                    "overlay-target": ("com.example.other", True),
+                    "overlay-not-static": (camera_app_package, False),
+                    "overlay-static-missing": (camera_app_package, None),
+                    "overlay-target-missing": (None, True),
+                }.get(camera_variant, (camera_app_package, True))
+                with zipfile.ZipFile(overlay_apk, "w") as apk:
+                    apk.writestr("AndroidManifest.xml", synthetic_overlay_manifest(
+                        overlay_target, overlay_static, utf8=camera_variant == "compact"))
+                    apk.writestr("resources.arsc", overlay_table)
+                if camera_variant not in {"app-values", "overlay-missing"}:
+                    archive.writestr(camera_overlay_path, overlay_apk.getvalue())
                 archive.writestr("VENDOR/bin/hw/android.hardware.thermal-service.andarium", synthetic_aarch64_elf())
                 archive.writestr(thermal_rc_path, good_thermal_rc)
                 archive.writestr(thermal_fragment_path, good_thermal_manifest)
@@ -5249,6 +5323,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "unneeded built-in application payload is forbidden"),
             ("stock-camera-application", {"entries": {"PRODUCT/app/Camera2/Camera2.apk": synthetic_apk()}},
              "unneeded built-in application payload is forbidden"),
+            # The lens settings are the product overlay's: the application's own table holds the defaults.
+            ("camera-values-only-in-the-application", {"camera_variant": "app-values"},
+             "Aperture__lineage_andarium__auto_generated_rro_product.apk is missing"),
+            ("camera-overlay-missing", {"camera_variant": "overlay-missing"},
+             "Aperture__lineage_andarium__auto_generated_rro_product.apk is missing"),
+            ("camera-overlay-other-target", {"camera_variant": "overlay-target"}, "must be a static overlay of"),
+            ("camera-overlay-not-static", {"camera_variant": "overlay-not-static"}, "must be a static overlay of"),
+            ("camera-overlay-static-missing", {"camera_variant": "overlay-static-missing"},
+             "must be a static overlay of"),
+            ("camera-overlay-target-missing", {"camera_variant": "overlay-target-missing"},
+             "must be a static overlay of"),
+            ("camera-application-overlayable", {"camera_variant": "app-overlayable"},
+             "declares an overlayable section"),
             ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
             ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
              "must set config_enableAuxCameras to true"),

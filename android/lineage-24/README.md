@@ -294,8 +294,11 @@ controls, Exif, concurrency) are the headers of `overlay/camera/hal/`, which
 the HAL includes and the `andarium-camera-*` unit tests compile without
 Android. The camera application is LineageOS's Aperture, without its Google
 Lens launcher and button (route `p0031`), and its lens selector lists each
-lens of the host as a camera of its own (a static overlay in
-`overlay/overlay/packages/apps/Aperture`).
+lens of the host as a camera of its own (a product overlay in
+`overlay/overlay/packages/apps/Aperture`, which the build installs as a static
+runtime overlay of the application; the application declares no overlayable
+section, so Android applies the preinstalled overlay, and the target-files
+verifier reads the overlay, not the application).
 
 The image states no camera feature of its own. The host composes a camera
 layout from the cameras it has and passes its name as

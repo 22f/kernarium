@@ -2152,6 +2152,71 @@ def resource_integers(table: bytes) -> dict[str, list[int]]:
     return integers
 
 
+# The chunks of a compiled resource table that declare an <overlayable> section and its policies.
+RES_TABLE_PACKAGE_TYPE = 0x0200
+RES_TABLE_OVERLAYABLE_TYPES = (0x0204, 0x0205)
+
+
+def resource_table_defines_overlayable(table: bytes) -> bool:
+    """Whether a package of a compiled resource table declares an <overlayable> section."""
+    position = struct.unpack_from("<H", table, 2)[0]
+    while position + 8 <= len(table):
+        chunk, header_size, size = struct.unpack_from("<HHI", table, position)
+        if size < 8:
+            break
+        if chunk == RES_TABLE_PACKAGE_TYPE:
+            inner, end = position + header_size, position + size
+            while inner + 8 <= end:
+                inner_chunk, _, inner_size = struct.unpack_from("<HHI", table, inner)
+                if inner_size < 8:
+                    break
+                if inner_chunk in RES_TABLE_OVERLAYABLE_TYPES:
+                    return True
+                inner += inner_size
+        position += size
+    return False
+
+
+def manifest_element_attributes(manifest: bytes, element_name: str) -> dict[str, str | int | bool | None] | None:
+    """The attributes, by name, of the first element of this name in a compiled manifest, or None when
+    it has no such element. A value is a string, an integer or a boolean as the manifest typed it, and
+    None for any other type."""
+    if len(manifest) < 8 or struct.unpack_from("<HH", manifest, 0)[0] != 0x0003:
+        raise ValueError("not a compiled XML file")
+    strings: list[str] = []
+    offset = struct.unpack_from("<H", manifest, 2)[0]
+    while offset + 8 <= len(manifest):
+        kind, header, size = struct.unpack_from("<HHI", manifest, offset)
+        if size < 8 or offset + size > len(manifest):
+            raise ValueError("truncated compiled XML chunk")
+        if kind == AXML_STRING_POOL:
+            strings = axml_strings(manifest, offset)
+        elif kind == AXML_START_ELEMENT:
+            body = offset + header
+            element = struct.unpack_from("<I", manifest, body + 4)[0]
+            if element < len(strings) and strings[element] == element_name:
+                attribute_start, attribute_size, count = struct.unpack_from("<HHH", manifest, body + 8)
+                attributes: dict[str, str | int | bool | None] = {}
+                for index in range(count):
+                    position = body + attribute_start + index * attribute_size
+                    name, _, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
+                    if name >= len(strings):
+                        raise ValueError("an attribute name outside the string pool")
+                    if data_type == AXML_STRING_TYPE:
+                        if data >= len(strings):
+                            raise ValueError("an attribute value outside the string pool")
+                        attributes[strings[name]] = strings[data]
+                    elif data_type in AXML_INTEGER_TYPES:
+                        attributes[strings[name]] = data
+                    elif data_type == AXML_BOOLEAN_TYPE:
+                        attributes[strings[name]] = data != 0
+                    else:
+                        attributes[strings[name]] = None
+                return attributes
+        offset += size
+    return None
+
+
 def check_network_time(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The platform queries no NTP server and takes no time from the network."""
     info = infos.get(FRAMEWORK_OVERLAY)
@@ -3055,6 +3120,13 @@ CAMERA_TEMPLATE = "VENDOR/etc/config/emu_camera_v4l2.json"
 CAMERA_CONFIG_DIRECTORY = "VENDOR/etc/config/"
 CAMERA_APP = "PRODUCT/app/Aperture/Aperture.apk"
 CAMERA_APP_LIMIT = 256 << 20
+# The product's overlay directory is enforced as runtime overlays: the build leaves the application's own
+# resources at their defaults and installs the product's values in a static overlay beside the others
+# (SimpleDeviceConfig, Launcher3QuickStep, framework-res). Android applies a preinstalled overlay to
+# an application that declares no overlayable section, so the check reads the overlay, and requires
+# the target to stay without such a section: one that defined it would bind the overlay to a policy.
+CAMERA_APP_PACKAGE = "org.lineageos.aperture"
+CAMERA_APP_OVERLAY = "PRODUCT/overlay/Aperture__lineage_andarium__auto_generated_rro_product.apk"
 CAMERA_AUX_CAMERAS = "config_enableAuxCameras"
 CAMERA_IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 CAMERA_IGNORED_AUX_IDS = ["2"]
@@ -3196,20 +3268,44 @@ def check_camera_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfil
 def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The camera application lists each lens the host has, and the sensor privacy service reads
     the camera switch."""
-    table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
+    app_table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
     try:
+        defines_overlayable = resource_table_defines_overlayable(app_table)
+    except (struct.error, IndexError) as error:
+        fail(f"{CAMERA_APP} has no readable resource table: {error}")
+    if defines_overlayable:
+        fail(
+            f"{CAMERA_APP} declares an overlayable section: Android would apply a product overlay to the "
+            "resources it names under its policies alone, and this check cannot tell which"
+        )
+    info = infos.get(CAMERA_APP_OVERLAY)
+    if info is None or info.is_dir():
+        fail(
+            f"{CAMERA_APP_OVERLAY} is missing: the application's own resources keep the defaults that "
+            "hide each lens of the host as a camera of its own"
+        )
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, CAMERA_APP_LIMIT))) as overlay_apk:
+            manifest = overlay_apk.read("AndroidManifest.xml")
+            table = overlay_apk.read("resources.arsc")
+        overlay = manifest_element_attributes(manifest, "overlay")
         booleans = resource_booleans(table)
         arrays = resource_arrays(table)
-    except (ValueError, struct.error, IndexError) as error:
-        fail(f"{CAMERA_APP} has no readable resource table: {error}")
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{CAMERA_APP_OVERLAY} has no readable manifest and resource table: {error}")
+    if overlay is None or overlay.get("targetPackage") != CAMERA_APP_PACKAGE or overlay.get("isStatic") is not True:
+        fail(
+            f"{CAMERA_APP_OVERLAY} must be a static overlay of {CAMERA_APP_PACKAGE}: Android would not "
+            f"apply it otherwise: {overlay}"
+        )
     if booleans.get(CAMERA_AUX_CAMERAS) != [True]:
         fail(
-            f"{CAMERA_APP} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
+            f"{CAMERA_APP_OVERLAY} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
             "each lens of the host is its own camera device"
         )
     if arrays.get(CAMERA_IGNORED_AUX_CAMERAS) != [CAMERA_IGNORED_AUX_IDS]:
         fail(
-            f"{CAMERA_APP} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
+            f"{CAMERA_APP_OVERLAY} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
             f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
             "the wide lens is the zoom camera's 1x"
         )
