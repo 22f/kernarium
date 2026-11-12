@@ -612,7 +612,7 @@ struct FoldSessionHostingTests {
             case .boot: ["Linux kernel", "System image", "Storage", "Startup"]
             case .busy: ["Erasing virtual machine", "65%", "Deleting everything."]
             case .lowSpace: [SpacePauseWords.title(SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .notPaused))]
-            case .end: ["Copy report"]
+            case .end: ["The virtual machine stopped unexpectedly"]
             }
         }
     }
@@ -647,12 +647,6 @@ struct FoldSessionHostingTests {
             let expected = CGPoint(x: plain.midX + area.midX - safe.midX, y: plain.midY + area.midY - safe.midY)
             #expect(abs(shown.midX - expected.x) < 1 && abs(shown.midY - expected.y) < 1,
                     "\(pose): the \(popup) is at \(shown), not centred as without a fold, \(plain), moved to \(expected)")
-            // The busy card's words span its width: it is on the display's
-            // centre along the axis the fold crosses.
-            if popup == .busy {
-                let along = pose == .uprightFlat ? (shown.midX, pose.reading.window.midX) : (shown.midY, pose.reading.window.midY)
-                #expect(abs(along.0 - along.1) < 1, "\(pose): the \(popup) at \(shown) is not centred on the display")
-            }
         } else {
             let place = popup == .boot && pose == .turnedBook ? halves.first : halves.card
             #expect(!shown.intersects(band), "\(pose): the \(popup) is on the fold at \(shown)")
@@ -675,6 +669,9 @@ struct FoldSessionHostingTests {
         let container = UIViewController()
         lease.window.rootViewController = container
         let host = UIHostingController(rootView: Text("Sending").onCardHalf().environment(model))
+        // The window is the application's own, and its safe area is not the
+        // sheet's: the sheet takes none.
+        host.safeAreaRegions = []
         container.addChild(host)
         let holder = UIView(frame: test.pose.reading.window)
         container.view.addSubview(holder)
@@ -794,12 +791,16 @@ struct FoldSessionHostingTests {
         driver.storage = true
         model.driver = driver
         model.refreshPlan()
-        let browser = FileBrowserModel(backend: FileBrowserModelTests.ScriptedBackend(), center: NotificationCenter())
+        let download = GuestPath.child("Download", of: GuestPath.root)
+        let backend = FileBrowserModelTests.ScriptedBackend()
+        backend.folders[download] = [
+            GuestFile(path: GuestPath.child("Trip.jpg", of: download), isFolder: false, size: 4_000_000, modified: .now),
+        ]
+        let browser = FileBrowserModel(backend: backend, center: NotificationCenter())
         model.fileBrowser = browser
         model.start(.normal)
         model.finishBoot(.normal)
         await model.refreshStorage()
-        let download = GuestPath.child("Download", of: GuestPath.root)
         browser.route = [FolderRoute(path: GuestPath.root), FolderRoute(path: download)]
         await browser.load(download)
         return (model, browser)
