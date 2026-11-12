@@ -85,17 +85,6 @@ public enum CameraNotice {
     }
 }
 
-/// The note under Capabilities for photos taken sideways: apps in the guest
-/// turn a photo upright from the accelerometer, so with Gyroscope off a
-/// landscape photo is saved tagged portrait. It shows only while Camera is on,
-/// Gyroscope is off and the device has the sensors to share; a note about the
-/// sensors themselves takes its place.
-public enum CameraFootnote {
-    public static func isUp(cameraOn: Bool, gyroscopeOn: Bool, sensorsAvailable: Bool) -> Bool {
-        cameraOn && !gyroscopeOn && sensorsAvailable
-    }
-}
-
 /// The turn of the device body the guest is told, for its cameras. Where the
 /// host owns the guest's rotation (an iPad window) the guest stays upright in
 /// the window while the device, which carries every built-in sensor, turns under

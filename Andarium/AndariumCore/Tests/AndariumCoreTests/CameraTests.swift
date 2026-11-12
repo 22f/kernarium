@@ -59,17 +59,6 @@ struct CameraTests {
         #expect(all.filter { CameraNotice.isUp(for: $0) } == [.interruptedByMultitasking])
     }
 
-    @Test func theFootnoteShowsOnlyForCameraOnWithGyroscopeOffOnADeviceWithSensors() {
-        for camera in [false, true] {
-            for gyroscope in [false, true] {
-                for sensors in [false, true] {
-                    let shown = CameraFootnote.isUp(cameraOn: camera, gyroscopeOn: gyroscope, sensorsAvailable: sensors)
-                    #expect(shown == (camera && !gyroscope && sensors))
-                }
-            }
-        }
-    }
-
     @Test func theRowOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {
         // Elsewhere: a built-in front camera, the rule the guest's layout follows.
         #expect(CameraAvailability.isAvailable(hasFrontCamera: true, isiOSAppOnMac: false))

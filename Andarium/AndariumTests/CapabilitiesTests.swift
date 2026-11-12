@@ -36,8 +36,7 @@ final class GuestMicrophone {
 
 /// Microphone asks iOS when it is turned on, shows itself off and unusable
 /// when iOS refuses or the person takes the access away, and gives the guest
-/// no input then. Gyroscope asks for nothing: raw accelerometer and gyroscope
-/// updates need no permission on iOS.
+/// no input then.
 @MainActor
 struct CapabilitiesFlowTests {
     private let host = HostDevice(
@@ -226,45 +225,28 @@ struct CapabilitiesFlowTests {
 
     // MARK: The order of the rows
 
-    /// Location sits above Microphone, Camera follows Microphone, Gyroscope
-    /// comes next and Haptics comes last; the section draws its rows in this
-    /// order, which VoiceOver reads.
-    @Test func capabilitiesAreListedLocationMicrophoneCameraGyroscopeHaptics() {
-        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .camera, .gyroscope, .haptics])
-        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .camera, .gyroscope, .haptics])
+    /// Location sits above Microphone, Camera follows Microphone and Haptics
+    /// comes last; the section draws its rows in this order, which VoiceOver
+    /// reads.
+    @Test func capabilitiesAreListedLocationMicrophoneCameraHaptics() {
+        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .camera, .haptics])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .camera, .haptics])
     }
 
     /// An iPad, a Mac and the Simulator have no Taptic Engine: nothing to
     /// switch, so no row (and no disabled one).
     @Test func hapticsHasNoRowWithoutADeviceThatHasThem() {
-        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .camera, .gyroscope])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .camera])
         #expect(!setup().model.hapticsAvailable)
     }
 
-    // MARK: The preview and Gyroscope
+    // MARK: The preview
 
     @Test func thePreviewWithoutAControllerTakesAccessAsGiven() {
         let s = setup(controller: false)
         s.model.setMicrophone(true)
         #expect(s.model.microphoneState == .granted)
         #expect(s.model.microphoneShownOn)
-    }
-
-    @Test func gyroscopeIsOnByDefaultAndAsksForNothing() {
-        let s = setup()
-        #expect(s.model.guest?.motionChoice == nil)
-        #expect(s.model.motionSensorsOn)
-        #expect(s.model.permissionPrompt == nil)
-        #expect(s.model.microphoneState == .notAsked)
-        #expect(s.system.asked == 0)
-        s.model.setMotionSensors(false)
-        #expect(s.model.guest?.motionChoice == false)
-        #expect(!s.model.motionSensorsOn)
-        #expect(!s.driver.motionSensors)
-        s.model.setMotionSensors(true)
-        #expect(s.model.guest?.motionChoice == true)
-        #expect(s.driver.motionSensors)
-        #expect(s.system.asked == 0)
     }
 
     @Test func hapticsAreOnByDefaultAndAskForNothing() {
@@ -286,7 +268,7 @@ struct CapabilitiesFlowTests {
         #expect(s.driver.haptics)
         #expect(s.system.asked == 0)
         // The other switches were never touched.
-        #expect(s.model.guest?.motionChoice == nil && s.model.guest?.location == false && s.model.guest?.microphone == false)
+        #expect(s.model.guest?.location == false && s.model.guest?.microphone == false)
     }
 
     @Test func aGuestStoredBeforeTheSwitchReadsAsOn() throws {
@@ -310,14 +292,5 @@ struct CapabilitiesFlowTests {
 
     @Test func hapticsSymbolExistsOnTheOSFloor() {
         #expect(UIImage(systemName: HapticsRow.symbol) != nil)
-    }
-
-    @Test func gyroscopeShowsOffOnADeviceWithNoSensors() {
-        let s = setup()
-        s.model.motionSensorsAvailable = false
-        #expect(!s.model.motionSensorsOn)
-        s.model.setMotionSensors(true)
-        #expect(s.model.guest?.motionChoice == nil)
-        #expect(!s.driver.motionSensors)
     }
 }

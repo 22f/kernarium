@@ -57,8 +57,6 @@ enum CameraWords {
     static let denied = String(localized: "Not allowed in Settings")
     static let restricted = String(localized: "Restricted on this device")
     static let noCamera = String(localized: "This device has no camera to share.")
-    static let gyroscopeFootnote = String(
-        localized: "Turn on Gyroscope so that photos taken sideways are saved the right way up.")
     static let noticeTitle = String(localized: "Camera paused while other apps are on screen")
 
     /// The line under Camera: why it cannot be used; none otherwise.
@@ -109,20 +107,9 @@ enum CameraWords {
         }
     }
 
-    /// The notes under Capabilities, top to bottom. A note about the sensors
-    /// themselves (`gyroscopeReason`) takes the place of the footnote about
-    /// photos taken sideways, which needs them; the note that the device has
-    /// no camera stands beside either.
-    static func notes(
-        gyroscopeReason: String?, access: CameraAccess, cameraOn: Bool, gyroscopeOn: Bool, sensorsAvailable: Bool
-    ) -> [String] {
-        var notes: [String] = []
-        if let gyroscopeReason {
-            notes.append(gyroscopeReason)
-        } else if CameraFootnote.isUp(cameraOn: cameraOn, gyroscopeOn: gyroscopeOn, sensorsAvailable: sensorsAvailable) {
-            notes.append(gyroscopeFootnote)
-        }
-        if access == .unavailable { notes.append(noCamera) }
-        return notes
+    /// The notes under Capabilities, top to bottom: that the device has no
+    /// camera to share.
+    static func notes(access: CameraAccess) -> [String] {
+        access == .unavailable ? [noCamera] : []
     }
 }

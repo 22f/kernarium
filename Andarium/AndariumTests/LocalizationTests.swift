@@ -46,7 +46,6 @@ struct LocalizationTests {
         let words: [String.LocalizationValue] = [
             "Camera", "Not allowed in Settings", "Restricted on this device",
             "This device has no camera to share.",
-            "Turn on Gyroscope so that photos taken sideways are saved the right way up.",
             "Camera paused while other apps are on screen", "Allow camera access",
             "iOS is not allowing Andarium to use the camera. Turn on Camera for Andarium in Settings, then come back to use it.",
             "Camera is restricted",

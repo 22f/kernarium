@@ -27,17 +27,6 @@ nonisolated enum ApkInstallOperation {
     static let sendIdleLimit = Duration.seconds(60)
     static let commitLimit = Duration.seconds(15 * 60)
 
-    /// Android's `INSTALL_REASON_USER`: an install the person started.
-    static let userInstallReason = 4
-
-    /// `-r` replaces an installed app, as the person expects of an APK for
-    /// one already there; `-t` admits test-only builds; `--install-reason`
-    /// marks the install as the person's, because the launcher adds a
-    /// home-screen icon only for such an install; `-S` gives the size.
-    static func service(size: Int) -> String {
-        "abb_exec:package\0install\0-r\0-t\0--install-reason\0\(userInstallReason)\0-S\0\(size)"
-    }
-
     /// Installs the file at `url`. What the install needs to know of the file
     /// (its size, and with it the room it takes) is read once the coordinated
     /// read has the file, since an iCloud file has no size, and perhaps no
@@ -45,7 +34,8 @@ nonisolated enum ApkInstallOperation {
     /// `hostFree` the device's free space, read after the file is in hand.
     static func run(
         session: AdbSession, coordinator: FileCoordinatorBox, url: URL, device: String,
-        hostFree: @Sendable () -> UInt64, update: @escaping @Sendable (BusyUpdate) -> Void
+        bypassLowTargetSdkBlock: Bool = false, hostFree: @Sendable () -> UInt64,
+        update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws {
         var result: Result<Void, Error> = .success(())
         var coordinationError: NSError?
@@ -54,8 +44,8 @@ nonisolated enum ApkInstallOperation {
         coordinator.current.coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
             result = Result {
                 try send(
-                    session: session, file: readable, name: url.lastPathComponent, device: device, hostFree: hostFree,
-                    update: update)
+                    session: session, file: readable, name: url.lastPathComponent, device: device,
+                    bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, hostFree: hostFree, update: update)
             }
         }
         if let coordinationError { throw coordinationError }
@@ -63,8 +53,8 @@ nonisolated enum ApkInstallOperation {
     }
 
     private static func send(
-        session: AdbSession, file: URL, name: String, device: String, hostFree: @Sendable () -> UInt64,
-        update: @escaping @Sendable (BusyUpdate) -> Void
+        session: AdbSession, file: URL, name: String, device: String, bypassLowTargetSdkBlock: Bool,
+        hostFree: @Sendable () -> UInt64, update: @escaping @Sendable (BusyUpdate) -> Void
     ) throws {
         let reader = try FileChunkReader(contentsOf: file, capacity: chunkBytes)
         let bytes = reader.size
@@ -88,7 +78,8 @@ nonisolated enum ApkInstallOperation {
                let shortage = InstallRoom.guestShortage(bytes: bytes, free: free) {
                 throw AdbFailure(message: shortage.message(device: device))
             }
-            let stream = try connection.open(service(size: size))
+            let stream = try connection.open(
+                PackageInstallCommand.service(size: size, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock))
             var sent = 0
             do {
                 while sent < size {
@@ -107,8 +98,14 @@ nonisolated enum ApkInstallOperation {
                 progress: sendingShare, detail: String(localized: "The virtual machine is installing the app\u{2026}"),
                 cancellable: false))
             watchdog.arm(idle: nil, overall: commitLimit)
-            let output = try stream.readToEnd(limit: 64 * 1024)
-            if let message = PackageInstallMessages.failure(inOutput: String(decoding: output, as: UTF8.self)) {
+            let text = String(decoding: try stream.readToEnd(limit: 64 * 1024), as: UTF8.self)
+            // The one refusal that is asked about, when the flag was not sent:
+            // Settings decides what follows (`LegacyInstallFlow`). With the
+            // flag it is an ordinary failure.
+            if !bypassLowTargetSdkBlock, case let .tooOldTarget(target) = PackageInstallAnswer(output: text) {
+                throw LegacyApkRefused(target: target)
+            }
+            if let message = PackageInstallMessages.failure(inOutput: text) {
                 throw AdbFailure(message: message)
             }
         }

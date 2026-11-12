@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -20,11 +21,19 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private var opened: [String] = []
     private var commands: [String] = []
     private var installedBytes: UInt64 = 0
+    private var digests: [String] = []
+    private var outputs: [String] = []
     private var sentBytes: UInt64 = 0
     private var connections = 0
 
     /// What the install stream prints when its bytes have all arrived.
     var installOutput = "Success\n"
+    /// What the next installs print, one each, before `installOutput` is the
+    /// answer again: a refusal first and a success after it, say.
+    var installOutputs: [String] {
+        get { lock.withLock { outputs } }
+        set { lock.withLock { outputs = newValue } }
+    }
     /// Prints `installOutput` and ends the install stream after its first
     /// write instead of reading the whole file, as `createSession` failing
     /// does.
@@ -38,6 +47,8 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     var shellCommands: [String] { lock.withLock { commands } }
     /// The bytes the install stream took, and the bytes `SEND` frames carried.
     var installBytes: UInt64 { lock.withLock { installedBytes } }
+    /// The SHA-256 of what each install stream took, in order (hex).
+    var installDigests: [String] { lock.withLock { digests } }
     var syncBytes: UInt64 { lock.withLock { sentBytes } }
     /// How many times a client connected.
     var connectionCount: Int { lock.withLock { connections } }
@@ -120,17 +131,26 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private func serveInstall(_ stream: Channel, service: String) throws {
         let size = service.split(separator: "\0", omittingEmptySubsequences: false).last.flatMap { UInt64($0) } ?? 0
         var received: UInt64 = 0
+        var hash = SHA256()
         if failsAtOnce {
             // The first write is read and answered; then the exception.
-            if let first = try autoreleasepool(invoking: { try stream.receive() }) { received += UInt64(first.count) }
+            if let first = try autoreleasepool(invoking: { try stream.receive() }) {
+                received += UInt64(first.count)
+                hash.update(data: first)
+            }
         } else {
             while received < size {
                 guard let piece = try autoreleasepool(invoking: { try stream.receive() }) else { break }
                 received += UInt64(piece.count)
+                hash.update(data: piece)
             }
         }
-        lock.withLock { installedBytes += received }
-        try stream.send(Data(installOutput.utf8))
+        let output = lock.withLock {
+            installedBytes += received
+            digests.append(hash.finalize().map { String(format: "%02x", $0) }.joined())
+            return outputs.isEmpty ? installOutput : outputs.removeFirst()
+        }
+        try stream.send(Data(output.utf8))
     }
 
     private func serveShell(_ stream: Channel, command: String) throws {

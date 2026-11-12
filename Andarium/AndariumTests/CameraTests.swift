@@ -344,25 +344,12 @@ struct CameraFlowTests {
 
     // MARK: The notes under Capabilities
 
-    @Test func theFootnoteAppearsOnlyForCameraOnWithGyroscopeOffAndSensorsToShare() {
-        let footnote = CameraWords.gyroscopeFootnote
-        func notes(
-            reason: String? = nil, access: CameraAccess = .authorized, camera: Bool, gyroscope: Bool, sensors: Bool = true
-        ) -> [String] {
-            CameraWords.notes(
-                gyroscopeReason: reason, access: access, cameraOn: camera, gyroscopeOn: gyroscope, sensorsAvailable: sensors)
+    @Test func onlyADeviceWithoutACameraHasANoteUnderCapabilities() {
+        // Photos taken sideways need no note: the guest always has the device's motion sensors where it has them.
+        #expect(CameraWords.notes(access: .unavailable) == [CameraWords.noCamera])
+        for access in [CameraAccess.notDetermined, .authorized, .denied, .restricted] {
+            #expect(CameraWords.notes(access: access).isEmpty)
         }
-        #expect(notes(camera: true, gyroscope: false) == [footnote])
-        #expect(notes(camera: false, gyroscope: false).isEmpty)
-        #expect(notes(camera: true, gyroscope: true).isEmpty)
-        // The notes about the sensors come first and take its place.
-        #expect(notes(reason: "No sensors.", camera: true, gyroscope: false, sensors: false) == ["No sensors."])
-        #expect(notes(reason: "Problem.", camera: true, gyroscope: false) == ["Problem."])
-        #expect(notes(camera: true, gyroscope: false, sensors: false).isEmpty)
-        // A device without a camera says so beside whatever else it says.
-        #expect(notes(access: .unavailable, camera: false, gyroscope: true) == [CameraWords.noCamera])
-        #expect(notes(reason: "No sensors.", access: .unavailable, camera: false, gyroscope: false, sensors: false)
-            == ["No sensors.", CameraWords.noCamera])
     }
 
     @Test func theDeviceOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {
@@ -380,7 +367,6 @@ struct CameraFlowTests {
         #expect(CameraWords.title == "Camera")
         #expect(CameraWords.noCamera == "This device has no camera to share.")
         #expect(CameraWords.noticeTitle == "Camera paused while other apps are on screen")
-        #expect(CameraWords.gyroscopeFootnote == "Turn on Gyroscope so that photos taken sideways are saved the right way up.")
     }
 }
 
@@ -389,7 +375,7 @@ struct CameraFlowTests {
 struct CameraRowTests {
     @Test func cameraFollowsMicrophone() {
         let rows = CapabilitiesSection.rows(hapticsAvailable: true)
-        #expect(rows == [.location, .microphone, .camera, .gyroscope, .haptics])
-        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .camera, .gyroscope])
+        #expect(rows == [.location, .microphone, .camera, .haptics])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .camera])
     }
 }

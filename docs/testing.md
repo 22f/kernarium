@@ -403,8 +403,9 @@ folder, so a device can load it; the application never does (the App Store
 bundle check refuses a build that does).
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
-and end of the device's notifications, and the path from a turn to the record a
-fake guest reads with the Gyroscope switch off. The Simulator cannot turn an
+and end of the device's notifications, the path from a turn to the record a
+fake guest reads on a device without sensors, and that the Simulator and a Mac,
+which have none, hold no connection for them. The Simulator cannot turn an
 iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
 interface only), so the device is injected there; the real turns are checked on
 an iPhone.

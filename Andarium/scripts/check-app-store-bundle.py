@@ -415,6 +415,10 @@ DEBUG_SYMBOLS = (
     # The Simulator preview's denied-network notice (Model.previewNetworkNotice):
     # the Simulator cannot be denied the network, so the preview plays it.
     ("network notice preview", (b"20previewNetworkNotice",)),
+    # The Simulator preview's play of the legacy install
+    # (AppModel.previewInstallAttempt): the preview refuses the first attempt
+    # for its version, which the application's install never does by itself.
+    ("legacy install preview", (b"21previewInstallAttempt",)),
     # The Simulator preview's hooks into the Send feedback sheet
     # (SendFeedbackServices.previewOpensAtLaunch, previewPrepare and
     # previewKeepsConfirmation): the preview opens the sheet, fills a draft and
@@ -430,6 +434,9 @@ DEBUG_SYMBOLS = (
     # The reading a test puts in place of the system's hinge and regions
     # (Andarium/Shared/FoldSceneReader.swift), compiled out by APP_STORE.
     ("fold reader stub", (b"15FoldSceneReaderC4stub",)),
+    # The picked file's access that a hosted test puts in place of the real
+    # one (AppModel.accessPickedFileStub), compiled out by APP_STORE.
+    ("picked file access stub", (b"20accessPickedFileStub",)),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.

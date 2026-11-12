@@ -32,10 +32,6 @@ public struct Guest: Equatable, Codable, Sendable {
     /// GNSS receiver. Off for a new guest and for one stored before the
     /// switch existed.
     public var location: Bool
-    /// The person's choice to share the device's accelerometer and gyroscope
-    /// with the guest; nil until they choose, and then it follows the device
-    /// (`motionSensorsOn(available:)`). Stored under `motionSensors`.
-    public var motionChoice: Bool?
     /// The person's choice to let the guest play its haptics (Android's
     /// vibrator and haptic feedback) on this device's Taptic Engine. On for
     /// a new guest and for one stored before the switch existed. A game
@@ -53,12 +49,11 @@ public struct Guest: Equatable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case cores, memoryMiB, capacityGiB, pendingCapacityGiB, microphone
         case includeInBackups, location, haptics, camera
-        case motionChoice = "motionSensors"
     }
 
     public init(
         cores: Int, memoryMiB: Int, capacityGiB: Int, pendingCapacityGiB: Int? = nil,
-        microphone: Bool = false, includeInBackups: Bool = false, motionChoice: Bool? = nil,
+        microphone: Bool = false, includeInBackups: Bool = false,
         location: Bool = false, haptics: Bool = true, camera: Bool = false, usedBytes: UInt64 = 0
     ) {
         self.cores = cores
@@ -67,7 +62,6 @@ public struct Guest: Equatable, Codable, Sendable {
         self.pendingCapacityGiB = pendingCapacityGiB
         self.microphone = microphone
         self.location = location
-        self.motionChoice = motionChoice
         self.haptics = haptics
         self.camera = camera
         self.includeInBackups = includeInBackups
@@ -83,18 +77,8 @@ public struct Guest: Equatable, Codable, Sendable {
         microphone = try values.decode(Bool.self, forKey: .microphone)
         location = try values.decodeIfPresent(Bool.self, forKey: .location) ?? false
         includeInBackups = try values.decode(Bool.self, forKey: .includeInBackups)
-        motionChoice = try values.decodeIfPresent(Bool.self, forKey: .motionChoice)
         haptics = try values.decodeIfPresent(Bool.self, forKey: .haptics) ?? true
         camera = try values.decodeIfPresent(Bool.self, forKey: .camera) ?? false
-    }
-
-    /// Whether the guest gets the device's motion: the person's choice, else
-    /// on, wherever the device has the sensors to share. It needs no iOS
-    /// permission, and nothing is read until an application in the guest
-    /// uses a sensor (`MotionSampling`). Without sensors it is off, whatever
-    /// was chosen.
-    public func motionSensorsOn(available: Bool) -> Bool {
-        available && (motionChoice ?? true)
     }
 
     public var usedGiB: Double { Double(usedBytes) / Double(Limits.bytesPerGiB) }
