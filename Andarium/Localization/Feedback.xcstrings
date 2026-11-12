@@ -899,7 +899,7 @@
       }
     },
     "Reporting a bug?" : {
-      "comment" : "The title of the same card when no virtual machine runs (the sheet was opened from Info).",
+      "comment" : "The title of the same card when no virtual machine runs (the sheet was opened from Home).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
@@ -1083,7 +1083,7 @@
       }
     },
     "Start the virtual machine." : {
-      "comment" : "Step 1 of the way to a bug report from Info.",
+      "comment" : "Step 1 of the way to a bug report from Home.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
