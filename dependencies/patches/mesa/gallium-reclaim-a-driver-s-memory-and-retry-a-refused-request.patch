@@ -38,11 +38,11 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/gallium/auxiliary/meson.build           |  16 ++
  src/gallium/auxiliary/util/u_reclaim.c      | 130 ++++++++++++++
  src/gallium/auxiliary/util/u_reclaim.h      |  68 ++++++++
- src/gallium/auxiliary/util/u_reclaim_test.c | 184 ++++++++++++++++++++
+ src/gallium/auxiliary/util/u_reclaim_test.c | 183 ++++++++++++++++++++
  src/gallium/auxiliary/util/u_transfer.c     |  33 +++-
  src/gallium/auxiliary/util/u_transfer.h     |  11 ++
  src/gallium/include/pipe/p_screen.h         |   8 +
- 7 files changed, 441 insertions(+), 9 deletions(-)
+ 7 files changed, 440 insertions(+), 9 deletions(-)
  create mode 100644 src/gallium/auxiliary/util/u_reclaim.c
  create mode 100644 src/gallium/auxiliary/util/u_reclaim.h
  create mode 100644 src/gallium/auxiliary/util/u_reclaim_test.c
@@ -293,10 +293,10 @@ index 0000000000000000000000000000000000000000..5cafd59a08a2d308a7f321ae3d2fbb2f
 +#endif
 diff --git a/src/gallium/auxiliary/util/u_reclaim_test.c b/src/gallium/auxiliary/util/u_reclaim_test.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..8696acdfdef1eb4f0b1b895add5d2b83646ce4e0
+index 0000000000000000000000000000000000000000..6caa75b857246344fe1d8f78d1861c55d6f46d6b
 --- /dev/null
 +++ b/src/gallium/auxiliary/util/u_reclaim_test.c
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,183 @@
 +/*
 + * SPDX-License-Identifier: MIT
 + */
@@ -306,6 +306,7 @@ index 0000000000000000000000000000000000000000..8696acdfdef1eb4f0b1b895add5d2b83
 +
 +#include <stdio.h>
 +#include <stdlib.h>
++#include <string.h>
 +
 +#include "pipe/p_context.h"
 +#include "pipe/p_defines.h"
@@ -391,10 +392,8 @@ index 0000000000000000000000000000000000000000..8696acdfdef1eb4f0b1b895add5d2b83
 +static void
 +reset(void)
 +{
-+   const bool signals = true;
-+
-+   fake = (typeof(fake)){0};
-+   fake.fence_signals = signals;
++   memset(&fake, 0, sizeof(fake));
++   fake.fence_signals = true;
 +}
 +
 +int
