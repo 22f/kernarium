@@ -149,14 +149,17 @@ struct RootView: View {
 /// carries two alerts presents only one of them reliably.
 private struct LegacyInstallAlert: ViewModifier {
     @Environment(AppModel.self) private var model
+    /// The alert is taken away for a moment so that it is presented again.
+    @State private var withdrawn = false
 
     func body(content: Content) -> some View {
         content.background {
             Color.clear
                 .accessibilityHidden(true)
+                .task(id: model.legacyInstallQuestion?.id) { await presentUntilShown() }
                 .alert(
                     LegacyInstallWords.title,
-                    isPresented: Binding(get: { model.legacyInstallQuestion != nil }, set: { _ in }),
+                    isPresented: Binding(get: { model.legacyInstallQuestion != nil && !withdrawn }, set: { _ in }),
                     presenting: model.legacyInstallQuestion
                 ) { _ in
                     // Cancel is the alert's default: the bold button, and what Return does.
@@ -167,6 +170,36 @@ private struct LegacyInstallAlert: ViewModifier {
                     Text(LegacyInstallWords.message(for: question.target).keepingTogether)
                 }
         }
+    }
+}
+
+extension LegacyInstallAlert {
+    /// UIKit refuses an alert while a popover (the side keys' tip) or a sheet is
+    /// coming or going, and SwiftUI does not ask again: while the question
+    /// stands and no alert is up, the alert is withdrawn and offered again. An
+    /// alert that is up, whoever's it is, is left alone: UIKit shows ours after it.
+    fileprivate func presentUntilShown() async {
+        guard model.legacyInstallQuestion != nil else { return }
+        for _ in 0..<120 {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard model.legacyInstallQuestion != nil else { return }
+            guard !Self.alertIsUp else { continue }
+            withdrawn = true
+            try? await Task.sleep(for: .milliseconds(100))
+            withdrawn = false
+        }
+    }
+
+    /// Whether a UIKit alert is the topmost presentation of any window now.
+    private static var alertIsUp: Bool {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                var top = window.rootViewController
+                while let next = top?.presentedViewController { top = next }
+                if top is UIAlertController { return true }
+            }
+        }
+        return false
     }
 }
 
