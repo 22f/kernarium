@@ -232,6 +232,26 @@ void testRawNeedsCalibration()
             "48 MP RAW needs the large tier");
 }
 
+// What a live session holds on the host outside the guest's RAM, which the GPU budget gives up (the pool is B less
+// the reserve): derived from the tier's limits, so a larger tier needs more.
+void testHostMemoryReserve()
+{
+    const auto small = cameraHostMemory(CameraTier::small);
+    require(small.capturePools == 4ull * 1920 * 1080 * 3 / 2, "four 1080p NV12 frames");
+    require(small.staging == 1920ull * 1080 * 3 / 2, "one frame");
+    require(small.rawStill == 12'700'000ull * 2 * 3, "the RAW pixels three times: the platform's, the copy, the DNG");
+    require(small.jpegStill == 12'700'000ull / 2 * 3, "three copies of the JPEG");
+    require(small.total() == 12'441'600ull + 3'110'400ull + 76'200'000ull + 19'050'000ull, "the parts add up");
+    require(cameraHostMemoryReserveMiB(CameraTier::small) == 106, "105.7 MiB, rounded up");
+    // The tier every host gets is the small one, whatever its budget, and so is the reserve it holds.
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 106);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 106);
+    const auto large = cameraHostMemory(CameraTier::large);
+    require(large.capturePools == 6ull * 3840 * 2160 * 3 / 2 && large.staging == 3840ull * 2160 * 3 / 2);
+    require(cameraHostMemoryReserveMiB(CameraTier::large) == 441 && large.total() > small.total(),
+            "lifting the cap raises it with the tier");
+}
+
 void testWireFormats()
 {
     for (const auto order : {BayerOrder::rggb, BayerOrder::grbg, BayerOrder::gbrg, BayerOrder::bggr})
@@ -385,6 +405,7 @@ int main()
     testPhoneOrder();
     testOtherHosts();
     testTiers();
+    testHostMemoryReserve();
     testRawNeedsCalibration();
     testWireFormats();
     testQueryPages();

@@ -85,7 +85,7 @@ struct SystemSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                SystemControls(guest: draftBinding, host: model.host)
+                SystemControls(guest: draftBinding, host: model.host, cameraLive: model.cameraMode == .live)
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
                 .padding(.bottom, 24)

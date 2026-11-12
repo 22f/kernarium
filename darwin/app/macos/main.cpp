@@ -1177,11 +1177,26 @@ public:
 		 * without a limit it is the guest's allocation. */
 		const auto plan = uml::emulator::plan_gpu_budget(
 			prepared_.kernel, prepared_.gpu_budget);
-		device_memory_limit_ = plan.budget.bytes;
-		/* The cameras' tier follows the budget within the cap. */
+		/* The pool the GPU gets is the budget less the host-side memory of
+		 * live cameras, which the same limit holds. */
 		camera_tier_ = prepared_.camera_tier.value_or(
 			uml::camera::cameraTierForBudget(plan.budget.bytes));
+		const bool cameras_live =
+			prepared_.camera == CameraSource::synthetic ||
+			prepared_.camera == CameraSource::host;
+		const std::uint64_t camera_reserve = cameras_live ?
+			uml::camera::cameraHostMemoryReserveMiB(camera_tier_) << 20 :
+			0;
+		device_memory_limit_ =
+			uml::platform::gpu_pool_bytes(plan.budget, camera_reserve);
 		if (prepared_.gpu.enabled && !information_only_) {
+			if (cameras_live)
+				std::fprintf(stderr,
+					"uml-darwin: live cameras hold %llu MiB of the "
+					"GPU budget: GPU pool %llu MiB\n",
+					static_cast<unsigned long long>(camera_reserve >> 20),
+					static_cast<unsigned long long>(
+						device_memory_limit_ >> 20));
 			if (plan.budget.short_of_floor)
 				std::fprintf(stderr, "uml-darwin: %s\n",
 					uml::emulator::describe_gpu_budget_shortfall(
@@ -1856,8 +1871,8 @@ private:
 	 * boots, so a restarted guest keeps it. */
 	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;
 	std::uint64_t device_memory_limit_{};
-	/* The cameras' tier: what the GPU budget and the cap give, or the tier
-	 * --camera-tier= states. */
+	/* The cameras' tier: what the GPU budget B and the cap give, or the
+	 * tier --camera-tier= states. */
 	uml::camera::CameraTier camera_tier_{uml::camera::CameraTier::small};
 	std::atomic<bool> stop_requested_{};
 };

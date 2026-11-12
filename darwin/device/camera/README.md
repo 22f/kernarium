@@ -36,6 +36,12 @@ application's statements (the sensor orientation, the rotation that
   (`largestOfferedTier`), so no layout of the large tier or with a 2160p front
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
   exercises them.
+- **Memory.** A live session holds host memory outside the guest's RAM: the
+  capture pools, the device's staging and the transients of a 12 MP RAW still
+  with its DNG and JPEG, 106 MiB at the small tier
+  (`cameraHostMemoryReserveMiB`). The GPU's pool is the budget B less that
+  while the cameras are live and B otherwise, in the runtime, the launcher and
+  the applications' figure alike.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer

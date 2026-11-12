@@ -2328,11 +2328,20 @@ int runtimeRun(
             const auto gpuBudget = planGpuBudget(
                 boot, guestMemoryMiB, guestProcessorCount,
                 request.jitCacheBudget != 0);
-            const std::uint64_t deviceMemoryLimit = gpuBudget.budget.bytes;
+            /* The pool the GPU service gets is the budget less the host-side
+             * memory of a live camera session, which the same limit holds. */
+            std::uint64_t cameraReserve = 0;
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
             /* The cameras' memory tier follows the launch's fixed GPU budget. */
-            request.gpuBudgetBytes = deviceMemoryLimit;
+            request.gpuBudgetBytes = gpuBudget.budget.bytes;
+            if (request.camera.mode == uml::camera::CameraMode::live)
+                cameraReserve = uml::camera::cameraHostMemoryReserveMiB(
+                                    uml::camera::cameraTierForBudget(
+                                        gpuBudget.budget.bytes)) *
+                    mebibyte;
 #endif
+            const std::uint64_t deviceMemoryLimit =
+                uml::platform::gpu_pool_bytes(gpuBudget.budget, cameraReserve);
             if (gpuBudget.budget.short_of_floor) {
                 std::fprintf(
                     stderr,
@@ -2347,8 +2356,15 @@ int runtimeRun(
 #else
             std::printf(
                 "Kernarium: GPU budget %llu MiB of a %llu MiB limit\n",
-                static_cast<unsigned long long>(deviceMemoryLimit >> 20),
+                static_cast<unsigned long long>(
+                    gpuBudget.budget.bytes >> 20),
                 static_cast<unsigned long long>(gpuBudget.process_limit >> 20));
+            if (cameraReserve != 0)
+                std::printf(
+                    "Kernarium: live cameras hold %llu MiB of it: GPU pool "
+                    "%llu MiB\n",
+                    static_cast<unsigned long long>(cameraReserve >> 20),
+                    static_cast<unsigned long long>(deviceMemoryLimit >> 20));
 #endif
             /* The display outlives the guest: the GPU service keeps the view and
              * the frame mirror, and hands each boot its own connection. */

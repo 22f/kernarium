@@ -43,4 +43,49 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
                                      : CameraTierLimits {3840, 2160, 50'000'000, 6};
 }
 
+/* The host-side memory a live session of a tier can hold at its worst, in
+ * bytes, outside the guest's RAM. A live session takes it out of the GPU
+ * budget B (gpu_pool_bytes in platform/gpu_budget.hpp), so the application's
+ * memory limit holds it. Each part is derived from the tier's limits:
+ *  - the capture pools: one NV12 frame of the largest video size for each of
+ *    the tier's buffers, which the platform's capture session holds;
+ *  - the device's staging: one NV12 frame of that size, where a frame is
+ *    cropped, rotated and scaled before it is copied to the guest;
+ *  - the still's transients, for one 12 MP RAW still with its DNG: the RAW
+ *    pixels (2 bytes each) three times, the platform's buffer, the device's
+ *    copy and the DNG that comes with it;
+ *  - and the JPEG that goes with it, three copies of a half byte a pixel
+ *    (the file, the device's copy and the copy that reserves the Exif gap). */
+struct CameraHostMemory {
+    std::uint64_t capturePools {};
+    std::uint64_t staging {};
+    std::uint64_t rawStill {};
+    std::uint64_t jpegStill {};
+
+    [[nodiscard]] constexpr std::uint64_t total() const noexcept
+    {
+        return capturePools + staging + rawStill + jpegStill;
+    }
+};
+
+[[nodiscard]] constexpr CameraHostMemory cameraHostMemory(CameraTier tier) noexcept
+{
+    const CameraTierLimits limits = limitsOf(tier);
+    const std::uint64_t frame = std::uint64_t {limits.maximumVideoWidth} * limits.maximumVideoHeight * 3 / 2;
+    return {
+        .capturePools = frame * limits.buffers,
+        .staging = frame,
+        .rawStill = limits.maximumStillPixels * 2 * 3,
+        .jpegStill = limits.maximumStillPixels / 2 * 3,
+    };
+}
+
+/* The reserve in whole mebibytes, rounded up: the figure the GPU budget gives
+ * up while the cameras are live. */
+[[nodiscard]] constexpr std::uint64_t cameraHostMemoryReserveMiB(CameraTier tier) noexcept
+{
+    constexpr std::uint64_t mebibyte = 1ull << 20;
+    return (cameraHostMemory(tier).total() + mebibyte - 1) / mebibyte;
+}
+
 } // namespace uml::camera

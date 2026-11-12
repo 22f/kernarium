@@ -2,6 +2,7 @@
 
 #import "KernariumRuntimeLoader.h"
 
+#include "../../darwin/device/camera/camera_tiers.hpp"
 #include "../../darwin/platform/apple/os_memory_limit.hpp"
 #include "../../darwin/runtime/guest_memory_budget.hpp"
 
@@ -755,6 +756,14 @@ extern "C" uint32_t kernarium_runtime_loader_gpu_budget_mib(
         guestMemoryMiB,
         guestProcessorCount,
         parameters);
+}
+
+extern "C" uint32_t kernarium_runtime_loader_camera_reserve_mib(
+    uint32_t gpuBudgetMiB)
+{
+    return static_cast<uint32_t>(uml::camera::cameraHostMemoryReserveMiB(
+        uml::camera::cameraTierForBudget(
+            static_cast<uint64_t>(gpuBudgetMiB) << 20)));
 }
 
 extern "C" int kernarium_runtime_loader_set_microphone(int enabled)

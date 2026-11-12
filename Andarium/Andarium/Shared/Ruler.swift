@@ -217,17 +217,21 @@ nonisolated struct HatchPattern: Shape {
 /// with the bound said beneath it. The third is the estimate of the guest's
 /// graphics memory (VRAM) for the chosen memory and vCPUs, which the host
 /// reads from the runtime (`MemoryPolicy.graphicsMemoryMiB`); it is left out
-/// where the host gives none.
+/// where the host gives none. While Camera is on (`cameraLive`) it is the pool
+/// the GPU is given, less what the camera's host-side memory takes out of it.
 struct SystemControls: View {
     @Binding var guest: Guest
     let host: HostDevice
+    var cameraLive = false
 
     var body: some View {
         VStack(spacing: 0) {
             processor
             Divider().padding(.leading, 58)
             memory
-            if let vram = host.memory.graphicsMemoryMiB(forMemory: guest.memoryMiB, vCPUs: guest.cores) {
+            if let vram = host.memory.graphicsMemoryMiB(
+                forMemory: guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraLive)
+            {
                 Divider().padding(.leading, 58)
                 GraphicsMemoryRow(
                     estimateMiB: vram, warns: host.memory.risk(guest.memoryMiB, vCPUs: guest.cores) != .none

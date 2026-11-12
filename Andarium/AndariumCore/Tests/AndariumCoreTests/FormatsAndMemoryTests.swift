@@ -523,6 +523,42 @@ struct MemoryPolicyTests {
         #expect(MemoryPolicy(maximumsMiB: [4096]).graphicsMemoryMiB(forMemory: 2048, vCPUs: 1) == nil)
     }
 
+    @Test func theGraphicsMemoryWhileCameraIsLiveIsTheBudgetLessTheCamerasReserve() {
+        // The runtime's figures: a reserve for every budget (106 MiB at the tier every host gets), asked once each.
+        var reserveAsked = 0
+        let policy = MemoryPolicy(
+            processorCount: 2,
+            bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+            graphicsMemory: { memory, count in
+                // The iPad mini 6's 534 MiB for the default guest and 384 MiB at the floor.
+                memory <= 1536 ? 534 : 384
+            },
+            cameraReserve: { budget in reserveAsked += 1; return 106 }
+        )
+        #expect(reserveAsked == 2 * 57, "once for every budget of the table")
+        // Camera off, or blocked: the budget itself.
+        #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1) == 534)
+        #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: false) == 534)
+        // Camera live: the pool the GPU is given, 428 MiB on an iPad mini 6.
+        #expect(policy.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 428)
+        // At the floor the reserve is taken after the clamp: the pool is below the floor.
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2) == 384)
+        #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 2, cameraLive: true) == 278)
+        // A host that states no reserve leaves the budget as it is, and one without an estimate has none.
+        let plain = MemoryPolicy(
+            processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 }, graphicsMemory: { _, _ in 534 })
+        #expect(plain.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 534)
+        #expect(MemoryPolicy(maximumsMiB: [4096]).graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == nil)
+        // The pool is never negative.
+        let tiny = MemoryPolicy(
+            processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+            graphicsMemory: { _, _ in 100 }, cameraReserve: { _ in 106 })
+        #expect(tiny.graphicsMemoryMiB(forMemory: 1536, vCPUs: 1, cameraLive: true) == 0)
+        // The reserve moves neither the sizes offered nor the default.
+        #expect(policy.maximumMiB(vCPUs: 1) == plain.maximumMiB(vCPUs: 1))
+        #expect(policy.defaultMemoryMiB(vCPUs: 1) == plain.defaultMemoryMiB(vCPUs: 1))
+    }
+
     @Test func theGraphicsWordsSayItIsSeparateAndWhereGamesRunShort() {
         #expect(GraphicsMemoryWarning.separateNote.contains("separate") && GraphicsMemoryWarning.separateNote.contains("RAM"))
         #expect(GraphicsMemoryWarning.note(aboveMiB: 3072) == "Above 3 GiB, games may run out of graphics memory.")
