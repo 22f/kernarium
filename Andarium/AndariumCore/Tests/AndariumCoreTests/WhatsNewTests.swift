@@ -29,10 +29,10 @@ private func release(_ build: Int, _ ids: [String]) -> WhatsNewRelease {
 private let releases = [release(6, ["a", "b", "c"]), release(5, ["d"]), release(4, []), release(7, ["z"])]
 private let all: @Sendable (WhatsNewEntry) -> Bool = { _ in true }
 
-private func host(maximumMiB: Int) -> HostDevice {
+private func host(maximumMiB: Int, hasCompass: Bool = false) -> HostDevice {
     HostDevice(
         name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [maximumMiB]),
-        freeStorageBytes: 40_000_000_000)
+        freeStorageBytes: 40_000_000_000, hasCompass: hasCompass)
 }
 
 struct WhatsNewRulesTests {
@@ -130,6 +130,19 @@ struct WhatsNewRulesTests {
         #expect(!requirement.isMet(by: host(maximumMiB: 4096), vCPUs: 6))
         #expect(requirement.isMet(by: host(maximumMiB: 4608), vCPUs: 6))
         #expect(WhatsNewRequirement(memoryAboveMiB: 4096).isMet(by: host(maximumMiB: 8192), vCPUs: 1))
+    }
+
+    @Test func aRequirementOfACompassIsMetOnlyWhereTheDeviceCanGiveOne() {
+        let requirement = WhatsNewRequirement(compass: true)
+        #expect(requirement.isMet(by: host(maximumMiB: 4096, hasCompass: true), vCPUs: 6))
+        #expect(!requirement.isMet(by: host(maximumMiB: 4096, hasCompass: false), vCPUs: 6))
+        // A device is not given a compass unless it says so.
+        #expect(!requirement.isMet(by: host(maximumMiB: 8192), vCPUs: 6))
+        // Both requirements must hold.
+        let both = WhatsNewRequirement(memoryAboveMiB: 4096, compass: true)
+        #expect(both.isMet(by: host(maximumMiB: 8192, hasCompass: true), vCPUs: 6))
+        #expect(!both.isMet(by: host(maximumMiB: 4096, hasCompass: true), vCPUs: 6))
+        #expect(!both.isMet(by: host(maximumMiB: 8192, hasCompass: false), vCPUs: 6))
     }
 }
 
@@ -247,6 +260,20 @@ struct WhatsNewCatalogTests {
         #expect(throws: (any Error).self) { try decode(notes(entry: entry + #", "place": "home""#)) }
         #expect(throws: (any Error).self) {
             try decode(#"[{"build": 6, "version": "1.0 (6)", "summary": "x", "entries": [{\#(entry)}]}]"#)
+        }
+    }
+
+    @Test func aCompassRequirementDecodesAloneOrWithMemoryAndOnlyAsABoolean() throws {
+        let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
+        let alone = try decode(notes(entry: entry + #", "requirement": {"compass": true}"#))
+        #expect(alone.first?.entries.first?.requirement == WhatsNewRequirement(compass: true))
+        let both = try decode(notes(entry: entry + #", "requirement": {"memoryAboveMiB": 4096, "compass": true}"#))
+        #expect(both.first?.entries.first?.requirement == WhatsNewRequirement(memoryAboveMiB: 4096, compass: true))
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"compass": "yes"}"#))
+        }
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"compass": true, "gyroscope": true}"#))
         }
     }
 
