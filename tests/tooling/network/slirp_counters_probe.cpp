@@ -7,13 +7,15 @@
  * uses (uml_slirp_net_read_counters).
  *
  * The resolver is confined to kDNSServiceInterfaceIndexLocalOnly, which needs
- * no network. A listener on the host's loopback, reached through the gateway,
- * is a connection that is made; the same address with no listener is one that
- * is reset (ECONNREFUSED at once); a connect to port 0 of a documentation
- * address is one SLiRP leaves unanswered. A SYN to port 53 of the name server
- * is answered by the guest forward and is no attempt at all. The classes
- * SLiRP's ICMP errors fall in (unreachable) come from SLiRP itself, in the
- * second part, which feeds the observer the frames of an unmodified SLiRP.
+ * no network. The guest cannot reach the host's loopback through the gateway,
+ * so a connection that is made goes to a listener behind a test guest forward
+ * (a Unix socket the probe listens on); a SYN to the gateway at the port of a
+ * live host listener is one that is unreachable, and the listener hears
+ * nothing; a connect to port 0 of a documentation address is one SLiRP leaves
+ * unanswered. A SYN to port 53 of the name server is answered by the guest
+ * forward and is no attempt at all. The class a reset falls in comes from SLiRP
+ * itself, in the second part, which feeds the observer the frames of an
+ * unmodified SLiRP.
  *
  * The third part checks how the resolver's failures reach the counts. The
  * system resolver does not refuse by policy, die or stay silent on request, so
@@ -35,12 +37,14 @@
 #include <dns_sd.h>
 
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -276,6 +280,66 @@ std::uint16_t unused_loopback_port()
 	return listener.port;
 }
 
+/* The listener behind a test guest forward: a Unix socket in a directory of
+ * the probe's own. */
+struct ForwardTarget final {
+	static constexpr std::uint16_t guest_port = 4242;
+
+	std::string directory;
+	std::string path;
+	int descriptor{-1};
+
+	ForwardTarget()
+	{
+		char name[] = "/tmp/uml-counters-probe-XXXXXX";
+		if (::mkdtemp(name) == nullptr)
+			return;
+		directory = name;
+		path = directory + "/forward";
+		sockaddr_un address{};
+		address.sun_family = AF_UNIX;
+		std::copy(path.begin(), path.end(), address.sun_path);
+		descriptor = ::socket(AF_UNIX, SOCK_STREAM, 0);
+		if (descriptor < 0 ||
+		    ::bind(descriptor, reinterpret_cast<sockaddr *>(&address),
+			   sizeof(address)) != 0 ||
+		    ::listen(descriptor, 4) != 0) {
+			if (descriptor >= 0)
+				::close(descriptor);
+			descriptor = -1;
+		}
+	}
+
+	~ForwardTarget()
+	{
+		if (descriptor >= 0)
+			::close(descriptor);
+		if (!path.empty())
+			(void)::unlink(path.c_str());
+		if (!directory.empty())
+			(void)::rmdir(directory.c_str());
+	}
+
+	ForwardTarget(const ForwardTarget &) = delete;
+	ForwardTarget &operator=(const ForwardTarget &) = delete;
+
+	[[nodiscard]] bool ready() const noexcept { return descriptor >= 0; }
+
+	/* The provider's guest forward to this listener, from the gateway. */
+	void install(uml::network::SlirpProvider &provider) const
+	{
+		provider.add_guest_forward_for_testing(
+			{uml::network::host_alias_address, guest_port, path});
+	}
+};
+
+/* Whether a connection arrived at `descriptor` within `wait_ms`. */
+bool heard_connection(int descriptor, int wait_ms = 150)
+{
+	pollfd entry{descriptor, POLLIN, 0};
+	return ::poll(&entry, 1, wait_ms) > 0;
+}
+
 void expect(const char *label, bool condition,
 	    const NetworkCounts &counts)
 {
@@ -290,6 +354,12 @@ void check_provider()
 	std::array<unsigned char, 6> mac{};
 	unsigned int mtu = 0;
 	provider.set_dns_interface_for_testing(kDNSServiceInterfaceIndexLocalOnly);
+	ForwardTarget target;
+	if (!target.ready()) {
+		fail("forward", "no Unix listener for the test guest forward");
+		return;
+	}
+	target.install(provider);
 	if (provider.open(mac, mtu) != 0) {
 		fail("open", "the provider did not open");
 		return;
@@ -324,18 +394,18 @@ void check_provider()
 		       counts.dhcp_acks == 1,
 	       counts);
 
-	/* TCP made, reset, and unanswered. */
+	/* TCP made, unreachable, and unanswered. */
 	Listener listener;
 	if (listener.port == 0) {
 		fail("listener", "no loopback listener");
 		return;
 	}
 	label = "a connection that is made";
-	(void)guest.send(tcp_frame(guest_ip, gateway, 42000, listener.port, 100,
-				   0, tcp_syn, 65535));
+	(void)guest.send(tcp_frame(guest_ip, gateway, 42000, target.guest_port,
+				   100, 0, tcp_syn, 65535));
 	const auto made = guest.receive([&](const Bytes &frame) {
 		const auto segment = parse_tcp(frame);
-		return segment && segment->source_port == listener.port &&
+		return segment && segment->source_port == target.guest_port &&
 			segment->destination_port == 42000;
 	});
 	if (!made || (parse_tcp(*made)->flags & (tcp_syn | tcp_ack)) !=
@@ -347,21 +417,24 @@ void check_provider()
 		       counts.tcp_reset == 0 && counts.tcp_unanswered() == 0,
 	       counts);
 
-	label = "a connection that is reset";
-	const std::uint16_t closed = unused_loopback_port();
-	(void)guest.send(tcp_frame(guest_ip, gateway, 42001, closed, 200, 0,
+	/* The host's loopback is not the guest's: a live listener behind the
+	 * gateway is unreachable, and hears nothing. */
+	label = "a connection that is unreachable";
+	(void)guest.send(tcp_frame(guest_ip, gateway, 42001, listener.port, 200, 0,
 				   tcp_syn, 65535));
-	const auto reset = guest.receive([&](const Bytes &frame) {
-		const auto segment = parse_tcp(frame);
-		return segment && segment->source_port == closed &&
-			segment->destination_port == 42001;
+	const auto refused = guest.receive([&](const Bytes &frame) {
+		return frame.size() >= 14 + 20 + 8 && frame[23] == IPPROTO_ICMP &&
+			frame[34] == 3;
 	});
-	if (!reset || (parse_tcp(*reset)->flags & tcp_rst) == 0)
-		fail(label, "no reset");
+	if (!refused)
+		fail(label, "no ICMP unreachable");
+	if (heard_connection(listener.descriptor))
+		fail(label, "the host listener took a connection");
 	counts = provider.counters();
 	expect(label,
 	       counts.tcp_attempts == 2 && counts.tcp_established == 1 &&
-		       counts.tcp_reset == 1 && counts.tcp_unanswered() == 0,
+		       counts.tcp_unreachable == 1 && counts.tcp_reset == 0 &&
+		       counts.tcp_unanswered() == 0,
 	       counts);
 
 	/* Port 0 of a documentation address: Darwin refuses it before sending
@@ -379,7 +452,8 @@ void check_provider()
 	counts = provider.counters();
 	expect(label,
 	       counts.tcp_attempts == 3 && counts.tcp_established == 1 &&
-		       counts.tcp_reset == 1 && counts.tcp_unanswered() == 1,
+		       counts.tcp_unreachable == 1 && counts.tcp_reset == 0 &&
+		       counts.tcp_unanswered() == 1,
 	       counts);
 
 	/* DNS over TCP to the name server and to the gateway is answered by the
@@ -403,7 +477,8 @@ void check_provider()
 	counts = provider.counters();
 	expect(label,
 	       counts.tcp_attempts == 3 && counts.tcp_established == 1 &&
-		       counts.tcp_reset == 1 && counts.tcp_unanswered() == 1,
+		       counts.tcp_unreachable == 1 && counts.tcp_reset == 0 &&
+		       counts.tcp_unanswered() == 1,
 	       counts);
 
 	/* DNS: a name in /etc/hosts and a missing one are both answers. */
@@ -432,7 +507,7 @@ void check_provider()
 	    read.dns_answered != 2 || read.dhcp_discovers != 1 ||
 	    read.dhcp_requests != 1 || read.dhcp_acks != 1 ||
 	    read.tcp_attempts != 3 || read.tcp_established != 1 ||
-	    read.tcp_unreachable != 0 || read.tcp_reset != 1)
+	    read.tcp_unreachable != 1 || read.tcp_reset != 0)
 		fail(label, "the counts differ from the provider's");
 	if (uml_slirp_net_read_counters(nullptr, &read) >= 0 ||
 	    uml_slirp_net_read_counters(&provider, nullptr) >= 0)
@@ -457,12 +532,14 @@ struct Rig final {
 	Guest guest{provider};
 	bool opened{};
 
-	Rig()
+	explicit Rig(std::function<void(uml::network::SlirpProvider &)> before = {})
 	{
 		std::array<unsigned char, 6> mac{};
 		unsigned int mtu = 0;
 		provider.set_dns_interface_for_testing(
 			kDNSServiceInterfaceIndexLocalOnly);
+		if (before)
+			before(provider);
 		opened = provider.open(mac, mtu) == 0;
 		if (!opened)
 			fail("open", "the provider did not open");
@@ -693,12 +770,20 @@ bool read_recorded_counts(uml::runtime::SessionNetworkCounts &counts) noexcept
 	return true;
 }
 
-/* A guest that gets its lease and makes one connection and one that is reset,
- * in a session record: the slot says so in words, as Andarium reads them. */
+/* A guest that gets its lease and makes one connection and one that is
+ * unreachable, in a session record: the slot says so in words, as Andarium
+ * reads them. */
 void check_session_record()
 {
 	const char *label = "the session record";
-	Rig rig;
+	ForwardTarget target;
+	if (!target.ready()) {
+		fail(label, "no Unix listener for the test guest forward");
+		return;
+	}
+	Rig rig{[&](uml::network::SlirpProvider &provider) {
+		target.install(provider);
+	}};
 	if (!rig.opened)
 		return;
 	/* The provider counted before the session began: the slot must hold only
@@ -732,18 +817,17 @@ void check_session_record()
 	    }))
 		fail(label, "the guest did not get its lease");
 	Listener listener;
-	const std::uint16_t closed = unused_loopback_port();
-	(void)rig.guest.send(tcp_frame(guest_ip, gateway, 45000, listener.port,
-				       100, 0, tcp_syn, 65535));
+	(void)rig.guest.send(tcp_frame(guest_ip, gateway, 45000,
+				       target.guest_port, 100, 0, tcp_syn, 65535));
 	(void)rig.guest.receive([&](const Bytes &frame) {
 		const auto segment = parse_tcp(frame);
-		return segment && segment->source_port == listener.port;
+		return segment && segment->source_port == target.guest_port;
 	});
-	(void)rig.guest.send(tcp_frame(guest_ip, gateway, 45001, closed, 200, 0,
-				       tcp_syn, 65535));
+	(void)rig.guest.send(tcp_frame(guest_ip, gateway, 45001, listener.port,
+				       200, 0, tcp_syn, 65535));
 	(void)rig.guest.receive([&](const Bytes &frame) {
-		const auto segment = parse_tcp(frame);
-		return segment && segment->source_port == closed;
+		return frame.size() >= 14 + 20 + 8 && frame[23] == IPPROTO_ICMP &&
+			frame[34] == 3;
 	});
 	uml::runtime::checkpoint_session_memory();
 	std::ifstream file{path, std::ios::binary};
@@ -758,7 +842,7 @@ void check_session_record()
 	};
 	if (!slot.starts_with("network 1\n") ||
 	    !has("net-dhcp discovers 1 requests 1 acks 1\n") ||
-	    !has("net-tcp attempts 2 established 1 unreachable 0 reset 1\n") ||
+	    !has("net-tcp attempts 2 established 1 unreachable 1 reset 0\n") ||
 	    !has("net-notice denials 0 now none\n"))
 		fail(label, "the network slot is wrong: " + slot);
 	/* The slot's lines, without the blanks that pad it. */
