@@ -76,6 +76,12 @@ Guest-visible guarantees:
   While the device memory budget is full the host driver can refuse the
   staging buffer of a later upload, which is then dropped without an error, so
   a texture can keep its older pixels until it is written again.
+- A classic resource that is a plain byte buffer, which is R8, one row, and
+  bind flags that name only shared, linear and software or camera use (the
+  JPEG buffer Android allocates through gralloc), has no host storage and no
+  size limit but 1 GiB. Its attached backing is the only copy: a transfer
+  checks its box and backing and moves nothing, a command that names it
+  reports an illegal resource, and it cannot be exported or shown.
 - A texture exported to another context through shared memory is written into
   its segment at the next fence after it is drawn. A read-back into client
   memory that the host driver refuses at a fence leaves the texture the newer

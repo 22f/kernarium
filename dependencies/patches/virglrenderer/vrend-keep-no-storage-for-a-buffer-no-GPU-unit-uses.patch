@@ -1,0 +1,253 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 00:06:24 +0900
+Subject: [PATCH] vrend: keep no storage for a buffer no GPU unit uses
+
+Android's camera framework allocates the output of a JPEG capture
+through gralloc as a BLOB buffer, which minigbm creates as a classic
+2D resource of format R8, as wide as the buffer is long and one row
+high: 18,354,160 bytes for a 12 megapixel camera. Its bind flags name
+no GPU unit, only that it is shared and linear and which software,
+camera or codec flags it carries. check_resource_valid() skips the
+size checks for such a buffer when a gbm allocator is compiled in, so
+that the allocator, not GL, stores it. This host has none, the request
+falls into the 2D texture size test, and the renderer refuses every
+such buffer wider than the largest texture, 16,384 bytes.
+
+The host never reads this buffer. The guest writes it through its own
+mapping of the backing pages and brackets the access with transfers
+to and from the host; another process reads it through a mapping of
+the same pages. The backing is the only storage anyone looks at, so
+the renderer registers the resource and keeps none: no texture, no
+fill, no host memory to bound or to charge to the device memory pool.
+
+The resource is R8, one level, one sample, one row and one layer, with
+no YUV flag, and its bind flags are a subset of shared, linear and the
+allocator's sub-flags. A guest names its size, which is refused above
+1 GiB, and a width of zero is refused as for any texture. Any other
+resource, a texture a GPU unit samples or renders included, keeps every
+check it had.
+
+  - A transfer in either direction keeps the checks of every transfer
+    (the box lies inside the resource, the named pages hold it) and
+    then moves nothing; copying the backing onto itself shifted by the
+    box offset would damage it. A resource without backing is refused
+    as before.
+  - No command can name it. The lookup that commands use does not find
+    it, so a view, a surface, a vertex, index or constant buffer, a
+    copy, a blit and an inline write report an illegal resource, as
+    for an id that does not exist. The transfer path alone looks it up.
+  - It has no texture to describe or to present, no storage size, no
+    cursor image, and no shared-memory segment to export: the export
+    of a texture already requires GL storage.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/virglrenderer.c        |  4 ++
+ src/vrend/vrend_renderer.c | 80 ++++++++++++++++++++++++++++++++++++--
+ src/vrend/vrend_renderer.h |  8 ++++
+ 3 files changed, 89 insertions(+), 3 deletions(-)
+
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index 4e612c56f7b4bad89c13a43a1dc54fbc91f6beb5..e147c89fc625dd9cab95df521fce5e8b46c8186d 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -567,6 +567,10 @@ static int virgl_renderer_resource_get_info_common(int res_handle,
+       return 0;
+ 
+ #ifdef ENABLE_VREND
++   /* There is no texture to describe: nothing can scan it out or sample it. */
++   if (vrend_renderer_resource_hostless(res->pipe_resource))
++      return EINVAL;
++
+    vrend_renderer_resource_get_info(res->pipe_resource,
+                                     (struct vrend_renderer_resource_info *)info);
+ 
+diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
+index 0630ff3ca27502045c43c144a0a9001df121ea12..5062f8a210b7d1c9e832a77402f626e31e8717c4 100644
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -3773,7 +3773,10 @@ void vrend_set_index_buffer(struct vrend_context *ctx,
+    ctx->sub->ib.offset = offset;
+    if (res_handle) {
+       res = vrend_renderer_ctx_res_lookup(ctx, res_handle);
+-      if ((struct vrend_resource *)ctx->sub->ib.buffer != res) {
++      /* A resource with no storage reads as none, which an unset index
++       * buffer would take for the one asked for: check it by its own. */
++      if ((struct vrend_resource *)ctx->sub->ib.buffer != res ||
++          (!res && vrend_renderer_ctx_res_lookup_any(ctx, res_handle))) {
+          if (!res || !res->gl_id) {
+             vrend_resource_reference((struct vrend_resource **)&ctx->sub->ib.buffer, NULL);
+             vrend_report_context_error(ctx, VIRGL_ERROR_CTX_ILLEGAL_RESOURCE, res_handle);
+@@ -8819,6 +8822,36 @@ static int vrend_packed_yuv_describe(const struct vrend_renderer_resource_create
+    return 0;
+ }
+ 
++/* The bind flags of a resource no GPU unit uses: the guest's allocator names
++ * the way the GPU uses a buffer in the bind flags, and a buffer it accesses
++ * with the CPU, a camera or a video codec names none of them, only that it is
++ * shared (VIRGL_BIND_SHARED), linear and which of those it is for (the
++ * VIRGL_BIND_SHARED_SUBFLAGS). */
++#define VREND_HOSTLESS_BIND_MASK (VIRGL_BIND_SHARED | VIRGL_BIND_LINEAR | \
++                                  VIRGL_BIND_SHARED_SUBFLAGS)
++
++/* The most bytes of one such buffer the renderer registers. It stores none of
++ * them, so this bounds only what a guest may name: the camera framework's
++ * largest JPEG is tens of MiB. */
++#define VREND_HOSTLESS_MAX_BYTES (1u << 30)
++
++/* A gralloc BLOB buffer: R8, one row as wide as the buffer is long, that no
++ * GPU unit uses. The guest allocates it as a classic 2D resource of that
++ * width, writes it through its own mapping of the backing pages and brackets
++ * the access with transfers; the bytes are never read by the host, so the
++ * renderer keeps no storage for the resource, and a texture limit of the GL
++ * driver does not apply to it. */
++static bool vrend_args_hostless(const struct vrend_renderer_resource_create_args *args)
++{
++   return args->target == PIPE_TEXTURE_2D &&
++          args->format == VIRGL_FORMAT_R8_UNORM &&
++          args->height == 1 && args->depth <= 1 && args->array_size <= 1 &&
++          args->last_level == 0 && args->nr_samples <= 1 &&
++          !(args->flags & (VIRGL_RESOURCE_FLAG_YUV_BIPLANAR |
++                           VIRGL_RESOURCE_FLAG_YUV_TRIPLANAR)) &&
++          args->bind != 0 && !(args->bind & ~VREND_HOSTLESS_BIND_MASK);
++}
++
+ static int check_resource_valid(const struct vrend_renderer_resource_create_args *args,
+                                 char errmsg[256])
+ {
+@@ -8980,6 +9013,16 @@ static int check_resource_valid(const struct vrend_renderer_resource_create_args
+       }
+ #endif
+ 
++      if (vrend_args_hostless(args)) {
++         if (args->width > VREND_HOSTLESS_MAX_BYTES) {
++            snprintf(errmsg, 256, "A buffer no GPU unit uses is %u bytes, "
++                     "more than the %u bytes accepted",
++                     args->width, VREND_HOSTLESS_MAX_BYTES);
++            return -1;
++         }
++         return 0;
++      }
++
+       if (args->target == PIPE_TEXTURE_2D ||
+           args->target == PIPE_TEXTURE_RECT ||
+           args->target == PIPE_TEXTURE_CUBE ||
+@@ -9718,6 +9761,7 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)
+ 
+    vrend_renderer_resource_copy_args(args, gr);
+    gr->storage_bits = VREND_STORAGE_GUEST_MEMORY;
++   gr->hostless = vrend_args_hostless(args);
+ 
+    if (args->flags & VIRGL_RESOURCE_Y_0_TOP)
+       gr->y_0_top = true;
+@@ -9955,7 +9999,10 @@ vrend_renderer_resource_create_once(const struct vrend_renderer_resource_create_
+    if (gr->packed_yuv && gr->packed_yuv->biplanar && !image_oes)
+       gr->packed_yuv->planes_only = true;
+ 
+-   if (args->target == PIPE_BUFFER) {
++   if (gr->hostless) {
++      /* The guest's backing pages are all the storage it has. */
++      ret = 0;
++   } else if (args->target == PIPE_BUFFER) {
+       ret = vrend_resource_alloc_buffer(gr, args->flags);
+    } else if (gr->packed_yuv && gr->packed_yuv->planes_only) {
+       ret = vrend_packed_yuv_alloc_name(gr);
+@@ -11920,6 +11967,11 @@ static int vrend_renderer_transfer_internal(struct vrend_context *ctx,
+       return EINVAL;
+    }
+ 
++   /* The pages the transfer names are the resource's only storage: what the
++    * guest wrote there is what it reads back. */
++   if (res->hostless)
++      return 0;
++
+    switch (transfer_mode) {
+    case VIRGL_TRANSFER_TO_HOST:
+       return vrend_renderer_transfer_write_iov(ctx, res, iov, num_iovs, info);
+@@ -11939,7 +11991,7 @@ int vrend_renderer_transfer_iov(struct vrend_context *ctx,
+ {
+    struct vrend_resource *res;
+ 
+-   res = vrend_renderer_ctx_res_lookup(ctx, dst_handle);
++   res = vrend_renderer_ctx_res_lookup_any(ctx, dst_handle);
+    if (!res) {
+       vrend_report_context_error(ctx, VIRGL_ERROR_CTX_ILLEGAL_RESOURCE, dst_handle);
+       return EINVAL;
+@@ -15029,6 +15081,9 @@ void *vrend_renderer_get_cursor_contents(struct pipe_resource *pres,
+    int size;
+    unsigned h;
+ 
++   if (res->hostless)
++      return NULL;
++
+    if (res->base.width0 > 128 || res->base.height0 > 128)
+       return NULL;
+ 
+@@ -15181,7 +15236,18 @@ void vrend_renderer_detach_res_ctx(struct vrend_context *ctx,
+    vrend_ctx_resource_remove(ctx->res_hash, res->res_id);
+ }
+ 
++/* The resource a command names. A resource with no host storage is not one
++ * any command can use: it has no texture to draw, sample or copy. */
+ struct vrend_resource *vrend_renderer_ctx_res_lookup(struct vrend_context *ctx, int res_handle)
++{
++   struct vrend_resource *res = vrend_ctx_resource_lookup(ctx->res_hash, res_handle);
++
++   return res && res->hostless ? NULL : res;
++}
++
++/* The resource the context has attached, whatever its storage: the lookup of
++ * a transfer, which moves no host storage for a resource that has none. */
++struct vrend_resource *vrend_renderer_ctx_res_lookup_any(struct vrend_context *ctx, int res_handle)
+ {
+    return vrend_ctx_resource_lookup(ctx->res_hash, res_handle);
+ }
+@@ -15195,6 +15261,11 @@ void vrend_context_set_debug_flags(struct vrend_context *ctx, const char *flagst
+    }
+ }
+ 
++bool vrend_renderer_resource_hostless(struct pipe_resource *pres)
++{
++   return ((struct vrend_resource *)pres)->hostless;
++}
++
+ void vrend_renderer_resource_get_info(struct pipe_resource *pres,
+                                       struct vrend_renderer_resource_info *info)
+ {
+@@ -15215,6 +15286,9 @@ void vrend_renderer_resource_get_info(struct pipe_resource *pres,
+ uint64_t
+ vrend_renderer_resource_storage_size(struct pipe_resource *pres)
+ {
++   if (((struct vrend_resource *)pres)->hostless)
++      return 0;
++
+    if (pres->target == PIPE_BUFFER)
+       return pres->width0;
+ 
+diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
+index 31496144de44ddd935b198eab280724404aee6fd..5db9442d5df8cf3a7af92df5820d23699a88855f 100644
+--- a/src/vrend/vrend_renderer.h
++++ b/src/vrend/vrend_renderer.h
+@@ -93,6 +93,11 @@ struct vrend_resource {
+    GLuint tbo_tex_id;/* tbos have two ids to track */
+    bool y_0_top;
+ 
++   /* A buffer no GPU unit uses, which the renderer keeps no storage for: the
++    * guest's backing pages are its contents, a transfer moves nothing, and no
++    * command can name it. gl_id is 0. */
++   bool hostless;
++
+    /* used for keeping track of multisampled renderbuffer for
+     * GL_EXT_multisampled_render_to_texture. */
+    GLuint rbo_id;
+@@ -580,6 +585,9 @@ void vrend_check_texture_storage(struct vrend_format_table *table);
+ void vrend_check_texture_multisample(struct vrend_format_table *table,
+                                      bool enable_storage);
+ 
++struct vrend_resource *vrend_renderer_ctx_res_lookup_any(struct vrend_context *ctx,
++                                                         int res_handle);
++bool vrend_renderer_resource_hostless(struct pipe_resource *pres);
+ struct vrend_resource *vrend_renderer_ctx_res_lookup(struct vrend_context *ctx,
+                                                      int res_handle);
+ 
