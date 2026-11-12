@@ -175,8 +175,12 @@ struct HomeMenuTests {
         defer { lease.give() }
         try await Task.sleep(for: .seconds(1))
         #expect(model.homeMenuItems == [.info])
-        #expect(!ToolbarProbe.barItems(under: controller).isEmpty, "the toolbar still shows Info")
-        #expect(ToolbarProbe.barItems(under: controller).allSatisfy { $0.menu == nil }, "no menu holds Info alone")
+        let items = ToolbarProbe.barItems(under: controller)
+        #expect(items.allSatisfy { $0.menu == nil }, "no menu holds Info alone")
+        #expect(items.count == 1, "the bar holds Info and nothing else: \(ToolbarProbe.describe(under: controller))")
+        #expect(
+            items.filter { $0.title == "Info" || $0.accessibilityLabel == "Info" }.count == 1,
+            "the one item reads Info: \(ToolbarProbe.describe(under: controller))")
     }
 
     @Test func sendFeedbackOpensOverHomeFromTheMenu() async throws {

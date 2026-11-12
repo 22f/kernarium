@@ -40,7 +40,12 @@ struct HomePlainInfoTests {
         let shown = await eventually { !ToolbarProbe.barItems(under: controller).isEmpty }
         try #require(shown, "the toolbar shows Info")
         try await Task.sleep(for: .seconds(1))
-        #expect(ToolbarProbe.barItems(under: controller).allSatisfy { $0.menu == nil }, "Info is a plain button, not a menu")
+        let items = ToolbarProbe.barItems(under: controller)
+        #expect(items.allSatisfy { $0.menu == nil }, "Info is a plain button, not a menu")
+        #expect(items.count == 1, "the bar holds Info and nothing else: \(ToolbarProbe.describe(under: controller))")
+        #expect(
+            items.filter { $0.title == "Info" || $0.accessibilityLabel == "Info" }.count == 1,
+            "the one item reads Info: \(ToolbarProbe.describe(under: controller))")
     }
 }
 
