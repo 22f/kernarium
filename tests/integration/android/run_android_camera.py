@@ -647,9 +647,10 @@ AUTO_LAYOUT = "auto"
 
 
 def auto_layout(profile: str, taught: bool) -> str:
-    """The layout the launcher composes for the profile's cameras: the profile's own, without RAW until
-    a Bayer still has taught the colour data (the first session of a calibration directory)."""
-    name = DEFAULT_LAYOUTS[profile]
+    """The layout the launcher composes for the profile's cameras: the profile's own at the large tier (the
+    launcher's default graphics budget is over 1 GiB), without RAW until a Bayer still has taught the colour
+    data (the first session of a calibration directory)."""
+    name = DEFAULT_LAYOUTS[profile].replace("-small", "-large")
     if taught:
         return name
     plain = "-".join(part for part in name.split("-") if part != "raw")

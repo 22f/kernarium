@@ -256,7 +256,8 @@ class LauncherTests(unittest.TestCase):
     def test_the_composed_layout_has_raw_only_once_a_still_taught_the_colour_data(self) -> None:
         self.assertEqual(runner.auto_layout("phone", taught=False), "bf-large-flash-manual-concurrent-front2160")
         self.assertEqual(runner.auto_layout("phone", taught=True), runner.DEFAULT_LAYOUTS["phone"])
-        self.assertEqual(runner.auto_layout("tablet", taught=False), "bf-small-flash-manual")
+        self.assertEqual(runner.auto_layout("tablet", taught=False), "bf-large-flash-manual")
+        self.assertEqual(runner.auto_layout("tablet", taught=True), "bf-large-flash-manual-raw")
         self.assertEqual(runner.auto_layout("laptop", taught=False), "front")
         for profile in runner.PROFILE_CAMERAS:
             for taught in (False, True):
