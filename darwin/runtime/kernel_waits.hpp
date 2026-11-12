@@ -25,7 +25,10 @@ namespace uml::runtime {
  *
  * An idle wait of a vCPU carrier is also reported to the activity record the
  * watch sleeps by (runtime/carrier_activity.hpp), and so is the call that names
- * a carrier, pthread_setname_np.
+ * a carrier, pthread_setname_np. The time limit a kevent reports is its
+ * relative nanosecond timer or its timeout, whichever ends first, none when
+ * the change list adds no timer; a timer of any other shape is not read, and
+ * its carrier stays counted outside its wait.
  *
  * recvmsg is marked by the resource ledger (kernel_resources.hpp), write
  * (send) by the session record (session_record.hpp) and the commit of guest
