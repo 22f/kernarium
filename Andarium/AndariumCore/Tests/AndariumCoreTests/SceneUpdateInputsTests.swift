@@ -16,13 +16,13 @@ struct SceneUpdateInputsTests {
 
     private func inputs(
         scene: Token? = nil, driver: Token?? = nil, size: CGSize = CGSize(width: 393, height: 852),
-        screen: CGSize = CGSize(width: 393, height: 852), orientation: Int = 1, locked: Bool = false,
+        screen: CGSize = CGSize(width: 393, height: 852), orientation: Int = 1,
         phase: Phase = .running(.normal)
     ) -> SceneUpdateInputs {
         SceneUpdateInputs(
             scene: ObjectIdentifier(scene ?? self.scene),
             driver: (driver ?? self.driver).map(ObjectIdentifier.init), sceneSize: size, screenSize: screen,
-            interfaceOrientation: orientation, interfaceLocked: locked, phase: phase)
+            interfaceOrientation: orientation, phase: phase)
     }
 
     @Test func inputsThatAreTheSameAreEqual() {
@@ -41,7 +41,6 @@ struct SceneUpdateInputsTests {
             ("screen width", inputs(screen: CGSize(width: 430, height: 852))),
             ("screen height", inputs(screen: CGSize(width: 393, height: 932))),
             ("interface orientation", inputs(orientation: 4)),
-            ("interface lock", inputs(locked: true)),
             ("phase", inputs(phase: .home)),
             ("mode of the phase", inputs(phase: .running(.recovery))),
         ]

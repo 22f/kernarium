@@ -61,7 +61,7 @@ struct MotionOverVsockTests {
             try #require(moved, "No physical tilt and rotation was observed within ten minutes")
             print("MOTION: real accelerometer and gyroscope movement passed")
             if ProcessInfo.processInfo.environment["ANDARIUM_ROTATION_VISUAL"] == "1" {
-                try await RotationOverVsockTests().checkSceneTransitions(model: model, operations: operations)
+                try await RotationOverVsockTests().checkInterfaceTurns(model: model, operations: operations)
             }
         }
     }

@@ -190,8 +190,9 @@ final class AppModel {
     /// The display options to keep; nil where the launch stated the
     /// resolution, so what the person chose stays stored.
     var displayOptionsToKeep: DisplayOptions? { launchScale != nil ? nil : displayOptions }
-    /// The host window owns display rotation until iPadOS grants the
-    /// full-screen session's orientation lock. Never a saved guest setting.
+    /// The host owns the guest's display rotation: in an iPad session the guest
+    /// is held at rotation zero and its display follows the scene. The scene's
+    /// root sets it (`SessionOrientationPolicy`). Never a saved guest setting.
     var hostDrivesGuestRotation = false
 
     var sessionPreset = SessionPreset()

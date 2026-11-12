@@ -765,11 +765,12 @@ final class LiveRuntime: RuntimeDriver {
 
     private func updateGuestRotation() {
         let policy = rotationPolicy
-        // A new full-screen session mounts the virtual device to the
-        // orientation now locked by UIKit and keeps that frame until the host
-        // owns rotation; while the host does, the guest is drawn upright in
-        // the window and the mount follows the window's orientation. Never
-        // remap per sensor sample.
+        // Where the guest owns rotation (an iPhone, which is portrait-only) a
+        // new period mounts the virtual device to the orientation UIKit holds
+        // and keeps that frame; where the host does (an iPad session, in a
+        // window or full screen) the guest is drawn upright in the scene and
+        // the mount follows the scene's orientation. Never remap per sensor
+        // sample.
         if motionMount.update(policy: policy, interface: interfaceMotionAxes) { motion.restart() }
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()

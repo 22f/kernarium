@@ -384,7 +384,9 @@ positions, the plug order, no software keyboard, a sheet's text field taking
 the keys while it is open and a sheet without one taking none from the guest,
 the pointer's hover, clicks, drag and scroll, "Use the pointer as touch" (the
 click is a touch of the touchscreen with it on, the mouse's without it), and a
-guest that never registers its mouse, whose pointer stays the touchscreen's. The
+guest that never registers its mouse, whose pointer stays the touchscreen's.
+`InterfaceRotationUITests` turns the Simulator through the four orientations in
+a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock.
@@ -445,8 +447,11 @@ Window layout follows iPadOS windowing, which only a device has. Whenever the
 guest view's layout changes, check on an iPad in Full Screen Apps, Windowed
 Apps and Stage Manager, switching Multitasking under the running application in
 both directions: the view must move at once, resize the guest display
-(`wm size`), keep touch coordinates mapped and show no lost GPU backend.
-Restore Full Screen Apps before releasing the lease.
+(`wm size`), keep touch coordinates mapped and show no lost GPU backend. In
+each mode also turn the iPad through its four orientations in a session: the
+interface and the guest's display follow, the last frame keeps its proportions
+meanwhile, and a game that asks for one orientation is letterboxed in the
+other. Restore Full Screen Apps before releasing the lease.
 
 ### Background lifecycle (device only)
 
