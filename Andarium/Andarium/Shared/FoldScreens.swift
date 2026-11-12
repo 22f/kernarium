@@ -80,10 +80,10 @@ private struct OnCardHalf: ViewModifier {
 }
 
 extension View {
-    /// On a folding display, puts the view in a scroll view that scrolls only
-    /// when it is taller than the space it is given, which a half can be at an
-    /// accessibility size; the view keeps its place otherwise. A device without
-    /// a hinge keeps the view it had.
+    /// While the device is bent, puts the view in a scroll view that scrolls
+    /// only when it is taller than the space it is given, which a half can be
+    /// at an accessibility size; the view keeps its place otherwise. Flat, on
+    /// the cover and on a display with no hinge it keeps the view it had.
     func scrollsWhenTall() -> some View { modifier(ScrollsWhenTall()) }
 }
 
@@ -91,7 +91,7 @@ private struct ScrollsWhenTall: ViewModifier {
     @Environment(AppModel.self) private var model: AppModel?
 
     func body(content: Content) -> some View {
-        if model?.fold != nil {
+        if model?.fold?.pose.spreads == true {
             GeometryReader { geo in
                 ScrollView {
                     content.frame(maxWidth: .infinity, minHeight: geo.size.height)

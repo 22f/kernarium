@@ -448,7 +448,7 @@ struct WelcomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        // On a folding display a half can be shorter than the column at an
+        // While the device is bent a half can be shorter than the column at an
         // accessibility size: it scrolls only then.
         column
             .scrollsWhenTall()

@@ -597,6 +597,20 @@ struct FoldSessionHostingTests {
         }
     }
 
+    /// Welcome scrolls when taller than its place only while the device is
+    /// bent, where a half can be shorter than the column (the end screen has
+    /// the same modifier); flat and on the cover it is what a display with no
+    /// hinge shows.
+    @Test(arguments: Pose.allCases)
+    func welcomeIsInAScrollViewOnlyWhileBent(_ pose: Pose) async throws {
+        let shown = try await welcome(on: pose)
+        #expect(shown.scrolls == pose.reading.pose.spreads, "\(pose): Welcome scrolls: \(shown.scrolls)")
+        if pose == .uprightFlat {
+            let plain = try await welcome(on: pose, plain: true)
+            #expect(!plain.scrolls, "with no hinge Welcome scrolls")
+        }
+    }
+
     /// Home's Start, as a screen reads it: the bar's button (not Start in
     /// recovery), on `pose` or, when `plain`, on a display with no hinge. The
     /// rig is ended before it returns, for the window has one holder at a time.
