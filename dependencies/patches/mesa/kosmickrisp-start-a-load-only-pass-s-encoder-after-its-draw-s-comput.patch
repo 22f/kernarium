@@ -87,19 +87,19 @@ no encoder behaves as it does.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- docs/drivers/kosmickrisp/workarounds.rst |  40 ++++++
+ docs/drivers/kosmickrisp/workarounds.rst |  56 +++++++++
  src/kosmickrisp/libkk/kk_geometry.cl     |  21 +++-
  src/kosmickrisp/vulkan/kk_cmd_buffer.c   |  64 +++++++++-
  src/kosmickrisp/vulkan/kk_cmd_buffer.h   |  23 +++-
  src/kosmickrisp/vulkan/kk_cmd_draw.c     | 154 +++++++++++++++++++++--
  src/kosmickrisp/vulkan/kk_query_pool.c   |   6 +
- 6 files changed, 289 insertions(+), 19 deletions(-)
+ 6 files changed, 305 insertions(+), 19 deletions(-)
 
 diff --git a/docs/drivers/kosmickrisp/workarounds.rst b/docs/drivers/kosmickrisp/workarounds.rst
-index de77d672211eafd60665deccd1f9c8bbab741420..ef6a0d9590a0291d07c8a3215572373deb58bab9 100644
+index de77d672211eafd60665deccd1f9c8bbab741420..8c666a683e79b2ee19053b5bb1dc3256d955064e 100644
 --- a/docs/drivers/kosmickrisp/workarounds.rst
 +++ b/docs/drivers/kosmickrisp/workarounds.rst
-@@ -49,6 +49,46 @@ info on what was updated.
+@@ -49,6 +49,62 @@ info on what was updated.
  Workarounds
  ===========
  
@@ -134,14 +134,30 @@ index de77d672211eafd60665deccd1f9c8bbab741420..ef6a0d9590a0291d07c8a3215572373d
 +
 +The workaround tests the overflow of the multiplications of that block with
 +``mul_hi``, whose result is zero exactly when the product fits in 32 bits
-+(a zero factor included), and so does without the four 32-bit divisions the
-+checks compile to. In the same load windows, the intact kernel failed in 5 of
-+696 iterations and the kernel with these multiplications in none of 559. The
-+mechanism inside the compiler is inferred, not shown, and an unrelated edit
-+may move the defect to another kernel.
++(a zero factor included), and so does without the divisions the five checks
++compile to: five checks, four distinct divisors, so four 32-bit divisions.
++Two programs were measured, in the same load windows as the intact kernel.
++A hand-patched build of the kernel with these multiplications failed in none
++of 559 iterations, against 5 of 696 for the intact kernel; its Apple binary
++is not the shipped one (its constant program is 3648 bytes, the shipped one's
++3712). The shipped kernel failed in none of 680 iterations, against 3 of 680
++for the intact kernel as the control. The mechanism inside the compiler is
++inferred, not shown, and an unrelated edit may move the defect to another
++kernel.
++
++To qualify removing the workaround, first show that the harness reproduces
++the failure in its load window: run the raster-state test's gs and tes-gs
++stages with the late encoder start on against the intact kernel (the
++multiplications as ``poly_u32_checked_mul``) on macOS 27.0.1 and an Apple7
++GPU, where 3 to 5 iterations in 700 fail. Then run the intact kernel on the OS
++and GPU under test. A remaining defect fails at least once in 600 iterations
++with about 93 percent probability at that rate, so 600 clean iterations
++qualify the removal for that combination and one failure keeps the
++workaround.
 +
 +| Log:
-+| 2026-11-12: Workaround implemented
++| 2026-11-12: Workaround implemented, with the figures of the shipped kernel
++  and the condition for removing it
 +
  KK_WORKAROUND_19
  ----------------

@@ -398,6 +398,38 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY)
 
+    # A new multisampled texture, which the renderer's clear reaches, and a
+    # new compressed texture, which no clear reaches, show nothing a released
+    # one held.
+    uml_add_gpu_unit_test(gpu-texture-zero-fill-special
+        uml_gpu_texture_zero_fill_special_tests
+        host_gl_texture_zero_fill_special_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY)
+
+    # The zero fill of a new compressed texture has several steps that the
+    # host driver can refuse room for. A refused step fails the creation with
+    # ENOMEM, which the renderer retries after giving back what it can, and
+    # no texture is left partly written.
+    uml_add_gpu_unit_test(gpu-compressed-zero-refusal
+        uml_gpu_compressed_zero_refusal_tests
+        host_gl_compressed_zero_refusal_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY)
+
+    # A gralloc BLOB buffer no GPU unit uses, such as a camera's JPEG output,
+    # is created at any size within the renderer's bound without host storage,
+    # keeps the bytes the guest wrote through the transfers, and is no resource
+    # a command can name.
+    uml_add_gpu_unit_test(gpu-hostless-buffer
+        uml_gpu_hostless_buffer_tests
+        host_gl_hostless_buffer_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY)
+
     # The OpenGL path stays within the host GPU's fixed budget: a texture past
     # it is refused at creation with ENOMEM, the host never holds more than the
     # budget, and the renderer stores new textures once the guest has released
@@ -448,6 +480,15 @@ if(TARGET uml_gpu_service)
     uml_add_gpu_unit_test(gpu-host-gl-upload-refusal
         uml_gpu_host_gl_upload_refusal_tests
         host_gl_upload_refusal_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY TIMEOUT 240)
+
+    # A texture shared with another context is written into its segment by a
+    # read-back; one the full budget refuses is tried again at the next fence.
+    uml_add_gpu_unit_test(gpu-host-gl-shm-export-refusal
+        uml_gpu_host_gl_shm_export_refusal_tests
+        host_gl_shm_export_refusal_tests.cpp
         LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY TIMEOUT 240)
@@ -616,7 +657,9 @@ if(TARGET uml_gpu_service)
     # A host without a usable GL stack or renderer skips these with status 77.
     set_tests_properties(
         gpu-transfer-context-error gpu-blob-copy-transfer
-        gpu-texture-zero-fill gpu-scanout-caps gpu-import-bounds
+        gpu-texture-zero-fill gpu-texture-zero-fill-special
+        gpu-compressed-zero-refusal gpu-hostless-buffer gpu-scanout-caps
+        gpu-import-bounds
         gpu-resource-metal-texture gpu-cross-context-readback
         gpu-depth-format-advertisement gpu-stencil-only-target
         gpu-line-loop-statistics gpu-statistics-availability
@@ -626,6 +669,7 @@ if(TARGET uml_gpu_service)
         gpu-host-gl-device-memory-budget gpu-host-gl-allocation-burst
         gpu-host-gl-surface-and-command-storage
         gpu-host-gl-reclaim-retry gpu-host-imported-memory
+        gpu-host-gl-shm-export-refusal
         PROPERTIES SKIP_RETURN_CODE 77)
 
     # The renderer and the same-process render server share one fence table.

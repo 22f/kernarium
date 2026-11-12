@@ -140,7 +140,7 @@ struct SessionSettingsSheet: View {
     private var diagnostics: some View {
         Section("Diagnostics") {
             #if FEEDBACK_MAIL
-            if model.feedbackAddress != nil { SendFeedbackEntrance(place: .settings) }
+            if model.feedbackAddress != nil { SendFeedbackEntrance() }
             #endif
             Button {
                 dismiss()
@@ -367,6 +367,9 @@ extension View {
             SessionSettingsSheet(large: large)
                 .environment(model)
                 .statusBarHidden(true)
+                // On a turned inner display the sheet rises to the fold and
+                // lets touches through to the guest above it.
+                .foldSheet(model, reachesBehind: true)
         }
     }
 }

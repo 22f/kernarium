@@ -112,6 +112,15 @@ struct LaunchOverridesTests {
         #expect(!launch([.stats: "0"]).isEmpty)
     }
 
+    @Test func aLaunchMayStateThatTheGuestFollowsTheDevicesOrientation() {
+        #expect(launch([:]).followsDeviceOrientation == nil)
+        #expect(launch([.followsOrientation: "1"]).followsDeviceOrientation == true)
+        #expect(launch([.followsOrientation: "0"]).followsDeviceOrientation == false)
+        #expect(launch([.followsOrientation: "yes"]).followsDeviceOrientation == nil)
+        // A launch that states it is a harness's.
+        #expect(!launch([.followsOrientation: "1"]).isEmpty)
+    }
+
     @Test func isolatedInstanceNamesCannotEscapeTheirDirectory() {
         #expect(launch([.instance: "armeabi-legacy_1"]).instance == "armeabi-legacy_1")
         for name in ["", ".", "..", "../Guest", "/tmp/guest", "a/b", "a b", "游戏", String(repeating: "a", count: 65)] {

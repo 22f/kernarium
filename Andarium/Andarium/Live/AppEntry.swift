@@ -134,6 +134,10 @@ struct AppEntry {
             guest: guest, host: host, system: system, capabilities: .device,
             createRequirementBytes: storage.createRequirementBytes
         )
+        // An iPhone's guest follows the device's orientation; a harness launch
+        // may state it for another device (an App Store build states nothing).
+        model.followsDeviceOrientation = launch.followsDeviceOrientation
+            ?? (UIDevice.current.userInterfaceIdiom == .phone)
         #if !APP_STORE && !targetEnvironment(simulator)
         // A development build on a device can run the guest on the JIT engine
         // when a debugger prepares its memory.

@@ -12,7 +12,9 @@ import UIKit
 /// guest host-driven in an iPad session whatever is presented) and deferred
 /// edges, and the built bundle's portrait-only iPhone declaration. Only a
 /// device shows how the system answers the swipes (docs/testing.md, "Edge
-/// gestures").
+/// gestures"). The scene reads as one that does not fold: a folding
+/// display's inner display rotates the guest as an iPad does, and
+/// `FoldSessionHostingTests` has that rule.
 @MainActor
 @Suite(.serialized)
 struct SessionOrientationHostingTests {
@@ -40,6 +42,7 @@ struct SessionOrientationHostingTests {
         defer { lease.give() }
         let scene = lease.scene
         let controller = AndariumHostingController(rootView: Color.black, model: model)
+        controller.foldReader.stub = { nil }
         lease.window.rootViewController = controller
         let phone = UIDevice.current.userInterfaceIdiom == .phone
         #expect(controller.supportedInterfaceOrientations == (phone ? .portrait : .all))
@@ -59,6 +62,26 @@ struct SessionOrientationHostingTests {
         #expect(!controller.prefersInterfaceOrientationLocked)
     }
 
+    /// The guest follows the device's orientation on an iPhone (whose interface stays
+    /// portrait), and a launch can ask the same of any device: the interface is then
+    /// portrait-only and the guest its own to rotate, as on an iPhone.
+    @Test func theGuestFollowsTheDeviceOnAnIPhoneAndALaunchCanAskItOfAnyDevice() async throws {
+        let model = AppEntry.fromArguments().makeModel()
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        #expect(model.followsDeviceOrientation == phone)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        model.followsDeviceOrientation = true
+        let controller = AndariumHostingController(rootView: Color.black, model: model)
+        lease.window.rootViewController = controller
+        #expect(controller.supportedInterfaceOrientations == .portrait)
+        for phase in [Phase.booting(.normal), .running(.normal)] {
+            model.phase = phase
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(!model.hostDrivesGuestRotation, "\(phase)")
+        }
+    }
+
     /// Whatever a session presents (the side keys' tip is a popover, Settings
     /// a sheet, a notice an alert) leaves the policy as it was. The scene root
     /// once asked for an interface lock, which UIKit answered with
@@ -72,6 +95,7 @@ struct SessionOrientationHostingTests {
         defer { lease.give() }
         let scene = lease.scene
         let controller = AndariumHostingController(rootView: PresentingRoot(toggles: toggles), model: model)
+        controller.foldReader.stub = { nil }
         lease.window.rootViewController = controller
         let phone = UIDevice.current.userInterfaceIdiom == .phone
         model.phase = .running(.normal)
@@ -139,6 +163,7 @@ struct SessionOrientationHostingTests {
         defer { lease.give() }
         let scene = lease.scene
         let controller = AndariumHostingController(rootView: Color.black, model: model)
+        controller.foldReader.stub = { nil }
         lease.window.rootViewController = controller
         // Outside a run the root keeps SwiftUI's preference, which never
         // takes the top or the bottom edge from the system.
@@ -174,6 +199,7 @@ struct SessionOrientationHostingTests {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = AndariumHostingController(rootView: Color.black, model: model)
+        controller.foldReader.stub = { nil }
         lease.window.rootViewController = controller
         #expect(await eventually { driver.geometryChanges > 0 })
         // Let the first layouts settle, then report a storm of geometry
