@@ -41,6 +41,19 @@ struct TipJarStoreKitTests {
 
     private final class BundleMarker {}
 
+    /// The session's storefront arrives asynchronously, and the first request on a fresh
+    /// Simulator can precede it and get nothing; the tests start once the store serves the four
+    /// products. The wait is bounded.
+    private func serving() async throws {
+        let deadline = ContinuousClock.now + .seconds(30)
+        while ContinuousClock.now < deadline {
+            if let found = try? await Product.products(for: Self.identifiers), found.count == Self.identifiers.count { return }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        Issue.record("the test session never served the four products")
+        throw CancellationError()
+    }
+
     private func eventually(_ condition: () async -> Bool) async -> Bool {
         let deadline = ContinuousClock.now + .seconds(20)
         while ContinuousClock.now < deadline {
@@ -62,6 +75,7 @@ struct TipJarStoreKitTests {
     }
 
     @Test func theStoreAnswersForTheFourProductsWithItsOwnPrices() async throws {
+        try await serving()
         let jar = TipJarModel(products: products, store: .live)
         jar.start()
         #expect(await eventually { jar.phase != .loading })
@@ -72,6 +86,7 @@ struct TipJarStoreKitTests {
     }
 
     @Test func aPurchaseIsFinishedAndThanksAndNothingIsLeftToDeliver() async throws {
+        try await serving()
         let jar = TipJarModel(products: products, store: .live)
         jar.start()
         #expect(await eventually { jar.phase == .loaded })
@@ -90,6 +105,7 @@ struct TipJarStoreKitTests {
     }
 
     @Test func aPurchaseThatTheStoreFailsShowsTheStoresMessageAndLeavesTheTiers() async throws {
+        try await serving()
         session.failTransactionsEnabled = true
         let jar = TipJarModel(products: products, store: .live)
         jar.start()
@@ -106,6 +122,7 @@ struct TipJarStoreKitTests {
     }
 
     @Test func askToBuyWaitsForApprovalAndTheListenerFinishesItWhenItArrives() async throws {
+        try await serving()
         session.askToBuyEnabled = true
         let listener = TipJarUpdates.listen(.live)
         defer { listener.cancel() }
@@ -125,6 +142,7 @@ struct TipJarStoreKitTests {
     }
 
     @Test func aTransactionLeftUnfinishedIsFinishedAtLaunch() async throws {
+        try await serving()
         // A purchase made outside the app, which nobody finished. The application's own
         // listener, running since its launch in this hosted run, may finish it before the test
         // looks, so what is checked is the end: nothing is left, and the purchase happened.
@@ -136,6 +154,7 @@ struct TipJarStoreKitTests {
     }
 
     @Test func purchasesTheDeviceMayNotMakeAreSaidBeforeAnyPurchase() async throws {
+        try await serving()
         // The live answer is the system's; the test environment allows purchases.
         #expect(TipJarStoreServices.live.canMakePayments())
         // The model dims the tiers and refuses a purchase when the answer is no.

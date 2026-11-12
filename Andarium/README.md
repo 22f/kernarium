@@ -225,10 +225,12 @@ A tip is voluntary and unlocks nothing: every feature is free either way, and
 nothing about a tip is remembered, counted or shown outside the sheet, which
 says only thanks and then only Done. There is no prompt, badge or banner; the
 one entrance is the item in [Home's toolbar menu](#home-toolbar-menu), offered
-once a virtual machine is set up. The words never use "donate", "plan" or
-"subscribe" and name no amount of tokens, and `scripts/check-tip-words.py`
-(`andarium-tip-words`) rejects those words in every language of the `TipJar`
-string table; each tier's price is the store's own.
+once a virtual machine is set up, and its icon is the system symbol
+`cup.and.heat.waves`, which also sits beside the sheet's title. The words never
+use "donate", "plan" or "subscribe" and name no amount of tokens, and
+`scripts/check-tip-words.py` (`andarium-tip-words`) rejects those words in
+every language of the `TipJar` string table; each tier's price is the store's
+own.
 
 The feature is compiled in, under the `TIP_JAR` condition, only in an AppStore
 build whose ignored `Config/TipJar.local.xcconfig` (from
@@ -260,11 +262,15 @@ privacy manifest declares nothing for it.
 ### Home toolbar menu
 
 When Send feedback or Buy me tokens is compiled in, Home's toolbar holds one
-menu instead of the Info button: Info, then Send feedback, then Buy me tokens,
-each present only when its own feature is (`Shared/HomeMenu.swift`; Buy me
-tokens also needs a virtual machine). Without either feature, or with only
-Info to offer, Info stays the plain button and the build holds no menu code
-that names a feature.
+menu in place of the Info button: it keeps Info's glyph and accessibility
+label, so the toolbar looks as it does without a menu, and holds Info, a
+separator, then Send feedback, then Buy me tokens, each present only when its
+own feature is (`Shared/HomeMenu.swift`). Welcome has the menu too, so Send
+feedback is reachable before a virtual machine is set up; Buy me tokens needs
+one. Without either feature, or with only Info to offer, Info stays the plain
+button and the build holds no menu code that names a feature. A system menu
+drops its item icons at accessibility text sizes, so the tip's icon is then
+only in its sheet's title.
 
 ## Model and storage
 

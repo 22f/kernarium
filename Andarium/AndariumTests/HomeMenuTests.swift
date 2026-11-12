@@ -56,9 +56,12 @@ struct HomeMenuTests {
         #expect(model(feedback: true, tips: true).homeMenuItems == [.info, .sendFeedback, .buyMeTokens])
     }
 
-    @Test func withoutAVirtualMachineBuyMeTokensIsNotThereAndSendFeedbackStays() {
-        #expect(model(guest: false, feedback: true, tips: true).homeMenuItems == [.info, .sendFeedback])
-        #expect(model(guest: false, feedback: false, tips: true).homeMenuItems == [.info])
+    /// Welcome, before a virtual machine is set up: Send feedback is there, Buy me tokens never is.
+    @Test func onWelcomeTheMenuHoldsInfoAndSendFeedbackAndNeverBuyMeTokens() {
+        for tips in [true, false] {
+            #expect(model(guest: false, feedback: true, tips: tips).homeMenuItems == [.info, .sendFeedback])
+            #expect(model(guest: false, feedback: false, tips: tips).homeMenuItems == [.info])
+        }
     }
     #elseif FEEDBACK_MAIL
     @Test func theMenuHoldsSendFeedbackWhereItsReceiverIsConfigured() {
@@ -106,8 +109,8 @@ struct HomeMenuTests {
         return (controller, lease)
     }
 
-    /// SwiftUI hands UIKit a deferred menu whose items exist only when it opens, so the
-    /// toolbar's contents are read from the model above; here the bar holds exactly one menu.
+    /// The bar holds one menu button, which keeps Info's own accessibility label, in place of
+    /// the Info button.
     @Test func theToolbarHoldsOneMenuInPlaceOfTheInfoButton() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
@@ -120,7 +123,25 @@ struct HomeMenuTests {
         let items = ToolbarProbe.barItems(under: controller)
         #expect(items.filter { $0.menu != nil }.count == 1, "one menu, not one per feature")
         #expect(items.count == 1, "Info is in the menu, not beside it")
+        #expect(items.first?.title == "Info" || items.first?.accessibilityLabel == "Info", "it reads Info: \(ToolbarProbe.describe(under: controller))")
         #expect(model.homeMenuItems.first == .info)
+    }
+
+    /// What VoiceOver finds in the navigation bar: buttons labelled Info (the bar's button and
+    /// the control inside it), which are the menu's control (a hint on a toolbar menu never
+    /// reaches it, so the label carries the meaning).
+    @Test func voiceOverFindsTheMenuAsTheInfoButton() async throws {
+        let model = model()
+        let (controller, lease) = try await host(model)
+        defer { lease.give() }
+        let shown = await eventually {
+            ToolbarProbe.barItems(under: controller).contains { $0.menu != nil }
+        }
+        try #require(shown, "the toolbar shows a menu")
+        try await Task.sleep(for: .milliseconds(500))
+        let top = ToolbarProbe.elements(in: lease.window)
+        let buttons = top.filter { $0.traits.contains(.button) && $0.top < 100 }
+        #expect(!buttons.isEmpty && buttons.allSatisfy { $0.label == "Info" }, "the bar: \(top.map(\.description))")
     }
 
     #if FEEDBACK_MAIL && TIP_JAR
