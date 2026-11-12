@@ -412,14 +412,6 @@ namespace uml::platform {
 namespace {
 
 
-// What the system's pressure leaves of the rate a camera was asked for. The
-// pressure observer reads and writes it on any thread.
-struct PressureThrottle {
-    std::atomic<std::uint32_t> requestedRate {0};
-    // The most frames a second the pressure allows; zero is no limit.
-    std::atomic<std::uint32_t> cap {0};
-};
-
 // The format a camera runs in and what its choice stands on: the device format,
 // its facts (equal to what discovery listed) and the rates the guest is offered.
 struct Anchor {
@@ -438,7 +430,10 @@ struct RunningCamera {
 #if TARGET_OS_IOS
     UMLPressureObserver* pressure {};
 #endif
-    std::shared_ptr<PressureThrottle> throttle {std::make_shared<PressureThrottle>()};
+    // What the system's pressure leaves of a running stream's rate: made when the
+    // stream starts, ended when it stops or its session does. The observer's
+    // handler and the work it queues hold it themselves.
+    std::shared_ptr<PressureWatch> watch;
     bool video {};
     CameraSettings settings;
     // What the stream was asked for, which the anchor covers.
@@ -453,24 +448,16 @@ struct RunningCamera {
 };
 
 // The rate a stream runs at while the system's pressure caps it, and how it is
-// programmed on the anchor (rateSettingFor).
-struct Programmed {
-    std::uint32_t rate {};
-    RateSetting setting;
-};
-
-std::optional<Programmed> programmedFor(const Anchor& anchor, std::uint32_t requested, std::uint32_t pressureCap)
+// programmed on the anchor (programmedRate).
+std::optional<ProgrammedRate> programmedFor(const Anchor& anchor, std::uint32_t requested, std::uint32_t pressureCap)
 {
-    const std::uint32_t rate = throttledRate(anchor.rates, requested, pressureCap);
-    if (rate == 0) return std::nullopt;
-    const auto setting = rateSettingFor(anchor.facts, rate);
-    if (!setting) return std::nullopt;
-    return Programmed {rate, *setting};
+    return programmedRate(anchor.facts, anchor.rates, requested, pressureCap);
 }
 
-[[maybe_unused]] std::optional<Programmed> programmedFor(const Anchor& anchor, const PressureThrottle& throttle)
+// The cap the system's pressure puts on a camera's stream now.
+std::uint32_t pressureCapOf(const RunningCamera& running)
 {
-    return programmedFor(anchor, throttle.requestedRate, throttle.cap);
+    return running.watch ? running.watch->cap() : 0;
 }
 
 // What a device holds of its frame durations and the format they belong to, as
@@ -518,7 +505,7 @@ bool putBackDurations(AVCaptureDevice* device, const HeldDurations& held)
 // (setting it again would revert the device's focus and exposure points), and,
 // for a stream, the frame durations the rate programs. False when the device
 // refuses.
-bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional<Programmed>& rate)
+bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional<ProgrammedRate>& rate)
 {
     NSError* error = nil;
     if (![device lockForConfiguration:&error]) return false;
@@ -940,7 +927,14 @@ public:
         }
         interrupted_ = resumed_ = failed_ = started_ = nil;
         AVCaptureSession* session = session_;
-        onQueue([session] {
+        // The pressure watches end first, inside the queue and before it is
+        // drained for the last time: nothing a notification queued behind this
+        // programs a device afterwards.
+        onQueue([&, session] {
+            for (auto& [camera, running] : cameras_) {
+                (void)camera;
+                endPressureWatch(running);
+            }
             if (session.running) [session stopRunning];
         });
         // Turn a torch off: a session that ends must not leave a light on.
@@ -957,10 +951,6 @@ public:
         {
             std::lock_guard lock(photoMutex_);
             photos_.clear();
-        }
-        for (auto& [camera, running] : cameras_) {
-            (void)camera;
-            endPressureWatch(running);
         }
         cameras_.clear();
         session_ = nil;
@@ -1135,9 +1125,9 @@ private:
             refuse(camera, Refusal::notJoinable);
             return false;
         }
-        std::optional<Programmed> rate;
+        std::optional<ProgrammedRate> rate;
         if (video) {
-            rate = programmedFor(*anchor, frameRate, running.throttle->cap);
+            rate = programmedFor(*anchor, frameRate, pressureCapOf(running));
             if (!rate) {
                 refuse(camera, Refusal::raised, "the anchor takes no rate near " + std::to_string(frameRate));
                 return false;
@@ -1303,8 +1293,7 @@ private:
             running.width = width;
             running.height = height;
             running.frameRate = frameRate;
-            running.throttle->requestedRate = frameRate;
-            beginPressureWatch(entry, running, anchors_[camera]);
+            beginPressureWatch(entry, running, anchors_[camera], frameRate);
         }
         refusals_.reset(camera);
         // A format change reverts some settings of the device: put them back.
@@ -1335,7 +1324,7 @@ private:
         if (rateChanges)
             steps.setDurations = [&] {
                 return guarded(camera, [&] {
-                    const auto rate = programmedFor(*anchor, frameRate, running.throttle->cap);
+                    const auto rate = programmedFor(*anchor, frameRate, pressureCapOf(running));
                     return rate && activate(entry.device, *anchor, rate);
                 });
             };
@@ -1358,7 +1347,7 @@ private:
         running.width = width;
         running.height = height;
         running.frameRate = frameRate;
-        running.throttle->requestedRate = frameRate;
+        if (running.watch) running.watch->request(frameRate);
         refusals_.reset(camera);
         return true;
     }
@@ -1385,7 +1374,7 @@ private:
             const Entry& entry = entries_[camera];
             [session_ beginConfiguration];
             const bool ok = guarded(camera, [&] {
-                if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, running.throttle->cap) : std::nullopt))
+                if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, pressureCapOf(running)) : std::nullopt))
                     return false;
                 if (running.videoOutput != nil) running.videoOutput.videoSettings = videoSettingsOf(anchor->facts, running.width, running.height);
                 if (running.photoOutput != nil)
@@ -1489,13 +1478,19 @@ private:
     // The system's pressure on a camera lowers the rate it runs at, as Apple
     // advises (heat that goes on rising ends in the session's interruption);
     // the capture's client sees fewer frames, and the interruption itself
-    // arrives as an event of its own.
-    void beginPressureWatch(const Entry& entry, RunningCamera& running, const std::shared_ptr<const Anchor>& anchor)
+    // arrives as an event of its own. The handler and the work it queues hold
+    // the watch, the device and the anchor themselves (copied into the blocks
+    // from locals: a block that named a parameter or a member by reference would
+    // reach what the session may have freed by the time it runs), and the work
+    // does nothing once the watch has ended.
+    void beginPressureWatch(const Entry& entry, RunningCamera& running, std::shared_ptr<const Anchor> anchor, std::uint32_t frameRate)
     {
+        if (running.watch) return;
+        auto watch = std::make_shared<PressureWatch>(anchor->facts, anchor->rates);
+        watch->request(frameRate);
+        running.watch = watch;
 #if TARGET_OS_IOS
-        if (running.pressure != nil) return;
         AVCaptureDevice* device = entry.device;
-        auto throttle = running.throttle;
         dispatch_queue_t queue = queue_;
         running.pressure = [[UMLPressureObserver alloc] initWithDevice:device
                                                                handler:^(AVCaptureSystemPressureLevel level) {
@@ -1504,28 +1499,26 @@ private:
             else if ([level isEqualToString:AVCaptureSystemPressureLevelCritical] ||
                      [level isEqualToString:AVCaptureSystemPressureLevelShutdown])
                 cap = 15;
-            if (throttle->cap.exchange(cap) == cap) return;
+            if (!watch->pressure(cap)) return;
             // The frame durations alone: the device is in its anchor already.
             dispatch_async(queue, ^{
-                (void)activate(device, *anchor, programmedFor(*anchor, *throttle));
+                if (const auto rate = watch->programmed()) (void)activate(device, *anchor, rate);
             });
         }];
 #else
         (void)entry;
-        (void)running;
-        (void)anchor;
 #endif
     }
 
+    // Nothing queued by the observer programs the device afterwards.
     static void endPressureWatch(RunningCamera& running)
     {
+        if (running.watch) running.watch->end();
+        running.watch.reset();
 #if TARGET_OS_IOS
         [running.pressure invalidate];
         running.pressure = nil;
-#else
-        (void)running;
 #endif
-        running.throttle->cap = 0;
     }
 
     // A still needs the anchor, the input and a photo output: the camera joins

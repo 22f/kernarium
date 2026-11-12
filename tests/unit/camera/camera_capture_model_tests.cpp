@@ -7,10 +7,14 @@
 #include "photo_dimensions.hpp"
 #include "require.hpp"
 
+#include <Block.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <tuple>
@@ -717,6 +721,103 @@ void aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldDurationsOnARefusal()
 }
 
 // ---------------------------------------------------------------------------
+// Pressure
+// ---------------------------------------------------------------------------
+
+// R1 (recheck5): the pressure observer's handler and the work it queues for the session's queue hold what they use.
+// The session's queue is drained when the session ends, but a notification that arrives during the drain queues its
+// work behind it, to run after the session, its anchors and its running cameras are gone. This is the glue's shape in
+// the glue's own medium, Objective-C blocks: the owner `session` (RunningCamera::watch), the observer's `handler` and
+// the queued work. `begin` takes the watch by value, so the blocks copy it from a local; a handler that named a
+// reference parameter (the old `const std::shared_ptr<const Anchor>&`, which was the session's element) would read
+// freed memory when the late work runs, which AddressSanitizer reports.
+struct PressureRig {
+    using Handler = void (^)(std::uint32_t);
+    using Work = void (^)();
+    std::unique_ptr<std::shared_ptr<PressureWatch>> session;
+    std::vector<Work> queue;                 // the session's queue
+    std::vector<ProgrammedRate> programmed;  // what reached the device
+    Handler handler {};
+
+    explicit PressureRig(const VideoFormatFacts& facts)
+        : session(std::make_unique<std::shared_ptr<PressureWatch>>(std::make_shared<PressureWatch>(facts, offeredRatesOf(facts, videoRateCap))))
+    {
+        (*session)->request(30);
+        begin(*session);
+    }
+    ~PressureRig()
+    {
+        drain();
+        if (handler) Block_release(handler);
+    }
+    PressureRig(const PressureRig&) = delete;
+    PressureRig& operator=(const PressureRig&) = delete;
+
+    void begin(std::shared_ptr<PressureWatch> watch)
+    {
+        PressureRig* const self = this;
+        handler = Block_copy(^(std::uint32_t cap) {
+            if (!watch->pressure(cap)) return;
+            self->queue.push_back(Block_copy(^{
+                if (const auto rate = watch->programmed()) self->programmed.push_back(*rate);
+            }));
+        });
+    }
+    void drain()
+    {
+        auto work = std::move(queue);
+        queue.clear();
+        for (auto item : work) {
+            item();
+            Block_release(item);
+        }
+    }
+};
+
+void aPressureNotificationIsAppliedWhileTheStreamRunsAndNeverAfterIt()
+{
+    const VideoFormatFacts facts = fmt(1920, 1440, {{4032, 3024}}, {{1, 60}});
+    {
+        PressureRig rig(facts);
+        rig.handler(20);
+        rig.drain();
+        require(rig.programmed.size() == 1 && rig.programmed.back().rate == 20, "serious pressure caps the stream at 20 fps");
+        rig.handler(20);
+        require(rig.queue.empty(), "the same cap again changes nothing and queues nothing");
+        rig.handler(15);
+        rig.handler(0);
+        rig.drain();
+        require(rig.programmed.size() == 3 && rig.programmed[1].rate == 30 && rig.programmed[2].rate == 30,
+                "each change is programmed from the cap the work finds when it runs: both found the pressure gone");
+        rig.handler(15);
+        rig.drain();
+        require(rig.programmed.size() == 4 && rig.programmed.back().rate == 15, "and 15 fps under critical pressure");
+    }
+    {
+        // The notification that arrives during the session's final drain: its work runs after the session is gone.
+        PressureRig rig(facts);
+        rig.handler(15);
+        require(rig.queue.size() == 1, "the work is queued behind the session's drain");
+        (*rig.session)->end();  // stop() ends the watches inside the queue...
+        rig.session->reset();    // ...and the session lets go of its own (the anchors_ element, null from now on)
+        rig.drain();             // the late work runs now: through a reference to that element it would find null
+        rig.session.reset();     // and the session's storage goes
+        require(rig.programmed.empty(), "it programs nothing: the stream is over");
+        rig.handler(20);
+        require(rig.queue.empty(), "and a notification after the end queues nothing");
+    }
+    {
+        // Ended before a cap change that was already queued, with the session still there.
+        PressureRig rig(facts);
+        rig.handler(20);
+        (*rig.session)->end();
+        require(!(*rig.session)->live() && (*rig.session)->cap() == 0 && !(*rig.session)->programmed().has_value(), "an ended watch programs nothing");
+        rig.drain();
+        require(rig.programmed.empty(), "so the queued work does nothing");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
 
@@ -1053,6 +1154,7 @@ int main()
     aSessionOverItsBudgetRemovesWhatTheJoinAdded();
     aRefusedStreamOnACameraInTheSessionPutsItsDurationsBack();
     aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldDurationsOnARefusal();
+    aPressureNotificationIsAppliedWhileTheStreamRunsAndNeverAfterIt();
     aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges();
     everyGeneratedTableHoldsTheInvariants();
     return 0;

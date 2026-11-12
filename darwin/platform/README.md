@@ -158,7 +158,9 @@ interface to the wire.
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at
   critical), as Apple advises, to the largest rate the camera offers below the
-  cap (`throttledRate`), before the session is interrupted. A runtime
+  cap (`throttledRate`), before the session is interrupted; the work a
+  pressure notification queues holds what it uses (`PressureWatch`) and does
+  nothing once the stream or the session has ended. A runtime
   error is restarted once: the restart ends with a `resumed` event, and an
   error before that ends the episode with `failed`, so that the client closes
   the session and tries again later.

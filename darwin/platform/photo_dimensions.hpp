@@ -16,6 +16,7 @@
 
 #include "camera.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -188,6 +189,50 @@ struct RateSetting {
 // request and the cap, else the slowest offered. Zero when nothing is offered.
 [[nodiscard]] std::uint32_t throttledRate(std::span<const WholeRates> offered, std::uint32_t requested,
                                           std::uint32_t pressureCap) noexcept;
+
+// A rate as programmed on a format: the whole rate and how the span sets it.
+struct ProgrammedRate {
+    std::uint32_t rate {};
+    RateSetting setting;
+    friend bool operator==(const ProgrammedRate&, const ProgrammedRate&) = default;
+};
+
+// What a stream asked for at `requested` frames a second runs at under the
+// pressure cap (throttledRate, from the format's offered rates) and how that
+// rate is programmed (rateSettingFor); nothing when no offered rate can be.
+[[nodiscard]] std::optional<ProgrammedRate> programmedRate(const VideoFormatFacts& format, std::span<const WholeRates> offered,
+                                                           std::uint32_t requested, std::uint32_t pressureCap);
+
+// What the system's pressure leaves of a running stream's rate. The pressure
+// observer (any thread) and the session's queue share one, and both hold it by
+// shared ownership: it owns the facts the rate is programmed from, so a
+// notification that comes after its session has gone finds them alive, and
+// `end()` makes whatever is still queued program nothing.
+class PressureWatch {
+public:
+    PressureWatch(VideoFormatFacts format, std::vector<WholeRates> offered);
+
+    // The rate the guest asked for.
+    void request(std::uint32_t rate) noexcept;
+    [[nodiscard]] std::uint32_t requested() const noexcept;
+    // The most frames a second the system's pressure allows; zero is no limit.
+    [[nodiscard]] std::uint32_t cap() const noexcept;
+    // The system now allows `cap`: whether that changed the cap of a live watch,
+    // which means the rate is to be programmed again.
+    [[nodiscard]] bool pressure(std::uint32_t cap) noexcept;
+    // The rate to program now; nothing once the watch has ended.
+    [[nodiscard]] std::optional<ProgrammedRate> programmed() const;
+    [[nodiscard]] bool live() const noexcept;
+    // The stream is over or its session is: nothing is programmed afterwards.
+    void end() noexcept;
+
+private:
+    const VideoFormatFacts format_;
+    const std::vector<WholeRates> offered_;
+    std::atomic<std::uint32_t> requested_ {0};
+    std::atomic<std::uint32_t> cap_ {0};
+    std::atomic<bool> live_ {true};
+};
 
 // ---------------------------------------------------------------------------
 // The anchor and the offer

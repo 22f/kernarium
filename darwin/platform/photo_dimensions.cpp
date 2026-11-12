@@ -242,6 +242,58 @@ std::uint32_t throttledRate(std::span<const WholeRates> offered, std::uint32_t r
     return best != 0 ? best : slowest;
 }
 
+std::optional<ProgrammedRate> programmedRate(const VideoFormatFacts& format, std::span<const WholeRates> offered,
+                                             std::uint32_t requested, std::uint32_t pressureCap)
+{
+    const std::uint32_t rate = throttledRate(offered, requested, pressureCap);
+    if (rate == 0) return std::nullopt;
+    const auto setting = rateSettingFor(format, rate);
+    if (!setting) return std::nullopt;
+    return ProgrammedRate {rate, *setting};
+}
+
+PressureWatch::PressureWatch(VideoFormatFacts format, std::vector<WholeRates> offered)
+    : format_(std::move(format)), offered_(std::move(offered))
+{
+}
+
+void PressureWatch::request(std::uint32_t rate) noexcept
+{
+    requested_ = rate;
+}
+
+std::uint32_t PressureWatch::requested() const noexcept
+{
+    return requested_;
+}
+
+std::uint32_t PressureWatch::cap() const noexcept
+{
+    return cap_;
+}
+
+bool PressureWatch::pressure(std::uint32_t cap) noexcept
+{
+    return cap_.exchange(cap) != cap && live_;
+}
+
+std::optional<ProgrammedRate> PressureWatch::programmed() const
+{
+    if (!live_) return std::nullopt;
+    return programmedRate(format_, offered_, requested_, cap_);
+}
+
+bool PressureWatch::live() const noexcept
+{
+    return live_;
+}
+
+void PressureWatch::end() noexcept
+{
+    live_ = false;
+    cap_ = 0;
+}
+
 namespace {
 
 // The sizes a format's video is cut from and how far they reach: those of the
