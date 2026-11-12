@@ -1311,6 +1311,11 @@ final class AppModel {
                 switch ending {
                 case .installed: return
                 case .cancelled: throw CancellationError()
+                // Today only a second too-old refusal ends this way, and
+                // `ApkInstall` words one of those as an ordinary failure
+                // itself, so these are the same words. A later route to
+                // `.failed` for another cause needs words of its own: these
+                // would name the wrong one.
                 case .failed: throw AdbFailure(message: PackageInstallMessages.message(forCode: PackageInstallAnswer.tooOldCode))
                 }
             }

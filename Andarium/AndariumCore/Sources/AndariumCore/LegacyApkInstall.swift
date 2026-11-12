@@ -81,8 +81,8 @@ public enum PackageInstallAnswer: Equatable, Sendable {
             return
         }
         let code = name.hasPrefix("INSTALL_") ? String(name.dropFirst("INSTALL_".count)) : name
-        // The same code answers an instant app that targets too low, which
-        // the flag does not lift.
+        // Defensive: a line that names an instant app is not this refusal,
+        // and is left to the ordinary words.
         guard code == Self.tooOldCode, !line.lowercased().contains("instant app") else {
             self = .refused(code: code)
             return
