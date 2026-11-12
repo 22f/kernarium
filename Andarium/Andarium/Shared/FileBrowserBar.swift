@@ -202,7 +202,7 @@ struct FilesBar: View {
         .buttonBorderShape(.capsule)
     }
 
-    private func actionLabel(_ title: String, symbol: String) -> some View {
+    private func actionLabel(_ title: LocalizedStringKey, symbol: String) -> some View {
         Label(title, systemImage: symbol)
             .font(.subheadline.weight(.semibold))
             .labelStyle(.titleAndIcon)
