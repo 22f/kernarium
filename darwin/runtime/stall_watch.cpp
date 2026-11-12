@@ -768,12 +768,15 @@ struct StallWatch::State final {
 				(void)fcntl(descriptor, F_SETFD, FD_CLOEXEC);
 				(void)fcntl(descriptor, F_SETFL, O_NONBLOCK);
 			}
-			const std::lock_guard guard{request_lock};
-			request_write_descriptor = request_pipe[1];
 			request_source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
 				static_cast<uintptr_t>(request_pipe[0]), 0, observer_queue);
 		}
 		if (request_source != nullptr) {
+			/* Asked for from outside only once the read end has a source. */
+			{
+				const std::lock_guard guard{request_lock};
+				request_write_descriptor = request_pipe[1];
+			}
 			dispatch_set_context(request_source, this);
 			dispatch_source_set_event_handler_f(request_source,
 				&State::observe_requested);
@@ -795,6 +798,12 @@ struct StallWatch::State final {
 		/* No notice is running or will start; the observer's queue then ends
 		 * what it has. */
 		thermal->observe(nullptr, nullptr);
+		/* Before the source goes, whose cancel handler closes the read end: a
+		 * request from outside then cannot write to a pipe with no reader. */
+		{
+			const std::lock_guard guard{request_lock};
+			request_write_descriptor = -1;
+		}
 		if (request_source != nullptr) {
 			dispatch_source_cancel(request_source);
 			dispatch_release(request_source);
@@ -812,10 +821,6 @@ struct StallWatch::State final {
 			observer_queue = nullptr;
 		}
 		if (request_pipe[1] >= 0) {
-			{
-				const std::lock_guard guard{request_lock};
-				request_write_descriptor = -1;
-			}
 			(void)close(request_pipe[1]);
 			request_pipe[1] = -1;
 		}
