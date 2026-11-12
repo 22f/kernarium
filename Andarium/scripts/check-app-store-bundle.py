@@ -401,9 +401,11 @@ DEBUG_SYMBOLS = (
     # the Simulator cannot be denied the network, so the preview plays it.
     ("network notice preview", (b"20previewNetworkNotice",)),
     # The Simulator preview's hooks into the Send feedback sheet
-    # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
-    # preview opens the sheet and fills a draft; the application never does.
-    ("send feedback preview", (b"20previewOpensAtLaunch", b"14previewPrepare")),
+    # (SendFeedbackServices.previewOpensAtLaunch, previewPrepare and
+    # previewKeepsConfirmation): the preview opens the sheet, fills a draft and
+    # holds the confirmation; the application never does.
+    ("send feedback preview",
+     (b"20previewOpensAtLaunch", b"14previewPrepare", b"24previewKeepsConfirmation")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.

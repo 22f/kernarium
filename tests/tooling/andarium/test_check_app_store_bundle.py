@@ -75,6 +75,7 @@ DEBUG_SUPPORT = (
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
+    ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV24previewKeepsConfirmationSbvg(void) { return 1; }\n"),
     # The UI tests' probe of the guest's keyboard and mouse: its log, its launch,
     # the recording runtime, and the identifiers of its two elements.
     ("input probe", "int _s8Andarium10InputProbeC6recordyySSF(void) { return 1; }\n"),

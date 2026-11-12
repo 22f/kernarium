@@ -31,6 +31,7 @@ enum FeedbackPreview {
         services.runningSeconds = { _ in 2520 }
         services.previewOpensAtLaunch = opensSheet(screen)
         services.previewPrepare = { feedback in await prepare(screen: screen, feedback: feedback) }
+        services.previewKeepsConfirmation = screen == "feedback-sent"
         model.feedbackServices = services
         guard opensSheet(screen) else { return }
         if overInfo(screen) {
