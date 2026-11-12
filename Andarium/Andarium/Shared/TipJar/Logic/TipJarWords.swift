@@ -55,8 +55,8 @@ nonisolated enum TipJarWords {
         "Waiting for approval", table: "TipJar",
         comment: "Title of the note when a tip waits for a family organiser to approve it (Ask to Buy).")
     static let pendingText = LocalizedStringResource(
-        "This tip needs approval before it completes. You can close this sheet meanwhile.", table: "TipJar",
-        comment: "The note under the waiting title.")
+        "You can close this sheet meanwhile.", table: "TipJar",
+        comment: "The note under the waiting title: the sheet may be closed while the approval is pending.")
     static let failedTitle = LocalizedStringResource(
         "The tip didn\u{2019}t go through", table: "TipJar",
         comment: "Title of the note when a purchase failed; the App Store's own message follows it.")
@@ -80,7 +80,7 @@ nonisolated enum TipJarWords {
     // Controls and VoiceOver.
     static let done = LocalizedStringResource(
         "Done", table: "TipJar",
-        comment: "Button that closes the sheet, in the bar and, after a tip, under the conversation.")
+        comment: "Button under the conversation that closes the sheet after a tip. The close symbol in the bar has no label of ours: the system names it.")
     static let chipHint = LocalizedStringResource(
         "One-time tip", table: "TipJar",
         comment: "VoiceOver hint of each tier button.")

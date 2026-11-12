@@ -147,7 +147,7 @@
       }
     },
     "Done": {
-      "comment": "Button that closes the sheet, in the bar and, after a tip, under the conversation.",
+      "comment": "Button under the conversation that closes the sheet after a tip. The close symbol in the bar has no label of ours: the system names it.",
       "localizations": {
         "en": {
           "stringUnit": {
@@ -436,35 +436,6 @@
         }
       }
     },
-    "This tip needs approval before it completes. You can close this sheet meanwhile.": {
-      "comment": "The note under the waiting title.",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This tip needs approval before it completes. You can close this sheet meanwhile."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "このチップは承認されるまで完了しません。それまでこのシートを閉じても構いません。"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此打赏需要经过批准才会完成。你可以先关闭此页面。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此打賞需要經過核准才會完成。你可以先關閉此頁面。"
-          }
-        }
-      }
-    },
     "Tips aren’t available right now": {
       "comment": "Title of the note when the App Store gave no prices.",
       "localizations": {
@@ -577,6 +548,35 @@
           "stringUnit": {
             "state": "translated",
             "value": "正在等待App Store"
+          }
+        }
+      }
+    },
+    "You can close this sheet meanwhile.": {
+      "comment": "The note under the waiting title.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can close this sheet meanwhile."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "承認を待つあいだ、この画面は閉じても構いません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你可以先关闭此页面。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你可以先關閉此頁面。"
           }
         }
       }
