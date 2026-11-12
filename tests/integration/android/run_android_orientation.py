@@ -12,25 +12,28 @@ overlay/sensors/motion_protocol.hpp and tests/unit/andarium/fixtures/motion-orie
 ``androidboot.kernarium.orientation=1``, which the runner passes as the application does. It boots twice:
 
 - early, a fresh data disk with a host that connects at once and sends a value before system_server has
-  registered the sensor: the image's auto-rotate default; the setup wizard and the launcher turn to that
-  value; with the home screen provisioned, Settings follows each of the four values (no 180 degree turn on a
-  phone) and holds each; with auto-rotate off the display stays and the rotation suggestion button appears,
-  and tapping it turns the display; applications that ask for landscape, sensor landscape, portrait and full
-  sensor are turned as DisplayRotation turns them;
+  registered the sensor (the first frame must not yet say it is in use): the image's auto-rotate default;
+  the setup wizard must follow the sensor and turn to that value; with the home screen provisioned, Settings
+  follows each of the four values (no 180 degree turn on a phone) and holds each; with auto-rotate off the
+  display stays and the rotation suggestion button appears, and tapping it turns the display; applications
+  that ask for landscape, sensor landscape, portrait and full sensor are turned as DisplayRotation turns
+  them;
 - late, no host for a minute: the window manager has registered the sensor and the display stays upright; a
   host that connects late is told the sensor is in use (an "ANC2" frame with bit 2), no value turns nothing,
-  and the first value turns the display; the lock screen keeps the newest value for the unlock; a value said
-  again changes nothing; a value sent with a finger down turns the display when the finger lifts, with no
-  further event from the host; a value sent while the screen is off turns the display once it is on, with
-  the sensor's own memory and with the application's rule of saying it again at activation; a host that
-  drops and connects again is told the same, and a record the guest refuses ends the connection and leaves
-  the guest up. Restarting the framework or the sensors HAL needs root, which a user build does not give.
+  and the first value turns the display; the lock screen (a swipe lock the step turns on) stays upright and
+  the newest value turns the display at unlock; a value said again changes nothing; a value sent with a
+  finger down leaves the display alone until the finger lifts, then turns it with no further event from the
+  host; a value sent while the screen is off turns the display once it is on, the guest having said the
+  sensor idle while off and in use again, with the sensor's own memory and with the application's rule of
+  saying it again at activation; a host that drops and connects again is told the same, and a record the
+  guest refuses ends the connection and leaves the guest up. Restarting the framework or the sensors HAL
+  needs root, which a user build does not give.
 
 ``--expect none`` is a release that does not list the sensor (an older release given the argument, or this
 release without it, ``--no-argument``). The guest sends "ANC1" frames only, lists no orientation sensor, the
 window manager judges the accelerometer, and the runner turns the display with accelerometer records of
-the same four postures (then the same repeat, touch and screen-off steps with a posture streamed until the
-next), which proves the older path is untouched and gives the rotation each posture means.
+the same four postures (then the same repeat, touch, screen-off and lock-screen steps with a posture streamed
+until the next), which proves the older path is untouched and gives the rotation each posture means.
 
 ``--launch-only`` stops each guest once the launch's state is checked (the property, the sensor service's
 list and the sensor's flags, the sub-HAL's log line, no SELinux denial about the property, the judge the window
@@ -87,6 +90,7 @@ ROTATION_SECONDS = 40
 HOLD_SECONDS = 6
 CLOSE_SECONDS = 15
 FRAME_SECONDS = 20
+SEND_SECONDS = 10
 CONTROL_SIZE = 16
 RECORD_SIZE = 20
 ORIENTATION_TYPE = 27
@@ -365,8 +369,10 @@ class Host:
 
     def connect(self) -> None:
         self.close()
+        # A bound on every send: a guest that stops reading fails the step instead of blocking the runner. The
+        # reader treats a timeout as no frame yet.
         connection = socket.create_connection(("127.0.0.1", self.port), timeout=10)
-        connection.settimeout(None)
+        connection.settimeout(SEND_SECONDS)
         with self.condition:
             self.connection = connection
             self.frames = []
@@ -381,7 +387,10 @@ class Host:
         buffer = b""
         try:
             while True:
-                data = connection.recv(256)
+                try:
+                    data = connection.recv(256)
+                except socket.timeout:
+                    continue
                 if not data:
                     break
                 buffer += data
@@ -414,12 +423,14 @@ class Host:
                 self.closed = True
             self.condition.notify_all()
 
-    def wait_frame(self, seconds: float, predicate: Callable[[Control], bool] = lambda frame: True) -> Control | None:
-        """The first frame (of those received since connecting) that satisfies the predicate, or None."""
+    def wait_frame(self, seconds: float, predicate: Callable[[Control], bool] = lambda frame: True,
+                   after: int = 0) -> Control | None:
+        """The first frame that satisfies the predicate, or None. It looks among the frames received since
+        connecting, from index ``after`` on (``len(host.frames)`` when a step began)."""
         deadline = time.monotonic() + seconds
         with self.condition:
             while True:
-                for frame in self.frames:
+                for frame in self.frames[after:]:
                     if predicate(frame):
                         return frame
                 remaining = deadline - time.monotonic()
@@ -816,6 +827,9 @@ def describe_early(guest: Guest, early: EarlyHost) -> str:
         raise Failure("the early host never received a frame from the guest")
     if early.first.version != 2:
         raise Failure(f"the first frame was version {early.first.version}, not ANC2")
+    if early.first.orientation_active:
+        raise Failure(f"the first frame already says the sensor is in use (mask {early.first.mask:#x}): the window "
+                      "manager had registered it, so the value was not sent ahead of the registration")
     if early.sent_at is None:
         raise Failure("the early host sent no value")
     if guest.boot_completed_at is None or early.sent_at >= guest.boot_completed_at:
@@ -840,12 +854,13 @@ def wizard_rotation(guest: Guest, host: Host) -> str:
     top = guest.shell("dumpsys activity activities | grep -m1 topResumedActivity").strip()
     request = state.app_orientation or "?"
     follows = request.endswith("UNSPECIFIED") or request.endswith("SENSOR") or request.endswith("USER")
-    if follows:
-        wait_rotation(guest, CLOCKWISE, "setup wizard")
-        host.push(UPRIGHT)
-        wait_rotation(guest, UPRIGHT, "setup wizard, back to upright")
-        return f"{top.split()[-2] if top else '?'} ({request}) went to 3 with the early value and back to 0"
-    return f"the wizard asks for {request}: rotation {state.rotation}, not following the sensor"
+    if not follows:
+        raise Failure(f"the setup wizard asks for {request} (rotation {state.rotation}), not an orientation that "
+                      "follows the sensor")
+    wait_rotation(guest, CLOCKWISE, "setup wizard")
+    host.push(UPRIGHT)
+    wait_rotation(guest, UPRIGHT, "setup wizard, back to upright")
+    return f"{top.split()[-2] if top else '?'} ({request}) went to 3 with the early value and back to 0"
 
 
 def settings_values(guest: Guest, push: Callable[[int], None]) -> str:
@@ -943,10 +958,10 @@ def late_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, rep
         if options.launch_only:
             return
         report.run("host connects late", lambda: late_host(guest, host))
-        report.run("lock screen", lambda: lock_screen(guest, host))
+        report.run("lock screen", lambda: lock_screen(guest, host.push))
         report.run("a value said again", lambda: duplicates(guest, host.push))
         report.run("a touch held during a turn", lambda: touch_held(guest, host.push))
-        report.run("a value sent while the screen is off", lambda: screen_off_on(guest, host, host.push))
+        report.run("a value sent while the screen is off", lambda: screen_off_on(guest, host, host.push, True))
         report.run("reconnect and refused records", lambda: reconnect(guest, host))
         report.run("system_server stayed up", lambda: stayed_up(guest, server))
     finally:
@@ -974,24 +989,49 @@ def late_host(guest: Guest, host: Host) -> str:
     return f"first frame ANC2 mask {first.mask:#x}; no value, no turn; value 1 turned the display to 1"
 
 
-def lock_screen(guest: Guest, host: Host) -> str:
-    guest.shell("input keyevent KEYCODE_SLEEP")
-    time.sleep(3)
-    guest.shell("input keyevent KEYCODE_WAKEUP")
-    time.sleep(3)
-    policy = guest.shell("dumpsys window policy | grep -i -E 'showing|keyguardOccluded|isKeyguardLocked' | head -6")
-    showing = re.search(r"showing=true|mShowingLockscreen=true|isKeyguardShowing.*true", policy) is not None
-    host.push(CLOCKWISE)
-    time.sleep(6)
-    state = guest.rotation_state()
-    on_lock = state.rotation
-    guest.shell("wm dismiss-keyguard")
-    guest.shell("input keyevent KEYCODE_MENU")
-    wait_rotation(guest, CLOCKWISE, "after the lock screen")
-    host.push(UPRIGHT)
-    wait_rotation(guest, UPRIGHT, "after the lock screen, a new value")
-    return (f"keyguard {'showing' if showing else 'not shown (no secure lock)'}; value 3 sent there: display "
-            f"{on_lock}; after unlocking it is 3 and the next value (0) turns it back")
+def keyguard_showing(text: str) -> bool | None:
+    """`dumpsys window policy`: whether the keyguard is showing, or None if the dump does not say."""
+    match = re.search(r"^\s*showing=(true|false)", text, re.MULTILINE)
+    return None if match is None else match[1] == "true"
+
+
+def keyguard_state(guest: Guest) -> bool:
+    found = keyguard_showing(guest.shell("dumpsys window policy | grep -E '^ +showing='; true"))
+    if found is None:
+        raise Failure("the window policy dump states no keyguard")
+    return found
+
+
+def lock_screen(guest: Guest, push: Callable[[int], None]) -> str:
+    """The lock screen asks not to follow the sensor, so the display shows it upright whatever the value, and a
+    value sent there turns the display once the screen is unlocked. A provisioned guest has no lock screen, so
+    the step turns it on (a swipe lock, no credential) and back off."""
+    guest.shell("cmd lock_settings set-disabled false")
+    try:
+        guest.settings_app()
+        push(COUNTER_CLOCKWISE)
+        wait_rotation(guest, COUNTER_CLOCKWISE, "before the lock screen")
+        guest.shell("input keyevent KEYCODE_SLEEP")
+        wait_for("the screen going off", 20, lambda: None if wakefulness(guest) == "Asleep" else "awake", guest)
+        time.sleep(1)
+        guest.shell("input keyevent KEYCODE_WAKEUP")
+        wait_for("the screen coming on", 20, lambda: None if wakefulness(guest) == "Awake" else "asleep", guest)
+        wait_for("the lock screen", 20, lambda: None if keyguard_state(guest) else "the keyguard is not showing", guest)
+        request = guest.rotation_state().app_orientation
+        if request != "SCREEN_ORIENTATION_NOSENSOR":
+            raise Failure(f"the lock screen asks for {request}, not SCREEN_ORIENTATION_NOSENSOR")
+        push(CLOCKWISE)
+        hold_rotation(guest, UPRIGHT, "the lock screen with the value 3", 5)
+        guest.shell("wm dismiss-keyguard")
+        guest.shell("input keyevent KEYCODE_MENU")
+        wait_for("the lock screen to go", 20, lambda: "the keyguard is showing" if keyguard_state(guest) else None, guest)
+        wait_rotation(guest, CLOCKWISE, "after unlocking")
+        push(UPRIGHT)
+        wait_rotation(guest, UPRIGHT, "after unlocking, a new value")
+    finally:
+        guest.shell("cmd lock_settings set-disabled true")
+    return ("the lock screen showed (request NOSENSOR) upright with the value 3 sent there; after unlocking the display "
+            "turned to 3, and the next value (0) turned it back")
 
 
 def reconnect(guest: Guest, host: Host) -> str:
@@ -1061,6 +1101,7 @@ def touch_held(guest: Guest, push: Callable[[int], None]) -> str:
     point = touch_point(guest)
     guest.shell(f"input touchscreen motionevent DOWN {point} {point}")
     turned: float | None = None
+    start = time.monotonic()
     try:
         push(COUNTER_CLOCKWISE)
         start = time.monotonic()
@@ -1073,9 +1114,13 @@ def touch_held(guest: Guest, push: Callable[[int], None]) -> str:
         # Away from where it went down, so that letting go is no tap on Settings.
         guest.shell(f"input touchscreen motionevent MOVE {point + 200} {point}")
         guest.shell(f"input touchscreen motionevent UP {point + 200} {point}")
+    if turned is not None:
+        # The step exists for the turn after the finger lifts; a turn under the finger would never exercise it.
+        raise Failure(f"the display turned {turned:.1f} s into the touch, before the finger lifted")
+    held_for = time.monotonic() - start
     wait_rotation(guest, COUNTER_CLOCKWISE, "after the touch ended")
-    when = f"{turned:.1f} s into the touch" if turned is not None else "when the touch ended"
-    return f"the value 1 sent with a finger down turned the display {when}, with no further event from the host"
+    return (f"the value 1 sent with a finger down left the display at 0 for {held_for:.0f} s and turned it to 1 when "
+            "the finger lifted, with no further event from the host")
 
 
 def wakefulness(guest: Guest) -> str:
@@ -1083,9 +1128,13 @@ def wakefulness(guest: Guest) -> str:
     return found[1] if found else "?"
 
 
-def screen_off_on(guest: Guest, host: Host, push: Callable[[int], None]) -> str:
-    """A value sent while the screen is off turns the display once it is on. First with what the sensor
-    keeps for itself, then with the application's own rule (the host says its value again at activation)."""
+def screen_off_on(guest: Guest, host: Host, push: Callable[[int], None], sensor: bool) -> str:
+    """A value sent while the screen is off turns the display once it is on. The guest says the sensor idle
+    while the screen is off and in use again after (for a release without the orientation sensor, the
+    accelerometer). First with what the sensor keeps for itself, then with the application's own rule (the host
+    says its value again at activation)."""
+    in_use = (lambda frame: frame.orientation_active) if sensor else (lambda frame: bool(frame.mask & 1))
+    what = "the orientation sensor" if sensor else "the accelerometer"
     notes = []
     for replay, first, second in ((False, UPRIGHT, CLOCKWISE), (True, CLOCKWISE, COUNTER_CLOCKWISE)):
         host.replay = replay
@@ -1096,23 +1145,25 @@ def screen_off_on(guest: Guest, host: Host, push: Callable[[int], None]) -> str:
             seen = len(host.frames)
             guest.shell("input keyevent KEYCODE_SLEEP")
             wait_for("the screen going off", 20, lambda: None if wakefulness(guest) == "Asleep" else "awake", guest)
-            time.sleep(3)
+            if host.wait_frame(FRAME_SECONDS, lambda frame: not in_use(frame), after=seen) is None:
+                raise Failure(f"the guest never said {what} idle while the screen was off")
+            time.sleep(1)
             push(second)
             time.sleep(2)
+            mark = len(host.frames)
             guest.shell("input keyevent KEYCODE_WAKEUP")
             wait_for("the screen coming on", 20, lambda: None if wakefulness(guest) == "Awake" else "asleep", guest)
+            if host.wait_frame(FRAME_SECONDS, in_use, after=mark) is None:
+                raise Failure(f"the guest never said {what} in use again after the screen came on")
             time.sleep(2)
             guest.shell("wm dismiss-keyguard")
             guest.shell("input keyevent KEYCODE_MENU")
             wait_rotation(guest, second, "after the screen is on")
-            states = "".join("A" if frame.orientation_active else "i" for frame in host.frames[seen:]
-                             if frame.version >= 2)
-            notes.append(f"{'with' if replay else 'without'} the host saying it again: {first} -> {second} "
-                         f"(frames while off and after: {states or 'none'})")
+            notes.append(f"{'with' if replay else 'without'} the host saying it again: {first} -> {second}, "
+                         f"{what} idle while off and in use again on waking")
         finally:
             host.replay = False
     return "; ".join(notes)
-
 
 
 def legacy_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
@@ -1137,7 +1188,8 @@ def legacy_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, r
         # From here the posture is streamed until the next one, as the accelerometer's own samples would be.
         report.run("a posture said again", lambda: duplicates(guest, host.sustain))
         report.run("a touch held during a turn", lambda: touch_held(guest, host.sustain))
-        report.run("the screen off and on", lambda: screen_off_on(guest, host, host.sustain))
+        report.run("the screen off and on", lambda: screen_off_on(guest, host, host.sustain, False))
+        report.run("the lock screen", lambda: lock_screen(guest, host.sustain))
     finally:
         host.stop()
         stop_guest(adb, guest)

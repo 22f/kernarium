@@ -24,6 +24,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TESTS = Path(__file__).resolve().parents[2]
 SCRIPT = TESTS / "integration/android/run_android_orientation.py"
@@ -265,7 +266,8 @@ class FakeGuest:
     """The guest's end of the motion connection on loopback: says a frame on connect, keeps the records, and
     ends the connection on a record it refuses."""
 
-    def __init__(self, first: bytes) -> None:
+    def __init__(self, first: bytes, delay: float = 0.0) -> None:
+        self.delay = delay
         self.server = socket.socket()
         self.server.bind(("127.0.0.1", 0))
         self.server.listen(4)
@@ -287,6 +289,8 @@ class FakeGuest:
             with self.lock:
                 self.connections += 1
                 self.connections_open.append(connection)
+            if self.delay:
+                threading.Event().wait(self.delay)
             connection.sendall(self.first)
             buffer = b""
             while True:
@@ -425,6 +429,37 @@ class HostTests(unittest.TestCase):
             host.stop()
             guest.close()
 
+    def test_a_guest_that_is_slow_to_speak_is_waited_for_not_taken_for_gone(self) -> None:
+        guest = FakeGuest(golden()["control-v2-idle"], delay=0.6)
+        host = runner.Host(guest.port)
+        try:
+            with mock.patch.object(runner, "SEND_SECONDS", 0.2):
+                host.connect()
+                self.assertEqual(host.connection.gettimeout(), 0.2)
+                self.assertEqual(host.wait_frame(5), runner.Control(2, 0, 10_000, 10_000))
+                self.assertFalse(host.closed)
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_a_wait_can_start_after_the_frames_a_step_began_with(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["control-v2-orientation"])
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            self.assertIsNotNone(host.wait_frame(5))
+            began = len(host.frames)
+            self.assertIsNone(host.wait_frame(0.3, after=began))
+            guest.say(frames["control-v2-idle"])
+            idle = host.wait_frame(5, lambda frame: not frame.orientation_active, after=began)
+            self.assertEqual(idle, runner.Control(2, 0, 10_000, 10_000))
+            # The earlier, active frame is not what an idle wait from `began` finds.
+            self.assertIsNone(host.wait_frame(0.3, lambda frame: frame.orientation_active, after=began))
+        finally:
+            host.stop()
+            guest.close()
+
     def test_a_host_with_no_guest_listening_gets_no_frame(self) -> None:
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
@@ -439,6 +474,198 @@ class HostTests(unittest.TestCase):
         finally:
             host.close()
             listener.close()
+
+
+class VirtualTime:
+    """The runner's clock, so that a step that waits for a deadline runs in no time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class ScriptedHost:
+    """What a step needs of the host: the frames the guest has said, and a way to say a value."""
+
+    def __init__(self, device: "ScriptedDevice") -> None:
+        self.device = device
+        self.frames: list[runner.Control] = []
+        self.replay = False
+
+    def push(self, value: int) -> None:
+        self.device.value(value)
+
+    def wait_frame(self, seconds: float, predicate=lambda frame: True, after: int = 0):
+        return next((frame for frame in self.frames[after:] if predicate(frame)), None)
+
+
+class ScriptedDevice(runner.Guest):
+    """An Android guest as far as the steps ask it: a rotation that follows the newest value unless a finger is
+    down, the screen is off or a lock screen is up, and the commands that change those."""
+
+    def __init__(self) -> None:  # no adb, no process
+        self.host = ScriptedHost(self)
+        self.shown = 0
+        self.latest = 0
+        self.touching = False
+        self.awake = True
+        self.lock_enabled = False
+        self.keyguard = False
+        self.request = "SCREEN_ORIENTATION_UNSPECIFIED"
+        # The faults a step must notice.
+        self.turns_under_touch = False
+        self.says_idle = True
+        self.says_active = True
+        self.lock_shows = True
+        self.boot_completed_at = 0.0
+
+    def value(self, value: int) -> None:
+        self.latest = value
+        if self.touching and not self.turns_under_touch:
+            return
+        self.settle()
+
+    def settle(self) -> None:
+        if self.awake and not self.keyguard:
+            self.shown = self.latest
+
+    def frame(self, active: bool) -> None:
+        self.host.frames.append(runner.Control(2, 4 if active else 0, 10_000, 10_000))
+
+    def alive(self) -> None:
+        pass
+
+    def settings_app(self) -> None:
+        pass
+
+    def rotation_state(self):
+        request = "SCREEN_ORIENTATION_NOSENSOR" if self.keyguard else self.request
+        return runner.RotationState(
+            rotation=0 if self.keyguard else self.shown, user_mode="USER_ROTATION_FREE", user_rotation=0,
+            allow_all=False, landscape=1, seascape=3, app_orientation=request, listener_enabled=True,
+            judge="OrientationSensorJudge", sensor=runner.SENSOR_NAME, proposed=None)
+
+    def rotation(self) -> int:
+        return self.rotation_state().rotation
+
+    def shell(self, command: str, timeout: float = 0) -> str:
+        if command == "wm size":
+            return "Physical size: 720x1280\n"
+        if "motionevent DOWN" in command:
+            self.touching = True
+        elif "motionevent UP" in command:
+            self.touching = False
+            self.settle()
+        elif "KEYCODE_SLEEP" in command:
+            self.awake = False
+            if self.says_idle:
+                self.frame(False)
+        elif "KEYCODE_WAKEUP" in command:
+            self.awake = True
+            self.keyguard = self.lock_enabled and self.lock_shows
+            if self.says_active:
+                self.frame(True)
+            self.settle()
+        elif "set-disabled" in command:
+            self.lock_enabled = command.endswith("false")
+            self.keyguard = self.keyguard and self.lock_enabled
+        elif "wm dismiss-keyguard" in command:
+            self.keyguard = False
+            self.settle()
+        elif "mWakefulness" in command:
+            return f"  mWakefulness={'Awake' if self.awake else 'Asleep'}\n"
+        elif "window policy" in command:
+            return f"      showing={'true' if self.keyguard else 'false'}\n"
+        return ""
+
+
+class StepTests(unittest.TestCase):
+    """The steps that must be able to fail: each passes on a guest that behaves and fails on one that does not."""
+
+    def setUp(self) -> None:
+        self.time = VirtualTime()
+        patcher = mock.patch.object(runner, "time", self.time)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_touch_held_waits_for_the_finger_and_a_turn_under_it_fails_the_step(self) -> None:
+        device = ScriptedDevice()
+        text = runner.touch_held(device, device.host.push)
+        self.assertIn("turned it to 1 when the finger lifted", text)
+        device = ScriptedDevice()
+        device.turns_under_touch = True
+        with self.assertRaisesRegex(runner.Failure, "turned .* s into the touch, before the finger lifted"):
+            runner.touch_held(device, device.host.push)
+        self.assertFalse(device.touching, "the finger is lifted whatever happened")
+
+    def test_the_screen_off_step_needs_the_sensor_idle_while_off_and_in_use_again_on_waking(self) -> None:
+        device = ScriptedDevice()
+        text = runner.screen_off_on(device, device.host, device.host.push, True)
+        self.assertIn("idle while off and in use again on waking", text)
+        self.assertFalse(device.host.replay)
+        silent = ScriptedDevice()
+        silent.says_idle = False
+        with self.assertRaisesRegex(runner.Failure, "never said the orientation sensor idle"):
+            runner.screen_off_on(silent, silent.host, silent.host.push, True)
+        deaf = ScriptedDevice()
+        deaf.says_active = False
+        with self.assertRaisesRegex(runner.Failure, "never said the orientation sensor in use again"):
+            runner.screen_off_on(deaf, deaf.host, deaf.host.push, True)
+
+    def test_without_an_orientation_sensor_the_accelerometer_bit_is_what_goes_idle(self) -> None:
+        device = ScriptedDevice()
+        # ANC1 frames: bit 0 is the accelerometer.
+        device.frame = lambda active: device.host.frames.append(runner.Control(1, 1 if active else 0, 1, 1))
+        text = runner.screen_off_on(device, device.host, device.host.push, False)
+        self.assertIn("the accelerometer idle while off", text)
+
+    def test_the_lock_screen_must_show_ask_not_to_follow_and_hand_the_value_on_at_unlock(self) -> None:
+        device = ScriptedDevice()
+        text = runner.lock_screen(device, device.host.push)
+        self.assertIn("after unlocking the display turned to 3", text)
+        self.assertFalse(device.lock_enabled, "the provisioned guest has no lock screen again")
+        absent = ScriptedDevice()
+        absent.lock_shows = False
+        with self.assertRaisesRegex(runner.Failure, "the keyguard is not showing"):
+            runner.lock_screen(absent, absent.host.push)
+        self.assertFalse(absent.lock_enabled)
+
+    def test_the_keyguard_is_read_from_the_window_policy_dump(self) -> None:
+        self.assertTrue(runner.keyguard_showing("  KeyguardServiceDelegate\n      showing=true\n"))
+        self.assertFalse(runner.keyguard_showing("      showing=false\n"))
+        self.assertIsNone(runner.keyguard_showing("mKeyguardOccluded=false\n"))
+
+    def test_the_setup_wizard_must_follow_the_sensor(self) -> None:
+        device = ScriptedDevice()
+        device.shown = 3
+        device.latest = 3
+        text = runner.wizard_rotation(device, device.host)
+        self.assertIn("went to 3 with the early value and back to 0", text)
+        fixed = ScriptedDevice()
+        fixed.request = "SCREEN_ORIENTATION_PORTRAIT"
+        with self.assertRaisesRegex(runner.Failure, "not an orientation that follows the sensor"):
+            runner.wizard_rotation(fixed, fixed.host)
+
+    def test_the_early_value_must_come_before_the_sensor_is_in_use(self) -> None:
+        class Early:
+            sent_at = 5.0
+
+            def __init__(self, active: bool) -> None:
+                self.first = runner.Control(2, 4 if active else 0, 10_000, 10_000)
+
+            def join(self) -> None:
+                pass
+
+        device = ScriptedDevice()
+        device.boot_completed_at = 30.0
+        self.assertIn("ahead of the window manager's registration", runner.describe_early(device, Early(False)))
+        with self.assertRaisesRegex(runner.Failure, "already says the sensor is in use"):
+            runner.describe_early(device, Early(True))
 
 
 class ProbeApplicationTests(unittest.TestCase):
