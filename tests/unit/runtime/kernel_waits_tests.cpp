@@ -22,6 +22,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/event.h>
 #include <sys/select.h>
 #include <string>
 #include <sys/socket.h>
@@ -136,6 +137,8 @@ void blocking_calls_are_marked_for_as_long_as_they_block()
 	using Recvfrom = ssize_t (*)(int, void *, size_t, int, sockaddr *,
 		socklen_t *);
 	using CondWait = int (*)(pthread_cond_t *, pthread_mutex_t *);
+	using Kevent = int (*)(int, const struct kevent *, int, struct kevent *, int,
+		const timespec *);
 
 	int pipe_fds[2];
 	require(pipe(pipe_fds) == 0);
@@ -167,6 +170,25 @@ void blocking_calls_are_marked_for_as_long_as_they_block()
 			&readable, nullptr, nullptr, nullptr, nullptr);
 	}, wake);
 	(void)!read(pipe_fds[0], &leftover, 1);
+
+	/* A vCPU's idle wait: a kevent() that adds its deadline timer in the
+	 * change list and has no timeout of its own. */
+	const int queue = kqueue();
+	require(queue >= 0);
+	struct kevent watch;
+	EV_SET(&watch, static_cast<uintptr_t>(pipe_fds[0]), EVFILT_READ, EV_ADD, 0,
+		0, nullptr);
+	require(kevent(queue, &watch, 1, nullptr, 0, nullptr) == 0);
+	marks_while_blocked(HostWait::idle, [&] {
+		struct kevent timer;
+		EV_SET(&timer, 0, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+			NOTE_NSECONDS | NOTE_CRITICAL, 60'000'000'000, nullptr);
+		struct kevent result[2];
+		require(import_of<Kevent>("kevent")(queue, &timer, 1, result, 2,
+			nullptr) == 1);
+	}, wake);
+	(void)!read(pipe_fds[0], &leftover, 1);
+	close(queue);
 
 	int pair[2];
 	require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
@@ -208,6 +230,8 @@ void other_calls_are_marked_and_immediate_ones_are_not()
 	using Poll = int (*)(pollfd *, nfds_t, int);
 	using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
 		const sigset_t *);
+	using Kevent = int (*)(int, const struct kevent *, int, struct kevent *, int,
+		const timespec *);
 
 	const uml::testing::ScratchSubdirectory directory{"uml-kernel-waits.XXXXXX"};
 	const std::string path = (directory.path() / "file").string();
@@ -235,6 +259,18 @@ void other_calls_are_marked_and_immediate_ones_are_not()
 		const timespec none{0, 0};
 		require(import_of<Pselect>("pselect")(0, nullptr, nullptr, nullptr,
 			&none, nullptr) == 0);
+		/* A kevent that only changes the queue, and one that polls it. */
+		const int queue = kqueue();
+		require(queue >= 0);
+		struct kevent timer;
+		struct kevent result[1];
+		EV_SET(&timer, 0, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+			NOTE_NSECONDS | NOTE_CRITICAL, 60'000'000'000, nullptr);
+		require(import_of<Kevent>("kevent")(queue, &timer, 1, nullptr, 0,
+			nullptr) == 0);
+		require(import_of<Kevent>("kevent")(queue, nullptr, 0, result, 1,
+			&none) == 0);
+		(void)close(queue);
 		sequence_after_immediate = uml::platform::wait_sequence(word());
 	}};
 	require(within(std::chrono::seconds{3}, [&] {
@@ -244,7 +280,7 @@ void other_calls_are_marked_and_immediate_ones_are_not()
 	require(sequence_after_marked == sequence_before + 3,
 		"pwrite, pread and fsync are one mark each");
 	require(sequence_after_immediate == sequence_after_marked,
-		"an immediate poll or select was marked");
+		"an immediate poll or select, or a kevent that cannot wait, was marked");
 	(void)close(file);
 }
 

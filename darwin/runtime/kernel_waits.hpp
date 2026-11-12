@@ -9,11 +9,14 @@ namespace uml::runtime {
  * The loader resolves each of the kernel's blocking imports to a wrapper that
  * says what the thread waits for (platform/host_wait.hpp) for the length of
  * the call and then makes the same call. A call that cannot block, a poll or
- * select with a zero timeout, is made unmarked. The stall watch reads the
- * marks to tell a vCPU that waits for the host from one the system did not
- * run (runtime/stall_watch.hpp):
+ * select with a zero timeout, or a kevent that asks for no event or has a zero
+ * timeout, is made unmarked. A vCPU's idle wait is a kevent() whose deadline
+ * timer is in its change list. The stall watch reads the marks to tell a vCPU
+ * that waits for the host from one the system did not run
+ * (runtime/stall_watch.hpp):
  *
- *   pselect, pause, pthread_cond_wait, pthread_cond_timedwait   idle
+ *   pselect, kevent, pause, pthread_cond_wait,
+ *   pthread_cond_timedwait                                      idle
  *   poll                                                        answer
  *   read, recvfrom                                              receive
  *   sendmsg, sendto                                             send

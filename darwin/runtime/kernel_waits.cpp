@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/event.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -39,6 +40,8 @@ struct Real final {
 	ssize_t (*pread)(int, void *, size_t, off_t){};
 	ssize_t (*pwrite)(int, const void *, size_t, off_t){};
 	int (*fsync)(int){};
+	int (*kevent)(int, const struct kevent *, int, struct kevent *, int,
+		const timespec *){};
 };
 
 Real real;
@@ -51,6 +54,21 @@ int kernel_pselect(int count, fd_set *readable, fd_set *writable,
 		return real.pselect(count, readable, writable, failed, timeout, mask);
 	const ScopedHostWait wait{HostWait::idle};
 	return real.pselect(count, readable, writable, failed, timeout, mask);
+}
+
+/* A vCPU's idle wait is a kevent() whose timer is in its change list, so the
+ * call carries no timeout. Only a call that asks for events and may block is
+ * a wait: a change list alone, and an immediate poll, wait for nothing. */
+int kernel_kevent(int queue, const struct kevent *changes, int change_count,
+	struct kevent *events, int event_count, const timespec *timeout)
+{
+	if (event_count <= 0 ||
+	    (timeout != nullptr && timeout->tv_sec == 0 && timeout->tv_nsec == 0))
+		return real.kevent(queue, changes, change_count, events, event_count,
+			timeout);
+	const ScopedHostWait wait{HostWait::idle};
+	return real.kevent(queue, changes, change_count, events, event_count,
+		timeout);
 }
 
 int kernel_pause()
@@ -154,6 +172,7 @@ void *kernel_wait_import(const char *name) noexcept
 			slot(real.pselect)},
 		{"pselect", reinterpret_cast<void *>(&kernel_pselect),
 			slot(real.pselect)},
+		{"kevent", reinterpret_cast<void *>(&kernel_kevent), slot(real.kevent)},
 		{"pause", reinterpret_cast<void *>(&kernel_pause), slot(real.pause)},
 		{"pthread_cond_wait", reinterpret_cast<void *>(&kernel_cond_wait),
 			slot(real.cond_wait)},
