@@ -179,17 +179,29 @@ patches provide the behaviors the `slirp-network-*` tests check.
   unreachable at once, whether or not anything listens, and silence for the
   other protocols. The provider checks the host's current addresses when the
   guest starts a flow: it lists them when a connect attempt or a datagram to
-  an address outside the virtual network finds the last listing a second old,
-  never otherwise, so a quiet guest costs no wake-up and no system call, and
-  the network does not open without a first listing. Addresses of the virtual
-  network are never the host's. An address the host answers that no interface
-  holds, such as a service a VPN client runs inside its tunnel, is not
-  covered. What the guest reaches through the gateway is SLiRP's own (DHCP,
-  ICMP echo, the name server's DNS); other machines on the local network are
-  reached as before. A host forward is the one listener the guest shares with
-  the host, and it leads into the guest, also when the host's own client comes
-  through one of the host's addresses (TCP; a UDP forward used that way from a
-  non-loopback address of the host stays unreachable). A test that needs a host
+  an address that is not one of SLiRP's own services finds the last listing a
+  second old, never otherwise, so a quiet guest costs no wake-up and no system
+  call, and the network does not open without a first listing. A listing that
+  fails is tried again by the next such frame, at most every 100 ms; once the
+  last good listing is four seconds old, new flows are refused as if every
+  address were the host's (a DHCP broadcast and multicast excepted, which no
+  interface holds), until a listing succeeds. The virtual network is no
+  exception: SLiRP connects a flow to every address of it but the gateway as
+  given, so an address of it that a host interface holds is the host's and is
+  refused like any other. Only what SLiRP and the provider serve at their own
+  addresses is theirs even then: an ICMP echo to the gateway or the name
+  server, DNS at either, and DHCP at the gateway. The rule is about the host's
+  own addresses, not about what the host can route to: a destination the host
+  reaches over its network is reached as before. An address the host answers
+  that no interface holds, such as a service a VPN client runs inside its
+  tunnel, is not covered. What the guest reaches through the gateway is SLiRP's
+  own (DHCP, ICMP echo, the name server's DNS); other machines on the local
+  network are reached as before. A host forward is the one listener the guest
+  shares with the host, and it leads into the guest, also when the host's own
+  client comes through one of the host's addresses (TCP; a UDP forward used that
+  way from a non-loopback address of the host stays unreachable, as does a UDP
+  reply to a forwarded peer SLiRP presents as the gateway when the host holds
+  that address on a 10.0.2.0/24 network of its own). A test that needs a host
   listener names a guest forward to a Unix socket, which only the provider's
   test build offers (`UML_TEST_SLIRP_GUEST_FORWARD`, read by
   `uml-darwin-network-test`, which no preset installs or packages); no product
