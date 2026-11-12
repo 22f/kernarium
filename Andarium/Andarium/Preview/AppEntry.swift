@@ -98,6 +98,7 @@ struct AppEntry {
         "info-license": .license("mesa"),
         "info-license-gpl": .license("linux"),
         "whatsnew-history": .whatsNew,
+        "whatsnew-history-nofeedback": .whatsNew,
     ]
 
     var hints: ScreenHints {
@@ -479,7 +480,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history", "feedback-info", "feedback-info-filled":
+             "whatsnew-history", "whatsnew-history-nofeedback", "feedback-info", "feedback-info-filled":
             model.sheet = .info
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew

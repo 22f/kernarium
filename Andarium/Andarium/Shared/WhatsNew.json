@@ -49,7 +49,10 @@
         "id": "send-feedback",
         "title": "Send feedback",
         "text": "Email the developer from Info, or from Settings while the virtual machine runs, with screenshots and a bug report if you like.",
-        "symbol": "envelope.fill"
+        "symbol": "envelope.fill",
+        "requirement": {
+          "feature": "sendFeedback"
+        }
       },
       {
         "id": "more-fixes",

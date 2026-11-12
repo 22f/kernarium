@@ -359,9 +359,11 @@ control out.
   on at most three launches, that opens them; a build shows the notes up to its
   own number and no later ones. An entry can name the devices it is for (more
   guest memory than a limit, an iPad, a device with haptics): the ribbon and its
-  sheet announce only the entries the device meets. Info keeps every release's
-  notes as written (`WhatsNewRules`, `WhatsNewStore`). A launch with a launch
-  setting, or one a test runs, shows no ribbon and keeps no record.
+  sheet announce only the entries the device meets. An entry can also name a
+  feature the build may lack (Send feedback): a build without it shows the entry
+  nowhere. Info keeps every other entry as written (`WhatsNewRules`,
+  `WhatsNewStore`). A launch with a launch setting, or one a test runs, shows no
+  ribbon and keeps no record.
 
 ## Runtime
 

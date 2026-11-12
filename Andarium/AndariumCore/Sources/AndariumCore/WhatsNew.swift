@@ -77,7 +77,8 @@ public struct WhatsNewEntry: Identifiable, Hashable, Decodable, Sendable {
     /// The entry's name, which the ribbon lists: "File browser".
     public let title: String
     /// What it does, in a sentence or two, true on every device: an entry
-    /// a device cannot use is still listed in Info's history. Nil for an
+    /// a device cannot use is still listed in Info's history. (A feature
+    /// the build itself lacks is not: see `WhatsNewFeature`.) Nil for an
     /// entry that is only its points.
     public let text: String?
     /// Short points under the title, one line to two each, for an entry that
@@ -88,8 +89,8 @@ public struct WhatsNewEntry: Identifiable, Hashable, Decodable, Sendable {
     public let symbol: String
     /// Where the feature lives, for one the person finds outside Home.
     public var place: WhatsNewPlace?
-    /// What the device must offer for the ribbon and its notes to show the
-    /// entry at all.
+    /// What the device and the build must offer for the ribbon and its notes
+    /// to show the entry at all.
     public var requirement: WhatsNewRequirement?
 
     public init(
@@ -171,41 +172,59 @@ public enum WhatsNewPlace: String, Hashable, Decodable, Sendable {
     }
 }
 
-/// What a device must offer for an entry to be announced on it. A field the
-/// code does not know, a `device` it does not know, or no field at all is a
-/// mistake in the notes and refuses them: the notes and the code that reads
-/// them ship in one build, so such a value is caught where they are bundled
-/// and never shown without what it meant. A requirement with more than one
-/// field needs all of them.
+/// What a device or the build must offer for an entry to be announced. A
+/// field the code does not know, a `device` or `feature` it does not know, a
+/// field set to `null`, or no field at all is a mistake in the notes and
+/// refuses them: the notes and the code that reads them ship in one build, so
+/// such a value is caught where they are bundled and never shown without
+/// what it meant. A requirement with more than one field needs all of them.
 public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     /// The device offers a guest more RAM than this, in MiB, at its vCPU
     /// count.
     public var memoryAboveMiB: Int?
     /// The kind of device the feature is for.
     public var device: WhatsNewDevice?
+    /// The build has this feature.
+    public var feature: WhatsNewFeature?
 
-    public init(memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil) {
+    public init(memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil, feature: WhatsNewFeature? = nil) {
         self.memoryAboveMiB = memoryAboveMiB
         self.device = device
+        self.feature = feature
     }
 
-    private enum CodingKeys: String, CodingKey, CaseIterable { case memoryAboveMiB, device }
+    private enum CodingKeys: String, CodingKey, CaseIterable { case memoryAboveMiB, device, feature }
 
     public init(from decoder: any Decoder) throws {
         try decoder.requireOnly(CodingKeys.self)
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        memoryAboveMiB = try values.decodeIfPresent(Int.self, forKey: .memoryAboveMiB)
-        device = try values.decodeIfPresent(WhatsNewDevice.self, forKey: .device)
-        guard memoryAboveMiB != nil || device != nil else {
+        // A key that is there must hold a value: `decodeIfPresent` would take
+        // `null` for no key at all, and drop the requirement without a word.
+        memoryAboveMiB = try values.contains(.memoryAboveMiB)
+            ? values.decode(Int.self, forKey: .memoryAboveMiB) : nil
+        device = try values.contains(.device) ? values.decode(WhatsNewDevice.self, forKey: .device) : nil
+        feature = try values.contains(.feature) ? values.decode(WhatsNewFeature.self, forKey: .feature) : nil
+        guard memoryAboveMiB != nil || device != nil || feature != nil else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "a requirement states nothing"))
         }
     }
 
-    public func isMet(by host: HostDevice, vCPUs: Int) -> Bool {
+    /// Whether the device and the build offer all it asks for; `features` is
+    /// what the build has.
+    public func isMet(by host: HostDevice, vCPUs: Int, features: Set<WhatsNewFeature>) -> Bool {
+        guard isPresent(in: features) else { return false }
         if let memoryAboveMiB, host.memory.maximumMiB(vCPUs: vCPUs) <= memoryAboveMiB { return false }
         if let device, !device.isMet(by: host) { return false }
         return true
+    }
+
+    /// Whether the build has the feature the entry is about, true when it
+    /// names none. Unlike the device and the memory, which one install has
+    /// and another does not, this is true or false of the build wherever its
+    /// notes show.
+    public func isPresent(in features: Set<WhatsNewFeature>) -> Bool {
+        feature.map(features.contains) ?? true
     }
 }
 
@@ -225,6 +244,16 @@ public enum WhatsNewDevice: String, Hashable, Decodable, Sendable {
         case .haptics: host.hasHaptics
         }
     }
+}
+
+/// A feature a build may be made without, written in the notes as
+/// `"sendFeedback"`. The build reports what it has, so an entry about a
+/// feature a build lacks is left out of the ribbon, its notes and Info's
+/// history alike (`WhatsNewCatalog.available`).
+public enum WhatsNewFeature: String, Hashable, Decodable, Sendable {
+    /// Send feedback: only a build made with a receiver for it has the sheet
+    /// and its two entrances.
+    case sendFeedback
 }
 
 private struct AnyKey: CodingKey {
@@ -276,6 +305,16 @@ public enum WhatsNewCatalog {
             }
         }
         return releases
+    }
+
+    /// The notes as this build has them: without the entries about a feature
+    /// it lacks, and without a release that leaves empty. Every screen starts
+    /// from these; the device's own requirements then apply to the ribbon and
+    /// its notes only, while Info lists the rest as written.
+    public static func available(_ releases: [WhatsNewRelease], features: Set<WhatsNewFeature>) -> [WhatsNewRelease] {
+        releases
+            .map { $0.keeping { $0.requirement?.isPresent(in: features) ?? true } }
+            .filter { !$0.entries.isEmpty }
     }
 }
 

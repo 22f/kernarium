@@ -6,6 +6,18 @@ import Testing
 import UIKit
 @testable import Andarium
 
+/// A build made with Send feedback: what the tests' launches have unless they
+/// say otherwise, whatever the build that runs them was made with.
+private let withSendFeedback: Set<WhatsNewFeature> = [.sendFeedback]
+
+private extension AppEntry {
+    /// The launch's notes for a six-vCPU guest, in a build with `features`.
+    @MainActor
+    func announce(on model: AppModel, hasGuest: Bool, features: Set<WhatsNewFeature> = withSendFeedback) {
+        announceWhatsNew(on: model, hasGuest: hasGuest, vCPUs: 6, features: features)
+    }
+}
+
 /// The bundled release notes and how a launch announces them: the person's
 /// own launch gets the ribbon and keeps its record, any other shows no
 /// ribbon and keeps none. Each test keeps into a defaults database of its own.
@@ -91,7 +103,7 @@ struct WhatsNewTests {
             }
         }
         // A requirement the code does not know fails to decode, so the notes
-        // would not be here; these three entries are the ones that have any.
+        // would not be here; these four entries are the ones that have any.
         let requirements = WhatsNewCatalog.load().flatMap(\.entries).compactMap { entry in
             entry.requirement.map { (entry.id, $0) }
         }
@@ -99,6 +111,7 @@ struct WhatsNewTests {
             "more-memory": WhatsNewRequirement(memoryAboveMiB: 4096),
             "ipad-rotation": WhatsNewRequirement(device: .pad),
             "haptics": WhatsNewRequirement(device: .haptics),
+            "send-feedback": WhatsNewRequirement(feature: .sendFeedback),
         ])
     }
 
@@ -120,7 +133,7 @@ struct WhatsNewTests {
             withDefaultsReturning { defaults in
                 WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
                 let model = model(on: host)
-                entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+                entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
                 return WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: named)
             }
         }
@@ -140,7 +153,7 @@ struct WhatsNewTests {
             withDefaultsReturning { defaults in
                 WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
                 let model = model(on: host)
-                entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+                entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
                 // Info lists the notes as written, whatever the device.
                 #expect(model.whatsNew.releases.first?.entries.map(\.id) == Self.buildTenIDs)
                 return model.whatsNew.pendingEntries.map(\.id)
@@ -151,6 +164,78 @@ struct WhatsNewTests {
         #expect(told(by: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false)) == Self.buildTenIDsOnAnIPad)
         #expect(told(by: host(maximumMiB: 4096, hasHaptics: false)) == withoutDeviceEntries)
         #expect(told(by: host(maximumMiB: 4096, idiom: .mac, hasHaptics: false)) == withoutDeviceEntries)
+    }
+
+    /// A build without Send feedback (a sideload, a Debug build, an App Store
+    /// build made with no receiver) neither announces the entry nor lists it,
+    /// which a device that lacks a haptic engine or an iPad's turn does not do:
+    /// Info keeps those as written.
+    @Test func aBuildWithoutSendFeedbackLeavesItOutOfTheRibbonTheSheetAndInfo() {
+        withDefaults { defaults in
+            WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
+            let model = model(on: host(maximumMiB: 4096))
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true, features: [])
+            let withoutFeedback = Self.buildTenIDs.filter { $0 != "send-feedback" }
+            let toldWithoutFeedback = Self.buildTenIDsOnAnIPhone.filter { $0 != "send-feedback" }
+            #expect(model.whatsNew.pendingEntries.map(\.id) == toldWithoutFeedback)
+            #expect(model.whatsNew.pending.first?.entries.count == 6)
+            // Info: the device's entries as written (Rotation on iPad, here on an
+            // iPhone), but not the feature the build lacks.
+            #expect(model.whatsNew.releases.first?.entries.map(\.id) == withoutFeedback)
+            #expect(model.whatsNew.releases.map(\.build) == [10, 9])
+            #expect(WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: 0) == "6 new features")
+        }
+    }
+
+    @Test func aLaunchThatIsNotThePersonsListsOnlyWhatTheBuildHas() {
+        withDefaults { defaults in
+            let model = model(on: host(maximumMiB: 4096))
+            entry(announces: false, defaults: defaults).announce(on: model, hasGuest: true, features: [])
+            #expect(!model.whatsNew.showsRibbon)
+            #expect(model.whatsNew.releases.first?.entries.map(\.id).contains("send-feedback") == false)
+        }
+    }
+
+    /// A release whose entries are all about a feature the build lacks is in
+    /// no screen.
+    @Test func aReleaseThatTheMissingFeatureEmptiesIsDropped() {
+        withDefaults { defaults in
+            let only = WhatsNewRelease(
+                build: 11, version: "1.0 (11)",
+                entries: [WhatsNewEntry(
+                    id: "only", title: "Only", text: "T", symbol: "star",
+                    requirement: WhatsNewRequirement(feature: .sendFeedback))])
+            let model = model(on: host(maximumMiB: 4096))
+            let notes = WhatsNewCatalog.load() + [only]
+            let launch = entry(announces: false, defaults: defaults)
+            launch.announceWhatsNew(on: model, hasGuest: true, vCPUs: 6, features: [], notes: notes)
+            #expect(model.whatsNew.releases.map(\.build) == [10, 9])
+            launch.announceWhatsNew(on: model, hasGuest: true, vCPUs: 6, features: [.sendFeedback], notes: notes)
+            #expect(model.whatsNew.releases.map(\.build) == [11, 10, 9])
+        }
+    }
+
+    /// What the model says its build has is what Send feedback's own entrances
+    /// use: a receiver, and `#if FEEDBACK_MAIL` is the build's own switch.
+    @Test func theModelsBuildHasSendFeedbackExactlyWhenItHasAReceiver() {
+        let model = model(on: host(maximumMiB: 4096))
+        #if FEEDBACK_MAIL
+        model.feedbackServices.address = { "feedback@example.com" }
+        #expect(model.buildFeatures == [.sendFeedback])
+        model.feedbackServices.address = { nil }
+        #expect(model.buildFeatures.isEmpty)
+        // A launch that is given none asks the model.
+        withDefaults { defaults in
+            WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
+            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            #expect(model.whatsNew.pendingEntries.map(\.id).contains("send-feedback") == false)
+            model.feedbackServices.address = { "feedback@example.com" }
+            entry(announces: false, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            #expect(model.whatsNew.releases.first?.entries.map(\.id).contains("send-feedback") == true)
+        }
+        #else
+        #expect(model.buildFeatures.isEmpty)
+        #endif
     }
 
     /// The host the application builds reports what the entries ask about.
@@ -171,7 +256,7 @@ struct WhatsNewTests {
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 5))
             let host = host(maximumMiB: 6144)
             let model = model(on: host)
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(model.whatsNew.showsRibbon)
             // Build 10's notes first, then the build 9 the person skipped.
             #expect(model.whatsNew.pending.map(\.build) == [10, 9])
@@ -186,7 +271,7 @@ struct WhatsNewTests {
         withDefaults { defaults in
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
             let model = model(on: host(maximumMiB: 4096))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(model.whatsNew.pending.map(\.build) == [10])
             #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDsOnAnIPhone)
             #expect(WhatsNewStore(defaults: defaults).record
@@ -199,7 +284,7 @@ struct WhatsNewTests {
     @Test func anInstallWithAGuestAndNoRecordIsAnUpdateFromBuildFive() {
         withDefaults { defaults in
             let model = model(on: host(maximumMiB: 6144))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(model.whatsNew.showsRibbon)
         }
     }
@@ -207,7 +292,7 @@ struct WhatsNewTests {
     @Test func aDeviceThatOffersNoMoreThanFourGiBIsNotToldAboutMoreMemory() {
         withDefaults { defaults in
             let model = model(on: host(maximumMiB: 4096))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(model.whatsNew.pendingEntries.map(\.id)
                 == Self.buildTenIDsOnAnIPhone + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
@@ -218,7 +303,7 @@ struct WhatsNewTests {
     @Test func aNewInstallAnnouncesNothingAndRecordsThisBuild() {
         withDefaults { defaults in
             let model = model(on: host(maximumMiB: 6144))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: false, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: false)
             #expect(!model.whatsNew.showsRibbon)
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 10))
         }
@@ -228,7 +313,7 @@ struct WhatsNewTests {
         withDefaults { defaults in
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 4))
             let model = model(on: host(maximumMiB: 6144))
-            entry(announces: true, build: 5, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, build: 5, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(!model.whatsNew.showsRibbon)
         }
     }
@@ -240,14 +325,14 @@ struct WhatsNewTests {
         withDefaults { defaults in
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 5))
             let eight = model(on: host(maximumMiB: 6144))
-            entry(announces: true, build: 8, defaults: defaults).announceWhatsNew(on: eight, hasGuest: true, vCPUs: 6)
+            entry(announces: true, build: 8, defaults: defaults).announce(on: eight, hasGuest: true)
             #expect(!eight.whatsNew.showsRibbon)
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 8))
             // Info lists the notes as bundled.
             #expect(eight.whatsNew.releases.map(\.build) == [10, 9])
 
             let nine = model(on: host(maximumMiB: 6144))
-            entry(announces: true, build: 9, defaults: defaults).announceWhatsNew(on: nine, hasGuest: true, vCPUs: 6)
+            entry(announces: true, build: 9, defaults: defaults).announce(on: nine, hasGuest: true)
             #expect(nine.whatsNew.pending.map(\.build) == [9])
             #expect(nine.whatsNew.pendingEntries.map(\.id) == Self.buildNineIDs)
             #expect(WhatsNewStore(defaults: defaults).record
@@ -256,7 +341,7 @@ struct WhatsNewTests {
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 9))
 
             let ten = model(on: host(maximumMiB: 6144))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: ten, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: ten, hasGuest: true)
             #expect(ten.whatsNew.pending.map(\.build) == [10])
             #expect(ten.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDsOnAnIPhone)
             #expect(WhatsNewStore(defaults: defaults).record
@@ -267,7 +352,7 @@ struct WhatsNewTests {
     @Test func aBuildWithoutANumberAnnouncesNothingAndKeepsNothing() {
         withDefaults { defaults in
             let model = model(on: host(maximumMiB: 6144))
-            entry(announces: true, build: nil, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, build: nil, defaults: defaults).announce(on: model, hasGuest: true)
             #expect(!model.whatsNew.showsRibbon)
             #expect(WhatsNewStore(defaults: defaults).record == nil)
         }
@@ -277,7 +362,7 @@ struct WhatsNewTests {
         withDefaults { defaults in
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 5))
             let model = model(on: host(maximumMiB: 6144))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: model, hasGuest: true)
             model.whatsNew.read()
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 10))
             #expect(model.whatsNew.showsRibbon)
@@ -287,7 +372,7 @@ struct WhatsNewTests {
 
             // The next launch of the same build offers nothing.
             let next = self.model(on: host(maximumMiB: 6144))
-            entry(announces: true, defaults: defaults).announceWhatsNew(on: next, hasGuest: true, vCPUs: 6)
+            entry(announces: true, defaults: defaults).announce(on: next, hasGuest: true)
             #expect(!next.whatsNew.showsRibbon)
         }
     }
@@ -299,7 +384,7 @@ struct WhatsNewTests {
             WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 5))
             let model = model(on: host(maximumMiB: 6144))
             let launch = entry(announces: false, defaults: defaults)
-            launch.announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+            launch.announce(on: model, hasGuest: true)
             #expect(!model.whatsNew.showsRibbon)
             #expect(WhatsNewStore(defaults: defaults).record == WhatsNewRecord(seenBuild: 5))
             model.whatsNew.read()
@@ -311,7 +396,7 @@ struct WhatsNewTests {
             // The record of an install that has none stays none.
             withDefaults { fresh in
                 let model = self.model(on: host(maximumMiB: 6144))
-                self.entry(announces: false, defaults: fresh).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+                self.entry(announces: false, defaults: fresh).announce(on: model, hasGuest: true)
                 #expect(WhatsNewStore(defaults: fresh).record == nil)
             }
         }
