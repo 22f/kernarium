@@ -555,6 +555,41 @@ void a_doomed_space_is_let_go_of_without_telling_it_of_each_body(
 		"letting go of a doomed space queued its bodies one by one");
 }
 
+/* A space the budget shed and nothing has closed yet (no holder has been
+ * through its next entry) is doomed by the shed alone: an executor that ends
+ * while it holds one, as a vCPU's executor does when its guest exits, empties
+ * its slots without telling the space and takes the space with it as the last
+ * holder. */
+void a_shed_space_goes_with_the_executor_that_ends_holding_it(
+	unsigned long generation)
+{
+	constexpr std::size_t blocks = 200;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{pages_for((blocks + 1) * 4)};
+	put_chain(backing, blocks);
+	JitMapping mapping{generation, code_base, backing,
+		pages_for((blocks + 1) * 4)};
+	auto vcpu = std::make_unique<Vcpu>();
+	const auto base = cache::ledger_state();
+	const auto closes = stress::closes();
+	require(run_to_system_call(vcpu->executor, vcpu->memory, generation,
+		vcpu->cpu, code_base, blocks + 4) != 0);
+	const auto pushes = stress::limbo_pushes();
+	cache::set_budget(1);
+	cache::relieve();
+	cache::set_budget(cache::fallback_budget);
+	require(cache::ledger_state().shedding > base.shedding);
+	require(stress::closes() == closes,
+		"the space was closed before the executor ended");
+
+	vcpu.reset();
+	require(cache::ledger_state().shedding == base.shedding,
+		"the shed space did not go with the executor that held it");
+	require(stress::limbo_pushes() == pushes,
+		"an executor that ended queued the bodies of a shed space");
+}
+
 /* A private cache's window retires its space, whichever way it is used: no
  * other executor holds it. */
 void a_private_space_is_let_go_of_without_telling_it_of_each_body()
@@ -969,6 +1004,7 @@ int main()
 		Doomed::shed);
 	a_doomed_space_is_let_go_of_without_telling_it_of_each_body(1235,
 		Doomed::closed);
+	a_shed_space_goes_with_the_executor_that_ends_holding_it(1237);
 	a_private_space_is_let_go_of_without_telling_it_of_each_body();
 	a_holder_runs_on_in_a_space_another_holder_let_go_of(1240,
 		Ends::next_run);
