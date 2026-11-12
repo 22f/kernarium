@@ -196,9 +196,19 @@ final class AppModel {
     var hostDrivesGuestRotation = false
     /// The guest follows the device's orientation, as iOS reports it: the device
     /// is an iPhone, whose interface stays portrait while the guest turns with
-    /// the device, or the launch states it (a Mac test). Set once, when the
-    /// model is made (`AppEntry`).
+    /// the device, or the launch states it (a Mac test). Where the interface
+    /// turns (a folding iPhone's inner display) the host drives the guest
+    /// instead. Set once, when the model is made (`AppEntry`).
     var followsDeviceOrientation = false
+    /// What the system says of the folding display the scene is on (the iPhone
+    /// Duo); nil on every device that reports no hinge, which keeps every
+    /// layout it has. The scene's root reads it (`FoldSceneReader`) and the
+    /// layout decisions are `AndariumCore`'s (`FoldLayout.swift`).
+    var fold: FoldReading?
+    /// Where the scene is: `.plain` unless the display folds.
+    var foldPose: FoldPose { fold?.pose ?? .plain }
+    /// The session's layout on a folding display; nil elsewhere.
+    var sessionPlan: SessionPlan? { fold.flatMap(SessionPlan.init) }
 
     var sessionPreset = SessionPreset()
     var session = SessionState() {

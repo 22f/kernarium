@@ -22,7 +22,17 @@ struct FilesBar: View {
     /// The sheet's own bottom inset, measured outside the bar: read here, the
     /// bar's padding would feed its own measurement.
     let bottomInset: CGFloat
+    /// Optional: the bar shown without a model is the phone's.
+    @Environment(AppModel.self) private var model: AppModel?
     @State private var trailScrolled = false
+
+    /// On the folding iPhone's cover the toolbar's buttons stand in a column
+    /// beside the camera, and Import is one of them (`FolderPage`), so the
+    /// trail has the bar to itself until something is selected: Export, which
+    /// replaces Import then, stays here.
+    private var importIsInToolbar: Bool {
+        (model?.foldPose.importIsInToolbar ?? false) && browser.selection.isEmpty
+    }
 
     var body: some View {
         GlassEffectContainer(spacing: 10) {
@@ -33,7 +43,7 @@ struct FilesBar: View {
                 if browser.browsing, usable {
                     HStack(spacing: 10) {
                         trail
-                        action
+                        if !importIsInToolbar { action }
                     }
                     .transition(.opacity)
                 }
@@ -192,7 +202,7 @@ struct FilesBar: View {
         .buttonBorderShape(.capsule)
     }
 
-    private func actionLabel(_ title: String, symbol: String) -> some View {
+    private func actionLabel(_ title: LocalizedStringKey, symbol: String) -> some View {
         Label(title, systemImage: symbol)
             .font(.subheadline.weight(.semibold))
             .labelStyle(.titleAndIcon)
