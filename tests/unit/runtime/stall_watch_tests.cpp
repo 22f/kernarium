@@ -610,11 +610,11 @@ void a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second()
 	Carrier wedger;
 	Carrier spinner;
 	start(idle0, 0, [&] { blink_until_stopped(idle0, 40); }, true);
-	/* A thread of the process's that is no carrier and keeps a core busy while
-	 * the watch sleeps, and stops as the host wakes the guest: the event after
-	 * the wake looks back over the time since the wake, which the spinner
-	 * did not use, and not over the sleep, which it did. */
-	std::atomic<bool> spinning{true};
+	/* A thread of the process's that is no carrier. It naps while the watch
+	 * sleeps and keeps a core busy from the host's wake to the event: the
+	 * event looks back over the time since the wake, in which the spinner
+	 * used a core, and not over the sleep, in which it used none. */
+	std::atomic<bool> spinning{false};
 	start_other(spinner, "uml-test-spinner", [&] {
 		while (!spinner.stop.load(std::memory_order_acquire)) {
 			if (!spinning.load(std::memory_order_acquire))
@@ -637,17 +637,12 @@ void a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second()
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr);
 	/* Longer than the five seconds an event looks back over. */
-	const std::uint64_t cpu_at_start = process_cpu_ns();
-	const auto started = std::chrono::steady_clock::now();
 	sleep_ms(5600);
-	spinning.store(false, std::memory_order_release);
-	sleep_ms(20);
-	const double slept = static_cast<double>(process_cpu_ns() - cpu_at_start) /
-		1'000'000.0 / milliseconds_since(started) * 100.0;
 	/* The wedger's own event is the one that is timed: an unrelated starvation
 	 * of the idle carrier on a loaded host is not. */
 	const std::uint64_t cpu_at_wake = process_cpu_ns();
 	const auto woken = std::chrono::steady_clock::now();
+	spinning.store(true, std::memory_order_release);
 	require(write(wake[1], "w", 1) == 1);
 	double found = -1;
 	std::string slot;
@@ -663,6 +658,7 @@ void a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second()
 		}
 		sleep_ms(5);
 	}
+	spinning.store(false, std::memory_order_release);
 	require(found >= 0, "a wedge after a wake was never found:\n" + slot);
 	std::printf("a wedge after a wake was recorded %.0f ms after the wake\n", found);
 	/* The timer 50 ms after the wake, then the 100 ms a stall must last. */
@@ -671,23 +667,28 @@ void a_wedge_after_a_wake_is_found_within_a_quarter_of_a_second()
 	require(found <= 250, "a wedge after a wake was found late: " +
 		std::to_string(found) + " ms");
 	require(line.find("+ ") != std::string::npos,
-		"the wedger's event is still open:\n" + line);
+		"the wedger's event has ended:\n" + line);
 	/* The watch slept, yet the event says what the process was doing in the
 	 * seconds before it: since the wake, when the watch first looked, and not
-	 * over the sleep. The spinner used a core for the sleep and stopped at the
-	 * wake, so the figure is the process's use over the span the test measures
-	 * from the wake, within a factor of two (and a few hundredths of a core
-	 * for the rounding of two small figures), and far below the sleep's. */
+	 * over the sleep. The spinner used a core from the wake and none during
+	 * the sleep, so the figure is the process's use over the span the test
+	 * measures from the wake, within a factor of two (and a couple of
+	 * hundredths of a core for the rounding of two small figures). A figure
+	 * of nothing, and the sleep's average, which is the spinner's use over
+	 * five seconds of a nap, both fail it. */
 	const long before = cores_before_of(line);
 	const double measured = static_cast<double>(cpu_at_found - cpu_at_wake) /
 		1'000'000.0 / found * 100.0;
 	const std::string figures = "the process's use before the event is " +
 		std::to_string(before) + " hundredths of a core; measured over the "
-		"wake to the event: " + std::to_string(measured) + "; over the sleep: " +
-		std::to_string(slept) + "\n" + line;
-	require(before >= 0 && before * 2.0 + 6.0 >= measured &&
-		before <= measured * 2.0 + 6.0, figures);
-	require(slept > 10 && before * 4.0 < slept, figures);
+		"wake to the event: " + std::to_string(measured) + "\n" + line;
+	std::printf("the process's use before that event: %ld hundredths of a "
+		"core, measured from the wake: %.0f\n", before, measured);
+	/* A host too loaded to let the spinner run says nothing: run it alone. */
+	require(measured >= 20, "the spinner did not get a fifth of a core, rerun "
+		"this test alone: " + figures);
+	require(before >= 0 && before * 2.0 + 2.0 >= measured &&
+		before <= measured * 2.0 + 2.0, figures);
 
 	spinner.stop.store(true, std::memory_order_release);
 	wedger.stop.store(true, std::memory_order_release);
