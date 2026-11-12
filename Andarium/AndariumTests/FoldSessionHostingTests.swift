@@ -117,15 +117,19 @@ struct FoldSessionHostingTests {
         let controller: AndariumHostingController<AnyView>
         let driver = StubDriver(plan: nil)
         var pose: Pose
+        /// The scene reports no hinge, as an iPad does, in the pose's own window.
+        let plain: Bool
         private(set) var guest: GuestMetalView!
 
         /// `phase` is what the root shows; Home and the boot have no guest's
         /// display to wait for, and `withoutGuest` is the screen before a
         /// virtual machine exists.
         init(
-            _ pose: Pose, phase: Phase = .running(.normal), withoutGuest: Bool = false, test: FoldSessionHostingTests
+            _ pose: Pose, phase: Phase = .running(.normal), withoutGuest: Bool = false, plain: Bool = false,
+            test: FoldSessionHostingTests
         ) async throws {
             self.pose = pose
+            self.plain = plain
             let entry = AppEntry.fromArguments()
             let model = entry.makeModel()
             model.launchApplied = true
@@ -135,7 +139,7 @@ struct FoldSessionHostingTests {
             holder = UIView(frame: pose.reading.window)
             controller = AndariumHostingController(rootView: AnyView(RootView(entry: entry).environment(model)), model: model)
             model.driver = driver
-            controller.foldReader.stub = { [unowned self] in self.pose.reading }
+            controller.foldReader.stub = { [unowned self] in self.plain ? nil : self.pose.reading }
             container.view.backgroundColor = .black
             lease.window.rootViewController = container
             container.view.addSubview(holder)
@@ -156,7 +160,7 @@ struct FoldSessionHostingTests {
                     left: extra.left + safe.minX - window.minX - have.left,
                     bottom: extra.bottom + window.maxY - safe.maxY - have.bottom,
                     right: extra.right + window.maxX - safe.maxX - have.right)
-                _ = await test.eventually { model.fold == pose.reading }
+                _ = await test.eventually { model.fold == (plain ? nil : pose.reading) }
                 try? await Task.sleep(for: .milliseconds(700))
                 controller.view.layoutIfNeeded()
                 return
@@ -569,36 +573,112 @@ struct FoldSessionHostingTests {
         }
     }
 
-    @Test(arguments: Pose.allCases.filter(\.inner))
-    func theBootSitsOnTheUpperHalfWhenStandingAndOnTheAlertsHalfOtherwise(_ pose: Pose) async throws {
-        let rig = try await Rig(pose, phase: .booting(.normal), test: self)
-        defer { rig.end() }
-        let steps = rig.labelled().filter { $0.label.contains("Linux kernel") || $0.label.contains("System image") }
-        let boot = try #require(steps.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no boot steps")
-        let band = try #require(pose.reading.division).frame
-        let halves = try #require(FoldHalves(pose.reading))
-        #expect(!boot.intersects(band), "\(pose): the boot is on the fold at \(boot)")
-        let place = pose == .turnedBook ? halves.first : halves.card
-        #expect(place.insetBy(dx: -1, dy: -1).contains(boot), "\(pose): the boot \(boot) is not on \(place)")
+    /// A popup of the app: what sits over a screen, and the screen it sits on.
+    enum Popup: CaseIterable, CustomStringConvertible, Sendable {
+        case boot, busy, lowSpace, end
+
+        var description: String {
+            switch self {
+            case .boot: "boot"
+            case .busy: "busy card"
+            case .lowSpace: "low-space card"
+            case .end: "end card"
+            }
+        }
+
+        var phase: Phase {
+            switch self {
+            case .boot: .booting(.normal)
+            case .end: .failed
+            case .busy, .lowSpace: .home
+            }
+        }
+
+        /// What the model shows over `phase`.
+        @MainActor func show(on model: AppModel) {
+            switch self {
+            case .busy:
+                model.busy = BusyState(title: "Erasing virtual machine", detail: "Deleting everything.", progress: 0.65)
+            case .lowSpace:
+                model.spacePause = SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .notPaused)
+            case .boot, .end:
+                break
+            }
+        }
+
+        /// Words of the popup, whose frames stand for it.
+        var words: [String] {
+            switch self {
+            case .boot: ["Linux kernel", "System image", "Storage", "Startup"]
+            case .busy: ["Erasing virtual machine", "65%", "Deleting everything."]
+            case .lowSpace: [SpacePauseWords.title(SpacePause(freeBytes: 820 * Limits.bytesPerMiB, stage: .notPaused))]
+            case .end: ["Copy report"]
+            }
+        }
     }
 
-    /// A card is kept to its half by the space it is given, not by the
+    /// The frame of `popup` on `pose`, or on a display that reports no hinge
+    /// when `plain`: the union of what its words name.
+    private func frame(of popup: Popup, on pose: Pose, plain: Bool = false) async throws -> CGRect {
+        let rig = try await Rig(pose, phase: popup.phase, plain: plain, test: self)
+        defer { rig.end() }
+        popup.show(on: rig.model)
+        try await Task.sleep(for: .milliseconds(900))
+        rig.controller.view.layoutIfNeeded()
+        let shown = rig.labelled().filter { element in popup.words.contains { element.label.contains($0) } }
+        return try #require(
+            shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "\(pose): no \(popup) in \(rig.labelled())")
+    }
+
+    /// Flat, every popup is where it is on a display that does not fold, as on
+    /// an iPad, moved only to the fold's centre (the status bar's strip and
+    /// the safe area's edges leave the safe area off the display's centre);
+    /// bent, it keeps to a half, the boot of a standing device to the upper
+    /// one.
+    @Test(arguments: Pose.allCases.filter(\.inner), Popup.allCases)
+    func everyPopupIsCentredOnTheDisplayWhenFlatAndKeepsToAHalfWhenBent(_ pose: Pose, _ popup: Popup) async throws {
+        let halves = try #require(FoldHalves(pose.reading))
+        let band = try #require(pose.reading.division).frame
+        let shown = try await frame(of: popup, on: pose)
+        if pose == .uprightFlat || pose == .turnedFlat {
+            let plain = try await frame(of: popup, on: pose, plain: true)
+            let area = halves.area(for: .card)
+            let safe = pose.reading.safeArea
+            let expected = CGPoint(x: plain.midX + area.midX - safe.midX, y: plain.midY + area.midY - safe.midY)
+            #expect(abs(shown.midX - expected.x) < 1 && abs(shown.midY - expected.y) < 1,
+                    "\(pose): the \(popup) is at \(shown), not centred as without a fold, \(plain), moved to \(expected)")
+            // The busy card's words span its width: it is on the display's
+            // centre along the axis the fold crosses.
+            if popup == .busy {
+                let along = pose == .uprightFlat ? (shown.midX, pose.reading.window.midX) : (shown.midY, pose.reading.window.midY)
+                #expect(abs(along.0 - along.1) < 1, "\(pose): the \(popup) at \(shown) is not centred on the display")
+            }
+        } else {
+            let place = popup == .boot && pose == .turnedBook ? halves.first : halves.card
+            #expect(!shown.intersects(band), "\(pose): the \(popup) is on the fold at \(shown)")
+            #expect(place.insetBy(dx: -1, dy: -1).contains(shown), "\(pose): the \(popup) \(shown) is not on \(place)")
+        }
+    }
+
+    /// A card is kept to its place by the space it is given, not by the
     /// window: in a sheet that is only the leading half wide, the Send
-    /// feedback's busy card must not be padded away.
-    @Test func aCardInASheetsOwnFrameIsNotPaddedAwayByTheWindowsHalves() async throws {
+    /// feedback's busy card must not be padded away, and in a sheet the
+    /// system centres on a flat display it is centred in the sheet.
+    @Test(arguments: [(pose: Pose.uprightBook, sheet: CGRect(x: 0, y: 0, width: 455.5, height: 500)),
+                      (pose: Pose.uprightFlat, sheet: CGRect(x: 150, y: 0, width: 651, height: 500)),
+                      (pose: Pose.turnedFlat, sheet: CGRect(x: 60, y: 200, width: 549, height: 600))])
+    func aCardInASheetsOwnFrameIsNotPaddedAwayByTheWindowsHalves(_ test: (pose: Pose, sheet: CGRect)) async throws {
         let model = AppEntry.fromArguments().makeModel()
-        model.fold = Pose.uprightBook.reading
+        model.fold = test.pose.reading
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let container = UIViewController()
         lease.window.rootViewController = container
         let host = UIHostingController(rootView: Text("Sending").onCardHalf().environment(model))
         container.addChild(host)
-        let holder = UIView(frame: Pose.uprightBook.reading.window)
+        let holder = UIView(frame: test.pose.reading.window)
         container.view.addSubview(holder)
-        // The sheet the system keeps to the leading half: 455.5 wide, the
-        // card's half, and nothing of the window's other half.
-        host.view.frame = CGRect(x: 0, y: 0, width: 455.5, height: 500)
+        host.view.frame = test.sheet
         holder.addSubview(host.view)
         host.didMove(toParent: container)
         try await Task.sleep(for: .milliseconds(700))
@@ -606,6 +686,9 @@ struct FoldSessionHostingTests {
         let text = try #require(Self.labelled(in: host.view, relativeTo: holder).first { $0.label == "Sending" }, "no card")
         #expect(text.frame.width > 40, "the card collapsed to \(text.frame)")
         #expect(host.view.frame.insetBy(dx: -1, dy: -1).contains(text.frame), "the card is at \(text.frame)")
+        if test.pose != .uprightBook {
+            #expect(abs(text.frame.midX - test.sheet.midX) < 1, "\(test.pose): the card \(text.frame) is not centred in the sheet")
+        }
         host.willMove(toParent: nil)
         host.view.removeFromSuperview()
         host.removeFromParent()
@@ -632,6 +715,29 @@ struct FoldSessionHostingTests {
         #expect(counter.appeared == 1, "\(turn): the sheet's content was built \(counter.appeared) times")
         #expect(counter.disappeared == 0, "\(turn): the sheet's content went away")
         #expect(counter.tokens.count == 1 && counter.tokens.first == token, "\(turn): the sheet's state was lost")
+        host.dismiss(animated: false)
+        #expect(await eventually { host.presentedViewController == nil })
+        lease.window.rootViewController = nil
+    }
+
+    /// A sheet is kept below the fold only while the device stands bent; flat,
+    /// it is the system's, as on an iPad.
+    @Test(arguments: [Pose.turnedBook, Pose.turnedFlat, Pose.uprightFlat])
+    func aSheetRisesToTheFoldOnlyWhileTheDeviceStandsBent(_ pose: Pose) async throws {
+        let model = AppEntry.fromArguments().makeModel()
+        model.fold = pose.reading
+        let counter = SheetProbe.Counter()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let host = UIHostingController(rootView: SheetProbe(model: model, counter: counter))
+        lease.window.rootViewController = host
+        #expect(await eventually { counter.appeared == 1 }, "the sheet did not appear")
+        let detents = host.presentedViewController?.sheetPresentationController?.detents ?? []
+        if pose == .turnedBook {
+            #expect(!detents.isEmpty && !detents.contains { $0.identifier == .large }, "\(pose): the detents are \(detents)")
+        } else {
+            #expect(detents.allSatisfy { $0.identifier == .large }, "\(pose): the detents are \(detents)")
+        }
         host.dismiss(animated: false)
         #expect(await eventually { host.presentedViewController == nil })
         lease.window.rootViewController = nil

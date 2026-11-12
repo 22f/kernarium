@@ -9,29 +9,32 @@ import SwiftUI
 
 extension View {
     /// Keeps the view to the place of `screen` on the inner display (see
-    /// `FoldHalves.area(for:)`): by default the half where the system puts its
-    /// own alerts, the leading one upright and the lower one turned, so a card
-    /// or a boot step never straddles the fold. The view is padded away from
-    /// the rest of the space it has, or reaches past that space to the whole
-    /// display (Welcome, flat); elsewhere there is no padding, so it lays out
-    /// as it always did. It measures the space it is given and not
-    /// the window's safe area, so it holds in a sheet and under a navigation
-    /// bar. Apply it to a view that fills the space it is shown in.
+    /// `FoldHalves.area(for:)`). While the device is bent that is the half
+    /// where the system puts its own alerts, the leading one upright and the
+    /// lower one turned, so a card or a boot step never straddles the fold;
+    /// while it is flat the view spans the display, centred on the fold, as on
+    /// an iPad. The view is padded away from the rest of the space it has, or
+    /// reaches past that space to the whole display (Welcome, flat);
+    /// elsewhere there is no padding, so it lays out as it always did. It
+    /// measures the space it is given and not the window's safe area, so it
+    /// holds in a sheet and under a navigation bar. Apply it to a view that
+    /// fills the space it is shown in.
     func onCardHalf(_ screen: FoldScreen = .card) -> some View { modifier(OnCardHalf(screen: screen)) }
 
-    /// A sheet's presentation on the turned inner display. Upright the system
-    /// keeps a sheet to the leading half while the device is bent. Turned,
-    /// bent or flat, the sheet rises to the fold and no further: it covers the
-    /// lower half only, the upper half stays in sight, and nothing moves when
-    /// the hinge crosses between bent and flat. `reachesBehind` lets touches
-    /// reach what the sheet leaves uncovered, as the session's Settings does
-    /// over the guest. Apply it outside the sheet's own presentation
-    /// modifiers. It is handed the model and does not read the environment:
-    /// a sheet's presentation preferences are read before the sheet inherits
-    /// its presenter's environment, on a Mac and in a harness that gives the
-    /// presenter no model. A sheet decides once, when it is presented, whether
-    /// it takes the turned presentation; turning the display with it open
-    /// leaves its content, and what the person has typed in it, in place.
+    /// A sheet's presentation on the turned inner display while the device
+    /// stands bent. Upright the system keeps a sheet to the leading half while
+    /// the device is bent. Turned and bent, the sheet rises to the fold and no
+    /// further: it covers the lower half only and the upper half stays in
+    /// sight. Flat, upright or turned, a sheet is the system's, centred as on
+    /// an iPad. `reachesBehind` lets touches reach what the sheet leaves
+    /// uncovered, as the session's Settings does over the guest. Apply it
+    /// outside the sheet's own presentation modifiers. It is handed the model
+    /// and does not read the environment: a sheet's presentation preferences
+    /// are read before the sheet inherits its presenter's environment, on a
+    /// Mac and in a harness that gives the presenter no model. A sheet decides
+    /// once, when it is presented, whether it takes the turned presentation;
+    /// turning the display with it open leaves its content, and what the person
+    /// has typed in it, in place.
     func foldSheet(_ model: AppModel, reachesBehind: Bool = false) -> some View {
         modifier(FoldSheetPresentation(model: model, reachesBehind: reachesBehind))
     }
