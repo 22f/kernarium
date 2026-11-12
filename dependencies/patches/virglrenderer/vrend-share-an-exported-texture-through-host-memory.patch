@@ -65,10 +65,11 @@ would leave the importer the older picture for good. The read-back of a
 first export is the exception and leaves the texture clean: the importer
 may write the segment before any fence, as a Venus producer does, and
 the retry would replace that frame with GL's older pixels. What remains
-is what the renderer did before: a texture GL drew before its first
-export, whose first read-back was refused, shows the importer zeros
-until GL draws it again. A read-back into a pinned segment is not
-checked and adds no call.
+is what the renderer did before: for a texture GL drew before its
+first export, whose first read-back was refused, an importer that
+reads the segment first, and GL's own next read of the texture, see
+zeros until GL draws it again. A read-back into a pinned segment is
+not checked and adds no call.
 
 The retry cannot see the importer write the segment. An importer that
 rewrites it whole after a refused fence and before a retry that

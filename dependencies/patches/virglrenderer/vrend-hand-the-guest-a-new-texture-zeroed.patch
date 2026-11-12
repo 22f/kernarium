@@ -44,10 +44,14 @@ Cost on an M1 Ultra under load, creating thread, main against this:
 4x4 at 1024x1024, 0.01 -> 0.9 ms for a cube, 0.01 -> 15 to 20 ms for
 a 256-layer array and 0.01 -> 40 to 60 ms for a 4096-high array one
 to five texels wide, with 512 layers. The cost is a copy for each layer
-and level; copying the layers from the first, or by doubling, was not
-faster on Zink over KosmicKrisp, which does a Metal copy per layer. The
-GPU needs 0.4 to 0.7 ms more for a 2D texture before it is finished.
-Nothing is paid once the texture exists.
+and level. Copying the layers from the first, or by doubling, was
+measured as well, on Zink over KosmicKrisp, which does a Metal copy per
+layer. The per-layer loop is kept because it is best or tied on the
+costly shapes, the 256-layer ETC2 array and the narrow arrays; the
+others win only on cubes, which take under a millisecond. The Mesa
+fallback path of the others was not run. The GPU needs 0.4 to 0.7 ms
+more for a 2D texture before it is finished. Nothing is paid once the
+texture exists.
 
 The driver holds the tile (256 KiB at most) and the staging of its
 upload, as much again, and the staging of the part block uploads, which
@@ -55,7 +59,12 @@ grow with the layers: the Metal allocation of a 1 x 4096 x 512 ASTC 4x4
 array is 4 MiB above its 8 MiB, and that of a 1022 x 1022 x 64 array
 with levels 8 MiB above its 86 MiB. A released compressed texture is
 freed when its context next reuses the batch state of its zeroing, is
-trimmed as idle, or a refused creation reclaims, not at once.
+trimmed as idle, or a refused creation reclaims, not at once. The
+command storage of the copies is counted by the memory pool but cannot
+be refused: it measured 22 to 26 MiB straight after the creation of a
+1022 x 1022 x 64 ASTC 4x4 array with levels and of a 256 x 256 x 256
+one. A large layered compressed texture therefore needs about that much
+room beyond its size, or its creation is refused with ENOMEM.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
