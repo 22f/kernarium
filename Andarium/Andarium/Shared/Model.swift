@@ -423,6 +423,15 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
     var alert: AppAlert?
+    /// Settings' Install APK asks whether to install an app Android refused for
+    /// the version it was built for; the screens' alert shows it while the
+    /// install waits behind the overlay (`LegacyInstallFlow`).
+    var legacyInstallQuestion: LegacyInstallQuestion?
+    @ObservationIgnored private var legacyInstallAnswer: CheckedContinuation<Bool?, Never>?
+    /// Which attempt of an install the overlay listens to: what an attempt that is over reports
+    /// late (the guest's last words arrive on the main actor after the attempt has thrown) is
+    /// dropped, so it cannot write over the question's or the retry's overlay.
+    @ObservationIgnored private var installAttemptTag = 0
     /// How far the current boot has got, from the guest's console.
     var bootTracker = BootTracker()
     /// The guest's disk is being written before the run can begin.
@@ -454,7 +463,7 @@ final class AppModel {
     /// the keys, and the guest takes them back when it goes. The pointer lock
     /// goes with them.
     var guestHasKeys: Bool {
-        !sessionSettingsOpen && sheet == nil && alert == nil && !shareSheetUp
+        !sessionSettingsOpen && sheet == nil && alert == nil && legacyInstallQuestion == nil && !shareSheetUp
     }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
@@ -1099,6 +1108,7 @@ final class AppModel {
         operationEpoch += 1
         operation?.cancel()
         operation = nil
+        finishLegacyInstallQuestion(nil)
         busy = nil
     }
 
@@ -1222,17 +1232,15 @@ final class AppModel {
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
+        let detail = size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name
         runOperation(
-            BusyState(
-                title: String(localized: "Installing app"),
-                detail: size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name, progress: 0
-            ),
+            BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
             ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 if let driver {
-                    try await driver.installApk(at: url, update: update)
+                    try await self.installAskingAboutLegacyApps(url, with: driver, detail: detail)
                 } else {
                     try await Self.playInstall(update)
                 }
@@ -1241,6 +1249,93 @@ final class AppModel {
                 try? await Task.sleep(for: .milliseconds(500))
             }
         )
+    }
+
+    /// The install, as `LegacyInstallFlow` has it: the ordinary attempt first,
+    /// which is exactly what Install APK always did. When Android refuses the
+    /// app for the version it was built for, and only then, the person is
+    /// asked; "Install anyway" sends the same file again with the package
+    /// manager's flag, once, and Cancel ends the install as a cancelled one.
+    /// The file's security scope is the caller's and spans the question; each
+    /// attempt reads the file and checks the room afresh.
+    private func installAskingAboutLegacyApps(
+        _ url: URL, with driver: any RuntimeDriver, detail: String
+    ) async throws {
+        let epoch = operationEpoch
+        var flow = LegacyInstallFlow()
+        while true {
+            switch flow.step {
+            case let .attempt(bypass):
+                installAttemptTag += 1
+                let tag = installAttemptTag
+                let update: @Sendable (BusyUpdate) -> Void = { [weak self] update in
+                    Task { @MainActor in
+                        guard let self, self.installAttemptTag == tag else { return }
+                        self.apply(update, epoch: epoch)
+                    }
+                }
+                do {
+                    try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                    flow.attemptEnded(.installed)
+                } catch let refused as LegacyApkRefused {
+                    flow.attemptEnded(.tooOldTarget(refused.target))
+                }
+            case let .ask(target):
+                // The file is not being sent while the person thinks: the
+                // overlay says which file, and has no Cancel (the alert's is).
+                installAttemptTag += 1
+                busy?.cancel = nil
+                busy?.detail = detail
+                guard let installAnyway = await askAboutLegacyInstall(target) else {
+                    flow.stopped()
+                    continue
+                }
+                flow.answered(installAnyway: installAnyway)
+                if installAnyway {
+                    // The bar starts over for the second attempt.
+                    busy?.progress = 0
+                    busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
+                }
+            case let .finished(ending):
+                switch ending {
+                case .installed: return
+                case .cancelled: throw CancellationError()
+                case .failed: throw AdbFailure(message: PackageInstallMessages.message(forCode: PackageInstallAnswer.tooOldCode))
+                }
+            }
+        }
+    }
+
+    /// Opens the question and waits for the answer: true for Install anyway,
+    /// false for Cancel, nil when the install was stopped meanwhile (the guest
+    /// ended, or the task was cancelled), which takes the question away.
+    private func askAboutLegacyInstall(_ target: LegacyTarget) async -> Bool? {
+        guard !Task.isCancelled else { return nil }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+                finishLegacyInstallQuestion(nil)
+                if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                legacyInstallAnswer = continuation
+                legacyInstallQuestion = LegacyInstallQuestion(target: target)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.finishLegacyInstallQuestion(nil) }
+        }
+    }
+
+    /// The alert's buttons.
+    func answerLegacyInstall(installAnyway: Bool) {
+        finishLegacyInstallQuestion(installAnyway)
+    }
+
+    private func finishLegacyInstallQuestion(_ answer: Bool?) {
+        legacyInstallQuestion = nil
+        let continuation = legacyInstallAnswer
+        legacyInstallAnswer = nil
+        continuation?.resume(returning: answer)
     }
 
     /// The title of an install that did not happen.

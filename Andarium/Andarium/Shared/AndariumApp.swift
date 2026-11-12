@@ -129,6 +129,7 @@ struct RootView: View {
         } message: { alert in
             Text(alert.message.keepingTogether)
         }
+        .legacyInstallAlert()
         #if !APP_STORE
         .task {
             // The launch's automation work happens once per model: a scene
@@ -140,4 +141,33 @@ struct RootView: View {
         }
         #endif
     }
+}
+
+/// Settings' Install APK, when Android refused an app for the version it was
+/// built for: the question over the install's overlay. The buttons answer;
+/// nothing else closes it. It sits on a view of its own, since a view that
+/// carries two alerts presents only one of them reliably.
+private struct LegacyInstallAlert: ViewModifier {
+    @Environment(AppModel.self) private var model
+
+    func body(content: Content) -> some View {
+        content.background {
+            Color.clear
+                .accessibilityHidden(true)
+                .alert(
+                    LegacyInstallWords.title,
+                    isPresented: Binding(get: { model.legacyInstallQuestion != nil }, set: { _ in }),
+                    presenting: model.legacyInstallQuestion
+                ) { _ in
+                    Button("Cancel", role: .cancel) { model.answerLegacyInstall(installAnyway: false) }
+                    Button(LegacyInstallWords.install) { model.answerLegacyInstall(installAnyway: true) }
+                } message: { question in
+                    Text(LegacyInstallWords.message(for: question.target).keepingTogether)
+                }
+        }
+    }
+}
+
+extension View {
+    fileprivate func legacyInstallAlert() -> some View { modifier(LegacyInstallAlert()) }
 }

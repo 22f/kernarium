@@ -4041,6 +4041,28 @@
         }
       }
     },
+    "Install anyway" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "それでもインストール"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安装"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安裝"
+          }
+        }
+      }
+    },
     "Install APK…" : {
       "localizations" : {
         "ja" : {
@@ -4081,6 +4103,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "安裝應用程式、ADB、統計資料和選項"
+          }
+        }
+      }
+    },
+    "Install this app anyway?" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "それでもこのアプリをインストールしますか？"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安装此应用吗？"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍要安裝此應用程式嗎？"
           }
         }
       }
@@ -7459,6 +7503,29 @@
         }
       }
     },
+    "The app was built for API level %lld. This virtual machine installs apps built for API level %lld or later." : {
+      "comment" : "API level is Android's number for a version; both are plain numbers (7, 24).",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリはAPIレベル%1$lldを対象に作られています。この仮想マシンでは、APIレベル%2$lld以降を対象としたアプリをインストールできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为API级别%1$lld开发的。此虚拟机可安装为API级别%2$lld或更高版本开发的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為API級別%1$lld所開發。此虛擬機器可安裝為API級別%2$lld或更新版本所開發的應用程式。"
+          }
+        }
+      }
+    },
     "The file changed while it was being copied." : {
       "localizations" : {
         "ja" : {
@@ -8844,6 +8911,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此App版本比虛擬機器上次啟動時使用的版本更舊，且虛擬機器資料無法降級回舊版本。請安裝較新版本的Andarium、回復較早的快照，或清除虛擬機器以使用此版本重新開始。"
+          }
+        }
+      }
+    },
+    "This app was built for a much older version of Android. Android blocks apps like this because they predate its newer privacy and security protections. If you install it anyway, it may not work properly." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリは、はるかに古いバージョンのAndroid向けに作られています。Androidは、新しいプライバシー保護やセキュリティ保護より前に作られたこのようなアプリのインストールをブロックします。それでもインストールすると、正しく動作しない場合があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用是为早得多的Android版本开发的。Android会阻止这类应用，因为它们早于Android较新的隐私和安全保护。如果仍要安装，它可能无法正常运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式是為更早許多的Android版本所開發。Android會阻擋這類應用程式，因為它們早於Android較新的隱私權與安全性保護。若仍要安裝，它可能無法正常運作。"
           }
         }
       }

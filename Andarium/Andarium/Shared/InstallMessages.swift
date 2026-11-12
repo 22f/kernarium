@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AndariumCore
 import Foundation
 
 /// What the package manager answered an install with, in plain words. The
@@ -87,4 +88,34 @@ nonisolated enum PackageInstallMessages {
 
     /// Every code the table maps, for the test that checks the table.
     static var mappedCodes: [String] { table.flatMap(\.codes) }
+}
+
+/// The package manager refused an app for the version of Android it was built
+/// for, and the first attempt is over: Settings' Install APK asks the person
+/// before it sends the file again. Carries the ordinary failure words, so a
+/// caller that does not ask shows what it always showed.
+nonisolated struct LegacyApkRefused: LocalizedError, Equatable {
+    var target: LegacyTarget
+
+    var errorDescription: String? { PackageInstallMessages.message(forCode: PackageInstallAnswer.tooOldCode) }
+}
+
+/// The question Settings' Install APK asks before it installs an app built for
+/// a much older version of Android. It says why Android blocks such an app and
+/// that the app may not work; it promises nothing and shows no code.
+nonisolated enum LegacyInstallWords {
+    static let title = String(localized: "Install this app anyway?")
+
+    static let install = String(localized: "Install anyway")
+
+    /// The message, with the versions when the package manager named both.
+    static func message(for target: LegacyTarget) -> String {
+        let body = String(
+            localized: "This app was built for a much older version of Android. Android blocks apps like this because they predate its newer privacy and security protections. If you install it anyway, it may not work properly.")
+        guard let app = target.appLevel, let required = target.requiredLevel else { return body }
+        let detail = String(
+            localized: "The app was built for API level \(app). This virtual machine installs apps built for API level \(required) or later.",
+            comment: "API level is Android's number for a version; both are plain numbers (7, 24).")
+        return body + "\n\n" + detail
+    }
 }

@@ -695,7 +695,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   before the first byte when the device (`TransferRoom`) or the virtual
   machine's data partition lacks room for the app and its reserve
   (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
-  Android cannot install (`InstallRefusal.tooLarge`).
+  Android cannot install (`InstallRefusal.tooLarge`). The first attempt is
+  always the plain install. When Android's own answer is the refusal of an app
+  built for a much older version (`INSTALL_FAILED_DEPRECATED_SDK_VERSION`),
+  and for no other answer, an alert asks whether to install it anyway, and
+  Install anyway sends the same file again with the package manager's
+  `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Only Settings'
+  Install APK can send that flag, and the choice is kept nowhere.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
