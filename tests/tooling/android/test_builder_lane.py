@@ -7086,6 +7086,42 @@ def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
     return problems
 
 
+def verify_camerax_denylist_assertion(android_root: Path) -> None:
+    """build-aosp.sh requires the inherited CameraX extensions switch in the vendor property denylist.
+
+    The switch stays in PRODUCT_VENDOR_PROPERTIES, which the product cannot edit: the denylist drops it
+    when the build writes the vendor property file, and the target-files verifier requires its absence
+    there. The statement is run on its own, with a stubbed get_build_var, against the cases that decide
+    it: the entry present beside others, absent, empty and a near match."""
+    script = (android_root / "build/build-aosp.sh").read_text()
+    property_name = "ro.camerax.extensions.enabled"
+    statement = re.search(
+        r'^\[\[ " \$\(get_build_var PRODUCT_VENDOR_PROPERTY_BLACKLIST\) " == \*" '
+        + re.escape(property_name) + r' "\* \]\] \|\|\n\tfail "[^"\n]*"$',
+        script, re.MULTILINE)
+    if statement is None:
+        fail("build-aosp.sh no longer requires the CameraX extensions switch in the vendor property denylist")
+    if re.search(r'PRODUCT_VENDOR_PROPERTIES" != \*" ' + re.escape(property_name), script):
+        fail("build-aosp.sh requires the inherited CameraX extensions switch to be absent from "
+             "PRODUCT_VENDOR_PROPERTIES, which an inherited property never is")
+    for denylist, accepted in (
+        (property_name, True),
+        (f"ro.a {property_name} ro.b", True),
+        ("", False),
+        ("ro.a ro.b", False),
+        (f"{property_name}2", False),
+        (f"x{property_name}", False),
+        ("ro.camerax.extensions", False),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", 'get_build_var() { [[ $1 == PRODUCT_VENDOR_PROPERTY_BLACKLIST ]] && printf %s "$DENYLIST"; }\n'
+             'fail() { echo "failed: $*"; exit 1; }\n' + statement.group(0)],
+            env={**os.environ, "DENYLIST": denylist}, capture_output=True, text=True, check=False)
+        if (result.returncode == 0) != accepted:
+            fail(f"build-aosp.sh's CameraX denylist assertion answers {result.returncode} for the denylist "
+                 f"{denylist!r}, not {'0' if accepted else '1'}: {result.stdout}{result.stderr}")
+
+
 def verify_network_stack_topic(android_root: Path) -> None:
     """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi exemption.
 
@@ -8528,6 +8564,7 @@ def main() -> None:
     verify_overlay_sepolicy(android_root)
     verify_lmkd_gpu_reclaim(android_root)
     verify_network_stack_topic(android_root)
+    verify_camerax_denylist_assertion(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)
     verify_debugging_defaults(android_root)
