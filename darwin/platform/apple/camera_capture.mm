@@ -295,6 +295,19 @@ using uml::platform::SessionState;
 namespace uml::platform {
 namespace {
 
+// The photo sizes a device format lists (supportedMaxPhotoDimensions).
+std::vector<CameraStillSize> listedPhotoSizes(AVCaptureDeviceFormat* format)
+{
+    std::vector<CameraStillSize> listed;
+    for (NSValue* value in format.supportedMaxPhotoDimensions) {
+        CMVideoDimensions candidate;
+        [value getValue:&candidate];
+        if (candidate.width > 0 && candidate.height > 0)
+            listed.push_back({std::uint32_t(candidate.width), std::uint32_t(candidate.height)});
+    }
+    return listed;
+}
+
 // What the system's pressure leaves of the rate a camera was asked for. The
 // pressure observer reads and writes it on any thread.
 struct PressureThrottle {
@@ -687,13 +700,7 @@ public:
         // The photo has the size the guest configured or the capture is refused:
         // the output makes up to the size set here, and a format that does not
         // list the request cannot make it, however large its other sizes are.
-        std::vector<uml::platform::CameraStillSize> listed;
-        for (NSValue* value in entry.device.activeFormat.supportedMaxPhotoDimensions) {
-            CMVideoDimensions candidate;
-            [value getValue:&candidate];
-            if (candidate.width > 0 && candidate.height > 0)
-                listed.push_back({std::uint32_t(candidate.width), std::uint32_t(candidate.height)});
-        }
+        const auto listed = listedPhotoSizes(entry.device.activeFormat);
         const CMVideoDimensions limit = output.maxPhotoDimensions;
         const uml::platform::CameraStillSize outputMaximum {std::uint32_t(std::max(0, int(limit.width))),
                                                             std::uint32_t(std::max(0, int(limit.height)))};
@@ -1266,40 +1273,57 @@ private:
                 if (running.input == nil) ok = addInput(entry, running);
                 if (ok) {
                     AVCapturePhotoOutput* output = [[AVCapturePhotoOutput alloc] init];
-                    // The output makes photos up to the largest size the format
-                    // lists (the default is the smallest, which the Mac gets too).
-                    CMVideoDimensions largest {0, 0};
-                    for (NSValue* value in entry.device.activeFormat.supportedMaxPhotoDimensions) {
-                        CMVideoDimensions candidate;
-                        [value getValue:&candidate];
-                        if (std::int64_t(candidate.width) * candidate.height > std::int64_t(largest.width) * largest.height)
-                            largest = candidate;
-                    }
-                    if (largest.width != 0) output.maxPhotoDimensions = largest;
 #if TARGET_OS_IOS
                     output.maxPhotoQualityPrioritization = AVCapturePhotoQualityPrioritizationQuality;
 #endif
-                    if (multiCamera_) {
+                    const auto attach = [&]() -> bool {
+                        if (multiCamera_) {
 #if TARGET_OS_IOS
-                        AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
-                                                                     sourceDeviceType:entry.device.deviceType
-                                                                 sourceDevicePosition:entry.device.position].firstObject;
-                        if (port != nil && [session_ canAddOutput:output]) {
+                            AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
+                                                                         sourceDeviceType:entry.device.deviceType
+                                                                     sourceDevicePosition:entry.device.position].firstObject;
+                            if (port == nil || ![session_ canAddOutput:output]) return false;
                             [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
                             newOutput = output;
                             AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
-                            ok = [session_ canAddConnection:connection];
-                            if (ok) [session_ addConnection:connection];
-                        } else {
-                            ok = false;
-                        }
+                            if (![session_ canAddConnection:connection]) return false;
+                            [session_ addConnection:connection];
+                            return true;
+#else
+                            return false;
 #endif
-                    } else if ([session_ canAddOutput:output]) {
+                        }
+                        if (![session_ canAddOutput:output]) return false;
                         [session_ addOutput:output];
                         newOutput = output;
-                    } else {
-                        ok = false;
-                    }
+                        return true;
+                    };
+                    // The output makes photos up to the largest size the format
+                    // lists (its default is the smallest, which the Mac gets
+                    // too). AVFoundation requires that size to be one of the
+                    // active format's supportedMaxPhotoDimensions of the
+                    // output's source device, and an unattached output has no
+                    // source: the maximum is set after the output is attached.
+                    const auto setMaximum = [&](uml::platform::CameraStillSize size) -> bool {
+                        @try {
+                            output.maxPhotoDimensions = CMVideoDimensions {std::int32_t(size.width), std::int32_t(size.height)};
+                            return true;
+                        } @catch (NSException* exception) {
+                            std::fprintf(stderr, "Camera: the photo output refused photos up to %ux%u: %s\n", size.width, size.height,
+                                         exception.reason.UTF8String);
+                            return false;
+                        }
+                    };
+                    const auto detach = [&]() {
+                        @try {
+                            [session_ removeOutput:output];
+                        } @catch (NSException*) {
+                        }
+                        newOutput = nil;
+                    };
+                    ok = uml::platform::preparePhotoOutput(uml::platform::largestPhotoSize(listedPhotoSizes(entry.device.activeFormat)),
+                                                           {attach, setMaximum, detach}) ==
+                        uml::platform::PhotoOutputPreparation::ready;
                 }
             } @catch (NSException*) {
                 ok = false;

@@ -110,17 +110,18 @@ interface to the wire.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
   exposure, focus and white balance only.
-- **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
-  carries its DNG's colour data (`dng_color.hpp`), the only place the host
-  reveals it. A part that fails leaves the others: a capture fails only when
-  nothing it asked for arrived. A JPEG is made at exactly the size asked for
-  (`photo_dimensions.hpp`): the capture is refused when the active format does
-  not list that size, and the photo is dropped when the platform resolved
-  another. Discovery lists the sizes of every format, since the format a camera
-  runs is not known until a session asks for it. A still's `exposure` is the
-  photo's own: the
-  exposure time, ISO, f-number, focal length and flash come from the photo's
-  Exif (`apple/photo_metadata.hpp`, `still_exposure.hpp`), the 3A states, white
+- **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer
+  still carries its DNG's colour data (`dng_color.hpp`), the only place the
+  host reveals it. A part that fails leaves the others: a capture fails only
+  when nothing it asked for arrived. A JPEG is made at exactly the size asked
+  for (`photo_dimensions.hpp`): the capture is refused when the active format
+  does not list that size, and the photo is dropped when the platform resolved
+  another. A photo output gets its maximum size only after it is attached to
+  the session, as AVFoundation requires. Discovery lists the sizes of every
+  format, since the format a camera runs is not known until a session asks for
+  it. A still's `exposure` is the photo's own: the exposure time, ISO,
+  f-number, focal length and flash come from the photo's Exif
+  (`apple/photo_metadata.hpp`, `still_exposure.hpp`), the 3A states, white
   balance, zoom and lens from the session when the photo is delivered, and a
   Bayer still's neutral point and noise profile from its DNG. A reading the
   platform does not give, or gives as a number that cannot be a measurement

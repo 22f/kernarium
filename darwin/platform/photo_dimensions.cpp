@@ -33,6 +33,26 @@ std::optional<CameraStillSize> coveringPhotoSize(std::span<const CameraStillSize
     return chosen;
 }
 
+std::optional<CameraStillSize> largestPhotoSize(std::span<const CameraStillSize> listed)
+{
+    std::optional<CameraStillSize> largest;
+    for (const auto& size : listed)
+        if (size.width != 0 && size.height != 0 &&
+            (!largest || std::uint64_t(size.width) * size.height > std::uint64_t(largest->width) * largest->height))
+            largest = size;
+    return largest;
+}
+
+PhotoOutputPreparation preparePhotoOutput(std::optional<CameraStillSize> largest, const PhotoOutputSteps& steps)
+{
+    if (!steps.attach()) return PhotoOutputPreparation::notAttached;
+    // A format that lists no size leaves the output's own default.
+    if (!largest) return PhotoOutputPreparation::ready;
+    if (steps.setMaximum(*largest)) return PhotoOutputPreparation::ready;
+    steps.detach();
+    return PhotoOutputPreparation::maximumRefused;
+}
+
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept
 {
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;

@@ -4,6 +4,8 @@
 #include "photo_dimensions.hpp"
 #include "require.hpp"
 
+#include <string>
+#include <utility>
 #include <vector>
 
 using namespace uml::platform;
@@ -85,6 +87,90 @@ void theResolvedSizeIsTheRequestOrItIsRefused()
     require(!resolvedSizeIsRequested({4032, 0}, {4032, 3024}), "half a size is a size that differs");
 }
 
+// A photo output as AVFoundation treats it: its maximum is refused (it raises)
+// unless the output is attached to the session with a source whose active
+// format lists the size.
+struct FakeOutput {
+    explicit FakeOutput(Sizes format) : sourceFormat(std::move(format)) {}
+    Sizes sourceFormat;
+    bool attachable {true};
+    bool attached {false};
+    std::vector<std::string> calls;
+    std::optional<CameraStillSize> maximum;
+
+    PhotoOutputSteps steps()
+    {
+        return {
+            [this] {
+                calls.push_back("attach");
+                attached = attachable;
+                return attached;
+            },
+            [this](CameraStillSize size) {
+                calls.push_back("set " + std::to_string(size.width) + "x" + std::to_string(size.height));
+                if (!attached) return false;  // no source device: the setter raises
+                for (const auto& listed : sourceFormat)
+                    if (listed == size) {
+                        maximum = size;
+                        return true;
+                    }
+                return false;
+            },
+            [this] {
+                calls.push_back("detach");
+                attached = false;
+            },
+        };
+    }
+};
+
+void theOutputIsAttachedBeforeItsMaximumIsSet()
+{
+    FakeOutput output(backFormat);
+    const auto largest = largestPhotoSize(backFormat);
+    require(largest && *largest == CameraStillSize(8064, 6048), "the largest by area");
+    require(preparePhotoOutput(largest, output.steps()) == PhotoOutputPreparation::ready, "an attached output takes its maximum");
+    require(output.calls == std::vector<std::string> {"attach", "set 8064x6048"}, "attach, then set the maximum");
+    require(output.attached && output.maximum && *output.maximum == CameraStillSize(8064, 6048), "and keeps it");
+}
+
+void aMaximumTheSourceRefusesDetachesTheOutput()
+{
+    FakeOutput output(fastFormat);
+    // A maximum the source's active format does not list: the setter raises.
+    require(preparePhotoOutput(CameraStillSize {8064, 6048}, output.steps()) == PhotoOutputPreparation::maximumRefused,
+            "the refused maximum is reported");
+    require(output.calls == std::vector<std::string> {"attach", "set 8064x6048", "detach"}, "attach, set, then detach");
+    require(!output.attached && !output.maximum, "the output is not left on the session");
+}
+
+void anOutputThatCannotBeAttachedGetsNoMaximum()
+{
+    FakeOutput output(backFormat);
+    output.attachable = false;
+    require(preparePhotoOutput(CameraStillSize {4032, 3024}, output.steps()) == PhotoOutputPreparation::notAttached,
+            "the session took no output");
+    require(output.calls == std::vector<std::string> {"attach"}, "nothing is set on it and nothing is detached");
+}
+
+void aFormatThatListsNothingLeavesTheDefault()
+{
+    FakeOutput output((Sizes()));
+    require(!largestPhotoSize(output.sourceFormat) && !largestPhotoSize(Sizes {{0, 0}, {4032, 0}}), "no usable size");
+    require(preparePhotoOutput(std::nullopt, output.steps()) == PhotoOutputPreparation::ready, "the output stands as it is");
+    require(output.calls == std::vector<std::string> {"attach"}, "attached, with no maximum set");
+}
+
+// The order the platform requires, stated against a fake that enforces it: the
+// same steps in the wrong order are refused.
+void aMaximumSetBeforeAttachIsRefused()
+{
+    FakeOutput output(backFormat);
+    const auto steps = output.steps();
+    require(!steps.setMaximum({4032, 3024}), "an unattached output refuses its maximum");
+    require(steps.attach() && steps.setMaximum({4032, 3024}), "and takes it once attached");
+}
+
 } // namespace
 
 int main()
@@ -96,5 +182,10 @@ int main()
     anEmptyOrZeroSizedTableAsksForNothing();
     aCaptureWithoutAJpegTakesTheSmallestSize();
     theResolvedSizeIsTheRequestOrItIsRefused();
+    theOutputIsAttachedBeforeItsMaximumIsSet();
+    aMaximumTheSourceRefusesDetachesTheOutput();
+    anOutputThatCannotBeAttachedGetsNoMaximum();
+    aFormatThatListsNothingLeavesTheDefault();
+    aMaximumSetBeforeAttachIsRefused();
     return 0;
 }
