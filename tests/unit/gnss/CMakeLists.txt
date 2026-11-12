@@ -54,3 +54,10 @@ target_include_directories(uml_gnss_hal_entry_tests PRIVATE ${UML_GNSS_HAL_DIR})
 uml_add_unit_test(NAME gnss-hal-entry
     COMMAND uml_gnss_hal_entry_tests
     LABELS "android;gnss")
+
+add_executable(uml_gnss_hal_callbacks_tests gnss_hal_callbacks_tests.cpp)
+target_link_libraries(uml_gnss_hal_callbacks_tests PRIVATE UML::GnssDevice)
+target_include_directories(uml_gnss_hal_callbacks_tests PRIVATE ${UML_GNSS_HAL_DIR})
+uml_add_unit_test(NAME gnss-hal-callbacks
+    COMMAND uml_gnss_hal_callbacks_tests
+    LABELS "android;gnss")

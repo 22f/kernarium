@@ -50,7 +50,7 @@ void startsAndStopsTheSessionOfTheCallback()
 {
     World world;
     Hal hal(world.env());
-    hal.set_callback(world.sink(), nullptr);
+    hal.set_callback(world.sink());
     require(hal.start() == Hal::StartResult::started);
     require(world.wait([&] { return world.statuses == beganSession; }));
     heldWakelocks(world, 1);
@@ -72,7 +72,7 @@ void reportsAMissingReceiver()
     World world;
     world.deviceMissing = true;
     Hal hal(world.env());
-    hal.set_callback(world.sink(), nullptr);
+    hal.set_callback(world.sink());
     require(hal.start() == Hal::StartResult::no_receiver);
     heldWakelocks(world, 0);
     require(statusesOf(world).empty());
@@ -82,7 +82,7 @@ void closeEndsTheSessionSilently()
 {
     World world;
     Hal hal(world.env());
-    hal.set_callback(world.sink(), nullptr);
+    hal.set_callback(world.sink());
     require(hal.start() == Hal::StartResult::started);
     require(world.wait([&] { return world.statuses == beganSession; }));
     hal.close();
@@ -99,12 +99,11 @@ void aNewCallbackReplacesTheSession()
     World first;
     World other;
     Hal hal(first.env());
-    hal.set_callback(first.sink(), nullptr);
+    hal.set_callback(first.sink());
     require(hal.start() == Hal::StartResult::started);
     require(first.wait([&] { return first.statuses == beganSession; }));
-    int announced = 0;
-    hal.set_callback(other.sink(), [&] { ++announced; });
-    require(announced == 1, "the new callback is told what the receiver is");
+    hal.set_callback(other.sink());
+    require(other.wait([&] { return other.readies == 1; }), "the new callback is told what the receiver is");
     // The old session is gone, silently, with its receiver and its lock.
     heldWakelocks(first, 0);
     require(first.receiverClosed());
@@ -122,7 +121,7 @@ void theModeAndTheTogglesOutliveOneCallback()
     require(hal.set_position_mode(1000));
     hal.set_nmea(true);
     hal.set_sv_status(true);
-    hal.set_callback(world.sink(), nullptr);
+    hal.set_callback(world.sink());
     require(hal.start() == Hal::StartResult::started);
     world.boottime += second;
     world.write(epoch(preciseFix(baseNs)));
@@ -137,7 +136,7 @@ void theModeAndTheTogglesOutliveOneCallback()
     hal.set_sv_status(false);
     hal.close();
     World again;
-    hal.set_callback(again.sink(), nullptr);
+    hal.set_callback(again.sink());
     require(hal.start() == Hal::StartResult::started);
     // The receiver and the clock are the first world's; the callback is the second's.
     world.boottime += second;
@@ -163,12 +162,15 @@ void announcesOncePerCallback()
 {
     World world;
     Hal hal(world.env());
-    int announced = 0;
-    hal.set_callback(world.sink(), [&] { ++announced; });
-    hal.set_callback(world.sink(), [&] { ++announced; });
-    require(announced == 2);
+    hal.set_callback(world.sink());
+    require(world.wait([&] { return world.readies == 1; }));
+    require(hal.start() == Hal::StartResult::started);
+    hal.stop();
+    require(world.wait([&] { return world.statuses.size() == 4; }));
     hal.close();
-    require(announced == 2);
+    std::lock_guard lock(world.mutex);
+    require(world.readies == 1);
+    require(world.log.front() == "ready");
 }
 
 } // namespace

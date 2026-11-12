@@ -234,9 +234,20 @@ receiver is open, and without the lock it would suspend and wake every second
 for as long as a client listens. The lock belongs to the HAL's process, so it
 goes with the HAL, and it holds back only Android's own autosuspend.
 
+The HAL never calls the framework from an entry point or under one of its own
+locks: the engine posts every status and report to one reporter thread, which
+makes the calls in the order posted, so a framework thread that holds a lock of
+its own while it calls the HAL cannot wait on a HAL thread that waits for it. A
+session's `engine_on` and `session_begin` come before its first location and
+its `session_end` and `engine_off` after the last, `stop()` returns before the
+framework has heard them, and a replaced or closed callback hears nothing more
+than the call already in flight.
+
 `overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
-rules and `gnss_engine.hpp` the session, with no Android dependency; the
-`gnss-hal-*` unit tests read the host writer's own epochs through them.
+rules, `gnss_engine.hpp` the session, `gnss_reporter.hpp` the calls to the
+framework and `gnss_hal.hpp` the state behind the AIDL entry points, with no
+Android dependency; the `gnss-hal-*` unit tests read the host writer's own
+epochs through them.
 `tests/integration/android/location/` is a probe application for the candidate
 image, never installed in a release.
 

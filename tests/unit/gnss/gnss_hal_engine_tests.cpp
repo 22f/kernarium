@@ -29,6 +29,32 @@ using andarium::gnss::Status;
 using uml::testing::require;
 using namespace std::chrono_literals;
 
+const std::vector<Status> beganSession{Status::engine_on, Status::session_begin};
+const std::vector<Status> endedSession{Status::engine_on, Status::session_begin, Status::session_end,
+                                       Status::engine_off};
+
+std::vector<Status> reportedStatuses(World& world)
+{
+    std::lock_guard lock(world.mutex);
+    return world.statuses;
+}
+
+bool reported(World& world, const std::vector<Status>& expected)
+{
+    return world.wait([&] { return world.statuses == expected; });
+}
+
+/* The framework hears the engine in order, so a new session's begin is a
+ * barrier: when it arrives, everything posted before it has been delivered, and
+ * `expected` is all there was. Starts a session, which the caller may stop. */
+void nothingMoreBefore(World& world, Engine& engine, std::vector<Status> expected)
+{
+    require(engine.start());
+    expected.push_back(Status::engine_on);
+    expected.push_back(Status::session_begin);
+    require(reported(world, expected), "nothing is said between the sessions");
+}
+
 void beginsAndEndsASession()
 {
     World world;
@@ -36,7 +62,7 @@ void beginsAndEndsASession()
     require(!engine.running());
     require(engine.start());
     require(engine.running());
-    require(world.statuses == (std::vector<Status>{Status::engine_on, Status::session_begin}));
+    require(reported(world, beganSession));
     heldWakelocks(world, 1);
 
     world.write(epoch(preciseFix(baseNs)));
@@ -52,13 +78,13 @@ void beginsAndEndsASession()
 
     engine.stop();
     require(!engine.running());
-    require(world.statuses == (std::vector<Status>{Status::engine_on, Status::session_begin,
-                                                   Status::session_end, Status::engine_off}));
+    require(reported(world, endedSession));
     heldWakelocks(world, 0);
     require(world.receiverClosed());
     // A second stop is nothing.
     engine.stop();
-    require(world.statuses.size() == 4);
+    nothingMoreBefore(world, engine, endedSession);
+    engine.stop();
 }
 
 /* The decision: the lock is held from start() to stop() across any number of
@@ -111,19 +137,11 @@ void releasesTheWakelockWhenTheReceiverDies()
     require(world.wait([&] { return world.wakelocksHeld == 0; }));
     require(world.wait([&] { return !world.logs.empty(); }));
     // The framework's stop() still works, and has nothing left to say.
+    require(reported(world, endedSession));
     engine.stop();
     heldWakelocks(world, 0);
-    std::lock_guard lock(world.mutex);
-    require(world.statuses.back() == Status::engine_off);
-}
-
-const std::vector<Status> endedSession{Status::engine_on, Status::session_begin, Status::session_end,
-                                       Status::engine_off};
-
-std::vector<Status> reportedStatuses(World& world)
-{
-    std::lock_guard lock(world.mutex);
-    return world.statuses;
+    nothingMoreBefore(world, engine, endedSession);
+    engine.stop();
 }
 
 /* A receiver that goes away ends the session by itself: the framework is told
@@ -136,8 +154,7 @@ void reportsTheEndWhenTheReceiverDiesOnItsOwn()
     world.write(epoch(preciseFix(baseNs)));
     require(world.wait([&] { return !world.locations.empty(); }));
     world.hangUp();
-    require(world.wait([&] { return world.statuses.size() == 4; }));
-    require(reportedStatuses(world) == endedSession);
+    require(reported(world, endedSession));
     require(!engine.running(), "a session that reported its end is not running");
     heldWakelocks(world, 0);
     {
@@ -145,10 +162,10 @@ void reportsTheEndWhenTheReceiverDiesOnItsOwn()
         require(world.opens == 1, "the receiver is not opened again");
     }
     engine.stop();
-    require(reportedStatuses(world) == endedSession, "stop() after the end sends nothing more");
     require(world.receiverClosed());
     engine.stop();
-    require(reportedStatuses(world) == endedSession);
+    nothingMoreBefore(world, engine, endedSession);
+    engine.stop();
 }
 
 /* The same for a session that never received an epoch. */
@@ -158,8 +175,7 @@ void reportsTheEndOfASessionThatReadNothing()
     Engine engine(world.env(), world.sink());
     require(engine.start());
     world.hangUp();
-    require(world.wait([&] { return world.statuses.size() == 4; }));
-    require(reportedStatuses(world) == endedSession);
+    require(reported(world, endedSession));
     // Destroying the engine after the end is silent too.
 }
 
@@ -171,17 +187,16 @@ void restartsAfterTheEnd()
     Engine engine(world.env(), world.sink());
     require(engine.start());
     world.hangUp();
-    require(world.wait([&] { return world.statuses.size() == 4; }));
+    require(reported(world, endedSession));
     require(engine.start());
     require(engine.running());
-    require(reportedStatuses(world) ==
-            (std::vector<Status>{Status::engine_on, Status::session_begin, Status::session_end,
-                                 Status::engine_off, Status::engine_on, Status::session_begin}));
+    require(reported(world, {Status::engine_on, Status::session_begin, Status::session_end, Status::engine_off,
+                             Status::engine_on, Status::session_begin}));
     heldWakelocks(world, 1);
     world.write(epoch(preciseFix(baseNs)));
     require(world.wait([&] { return !world.locations.empty(); }));
     engine.stop();
-    require(reportedStatuses(world).size() == 8);
+    require(world.wait([&] { return world.statuses.size() == 8; }));
     require(reportedStatuses(world).back() == Status::engine_off);
     std::lock_guard lock(world.mutex);
     require(world.opens == 2);
@@ -198,8 +213,10 @@ void reportsTheEndOnceWhenStopRacesTheReceiverDying()
         std::thread hang([&] { world.hangUp(); });
         engine.stop();
         hang.join();
-        require(reportedStatuses(world) == endedSession, "one end per session");
+        require(reported(world, endedSession), "one end per session");
         heldWakelocks(world, 0);
+        nothingMoreBefore(world, engine, endedSession);
+        engine.stop();
     }
 }
 
@@ -263,19 +280,19 @@ void reportsNothingAfterStop()
     });
     require(world.wait([&] { return world.locations.size() >= 3; }));
     engine.stop();
-    std::size_t locations = 0;
-    std::size_t statuses = 0;
-    {
-        std::lock_guard lock(world.mutex);
-        locations = world.locations.size();
-        statuses = world.statuses.size();
-    }
-    std::this_thread::sleep_for(100ms);
+    require(world.wait([&] { return world.statuses.size() == 4; }));
     writing = false;
     writer.join();
+    // The calls were made in the order they were posted: every location of the
+    // session came before its end, and none was made after it.
     std::lock_guard lock(world.mutex);
-    require(world.locations.size() == locations, "no location after stop");
-    require(world.statuses.size() == statuses);
+    require(world.log.back() == "off" && world.log[world.log.size() - 2] == "end");
+    std::size_t end = 0;
+    for (std::size_t index = 0; index < world.log.size(); ++index)
+        if (world.log[index] == "end")
+            end = index;
+    for (std::size_t index = end; index < world.log.size(); ++index)
+        require(world.log[index] != "location", "no location after the end of the session");
 }
 
 void startingTwiceRestartsTheSession()
@@ -284,13 +301,12 @@ void startingTwiceRestartsTheSession()
     Engine engine(world.env(), world.sink());
     require(engine.start());
     require(engine.start());
+    // The restart ends the first session without telling the framework, and
+    // begins the second.
+    require(reported(world, {Status::engine_on, Status::session_begin, Status::engine_on, Status::session_begin}));
     {
         std::lock_guard lock(world.mutex);
         require(world.opens == 2);
-        // The restart ends the first session without telling the framework, and
-        // begins the second.
-        require(world.statuses == (std::vector<Status>{Status::engine_on, Status::session_begin,
-                                                       Status::engine_on, Status::session_begin}));
         require(world.wakelocksHeld == 1 && world.wakelocksTaken == 2);
     }
     engine.stop();
@@ -399,8 +415,9 @@ void reportsAtTheFrameworksInterval()
     // A new fix each second, a second of uptime between epochs: one in three goes.
     for (int index = 0; index < 7; ++index)
         world.write(epoch(preciseFix(baseNs + index * second)));
-    // Every epoch makes a satellite status, so seven means all were handled.
-    require(world.wait([&] { return world.svStatuses == 7; }));
+    // Every epoch makes a satellite status, so seven means all were handled; the
+    // locations before it were delivered first, and the seventh epoch's follows.
+    require(world.wait([&] { return world.svStatuses == 7 && world.locations.size() >= 3; }));
     engine.stop();
     std::lock_guard lock(world.mutex);
     require(world.locations.size() == 3, "fixes 0, 3 and 6 of seven");

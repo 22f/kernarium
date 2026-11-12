@@ -17,72 +17,107 @@
 
 namespace andarium::gnss {
 
+// The framework's binder threads call these entry points, any of them at any
+// time. `mutex_` guards only the engine pointer and the settings: it is never
+// held while an engine runs or is torn down, and nothing here calls the
+// framework (the engine's reporter does, from a thread of its own), so a
+// framework thread that calls an entry point while it holds a lock of its own
+// can never wait on a thread of this HAL that waits for the framework.
 class Hal {
 public:
     enum class StartResult { started, no_callback, no_receiver };
 
     explicit Hal(Env env) : env_(std::move(env)) {}
 
+    ~Hal() { close(); }
+
     // The framework's setCallback: a new engine for the new callback replaces
-    // the old one, and `announce` tells the framework what the receiver is.
-    void set_callback(Sink sink, const std::function<void()>& announce) {
-        std::lock_guard lock(mutex_);
-        engine_.reset();
-        engine_ = std::make_unique<Engine>(env_, std::move(sink));
-        engine_->set_min_interval_ms(interval_ms_);
-        engine_->set_nmea(nmea_);
-        engine_->set_sv_status(sv_status_);
-        if (announce) announce();
+    // the old one, which ends silently. The engine tells the callback what the
+    // receiver is (`sink.ready`) before anything else.
+    void set_callback(Sink sink) {
+        auto fresh = std::make_shared<Engine>(env_, std::move(sink));
+        std::shared_ptr<Engine> old;
+        {
+            std::lock_guard lock(mutex_);
+            fresh->set_min_interval_ms(interval_ms_);
+            fresh->set_nmea(nmea_);
+            fresh->set_sv_status(sv_status_);
+            old = std::move(engine_);
+            engine_ = std::move(fresh);
+        }
+        if (old) old->close();
     }
 
     StartResult start() {
-        std::lock_guard lock(mutex_);
-        if (!engine_) return StartResult::no_callback;
-        return engine_->start() ? StartResult::started : StartResult::no_receiver;
+        const auto engine = current();
+        if (!engine) return StartResult::no_callback;
+        return engine->start() ? StartResult::started : StartResult::no_receiver;
     }
 
     void stop() {
-        std::lock_guard lock(mutex_);
-        if (engine_) engine_->stop();
+        if (const auto engine = current()) engine->stop();
     }
 
+    // The framework's close(): the session ends silently and the callback is
+    // dropped, with what was still queued for it.
     void close() {
-        std::lock_guard lock(mutex_);
-        engine_.reset();
+        std::shared_ptr<Engine> old;
+        {
+            std::lock_guard lock(mutex_);
+            old = std::move(engine_);
+        }
+        if (old) old->close();
     }
 
     // False when the interval is not positive.
     bool set_position_mode(int interval_ms) {
         if (interval_ms <= 0) return false;
-        std::lock_guard lock(mutex_);
-        interval_ms_ = interval_ms;
-        if (engine_) engine_->set_min_interval_ms(interval_ms_);
+        std::shared_ptr<Engine> engine;
+        {
+            std::lock_guard lock(mutex_);
+            interval_ms_ = interval_ms;
+            engine = engine_;
+        }
+        if (engine) engine->set_min_interval_ms(interval_ms);
         return true;
     }
 
     void set_sv_status(bool on) {
-        std::lock_guard lock(mutex_);
-        sv_status_ = on;
-        if (engine_) engine_->set_sv_status(on);
+        std::shared_ptr<Engine> engine;
+        {
+            std::lock_guard lock(mutex_);
+            sv_status_ = on;
+            engine = engine_;
+        }
+        if (engine) engine->set_sv_status(on);
     }
 
     void set_nmea(bool on) {
-        std::lock_guard lock(mutex_);
-        nmea_ = on;
-        if (engine_) engine_->set_nmea(on);
+        std::shared_ptr<Engine> engine;
+        {
+            std::lock_guard lock(mutex_);
+            nmea_ = on;
+            engine = engine_;
+        }
+        if (engine) engine->set_nmea(on);
     }
 
     std::optional<DebugFix> last_fix() {
-        std::lock_guard lock(mutex_);
-        if (!engine_) return std::nullopt;
-        return engine_->last_fix();
+        const auto engine = current();
+        if (!engine) return std::nullopt;
+        return engine->last_fix();
     }
 
 private:
+    std::shared_ptr<Engine> current() {
+        std::lock_guard lock(mutex_);
+        return engine_;
+    }
+
     const Env env_;
-    // Guards the members below.
+    // Guards the members below, and nothing else.
     std::mutex mutex_;
-    std::unique_ptr<Engine> engine_;
+    std::shared_ptr<Engine> engine_;
     int interval_ms_ = Engine::kDefaultIntervalMs;
     bool nmea_ = false;
     bool sv_status_ = false;

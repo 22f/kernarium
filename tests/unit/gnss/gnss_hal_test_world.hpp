@@ -65,13 +65,31 @@ struct World {
     std::atomic<std::int64_t> boottime{3600 * second};
     std::atomic<std::int64_t> boottimeStep{0};
 
-    // What the engine reported.
+    // What the engine reported. `log` has every call in the order it was made:
+    // "ready", "on", "begin", "end", "off", "location", "nmea" and "sv".
+    std::vector<std::string> log;
+    int readies = 0;
     std::vector<Status> statuses;
     std::vector<Location> locations;
     std::vector<std::string> sentences;
     std::vector<std::int64_t> sentenceTimes;
     int svStatuses = 0;
-    std::vector<std::string> logs;
+    std::vector<std::string> logs;  // what the engine said about itself (Env::log)
+
+    static const char* statusName(Status status)
+    {
+        switch (status) {
+        case Status::session_begin:
+            return "begin";
+        case Status::session_end:
+            return "end";
+        case Status::engine_on:
+            return "on";
+        case Status::engine_off:
+            return "off";
+        }
+        return "?";
+    }
 
     Env env()
     {
@@ -116,25 +134,35 @@ struct World {
     Sink sink()
     {
         Sink result;
+        result.ready = [this] {
+            std::lock_guard lock(mutex);
+            ++readies;
+            log.push_back("ready");
+            changed.notify_all();
+        };
         result.status = [this](Status status) {
             std::lock_guard lock(mutex);
             statuses.push_back(status);
+            log.push_back(statusName(status));
             changed.notify_all();
         };
         result.location = [this](const Location& location) {
             std::lock_guard lock(mutex);
             locations.push_back(location);
+            log.push_back("location");
             changed.notify_all();
         };
         result.nmea = [this](std::int64_t at, const std::string& sentence) {
             std::lock_guard lock(mutex);
             sentenceTimes.push_back(at);
             sentences.push_back(sentence);
+            log.push_back("nmea");
             changed.notify_all();
         };
         result.sv_status = [this] {
             std::lock_guard lock(mutex);
             ++svStatuses;
+            log.push_back("sv");
             changed.notify_all();
         };
         return result;

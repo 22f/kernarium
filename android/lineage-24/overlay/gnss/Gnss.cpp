@@ -107,8 +107,19 @@ Gnss::Gnss(andarium::gnss::Env env) : env_(env), hal_(std::move(env)) {}
 
 Gnss::~Gnss() = default;
 
+// The engine's reporter thread makes these calls, one at a time and in order,
+// with no lock of the HAL held (gnss_reporter.hpp); no entry point of Gnss does.
 andarium::gnss::Sink Gnss::sink_for(const std::shared_ptr<IGnssCallback>& callback) const {
     andarium::gnss::Sink sink;
+    // Positions only: no scheduling, no measurements, no geofencing, nothing
+    // that needs a satellite.
+    sink.ready = [callback] {
+        check(callback->gnssSetCapabilitiesCb(0), "gnssSetCapabilitiesCb");
+        IGnssCallback::GnssSystemInfo info;
+        info.yearOfHw = kYearOfHardware;
+        info.name = kHardwareName;
+        check(callback->gnssSetSystemInfoCb(info), "gnssSetSystemInfoCb");
+    };
     sink.status = [callback](Status status) {
         check(callback->gnssStatusCb(static_cast<IGnssCallback::GnssStatusValue>(status)), "gnssStatusCb");
     };
@@ -128,15 +139,7 @@ ndk::ScopedAStatus Gnss::setCallback(const std::shared_ptr<IGnssCallback>& callb
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
     }
     // A setCallback that follows another without a close replaces its session.
-    // Positions only: no scheduling, no measurements, no geofencing, nothing
-    // that needs a satellite.
-    hal_.set_callback(sink_for(callback), [&callback] {
-        check(callback->gnssSetCapabilitiesCb(0), "gnssSetCapabilitiesCb");
-        IGnssCallback::GnssSystemInfo info;
-        info.yearOfHw = kYearOfHardware;
-        info.name = kHardwareName;
-        check(callback->gnssSetSystemInfoCb(info), "gnssSetSystemInfoCb");
-    });
+    hal_.set_callback(sink_for(callback));
     return ndk::ScopedAStatus::ok();
 }
 
