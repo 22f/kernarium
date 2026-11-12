@@ -48,7 +48,7 @@ index 168cd8a1755ded1861f0e4a3042d4e2f3f5799d2..8f7cc928f1656969b6c6f6b50574678d
     map_info = vrend_renderer_resource_get_map_info(pipe_res);
     res = virgl_resource_create_from_pipe(args->handle, pipe_res, iov, num_iovs);
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9c845e655 100644
+index a5eeb2282e2f57b17c31d26da1e0e80343b703e1..5e67afc5b95e6a74755e0d52406e46f98798a0ed 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -474,6 +474,43 @@ static bool vrend_pin_host_pages(GLuint buffer, void *ptr, uint64_t size)
@@ -95,7 +95,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  
  struct vrend_linked_shader_program {
     struct list_head head;
-@@ -8999,7 +9036,7 @@ static bool vrend_create_pinned_buffer_storage(struct vrend_resource *gr,
+@@ -9014,7 +9051,7 @@ static bool vrend_create_pinned_buffer_storage(struct vrend_resource *gr,
     return true;
  }
  
@@ -104,7 +104,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  {
  
     GLbitfield buffer_storage_flags = 0;
-@@ -9019,6 +9056,7 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
+@@ -9034,6 +9071,7 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
     gr->storage_bits |= VREND_STORAGE_GL_BUFFER;
     glGenBuffersARB(1, &gr->gl_id);
     glBindBufferARB(gr->target, gr->gl_id);
@@ -112,7 +112,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  
     if (buffer_storage_flags) {
        if (vrend_create_pinned_buffer_storage(gr, width)) {
-@@ -9038,13 +9076,13 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
+@@ -9053,13 +9091,13 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
                                             GBM_FORMAT_R8, GBM_BO_USE_LINEAR);
           if (!bo) {
              virgl_error("Failed to allocate emulated GL buffer backing storage");
@@ -128,7 +128,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
           }
  
           glCreateMemoryObjectsEXT(1, &memobj);
-@@ -9058,7 +9096,7 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
+@@ -9073,7 +9111,7 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
  #endif
        else {
           virgl_error("Missing buffer storage and interop extensions\n");
@@ -137,7 +137,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
        }
  
        /* Pinned host pages are ordinary mutable buffer storage. */
-@@ -9069,7 +9107,24 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
+@@ -9084,7 +9122,24 @@ static void vrend_create_buffer(struct vrend_resource *gr, uint32_t width, uint3
     } else
        glBufferData(gr->target, width, NULL, GL_STREAM_DRAW);
  
@@ -162,7 +162,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  }
  
  static int
-@@ -9077,6 +9132,7 @@ vrend_resource_alloc_buffer(struct vrend_resource *gr, uint32_t flags)
+@@ -9092,6 +9147,7 @@ vrend_resource_alloc_buffer(struct vrend_resource *gr, uint32_t flags)
  {
     const uint32_t bind = gr->base.bind;
     const uint32_t size = gr->base.width0;
@@ -170,7 +170,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  
     if (bind == VIRGL_BIND_CUSTOM) {
        /* use iovec directly when attached */
-@@ -9088,25 +9144,25 @@ vrend_resource_alloc_buffer(struct vrend_resource *gr, uint32_t flags)
+@@ -9103,25 +9159,25 @@ vrend_resource_alloc_buffer(struct vrend_resource *gr, uint32_t flags)
       /* staging buffers only use guest memory -- nothing to do. */
     } else if (bind == VIRGL_BIND_INDEX_BUFFER) {
        gr->target = GL_ELEMENT_ARRAY_BUFFER_ARB;
@@ -203,7 +203,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
     } else if (bind & VIRGL_BIND_SAMPLER_VIEW) {
        /*
      * On Desktop we use GL_ARB_texture_buffer_object on GLES we use
-@@ -9122,13 +9178,13 @@ vrend_resource_alloc_buffer(struct vrend_resource *gr, uint32_t flags)
+@@ -9137,13 +9193,13 @@ vrend_resource_alloc_buffer(struct vrend_resource *gr, uint32_t flags)
        } else {
           gr->target = GL_PIXEL_PACK_BUFFER_ARB;
        }
@@ -219,7 +219,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  }
  
  static inline void
-@@ -9432,6 +9488,7 @@ static int vrend_resource_alloc_texture(struct vrend_resource *gr,
+@@ -9447,6 +9503,7 @@ static int vrend_resource_alloc_texture(struct vrend_resource *gr,
  
     glGenTextures(1, &gr->gl_id);
     glBindTexture(gr->target, gr->gl_id);
@@ -227,7 +227,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
  
     debug_texture(__func__, gr);
  
-@@ -9549,6 +9606,16 @@ static int vrend_resource_alloc_texture(struct vrend_resource *gr,
+@@ -9564,6 +9621,16 @@ static int vrend_resource_alloc_texture(struct vrend_resource *gr,
        }
     }
  
@@ -244,7 +244,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
     if (!format_can_texture_storage) {
        glTexParameteri(gr->target, GL_TEXTURE_BASE_LEVEL, 0);
        glTexParameteri(gr->target, GL_TEXTURE_MAX_LEVEL, pr->last_level);
-@@ -9708,11 +9775,15 @@ static void vrend_resource_zero_texture(struct vrend_resource *gr)
+@@ -9723,11 +9790,15 @@ static void vrend_resource_zero_texture(struct vrend_resource *gr)
  
  struct pipe_resource *
  vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args *args,
@@ -261,7 +261,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
     gr = vrend_resource_create(args);
     if (!gr)
        return NULL;
-@@ -9750,6 +9821,10 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
+@@ -9765,6 +9836,10 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
     }
  
     if (ret) {
@@ -272,7 +272,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
        FREE(gr->packed_yuv);
        FREE(gr);
        return NULL;
-@@ -9792,7 +9867,7 @@ static bool vrend_packed_yuv_make_planes(struct vrend_packed_yuv *yuv)
+@@ -9807,7 +9882,7 @@ static bool vrend_packed_yuv_make_planes(struct vrend_packed_yuv *yuv)
        };
  
        yuv->plane[plane] = (struct vrend_resource *)
@@ -281,7 +281,7 @@ index 6567c684953098bed182d30b4be9089e40a1936b..bb4de69d8cb1eb4bc1523a13900cc3f9
        if (!yuv->plane[plane]) {
           while (plane--)
              vrend_resource_reference(&yuv->plane[plane], NULL);
-@@ -15097,9 +15172,10 @@ int vrend_renderer_pipe_resource_create(struct vrend_context *ctx, uint32_t blob
+@@ -15112,9 +15187,10 @@ int vrend_renderer_pipe_resource_create(struct vrend_context *ctx, uint32_t blob
                                          const struct vrend_renderer_resource_create_args *args)
  {
     struct vrend_resource *res;

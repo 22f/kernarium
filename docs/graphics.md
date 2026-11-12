@@ -72,6 +72,9 @@ Guest-visible guarantees:
   budget is full the host driver can refuse the staging buffer of a later
   upload, which is then dropped without an error, so a texture can keep its
   older pixels until it is written again.
+- A texture exported to another context through shared memory is written into
+  its segment at the next fence after it is drawn. A read-back the host driver
+  refuses leaves the texture the newer copy, and the next fence tries again.
 - Images shared through native Metal heaps keep tiled storage but disable
   lossless compression, so a compositor can sample a render target. A Virgl
   import of such a blob is bounded by what backs it; an import that does not

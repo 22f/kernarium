@@ -19,7 +19,7 @@ image.
  1 file changed, 14 insertions(+)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index e1767786273f677e1e3fee72094def63b36056ed..ff8d0f7b06b6495a4b2040c673cf8ca07f98dc0c 100644
+index f5a4f43c9f69f725b3624f1d882b6e554315c008..5850c573e2c8539c363b452a12b5f489eda458d4 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -2810,6 +2810,20 @@ int vrend_create_sampler_view(struct vrend_context *ctx,

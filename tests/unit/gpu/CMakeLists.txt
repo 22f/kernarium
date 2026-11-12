@@ -461,6 +461,15 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY TIMEOUT 240)
 
+    # A texture shared with another context is written into its segment by a
+    # read-back; one the full budget refuses is tried again at the next fence.
+    uml_add_gpu_unit_test(gpu-host-gl-shm-export-refusal
+        uml_gpu_host_gl_shm_export_refusal_tests
+        host_gl_shm_export_refusal_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries} UML::HostGpuMemory
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY TIMEOUT 240)
+
     # glthread's shared upload buffer is refused with the rest of the budget;
     # a glBufferSubData that meets the refusal neither faults the host nor
     # blocks uploads once the memory is back.
@@ -636,6 +645,7 @@ if(TARGET uml_gpu_service)
         gpu-host-gl-device-memory-budget gpu-host-gl-allocation-burst
         gpu-host-gl-surface-and-command-storage
         gpu-host-gl-reclaim-retry gpu-host-imported-memory
+        gpu-host-gl-shm-export-refusal
         PROPERTIES SKIP_RETURN_CODE 77)
 
     # The renderer and the same-process render server share one fence table.
