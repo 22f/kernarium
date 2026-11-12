@@ -268,7 +268,9 @@ void checkCopies(VirglRenderer& renderer, Pipeline& pipeline,
 // released it, when the context next reuses the state of that work's batch:
 // without further work the previous image is still counted, and is freed
 // during the next measurement. A few small textures, each zeroed in a batch of
-// its own, bring that about.
+// its own, bring that about: eight is more than the host driver's pool of
+// batch states. Trimming the contexts as they are once idle settles it only
+// when the context had work to flush, and no completion is visible from here.
 [[nodiscard]] std::uint64_t allocatedAfter(VirglRenderer& renderer,
     std::uint64_t& fence)
 {

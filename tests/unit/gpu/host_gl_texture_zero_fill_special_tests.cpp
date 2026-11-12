@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// A new texture reads as zeros, whatever its kind. The renderer hands the
-// guest a texture whose storage is memory the host driver gave out before,
-// with the pixels of the resource that released it, which may have belonged to
-// another guest process. gpu-texture-zero-fill covers the single-sample
-// uncompressed textures; this test covers the two kinds a plain clear does not
-// reach:
+// A new texture holds zeros, whatever its kind. The renderer hands the guest a
+// texture whose storage is memory the host driver gave out before, with the
+// pixels of the resource that released it, which may have belonged to another
+// guest process. gpu-texture-zero-fill covers the single-sample uncompressed
+// textures; this test covers two more kinds:
 //
-//  - a multisampled texture, which a guest resolves or blits and so reads
-//    after drawing only part of it; and
-//  - a compressed texture, which a guest fills block by block and may sample
+//  - a multisampled texture, which the renderer's clear reaches and this test
+//    guards: a guest resolves or blits one after drawing only part of it, and
+//    a change to the clear must not lose it; and
+//  - a compressed texture, which no clear reaches and the renderer fills with
+//    zero blocks instead: a guest uploads one block by block and may sample it
 //    before it has uploaded every block, down to a level that is part of one
-//    block.
+//    block, in a 2D, array, cube or cube array texture.
 //
 // The contract under test: after textures of the kind that held a pattern are
-// released, a new texture of the same shape reads back as a texture of zeros
-// does, every sample of it.
+// released, a new texture of the same shape holds what a texture written with
+// zeros does, every sample of it. A compressed format decodes a block of zeros
+// as it defines, which is not always a zero texel, so the comparison is with
+// the decoding of a texture the guest wrote zero blocks to.
 
 #include "host_gl_stream_support.hpp"
 #include "host_gl_test_support.hpp"
@@ -234,18 +237,23 @@ constexpr std::array kinds {
 // blocks and leaves a part block against 8x8 blocks, its levels (50, 25, 12, 6,
 // 3, 1) leave one against both, and the last ones are smaller than a block. A
 // side of 1100 texels is 275 blocks of 4x4, more than one tile of the host's
-// zero fill across. The third is a 2D array of three layers, whose layers each
-// need the same.
+// zero fill across. The others have layers, each of which the host fills: a 2D
+// array of three, a cube, and a cube array of two cubes.
 struct Shape {
     std::uint32_t side;
     std::uint32_t lastLevel;
     std::uint32_t layers;
+    std::uint32_t target;
 };
 
-constexpr std::array shapes {
-    Shape {100, 6, 1}, Shape {1100, 2, 1}, Shape {70, 3, 3}};
-
+constexpr std::uint32_t pipeTextureCube = 4;
 constexpr std::uint32_t pipeTexture2dArray = 7;
+constexpr std::uint32_t pipeTextureCubeArray = 8;
+
+constexpr std::array shapes {Shape {100, 6, 1, pipeTexture2d},
+    Shape {1100, 2, 1, pipeTexture2d}, Shape {70, 3, 3, pipeTexture2dArray},
+    Shape {64, 2, 6, pipeTextureCube},
+    Shape {36, 1, 12, pipeTextureCubeArray}};
 
 // A compressed texture of the kind, with guest storage for every level.
 class CompressedTexture final {
@@ -265,8 +273,7 @@ public:
         storage_.resize(total);
         require(renderer_.createResource3d(VirglRenderer::Resource3d {
                     .resourceId = resourceId_,
-                    .target = shape_.layers > 1 ? pipeTexture2dArray
-                                                : pipeTexture2d,
+                    .target = shape_.target,
                     .format = kind_.format,
                     .bind = virglBindSamplerView,
                     .width = shape_.side,

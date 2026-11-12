@@ -398,8 +398,9 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY)
 
-    # The kinds a plain clear skips read as zeros too: a new multisampled
-    # texture and a new compressed texture show nothing a released one held.
+    # A new multisampled texture, which the renderer's clear reaches, and a
+    # new compressed texture, which no clear reaches, show nothing a released
+    # one held.
     uml_add_gpu_unit_test(gpu-texture-zero-fill-special
         uml_gpu_texture_zero_fill_special_tests
         host_gl_texture_zero_fill_special_tests.cpp
