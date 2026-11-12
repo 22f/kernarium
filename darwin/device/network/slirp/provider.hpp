@@ -343,8 +343,7 @@ private:
 	/* What the guest may not address: open() fills the table before the
 	 * worker exists, and the worker alone reads and refreshes it after. */
 	HostAddresses host_addresses_;
-	/* When the table was last read well; a read that fails leaves it alone,
-	 * and so does a path report. */
+	/* When the table was last read well; a read that fails leaves it alone. */
 	std::chrono::steady_clock::time_point host_addresses_read_at_{};
 	/* After a failed read: when to try again. */
 	std::chrono::steady_clock::time_point host_address_retry_at_{};
