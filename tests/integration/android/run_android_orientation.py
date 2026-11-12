@@ -874,7 +874,8 @@ def wizard_rotation(guest: Guest, host: Host) -> str:
     wait_rotation(guest, CLOCKWISE, "setup wizard")
     host.push(UPRIGHT)
     wait_rotation(guest, UPRIGHT, "setup wizard, back to upright")
-    return f"{top.split()[-2] if top else '?'} ({request}) went to 3 with the early value and back to 0"
+    component = re.search(r"u\d+ (\S+/\S+)", top)
+    return f"{component[1] if component else '?'} ({request}) went to 3 with the early value and back to 0"
 
 
 def settings_values(guest: Guest, push: Callable[[int], None]) -> str:

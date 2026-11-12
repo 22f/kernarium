@@ -697,6 +697,12 @@ class StepTests(unittest.TestCase):
         device.latest = 3
         text = runner.wizard_rotation(device, device.host)
         self.assertIn("went to 3 with the early value and back to 0", text)
+        # The component comes from the activity dump, not from the "Broken pipe" grep -m1 leaves after it.
+        device.shown = device.latest = 3
+        device.shell = lambda command, timeout=0: (
+            "  topResumedActivity=ActivityRecord{1 u0 org.lineageos.setupwizard/.WelcomeActivity t9}\n"
+            "Failed to write while dumping service activity: Broken pipe\n" if "topResumedActivity" in command else "")
+        self.assertIn("org.lineageos.setupwizard/.WelcomeActivity (", runner.wizard_rotation(device, device.host))
         fixed = ScriptedDevice()
         fixed.request = "SCREEN_ORIENTATION_PORTRAIT"
         with self.assertRaisesRegex(runner.Failure, "not an orientation that follows the sensor"):
