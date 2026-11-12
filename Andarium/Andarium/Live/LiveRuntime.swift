@@ -477,11 +477,7 @@ final class LiveRuntime: RuntimeDriver {
         inputRunReady = false
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
-        // iOS may have changed the camera's access since Home read it: the
-        // mode is what it allows at this moment, and it holds until the guest
-        // powers off.
-        model?.camera?.refresh()
-        let cameraMode = Self.cameraRuntimeMode(model?.cameraMode ?? .blocked)
+        let cameraMode = cameraBootMode()
         let cameraPath = cameraDirectory?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
@@ -577,6 +573,14 @@ final class LiveRuntime: RuntimeDriver {
     /// (`android_host_features`): a vibrator, on a device with haptics.
     nonisolated static func hostFeatures(hapticsAvailable: Bool) -> UInt32 {
         hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0
+    }
+
+    /// The camera mode the boot request states. iOS may have changed the
+    /// camera's access since Home read it: the mode is what it allows at this
+    /// moment, and it holds until the guest powers off.
+    func cameraBootMode() -> UInt32 {
+        model?.camera?.refresh()
+        return Self.cameraRuntimeMode(model?.cameraMode ?? .blocked)
     }
 
     /// The runtime's word for the session's camera mode (KernariumRuntime.h).

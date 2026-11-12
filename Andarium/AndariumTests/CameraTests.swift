@@ -260,6 +260,43 @@ struct CameraFlowTests {
         #expect(LiveRuntime.cameraRuntimeMode(.blocked) != LiveRuntime.cameraRuntimeMode(.live))
     }
 
+    @Test func theStartPutsTheModelsModeInTheBootRequestAndReadsIOSAgain() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let systemDirectory = try #require(Bundle.main.resourceURL).appendingPathComponent(SystemFolder.name)
+        let release = try SystemFolder.release(in: systemDirectory)
+        let storage = TwoDiskStorage(
+            locations: GuestLocations(directory: directory), release: release.identity, releaseDirectory: systemDirectory
+        )
+        let s = setup(.authorized, chosen: true)
+        let runtime = LiveRuntime(
+            model: s.model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
+        #expect(runtime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_LIVE))
+        // iOS takes the access away after Home read it: the boot says blocked.
+        s.system.access = .denied
+        #expect(runtime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED))
+        #expect(s.model.guest?.camera == false)
+        // Off, or no camera at all: blocked.
+        let off = setup(.authorized, chosen: false)
+        let offRuntime = LiveRuntime(
+            model: off.model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
+        #expect(offRuntime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED))
+        let none = setup(.unavailable, chosen: true)
+        let noneRuntime = LiveRuntime(
+            model: none.model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
+        #expect(noneRuntime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED))
+    }
+
+    @Test func theLoaderStatesTheCamerasReserveThatTheRuntimeTakesOutOfTheBudget() {
+        // Every host is given the small tier for now, so the reserve is the same at any budget: 105.7 MiB,
+        // the worst case of 1080p capture pools, the staging and a 12 MP RAW still with its DNG and JPEG.
+        for budget: UInt32 in [384, 534, 1249, 2048, 4096, 9152] {
+            #expect(kernarium_runtime_loader_camera_reserve_mib(budget) == 106, "budget \(budget) MiB")
+        }
+        // An iPad mini 6 (B 534) is left 428 MiB, a 4 GiB iPhone (B 1249) 1143 MiB.
+        #expect(534 - 106 == 428 && 1249 - 106 == 1143)
+    }
+
     @Test func theRuntimesStatesAreReadAsTheyAreSaid() {
         let said: [(Int, CameraCapture)] = [
             (KERNARIUM_RUNTIME_CAMERA_STATE_IDLE, .idle),
