@@ -15,7 +15,9 @@ import UIKit
 @MainActor
 @Suite(.serialized)
 struct HomeMenuTests {
+    #if TIP_JAR
     private static let arranged = TipJarProductsFixture.arranged
+    #endif
 
     private func model(guest: Bool = true, feedback: Bool = true, review: Bool = true, tips: Bool = true) -> AppModel {
         let host = HostDevice(

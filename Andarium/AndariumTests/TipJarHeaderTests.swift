@@ -33,7 +33,7 @@ struct TipJarHeaderTests {
     }
 
     private static func content(
-        name: String? = "example", github: String? = "example", x: String? = "example_handle",
+        name: String? = "example", github: String? = "example", x: String? = "example_x",
         avatar: Bool = true, githubLogo: Bool = true, xLogo: Bool = true
     ) -> TipJarSenderContent {
         TipJarSenderContent(
@@ -56,7 +56,7 @@ struct TipJarHeaderTests {
         #expect(header.name == "example")
         #expect(header.avatar != nil)
         #expect(header.links.map(\.site) == Self.sites)
-        let addresses = ["github": "https://github.com/example", "x": "https://x.com/example_handle"]
+        let addresses = ["github": "https://github.com/example", "x": "https://x.com/example_x"]
         #expect(header.links.map(\.url.absoluteString) == header.links.map { addresses[$0.site.rawValue]! })
         #expect(header.links.map(\.name) == header.links.map { $0.site == .github ? "GitHub" : "X" },
                 "the brands' names, whatever the language")
@@ -153,7 +153,8 @@ struct TipJarHeaderTests {
         model.tipJarServices.openLink = { opened.append($0); return .handled }
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let (_, elements) = try await openSheet(model, lease: lease)
+        let (controller, elements) = try await openSheet(model, lease: lease)
+        let sheetView = controller.presentedViewController?.view
         let role = String(localized: TipJarWords.sender)
         let sender = elements.filter { $0.label == "example, \(role)" }
         try #require(sender.count == 1, "one sender element: \(elements.map(\.description))")
@@ -162,8 +163,13 @@ struct TipJarHeaderTests {
         let bubble = String(localized: TipJarWords.coffee)
         let first = try #require(elements.first { $0.label == bubble || $0.label.hasPrefix(String(bubble.prefix(12))) })
         #expect(sender[0].top < first.top, "the sender comes before the messages")
-        // No element without a label in the header's band: the avatar is decorative.
-        let band = elements.filter { $0.label.isEmpty && abs($0.top - sender[0].top) < 40 }
+        // No element without a label in the header's band: the avatar is decorative. (A control of Home
+        // behind a form sheet is not the sheet's.)
+        func inSheet(_ element: ToolbarProbe.Element) -> Bool {
+            guard let view = element.object as? UIView, let sheetView else { return true }
+            return view.isDescendant(of: sheetView)
+        }
+        let band = elements.filter { $0.label.isEmpty && abs($0.top - sender[0].top) < 40 && inSheet($0) }
         #expect(band.isEmpty, "unlabelled elements by the sender: \(band.map(\.description))")
         // Each link its own element with the link trait, labelled with the brand.
         let brands = Self.sites.map { $0 == .github ? "GitHub" : "X" }
@@ -175,7 +181,7 @@ struct TipJarHeaderTests {
             #expect(link.object.accessibilityActivate(), "\(name) activates")
         }
         #expect(await eventually { opened.count == brands.count })
-        let addresses = ["GitHub": "https://github.com/example", "X": "https://x.com/example_handle"]
+        let addresses = ["GitHub": "https://github.com/example", "X": "https://x.com/example_x"]
         #expect(opened.map(\.absoluteString).sorted() == brands.map { addresses[$0]! }.sorted())
     }
 
