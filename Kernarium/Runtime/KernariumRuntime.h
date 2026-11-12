@@ -802,8 +802,9 @@ typedef int (*kernarium_runtime_set_network_notice_function)(int notice);
  * callback reports it (runtime API 37). */
 enum {
     /* No guest app has a camera open: no capture session exists and the
-     * system's camera indicator is off. Also the state of a blocked guest
-     * and of one that ended. */
+     * system's camera indicator is off. Also the state of a blocked guest,
+     * whose apps may stream black frames and never capture, and of one that
+     * ended. */
     KERNARIUM_RUNTIME_CAMERA_STATE_IDLE = 0,
     /* A guest app has a camera open and frames flow. */
     KERNARIUM_RUNTIME_CAMERA_STATE_STREAMING = 1,

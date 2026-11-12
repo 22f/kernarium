@@ -525,7 +525,9 @@ public:
             (void)id;
             active |= startedVideo(stream);
         }
-        CameraState state = !active ? CameraState::idle : multitasking ? CameraState::interruptedByMultitasking
+        // A blocked session never captures, so nothing is "streaming" however many
+        // black frames the guest's streams get.
+        CameraState state = blocked() || !active ? CameraState::idle : multitasking ? CameraState::interruptedByMultitasking
             : pressure ? CameraState::interruptedBySystemPressure
             : interrupted ? CameraState::interrupted : CameraState::streaming;
         if (state == reported) return;

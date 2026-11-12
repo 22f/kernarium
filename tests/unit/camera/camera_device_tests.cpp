@@ -744,6 +744,8 @@ void testBlockedNeverOpensASession()
     rig.ok(virtio_video_queue_clear {{VIRTIO_VIDEO_CMD_QUEUE_CLEAR, 1}, output, {}});
     rig.destroy(1);
     rig.destroy(2);
+    // Black frames are not capture: the host is idle however many flow.
+    require(rig.states.empty(), "a blocked session with streams running is idle and reports no change");
     rig.destroy(3);
     rig.device->reset();
     require(rig.camera->sessionsOpened() == 0 && rig.camera->sessionsOpen() == 0,
