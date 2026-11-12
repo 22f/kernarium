@@ -478,7 +478,7 @@ final class LiveRuntime: RuntimeDriver {
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
         let cameraMode = cameraBootMode()
-        let cameraPath = cameraDirectory?.path
+        let cameraPath = cameraDirectory.map { Self.prepareCalibrationDirectory($0) }?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -581,6 +581,18 @@ final class LiveRuntime: RuntimeDriver {
     func cameraBootMode() -> UInt32 {
         model?.camera?.refresh()
         return Self.cameraRuntimeMode(model?.cameraMode ?? .blocked)
+    }
+
+    /// Where the colour data a Bayer still teaches is kept. It is derived from
+    /// this device's own sensors and learned again at the next photo, so it
+    /// stays out of iCloud and computer backups.
+    nonisolated static func prepareCalibrationDirectory(_ directory: URL) -> URL {
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var target = directory
+        var excluded = URLResourceValues()
+        excluded.isExcludedFromBackup = true
+        try? target.setResourceValues(excluded)
+        return directory
     }
 
     /// The runtime's word for the session's camera mode (KernariumRuntime.h).

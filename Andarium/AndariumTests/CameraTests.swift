@@ -297,6 +297,21 @@ struct CameraFlowTests {
         #expect(534 - 106 == 428 && 1249 - 106 == 1143)
     }
 
+    @Test func theCalibrationFolderIsMadeAndKeptOutOfBackups() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Camera", isDirectory: true)
+        let prepared = LiveRuntime.prepareCalibrationDirectory(folder)
+        #expect(prepared == folder)
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory) && isDirectory.boolValue)
+        let values = try folder.resourceValues(forKeys: [.isExcludedFromBackupKey])
+        #expect(values.isExcludedFromBackup == true)
+        // A folder that is already there is kept and flagged all the same.
+        _ = LiveRuntime.prepareCalibrationDirectory(folder)
+        #expect(try folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+    }
+
     @Test func theRuntimesStatesAreReadAsTheyAreSaid() {
         let said: [(Int, CameraCapture)] = [
             (KERNARIUM_RUNTIME_CAMERA_STATE_IDLE, .idle),
