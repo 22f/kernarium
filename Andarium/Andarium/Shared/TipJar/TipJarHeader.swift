@@ -87,6 +87,8 @@ struct TipJarSender: View {
     private let spacing = 8.0
 
     private var avatarSize: Double { min(avatarMetric, 56) }
+    /// The logos stay smaller than the name they follow, at any text size.
+    private var glyphSize: Double { min(glyphMetric, 24) }
     private var shownLinks: [TipJarSenderContent.Link] { links ? content.links : [] }
 
     var body: some View {
@@ -141,7 +143,7 @@ struct TipJarSender: View {
     }
 
     private var logos: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: spacing) {
             ForEach(shownLinks) { link in
                 SwiftUI.Link(destination: link.url) {
                     // The label colour, black or white as the appearance says, never the tint.
@@ -150,7 +152,7 @@ struct TipJarSender: View {
                         .resizable()
                         .aspectRatio(link.aspectRatio, contentMode: .fit)
                         .foregroundStyle(Color(.label))
-                        .frame(height: glyphMetric)
+                        .frame(height: glyphSize)
                         // The logo is small; the touch target is not.
                         .frame(minWidth: target, minHeight: target)
                         .contentShape(.rect)
@@ -165,7 +167,7 @@ struct TipJarSender: View {
     /// logo under the text lines up with it.
     private var logoInset: Double {
         guard let first = shownLinks.first else { return 0 }
-        return max(0, (target - glyphMetric * first.aspectRatio) / 2)
+        return max(0, (target - glyphSize * first.aspectRatio) / 2)
     }
 }
 

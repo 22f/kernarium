@@ -61,6 +61,9 @@ struct TipJarSheet: View {
                     TipJarNote(text: Text(TipJarWords.statement))
                         .padding(.vertical, 12)
                     replies
+                    if typeSize.isAccessibilitySize {
+                        TipJarBar(jar: jar, close: close, pinned: false)
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -85,10 +88,14 @@ struct TipJarSheet: View {
                 }
             }
             .safeAreaBar(edge: .bottom) {
-                TipJarBar(jar: jar, close: close)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                        barHeight = height
-                    }
+                // At accessibility sizes four full-width chips would take half the screen from the
+                // conversation, so the bar is the last thing in the conversation instead.
+                if !typeSize.isAccessibilitySize {
+                    TipJarBar(jar: jar, close: close)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            barHeight = height
+                        }
+                }
             }
         }
         // Larger text needs the whole height.
@@ -223,13 +230,15 @@ private struct TipJarNote: View {
 }
 
 /// What stands under the conversation: the four tiers as reply chips, two by
-/// two (one column at accessibility sizes); Try again when the store gave
+/// two (one column at the end of the conversation at accessibility sizes); Try again when the store gave
 /// nothing; Done alone after the thank-you; nothing when purchases are not
 /// allowed and no prices came.
 private struct TipJarBar: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     let jar: TipJarModel
     let close: () -> Void
+    /// Pinned under the conversation on a fade, or (accessibility sizes) the last thing in it.
+    var pinned = true
 
     var body: some View {
         Group {
@@ -257,11 +266,13 @@ private struct TipJarBar: View {
             }
         }
         .frame(maxWidth: 600)
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 6)
+        .padding(.horizontal, pinned ? 16 : 0)
+        .padding(.top, pinned ? 14 : 12)
+        .padding(.bottom, pinned ? 6 : 0)
         .frame(maxWidth: .infinity)
-        .background { TipJarBarFade(color: Color(.systemBackground)) }
+        .background {
+            if pinned { TipJarBarFade(color: Color(.systemBackground)) }
+        }
     }
 
     private func chip(_ tier: TipJarTier) -> some View {

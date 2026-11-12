@@ -185,6 +185,37 @@ struct TipJarHeaderTests {
         #expect(opened.map(\.absoluteString).sorted() == brands.map { addresses[$0]! }.sorted())
     }
 
+    /// At the largest text size the logos stay a touch target each, no larger than the target, and
+    /// keep a gap between them: they used to grow with the text until they touched and rivalled the name.
+    @Test func atTheLargestTextSizeTheLogosKeepTheirSizeAndTheirDistance() async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = UIHostingController(
+            rootView: TipJarSender(content: Self.content())
+                .dynamicTypeSize(.accessibility5)
+                .padding(16)
+                .frame(width: 380)
+                .frame(maxHeight: .infinity, alignment: .top))
+        lease.window.rootViewController = controller
+        var links: [CGRect] = []
+        let drawn = await eventually {
+            controller.view.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            links = ToolbarProbe.elements(in: lease.window, above: 5000, includeUnlabelled: true)
+                .filter { $0.traits.contains(.link) }.map { $0.object.accessibilityFrame }
+                .sorted { ($0.minY, $0.minX) < ($1.minY, $1.minX) }
+            return links.count == Self.sites.count
+        }
+        try #require(drawn, "the logos were not drawn; is ApplicationAccessibilityEnabled on?")
+        for frame in links {
+            #expect(frame.width <= 48 && frame.height <= 48, "a logo grew with the text: \(frame)")
+        }
+        for (first, second) in zip(links, links.dropFirst()) {
+            let apart = second.minY >= first.maxY || second.minX - first.maxX >= 8
+            #expect(apart, "the logos touch: \(first) \(second)")
+        }
+    }
+
     @Test func withoutTheDeveloperTheHeaderIsTheRoleAlone() async throws {
         let model = app()
         model.tipJarServices.sender = { TipJarSenderContent() }
