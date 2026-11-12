@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <optional>
+#include <utility>
 
 namespace uml::network {
 
@@ -99,14 +101,63 @@ void SlirpProvider::process_transmit_queue() noexcept
 	}
 }
 
+std::chrono::steady_clock::time_point
+SlirpProvider::host_clock_now() const noexcept
+{
+#if UML_SLIRP_TESTING
+	if (clock_for_testing_)
+		return clock_for_testing_();
+#endif
+	return std::chrono::steady_clock::now();
+}
+
+bool SlirpProvider::read_host_addresses_now() noexcept
+{
+	std::optional<HostAddresses> addresses;
+	try {
+#if UML_SLIRP_TESTING
+		host_address_reads_for_testing_.fetch_add(
+			1, std::memory_order_release);
+		addresses = address_reader_for_testing_ ?
+			address_reader_for_testing_() : read_host_addresses();
+#else
+		addresses = read_host_addresses();
+#endif
+	} catch (...) {
+	}
+	/* A failed read is counted as a read, so it is not retried for every
+	 * frame; it keeps the table the last good read left. */
+	host_addresses_read_at_ = host_clock_now();
+	if (!addresses)
+		return false;
+	host_addresses_ = std::move(*addresses);
+	return true;
+}
+
+void SlirpProvider::refresh_host_addresses_if_stale() noexcept
+{
+	if (host_clock_now() - host_addresses_read_at_ >= host_address_max_age)
+		(void)read_host_addresses_now();
+}
+
 bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 {
 	const auto bytes = std::span<const std::uint8_t>{
 		reinterpret_cast<const std::uint8_t *>(frame.data()),
 		frame.size()};
-	const auto classified = dns::classify_guest_frame(
+	auto classified = dns::classify_guest_frame(
 		bytes, {nameserver_ipv4, host_alias_ipv4, name_server_stream_,
 			gateway_stream_});
+	/* What SLiRP would connect to the machine the application runs on is
+	 * refused here instead: the guest gets the answer a closed port gives.
+	 * The host's addresses are looked up again only for a frame that is
+	 * judged by them, and not more than once in host_address_max_age. */
+	if (classified.action == dns::FrameAction::pass) {
+		if (dns::needs_host_check(bytes, virtual_network_ipv4))
+			refresh_host_addresses_if_stale();
+		classified = dns::classify_host_bound_frame(
+			bytes, host_addresses_, virtual_network_ipv4);
+	}
 	switch (classified.action) {
 	case dns::FrameAction::pass:
 		return false;
@@ -123,6 +174,15 @@ bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 			if (!reset.empty())
 				(void)enqueue_received(std::as_bytes(
 					std::span<const std::uint8_t>{reset}));
+		} catch (...) {
+		}
+		return true;
+	case dns::FrameAction::unreachable:
+		try {
+			const auto error = dns::icmp_unreachable_frame(
+				classified, next_identification_++);
+			(void)enqueue_received(std::as_bytes(
+				std::span<const std::uint8_t>{error}));
 		} catch (...) {
 		}
 		return true;

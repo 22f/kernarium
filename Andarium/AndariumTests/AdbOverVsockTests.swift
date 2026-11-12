@@ -587,13 +587,19 @@ struct AdbOverVsockTests {
         #expect(setting != nil)
     }
 
-    /// A computer on the network, here a loopback client of the bridge, reaches
-    /// the guest's adbd through a fresh stream: adbd answers its CNXN with an
-    /// AUTH challenge, since the computer's key is not the host's.
+    /// A computer on the network, here a loopback client of the bridge that is
+    /// given another device's addresses so that the loopback is a computer
+    /// elsewhere, reaches the guest's adbd through a fresh stream: adbd answers
+    /// its CNXN with an AUTH challenge, since the computer's key is not the
+    /// host's.
     @Test(.timeLimit(.minutes(20))) func theBridgeCarriesAComputersConnectionToAdbd() async throws {
         guard Self.enabled else { return }
         _ = try await readyOperations()
-        let bridge = AdbNetworkBridge(port: 0, opener: VsockConnector())
+        let bridge = AdbNetworkBridge(
+            port: 0,
+            deviceAddresses: {
+                [InterfaceAddress(name: "en0", isActive: true, isLoopback: false, octets: [192, 0, 2, 10])]
+            }, opener: VsockConnector())
         let port = try bridge.start()
         defer { bridge.stop() }
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
@@ -796,10 +802,11 @@ struct AdbOverVsockTests {
         try await control.setDebugging(initial ?? false)
     }
 
-    /// A real adb on the Mac against the bridge, for as long as the launch
-    /// asks (`ANDARIUM_ADB_NET_HOLD_SECONDS`, or until the file named
+    /// A real adb on another computer against the bridge (it refuses the
+    /// device's own computer), for as long as the launch asks
+    /// (`ANDARIUM_ADB_NET_HOLD_SECONDS`, or until the file named
     /// `adb-net-done` appears in the printed folder). The application's own
-    /// key is written there as `adbkey` for the Mac's adb to offer, since the
+    /// key is written there as `adbkey` for that adb to offer, since the
     /// guest authorizes that key for the boot.
     @Test(.timeLimit(.minutes(60))) func holdTheBridgeForARealAdbClient() async throws {
         guard Self.enabled,
