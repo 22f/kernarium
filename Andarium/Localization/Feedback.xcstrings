@@ -991,7 +991,7 @@
       }
     },
     "Send feedback" : {
-      "comment" : "The name of the feature: the row in Info, the title of the sheet, the button of its bar and the button's VoiceOver name. iOS's TestFlight says Send Feedback this way.",
+      "comment" : "The name of the feature: the item in Home's toolbar menu, the title of the sheet, the button of its bar and the button's VoiceOver name. iOS's TestFlight says Send Feedback this way.",
       "localizations" : {
         "ja" : {
           "stringUnit" : {
