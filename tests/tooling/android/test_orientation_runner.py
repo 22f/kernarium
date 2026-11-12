@@ -522,6 +522,7 @@ class ScriptedDevice(runner.Guest):
         self.says_idle = True
         self.says_active = True
         self.lock_shows = True
+        self.lock_request = "SCREEN_ORIENTATION_NOSENSOR"
         self.boot_completed_at = 0.0
 
     def value(self, value: int) -> None:
@@ -544,7 +545,7 @@ class ScriptedDevice(runner.Guest):
         pass
 
     def rotation_state(self):
-        request = "SCREEN_ORIENTATION_NOSENSOR" if self.keyguard else self.request
+        request = self.lock_request if self.keyguard else self.request
         return runner.RotationState(
             rotation=0 if self.keyguard else self.shown, user_mode="USER_ROTATION_FREE", user_rotation=0,
             allow_all=False, landscape=1, seascape=3, app_orientation=request, listener_enabled=True,
@@ -571,9 +572,11 @@ class ScriptedDevice(runner.Guest):
             if self.says_active:
                 self.frame(True)
             self.settle()
+        elif "get-disabled" in command:
+            return "false\n" if self.lock_enabled else "true\n"
         elif "set-disabled" in command:
+            # Only the setting; a lock screen already up stays up until it is dismissed.
             self.lock_enabled = command.endswith("false")
-            self.keyguard = self.keyguard and self.lock_enabled
         elif "wm dismiss-keyguard" in command:
             self.keyguard = False
             self.settle()
@@ -634,6 +637,29 @@ class StepTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Failure, "the keyguard is not showing"):
             runner.lock_screen(absent, absent.host.push)
         self.assertFalse(absent.lock_enabled)
+
+    def test_a_lock_screen_step_that_fails_leaves_no_lock_screen_over_the_display(self) -> None:
+        device = ScriptedDevice()
+        device.lock_request = "SCREEN_ORIENTATION_PORTRAIT"
+        with self.assertRaisesRegex(runner.Failure, "not SCREEN_ORIENTATION_NOSENSOR"):
+            runner.lock_screen(device, device.host.push)
+        self.assertFalse(device.keyguard, "the lock screen is dismissed")
+        self.assertTrue(device.awake)
+        self.assertFalse(device.lock_enabled, "the setting is as the step found it")
+        # The next step's first rotation wait is not stuck behind the lock screen.
+        device.value(runner.COUNTER_CLOCKWISE)
+        self.assertEqual(device.rotation(), runner.COUNTER_CLOCKWISE)
+
+    def test_the_lock_setting_is_put_back_as_the_step_found_it(self) -> None:
+        device = ScriptedDevice()
+        device.lock_enabled = True  # an instance that has a lock screen of its own
+        runner.lock_screen(device, device.host.push)
+        self.assertTrue(device.lock_enabled)
+        self.assertFalse(device.keyguard)
+        other = ScriptedDevice()
+        other.shell = lambda command, timeout=0: "gone\n" if "get-disabled" in command else ""
+        with self.assertRaisesRegex(runner.Failure, "get-disabled' says 'gone'"):
+            runner.lock_screen(other, other.host.push)
 
     def test_the_keyguard_is_read_from_the_window_policy_dump(self) -> None:
         self.assertTrue(runner.keyguard_showing("  KeyguardServiceDelegate\n      showing=true\n"))

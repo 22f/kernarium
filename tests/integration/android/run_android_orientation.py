@@ -1005,7 +1005,11 @@ def keyguard_state(guest: Guest) -> bool:
 def lock_screen(guest: Guest, push: Callable[[int], None]) -> str:
     """The lock screen asks not to follow the sensor, so the display shows it upright whatever the value, and a
     value sent there turns the display once the screen is unlocked. A provisioned guest has no lock screen, so
-    the step turns it on (a swipe lock, no credential) and back off."""
+    the step turns it on (a swipe lock, no credential) and puts the setting back as it found it, with the
+    screen on and no lock screen over the display, whatever happened in between."""
+    before = guest.shell("cmd lock_settings get-disabled").strip()
+    if before not in ("true", "false"):
+        raise Failure(f"'cmd lock_settings get-disabled' says {before!r}")
     guest.shell("cmd lock_settings set-disabled false")
     try:
         guest.settings_app()
@@ -1029,7 +1033,17 @@ def lock_screen(guest: Guest, push: Callable[[int], None]) -> str:
         push(UPRIGHT)
         wait_rotation(guest, UPRIGHT, "after unlocking, a new value")
     finally:
-        guest.shell("cmd lock_settings set-disabled true")
+        # A step that failed with the lock screen up would leave every later step waiting on a display that
+        # cannot turn: wake the screen and dismiss the keyguard before the setting goes back.
+        try:
+            if wakefulness(guest) != "Awake":
+                guest.shell("input keyevent KEYCODE_WAKEUP")
+            if keyguard_state(guest):
+                guest.shell("wm dismiss-keyguard")
+                guest.shell("input keyevent KEYCODE_MENU")
+        except Failure:
+            pass
+        guest.shell(f"cmd lock_settings set-disabled {before}")
     return ("the lock screen showed (request NOSENSOR) upright with the value 3 sent there; after unlocking the display "
             "turned to 3, and the next value (0) turned it back")
 
