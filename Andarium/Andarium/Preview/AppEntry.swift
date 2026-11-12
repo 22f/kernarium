@@ -279,7 +279,8 @@ struct AppEntry {
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
-             "settings-feedback", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
+             "settings-feedback", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk", "install-bundle",
+             "bug-report":
             let session = model.session
             switch screen {
             case "settings-adb":
@@ -347,7 +348,8 @@ struct AppEntry {
 
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
-        "bug-report", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle",
+        "bug-report", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk",
+        "install-bundle",
     ]
     /// The ones that show how an install ended.
     private static let resultScreens: Set<String> = [
@@ -366,6 +368,13 @@ struct AppEntry {
                 title: String(localized: "Creating bug report"),
                 detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."),
                 progress: 0.6, cancel: cancel
+            )
+        case "install-legacy":
+            // The first attempt is over and the question is up: no Cancel here.
+            return BusyState(
+                title: String(localized: "Installing app"),
+                detail: "\(file) \u{00B7} \(Formats.size(bytes: PreviewData.sampleApkSizeBytes))",
+                progress: 0.8
             )
         case "install-done":
             return BusyState(
@@ -508,6 +517,10 @@ struct AppEntry {
         case "install-apk" where play:
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
+        case "install-legacy":
+            // What Android's refusal of an app built for API level 7 asks.
+            try? await Task.sleep(for: .milliseconds(450))
+            model.legacyInstallQuestion = LegacyInstallQuestion(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
         default:
             await SnapshotPreview.applyDeferred(screen: screen, to: model)
         }
