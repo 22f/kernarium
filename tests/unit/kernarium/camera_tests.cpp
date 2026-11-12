@@ -453,6 +453,10 @@ private:
             calls_.push_back("still " + std::to_string(camera));
             return true;
         }
+        void setLimits(const uml::platform::CameraLimits& limits) override
+        {
+            calls_.push_back("limits " + std::to_string(limits.maximumStillPixels));
+        }
         void stop() override { calls_.push_back("stop all"); }
 
     private:
@@ -479,6 +483,7 @@ void theBackKnobNeverReachesTheFrontCamera()
     NullDelegate delegate;
     auto session = source->openSession(delegate);
     require(session != nullptr && recording->delegate == &delegate, "the host's session reports to the caller's delegate");
+    session->setLimits({12'700'000});
     require(session->startVideo(0, 1280, 720, 30) && session->startVideo(2, 640, 480, 30), "the back lenses start");
     session->apply(0, {});
     require(session->takeStill(2, {}));
@@ -490,8 +495,8 @@ void theBackKnobNeverReachesTheFrontCamera()
     session->stopVideo(1);
     require(!session->startVideo(3, 1280, 720, 30) && !session->takeStill(99, {}), "an index past the cameras");
     session->stop();
-    const std::vector<std::string> expected {"start 0", "start 2", "apply 0", "still 2", "stop 2", "stop all"};
-    require(recording->calls == expected, "the host saw the back cameras' calls and no other");
+    const std::vector<std::string> expected {"limits 12700000", "start 0", "start 2", "apply 0", "still 2", "stop 2", "stop all"};
+    require(recording->calls == expected, "the host saw the guest's limits and the back cameras' calls and no other");
 
     // The same cameras give the same layout with or without the filter.
     int hosts = 0;

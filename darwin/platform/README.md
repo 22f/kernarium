@@ -120,11 +120,15 @@ interface to the wire.
   not list that size, and the photo is dropped when the platform resolved
   another. A photo output gets its maximum size only after it is attached to the
   session, as AVFoundation requires. A stream runs in the smallest format that
-  covers it and takes its rate, among those that list the camera's largest photo
-  when there are any (`chooseVideoFormat`), and discovery offers the photo sizes
-  that every such format lists (`photoSizesOfEveryRun`), so a size offered is
-  one the running format makes; a camera in a multi-camera session runs in a
-  format that session takes and can be refused a size that format lacks. A
+  covers it and takes its rate, among those that make the largest photo the
+  guest may ask for (`chooseVideoFormat`; the device gives the session that
+  limit through `setLimits()`). Discovery reports the formats as data
+  (`CameraInfo::captureFormats`), and the device offers the photo sizes that
+  every stream it permits can make (`offerStills`, see
+  [`darwin/device/camera`](../device/camera/README.md)). A camera that only
+  takes stills runs in the format that makes the size asked for
+  (`chooseStillFormat`). A camera in a multi-camera session runs in a format
+  that session takes. A
   still's `exposure` is the photo's own where the photo states it: the exposure
   time, ISO, f-number, focal length and flash come from the photo's Exif
   (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's

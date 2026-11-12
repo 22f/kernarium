@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "camera_description.hpp"
 
+#include "photo_dimensions.hpp"
 #include "vhost_user_device.hpp"
 
 #include <algorithm>
@@ -20,6 +21,12 @@ using uml::virtio::toBytes;
  * the ratio of the lenses stays exact, and the absolute figures are nominal
  * until a Bayer still replaces them. */
 constexpr double nominalPitchMicrometres = 1.2;
+
+/* The frame rate up to which a camera's streams are always allowed the photos
+ * it offers: a format that cannot make them at a higher rate does not
+ * restrict the photos, and a host with such a format offers the rates the
+ * photos hold up to (offerStills). */
+constexpr std::uint32_t stillsHoldUntilRate = 30;
 constexpr std::uint32_t maximumCameras = VIRTIO_VIDEO_CAMERA_MAX_CAMERAS;
 
 /* The sizes every camera offers beyond its native ones, so that a guest has
@@ -203,6 +210,38 @@ BayerOrder bayerOrderOf(std::uint32_t wireFormat) noexcept
     }
 }
 
+namespace {
+
+/* The photo sizes a camera whose still sizes depend on its format offers, and
+ * the streams that go with them: a size is offered when the format of every
+ * stream the camera permits makes it (uml::platform::offerStills), and a
+ * stream faster than the photos hold for is not permitted. */
+void offerCameraStills(CameraDescription& camera, const CameraTierLimits& limits,
+                 std::span<const std::vector<std::size_t>> concurrentSets)
+{
+    std::vector<uml::platform::VideoRequest> requests;
+    std::uint32_t fastest = 0;
+    for (const auto& mode : camera.video) {
+        requests.push_back({mode.width, mode.height, mode.minimumFrameRate, mode.maximumFrameRate});
+        fastest = std::max(fastest, mode.maximumFrameRate);
+    }
+    const bool concurrent = std::any_of(concurrentSets.begin(), concurrentSets.end(), [&](const auto& set) {
+        return set.size() > 1 && std::find(set.begin(), set.end(), camera.platformIndex) != set.end();
+    });
+    const auto offer = uml::platform::offerStills(camera.info.captureFormats, requests, concurrent,
+                                                  uml::platform::CameraLimits {limits.maximumStillPixels}, stillsHoldUntilRate);
+    camera.jpegSizes = offer.sizes;
+    camera.info.stillSizes = offer.sizes;
+    if (offer.maximumRate >= fastest) return;
+    // The streams that are faster are not permitted.
+    auto& formats = camera.info.videoFormats;
+    std::erase_if(formats, [&](const auto& format) { return format.minimumFrameRate > offer.maximumRate; });
+    for (auto& format : formats) format.maximumFrameRate = std::min(format.maximumFrameRate, offer.maximumRate);
+    camera.video = videoModes(camera.info, limits);
+}
+
+} // namespace
+
 std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
                                               std::span<const std::vector<std::size_t>> concurrentSets,
                                               std::string_view hostModel, const CalibrationStore& calibration,
@@ -247,8 +286,13 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
         const auto& info = camera.info;
         camera.sensorOrientation = options.sensorOrientation ? options.sensorOrientation(info) : info.sensorOrientation;
         camera.video = videoModes(info, limits);
-        for (const auto& size : info.stillSizes)
-            if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels) camera.jpegSizes.push_back(size);
+        if (info.captureFormats.empty()) {
+            // Every size works with every format.
+            for (const auto& size : info.stillSizes)
+                if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels) camera.jpegSizes.push_back(size);
+        } else {
+            offerCameraStills(camera, limits, concurrentSets);
+        }
         // RAW is advertised only for a lens whose colour data is known.
         if (info.rawStills) {
             camera.calibration = calibration.load(hostModel, CalibrationStore::lensKey(info));

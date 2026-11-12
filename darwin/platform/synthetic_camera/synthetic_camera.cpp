@@ -424,6 +424,7 @@ public:
     const SyntheticCameraOptions options_;
     const Profile profile_;
     std::atomic<unsigned> opened {0};
+    std::atomic<std::uint64_t> stillPixelLimit {0};
     std::atomic<unsigned> open {0};
     std::atomic<std::uint64_t> clock {1'000'000'000};
     std::atomic<bool> rawRefused {false};
@@ -449,6 +450,8 @@ public:
     }
 
     ~Session() override { stop(); }
+
+    void setLimits(const CameraLimits& limits) override { core_.stillPixelLimit = limits.maximumStillPixels; }
 
     bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate) override
     {
@@ -914,6 +917,7 @@ public:
         return session;
     }
 
+    CameraLimits sessionLimits() const noexcept override { return {core_.stillPixelLimit}; }
     unsigned sessionsOpened() const noexcept override { return core_.opened; }
     unsigned sessionsOpen() const noexcept override { return core_.open; }
 

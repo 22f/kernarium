@@ -194,79 +194,188 @@ const std::vector<VideoFormatFacts> tabletFormats {
     format(1920, 1080, {{1920, 1080}, {2016, 1134}}, 60),
 };
 const CameraStillSize twelveMegapixels {4032, 3024};
+// The guest's cap: 12 MP stills (the small tier's 12.7 million pixels), and no
+// cap at all.
+const CameraLimits capped {12'700'000};
+const CameraLimits uncapped {};
 
-void theStreamRunsInTheSmallestFormatThatListsTheLargestStill()
+void theStreamRunsInTheSmallestFormatThatMakesTheLargestStill()
 {
-    const auto chosen = chooseVideoFormat(tabletFormats, 1440, 1080, 30, false, twelveMegapixels);
-    require(chosen && *chosen == 1, "1920x1440 is the smallest covering format that lists 12 MP");
-    const auto plain = chooseVideoFormat(tabletFormats, 1440, 1080, 30, false, {});
-    require(plain && *plain == 0, "without a preferred still it is the smallest covering format");
+    const auto chosen = chooseVideoFormat(tabletFormats, 1440, 1080, 30, false, capped);
+    require(chosen && *chosen == 1, "1920x1440 is the smallest covering format that makes 12 MP");
+    const std::vector<VideoFormatFacts> equal {format(1920, 1440, {{1440, 1080}}), format(1440, 1080, {{1440, 1080}})};
+    const auto first = chooseVideoFormat(equal, 1440, 1080, 30, false, capped);
+    require(first && *first == 1, "formats that make the same photos: the smallest covering format");
 }
 
 void aFormatThatCannotTakeTheRateOrTheSizeIsNotChosen()
 {
     // 60 fps: only the 1080p format takes it, and it lists no 12 MP; the
     // preference does not reach past a format that cannot carry the stream.
-    const auto fast = chooseVideoFormat(tabletFormats, 1280, 720, 60, false, twelveMegapixels);
+    const auto fast = chooseVideoFormat(tabletFormats, 1280, 720, 60, false, capped);
     require(fast && *fast == 3, "the only format that takes 60 fps is chosen without the large still");
-    require(!chooseVideoFormat(tabletFormats, 4096, 3072, 30, false, twelveMegapixels), "nothing covers 4096x3072");
-    require(!chooseVideoFormat(tabletFormats, 640, 480, 120, false, twelveMegapixels), "nothing takes 120 fps");
+    require(!chooseVideoFormat(tabletFormats, 4096, 3072, 30, false, capped), "nothing covers 4096x3072");
+    require(!chooseVideoFormat(tabletFormats, 640, 480, 120, false, capped), "nothing takes 120 fps");
 }
 
 void aMultiCameraSessionChoosesAmongItsFormatsOnly()
 {
     auto formats = tabletFormats;
     formats[1].multiCamera = true;  // only the 1920x1440 format joins
-    const auto chosen = chooseVideoFormat(formats, 1440, 1080, 30, true, twelveMegapixels);
+    const auto chosen = chooseVideoFormat(formats, 1440, 1080, 30, true, capped);
     require(chosen && *chosen == 1, "the multi-camera format is chosen");
     formats[1].multiCamera = false;
-    require(!chooseVideoFormat(formats, 1440, 1080, 30, true, twelveMegapixels), "none joins: nothing is chosen");
+    require(!chooseVideoFormat(formats, 1440, 1080, 30, true, capped), "none joins: nothing is chosen");
 }
 
 void theFullRangeFormatWinsAmongEqualOnes()
 {
     std::vector<VideoFormatFacts> formats {format(1920, 1440, {{4032, 3024}}, 30, false), format(1920, 1440, {{4032, 3024}}, 30, true)};
-    const auto chosen = chooseVideoFormat(formats, 1920, 1440, 30, false, twelveMegapixels);
+    const auto chosen = chooseVideoFormat(formats, 1920, 1440, 30, false, capped);
     require(chosen && *chosen == 1, "the full-range format of the same size and sizes");
 }
 
-void theSizesOfferedAreTheOnesEveryRunMakes()
+// The guest never asks for more than its cap, so a format is not chosen for a
+// size above it: the cheaper format that makes the largest permitted still wins
+// over the larger one that makes more.
+void theCapDecidesWhichStillAFormatIsChosenFor()
 {
-    // Streams the guest may configure: preview sizes at 30 fps, and 1080p
-    // video up to 60 fps, which runs in the 1080p format.
-    const std::vector<VideoRequest> requests {{1440, 1080, 1, 30}, {1920, 1080, 1, 60}};
-    const auto offered = photoSizesOfEveryRun(tabletFormats, requests, twelveMegapixels);
-    // 1440x1080 runs in 1920x1440 {1920x1440, 4032x3024}; 1920x1080 at 60 fps
-    // runs in the 1080p format {1920x1080, 2016x1134}: nothing is common.
-    require(offered.empty(), "a size one run cannot make is not offered");
-    const std::vector<VideoRequest> previews {{1440, 1080, 1, 30}, {640, 480, 1, 30}, {1920, 1440, 1, 30}};
-    const auto previewSizes = photoSizesOfEveryRun(tabletFormats, previews, twelveMegapixels);
-    require(previewSizes == Sizes({{4032, 3024}, {1920, 1440}}), "the sizes of the shared format, largest first");
+    const std::vector<VideoFormatFacts> formats {
+        format(1920, 1440, {{1920, 1440}, {4032, 3024}}),
+        format(4032, 3024, {{4032, 3024}, {8064, 6048}}),
+    };
+    require(preferredPhotoSize(formats, capped) == std::optional<CameraStillSize>(CameraStillSize {4032, 3024}),
+            "the largest permitted still is 12 MP");
+    require(preferredPhotoSize(formats, uncapped) == std::optional<CameraStillSize>(CameraStillSize {8064, 6048}),
+            "with no cap it is the largest listed anywhere");
+    const auto chosen = chooseVideoFormat(formats, 1440, 1080, 30, false, capped);
+    require(chosen && *chosen == 0, "the smaller format that makes 12 MP");
+    const auto unbounded = chooseVideoFormat(formats, 1440, 1080, 30, false, uncapped);
+    require(unbounded && *unbounded == 1, "where the larger one is chosen for 48 MP when no cap says otherwise");
+    require(!preferredPhotoSize(formats, {100}), "a cap below every size leaves no preferred still");
 }
 
-void aSizeOnlyAnotherFormatListsIsNotOffered()
+// The output's maximum is the largest size by area, and the output takes no
+// size above it in either dimension: a listed size wider than that maximum
+// (4224 against 4032) is not one the format makes.
+void aSizeWiderThanTheOutputMaximumIsNotMade()
 {
-    // 4224x2376 is listed by the 12 MP video format only; the camera's streams
-    // run in 1920x1440, so it is not offered, while 4032x3024 is.
-    const std::vector<VideoRequest> requests {{1440, 1080, 1, 30}, {1920, 1440, 1, 30}};
-    const auto offered = photoSizesOfEveryRun(tabletFormats, requests, twelveMegapixels);
-    require(std::find(offered.begin(), offered.end(), CameraStillSize {4224, 2376}) == offered.end(), "the 16:9 size is not offered");
-    require(!offered.empty() && offered.front() == twelveMegapixels, "the 12 MP size is");
+    const VideoFormatFacts wide = format(4032, 3024, {{4032, 3024}, {4224, 2376}});
+    require(formatMakesPhoto(wide, {4032, 3024}) && !formatMakesPhoto(wide, {4224, 2376}), "12.19 MP is the maximum, 4224 is wider");
+    require(!formatMakesPhoto(wide, {2016, 1512}) && !formatMakesPhoto(format(1, 1, {}), {4032, 3024}), "a size the format does not list");
+    const std::vector<VideoFormatFacts> formats {wide};
+    require(photoSizesMade(formats, uncapped) == Sizes({{4032, 3024}}), "so it is not among the sizes the host makes");
 }
 
-void aCameraWithoutTheLargestStillOffersWhatItsFormatMakes()
+// The streams the guest may run on the iPad mini's back camera, as the
+// platform reports its formats: preview sizes at up to 30 fps and 1080p video
+// up to 60.
+const std::vector<VideoRequest> tabletStreams {{1920, 1080, 1, 60}, {1440, 1080, 1, 30}, {640, 480, 1, 30}, {176, 144, 1, 30}};
+
+void theOfferIsWhatEveryRunMakes()
 {
-    // No format lists 12 MP: the preference finds nothing and the smallest
-    // covering format decides, so the offer shrinks to its sizes.
-    std::vector<VideoFormatFacts> formats {format(1440, 1080, {{1440, 1080}, {2016, 1512}}), format(1920, 1440, {{1920, 1440}})};
-    const std::vector<VideoRequest> requests {{1440, 1080, 1, 30}};
-    const auto offered = photoSizesOfEveryRun(formats, requests, {5712, 4284});
-    require(offered == Sizes({{2016, 1512}, {1440, 1080}}), "the running format's own sizes");
+    // Runs up to 30 fps choose the 1920x1440 format ({1920x1440, 4032x3024});
+    // 1080p at 31 to 60 chooses the 1080p format ({1920x1080, 2016x1134}).
+    const auto offer = offerStills(tabletFormats, tabletStreams, false, capped, 30);
+    require(offer.sizes == Sizes({{4032, 3024}, {1920, 1440}}), "the sizes of the format the streams run in, largest first");
+    require(offer.maximumRate == 30, "streams above 30 fps are not permitted: the 1080p format makes no 12 MP");
 }
 
-void aCameraWithoutRequestsOffersNothing()
+// A size that the format of a run lacks is not offered. The unit test of the
+// first review: 4224x2376 is made by the 12 MP video format only, and a
+// 1440x1080 stream runs in 1920x1440; discovery used to fall back to it.
+void aSizeOnlyAnotherFormatMakesIsNotOffered()
 {
-    require(photoSizesOfEveryRun(tabletFormats, {}, twelveMegapixels).empty(), "no stream, no run");
+    const std::vector<VideoRequest> streams {{1440, 1080, 1, 30}, {1920, 1440, 1, 30}};
+    const auto offer = offerStills(tabletFormats, streams, false, capped, 30);
+    require(std::find(offer.sizes.begin(), offer.sizes.end(), CameraStillSize {4224, 2376}) == offer.sizes.end(),
+            "the 16:9 size of the 12 MP video format");
+    require(!offer.sizes.empty() && offer.sizes.front() == twelveMegapixels, "12 MP, which every run makes");
+    // The same table with the 1080p60 mode: no size is common to every run, as
+    // the rate ceiling is what keeps the photos, nothing is offered unconditionally.
+    const auto fast = offerStills(tabletFormats, tabletStreams, false, capped, 60);
+    require(fast.sizes.empty(), "with 60 fps held too, no size survives every run");
+    require(fast.maximumRate == 60, "and nothing is restricted for a camera that offers none");
+}
+
+void aRateInsideTheRangeDecidesWhichFormatARunUses()
+{
+    // 1080p at 1 to 60 fps, and a 4K format that makes 12 MP at 1 to 10 and 50
+    // to 60 fps only. The ends of the range choose the 4K format; 30 fps, in
+    // the middle, runs in the 1080p one, which lists no 12 MP.
+    const std::vector<VideoFormatFacts> formats {
+        format(1920, 1080, {{1920, 1080}}, 60),
+        VideoFormatFacts {3840, 2160, {{1, 10}, {50, 60}}, {{4032, 3024}}, true, false},
+    };
+    const std::vector<VideoRequest> streams {{1920, 1080, 1, 60}};
+    const auto offer = offerStills(formats, streams, false, capped, 60);
+    require(offer.sizes.empty(), "12 MP is refused at 30 fps, so it is not offered, whatever the ends of the range do");
+    require(chooseVideoFormat(formats, 1920, 1080, 30, false, capped) == std::optional<std::size_t>(0), "the middle runs in the 1080p format");
+    require(chooseVideoFormat(formats, 1920, 1080, 5, false, capped) == std::optional<std::size_t>(1), "the low end in the 4K one");
+    require(chooseVideoFormat(formats, 1920, 1080, 55, false, capped) == std::optional<std::size_t>(1), "the high end in the 4K one");
+}
+
+void aCameraKeepsItsPhotosOverTheFastStreamsThatCannotMakeThem()
+{
+    // The 1080p60 format lists no 12 MP: 12 MP wins and the streams stop at 30.
+    const auto offer = offerStills(tabletFormats, tabletStreams, false, capped, 30);
+    require(!offer.sizes.empty() && offer.sizes.front() == twelveMegapixels, "12 MP is offered");
+    require(offer.maximumRate == 30, "up to 30 fps");
+    // The streams after the ceiling are what the offer holds for: the same
+    // camera with its fast mode removed offers the same sizes at the same rate.
+    const std::vector<VideoRequest> clipped {{1920, 1080, 1, 30}, {1440, 1080, 1, 30}, {640, 480, 1, 30}, {176, 144, 1, 30}};
+    const auto again = offerStills(tabletFormats, clipped, false, capped, 30);
+    require(again.sizes == offer.sizes && again.maximumRate == 30, "the offer holds for what remains");
+}
+
+void aFormatThatMakesTheLargestStillAtAHigherRateRaisesTheCeiling()
+{
+    std::vector<VideoFormatFacts> formats = tabletFormats;
+    formats[1].frameRates = {{1, 60}};  // the 4:3 format reaches 60 fps too
+    const auto offer = offerStills(formats, tabletStreams, false, capped, 30);
+    require(!offer.sizes.empty() && offer.sizes.front() == twelveMegapixels, "12 MP");
+    require(offer.maximumRate == 60, "held up to 60 fps, where the 4:3 format carries it");
+}
+
+void aConcurrentCameraOffersWhatAMultiCameraFormatMakes()
+{
+    std::vector<VideoFormatFacts> formats = tabletFormats;
+    formats[1].multiCamera = false;
+    formats[0].multiCamera = true;  // the binned format is the only one a multi-camera session takes
+    const std::vector<VideoRequest> streams {{1440, 1080, 1, 30}};
+    const auto alone = offerStills(formats, streams, false, capped, 30);
+    require(!alone.sizes.empty() && alone.sizes.front() == twelveMegapixels, "alone it runs in the 12 MP format");
+    const auto together = offerStills(formats, streams, true, capped, 30);
+    // Running with others the stream is in 1440x1080, which makes nothing the
+    // format it runs in alone makes.
+    require(together.sizes == Sizes({}), "no size is made by both formats the stream runs in");
+    formats[1].multiCamera = true;
+    const auto both = offerStills(formats, streams, true, capped, 30);
+    require(both.sizes == Sizes({{4032, 3024}, {1920, 1440}}), "once the 12 MP format joins too, alone and together alike");
+}
+
+void aStillWithoutAStreamSelectsTheFormatThatMakesItsSize()
+{
+    const auto widest = chooseStillFormat(tabletFormats, CameraStillSize {4032, 3024}, false, capped);
+    require(widest && *widest == 1, "12 MP: the smallest format that makes it");
+    const auto binned = chooseStillFormat(tabletFormats, CameraStillSize {1440, 1080}, false, capped);
+    require(binned && *binned == 0, "1440x1080: the smallest of all");
+    require(!chooseStillFormat(tabletFormats, CameraStillSize {5712, 4284}, false, capped), "a size no format makes is refused");
+    const auto bayer = chooseStillFormat(tabletFormats, std::nullopt, false, capped);
+    require(bayer && *bayer == 1, "with no JPEG asked, the format that makes the largest permitted photo");
+    std::vector<VideoFormatFacts> formats = tabletFormats;
+    formats[1].multiCamera = false;
+    formats[2].multiCamera = true;
+    require(chooseStillFormat(formats, CameraStillSize {4032, 3024}, true, capped) == std::optional<std::size_t>(2),
+            "among the formats a multi-camera session takes: the one that does");
+    formats[2].multiCamera = false;
+    require(!chooseStillFormat(formats, CameraStillSize {4032, 3024}, true, capped), "none does: refused");
+}
+
+void aCameraWithoutStreamsOffersNothing()
+{
+    require(offerStills(tabletFormats, {}, false, capped, 30).sizes.empty(), "no stream, no run");
+    require(offerStills({}, tabletStreams, false, capped, 30).sizes.empty(), "no format, no photo");
 }
 
 // The platform raises for a scaled size of another aspect, so the delivered
@@ -341,14 +450,20 @@ int main()
     anOutputThatCannotBeAttachedGetsNoMaximum();
     aFormatThatListsNothingLeavesTheDefault();
     aMaximumSetBeforeAttachIsRefused();
-    theStreamRunsInTheSmallestFormatThatListsTheLargestStill();
+    theStreamRunsInTheSmallestFormatThatMakesTheLargestStill();
     aFormatThatCannotTakeTheRateOrTheSizeIsNotChosen();
     aMultiCameraSessionChoosesAmongItsFormatsOnly();
     theFullRangeFormatWinsAmongEqualOnes();
-    theSizesOfferedAreTheOnesEveryRunMakes();
-    aSizeOnlyAnotherFormatListsIsNotOffered();
-    aCameraWithoutTheLargestStillOffersWhatItsFormatMakes();
-    aCameraWithoutRequestsOffersNothing();
+    theCapDecidesWhichStillAFormatIsChosenFor();
+    aSizeWiderThanTheOutputMaximumIsNotMade();
+    theOfferIsWhatEveryRunMakes();
+    aSizeOnlyAnotherFormatMakesIsNotOffered();
+    aRateInsideTheRangeDecidesWhichFormatARunUses();
+    aCameraKeepsItsPhotosOverTheFastStreamsThatCannotMakeThem();
+    aFormatThatMakesTheLargestStillAtAHigherRateRaisesTheCeiling();
+    aConcurrentCameraOffersWhatAMultiCameraFormatMakes();
+    aStillWithoutAStreamSelectsTheFormatThatMakesItsSize();
+    aCameraWithoutStreamsOffersNothing();
     aStreamSmallerThanItsFormatIsDeliveredScaled();
     aStreamOfAnotherAspectIsDeliveredAtTheFormatsAspect();
     everyStandardSizeIsDeliveredAtEveryFormatsAspect();

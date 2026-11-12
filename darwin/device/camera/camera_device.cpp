@@ -400,6 +400,8 @@ public:
         session = host->openSession(*this);
         sessionFailed = session == nullptr;
         if (session) {
+            // What the guest may ask, which the platform's formats serve.
+            session->setLimits({limits.maximumStillPixels});
             checkpoint(CameraCheckpoint::sessionOpened);
             // A session that opens runs; what interrupted the last one is over.
             // A camera with a stream waiting for frames starts its capture again

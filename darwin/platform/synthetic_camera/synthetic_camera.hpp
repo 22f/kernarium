@@ -60,6 +60,8 @@ public:
     // blocked guest never opens one.
     [[nodiscard]] virtual unsigned sessionsOpened() const noexcept = 0;
     [[nodiscard]] virtual unsigned sessionsOpen() const noexcept = 0;
+    // The limits the device last gave a session (zero before any was given).
+    [[nodiscard]] virtual CameraLimits sessionLimits() const noexcept = 0;
     // The settings last applied to a camera, and the cameras running video.
     [[nodiscard]] virtual CameraSettings appliedSettings(std::size_t camera) const = 0;
     [[nodiscard]] virtual bool videoRunning(std::size_t camera) const = 0;

@@ -32,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -78,9 +79,6 @@ struct Entry {
     CameraInfo info;
     // AVFoundation's zoom factor times this is the ratio Android sees.
     float zoomMultiplier {1.0f};
-    // The largest photo any format lists: the video format is chosen among
-    // those that list it, so the photos offered can be made while it streams.
-    CameraStillSize preferredStill;
 };
 
 [[maybe_unused]] BayerOrder bayerOrderOf(OSType format)
@@ -265,24 +263,15 @@ std::vector<Entry> discover()
             }
         }
         if (info.videoFormats.empty()) continue;
-        // The photos offered are the ones the camera makes in every format it
-        // streams in: a size that only another format lists would be refused
-        // whenever the camera runs in this one.
-        entry.preferredStill = largestPhoto;
+        // The formats go to the device as data: it offers the photos that every
+        // stream the guest may run can make, and the session runs a stream in
+        // the format that makes them (photo_dimensions.hpp).
         {
             const FormatSet set = formatSetOf(device);
-            std::vector<VideoRequest> requests;
-            for (const auto& format : info.videoFormats)
-                requests.push_back({format.width, format.height, format.minimumFrameRate, format.maximumFrameRate});
-            info.stillSizes = photoSizesOfEveryRun(set.facts, requests, largestPhoto);
-            if (info.stillSizes.empty() && !requests.empty()) {
-                // No size is common to every run: the camera offers what the
-                // format of its largest stream makes.
-                const auto largest = *std::max_element(requests.begin(), requests.end(), [](const VideoRequest& a, const VideoRequest& b) {
-                    return std::uint64_t(a.width) * a.height < std::uint64_t(b.width) * b.height;
-                });
-                info.stillSizes = photoSizesOfEveryRun(set.facts, std::span<const VideoRequest>(&largest, 1), largestPhoto);
-            }
+            info.captureFormats = set.facts;
+            // Every size some format makes: what the host can do at all.
+            const auto made = photoSizesMade(set.facts, {});
+            info.stillSizes.assign(made.begin(), made.end());
         }
         info.pixelArrayWidth = std::max(pixelWidth, largestPhoto.width);
         info.pixelArrayHeight = std::max(pixelHeight, largestPhoto.height);
@@ -406,6 +395,9 @@ struct RunningCamera {
     std::uint32_t width {};
     std::uint32_t height {};
     std::uint32_t frameRate {};
+    // The size of the last JPEG asked of the camera: a camera that only takes
+    // stills moves to a format that makes it.
+    std::optional<CameraStillSize> stillSize;
     std::uint32_t focusSerial {};
     std::uint32_t focusDistanceSerial {};
     // Settings have been applied to the device at least once, so that a format
@@ -572,6 +564,12 @@ public:
     // Runs `work` on the session's queue and waits for it. A lambda keeps the
     // references it captures as references, which a block would copy.
     void onQueue(const std::function<void()>& work) { dispatch_sync(queue_, ^{ work(); }); }
+
+    void setLimits(const CameraLimits& limits) override
+    {
+        if (stopped_) return;
+        onQueue([&] { limits_ = limits; });
+    }
 
     bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate) override
     {
@@ -741,7 +739,9 @@ public:
     {
         const Entry& entry = entries_[camera];
         auto& running = cameras_[camera];
-        if (!prepareStill(camera, entry, running)) return false;
+        const std::optional<CameraStillSize> asked = request.jpegWidth != 0
+            ? std::optional<CameraStillSize>(CameraStillSize {request.jpegWidth, request.jpegHeight}) : std::nullopt;
+        if (!prepareStill(camera, entry, running, asked)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
         // The quality belongs inside the compression properties: iOS raises
@@ -954,13 +954,23 @@ private:
     static bool formatTakenByMultiCamera(AVCaptureDeviceFormat* format) { return formatTakenByMultiCameraSession(format); }
 
     // The format a stream runs in (uml::platform::chooseVideoFormat): the
-    // smallest that covers it and takes its rate, among those that list the
-    // camera's largest photo when there are any.
+    // smallest that covers it and takes its rate, among those that make the
+    // largest photo the guest may ask for when there are any.
     AVCaptureDeviceFormat* chooseFormat(const Entry& entry, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate,
                                         bool multiCameraOnly) const
     {
         const FormatSet set = formatSetOf(entry.device);
-        const auto index = chooseVideoFormat(set.facts, width, height, frameRate, multiCameraOnly, entry.preferredStill);
+        const auto index = chooseVideoFormat(set.facts, width, height, frameRate, multiCameraOnly, limits_);
+        return index ? set.formats[*index] : nil;
+    }
+
+    // The format a camera that only takes stills runs in: the one that makes
+    // the size asked for (uml::platform::chooseStillFormat), among the formats
+    // of a multi-camera session when asked.
+    AVCaptureDeviceFormat* chooseStillFormat(const Entry& entry, std::optional<CameraStillSize> wanted, bool multiCameraOnly) const
+    {
+        const FormatSet set = formatSetOf(entry.device);
+        const auto index = uml::platform::chooseStillFormat(set.facts, wanted, multiCameraOnly, limits_);
         return index ? set.formats[*index] : nil;
     }
 
@@ -994,7 +1004,7 @@ private:
             if (formatTakenByMultiCamera(current)) continue;
             AVCaptureDeviceFormat* moved = other.video
                 ? chooseFormat(entries_[index], other.width, other.height, other.frameRate, true)
-                : chooseStillFormat(entries_[index], true);
+                : chooseStillFormat(entries_[index], other.stillSize, true);
             if (moved == nil) return false;
             moves.emplace_back(index, moved);
         }
@@ -1147,29 +1157,6 @@ private:
         returnAlone();
     }
 
-    // The format with the largest still a camera offers (among those a
-    // multi-camera session takes, when asked): what a camera that only takes
-    // stills runs in a session with other cameras.
-    AVCaptureDeviceFormat* chooseStillFormat(const Entry& entry, bool multiCameraOnly) const
-    {
-        AVCaptureDeviceFormat* best = nil;
-        std::int64_t bestArea = -1;
-        for (AVCaptureDeviceFormat* format in entry.device.formats) {
-            if (multiCameraOnly && !formatTakenByMultiCamera(format)) continue;
-            std::int64_t area = 0;
-            for (NSValue* value in format.supportedMaxPhotoDimensions) {
-                CMVideoDimensions photo;
-                [value getValue:&photo];
-                area = std::max<std::int64_t>(area, std::int64_t(photo.width) * photo.height);
-            }
-            if (area > bestArea) {
-                best = format;
-                bestArea = area;
-            }
-        }
-        return best;
-    }
-
     bool configureVideo(std::size_t camera, const Entry& entry, RunningCamera& running, AVCaptureDeviceFormat* format,
                         std::uint32_t width, std::uint32_t height, std::uint32_t frameRate)
     {
@@ -1304,18 +1291,28 @@ private:
         running.throttle->cap = 0;
     }
 
-    bool prepareStill(std::size_t camera, const Entry& entry, RunningCamera& running)
+    bool prepareStill(std::size_t camera, const Entry& entry, RunningCamera& running, std::optional<CameraStillSize> wanted)
     {
+        running.stillSize = wanted;
         if (running.photoOutput != nil) return true;
         // A camera that takes only a still joins the session as a video camera
         // does: the cameras in it move to formats a multi-camera session takes,
-        // as does this one, or the still is refused.
+        // as does this one, or the still is refused. The size asked for selects
+        // the format of a camera that runs nothing, whatever format it was left
+        // in: a size another format makes is not refused for being there.
         const auto peers = peersOf(camera);
         const bool several = multiCamera_ && !peers.empty();
         AVCaptureDeviceFormat* own = nil;
-        if (several && running.input == nil && !formatTakenByMultiCamera(entry.device.activeFormat)) {
-            own = chooseStillFormat(entry, true);
-            if (own == nil) return false;
+        if (running.input == nil) {
+            AVCaptureDeviceFormat* active = entry.device.activeFormat;
+            const auto listed = listedPhotoSizes(active);
+            const bool makes = !wanted ||
+                (!listed.empty() && uml::platform::exactPhotoSize(listed, *wanted, *uml::platform::largestPhotoSize(listed)));
+            if (!makes || (several && !formatTakenByMultiCamera(active))) {
+                own = chooseStillFormat(entry, wanted, several);
+                if (own == nil) return false;
+                if (own == active) own = nil;
+            }
         }
         std::vector<Move> moves;
         if (several && !planMoves(peers, moves)) return false;
@@ -1435,6 +1432,8 @@ private:
     id started_ {};
     std::shared_ptr<std::atomic_bool> restarting_ {std::make_shared<std::atomic_bool>(false)};
     bool multiCamera_ {};
+    // What the guest may ask: the formats are chosen to serve it.
+    CameraLimits limits_;
     std::atomic_bool stopped_ {};
     std::map<std::size_t, RunningCamera> cameras_;
 };

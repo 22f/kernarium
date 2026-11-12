@@ -197,6 +197,89 @@ void testTiers()
                 "largest first");
 }
 
+// An iPad mini's back camera as the platform reports it: the photo sizes belong to the format a camera runs in.
+CameraInfo tabletCamera()
+{
+    CameraInfo info;
+    info.identifier = "tablet-back";
+    info.position = CameraPosition::back;
+    info.lens = CameraLensKind::wide;
+    info.captureFormats = {
+        {1440, 1080, {{1, 30}}, {{1440, 1080}, {2016, 1512}}, true, true},
+        {1920, 1440, {{1, 30}}, {{1920, 1440}, {4032, 3024}}, true, true},
+        {4032, 3024, {{1, 30}}, {{4032, 3024}, {4224, 2376}}, true, false},
+        {1920, 1080, {{1, 60}}, {{1920, 1080}, {2016, 1134}}, true, true},
+    };
+    for (const auto& format : info.captureFormats)
+        info.videoFormats.push_back({format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), format.multiCamera});
+    // Every size some format makes, as the platform lists them.
+    info.stillSizes = {{4032, 3024}, {2016, 1512}, {1920, 1440}, {1920, 1080}, {1440, 1080}, {2016, 1134}};
+    return info;
+}
+
+std::uint32_t fastestRate(const CameraDescription& camera)
+{
+    std::uint32_t rate = 0;
+    for (const auto& mode : camera.video) rate = std::max(rate, mode.maximumFrameRate);
+    return rate;
+}
+
+// The photos a camera is offered are those every stream it permits can make: no size that only another format makes,
+// and the streams that could not make them are not permitted (the photos win over a 60 fps stream).
+void testOfferedStillsFollowTheFormats()
+{
+    const std::vector<CameraInfo> infos {tabletCamera()};
+    const auto cameras = arrangeCameras(infos, {}, "tablet", CalibrationStore(), {});
+    require(cameras.size() == 1);
+    const auto& camera = cameras[0];
+    require(camera.jpegSizes == std::vector<CameraStillSize>({{4032, 3024}, {1920, 1440}}),
+            "the sizes the 1920x1440 format makes: not 4224x2376, which only the 12 MP video format lists");
+    require(camera.info.stillSizes == camera.jpegSizes, "the camera's own list is the offer");
+    require(fastestRate(camera) == 30, "no stream above 30 fps: the 1080p60 format makes no 12 MP");
+    require(std::none_of(camera.info.videoFormats.begin(), camera.info.videoFormats.end(),
+                         [](const CameraVideoFormat& format) { return format.maximumFrameRate > 30; }),
+            "the rates the guest is told are cut with the modes");
+    // The offer holds for what remains: arranging the arranged camera changes nothing.
+    const std::vector<CameraInfo> again {camera.info};
+    const auto second = arrangeCameras(again, {}, "tablet", CalibrationStore(), {});
+    require(second[0].jpegSizes == camera.jpegSizes && fastestRate(second[0]) == 30, "stable");
+    // The guest's cap bounds the offer: the small tier's 12 MP, the large tier's 48 MP.
+    ArrangementOptions large;
+    large.tier = CameraTier::large;
+    require(arrangeCameras(infos, {}, "tablet", CalibrationStore(), large)[0].jpegSizes.front() == CameraStillSize({4032, 3024}),
+            "a camera that lists no 48 MP offers none");
+}
+
+// A camera that runs with others streams in a multi-camera session's formats then, and a still taken beside another
+// camera is made in one: both are what the offer holds for.
+void testConcurrentCamerasOfferWhatAMultiCameraSessionMakes()
+{
+    auto info = tabletCamera();
+    info.captureFormats[1].multiCamera = false;  // the 12 MP-making format cannot join a multi-camera session
+    for (auto& format : info.videoFormats)
+        if (format.width == 1920 && format.height == 1440) format.multiCamera = false;
+    CameraInfo other = tabletCamera();
+    other.identifier = "tablet-front";
+    other.position = CameraPosition::front;
+    const std::vector<CameraInfo> infos {info, other};
+    const std::vector<std::vector<std::size_t>> together {{0, 1}};
+    const auto alone = arrangeCameras(infos, {}, "tablet", CalibrationStore(), {});
+    require(alone[0].jpegSizes.front() == CameraStillSize({4032, 3024}), "alone, in the 12 MP format");
+    const auto joined = arrangeCameras(infos, together, "tablet", CalibrationStore(), {});
+    require(joined[0].jpegSizes.empty(), "beside another camera the streams run in the binned format, which makes no 12 MP");
+}
+
+// A host with one format per camera states its sizes and nothing else: they are all offered up to the cap.
+void testHostsWithoutCaptureFormatsOfferTheirSizesUpToTheCap()
+{
+    auto info = tabletCamera();
+    info.captureFormats.clear();
+    info.stillSizes = {{4032, 3024}, {8064, 6048}, {640, 480}};
+    const auto cameras = arrangeCameras(std::vector<CameraInfo> {info}, {}, "plain", CalibrationStore(), {});
+    require(cameras[0].jpegSizes == std::vector<CameraStillSize>({{4032, 3024}, {640, 480}}), "the sizes under the cap");
+    require(fastestRate(cameras[0]) == 60, "and every rate");
+}
+
 void testRawNeedsCalibration()
 {
     const Host phone(SyntheticCameraProfile::phone);
@@ -405,6 +488,9 @@ int main()
     testPhoneOrder();
     testOtherHosts();
     testTiers();
+    testOfferedStillsFollowTheFormats();
+    testConcurrentCamerasOfferWhatAMultiCameraSessionMakes();
+    testHostsWithoutCaptureFormatsOfferTheirSizesUpToTheCap();
     testHostMemoryReserve();
     testRawNeedsCalibration();
     testWireFormats();

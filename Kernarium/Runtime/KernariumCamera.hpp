@@ -338,6 +338,7 @@ private:
         {
             return openable(camera, true) && host_->takeStill(camera, request);
         }
+        void setLimits(const uml::platform::CameraLimits& limits) override { host_->setLimits(limits); }
         void stop() override { host_->stop(); }
 
     private:

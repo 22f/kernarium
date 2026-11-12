@@ -560,6 +560,8 @@ void testVideoAndMetadata()
     for (std::uint32_t resource = 1; resource <= 3; ++resource) frames.push_back(rig.queue(1, resource));
     require(rig.camera->sessionsOpened() == 1 && rig.camera->videoRunning(0) && rig.camera->videoFrameRate(0) == 30,
             "the first video buffer starts the camera at the stream's rate");
+    require(rig.camera->sessionLimits().maximumStillPixels == limitsOf(CameraTier::small).maximumStillPixels,
+            "the session is told what the guest may ask, before it starts anything");
     require(rig.states == std::vector<CameraState> {CameraState::streaming}, "the host is streaming");
 
     rig.camera->pump(0, 3);

@@ -20,7 +20,7 @@ target_include_directories(uml_camera_device PUBLIC
     ${PROJECT_SOURCE_DIR}/darwin/device/vhost_user
     ${PROJECT_SOURCE_DIR}/darwin/device/video
     ${PROJECT_SOURCE_DIR}/darwin/platform)
-target_link_libraries(uml_camera_device PUBLIC UML::VideoGuestBuffers UML::Nv12Transform)
+target_link_libraries(uml_camera_device PUBLIC UML::VideoGuestBuffers UML::Nv12Transform UML::PhotoDimensions)
 target_link_libraries(uml_camera_device PRIVATE UML::VhostUserTransport)
 
 # The platform cameras a launcher can serve through the device: the host's

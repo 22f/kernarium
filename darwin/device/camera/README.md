@@ -62,7 +62,14 @@ application's statements (the sensor orientation, the rotation that
   of image, without a multi-picture index or any picture behind it. A JPEG is
   the size of its stream or its buffer completes with the error flag: the frame
   header the device reads is compared with the configured size, and the
-  platform is asked for exactly that size.
+  platform is asked for exactly that size. A host whose photo sizes belong to
+  its formats (`CameraInfo::captureFormats`) offers the sizes that every
+  stream it permits can make in the format it runs in (every whole rate of
+  every video mode, the multi-camera formats too for a camera that may run with
+  others) and that a still taken alone can make, up to the tier's cap
+  (`offerStills`). Photos win over fast streams: a stream is permitted only up
+  to the rate at which the largest offered size is still made, and never below
+  30 frames a second.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and

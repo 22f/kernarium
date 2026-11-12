@@ -56,59 +56,152 @@ PhotoOutputPreparation preparePhotoOutput(std::optional<CameraStillSize> largest
     return PhotoOutputPreparation::maximumRefused;
 }
 
-std::optional<std::size_t> chooseVideoFormat(std::span<const VideoFormatFacts> formats, std::uint32_t width, std::uint32_t height,
-                                             std::uint32_t frameRate, bool multiCameraOnly, CameraStillSize preferredStill)
+bool formatMakesPhoto(const VideoFormatFacts& format, CameraStillSize size)
 {
+    const auto largest = largestPhotoSize(format.photoSizes);
+    return largest && exactPhotoSize(format.photoSizes, size, *largest).has_value();
+}
+
+namespace {
+
+[[nodiscard]] std::uint64_t areaOf(CameraStillSize size) noexcept
+{
+    return std::uint64_t(size.width) * size.height;
+}
+
+[[nodiscard]] bool largerPhoto(CameraStillSize a, CameraStillSize b) noexcept
+{
+    return areaOf(a) != areaOf(b) ? areaOf(a) > areaOf(b) : a.width > b.width;
+}
+
+[[nodiscard]] bool withinCap(CameraStillSize size, const CameraLimits& limits) noexcept
+{
+    return limits.maximumStillPixels == 0 || areaOf(size) <= limits.maximumStillPixels;
+}
+
+[[nodiscard]] bool takesRate(const VideoFormatFacts& format, std::uint32_t frameRate) noexcept
+{
+    return std::any_of(format.frameRates.begin(), format.frameRates.end(), [&](const FrameRateSpan& span) {
+        return span.minimum <= frameRate + 1e-3 && span.maximum >= frameRate - 1e-3;
+    });
+}
+
+} // namespace
+
+std::vector<CameraStillSize> photoSizesMade(std::span<const VideoFormatFacts> formats, const CameraLimits& limits)
+{
+    std::vector<CameraStillSize> sizes;
+    for (const auto& format : formats)
+        for (const auto& size : format.photoSizes)
+            if (size.width != 0 && size.height != 0 && withinCap(size, limits) && formatMakesPhoto(format, size) &&
+                std::find(sizes.begin(), sizes.end(), size) == sizes.end())
+                sizes.push_back(size);
+    std::sort(sizes.begin(), sizes.end(), largerPhoto);
+    return sizes;
+}
+
+std::optional<CameraStillSize> preferredPhotoSize(std::span<const VideoFormatFacts> formats, const CameraLimits& limits)
+{
+    const auto sizes = photoSizesMade(formats, limits);
+    if (sizes.empty()) return std::nullopt;
+    return sizes.front();
+}
+
+std::optional<std::size_t> chooseVideoFormat(std::span<const VideoFormatFacts> formats, std::uint32_t width, std::uint32_t height,
+                                             std::uint32_t frameRate, bool multiCameraOnly, const CameraLimits& limits)
+{
+    const auto preferred = preferredPhotoSize(formats, limits);
     std::optional<std::size_t> best;
     std::uint64_t bestArea = 0;
-    bool bestLists = false;
+    bool bestMakes = false;
     for (std::size_t index = 0; index < formats.size(); ++index) {
         const auto& format = formats[index];
         if (format.width < width || format.height < height) continue;
         if (multiCameraOnly && !format.multiCamera) continue;
-        const bool rate = std::any_of(format.frameRates.begin(), format.frameRates.end(), [&](const FrameRateSpan& span) {
-            return span.minimum <= frameRate + 1e-3 && span.maximum >= frameRate - 1e-3;
-        });
-        if (!rate) continue;
+        if (!takesRate(format, frameRate)) continue;
         const std::uint64_t area = std::uint64_t(format.width) * format.height;
-        const bool lists = preferredStill.width != 0 &&
-            std::find(format.photoSizes.begin(), format.photoSizes.end(), preferredStill) != format.photoSizes.end();
-        const bool better = !best || (lists && !bestLists) ||
-            (lists == bestLists && (area < bestArea || (area == bestArea && format.fullRange && !formats[*best].fullRange)));
+        const bool makes = preferred && formatMakesPhoto(format, *preferred);
+        const bool better = !best || (makes && !bestMakes) ||
+            (makes == bestMakes && (area < bestArea || (area == bestArea && format.fullRange && !formats[*best].fullRange)));
         if (better) {
             best = index;
             bestArea = area;
-            bestLists = lists;
+            bestMakes = makes;
         }
     }
     return best;
 }
 
-std::vector<CameraStillSize> photoSizesOfEveryRun(std::span<const VideoFormatFacts> formats, std::span<const VideoRequest> requests,
-                                                  CameraStillSize preferredStill)
+std::optional<std::size_t> chooseStillFormat(std::span<const VideoFormatFacts> formats, std::optional<CameraStillSize> wanted,
+                                             bool multiCameraOnly, const CameraLimits& limits)
 {
-    std::vector<CameraStillSize> common;
-    bool first = true;
-    for (const auto& request : requests) {
-        for (const std::uint32_t rate : {request.minimumFrameRate, request.maximumFrameRate}) {
-            const auto index = chooseVideoFormat(formats, request.width, request.height, rate, false, preferredStill);
-            if (!index) continue;
-            const auto& listed = formats[*index].photoSizes;
-            if (first) {
-                common = listed;
-                first = false;
-            } else {
-                std::erase_if(common, [&](CameraStillSize size) { return std::find(listed.begin(), listed.end(), size) == listed.end(); });
-            }
+    std::optional<std::size_t> best;
+    std::uint64_t bestPhoto = 0, bestArea = 0;
+    for (std::size_t index = 0; index < formats.size(); ++index) {
+        const auto& format = formats[index];
+        if (multiCameraOnly && !format.multiCamera) continue;
+        std::uint64_t photo = 0;
+        if (wanted) {
+            if (!formatMakesPhoto(format, *wanted)) continue;
+        } else {
+            for (const auto& size : format.photoSizes)
+                if (withinCap(size, limits) && formatMakesPhoto(format, size)) photo = std::max(photo, areaOf(size));
+        }
+        const std::uint64_t area = std::uint64_t(format.width) * format.height;
+        const bool better = !best || photo > bestPhoto ||
+            (photo == bestPhoto && (area < bestArea || (area == bestArea && format.fullRange && !formats[*best].fullRange)));
+        if (better) {
+            best = index;
+            bestPhoto = photo;
+            bestArea = area;
         }
     }
-    std::erase_if(common, [](CameraStillSize size) { return size.width == 0 || size.height == 0; });
-    std::sort(common.begin(), common.end(), [](CameraStillSize a, CameraStillSize b) {
-        const auto areaA = std::uint64_t(a.width) * a.height, areaB = std::uint64_t(b.width) * b.height;
-        return areaA != areaB ? areaA > areaB : a.width > b.width;
+    return best;
+}
+
+StillOffer offerStills(std::span<const VideoFormatFacts> formats, std::span<const VideoRequest> requests, bool concurrent,
+                       const CameraLimits& limits, std::uint32_t holdsUntil)
+{
+    StillOffer offer;
+    // The formats of the runs, by the rate of the run.
+    struct Run {
+        std::uint32_t rate;
+        std::size_t format;
+    };
+    std::vector<Run> runs;
+    for (const auto& request : requests) {
+        offer.maximumRate = std::max(offer.maximumRate, request.maximumFrameRate);
+        for (std::uint32_t rate = std::max<std::uint32_t>(1, request.minimumFrameRate); rate <= request.maximumFrameRate; ++rate)
+            for (const bool several : {false, true}) {
+                if (several && !concurrent) continue;
+                if (const auto index = chooseVideoFormat(formats, request.width, request.height, rate, several, limits))
+                    runs.push_back({rate, *index});
+            }
+    }
+    if (runs.empty()) return offer;
+    // A still with no stream running is a run of its own: it takes the
+    // format of the size asked for, among the formats of a multi-camera
+    // session when the camera may run with others.
+    auto candidates = photoSizesMade(formats, limits);
+    std::erase_if(candidates, [&](CameraStillSize size) {
+        return !chooseStillFormat(formats, size, false, limits) ||
+            (concurrent && !chooseStillFormat(formats, size, true, limits));
     });
-    common.erase(std::unique(common.begin(), common.end()), common.end());
-    return common;
+    const auto holds = [&](CameraStillSize size, std::uint32_t upTo) {
+        return std::all_of(runs.begin(), runs.end(), [&](const Run& run) {
+            return run.rate > upTo || formatMakesPhoto(formats[run.format], size);
+        });
+    };
+    const std::uint32_t floorRate = std::min(holdsUntil, offer.maximumRate);
+    const auto largest = std::find_if(candidates.begin(), candidates.end(), [&](CameraStillSize size) { return holds(size, floorRate); });
+    if (largest == candidates.end()) return offer;
+    // How fast the streams may run with the largest size still made.
+    std::uint32_t ceiling = floorRate;
+    while (ceiling < offer.maximumRate && holds(*largest, ceiling + 1)) ++ceiling;
+    offer.maximumRate = ceiling;
+    for (const auto& size : candidates)
+        if (holds(size, ceiling)) offer.sizes.push_back(size);
+    return offer;
 }
 
 FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,

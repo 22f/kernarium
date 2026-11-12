@@ -52,6 +52,29 @@ struct CameraStillSize {
     friend bool operator==(const CameraStillSize&, const CameraStillSize&) = default;
 };
 
+// A device format as data, for hosts whose photo sizes and frame rates belong
+// to the format a camera runs in: what the choice of that format needs to know
+// of it. `photoSizes` are the sizes its photo output can make.
+struct CameraRateSpan {
+    double minimum {};
+    double maximum {};
+};
+struct CameraCaptureFormat {
+    std::uint32_t width {};
+    std::uint32_t height {};
+    std::vector<CameraRateSpan> frameRates;
+    std::vector<CameraStillSize> photoSizes;
+    bool fullRange {};
+    bool multiCamera {};  // a session that runs several cameras takes it
+};
+
+// What a guest may ask of a session's cameras, which the formats the host runs
+// them in must serve. Zero is no limit.
+struct CameraLimits {
+    // The largest JPEG the guest is offered, in pixels.
+    std::uint64_t maximumStillPixels {};
+};
+
 // What a Bayer still teaches about a sensor. The matrices are DNG's, row-major.
 struct CameraColorData {
     BayerOrder bayer {BayerOrder::none};
@@ -116,7 +139,14 @@ struct CameraInfo {
     std::uint32_t sensorOrientation {};
 
     std::vector<CameraVideoFormat> videoFormats;
+    // Every JPEG size some format of the camera makes. A host that fills
+    // captureFormats leaves the offer to the device, which makes it over the
+    // streams it permits; it is the sizes the host can make at all.
     std::vector<CameraStillSize> stillSizes;  // JPEG
+    // The formats behind videoFormats and stillSizes, when the sizes a still
+    // can have depend on the format the camera runs in. Empty: every size in
+    // stillSizes works with every video format.
+    std::vector<CameraCaptureFormat> captureFormats;
     CameraStillSize rawStillSize {};          // zero: no Bayer still
 };
 
@@ -297,6 +327,10 @@ public:
     // Takes one still; the result arrives through the delegate. A still needs no
     // running video. Fails when the camera cannot take what the request asks.
     [[nodiscard]] virtual bool takeStill(std::size_t camera, const CameraStillRequest& request) = 0;
+    // Tells the session what its guest may ask: the host runs a camera in a
+    // format that serves it. Called once, right after the session opens; a host
+    // that has one format per camera has nothing to do with it.
+    virtual void setLimits(const CameraLimits& limits) { (void)limits; }
     // Stops every camera. The session cannot be used afterwards.
     virtual void stop() = 0;
 };
