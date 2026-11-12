@@ -11,6 +11,8 @@ text is the key. The strings live in:
   Andarium/Localization/WhatsNew.xcstrings      the notes of Shared/WhatsNew.json
   Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
   Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
+  Andarium/Localization/TipJar.xcstrings        the texts of Buy me tokens (table "TipJar"), carried by the builds that have it only
+  Andarium/Localization/Review.xcstrings        the text of Review on the App Store (table "Review"), carried by the builds that have it only
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
@@ -55,6 +57,14 @@ the `xcodebuild` line) and fails on one that extracted no string of the
 Feedback table, as the keys of code compiled out would read as stale. An App
 Store build with no receiver has none, and its Feedback catalog is not
 compared; one with a receiver is checked like the rest.
+
+Buy me tokens and Review on the App Store are the same: each has a table
+(TipJar, Review) built only where the feature is compiled in
+(Andarium/README.md#buy-me-tokens, #review-on-the-app-store). A development
+check needs a build that has them (the four `TIP_` settings and
+`REVIEW_ID=id0000000000` on the `xcodebuild` line) and fails on one that
+extracted no string of the table; an App Store build without the feature does
+not compare its catalog.
 """
 
 from __future__ import annotations
@@ -88,6 +98,8 @@ CATALOGS = {
     "WhatsNew": "Andarium/Localization/WhatsNew.xcstrings",
     "JIT": "Andarium/Localization/JIT.xcstrings",
     "Feedback": "Andarium/Localization/Feedback.xcstrings",
+    "TipJar": "Andarium/Localization/TipJar.xcstrings",
+    "Review": "Andarium/Localization/Review.xcstrings",
     "AndariumCore": CORE_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
@@ -96,11 +108,21 @@ PROJECT = "Andarium/Andarium.xcodeproj/project.xcproj"
 # The target of the application: its settings name the permission texts.
 APPLICATION_TARGET = "Andarium"
 
+# The tables of the features that are compiled in only where the build names their value, and how a development
+# build names it.
+FEATURE_TABLES = {
+    "Feedback": "FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in",
+    "TipJar": "TIP_LITE, TIP_PRO, TIP_MAX and TIP_ULTRA (com.example.andarium.tip.lite and so on) to compile Buy me tokens in",
+    "Review": "REVIEW_ID=id0000000000 to compile Review on the App Store in",
+}
+
 # Where the compiler-extracted strings of each source tree belong.
 SYNC_SOURCES = {
     "Localizable": ("Andarium/Andarium/", "GuestHost/Sources/"),
     "JIT": ("Andarium/Andarium/",),
     "Feedback": ("Andarium/Andarium/",),
+    "TipJar": ("Andarium/Andarium/",),
+    "Review": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
 }
 
@@ -475,13 +497,14 @@ def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, 
     if not any(parts.values()):
         problems.add("sync", "no .stringsdata of the application or the package found: build with SWIFT_EMIT_LOC_STRINGS=YES first")
         return problems.items
-    # Send feedback is compiled in where the build names a receiver: without its strings the catalog cannot be compared.
-    if "Feedback" not in extracted_tables(files):
-        parts["Feedback"] = []
-        if not app_store:
-            problems.add(
-                "Feedback",
-                "has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in")
+    # A feature is compiled in where the build names its receiver, identifiers or page: without its strings the
+    # catalog cannot be compared.
+    extracted = extracted_tables(files)
+    for table, arrangement in FEATURE_TABLES.items():
+        if table not in extracted:
+            parts[table] = []
+            if not app_store:
+                problems.add(table, f"has no extracted strings: build with {arrangement}")
     with tempfile.TemporaryDirectory() as scratch:
         for name, data in parts.items():
             if not data:

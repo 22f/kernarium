@@ -62,7 +62,8 @@ def main() -> int:
 
         # Plain words pass, including the ones that only contain a forbidden word.
         expect("clean", run(table("clean", {
-            "Buy me tokens": {"ja": "トークンをおごる", "zh-Hans": "请我吃点Token"},
+            "Buy me tokens": {"ja": "トークンをおごる", "zh-Hans": "请我喝点Token", "zh-Hant": "請我喝點Token"},
+            "Done": {"ja": "完了", "zh-Hans": "完成", "zh-Hant": "完成"},
             "Please explain the planet, planting and the planar plane.": {},
             "Tips aren’t available right now": {},
             "Pro, $4.99": {},
@@ -85,7 +86,11 @@ def main() -> int:
                 ("zh-Hans", "解锁功能"), ("zh-Hant", "余額不足"),
                 ("ja", "寄付をお願いします"), ("ja", "サブスクリプション"),
                 ("ja", "プランを選ぶ"), ("ja", "プレミアム機能"),
-                ("ja", "アップグレード"), ("ja", "残高"))):
+                ("ja", "アップグレード"), ("ja", "残高"),
+                ("zh-Hans", "选择套餐"), ("zh-Hant", "選擇方案"), ("zh-Hans", "你的计划"), ("zh-Hant", "你的計畫"),
+                ("zh-Hant", "你的計劃"), ("zh-Hans", "捐助开发者"), ("zh-Hant", "捐獻"),
+                ("ja", "ドネーション"), ("ja", "定期購読"), ("ja", "定期購入"), ("ja", "募金"),
+                ("ja", "サブスク"), ("ja", "寄附"))):
             expect(f"{language}-{index}", run(table(f"cjk-{index}", {"Thanks": {language: text}})),
                    passes=False, said=f"[{language}]")
 

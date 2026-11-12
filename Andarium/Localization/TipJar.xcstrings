@@ -1,237 +1,615 @@
 {
-  "sourceLanguage" : "en",
-  "strings" : {
-    "A tip is a voluntary one-time purchase that supports Andarium’s independent development. Every feature is free either way." : {
-      "comment" : "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A tip is a voluntary one-time purchase that supports Andarium’s independent development. Every feature is free either way."
+  "sourceLanguage": "en",
+  "strings": {
+    "A tip is a voluntary one-time purchase that supports Andarium’s independent development. Every feature is free either way.": {
+      "comment": "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A tip is a voluntary one-time purchase that supports Andarium’s independent development. Every feature is free either way."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "チップは、Andariumの独立した開発を支える任意の1回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小费是自愿的一次性购买，用于支持Andarium的独立开发。无论是否给小费，所有功能都免费。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小費是自願的一次性購買，用於支持Andarium的獨立開發。無論是否給小費，所有功能都免費。"
           }
         }
       }
     },
-    "A voluntary tip for Andarium’s developer." : {
-      "comment" : "VoiceOver hint of the Buy me tokens menu item.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A voluntary tip for Andarium’s developer."
+    "A voluntary tip for Andarium’s developer.": {
+      "comment": "VoiceOver hint of the Buy me tokens menu item.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A voluntary tip for Andarium’s developer."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andariumのデベロッパへの任意のチップです。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "给Andarium开发者的自愿小费。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "給Andarium開發者的自願小費。"
           }
         }
       }
     },
-    "Andarium’s developer" : {
-      "comment" : "Who speaks in the chat: the person who makes the app. Shown above the first message and the reply.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium’s developer"
+    "Andarium’s developer": {
+      "comment": "Who speaks in the chat: the person who makes the app. Shown above the first message and the reply.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andarium’s developer"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andariumのデベロッパ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andarium的开发者"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andarium的開發者"
           }
         }
       }
     },
-    "Buy me tokens" : {
-      "comment" : "The name of the tip sheet and of its menu item: a joke on 'buy me a coffee' for an app made by one developer. The tiers are Lite, Pro, Max and Ultra, which stay in English.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Buy me tokens"
+    "Buy me tokens": {
+      "comment": "The name of the tip sheet and of its menu item: a joke on 'buy me a coffee' for an app made by one developer. The tiers are Lite, Pro, Max and Ultra, which stay in English.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buy me tokens"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "トークンをおごる"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请我喝点Token"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請我喝點Token"
           }
         }
       }
     },
-    "Developers used to run on coffee." : {
-      "comment" : "First message of the chat: the joke begins. It runs on, and ends in the next message.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Developers used to run on coffee."
+    "Developers used to run on coffee.": {
+      "comment": "First message of the chat: the joke begins. It runs on, and ends in the next message.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Developers used to run on coffee."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "デベロッパはコーヒーで動いていました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开发者以前靠咖啡续命。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "開發者以前靠咖啡續命。"
           }
         }
       }
     },
-    "Done" : {
-      "comment" : "Button that closes the sheet, in the bar and, after a tip, under the conversation.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Done"
+    "Done": {
+      "comment": "Button that closes the sheet, in the bar and, after a tip, under the conversation.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完了"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
           }
         }
       }
     },
-    "If Andarium is useful to you, you can buy me some." : {
-      "comment" : "Third message of the chat: the invitation to tip, in the developer's first-person voice.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "If Andarium is useful to you, you can buy me some."
+    "If Andarium is useful to you, you can buy me some.": {
+      "comment": "Third message of the chat: the invitation to tip, in the developer's first-person voice.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If Andarium is useful to you, you can buy me some."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Andariumが役に立っていたら、おごってもらえるとうれしいです。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果Andarium对你有用，可以请我喝点。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果Andarium對你有用，可以請我喝點。"
           }
         }
       }
     },
-    "In-app purchases are restricted on this %@. Every feature stays free." : {
-      "comment" : "The note under the restricted title. The placeholder is iPhone or iPad.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "In-app purchases are restricted on this %@. Every feature stays free."
+    "In-app purchases are restricted on this %@. Every feature stays free.": {
+      "comment": "The note under the restricted title. The placeholder is iPhone or iPad.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In-app purchases are restricted on this %@. Every feature stays free."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この%@ではアプリ内購入が制限されています。すべての機能は引き続き無料です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此%@已限制App内购买。所有功能仍然免费。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此%@已限制App內購買。所有功能仍然免費。"
           }
         }
       }
     },
-    "Loading prices" : {
-      "comment" : "VoiceOver label of the spinner that stands where a price will be.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Loading prices"
+    "Loading prices": {
+      "comment": "VoiceOver label of the spinner that stands where a price will be.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading prices"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "価格を読み込み中"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在载入价格"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在載入價格"
           }
         }
       }
     },
-    "One-time tip" : {
-      "comment" : "VoiceOver hint of each tier button.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "One-time tip"
+    "One-time tip": {
+      "comment": "VoiceOver hint of each tier button.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One-time tip"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1回限りのチップ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一次性小费"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一次性小費"
           }
         }
       }
     },
-    "Purchases aren’t allowed on this %@" : {
-      "comment" : "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Purchases aren’t allowed on this %@"
+    "Purchases aren’t allowed on this %@": {
+      "comment": "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Purchases aren’t allowed on this %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この%@では購入が許可されていません"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此%@不允许购买"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此%@不允許購買"
           }
         }
       }
     },
-    "Thank you!" : {
-      "comment" : "The developer's first message after a tip.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Thank you!"
+    "Thank you!": {
+      "comment": "The developer's first message after a tip.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thank you!"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ありがとうございます！"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "谢谢你！"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "感謝你！"
           }
         }
       }
     },
-    "That’s a real token of appreciation, and it keeps Andarium going." : {
-      "comment" : "The developer's second message after a tip. 'Token of appreciation' is a pun on the tokens of the joke; a translation may drop the pun and thank warmly.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "That’s a real token of appreciation, and it keeps Andarium going."
+    "That’s a real token of appreciation, and it keeps Andarium going.": {
+      "comment": "The developer's second message after a tip. 'Token of appreciation' is a pun on the tokens of the joke; a translation may drop the pun and thank warmly.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That’s a real token of appreciation, and it keeps Andarium going."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このトークンは、まさに感謝のしるし。Andariumを続ける力になります。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这份Token是实实在在的心意，让Andarium得以继续前行。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "這份Token是實實在在的心意，讓Andarium得以繼續前行。"
           }
         }
       }
     },
-    "The App Store didn’t answer. Check the connection, then try again." : {
-      "comment" : "The note under the unavailable title; the Try again button follows it.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The App Store didn’t answer. Check the connection, then try again."
+    "The App Store didn’t answer. Check the connection, then try again.": {
+      "comment": "The note under the unavailable title; the Try again button follows it.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The App Store didn’t answer. Check the connection, then try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Storeから応答がありません。接続を確認して、もう一度お試しください。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Store没有响应。请检查网络连接，然后重试。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Store沒有回應。請檢查網路連線，然後再試一次。"
           }
         }
       }
     },
-    "The tip didn’t go through" : {
-      "comment" : "Title of the note when a purchase failed; the App Store's own message follows it.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The tip didn’t go through"
+    "The tip didn’t go through": {
+      "comment": "Title of the note when a purchase failed; the App Store's own message follows it.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The tip didn’t go through"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "チップを完了できませんでした"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小费未能完成"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小費未能完成"
           }
         }
       }
     },
-    "These days it’s tokens." : {
-      "comment" : "Second message of the chat: the end of the joke, tokens being what AI services bill in.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "These days it’s tokens."
+    "These days it’s tokens.": {
+      "comment": "Second message of the chat: the end of the joke, tokens being what AI services bill in.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "These days it’s tokens."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "いまはトークンで動いています。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "现在靠Token续命。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在靠Token續命。"
           }
         }
       }
     },
-    "This tip needs approval before it completes. You can close this sheet meanwhile." : {
-      "comment" : "The note under the waiting title.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "This tip needs approval before it completes. You can close this sheet meanwhile."
+    "This tip needs approval before it completes. You can close this sheet meanwhile.": {
+      "comment": "The note under the waiting title.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This tip needs approval before it completes. You can close this sheet meanwhile."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このチップは承認されるまで完了しません。それまでこのシートを閉じても構いません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此小费需要经过批准才会完成。你可以先关闭此页面。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此小費需要經過核准才會完成。你可以先關閉此頁面。"
           }
         }
       }
     },
-    "Tips aren’t available right now" : {
-      "comment" : "Title of the note when the App Store gave no prices.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tips aren’t available right now"
+    "Tips aren’t available right now": {
+      "comment": "Title of the note when the App Store gave no prices.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tips aren’t available right now"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在チップは利用できません"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前无法使用小费"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前無法使用小費"
           }
         }
       }
     },
-    "Try again" : {
-      "comment" : "Button under the unavailable note: asks the App Store for the prices again.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Try again"
+    "Try again": {
+      "comment": "Button under the unavailable note: asks the App Store for the prices again.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "やり直す"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "再試一次"
           }
         }
       }
     },
-    "Waiting for approval" : {
-      "comment" : "Title of the note when a tip waits for a family organiser to approve it (Ask to Buy).",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Waiting for approval"
+    "Waiting for approval": {
+      "comment": "Title of the note when a tip waits for a family organiser to approve it (Ask to Buy).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for approval"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "承認待ち"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待批准"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待核准"
           }
         }
       }
     },
-    "Waiting for the App Store" : {
-      "comment" : "VoiceOver label of the spinner beside the reply while the purchase is under way.",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Waiting for the App Store"
+    "Waiting for the App Store": {
+      "comment": "VoiceOver label of the spinner beside the reply while the purchase is under way.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for the App Store"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Storeの応答を待っています"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待App Store"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待App Store"
           }
         }
       }
     }
   },
-  "version" : "1.0"
+  "version": "1.0"
 }

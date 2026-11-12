@@ -41,9 +41,11 @@ FORBIDDEN = (
     ("upgrade", re.compile(r"\bupgrad\w*", re.IGNORECASE)),
     ("credits", re.compile(r"\bcredits?\b", re.IGNORECASE)),
     ("balance", re.compile(r"\bbalances?\b", re.IGNORECASE)),
-    ("a donation", re.compile("捐赠|捐贈|捐款|捐助|捐献|捐獻|斗内|斗內|寄付|寄附|募金")),
-    ("a subscription", re.compile("订阅|訂閱|購読|定期購入|サブスク")),
-    ("a plan", re.compile("方案|计划|計劃|計畫|プラン")),
+    # The Chinese and Japanese words are the App Store's and iOS's own for these ideas: 捐赠 and 捐款 are
+    # Apple's Donate, 订阅 and 訂閱 its Subscription, 套餐, 方案 and プラン its Plan.
+    ("a donation", re.compile("捐赠|捐贈|捐款|捐助|捐献|捐獻|斗内|斗內|寄付|寄附|募金|ドネーション")),
+    ("a subscription", re.compile("订阅|訂閱|購読|定期購入|定期購読|サブスク")),
+    ("a plan", re.compile("套餐|方案|计划|計劃|計畫|プラン")),
     ("an unlock", re.compile("解锁|解鎖|アンロック|ロック解除")),
     ("premium or upgrade", re.compile("高级版|高級版|プレミアム|升级|升級|アップグレード")),
     ("credits", re.compile("积分|積分|点数|點數|クレジット")),
