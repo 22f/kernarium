@@ -1288,9 +1288,9 @@ final class AppModel {
             case let .attempt(bypass):
                 installAttemptTag += 1
                 let tag = installAttemptTag
-                let update: @Sendable (BusyUpdate) -> Void = { [weak self] update in
+                let update: @Sendable (BusyUpdate) -> Void = { update in
                     Task { @MainActor in
-                        guard let self, self.installAttemptTag == tag else { return }
+                        guard self.installAttemptTag == tag else { return }
                         self.apply(update, epoch: epoch)
                     }
                 }
