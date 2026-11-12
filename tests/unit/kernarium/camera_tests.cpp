@@ -193,15 +193,27 @@ void theRotationTakesQuarterTurns()
         require(!rotation.set(bad) && rotation.degrees() == 90, "another value changes nothing");
 }
 
+uml::platform::CameraInfo lens(uml::platform::CameraPosition position, std::uint32_t sensorOrientation)
+{
+    uml::platform::CameraInfo info;
+    info.position = position;
+    info.sensorOrientation = sensorOrientation;
+    return info;
+}
+
 void theDeviceOptionsCarryTheSessionsStatements()
 {
+    using uml::platform::CameraPosition;
     const auto presentation =
         present(uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), CameraTier::large, "");
     StateReceiver receiver;
     Rotation rotation;
     Reports reports;
     receiver.set(Reports::callback, &reports);
+    const auto back = lens(CameraPosition::back, 90);
+    const auto front = lens(CameraPosition::front, 270);
 
+    // A phone, whose guest rotates itself, states no turn: the platform's values.
     const auto options = deviceOptions(presentation, CameraMode::blocked, receiver, rotation);
     require(options.mode == CameraMode::blocked && options.tier == CameraTier::large);
     require(options.calibration == presentation.calibration, "the one store of the run");
@@ -213,63 +225,6 @@ void theDeviceOptionsCarryTheSessionsStatements()
     require(deviceOptions(presentation, CameraMode::live, receiver, rotation).mode == CameraMode::live);
 }
 
-#ifndef UML_APP_STORE_RUNTIME
-void theEnvironmentNamesTheSyntheticCamera()
-{
-    require(std::string {sourceVariable} == "KERNARIUM_CAMERA_SOURCE");
-    for (const char* host : {static_cast<const char*>(nullptr), "", "host"}) {
-        const auto choice = parseSource(host);
-        require(!choice.synthetic && !choice.invalid);
-    }
-    using uml::camera::SyntheticProfile;
-    struct Case {
-        const char* value;
-        SyntheticProfile profile;
-    };
-    for (const Case& named : {Case {"synthetic", SyntheticProfile::phone}, Case {"synthetic:phone", SyntheticProfile::phone},
-                              Case {"synthetic:tablet", SyntheticProfile::tablet},
-                              Case {"synthetic:laptop", SyntheticProfile::laptop}}) {
-        const auto choice = parseSource(named.value);
-        require(choice.synthetic && !choice.invalid && choice.profile == named.profile, named.value);
-    }
-    for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:"}) {
-        const auto choice = parseSource(bad);
-        require(!choice.synthetic && choice.invalid, bad);
-    }
-}
-#endif
-uml::platform::CameraInfo lens(uml::platform::CameraPosition position, std::uint32_t sensorOrientation)
-{
-    uml::platform::CameraInfo info;
-    info.position = position;
-    info.sensorOrientation = sensorOrientation;
-    return info;
-}
-
-
-} // namespace
-    using uml::platform::CameraPosition;
-
-int main()
-{
-    static constexpr uml::testing::NamedTest tests[] = {
-        {"a-request-that-states-nothing-is-blocked", aRequestThatStatesNothingIsBlocked},
-        {"the-request-states-the-mode-and-the-path", theRequestStatesTheModeAndThePath},
-    const auto back = lens(CameraPosition::back, 90);
-    const auto front = lens(CameraPosition::front, 270);
-        {"a-camera-never-fails-a-boot", aCameraNeverFailsABoot},
-    // A phone, whose guest rotates itself, states no turn: the platform's values.
-        {"the-enums-are-the-applications-words", theEnumsAreTheApplicationsWords},
-        {"a-host-without-cameras-presents-none", aHostWithoutCamerasPresentsNone},
-        {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
-        {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
-        {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},
-        {"the-rotation-takes-quarter-turns", theRotationTakesQuarterTurns},
-        {"the-device-options-carry-the-sessions-statements", theDeviceOptionsCarryTheSessionsStatements},
-#ifndef UML_APP_STORE_RUNTIME
-        {"the-environment-names-the-synthetic-camera", theEnvironmentNamesTheSyntheticCamera},
-#endif
-    };
 void aBootStatesTheOrientationAndALaterTurnIsADelta()
 {
     using uml::platform::CameraPosition;
@@ -309,6 +264,52 @@ void aBootStatesTheOrientationAndALaterTurnIsADelta()
     require(next.automaticRotation(back) == 0);
 }
 
+#ifndef UML_APP_STORE_RUNTIME
+void theEnvironmentNamesTheSyntheticCamera()
+{
+    require(std::string {sourceVariable} == "KERNARIUM_CAMERA_SOURCE");
+    for (const char* host : {static_cast<const char*>(nullptr), "", "host"}) {
+        const auto choice = parseSource(host);
+        require(!choice.synthetic && !choice.invalid);
+    }
+    using uml::camera::SyntheticProfile;
+    struct Case {
+        const char* value;
+        SyntheticProfile profile;
+    };
+    for (const Case& named : {Case {"synthetic", SyntheticProfile::phone}, Case {"synthetic:phone", SyntheticProfile::phone},
+                              Case {"synthetic:tablet", SyntheticProfile::tablet},
+                              Case {"synthetic:laptop", SyntheticProfile::laptop}}) {
+        const auto choice = parseSource(named.value);
+        require(choice.synthetic && !choice.invalid && choice.profile == named.profile, named.value);
+    }
+    for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:"}) {
+        const auto choice = parseSource(bad);
+        require(!choice.synthetic && choice.invalid, bad);
+    }
+}
+
+#endif
+
+} // namespace
+
+int main()
+{
+    static constexpr uml::testing::NamedTest tests[] = {
+        {"a-request-that-states-nothing-is-blocked", aRequestThatStatesNothingIsBlocked},
+        {"the-request-states-the-mode-and-the-path", theRequestStatesTheModeAndThePath},
+        {"a-camera-never-fails-a-boot", aCameraNeverFailsABoot},
+        {"the-enums-are-the-applications-words", theEnumsAreTheApplicationsWords},
+        {"a-host-without-cameras-presents-none", aHostWithoutCamerasPresentsNone},
+        {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
+        {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
+        {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},
+        {"the-rotation-takes-quarter-turns", theRotationTakesQuarterTurns},
+        {"the-device-options-carry-the-sessions-statements", theDeviceOptionsCarryTheSessionsStatements},
+        {"a-boot-states-the-orientation-and-a-later-turn-is-a-delta", aBootStatesTheOrientationAndALaterTurnIsADelta},
+#ifndef UML_APP_STORE_RUNTIME
+        {"the-environment-names-the-synthetic-camera", theEnvironmentNamesTheSyntheticCamera},
+#endif
+    };
     return uml::testing::runNamedTests(tests);
 }
-        {"a-boot-states-the-orientation-and-a-later-turn-is-a-delta", aBootStatesTheOrientationAndALaterTurnIsADelta},
