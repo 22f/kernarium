@@ -617,8 +617,8 @@ PRODUCT_PACKAGE_OVERLAYS += device/kernarium/andarium/overlay
 # The host's cameras. The camera device (Virtio ID 65533) gives each camera a V4L2
 # capture node and a metadata node; the emulated camera HAL of hardware/google/camera
 # (route p0030) takes the cameras, frames, stills, RAW and metadata from them and sends
-# the controls back. Its provider is the lazy service: the init file of a camera layout
-# starts it whenever cameraserver starts, so that cameraserver lists the cameras, and the
+# the controls back. Its provider is the lazy service: a system_ext init file restarts
+# it whenever cameraserver starts, so that cameraserver lists the cameras, and the
 # process exits when no application holds a camera or the torch (ro.camera.enableLazyHal
 # tells cameraserver so; init starts the provider again through its interface). The
 # stock emulated provider of the inherited product is an APEX that this product removes,

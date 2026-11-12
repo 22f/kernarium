@@ -642,7 +642,8 @@ anywhere is a blocker. The candidate must show:
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
   `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  provider process exists only while a camera is open, no denial of
+  provider process runs from cameraserver's start until cameraserver holds no
+  camera, and again while an application holds one, no denial of
   `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)

@@ -3184,10 +3184,10 @@ def check_camera_layout_files(archive: zipfile.ZipFile, infos: dict[str, zipfile
             fail(f"{entry} is a VINTF manifest of a camera layout: the layouts differ in features, not in HALs")
 
 
-def camera_init_starts(script: str, service: str) -> dict[str, list[str]]:
-    """The init file's actions that start the service: each trigger (the text after `on `) with the
-    `start` commands of its action. An action with no such command is not listed."""
-    starts: dict[str, list[str]] = {}
+def camera_init_commands(script: str, service: str) -> dict[str, list[str]]:
+    """The init script's actions that start or restart the service: each trigger (the text after `on `) with
+    those commands of its action. An action with no such command is not listed."""
+    commands: dict[str, list[str]] = {}
     trigger = None
     for raw in script.splitlines():
         line = raw.strip()
@@ -3195,14 +3195,14 @@ def camera_init_starts(script: str, service: str) -> dict[str, list[str]]:
             continue
         if line.startswith("on "):
             trigger = line[len("on "):].strip()
-        elif line == f"start {service}" and trigger is not None:
-            starts.setdefault(trigger, []).append(line)
-    return starts
+        elif line in (f"start {service}", f"restart {service}") and trigger is not None:
+            commands.setdefault(trigger, []).append(line)
+    return commands
 
 
 def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The lazy provider is installed alone, declared once, started by an action of each layout that has
-    cameras when cameraserver is running and by its interface afterwards, and loads the V4L2 HWL."""
+    """The lazy provider is installed alone, declared once, restarted by an action of each layout that has
+    cameras when cameraserver is running and started by its interface afterwards, and loads the V4L2 HWL."""
     binary = f"VENDOR/bin/hw/{CAMERA_PROVIDER}"
     for entry in (binary, CAMERA_HWL):
         info = infos.get(entry)
@@ -3212,8 +3212,8 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
             fail(f"{entry} is not an ELF file")
     for entry in (f"VENDOR/bin/hw/{CAMERA_EAGER_PROVIDER}", f"VENDOR/etc/init/{CAMERA_EAGER_PROVIDER}.rc"):
         if entry in infos:
-            fail(f"{entry} is installed: only the lazy camera provider runs, so that no process exists "
-                 "while no application holds a camera")
+            fail(f"{entry} is installed: only the lazy camera provider runs, which exits when cameraserver "
+                 "holds no camera")
     library = read_small(archive, infos[CAMERA_HWL], CAMERA_HWL_LIMIT)
     for marker in CAMERA_HWL_MARKERS:
         if marker not in library:
@@ -3230,30 +3230,38 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
         if required not in lines:
             fail(f"the camera provider service must carry '{required}'")
     if any(line.startswith("on ") for line in lines):
-        fail("the camera provider init script may have no trigger: the layouts' init file starts the service "
-             "and its interface line restarts it")
+        fail("the camera provider init script may have no trigger: the layouts' provider init file starts the "
+             "service and its interface line restarts it")
     # cameraserver lists a lazy AIDL provider only if it registered when it looked or registers later, and
     # nothing but an init action starts it: not the first time, and not when cameraserver starts again
     # (a crash, a restart of the framework) after the provider has exited. So each layout that has cameras
-    # has the action that starts this service when cameraserver is running and the layout is the SKU, and
-    # no other action starts it (a start in the early profile action, or in a layout without cameras, or
-    # on a property other than cameraserver's state would list no camera after a restart).
+    # has the action that restarts this service when cameraserver is running and the layout is the SKU
+    # (restart, because start leaves a provider that has unregistered and is about to exit, and starts
+    # nothing again), and no other action starts or restarts it (one in the early profile action, in a
+    # layout without cameras, or on a property other than cameraserver's state would list no camera after
+    # a restart).
     service_name = service[0].split()[1]
     if service_name != camera_layouts.PROVIDER_SERVICE:
         fail(f"the camera provider service is {service_name}, not {camera_layouts.PROVIDER_SERVICE}, "
              "which the init file of the camera layouts starts")
-    init_info = infos.get(f"VENDOR/etc/init/{camera_layouts.INIT_FILE}")
+    profile_info = infos.get(f"VENDOR/etc/init/{camera_layouts.INIT_FILE}")
+    if profile_info is not None and camera_init_commands(
+            read_small(archive, profile_info).decode("utf-8", errors="strict"), service_name):
+        fail(f"VENDOR/etc/init/{camera_layouts.INIT_FILE} starts the camera provider: init reads a vendor script "
+             "in the vendor_init context and would drop the action on cameraserver's status, so the layouts' "
+             f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE} starts it")
+    init_info = infos.get(f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE}")
     if init_info is None or init_info.is_dir():
-        fail(f"VENDOR/etc/init/{camera_layouts.INIT_FILE} is missing: nothing starts the camera provider")
-    starts = camera_init_starts(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
-    wanted = {camera_layouts.provider_trigger(layout.name): [f"start {service_name}"]
+        fail(f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE} is missing: nothing starts the camera provider")
+    starts = camera_init_commands(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
+    wanted = {camera_layouts.provider_trigger(layout.name): [f"{camera_layouts.PROVIDER_COMMAND} {service_name}"]
               for layout in camera_layouts.all_layouts() if layout.has_front}
     if starts != wanted:
         missing = sorted(set(wanted) - set(starts))
         extra = sorted(set(starts) - set(wanted))
         repeated = sorted(trigger for trigger, commands in starts.items() if len(commands) != 1)
-        fail("the init file of the camera layouts must start the camera provider in one action for each layout "
-             "that has cameras, with the conditions cameraserver running and the layout's SKU, and nowhere else: "
+        fail("the init file of the camera provider must restart the camera provider in one action for each "
+             "layout that has cameras, with the conditions cameraserver running and the layout's SKU, and nowhere else: "
              f"missing {missing[:3]}{' ...' if len(missing) > 3 else ''} ({len(missing)}), "
              f"extra {extra[:3]}{' ...' if len(extra) > 3 else ''} ({len(extra)}), repeated {repeated[:3]}")
     declarations = []
@@ -3367,8 +3375,10 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
 
 
 def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    check_camera_layout_files(archive, infos)
+    # The provider's contract first: its message names what a changed init file broke, where the layout files'
+    # byte comparison only says that they differ.
     check_camera_provider(archive, infos)
+    check_camera_layout_files(archive, infos)
     check_camera_configuration(archive, infos)
     check_camera_app(archive, infos)
 
@@ -3671,15 +3681,18 @@ def check_kernel_policy(
         .decode("utf-8", errors="strict")
         .splitlines()
     ]
-    check_vendor_init_triggers(
-        init_actions(
-            read_small(archive, infos["VENDOR/etc/init/init.kernarium.rc"]).decode(
-                "utf-8", errors="strict"
+    for entry in sorted(infos):
+        if (
+            PurePosixPath(entry).parts[0] in ("VENDOR", "ODM")
+            and entry.endswith(".rc")
+            and not infos[entry].is_dir()
+        ):
+            check_vendor_init_triggers(
+                init_actions(read_small(archive, infos[entry]).decode("utf-8", errors="strict")),
+                contexts,
+                (platform_policy, vendor_policy, system_ext_policy),
+                f"{entry}: ",
             )
-        ),
-        contexts,
-        (platform_policy, vendor_policy, system_ext_policy),
-    )
     check_adbd_launch_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -4485,22 +4498,33 @@ def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -
             fail(f"adbd may not read {name}, labelled {label}: it would ignore it")
 
 
-def check_vendor_init_triggers(
-    actions: dict[str, list[str]], contexts: list[str], policies: tuple[bytes, ...]
-) -> None:
-    """Every property that a product init trigger names is readable by vendor_init.
+# The prefixes that init accepts in a vendor script without asking the policy
+# (system/core/init/action_parser.cpp, IsActionableProperty).
+INIT_PARTNER_PREFIXES = (
+    "init.svc.vendor.", "ro.vendor.", "persist.vendor.", "vendor.", "init.svc.odm.", "ro.odm.",
+    "persist.odm.", "odm.", "ro.boot.",
+)
 
-    Init parses a vendor script in the vendor_init subcontext and drops a trigger
+
+def check_vendor_init_triggers(
+    actions: dict[str, list[str]], contexts: list[str], policies: tuple[bytes, ...], where: str = ""
+) -> None:
+    """Every property that an init trigger of a vendor or odm script names is readable by vendor_init.
+
+    Init parses such a script in the vendor_init subcontext and drops a trigger
     whose property that domain may not read ("unexported property trigger"), so a
     service that only such a trigger starts never runs. The platform's
-    neverallow keeps vendor_init off system_internal_prop types.
+    neverallow keeps vendor_init off system_internal_prop types, and init.svc.<name>
+    is one of them for every service but a few.
     """
     for trigger in actions:
         for name in INIT_PROPERTY_TRIGGER.findall(trigger):
+            if name.startswith(INIT_PARTNER_PREFIXES):
+                continue
             label = property_label(name, contexts) or "default_prop"
             if not cil_allows_file_read(policies, "vendor_init", label):
                 fail(
-                    f"the trigger 'on {trigger}' names {name}, labelled {label}, which "
+                    f"{where}the trigger 'on {trigger}' names {name}, labelled {label}, which "
                     "vendor_init may not read; init drops the trigger"
                 )
 
