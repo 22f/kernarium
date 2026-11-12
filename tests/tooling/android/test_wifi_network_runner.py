@@ -389,11 +389,15 @@ class ScriptAndOverlayTests(unittest.TestCase):
 class UnprobedValidationTests(unittest.TestCase):
     """A platform that counts no failed internet check against the network (this image validates Wi-Fi first, so a
     failed check leaves it validated; an earlier one validated without probes) must say in its validation log that
-    the injected failures reached it."""
+    the injected failures reached it. The statement that Wi-Fi is validated without probes is the previous
+    release's alone: on the image under test it is a failure of its own."""
 
     class Guest(runner.Guest):
-        def __init__(self, dump: str, network_stack: str, connectivity: str) -> None:
+        # A guest of the image under test has its log captured; a previous release's has none (the class default).
+        def __init__(self, dump: str, network_stack: str, connectivity: str, under_test: bool = False) -> None:
             self.texts = (dump, network_stack, connectivity)
+            if under_test:
+                self.capture = mock.Mock()
 
         def inject_failing_checks(self) -> None:
             pass
@@ -425,11 +429,21 @@ class UnprobedValidationTests(unittest.TestCase):
         self.addCleanup(clock.stop)
 
     def test_what_the_log_says_of_the_injected_failures_is_read(self) -> None:
-        self.assertEqual(runner.failure_reached_platform(CHECK_FAILED_STACK),
-                         "its internet check failed and the network stays validated")
-        self.assertEqual(runner.failure_reached_platform(PRIVATE_DNS_STACK), "it evaluated the private DNS name")
-        self.assertEqual(runner.failure_reached_platform(UNPROBED_STACK), "it validates Wi-Fi without probes")
-        self.assertIsNone(runner.failure_reached_platform(SILENT_STACK))
+        for image_under_test in (True, False):
+            with self.subTest(image_under_test=image_under_test):
+                self.assertEqual(runner.failure_reached_platform(CHECK_FAILED_STACK, image_under_test),
+                                 "its internet check failed and the network stays validated")
+                self.assertEqual(runner.failure_reached_platform(PRIVATE_DNS_STACK, image_under_test),
+                                 "it evaluated the private DNS name")
+                self.assertIsNone(runner.failure_reached_platform(SILENT_STACK, image_under_test))
+
+    def test_the_unprobed_statement_is_the_previous_releases_alone(self) -> None:
+        self.assertEqual(runner.failure_reached_platform(UNPROBED_STACK, False), "it validates Wi-Fi without probes")
+        self.assertIsNone(runner.failure_reached_platform(UNPROBED_STACK, True))
+
+    def test_a_guest_is_the_image_under_test_when_its_log_is_captured(self) -> None:
+        self.assertTrue(self.Guest("", "", "", under_test=True).image_under_test)
+        self.assertFalse(self.Guest("", "", "").image_under_test)
 
     def test_the_validated_network_is_read(self) -> None:
         self.assertTrue(runner.wifi_validated(SCORED_CONNECTIVITY))
@@ -437,21 +451,41 @@ class UnprobedValidationTests(unittest.TestCase):
         self.assertFalse(runner.wifi_validated("  NetworkAgentInfo{network{101} ni{MOBILE CONNECTED} Score(IS_VALIDATED)\n"))
 
     def test_counted_failures_pass_as_before(self) -> None:
-        guest = self.Guest(ENABLED_DUMP, "", "")
-        self.assertIn("5 failed internet checks counted", runner.check_not_disabled(guest))
+        for under_test in (True, False):
+            with self.subTest(under_test=under_test):
+                guest = self.Guest(ENABLED_DUMP, "", "", under_test)
+                self.assertIn("5 failed internet checks counted", runner.check_not_disabled(guest))
 
     def test_nothing_counted_passes_when_the_log_shows_the_failure_reached_the_platform(self) -> None:
-        for stack, said in ((CHECK_FAILED_STACK, "its internet check failed"),
-                            (PRIVATE_DNS_STACK, "it evaluated the private DNS name"),
-                            (UNPROBED_STACK, "it validates Wi-Fi without probes")):
-            with self.subTest(said=said):
-                guest = self.Guest(NOTHING_COUNTED, stack, SCORED_CONNECTIVITY)
-                self.assertIn(said, runner.check_not_disabled(guest))
+        for under_test in (True, False):
+            for stack, said in ((CHECK_FAILED_STACK, "its internet check failed"),
+                                (PRIVATE_DNS_STACK, "it evaluated the private DNS name")):
+                with self.subTest(said=said, under_test=under_test):
+                    guest = self.Guest(NOTHING_COUNTED, stack, SCORED_CONNECTIVITY, under_test)
+                    self.assertIn(said, runner.check_not_disabled(guest))
+
+    def test_the_unprobed_statement_on_a_previous_release_passes(self) -> None:
+        guest = self.Guest(NOTHING_COUNTED, UNPROBED_STACK, SCORED_CONNECTIVITY)
+        self.assertIn("it validates Wi-Fi without probes", runner.check_not_disabled(guest))
+
+    def test_the_unprobed_statement_on_the_image_under_test_fails(self) -> None:
+        # The old patch is in the image: nothing counted and a counted failure both fail on it.
+        for dump in (NOTHING_COUNTED, ENABLED_DUMP):
+            with self.subTest(counted=runner.no_internet_count(dump)):
+                guest = self.Guest(dump, UNPROBED_STACK, SCORED_CONNECTIVITY, under_test=True)
+                with self.assertRaisesRegex(runner.Failure, "patch that skips the probes is still in the image"):
+                    runner.check_not_disabled(guest)
+        # Even when the log also shows the failed check.
+        guest = self.Guest(NOTHING_COUNTED, UNPROBED_STACK + CHECK_FAILED_STACK, SCORED_CONNECTIVITY, under_test=True)
+        with self.assertRaisesRegex(runner.Failure, "patch that skips the probes is still in the image"):
+            runner.check_not_disabled(guest)
 
     def test_nothing_counted_and_a_log_that_says_nothing_of_the_failures_is_the_vacuity_failure(self) -> None:
-        guest = self.Guest(NOTHING_COUNTED, SILENT_STACK, SCORED_CONNECTIVITY)
-        with self.assertRaisesRegex(runner.Failure, "does not say that it handled the injected failures"):
-            runner.check_not_disabled(guest)
+        for under_test in (True, False):
+            with self.subTest(under_test=under_test):
+                guest = self.Guest(NOTHING_COUNTED, SILENT_STACK, SCORED_CONNECTIVITY, under_test)
+                with self.assertRaisesRegex(runner.Failure, "does not say that it handled the injected failures"):
+                    runner.check_not_disabled(guest)
 
     def test_a_network_that_is_not_validated_is_reported_not_failed(self) -> None:
         # The injected strict private DNS name does not resolve, so the platform reports the network as not validated.

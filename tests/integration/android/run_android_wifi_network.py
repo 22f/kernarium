@@ -53,7 +53,9 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   probes at a black hole and a strict private DNS name that does not resolve,
   and VirtWifi forgotten and saved again, the network stays enabled and joined for
   a minute and a half (a platform that counts no failed check must say in its
-  validation log that the injected failure reached it), and is joined again after
+  validation log that the injected failure reached it: a failed check or the
+  private DNS name evaluated; on the image under test the old "validated
+  without probes" statement is a failure), and is joined again after
   a guest suspend and wake (the host's route, `suspend` and `wake` on the
   management console) and after a restart; a network the user marked metered, or turned Auto-connect off for,
   keeps that after a restart (the script has nothing to save once the station
@@ -309,15 +311,19 @@ UNPROBED_MARKER = "Wi-Fi is validated without probes"
 VALIDATED_WIFI = re.compile(r"^\s*NetworkAgentInfo\{[^\n]*ni\{WIFI CONNECTED[^\n]*(?<![A-Z_])IS_VALIDATED(?![A-Z_])", re.M)
 
 
-def failure_reached_platform(network_stack_dump: str) -> str | None:
+def failure_reached_platform(network_stack_dump: str, image_under_test: bool) -> str | None:
     """`dumpsys network_stack`: what the validation log says the platform did with the injected failures, or None
-    when it says nothing of them. A platform that counts no failed check against the network (this image
-    validates Wi-Fi first, and its failed check leaves the network validated, route p0029; an earlier one
-    validated Wi-Fi without probes) is trusted to have been at risk only when its own log shows the failures
-    reached it: a failed check, the private DNS name evaluated, or the statement that it validated without probes."""
-    for line, what in ((CHECK_FAILED_LINE, "its internet check failed and the network stays validated"),
-                       (PRIVATE_DNS_PROBE, "it evaluated the private DNS name"),
-                       (UNPROBED_MARKER, "it validates Wi-Fi without probes")):
+    when it says nothing of them. A platform that counts no failed check against the network is trusted to have
+    been at risk only when its own log shows the failures reached it. The image under test validates Wi-Fi first
+    (route p0029), so its failed check leaves the network validated: the failed check, or the private DNS name
+    evaluated, shows it. The statement that Wi-Fi is validated without probes is the true statement of an earlier
+    release's platform alone, so only a previous release's guest is told by it; on the image under test it is not
+    accepted (see `check_not_disabled`, which fails on it)."""
+    statements = [(CHECK_FAILED_LINE, "its internet check failed and the network stays validated"),
+                  (PRIVATE_DNS_PROBE, "it evaluated the private DNS name")]
+    if not image_under_test:
+        statements.append((UNPROBED_MARKER, "it validates Wi-Fi without probes"))
+    for line, what in statements:
         if line in network_stack_dump:
             return what
     return None
@@ -898,6 +904,11 @@ class Guest:
         self.capture: LogCapture | None = None
         self.stream_id = uuid.uuid4().hex[:8]
 
+    @property
+    def image_under_test(self) -> bool:
+        """A guest of the release under test is the one whose log is captured; a previous release's is not."""
+        return self.capture is not None
+
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         return subprocess.run(
             [self.adb, "-s", self.serial, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -1290,11 +1301,16 @@ def check_not_disabled(guest: Guest) -> str | None:
     if not guest.joined():
         raise Failure("the station left the network")
     counted = no_internet_count(dump)
+    stack = guest.network_stack_dump()
+    if guest.image_under_test and UNPROBED_MARKER in stack:
+        # The old patch (validate without probes) is in the image: it is a failure whatever was counted.
+        raise Failure(f"the validation log says {UNPROBED_MARKER!r}: the platform of the image under test validates "
+                      "Wi-Fi first and checks it after, so the patch that skips the probes is still in the image")
     if counted < 1:
         # Nothing counted: the injected failures did not reach the platform, or the platform does not count them
         # against a network (it validates Wi-Fi before its check, so a failed check leaves it validated). Its own
         # validation log says which.
-        reached = failure_reached_platform(guest.network_stack_dump())
+        reached = failure_reached_platform(stack, guest.image_under_test)
         if reached is None:
             raise Failure("the platform counted no failed internet check and its validation log does not say that "
                           "it handled the injected failures, so they did not reach it and the network was never "
