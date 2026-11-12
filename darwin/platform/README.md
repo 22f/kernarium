@@ -113,7 +113,15 @@ interface to the wire.
 - **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
   carries its DNG's colour data (`dng_color.hpp`), the only place the host
   reveals it. A part that fails leaves the others: a capture fails only when
-  nothing it asked for arrived.
+  nothing it asked for arrived. A still's `exposure` is the photo's own: the
+  exposure time, ISO, f-number, focal length and flash come from the photo's
+  Exif (`apple/photo_metadata.hpp`, `still_exposure.hpp`), the 3A states, white
+  balance, zoom and lens from the session when the photo is delivered, and a
+  Bayer still's neutral point and noise profile from its DNG. A reading the
+  platform does not give, or gives as a number that cannot be a measurement
+  (zero, negative, not finite, beyond any camera), is zero: absent, never a
+  made-up value. The flash fired is the Exif's word, then the resolved
+  settings'.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at

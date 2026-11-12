@@ -348,8 +348,10 @@ boot, the lens cover, the host memory a live session reserves (none for a
 host with no cameras), the camera state and rotation, and that an unknown or
 empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera),
 `camera-layout` (unit) that the layout name composed from a host's cameras is
-one of the image's layouts, and `camera-orientation` (unit) the sensor
-orientation of every interface orientation and facing
+one of the image's layouts, `camera-orientation` (unit) the sensor
+orientation of every interface orientation and facing, and
+`camera-still-exposure` (unit) the exposure a still reports from a photo's
+metadata, fed literal metadata and an in-memory image, never a camera
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`) play iOS's permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so

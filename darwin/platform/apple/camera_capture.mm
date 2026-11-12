@@ -9,6 +9,8 @@
 #include "accelerated_nv12.hpp"
 #include "camera.hpp"
 #include "dng_color.hpp"
+#include "photo_metadata.hpp"
+#include "still_exposure.hpp"
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
@@ -788,7 +790,11 @@ public:
         if (camera < entries_.size()) dispatch_async(queue_, ^{ releaseStill(camera); });
     }
 
-    CameraExposure exposureOf(std::size_t camera, CMSampleBufferRef sample) const
+    // The device's own state now: its 3A states, white balance, zoom, lens and
+    // frame duration, and what the preview exposes with. What a frame or a photo
+    // exposed with is read from that frame or photo (`exposureOf`, the photo
+    // delegate).
+    CameraExposure deviceExposureOf(std::size_t camera) const
     {
         const Entry& entry = entries_[camera];
         CameraExposure exposure;
@@ -820,6 +826,13 @@ public:
         exposure.frameDurationNanoseconds = CMTIME_IS_VALID(duration) && duration.value > 0
             ? std::uint64_t(CMTimeGetSeconds(duration) * 1e9) : 0;
 #endif
+        (void)device;
+        return exposure;
+    }
+
+    CameraExposure exposureOf(std::size_t camera, CMSampleBufferRef sample) const
+    {
+        CameraExposure exposure = deviceExposureOf(camera);
         // The sample's own Exif attachment states what the exposure used.
         if (auto* exif = static_cast<CFDictionaryRef>(CMGetAttachment(sample, kCGImagePropertyExifDictionary, nullptr))) {
             double time = 0;
@@ -833,7 +846,6 @@ public:
                     exposure.iso = std::uint32_t(iso);
             }
         }
-        (void)device;
         return exposure;
     }
 
@@ -1438,6 +1450,12 @@ std::unique_ptr<Camera> makeAppleCamera()
     BOOL _wantRaw;
     std::shared_ptr<SessionState> _state;
     uml::platform::CameraStillResult _result;
+    // What the photos' metadata and the Bayer still's DNG state of the
+    // exposure. The processed photo's readings are the exposure's when there
+    // is one; the Bayer still's otherwise.
+    uml::platform::PhotoReadings _jpegReadings;
+    uml::platform::PhotoReadings _rawReadings;
+    uml::platform::DngExposureData _dng;
 }
 
 - (instancetype)initWithCamera:(size_t)camera
@@ -1466,8 +1484,14 @@ std::unique_ptr<Camera> makeAppleCamera()
     // still that cannot be made does not take the person's JPEG with it.
     if (error != nil || photo == nil) return;
     NSData* data = photo.fileDataRepresentation;
+    // The photo's own Exif, read from its file: AVCapturePhoto.metadata is not
+    // on the Mac.
+    const auto readings = data == nil ? uml::platform::PhotoReadings {}
+        : uml::platform::photoReadingsOfImage(
+              std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data.bytes), data.length));
 #if TARGET_OS_IOS
     if (photo.isRawPhoto) {
+        _rawReadings = readings;
         CVPixelBufferRef pixels = photo.pixelBuffer;
         if (pixels == nullptr || data == nil) return;
         const auto order = uml::platform::bayerOrderOf(CVPixelBufferGetPixelFormatType(pixels));
@@ -1483,6 +1507,7 @@ std::unique_ptr<Camera> makeAppleCamera()
         CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
         // The DNG that comes with the Bayer pixels states what the sensor is.
         const auto bytes = std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data.bytes), data.length);
+        _dng = uml::platform::parseDngExposureData(bytes);
         if (auto color = uml::platform::parseDngColorData(bytes)) {
             _result.color = *color;
             if (_result.color.bayer == uml::platform::BayerOrder::none) _result.color.bayer = order;
@@ -1498,6 +1523,7 @@ std::unique_ptr<Camera> makeAppleCamera()
     } else
 #endif
     if (data != nil) {
+        _jpegReadings = readings;
         const auto* bytes = static_cast<const std::uint8_t*>(data.bytes);
         _result.jpeg.assign(bytes, bytes + data.length);
     }
@@ -1508,7 +1534,6 @@ std::unique_ptr<Camera> makeAppleCamera()
                                   error:(NSError*)error
 {
     (void)output;
-    (void)resolvedSettings;
     (void)error;
     // The session drops its hold on this object when it delivers, which can be
     // the last one.
@@ -1516,8 +1541,22 @@ std::unique_ptr<Camera> makeAppleCamera()
     (void)keepAlive;
     // Whatever arrived stands; the capture failed only when nothing asked for did.
     _result.ok = (_wantJpeg && !_result.jpeg.empty()) || (_wantRaw && !_result.raw.empty());
+    // Whether the flash fired is the metadata's word, and the platform's decision
+    // for the capture when the metadata has none.
+    std::optional<bool> flashResolved;
+#if TARGET_OS_IOS
+    if (resolvedSettings != nil) flashResolved = bool(resolvedSettings.isFlashEnabled);
+#else
+    (void)resolvedSettings;
+#endif
     std::lock_guard lock(_state->mutex);
-    if (_state->session) static_cast<uml::platform::AppleSession*>(_state->session)->deliverStill(_camera, std::move(_result));
+    if (!_state->session) return;
+    auto* session = static_cast<uml::platform::AppleSession*>(_state->session);
+    const bool haveJpegReadings = _jpegReadings.exposureSeconds || _jpegReadings.iso || _jpegReadings.fNumber ||
+        _jpegReadings.focalLengthMillimetres || _jpegReadings.flash;
+    _result.exposure = uml::platform::stillExposureOf(
+        session->deviceExposureOf(_camera), haveJpegReadings ? _jpegReadings : _rawReadings, flashResolved, _dng);
+    session->deliverStill(_camera, std::move(_result));
 }
 
 @end

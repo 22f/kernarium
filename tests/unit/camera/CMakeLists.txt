@@ -26,6 +26,16 @@ target_link_libraries(uml_camera_apple_discovery_tests PRIVATE UML::AppleCamera)
 uml_add_unit_test(NAME camera-apple-discovery COMMAND uml_camera_apple_discovery_tests
     LABELS "device;camera")
 
+# What a still reports of its exposure, from a literal photo-metadata dictionary
+# (no camera is opened).
+add_executable(uml_camera_still_exposure_tests camera_still_exposure_tests.cpp)
+target_link_libraries(uml_camera_still_exposure_tests PRIVATE UML::AppleCamera
+    "-framework CoreFoundation" "-framework CoreGraphics" "-framework ImageIO")
+target_include_directories(uml_camera_still_exposure_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
+uml_add_unit_test(NAME camera-still-exposure COMMAND uml_camera_still_exposure_tests
+    LABELS "device;camera")
+
 # The Apple host's accelerated transform against the portable one.
 add_executable(uml_camera_apple_transform_tests camera_apple_transform_tests.cpp)
 target_link_libraries(uml_camera_apple_transform_tests PRIVATE UML::AppleCamera)
