@@ -194,6 +194,15 @@ final class AppModel {
     /// is held at rotation zero and its display follows the scene. The scene's
     /// root sets it (`SessionOrientationPolicy`). Never a saved guest setting.
     var hostDrivesGuestRotation = false
+    /// What the system says of the folding display the scene is on (the iPhone
+    /// Duo); nil on every device that reports no hinge, which keeps every
+    /// layout it has. The scene's root reads it (`FoldSceneReader`) and the
+    /// layout decisions are `AndariumCore`'s (`FoldLayout.swift`).
+    var fold: FoldReading?
+    /// Where the scene is: `.plain` unless the display folds.
+    var foldPose: FoldPose { fold?.pose ?? .plain }
+    /// The session's layout on a folding display; nil elsewhere.
+    var sessionPlan: SessionPlan? { fold.flatMap(SessionPlan.init) }
 
     var sessionPreset = SessionPreset()
     var session = SessionState() {

@@ -144,6 +144,9 @@ struct SendFeedbackSheet: View {
         }
         .task(id: model.sent) {
             guard model.sent else { return }
+            #if !APP_STORE
+            if model.app.feedbackServices.previewKeepsConfirmation { return }
+            #endif
             try? await Task.sleep(for: .seconds(1.8))
             dismiss()
         }

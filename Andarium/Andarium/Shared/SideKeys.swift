@@ -199,6 +199,11 @@ enum KeyMetrics {
     static let rowGap: CGFloat = 10
     static let columnGap: CGFloat = 8
     static let edgeGap: CGFloat = 8
+    /// A key on the deck, which lies flat under the thumbs: wider than tall.
+    static let deckKey = CGSize(width: 66, height: 54)
+    /// A key in the cover's rail, which shares the strip with the stats.
+    static let railKeyHeight: CGFloat = 56
+    static let railGap: CGFloat = 8
 }
 
 /// The closed keys: Power and a longer volume rocker, each a plain glass key
@@ -245,28 +250,8 @@ struct OpenKeys: View {
 
     var body: some View {
         VStack(spacing: KeyMetrics.rowGap) {
-            ZStack {
-                Capsule().fill(.clear)
-                VStack(spacing: 3) {
-                    Image(systemName: "power")
-                        .font(.system(size: 20, weight: .semibold))
-                    Circle()
-                        .fill(lit ? Color.accentColor : Color.gray.opacity(0.5))
-                        .frame(width: 5, height: 5)
-                        .shadow(color: lit ? Color.accentColor : .clear, radius: 3)
-                }
-            }
-            .frame(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .matchedGeometryEffect(id: "power", in: space)
-            .contentShape(.capsule)
-            .onTapGesture(perform: power)
-            .onLongPressGesture(minimumDuration: 0.6, perform: powerHold)
-            .accessibilityElement()
-            .accessibilityLabel("Power")
-            .accessibilityHint(recovery ? "Chooses the highlighted item" : "Hold for the power menu")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction(named: "Power menu", powerHold)
+            PowerKey(recovery: recovery, lit: lit, power: power, powerHold: powerHold)
+                .matchedGeometryEffect(id: "power", in: space)
 
             KeyPair(
                 top: (recovery ? "chevron.up" : "plus", recovery ? String(localized: "Up") : String(localized: "Volume up"), volumeUp),
@@ -275,6 +260,40 @@ struct OpenKeys: View {
             .matchedGeometryEffect(id: "rocker", in: space)
         }
         .foregroundStyle(.primary)
+    }
+}
+
+/// Power: tap to press, hold for Android's power menu. Its light says
+/// whether the guest's screen is on.
+struct PowerKey: View {
+    let recovery: Bool
+    let lit: Bool
+    var size = CGSize(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
+    let power: () -> Void
+    let powerHold: () -> Void
+
+    var body: some View {
+        ZStack {
+            Capsule().fill(.clear)
+            VStack(spacing: 3) {
+                Image(systemName: "power")
+                    .font(.system(size: 20, weight: .semibold))
+                Circle()
+                    .fill(lit ? Color.accentColor : Color.gray.opacity(0.5))
+                    .frame(width: 5, height: 5)
+                    .shadow(color: lit ? Color.accentColor : .clear, radius: 3)
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .contentShape(.capsule)
+        .onTapGesture(perform: power)
+        .onLongPressGesture(minimumDuration: 0.6, perform: powerHold)
+        .accessibilityElement()
+        .accessibilityLabel("Power")
+        .accessibilityHint(recovery ? "Chooses the highlighted item" : "Hold for the power menu")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(named: "Power menu", powerHold)
     }
 }
 
@@ -287,16 +306,7 @@ struct GuestKeys: View {
 
     var body: some View {
         VStack(spacing: KeyMetrics.rowGap) {
-            Button(action: settings) {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
-                    .contentShape(.capsule)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .accessibilityLabel("Settings")
-            .accessibilityHint("Install apps, ADB, stats and options")
+            SettingsKey(action: settings)
 
             KeyPair(
                 top: ("arrowtriangle.backward.fill", String(localized: "Back"), back),
@@ -308,19 +318,54 @@ struct GuestKeys: View {
     }
 }
 
-/// Two keys in one glass capsule, like a volume rocker.
+/// Settings: Andarium's own, opened from the keys.
+struct SettingsKey: View {
+    var size = CGSize(width: KeyMetrics.width, height: KeyMetrics.keyHeight)
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "gearshape")
+                .font(.system(size: 20, weight: .semibold))
+                .frame(width: size.width, height: size.height)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .accessibilityLabel("Settings")
+        .accessibilityHint("Install apps, ADB, stats and options")
+    }
+}
+
+/// Two keys in one glass capsule, like a volume rocker: stacked on an edge,
+/// side by side on the deck.
 struct KeyPair: View {
     let top: (symbol: String, label: String, action: () -> Void)
     let bottom: (symbol: String, label: String, action: () -> Void)
     var glyphSize: CGFloat = 19
+    var axis: Axis = .vertical
+    /// A key's height on an edge.
+    var keyHeight = KeyMetrics.keyHeight
 
     var body: some View {
-        VStack(spacing: 0) {
-            key(top)
-            Capsule()
-                .fill(.primary.opacity(0.18))
-                .frame(width: 22, height: 1.5)
-            key(bottom)
+        Group {
+            if axis == .vertical {
+                VStack(spacing: 0) {
+                    key(top)
+                    Capsule()
+                        .fill(.primary.opacity(0.18))
+                        .frame(width: 22, height: 1.5)
+                    key(bottom)
+                }
+            } else {
+                HStack(spacing: 0) {
+                    key(top)
+                    Capsule()
+                        .fill(.primary.opacity(0.18))
+                        .frame(width: 1.5, height: 22)
+                    key(bottom)
+                }
+            }
         }
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .capsule)
@@ -330,10 +375,112 @@ struct KeyPair: View {
         Button(action: key.action) {
             Image(systemName: key.symbol)
                 .font(.system(size: glyphSize, weight: .semibold))
-                .frame(width: KeyMetrics.width, height: KeyMetrics.keyHeight - 0.75)
+                .frame(
+                    width: axis == .vertical ? KeyMetrics.width : KeyMetrics.deckKey.width - 0.75,
+                    height: axis == .vertical ? keyHeight - 0.75 : KeyMetrics.deckKey.height)
                 .contentShape(Rectangle())
         }
         .accessibilityLabel(key.label)
+    }
+}
+
+// MARK: - Rail and deck
+
+/// The side keys in the cover's trailing strip, beside the camera's: always
+/// open, one column, so every key is one tap and none covers the guest. Power
+/// and the volume rocker on top, as on a phone's side; Settings, then Back
+/// and Home nearest the thumb.
+struct KeyRail: View {
+    let mode: StartMode
+    let lit: Bool
+    let actions: SideKeyActions
+    @State private var keyPresses = 0
+
+    var body: some View {
+        let recovery = mode == .recovery
+        let key = CGSize(width: KeyMetrics.width, height: KeyMetrics.railKeyHeight)
+        VStack(spacing: KeyMetrics.railGap) {
+            PowerKey(recovery: recovery, lit: lit, size: key, power: { pressed(actions.power) }, powerHold: holdPower)
+            KeyPair(
+                top: (recovery ? "chevron.up" : "plus", recovery ? String(localized: "Up") : String(localized: "Volume up"), { pressed(actions.volumeUp) }),
+                bottom: (recovery ? "chevron.down" : "minus", recovery ? String(localized: "Down") : String(localized: "Volume down"), { pressed(actions.volumeDown) }),
+                keyHeight: key.height
+            )
+            if !recovery {
+                SettingsKey(size: key, action: actions.settings)
+                KeyPair(
+                    top: ("arrowtriangle.backward.fill", String(localized: "Back"), { pressed(actions.back) }),
+                    bottom: ("circle.fill", String(localized: "Home"), { pressed(actions.home) }),
+                    glyphSize: 16, keyHeight: key.height
+                )
+            }
+        }
+        .foregroundStyle(.primary)
+        .environment(\.colorScheme, .dark)
+        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+    }
+
+    private func pressed(_ action: () -> Void) {
+        keyPresses += 1
+        action()
+    }
+
+    private func holdPower() {
+        guard mode == .normal else { return }
+        actions.powerHold()
+    }
+}
+
+/// The side keys on the lower half while the device stands turned, its
+/// lower half on the table: one row along the near edge, under the thumbs.
+/// Back and Home on the left; Settings in the middle; volume and Power on
+/// the right, as a phone's side keys lie when the phone is on its side.
+struct KeyDeck: View {
+    let mode: StartMode
+    let lit: Bool
+    let actions: SideKeyActions
+    @State private var keyPresses = 0
+
+    var body: some View {
+        let recovery = mode == .recovery
+        HStack(spacing: 0) {
+            if !recovery {
+                KeyPair(
+                    top: ("arrowtriangle.backward.fill", String(localized: "Back"), { pressed(actions.back) }),
+                    bottom: ("circle.fill", String(localized: "Home"), { pressed(actions.home) }),
+                    glyphSize: 16, axis: .horizontal
+                )
+                Spacer(minLength: 16)
+                SettingsKey(size: KeyMetrics.deckKey, action: actions.settings)
+                Spacer(minLength: 16)
+            } else {
+                Spacer(minLength: 0)
+            }
+            KeyPair(
+                top: (recovery ? "chevron.up" : "minus", recovery ? String(localized: "Up") : String(localized: "Volume down"),
+                      { pressed(recovery ? actions.volumeUp : actions.volumeDown) }),
+                bottom: (recovery ? "chevron.down" : "plus", recovery ? String(localized: "Down") : String(localized: "Volume up"),
+                         { pressed(recovery ? actions.volumeDown : actions.volumeUp) }),
+                axis: .horizontal
+            )
+            .padding(.trailing, 14)
+            PowerKey(
+                recovery: recovery, lit: lit, size: KeyMetrics.deckKey,
+                power: { pressed(actions.power) }, powerHold: holdPower)
+        }
+        .foregroundStyle(.primary)
+        .environment(\.colorScheme, .dark)
+        .sensoryFeedback(.impact(weight: .light), trigger: keyPresses)
+    }
+
+    private func pressed(_ action: () -> Void) {
+        keyPresses += 1
+        action()
+    }
+
+    private func holdPower() {
+        guard mode == .normal else { return }
+        actions.powerHold()
     }
 }
 
