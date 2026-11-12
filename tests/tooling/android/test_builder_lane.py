@@ -408,11 +408,12 @@ def tracked_erofs_parameters(android_root: Path) -> tuple[str, str]:
 def synthetic_resource_table(
     arrays: list[tuple[str, list[str]]], *, utf8: bool = True,
     booleans: list[tuple[str, bool]] = (), compact: bool = False,
-    integers: list[tuple[str, int]] = (), overlayable: bool = False,
+    integers: list[tuple[str, int]] = (), overlayable: bool = False, qualified: frozenset[str] = frozenset(),
 ) -> bytes:
     """A compiled resource table whose one package holds the given string-array resources, bool
     resources and integer resources (the latter two as compact entries when `compact` is set, as a
-    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set."""
+    recent aapt2 writes them), and an <overlayable> section when `overlayable` is set. The resources
+    named in `qualified` are defined under a resource configuration (portrait), not by default."""
 
     def pool(strings: list[str]) -> bytes:
         data, offsets = b"", []
@@ -432,9 +433,10 @@ def synthetic_resource_table(
     values = sorted({item for _, items in arrays for item in items})
     names = [name for name, _ in arrays] + [name for name, _ in booleans] + [name for name, _ in integers]
     configuration = struct.pack("<I", 64) + b"\x00" * 60
+    portrait = struct.pack("<I", 64) + b"\x00" * 8 + b"\x01" + b"\x00" * 51  # the orientation qualifier
     type_header = 20 + len(configuration)
 
-    def type_chunk(type_id: int, entries: list[bytes]) -> bytes:
+    def type_chunk(type_id: int, entries: list[bytes], configuration: bytes = configuration) -> bytes:
         offsets, body = [], b""
         for entry in entries:
             offsets.append(len(body))
@@ -464,14 +466,23 @@ def synthetic_resource_table(
             integer_entries.append(struct.pack("<HHI", index, 0x1000 | 0x08, data))
         else:
             integer_entries.append(struct.pack("<HHI", 8, 0, index) + struct.pack("<HBBI", 8, 0, 0x10, data))
-    chunks = type_chunk(1, array_entries)
+
+    def configured(type_id: int, entries: list[bytes], entry_names: list[str], *, always: bool) -> bytes:
+        """The type's chunk of default definitions and, when some are qualified, a chunk of those."""
+        plain = [entry for entry, name in zip(entries, entry_names) if name not in qualified]
+        under = [entry for entry, name in zip(entries, entry_names) if name in qualified]
+        chunks = type_chunk(type_id, plain) if plain or (always and not under) else b""
+        return chunks + (type_chunk(type_id, under, portrait) if under else b"")
+
+    chunks = configured(1, array_entries, [name for name, _ in arrays], always=True)
     if overlayable:  # the <overlayable> section: its name and actor (256 UTF-16 units each) and no policy
         chunks += struct.pack("<HHI", 0x0204, 1032, 1032) + b"\x00" * 1024
     type_names = ["array"]
-    for type_name, typed in (("bool", bool_entries), ("integer", integer_entries)):
+    for type_name, typed, typed_names in (("bool", bool_entries, [name for name, _ in booleans]),
+                                          ("integer", integer_entries, [name for name, _ in integers])):
         if typed:
             type_names.append(type_name)
-            chunks += type_chunk(len(type_names), typed)
+            chunks += configured(len(type_names), typed, typed_names, always=False)
     type_pool, key_pool = pool(type_names), pool(names)
     package_header = 288
     package = (struct.pack("<HHII", 0x0200, package_header,
@@ -642,6 +653,40 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             if tool.resource_table_defines_overlayable(table) != declared:
                 fail(f"the overlayable reader misreads a {'compact' if compact else 'full'} table "
                      f"{'with' if declared else 'without'} the section")
+    # ... and which resources a table defines by default: the ones outside a resource configuration only.
+    for compact in (False, True):
+        table = synthetic_resource_table(
+            tables, booleans=flags + [("only_portrait", True)], integers=numbers, compact=compact,
+            qualified=frozenset({"only_portrait", "config_threshold", "config_ntpServers"}))
+        if (tool.resource_default_names(table, "bool"), tool.resource_default_names(table, "integer"),
+                tool.resource_default_names(table, "array")) != (
+                {"config_flipToScreenOffEnabled", "other"}, {"config_low", "config_negative"},
+                {"config_autoTimeSourcesPriority", "empty"}):
+            fail(f"the resource reader misreads which {'compact' if compact else 'full'} entries are in the default configuration")
+        if tool.resource_booleans(table)["only_portrait"] != [True]:
+            fail("the resource bool reader drops a definition under a resource configuration")
+    # A table that does not hold together is no table without the section: the header, the declared size and
+    # every chunk's bounds are checked.
+    good = synthetic_resource_table(tables, booleans=flags, overlayable=False)
+    package_at = struct.unpack_from("<H", good, 2)[0] + struct.unpack_from("<I", good, struct.unpack_from("<H", good, 2)[0] + 4)[0]
+    broken_tables = {
+        "empty": b"",
+        "text": b"not a resource table",
+        "wrong type": struct.pack("<H", 3) + good[2:],
+        "short header": struct.pack("<HHI", 2, 4, len(good)) + good[8:],
+        "declared size beyond the data": good[:-4],
+        "declared size below the header": good[:4] + struct.pack("<I", 8) + good[8:],
+        "chunk without a header": good[:12] + struct.pack("<HHI", 1, 4, 100) + good[20:],
+        "chunk past the table": good[:package_at] + struct.pack("<HHI", 0x0200, 288, len(good)) + good[package_at + 8:],
+    }
+    for label, broken in broken_tables.items():
+        try:
+            found = tool.resource_table_defines_overlayable(broken)
+        except ValueError:
+            continue
+        fail(f"the overlayable reader reads a table with a {label} as one {'with' if found else 'without'} the section")
+    if tool.resource_table_defines_overlayable(good):
+        fail("the overlayable reader finds a section in the good table")
     # The attributes of a compiled manifest's <overlay> element, through either string pool: a string, a boolean, or none.
     for utf8 in (True, False):
         for target, static in (("org.example.app", True), ("org.example.app", False), (None, True), ("org.example.app", None)):
@@ -2512,13 +2557,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     toggle_values = {
                         "toggle-off": [False],
                         "toggle-missing": [],
-                        "toggle-qualified": [True, False],
+                        "toggle-duplicate": [True, False],
                     }.get(camera_variant, [True])
                     network_table = synthetic_resource_table(
                         [*network_time.items(), *extra_definitions], utf8=network_time_variant != "utf16-pool",
                         booleans=[("config_flipToScreenOffEnabled", value) for value in flip_values]
                         + [("config_supportsHardwareCamToggle", value) for value in toggle_values],
                         compact=flip_variant == "compact",
+                        qualified=frozenset({"config_supportsHardwareCamToggle"})
+                        if camera_variant == "toggle-only-qualified" else frozenset(),
                     )
                     framework_apk = io.BytesIO()
                     with zipfile.ZipFile(framework_apk, "w") as overlay:
@@ -2568,23 +2615,41 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     None: [("config_enableAuxCameras", True)],
                     "aux-off": [("config_enableAuxCameras", False)],
                     "aux-missing": [],
-                    "aux-qualified": [("config_enableAuxCameras", True), ("config_enableAuxCameras", False)],
-                }[camera_variant if camera_variant in {"aux-off", "aux-missing", "aux-qualified"} else None]
+                    "aux-duplicate": [("config_enableAuxCameras", True), ("config_enableAuxCameras", False)],
+                }[camera_variant if camera_variant in {"aux-off", "aux-missing", "aux-duplicate"} else None]
                 ignored_ids = {
                     "ignored-extra": [["2", "3"]],
                     "ignored-none": [[]],
                     "ignored-missing": [],
                 }.get(camera_variant, [["2"]])
+                # "...-only-qualified": the one definition sits under a resource configuration (portrait), so
+                # it applies on a device in that orientation alone, whatever its value says.
+                overlay_qualified = {
+                    "aux-only-qualified": frozenset({"config_enableAuxCameras"}),
+                    "ignored-only-qualified": frozenset({"config_ignoredAuxCameraIds"}),
+                }.get(camera_variant, frozenset())
                 overlay_table = synthetic_resource_table(
                     [("config_ignoredAuxCameraIds", items) for items in ignored_ids],
-                    booleans=aux_booleans, compact=camera_variant == "compact",
+                    booleans=aux_booleans, compact=camera_variant == "compact", qualified=overlay_qualified,
                 )
                 # "app-values": the old assumption, the values in the application's own table and no overlay
+                # "app-no-aux", "app-no-ignored": the application lost a name the overlay replaces (an uprev renamed
+                # it), so the overlay applies to nothing; "app-aux-qualified": it keeps one under a qualifier only.
                 aperture_table = synthetic_resource_table(
+                    [] if camera_variant == "app-no-ignored" else
                     [("config_ignoredAuxCameraIds", ["2"] if camera_variant == "app-values" else [])],
-                    booleans=[("config_enableAuxCameras", camera_variant == "app-values")],
+                    booleans=[] if camera_variant == "app-no-aux" else
+                    [("config_enableAuxCameras", camera_variant == "app-values")],
                     compact=camera_variant == "compact", overlayable=camera_variant == "app-overlayable",
+                    qualified=frozenset({"config_enableAuxCameras"}) if camera_variant == "app-aux-qualified"
+                    else frozenset(),
                 )
+                # ... and a file that is no resource table, or one cut short, must not read as a table
+                # without an overlayable section.
+                if camera_variant == "app-not-a-table":
+                    aperture_table = b"not a resource table"
+                elif camera_variant == "app-truncated-table":
+                    aperture_table = aperture_table[:len(aperture_table) // 2]
                 aperture_apk = io.BytesIO()
                 with zipfile.ZipFile(aperture_apk, "w") as apk:
                     apk.writestr("AndroidManifest.xml", synthetic_compiled_manifest(None))
@@ -5401,8 +5466,22 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
             ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
              "must set config_enableAuxCameras to true"),
-            ("camera-aux-cameras-qualified", {"camera_variant": "aux-qualified"},
+            ("camera-aux-cameras-defined-twice", {"camera_variant": "aux-duplicate"},
              "must set config_enableAuxCameras to true"),
+            ("camera-aux-cameras-only-qualified", {"camera_variant": "aux-only-qualified"},
+             "defines config_enableAuxCameras only under a resource configuration"),
+            ("camera-ignored-ids-only-qualified", {"camera_variant": "ignored-only-qualified"},
+             "defines config_ignoredAuxCameraIds only under a resource configuration"),
+            ("camera-application-lost-aux-cameras", {"camera_variant": "app-no-aux"},
+             "does not define the bool resource config_enableAuxCameras in its default configuration"),
+            ("camera-application-lost-ignored-ids", {"camera_variant": "app-no-ignored"},
+             "does not define the array resource config_ignoredAuxCameraIds in its default configuration"),
+            ("camera-application-aux-cameras-only-qualified", {"camera_variant": "app-aux-qualified"},
+             "does not define the bool resource config_enableAuxCameras in its default configuration"),
+            ("camera-application-not-a-resource-table", {"camera_variant": "app-not-a-table"},
+             "Aperture.apk has no readable resource table: not a resource table"),
+            ("camera-application-truncated-resource-table", {"camera_variant": "app-truncated-table"},
+             "Aperture.apk has no readable resource table: not a resource table"),
             ("camera-ignored-ids-extra", {"camera_variant": "ignored-extra"},
              "must list the camera IDs"),
             ("camera-ignored-ids-empty", {"camera_variant": "ignored-none"}, "must list the camera IDs"),
@@ -5411,8 +5490,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must set config_supportsHardwareCamToggle to true"),
             ("camera-toggle-missing", {"camera_variant": "toggle-missing"},
              "must set config_supportsHardwareCamToggle to true"),
-            ("camera-toggle-qualified", {"camera_variant": "toggle-qualified"},
+            ("camera-toggle-defined-twice", {"camera_variant": "toggle-duplicate"},
              "must set config_supportsHardwareCamToggle to true"),
+            ("camera-toggle-only-qualified", {"camera_variant": "toggle-only-qualified"},
+             "defines config_supportsHardwareCamToggle only under a resource configuration"),
         ):
             reject(label, options, reason)
 

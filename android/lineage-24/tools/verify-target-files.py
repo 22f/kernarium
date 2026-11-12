@@ -2058,10 +2058,11 @@ def resource_string_pool(table: bytes, offset: int) -> list[str]:
     return strings
 
 
-def resource_entries(table: bytes, type_name: str):
+def resource_entries(table: bytes, type_name: str, *, configurations: bool = False):
     """The (name, position, flags) of every entry of one resource type in a compiled resource
     table, in each of its configurations. The position is that of the ResTable_entry, or of the
-    compact entry whose key sits where a full entry keeps its size."""
+    compact entry whose key sits where a full entry keeps its size. With `configurations`, a
+    fourth item says whether the entry is in the default configuration (no qualifier set)."""
     position = struct.unpack_from("<H", table, 2)[0]
     chunk, _, size = struct.unpack_from("<HHI", table, position)
     if chunk != 0x0001:
@@ -2083,6 +2084,9 @@ def resource_entries(table: bytes, type_name: str):
                 if inner_chunk == 0x0201 and types[table[inner + 8] - 1] == type_name:
                     count, entries_start = struct.unpack_from("<II", table, inner + 12)
                     kind = table[inner + 9]
+                    # The ResTable_config at +20 starts with its own size; the default one sets nothing after it.
+                    config_size = struct.unpack_from("<I", table, inner + 20)[0]
+                    default = not any(table[inner + 24:inner + 20 + config_size])
                     if kind & 0x01:  # sparse: (index, offset / 4) pairs of 16 bits
                         offsets = [4 * pair[1] for pair in struct.iter_unpack("<HH", table[inner + inner_header:inner + inner_header + 4 * count])]
                     elif kind & 0x02:  # 16-bit offsets in units of 4 bytes
@@ -2097,9 +2101,18 @@ def resource_entries(table: bytes, type_name: str):
                         key, flags = struct.unpack_from("<HH", table, entry)
                         if not flags & 0x08:  # a full entry: size, flags, then a 32-bit key
                             key = struct.unpack_from("<I", table, entry + 4)[0]
-                        yield keys[key], entry, flags
+                        if configurations:
+                            yield keys[key], entry, flags, default
+                        else:
+                            yield keys[key], entry, flags
                 inner += inner_size
         position += size
+
+
+def resource_default_names(table: bytes, type_name: str) -> set[str]:
+    """The names of the resources of one type that a compiled resource table defines in its default
+    configuration: the definitions that apply whatever the device's qualifiers are."""
+    return {name for name, _, _, default in resource_entries(table, type_name, configurations=True) if default}
 
 
 def resource_arrays(table: bytes) -> dict[str, list[list[str]]]:
@@ -2157,23 +2170,38 @@ RES_TABLE_PACKAGE_TYPE = 0x0200
 RES_TABLE_OVERLAYABLE_TYPES = (0x0204, 0x0205)
 
 
-def resource_table_defines_overlayable(table: bytes) -> bool:
-    """Whether a package of a compiled resource table declares an <overlayable> section."""
-    position = struct.unpack_from("<H", table, 2)[0]
-    while position + 8 <= len(table):
+RES_TABLE_TYPE = 0x0002
+
+
+def resource_chunks(table: bytes, start: int, end: int):
+    """The (type, header size, size, position) of each chunk that fills table[start:end] exactly.
+    A chunk that is smaller than its header, or does not fit, raises ValueError."""
+    position = start
+    while position < end:
+        if position + 8 > end:
+            raise ValueError(f"a chunk header at {position} runs past the end of its parent ({end})")
         chunk, header_size, size = struct.unpack_from("<HHI", table, position)
-        if size < 8:
-            break
+        if header_size < 8 or size < header_size or position + size > end:
+            raise ValueError(f"the chunk 0x{chunk:04x} at {position} declares header {header_size} and size {size} "
+                             f"in a parent that ends at {end}")
+        yield chunk, header_size, size, position
+        position += size
+
+
+def resource_table_defines_overlayable(table: bytes) -> bool:
+    """Whether a package of a compiled resource table declares an <overlayable> section. A table whose
+    header, declared size or chunks do not hold together raises ValueError instead of reading as one
+    without the section."""
+    if len(table) < 12:
+        raise ValueError(f"{len(table)} bytes are shorter than a resource table header")
+    chunk, header_size, size = struct.unpack_from("<HHI", table, 0)
+    if chunk != RES_TABLE_TYPE or header_size < 12 or size < header_size or size > len(table):
+        raise ValueError(f"not a resource table: type 0x{chunk:04x}, header {header_size}, size {size} of {len(table)} bytes")
+    for chunk, chunk_header, chunk_size, position in resource_chunks(table, header_size, size):
         if chunk == RES_TABLE_PACKAGE_TYPE:
-            inner, end = position + header_size, position + size
-            while inner + 8 <= end:
-                inner_chunk, _, inner_size = struct.unpack_from("<HHI", table, inner)
-                if inner_size < 8:
-                    break
+            for inner_chunk, _, _, _ in resource_chunks(table, position + chunk_header, position + chunk_size):
                 if inner_chunk in RES_TABLE_OVERLAYABLE_TYPES:
                     return True
-                inner += inner_size
-        position += size
     return False
 
 
@@ -3325,13 +3353,23 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
     app_table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
     try:
         defines_overlayable = resource_table_defines_overlayable(app_table)
-    except (struct.error, IndexError) as error:
+        app_defaults = {"bool": resource_default_names(app_table, "bool"),
+                        "array": resource_default_names(app_table, "array")}
+    except (ValueError, struct.error, IndexError) as error:
         fail(f"{CAMERA_APP} has no readable resource table: {error}")
     if defines_overlayable:
         fail(
             f"{CAMERA_APP} declares an overlayable section: Android would apply a product overlay to the "
             "resources it names under its policies alone, and this check cannot tell which"
         )
+    # An overlay replaces resources its target defines; one for a name the application lost (an uprev
+    # renamed it) applies to nothing, and the overlay's own values then look right.
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+        if name not in app_defaults[kind]:
+            fail(
+                f"{CAMERA_APP} does not define the {kind} resource {name} in its default configuration: "
+                "the overlay would apply to nothing"
+            )
     info = infos.get(CAMERA_APP_OVERLAY)
     if info is None or info.is_dir():
         fail(
@@ -3345,6 +3383,8 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
         overlay = manifest_element_attributes(manifest, "overlay")
         booleans = resource_booleans(table)
         arrays = resource_arrays(table)
+        overlay_defaults = {"bool": resource_default_names(table, "bool"),
+                            "array": resource_default_names(table, "array")}
     except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
         fail(f"{CAMERA_APP_OVERLAY} has no readable manifest and resource table: {error}")
     if overlay is None or overlay.get("targetPackage") != CAMERA_APP_PACKAGE or overlay.get("isStatic") is not True:
@@ -3363,8 +3403,16 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
             f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
             "the wide lens is the zoom camera's 1x"
         )
+    # The one definition of each name is the sole one, and it carries no qualifier: a value under a
+    # resource configuration applies only on a device that matches it.
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+        if name not in overlay_defaults[kind]:
+            fail(f"{CAMERA_APP_OVERLAY} defines {name} only under a resource configuration: "
+                 "it must be in the default configuration")
     try:
-        toggle = resource_booleans(camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT))
+        toggle_table = camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT)
+        toggle = resource_booleans(toggle_table)
+        toggle_defaults = resource_default_names(toggle_table, "bool")
     except (ValueError, struct.error, IndexError) as error:
         fail(f"{FRAMEWORK_OVERLAY} has no readable resource table: {error}")
     if toggle.get(CAMERA_HARDWARE_TOGGLE) != [True]:
@@ -3372,6 +3420,9 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
             f"{FRAMEWORK_OVERLAY} must set {CAMERA_HARDWARE_TOGGLE} to true: {toggle.get(CAMERA_HARDWARE_TOGGLE)}; "
             "a session started with Camera off could not show the camera blocked"
         )
+    if CAMERA_HARDWARE_TOGGLE not in toggle_defaults:
+        fail(f"{FRAMEWORK_OVERLAY} defines {CAMERA_HARDWARE_TOGGLE} only under a resource configuration: "
+             "it must be in the default configuration")
 
 
 def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
