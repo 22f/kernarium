@@ -72,6 +72,9 @@ DEBUG_SUPPORT = (
     ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
     # The Simulator preview's denied-network notice.
     ("network notice preview", "int _s8Andarium8AppModelC20previewNetworkNoticeyyAA0C6DenialOF(void) { return 1; }\n"),
+    # The Simulator preview's hooks into the Send feedback sheet.
+    ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
+    ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
     # The UI tests' probe of the guest's keyboard and mouse: its log, its launch,
     # the recording runtime, and the identifiers of its two elements.
     ("input probe", "int _s8Andarium10InputProbeC6recordyySSF(void) { return 1; }\n"),
@@ -125,6 +128,57 @@ STAND_INS = (
     "int _ZN12_GLOBAL__N_117runtimePrepareJitEijj(void) { return 1; }\n"
     "unsigned int fixture_data[] = { 0xd43e01a0u, 0xd43e01a0u };\n"
 )
+# Send feedback as a binary holds it: a type, the subject's prefix and the
+# Info.plist key; the Mail framework is linked in by the build of the fixture.
+FEEDBACK_FEATURE = (
+    "extern void *MFMailComposeViewControllerFixture;\n"
+    "const char *fixture(void) {\n"
+    '  return "Andarium feedback: " "AndariumFeedbackAddress" "_$s8Andarium17SendFeedbackModelC";\n'
+    "}\n"
+    "int mail(void) { return MFMailComposeViewControllerFixture != 0; }\n"
+    "void *MFMailComposeViewControllerFixture;\n"
+)
+# The same without the Mail framework: a build that lost part of the feature.
+FEEDBACK_PARTIAL = (
+    'const char *fixture(void) { return "Andarium feedback: AndariumFeedbackAddress"; }\n'
+)
+# Config/Info.plist as a fixture: the feedback block is conditional, and a value
+# names a build setting inside nested containers.
+INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+#ifdef FEEDBACK_MAIL
+\t<key>AndariumFeedbackAddress</key>
+\t<string>$(FEEDBACK_ADDRESS)</string>
+#endif
+\t<key>CFBundleName</key>
+\t<string>Fixture</string>
+\t<key>ITSAppUsesNonExemptEncryption</key>
+\t<false/>
+\t<key>UIApplicationSceneManifest</key>
+\t<dict>
+\t\t<key>UISceneConfigurations</key>
+\t\t<dict>
+\t\t\t<key>Role</key>
+\t\t\t<array>
+\t\t\t\t<dict>
+\t\t\t\t\t<key>UISceneConfigurationName</key>
+\t\t\t\t\t<string>Fixture</string>
+\t\t\t\t\t<key>UISceneDelegateClassName</key>
+\t\t\t\t\t<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+\t\t\t\t</dict>
+\t\t\t</array>
+\t\t</dict>
+\t</dict>
+\t<key>UIRequiredDeviceCapabilities</key>
+\t<array>
+\t\t<string>arm64</string>
+\t\t<string>metal</string>
+\t</array>
+</dict>
+</plist>
+"""
 # What a dependency compiles in from the prefix it was built under: a locale
 # directory on the volume that held the dependency prefixes, and a path in the
 # per-user temporary directory that held a build.
@@ -184,16 +238,17 @@ def build(root: Path, name: str, source: str, extra: list[str] | None = None) ->
     return output
 
 
-def build_with_debug_map(root: Path, name: str, directory: str | None = None) -> Path:
+def build_with_debug_map(root: Path, name: str, directory: str | None = None, source: str = CLEAN) -> Path:
     """A library linked from an object compiled with -g: the linker keeps a
     debug map whose N_OSO entry names the object file. The object sits in a
     directory that looks like a mounted volume, so that the map names a
     build-host path of the kind the check refuses elsewhere. `directory` is
-    the compilation directory the debug map's N_SO entries name."""
+    the compilation directory the debug map's N_SO entries name, and `source`
+    is the C the object is compiled from."""
     work = root / "Volumes" / "NAME"
     work.mkdir(parents=True, exist_ok=True)
     source_path = work / f"{name}.c"
-    source_path.write_text(CLEAN, encoding="utf-8")
+    source_path.write_text(source, encoding="utf-8")
     objects = work / f"{name}.o"
     # A source named relative to the compilation directory is what puts that
     # directory in the debug map.
@@ -279,10 +334,14 @@ def main() -> int:
 
     failures: list[str] = []
 
-    def check(app: Path, *, passes: bool, expect: str = "") -> None:
-        result = run([sys.executable, "-B", str(options.checker), str(app)])
+    def check(app: Path, *, passes: bool, expect: str = "", args: list[str] | None = None,
+              never: str = "") -> None:
+        result = run([sys.executable, "-B", str(options.checker), *(args or []), str(app)])
         label = app.parent.name
-        if (result.returncode == 0) != passes:
+        if never and never in result.stdout:
+            # The output itself is not repeated: it holds what must not be printed.
+            failures.append(f"{label}: the output prints text that is never to be printed")
+        elif (result.returncode == 0) != passes:
             failures.append(f"{label}: expected {'a pass' if passes else 'a failure'}:\n{result.stdout}")
         elif expect and expect not in result.stdout:
             failures.append(f"{label}: output lacks {expect!r}:\n{result.stdout}")
@@ -498,6 +557,219 @@ def main() -> int:
             else:
                 shutil.copyfile(clean, member)
             check(tested, passes=False, expect=f"{relative}: a test bundle or test framework")
+
+        # Send feedback is compiled in only where the build names a receiver. The
+        # fixtures stand for the application with it (the subject's prefix, the
+        # Info.plist key, the Mail framework, a type of the feature) and for the
+        # Debug build's code library; the receiver is a made-up address.
+        receiver = "person@receiver.fixture"
+        feature = build(root, "feature", FEEDBACK_FEATURE, ["-framework", "MessageUI"])
+        partial = build(root, "partial", FEEDBACK_PARTIAL)
+        feedback_info = app_info(AndariumFeedbackAddress=receiver)
+        # What the build phases pass: the address the build names and the local
+        # configuration's own receiver, whatever the configuration.
+        appstore = ["--feedback-address", receiver, "--feedback-receiver", receiver]
+        local = ["--feedback-receiver", receiver]
+        arranged = ["--feedback-address", "feedback@example.com"]
+        check(make_app(root, "feedback-built", feature, feedback_info), passes=True,
+              expect="Send feedback is compiled in", args=appstore)
+        check(make_app(root, "feedback-absent", clean, app_info()), passes=True,
+              expect="Send feedback is not compiled in")
+        check(make_app(root, "feedback-no-key", feature, app_info()), passes=False,
+              expect="AndariumFeedbackAddress must be the receiver", args=appstore)
+        check(make_app(root, "feedback-other-key", feature, app_info(AndariumFeedbackAddress="other@receiver.fixture")),
+              passes=False, expect="must be the receiver the build names", args=appstore)
+        check(make_app(root, "feedback-not-built", clean, feedback_info), passes=False,
+              expect="lacks Send feedback", args=appstore)
+        check(make_app(root, "feedback-partial", partial, feedback_info), passes=False,
+              expect="MessageUI.framework", args=appstore)
+        # No receiver, so nothing of it: not the code, not the key, not the strings.
+        check(make_app(root, "feedback-code-without-receiver", feature, app_info()), passes=False,
+              expect="carries Send feedback")
+        check(make_app(root, "feedback-key-without-receiver", clean, feedback_info), passes=False,
+              expect="has AndariumFeedbackAddress though the build names no receiver")
+        check(make_app(root, "feedback-framework-without-receiver", clean, app_info(), framework=feature),
+              passes=False, expect="Runtime.framework/Runtime: carries Send feedback")
+        words = make_app(root, "feedback-words", clean, app_info())
+        (words / "en.lproj").mkdir()
+        (words / "en.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
+        check(words, passes=False, expect="has Send feedback strings")
+        # The receiver of the local configuration is one strict address, and a
+        # real one: no quotes, angle brackets, trailing semicolon or second @,
+        # no placeholder domain. (SendFeedbackMail.isWellFormed holds the same
+        # rules; AndariumCore's SendFeedbackTests pin that side.)
+        for index, address in enumerate((
+                        "person", "person@receiver", "@receiver.fixture", "a b@receiver.fixture",
+                        "person@example.com", "person@mail.example.org", "person@receiver.test",
+                        "person@receiver.invalid",
+                        '"person@receiver.fixture"', '"person"@receiver.fixture', "<person@receiver.fixture>",
+                        "Person <person@receiver.fixture>", "person@receiver.fixture;",
+                        "person@receiver.fixture,other@receiver.fixture", "person@receiver@receiver.fixture",
+                        "per..son@receiver.fixture", ".person@receiver.fixture", "person.@receiver.fixture",
+                        "person@-receiver.fixture", "person@receiver-.fixture", "person@receiver..fixture",
+                        "person@receiver.fixture.", "person@receiver.f1x", "person@receiver.f",
+                        "person@receiver.fixture\n", "p" * 65 + "@receiver.fixture",
+                        "person@" + "r" * 64 + ".fixture")):
+            check(make_app(root, f"feedback-address-{index}",
+                           feature, app_info(AndariumFeedbackAddress=address)),
+                  passes=False, expect="Send feedback: the receiver", args=["--feedback-address", address])
+        for index, address in enumerate((
+                "first.last+tag@mail.receiver.fixture", "p_q%r-s@receiver-one.fixture", "p" * 64 + "@receiver.fixture")):
+            check(make_app(root, f"feedback-address-ok-{index}", feature,
+                           app_info(AndariumFeedbackAddress=address)),
+                  passes=True, expect="Send feedback is compiled in", args=["--feedback-address", address])
+        # A build that names no receiver still has the feature's file names in the
+        # linker's debug map of its Debug or Release product.
+        mapped_feedback = build_with_debug_map(root, "mapped-feedback", "/Users/NAME/SendFeedbackSheet")
+        # The map's symbol names are searched, though: a function the feature
+        # defines is a stab the linker shares its string with the symbol for.
+        symbol_only = build_with_debug_map(
+            root, "symbol-only", "/Users/NAME/Project",
+            # The linker gives a function's stab the symbol's own string for most
+            # functions (here the second); a hidden one is in no export trie.
+            "__attribute__((visibility(\"hidden\"))) int plain_first(void) { return 2; }\n"
+            "__attribute__((visibility(\"hidden\"))) int _s8Andarium17SendFeedbackModelC4openyyF(void) { return 1; }\n")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"feedback-{configuration}-debug-map", mapped_feedback, app_info()),
+                  passes=True, expect=f"Send feedback is not compiled in ({configuration})",
+                  args=["--feedback", "--configuration", configuration])
+            check(make_app(root, f"feedback-{configuration}-symbol-only", symbol_only, app_info()),
+                  passes=False, expect="carries Send feedback (SendFeedback)",
+                  args=["--feedback", "--configuration", configuration])
+        check(make_app(root, "feedback-appstore-debug-map", mapped_feedback, app_info()),
+              passes=True, expect="Send feedback is not compiled in")
+        check(make_app(root, "feedback-appstore-symbol-only", symbol_only, app_info()),
+              passes=False, expect="carries Send feedback (SendFeedback)")
+        # The Debug build keeps the application's code in a library beside the
+        # stub executable; the check reads it.
+        debug = make_app(root, "feedback-debug-library", clean, app_info())
+        shutil.copyfile(feature, debug / "Fixture.debug.dylib")
+        check(debug, passes=False, expect="Fixture.debug.dylib: carries Send feedback")
+        # The other configurations: absent, or the arranged example address,
+        # which Debug alone takes.
+        other = ["--feedback", "--configuration"]
+        arranged_info = app_info(AndariumFeedbackAddress="feedback@example.com")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"feedback-{configuration}-absent", clean, app_info()), passes=True,
+                  expect=f"Send feedback is not compiled in ({configuration})", args=[*other, configuration])
+            # The local configuration's receiver never reaches them.
+            check(make_app(root, f"feedback-{configuration}-receiver", feature, feedback_info), passes=False,
+                  expect="not the arranged example address", args=[*other, configuration, *appstore])
+            check(make_app(root, f"feedback-{configuration}-code", feature, app_info()), passes=False,
+                  expect="carries Send feedback", args=[*other, configuration])
+            check(make_app(root, f"feedback-{configuration}-key", clean, feedback_info), passes=False,
+                  expect="though the build names no receiver", args=[*other, configuration])
+        check(make_app(root, "feedback-Debug-arranged", feature, arranged_info),
+              passes=True, expect="Send feedback is compiled in (Debug)", args=[*other, "Debug", *arranged])
+        # Release is what sideloads and forks build: it refuses the arrangement,
+        # whatever the product holds.
+        check(make_app(root, "feedback-Release-arranged", feature, arranged_info),
+              passes=False, expect="only Debug takes the arrangement", args=[*other, "Release", *arranged])
+        check(make_app(root, "feedback-Release-arranged-absent", clean, app_info()),
+              passes=False, expect="only Debug takes the arrangement", args=[*other, "Release", *arranged])
+        check(make_app(root, "feedback-Debug-other-address", feature,
+                       app_info(AndariumFeedbackAddress="other@receiver.fixture")),
+              passes=False, expect="not the arranged example address",
+              args=[*other, "Debug", "--feedback-address", "other@receiver.fixture"])
+        check(make_app(root, "feedback-appstore-arranged", feature, arranged_info),
+              passes=False, expect="placeholder address", args=arranged)
+
+        # The local configuration's receiver is in no file of a bundle that does
+        # not name it, and the check never prints it. Nothing here is a Mach-O
+        # with a code section: bytes anywhere count, in either case.
+        leaky = build(root, "leaky", f'const char *fixture(void) {{ return "{receiver}"; }}\n')
+        data_file = make_app(root, "leak-data-file", clean, app_info())
+        (data_file / "Data.bin").write_bytes(b"\0\1" + receiver.upper().encode() + b"\2")
+        nested = make_app(root, "leak-nested-file", clean, app_info())
+        (nested / "en.lproj").mkdir()
+        (nested / "en.lproj" / "InfoPlist.strings").write_bytes(f'"CFBundleName" = "{receiver}";\n'.encode())
+        # The chunk the check reads ends inside the receiver.
+        straddle = make_app(root, "leak-straddle", clean, app_info())
+        (straddle / "Big.bin").write_bytes(b"\0" * ((8 << 20) - 5) + receiver.encode() + b"\0")
+        leaks = (
+            ("executable", make_app(root, "leak-executable", leaky, app_info()), "Fixture"),
+            ("framework", make_app(root, "leak-framework", clean, app_info(), framework=leaky),
+             "Frameworks/Runtime.framework/Runtime"),
+            ("info-plist", make_app(root, "leak-info-plist", clean, feedback_info), "Info.plist"),
+            ("data-file", data_file, "Data.bin"),
+            ("nested-file", nested, "en.lproj/InfoPlist.strings"),
+            ("straddle", straddle, "Big.bin"),
+        )
+        for name, app, path in leaks:
+            for configuration in ("Debug", "Release"):
+                # No address, and the arranged one: both are a build that does
+                # not name the local file's receiver.
+                for arguments in (local, [*local, *arranged]):
+                    check(app, passes=False, expect=f"{path}: holds the receiver of the local configuration",
+                          never=receiver, args=[*other, configuration, *arguments])
+            check(app, passes=False, expect=f"{path}: holds the receiver of the local configuration",
+                  never=receiver, args=local)
+        # The same bundles without the receiver passed in are not held to it,
+        # and a bundle without the bytes passes with it.
+        check(make_app(root, "leak-none", clean, app_info(), framework=clean), passes=True,
+              expect="ready for the App Store", args=local)
+        check(make_app(root, "leak-none-debug", clean, app_info()), passes=True,
+              expect="Send feedback is not compiled in (Debug)", args=[*other, "Debug", *local])
+        check(make_app(root, "leak-none-arranged", feature, arranged_info), passes=True,
+              expect="Send feedback is compiled in (Debug)", args=[*other, "Debug", *local, *arranged])
+        # An App Store build that names it holds it in Info.plist, and nowhere else.
+        check(make_app(root, "leak-named", feature, feedback_info), passes=True,
+              expect="Send feedback is compiled in", args=appstore)
+        named_leak = make_app(root, "leak-named-elsewhere", feature, feedback_info)
+        (named_leak / "Data.bin").write_bytes(receiver.encode())
+        check(named_leak, passes=True, expect="Send feedback is compiled in", args=appstore)
+
+        # The built Info.plist keeps every value of Config/Info.plist, whichever
+        # way the feedback block went: the preprocessor changes the feedback key
+        # alone. The source here has a build setting inside a nested value, as
+        # the real one does, and the feedback block.
+        source = root / "Info.plist.source"
+        source.write_text(INFO_SOURCE, encoding="utf-8")
+        scene = {"UISceneConfigurations": {"Role": [{"UISceneConfigurationName": "Fixture",
+                                                      "UISceneDelegateClassName": "Fixture.SceneDelegate"}]}}
+        base_info = {"UIApplicationSceneManifest": scene}
+        info_args = ["--info-source", str(source)]
+        for configuration, extra, info in (
+                ("Debug", [], app_info(**base_info)),
+                ("Release", [], app_info(**base_info)),
+                ("Debug", arranged, app_info(AndariumFeedbackAddress="feedback@example.com", **base_info))):
+            code = feature if extra else clean
+            check(make_app(root, f"info-source-{configuration}-{len(extra)}", code, info), passes=True,
+                  expect="not compiled in" if not extra else "compiled in",
+                  args=[*other, configuration, *extra, *info_args])
+        check(make_app(root, "info-source-appstore", clean, app_info(**base_info)), passes=True,
+              expect="ready for the App Store", args=info_args)
+        check(make_app(root, "info-source-appstore-named", feature,
+                       app_info(AndariumFeedbackAddress=receiver, **base_info)),
+              passes=True, expect="ready for the App Store", args=[*appstore, *info_args])
+        # A value the preprocessor changed: a macro expanded in a string, in a
+        # list, in a nested value; a key it lost.
+        for name, info, expect in (
+                ("string", app_info(CFBundleName="1", **base_info), "CFBundleName differs"),
+                ("list", app_info(UIRequiredDeviceCapabilities=["arm64", "1"], **base_info),
+                 "UIRequiredDeviceCapabilities differs"),
+                ("longer-list", app_info(UIRequiredDeviceCapabilities=["arm64", "metal", "1"], **base_info),
+                 "UIRequiredDeviceCapabilities differs"),
+                ("nested", app_info(UIApplicationSceneManifest={"UISceneConfigurations": {"Role": [
+                    {"UISceneConfigurationName": "1", "UISceneDelegateClassName": "Fixture.SceneDelegate"}]}}),
+                 "UIApplicationSceneManifest differs"),
+                ("setting-gone", app_info(UIApplicationSceneManifest={"UISceneConfigurations": {"Role": [
+                    {"UISceneConfigurationName": "Fixture", "UISceneDelegateClassName": 1}]}}),
+                 "UIApplicationSceneManifest differs"),
+                ("flag", app_info(ITSAppUsesNonExemptEncryption=True, **base_info),
+                 "ITSAppUsesNonExemptEncryption differs"),
+                ("missing", app_info(CFBundleName=None, **base_info), "CFBundleName of Info.plist.source is missing"),
+                ("missing-nested", app_info(UIApplicationSceneManifest={}),
+                 "UIApplicationSceneManifest differs")):
+            for configuration in ("Debug", "Release"):
+                check(make_app(root, f"info-source-{name}-{configuration}", clean, info), passes=False,
+                      expect=expect, args=[*other, configuration, *info_args])
+            check(make_app(root, f"info-source-{name}-appstore", clean, info), passes=False,
+                  expect=expect, args=info_args)
+        # A source that cannot be read is no pass.
+        check(make_app(root, "info-source-absent", clean, app_info(**base_info)), passes=False,
+              expect="cannot be compared", args=["--info-source", str(root / "absent.plist")])
 
         # The privacy manifests are checked too.
         check(make_app(root, "no-manifest", clean, app_info(), manifest=False),

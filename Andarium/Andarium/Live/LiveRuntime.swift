@@ -160,10 +160,10 @@ final class LiveRuntime: RuntimeDriver {
     /// What stopped the last attempt in this process to finish a restore that
     /// did not finish; the listing carries it.
     private var rollForwardFailure: SnapshotFailure?
-    private var view: GuestMetalView?
+    private(set) var view: GuestMetalView?
     private var geometry: GuestDisplayGeometry?
     private var bootStartedAt = Date()
-    private var runStartedAt: Date?
+    private(set) var runStartedAt: Date?
     private var thermalObserver: NSObjectProtocol?
     private var console: ConsoleSink?
 

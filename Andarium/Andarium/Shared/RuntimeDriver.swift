@@ -2,6 +2,9 @@
 
 import AndariumCore
 import Foundation
+#if FEEDBACK_MAIL
+import UIKit
+#endif
 
 /// What the Cancel button of a long task does. Two are equal when they are the
 /// same button, so a state that only changes its words stays equal to itself.
@@ -175,6 +178,14 @@ protocol RuntimeDriver: AnyObject {
     /// a guest that sleeps. The caller keeps the last figures then. It may
     /// wait up to half a second, and never on the main thread.
     func readGuestMemory() async -> GuestMemorySample?
+    #if FEEDBACK_MAIL
+    /// The guest's display as the host presents it now, at the guest's own
+    /// pixels and nothing of the application's screens over it; nil when no
+    /// guest runs or the display is not there.
+    func captureGuestDisplay() -> UIImage?
+    /// Seconds the guest has run in this session; nil while none runs.
+    func runningSeconds() -> Int?
+    #endif
     #if !APP_STORE
     /// Whether a debugger that serves the JIT is attached to Andarium now.
     func jitDebuggerAttached() -> Bool
@@ -191,6 +202,11 @@ extension RuntimeDriver {
     func guestStallFiles() async -> [BugReportArchive.Entry] { [] }
     /// A driver with no session record has nothing to tell.
     func setNetworkNotice(_ denial: NetworkDenial?) {}
+    #if FEEDBACK_MAIL
+    /// A driver with no display has no picture, and no run to time.
+    func captureGuestDisplay() -> UIImage? { nil }
+    func runningSeconds() -> Int? { nil }
+    #endif
 }
 
 /// What a screen needs from its launch arguments to open a state directly.

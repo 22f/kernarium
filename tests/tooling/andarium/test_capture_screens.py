@@ -201,5 +201,36 @@ class CaptureLanguageTests(unittest.TestCase):
             self.assertIn(f"{shot}\t", listing.getvalue())
 
 
+class FeedbackShotTests(unittest.TestCase):
+    """The shots of Send feedback need a Preview built with it; any other Preview skips them."""
+
+    def setUp(self):
+        self.script = load_script()
+        self.shots = [shot for shot in self.script.SHOTS if shot.feedback]
+
+    def test_the_feedback_shots_are_listed_and_named_apart(self):
+        self.assertGreaterEqual(len(self.shots), 10)
+        self.assertTrue(all(shot.id.startswith("feedback-") for shot in self.shots))
+        self.assertEqual({shot.group for shot in self.shots}, {"Feedback"})
+        ids = [shot.id for shot in self.script.SHOTS]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_a_preview_without_the_feature_is_no_reason_to_wait_and_is_named(self):
+        shot = self.shots[0]
+        state = {"pid": 7, "screen": shot.screen, "state": "active"}
+        with mock.patch.object(self.script, "alive", return_value=True), \
+                mock.patch.object(self.script, "app_state", return_value=state):
+            self.assertIn("FEEDBACK_ADDRESS", self.script.not_in_front("UDID", 7, shot))
+            state["feedback"] = True
+            self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
+
+    def test_the_other_shots_ask_nothing_of_the_build(self):
+        shot = next(shot for shot in self.script.SHOTS if not shot.feedback)
+        state = {"pid": 7, "screen": shot.screen, "state": "active"}
+        with mock.patch.object(self.script, "alive", return_value=True), \
+                mock.patch.object(self.script, "app_state", return_value=state):
+            self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
+
+
 if __name__ == "__main__":
     unittest.main()

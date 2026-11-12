@@ -60,6 +60,9 @@ struct SessionSettingsSheet: View {
                 }
             }
         }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model)
+        #endif
         .environment(\.filesBarHeight, filesBarHeight)
         // The bar is outside the pages, so folders slide under it.
         .safeAreaBar(edge: .bottom) {
@@ -136,6 +139,9 @@ struct SessionSettingsSheet: View {
     /// Tapping the row starts at once.
     private var diagnostics: some View {
         Section("Diagnostics") {
+            #if FEEDBACK_MAIL
+            if model.feedbackAddress != nil { SendFeedbackEntrance(place: .settings) }
+            #endif
             Button {
                 dismiss()
                 model.createBugReport()
@@ -150,6 +156,7 @@ struct SessionSettingsSheet: View {
             // The guest's one adb channel is busy with the transfer.
             .disabled(model.fileBrowser?.busy == true)
         }
+        .id("diagnostics")
     }
 
     // MARK: Apps
