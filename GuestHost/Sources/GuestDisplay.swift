@@ -205,6 +205,25 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
         }
     }
 
+    override init(frame frameRect: CGRect, device: MTLDevice?) {
+        super.init(frame: frameRect, device: device)
+        keepAspectWhileResizing()
+    }
+
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+        keepAspectWhileResizing()
+    }
+
+    /// The layer shows the last presented frame until the guest draws again,
+    /// and its default `.resize` stretches that frame to whatever bounds the
+    /// layer has meanwhile, which a rotation or a window resize makes another
+    /// shape for a moment. Aspect-fit keeps the frame's proportions; where the
+    /// frame and the view have the same shape it changes nothing.
+    private func keepAspectWhileResizing() {
+        layer.contentsGravity = .resizeAspect
+    }
+
     override var canBecomeFirstResponder: Bool { true }
     // While the guest has the keyboard focus, three fingers are the guest's
     // touches, not UIKit's undo, redo, copy and paste gestures.

@@ -256,6 +256,14 @@ struct GuestHardwareInputTests {
         #expect(!view.interactions.contains { $0 is UIPointerInteraction })
     }
 
+    @Test func theViewKeepsTheLastFramesProportionsWhileItResizes() {
+        // A turn or a window resize changes the layer's bounds before the guest
+        // draws for them, and the layer's default would stretch the frame.
+        let frame = CGRect(x: 0, y: 0, width: 200, height: 100)
+        #expect(GuestMetalView(frame: frame, device: nil).layer.contentsGravity == .resizeAspect)
+        #expect(TextGuestMetalView(frame: frame, device: nil).layer.contentsGravity == .resizeAspect)
+    }
+
     @Test func theViewHidesTheSystemPointerOnlyWhileTheMouseIsTheGuests() throws {
         let view = GuestMetalView(frame: CGRect(x: 0, y: 0, width: 200, height: 100), device: nil)
         let input = GuestHardwareInput()
