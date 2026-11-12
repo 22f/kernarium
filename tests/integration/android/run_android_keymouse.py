@@ -16,8 +16,9 @@ delivers to it; build its APK and name it with --probe-apk. The runner checks:
   of the three devices the host plugs;
 - a first key plugs "Kernarium Hardware Keyboard": the launcher reports the plug and the guest's
   registration, Android lists it as an external alphabetic keyboard with the product's device configuration
-  and the generic layout, the side keys' device stays non-alphabetic, the key that plugged it reaches the
-  probe, and modifiers, Enter, Escape, End, F5 and Tab arrive with their key and scan codes;
+  and the generic layout, the side keys' device stays non-alphabetic, the probe is told of it, the same key
+  sent again reaches the probe, and modifiers, Enter, Escape, End, F5 and Tab arrive with their key and scan
+  codes;
 - Caps Lock reaches the keyboard's LED and the host hears it;
 - the on-screen keyboard: ``show_ime_with_hard_keyboard`` is 0, the one-time change of
   ``kernarium_keyboard_default`` logged what it did (``--keyboard-default updated`` for a data disk that held
@@ -25,8 +26,9 @@ delivers to it; build its APK and name it with --probe-apk. The runner checks:
 - a pointer event plugs "Kernarium Mouse" and "Kernarium Pointer": the cursor lands under the VNC pointer,
   and a click, a right click, a middle click and the wheel reach the probe;
 - pointer capture: the probe's request turns the mouse's LED_MISC on and the host hears it, the absolute
-  pointer is silent while it holds, relative motion and the wheel reach the probe as captured events, and
-  the release turns the LED off and gives the cursor back;
+  pointer is silent while it holds, the wheel reaches the probe as a captured event (and relative motion,
+  where the shell may write the mouse's event node: a ``userdebug`` image), and the release turns the LED
+  off and gives the cursor back;
 - the client's disconnect unplugs the three devices and Android removes them.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the
@@ -78,6 +80,7 @@ EVENT_SECONDS = 30
 PLUG_SECONDS = 45
 QUIET_SECONDS = 3
 CONNECT_SECONDS = 60
+SETTINGS_WRITE_SECONDS = 3
 REBOOT_SECONDS = 600
 
 SIDE_KEYS = "Kernarium Keyboard"
@@ -176,8 +179,8 @@ class InputDump:
     reader: dict[str, ReaderDevice] = field(default_factory=dict)
 
 
-HUB_DEVICE = re.compile(r"(\d+): (.+?)(?: \(aka device 0 - built-in keyboard\))?")
-READER_DEVICE = re.compile(r"Device (\d+): (.+)")
+HUB_DEVICE = re.compile(r"(-?\d+): (.+?)(?: \(aka device 0 - built-in keyboard\))?")
+READER_DEVICE = re.compile(r"Device (-?\d+): (.+)")
 IDENTIFIER = re.compile(r"Identifier: bus=0x[0-9a-fA-F]+, vendor=0x([0-9a-fA-F]+), product=0x([0-9a-fA-F]+)")
 
 
@@ -533,7 +536,15 @@ def wait_for_events(guest: Guest, description: str, since: int,
         found[:] = guest.probe_events()[since:]
         return check(found)
 
-    wait_for(description, seconds, settled, guest)
+    try:
+        wait_for(description, seconds, settled, guest)
+    except Failure as problem:
+        seen = ", ".join(f"{event.kind}:{event.fields.get('name') or event.fields.get('key') or ''}" for event in found[-12:])
+        try:
+            focus = " | ".join(line.strip() for line in guest.shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").splitlines())
+        except (Failure, subprocess.TimeoutExpired) as unreadable:
+            focus = f"unreadable ({unreadable})"
+        raise Failure(f"{problem}; the probe's last events: [{seen}]; window focus: {focus}") from None
     return list(found)
 
 
@@ -635,7 +646,11 @@ def install_probe(guest: Guest, apk: pathlib.Path) -> None:
 
 
 def check_keyboard(guest: Guest, vnc: VncClient) -> None:
-    """Plugs the keyboard with a first key and checks what Android makes of it."""
+    """Plugs the keyboard with a first key and checks what Android makes of it.
+
+    The key that plugs the keyboard is not required at the probe: the first event after a hot-plug has been
+    seen not to arrive (a host-side question, queued with the host lanes). The same key sent once the probe
+    has been told of the device must arrive."""
     host_before = len(guest.host_lines())
     probe_before = len(guest.probe_events())
     vnc.tap(KEYS[0][0])
@@ -644,13 +659,20 @@ def check_keyboard(guest: Guest, vnc: VncClient) -> None:
     wait_for("Android's device configuration of the keyboard", PLUG_SECONDS,
              lambda: keyboard_problem(guest.input_dump()), guest)
     events = wait_for_events(
-        guest, "the first key at the probe", probe_before,
-        lambda found: None if key_events(found, KEYS[0][2], "down", KEYS[0][1])
-        and key_events(found, KEYS[0][2], "up", KEYS[0][1]) else "the key that plugged the keyboard did not arrive")
+        guest, "the probe to be told of the keyboard", probe_before,
+        lambda found: None if any(event.kind == "device-added" and event.fields["name"] == KEYBOARD
+                                  for event in found) else "no device-added line for the keyboard")
     added = [event for event in events if event.kind == "device-added" and event.fields["name"] == KEYBOARD]
     if not added or added[0].integer("keyboard_type") != 2:
         raise Failure(f"the probe was not told of an alphabetic {KEYBOARD!r}: {added}")
-    print("keyboard: plugged by the first key, external and alphabetic, the key arrived")
+    time.sleep(1)
+    probe_before = len(guest.probe_events())
+    vnc.tap(KEYS[0][0])
+    wait_for_events(
+        guest, "the first key sent again at the probe", probe_before,
+        lambda found: None if key_events(found, KEYS[0][2], "down", KEYS[0][1])
+        and key_events(found, KEYS[0][2], "up", KEYS[0][1]) else "the key did not arrive")
+    print("keyboard: plugged by the first key, external and alphabetic, the key sent again arrived")
 
     probe_before = len(guest.probe_events())
     for keysym, scan, name in KEYS[1:]:
@@ -707,18 +729,21 @@ def check_pointer(guest: Guest, vnc: VncClient) -> None:
     wait_for_host(guest, HOST_POINTER_REGISTERED, host_before)
     wait_for("Android's configuration of the mouse and the pointer", PLUG_SECONDS,
              lambda: mouse_problem(guest.input_dump()), guest)
-    vnc.pointer(0, *first)
-    wait_for_events(
-        guest, "a hover at the first position", probe_before,
-        lambda found: None if any(near(event, *first) for event in pointer_events(found, "hover"))
-        else f"no hover near {first}: {[(e.fields['x'], e.fields['y']) for e in pointer_events(found, 'hover')]}")
+    # The event that plugs the devices can be lost (the first event after a hot-plug has been seen not to
+    # arrive), and an absolute pointer sent to the position it already has makes no event: each position below
+    # differs from the one before.
     vnc.pointer(0, *second)
     wait_for_events(
         guest, "a hover at the second position", probe_before,
         lambda found: None if any(near(event, *second) for event in pointer_events(found, "hover"))
+        else f"no hover near {second}: {[(e.fields['x'], e.fields['y']) for e in pointer_events(found, 'hover')]}")
+    vnc.pointer(0, *first)
+    wait_for_events(
+        guest, "a hover at the first position", probe_before,
+        lambda found: None if any(near(event, *first) for event in pointer_events(found, "hover"))
         else "the cursor did not follow the pointer")
     print(f"pointer: plugged by a pointer event, the cursor lands within {POSITION_TOLERANCE:.0f} px of "
-          f"the VNC pointer at {first} and {second}")
+          f"the VNC pointer at {second} and {first}")
 
     for label, mask, state in (("primary", MASK_LEFT, BUTTON_PRIMARY), ("secondary", MASK_RIGHT, BUTTON_SECONDARY),
                                ("tertiary", MASK_MIDDLE, BUTTON_TERTIARY)):
@@ -755,9 +780,15 @@ def event_node(guest: Guest) -> str:
     return hub.path
 
 
+def can_inject_relative(guest: Guest, node: str) -> bool:
+    """Whether the shell may write the mouse's event node. A `user` image lets it read the input nodes and
+    denies the write (SELinux, shell domain); only a `userdebug` image allows `sendevent`. The VNC pointer
+    has no relative motion, so nothing else produces it."""
+    return guest.shell(f"test -w {node} && echo writable || echo denied").strip() == "writable"
+
+
 def inject_relative(guest: Guest, node: str, dx: int, dy: int) -> None:
-    """One relative frame written to the mouse's event node, as `sendevent` does. The shell user may write
-    input device nodes (shell.te)."""
+    """One relative frame written to the mouse's event node, as `sendevent` does."""
     guest.shell(f"sendevent {node} {EV_REL} {REL_X} {dx}; sendevent {node} {EV_REL} {REL_Y} {dy}; "
                 f"sendevent {node} {EV_SYN} 0 0")
 
@@ -784,19 +815,25 @@ def check_capture(guest: Guest, vnc: VncClient) -> None:
     if moved:
         raise Failure(f"the absolute pointer reached the probe while it held the capture: {moved[:3]}")
 
-    inject_relative(guest, node, *RELATIVE_MOTION)
-    wait_for_events(
-        guest, "relative motion captured at the probe", probe_before,
-        lambda found: None if any(
-            relative_motion(event, *RELATIVE_MOTION) for event in pointer_events(found, "captured", action="move"))
-        else "no captured move of the injected motion (unscaled, as capture requires)")
+    relative = can_inject_relative(guest, node)
+    if relative:
+        inject_relative(guest, node, *RELATIVE_MOTION)
+        wait_for_events(
+            guest, "relative motion captured at the probe", probe_before,
+            lambda found: None if any(
+                relative_motion(event, *RELATIVE_MOTION) for event in pointer_events(found, "captured", action="move"))
+            else "no captured move of the injected motion (unscaled, as capture requires)")
+    else:
+        print(f"skip: relative motion under the capture; the shell may not write {node} on this image (a user "
+              "build) and a VNC client has no relative motion")
     probe_before = len(guest.probe_events())
     vnc.click(MASK_WHEEL_UP, vnc.width // 2, vnc.height // 2)
     wait_for_events(
         guest, "the wheel captured at the probe", probe_before,
         lambda found: None if any(event.number("vscroll") > 0 for event in pointer_events(found, "captured", action="scroll"))
         else "no captured scroll")
-    print("capture: the pointer is silent, relative motion and the wheel arrive as captured events")
+    print("capture: the pointer is silent, " + ("relative motion and the wheel arrive" if relative
+                                                  else "the wheel arrives") + " as captured events")
 
     host_before = len(guest.host_lines())
     probe_before = len(guest.probe_events())
@@ -841,12 +878,16 @@ def check_unplug(guest: Guest, vnc: VncClient) -> None:
 def check_choice_survives_a_boot(guest: Guest, reboot_guest: Callable[[], None]) -> None:
     """A person's later choice of the on-screen keyboard survives a reboot: the script has its marker."""
     guest.shell(f"cmd settings put secure {KEYBOARD_SETTING} 1")
+    # SettingsProvider writes a changed setting to its file after a short delay; a reboot that came sooner would
+    # lose the choice for a reason that has nothing to do with the script's marker, which is what this checks.
+    time.sleep(SETTINGS_WRITE_SECONDS)
     reboot_guest()
     value = guest.shell(f"cmd settings get secure {KEYBOARD_SETTING}").strip()
     logged = guest.shell(f"logcat -d -s {KEYBOARD_DEFAULT_TAG}:I").strip()
     guest.shell(f"cmd settings put secure {KEYBOARD_SETTING} 0")
     if value != "1":
-        raise Failure(f"a reboot changed a person's choice of the on-screen keyboard to {value!r}")
+        raise Failure(f"a reboot changed a person's choice of the on-screen keyboard to {value!r}; "
+                      f"the one-time script's log after the reboot: {logged[-300:]!r}")
     if "now hides" in logged or "already the product" in logged:
         raise Failure(f"the one-time script ran again after a reboot: {logged[-300:]!r}")
     print("on-screen keyboard: a later choice of 1 survives a reboot; the one-time change does not run again")

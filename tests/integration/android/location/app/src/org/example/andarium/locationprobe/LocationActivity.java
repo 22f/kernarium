@@ -32,8 +32,17 @@ import java.util.Set;
  * installed in a product image.
  *
  * Extras: expect = fine | approximate | coarse | none; lat and lon (doubles, the position the
- * host source reports); seconds (1 to 120); max_accuracy (meters, fine only); run_id.
+ * host source reports); seconds (1 to 120); max_accuracy (meters, fine only); run_id; order =
+ * locations_first (the default) | status_first.
  * The permission state is the harness's to set (pm grant and pm revoke) before the launch.
+ *
+ * The order is that of the registrations. locations_first requests the fixes and then registers
+ * the status and NMEA listeners while the HAL's first session starts, an order that races the
+ * HAL's first callbacks. The framework tells a status listener onStarted only for a session that
+ * begins after it registered, and onFirstFix only if it registered before the session's first
+ * fix; it replays neither. So only status_first expects them, and only when its session is the
+ * first one on the device: another client already holding the gps provider means no session
+ * begins for this probe.
  */
 public final class LocationActivity extends Activity implements LocationListener {
     private static final String TAG = "LocationProbe";
@@ -43,7 +52,7 @@ public final class LocationActivity extends Activity implements LocationListener
     private String expect, runId;
     private double expectedLatitude, expectedLongitude, maxAccuracy;
     private long deadline;
-    private boolean completed, gnssDenied, nmeaDenied;
+    private boolean completed, gnssDenied, nmeaDenied, statusFirst;
 
     // What the location listener saw.
     private int fixes;
@@ -119,6 +128,7 @@ public final class LocationActivity extends Activity implements LocationListener
         int seconds = Math.max(1, Math.min(120, intent.getIntExtra("seconds", 15)));
         deadline = SystemClock.elapsedRealtime() + seconds * 1000L;
         completed = gnssDenied = nmeaDenied = false;
+        statusFirst = "status_first".equals(intent.getStringExtra("order"));
         fixes = firstFixes = satelliteCallbacks = maxSatellites = sentences = 0;
         minAccuracy = Double.MAX_VALUE;
         maxAccuracySeen = maxDistance = 0;
@@ -127,13 +137,19 @@ public final class LocationActivity extends Activity implements LocationListener
         ggaQualities.clear();
         for (int i = sample.length() - 1; i >= 0; i--) sample.remove(i);
         new File(getFilesDir(), "result.json").delete();
+        if (statusFirst) listenToStatus();
         try {
             manager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000, 0, this, getMainLooper());
         } catch (SecurityException | IllegalArgumentException error) {
             Log.e(TAG, "requestLocationUpdates", error);
         }
-        // Satellite status and NMEA need the precise permission; an application with the coarse
-        // one is refused, which is part of what the coarse expectation checks.
+        if (!statusFirst) listenToStatus();
+        handler.post(tick);
+    }
+
+    // Satellite status and NMEA need the precise permission; an application with the coarse
+    // one is refused, which is part of what the coarse expectation checks.
+    private void listenToStatus() {
         try {
             manager.registerGnssStatusCallback(getMainExecutor(), gnssCallback);
         } catch (SecurityException error) {
@@ -144,7 +160,16 @@ public final class LocationActivity extends Activity implements LocationListener
         } catch (SecurityException error) {
             nmeaDenied = true;
         }
-        handler.post(tick);
+    }
+
+    // onStarted is owed only to a listener that registered before the session began, and
+    // onFirstFix to one that registered before the first fix.
+    private boolean startReported() {
+        return started || !statusFirst;
+    }
+
+    private boolean firstFixReported() {
+        return firstFixes >= 1 || !statusFirst;
     }
 
     @Override public void onLocationChanged(Location location) {
@@ -177,7 +202,8 @@ public final class LocationActivity extends Activity implements LocationListener
         switch (expect) {
             case "fine":
                 return fixes >= 3 && maxDistance <= 10 && maxAccuracySeen <= maxAccuracy && onlyGps && !anyMock
-                    && started && satelliteCallbacks >= 1 && maxSatellites == 0 && !gnssDenied && !nmeaDenied
+                    && startReported() && firstFixReported() && satelliteCallbacks >= 1 && maxSatellites == 0
+                    && !gnssDenied && !nmeaDenied
                     && ggaQualities.contains("1") && newestAgeMs < 30_000;
             case "approximate":
                 // The host source reports an approximate fix; this application holds the precise
@@ -192,7 +218,7 @@ public final class LocationActivity extends Activity implements LocationListener
                     && gnssDenied && nmeaDenied;
             case "none":
                 // The receiver has no position: it powers up, searches and reports nothing.
-                return fixes == 0 && started && !gnssDenied && sentences >= 6
+                return fixes == 0 && startReported() && !gnssDenied && sentences >= 6
                     && ggaQualities.size() == 1 && ggaQualities.contains("0");
             default:
                 return false;
@@ -206,6 +232,7 @@ public final class LocationActivity extends Activity implements LocationListener
                 stopListening();
                 try {
                     JSONObject report = new JSONObject().put("expect", expect).put("run_id", runId)
+                        .put("order", statusFirst ? "status_first" : "locations_first")
                         .put("passed", passed())
                         .put("provider_enabled", manager.isProviderEnabled(LocationManager.GPS_PROVIDER))
                         .put("feature_gps", getPackageManager().hasSystemFeature(PackageManager.FEATURE_LOCATION_GPS))
