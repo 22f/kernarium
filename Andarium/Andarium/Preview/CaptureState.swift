@@ -32,9 +32,13 @@ enum CaptureState {
         case .inactive: "inactive"
         default: "background"
         }
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "pid": Int(ProcessInfo.processInfo.processIdentifier), "screen": screen, "state": state,
         ]
+        #if FEEDBACK_MAIL
+        // The screens of Send feedback exist only in a build that has it.
+        record["feedback"] = true
+        #endif
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
               let data = try? JSONSerialization.data(withJSONObject: record) else { return }
         try? data.write(to: caches.appendingPathComponent("capture-state.json"), options: .atomic)
