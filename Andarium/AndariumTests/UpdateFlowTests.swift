@@ -132,9 +132,24 @@ final class StubDriver: RuntimeDriver {
     }
     var install: (@Sendable (@Sendable (BusyUpdate) -> Void) async throws -> Void) = { _ in }
     private(set) var installed = 0
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    /// Whether each attempt carried the flag, in order.
+    private(set) var installAttempts: [Bool] = []
+    /// The file each attempt was asked to install, in order.
+    private(set) var installURLs: [URL] = []
+    /// What an install does for the attempt with or without the flag; set by a test
+    /// that tells the two apart, otherwise `install` answers both.
+    var installAttempt: (@Sendable (Bool, @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws {
         installed += 1
-        try await install(update)
+        installAttempts.append(bypassLowTargetSdkBlock)
+        installURLs.append(url)
+        if let installAttempt {
+            try await installAttempt(bypassLowTargetSdkBlock, update)
+        } else {
+            try await install(update)
+        }
     }
 
     /// What the resume of a guest paused for space answers, and what Shut

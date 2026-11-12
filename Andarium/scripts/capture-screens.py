@@ -286,6 +286,7 @@ SHOTS: list[Shot] = [
     # Operations on the guest
     s("overlay-bug-report", "Operations", "bug-report", "The full-screen progress while a bug report is made.", wait=2.0),
     s("overlay-install-apk", "Operations", "install-apk", "The full-screen progress while an app installs from Files.", wait=2.0),
+    s("alert-install-legacy", "Operations", "install-legacy", "The question over the install overlay when Android refused an app built for a much older version: Cancel and Install anyway.", wait=2.0),
     s("overlay-install-done", "Operations", "install-done", "The install overlay at its end: App installed with Done. It stays until closed."),
     s("overlay-install-failed", "Operations", "install-failed", "The install overlay at its end: App not installed, the guest's reason and OK."),
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),

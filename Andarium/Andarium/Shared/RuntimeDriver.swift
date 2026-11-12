@@ -60,6 +60,13 @@ struct AppAlert: Identifiable, Equatable {
     var message: String
 }
 
+/// Settings' Install APK asks whether to install an app Android refused for
+/// the version it was built for, with the versions when Android named them.
+struct LegacyInstallQuestion: Identifiable, Equatable {
+    let id = UUID()
+    var target: LegacyTarget
+}
+
 /// How far the system lets Andarium use the microphone.
 enum MicrophoneState: Equatable {
     case notAsked, denied, granted
@@ -136,8 +143,13 @@ protocol RuntimeDriver: AnyObject {
     /// Installs the APK at `url`, which the caller can read, into the guest.
     /// Its size is read once the file is in hand, since an iCloud file has
     /// none before. Cancelling the task stops it while the file is still being
-    /// sent.
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws
+    /// sent. `bypassLowTargetSdkBlock` is true only for the second attempt of
+    /// Settings' Install APK, after the person chose to install an app Android
+    /// refused for the version it was built for; without it that refusal
+    /// throws `LegacyApkRefused`.
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws
     /// Whether the guest's USB debugging setting is on; nil when it cannot be
     /// read now.
     func usbDebugging() async -> Bool?
