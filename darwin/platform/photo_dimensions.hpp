@@ -144,6 +144,38 @@ struct FrameSize {
 [[nodiscard]] FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
                                            std::uint32_t height) noexcept;
 
+// What a format decides about the outputs of the camera that runs in it: the
+// video output's explicit size, which AVFoundation requires to be the aspect
+// ratio of the device's active format (it raises otherwise), and the photo
+// output's maximum, which must be one of the active format's sizes. Both
+// change with every change of the active format, so a camera's outputs are
+// set again for each one.
+struct OutputSizes {
+    // The size the video output is told to deliver; nothing when it delivers
+    // the format's own size (or the camera has no stream, `width` of zero).
+    std::optional<FrameSize> frame;
+    // The largest size the format lists; nothing when it lists none, which
+    // leaves the output's own maximum.
+    std::optional<CameraStillSize> photoMaximum;
+};
+[[nodiscard]] OutputSizes outputSizesFor(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height);
+
+// How a camera changes format, in the order that keeps its outputs valid: the
+// device takes the format, then the outputs take the sizes the format decides
+// (outputSizesFor), and a change that fails undoes both, the format first (an
+// output's sizes are checked against the device's active format, so they are
+// restored once the format they belong to is back). `activate` and
+// `syncOutputs` report a refusal (an exception) as false; `restoreFormat` also
+// runs after a refused `activate`, which may have changed the device in part.
+struct FormatMoveSteps {
+    std::function<bool()> activate;
+    std::function<bool()> syncOutputs;
+    std::function<void()> restoreFormat;
+    std::function<void()> restoreOutputs;
+};
+enum class FormatMove : std::uint8_t { moved, formatRefused, outputsRefused };
+[[nodiscard]] FormatMove moveFormat(const FormatMoveSteps& steps);
+
 // Whether the size the platform resolved for a photo is the size asked for. A
 // resolved size of zero by zero is the platform stating none (a Bayer still
 // alone has no processed photo), which is not a different size.

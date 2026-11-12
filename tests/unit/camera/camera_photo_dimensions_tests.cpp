@@ -401,6 +401,124 @@ void aCameraWithoutStreamsOffersNothing()
     require(offerStills({}, tabletStreams, false, capped, 30).sizes.empty(), "no format, no photo");
 }
 
+// A camera device as AVFoundation treats it: the video output's explicit size
+// is checked against the device's active format (a size of another aspect
+// raises) and the photo output's maximum must be one of the active format's
+// sizes. The steps are built as the platform builds them.
+struct FakeDevice {
+    VideoFormatFacts active;
+    std::optional<FrameSize> video;        // explicit; native when none
+    std::optional<CameraStillSize> photo;  // the photo output's maximum
+    std::uint32_t width {}, height {};     // the stream's size
+    bool refuseOutputs {};                 // the platform refuses the outputs' sizes (a rejected join)
+    std::uint32_t checkedCalls {};
+
+    [[nodiscard]] static bool sameAspect(FrameSize size, const VideoFormatFacts& format)
+    {
+        return std::uint64_t(size.width) * format.height == std::uint64_t(size.height) * format.width;
+    }
+    [[nodiscard]] bool consistent() const
+    {
+        if (video && !sameAspect(*video, active)) return false;
+        return !photo || std::find(active.photoSizes.begin(), active.photoSizes.end(), *photo) != active.photoSizes.end();
+    }
+
+    FormatMove move(const VideoFormatFacts& next)
+    {
+        const VideoFormatFacts before = active;
+        const auto videoBefore = video;
+        const auto photoBefore = photo;
+        FormatMoveSteps steps;
+        steps.activate = [&] {
+            active = next;
+            return true;
+        };
+        steps.syncOutputs = [&] {
+            ++checkedCalls;
+            const OutputSizes sizes = outputSizesFor(next, width, height);
+            if (sizes.frame && !sameAspect(*sizes.frame, active)) return false;
+            video = sizes.frame;
+            if (sizes.photoMaximum) photo = sizes.photoMaximum;
+            // A refusal that comes after the sizes were set (the session's own check at commit).
+            return !refuseOutputs;
+        };
+        steps.restoreFormat = [&] { active = before; };
+        steps.restoreOutputs = [&] {
+            // Restored once the format is back: the check is against the active one.
+            video = videoBefore;
+            photo = photoBefore;
+        };
+        return moveFormat(steps);
+    }
+};
+
+void aFormatChangeSetsTheOutputsForTheNewFormat()
+{
+    const VideoFormatFacts fourByThree = format(1920, 1440, {{1920, 1440}, {4032, 3024}});
+    const VideoFormatFacts wide = format(1280, 720, {{1280, 720}, {1920, 1080}}, 30, true, true);
+    // A 640x480 stream with a photo output, first configured in the 4:3 format.
+    FakeDevice device;
+    device.width = 640;
+    device.height = 480;
+    require(device.move(fourByThree) == FormatMove::moved, "first configure");
+    require(device.video == std::optional<FrameSize>(FrameSize {640, 480}) && device.photo == CameraStillSize({4032, 3024}) &&
+                device.consistent(),
+            "640x480 from a 4:3 format, and a photo maximum the format lists");
+    // A peer joins and the camera moves to a multi-camera format of another aspect.
+    require(device.move(wide) == FormatMove::moved, "migration");
+    require(device.video == std::optional<FrameSize>(FrameSize {864, 486}) && device.photo == CameraStillSize({1920, 1080}) &&
+                device.consistent(),
+            "the output follows: 864x486 is 16:9 and the maximum is the new format's");
+    // The camera is alone again.
+    require(device.move(fourByThree) == FormatMove::moved && device.consistent() &&
+                device.video == std::optional<FrameSize>(FrameSize {640, 480}) && device.photo == CameraStillSize({4032, 3024}),
+            "returning alone sets the outputs of the format it returns to");
+    // The old code left the explicit size alone: the device refuses it.
+    FakeDevice stale = device;
+    stale.active = wide;
+    require(!stale.consistent(), "the 4:3 size against the 16:9 format is what AVFoundation raises for");
+}
+
+void aRejectedChangeRestoresTheFormatAndTheOutputs()
+{
+    const VideoFormatFacts fourByThree = format(1920, 1440, {{1920, 1440}, {4032, 3024}});
+    const VideoFormatFacts wide = format(1280, 720, {{1280, 720}, {1920, 1080}});
+    FakeDevice device;
+    device.width = 640;
+    device.height = 480;
+    require(device.move(fourByThree) == FormatMove::moved);
+    device.refuseOutputs = true;
+    require(device.move(wide) == FormatMove::outputsRefused, "the outputs refuse the new sizes");
+    require(device.active.width == 1920 && device.consistent() && device.video == std::optional<FrameSize>(FrameSize {640, 480}) &&
+                device.photo == CameraStillSize({4032, 3024}),
+            "the old format and the old outputs are back, together");
+    // A device that refuses the format changes nothing and the outputs are not touched.
+    FakeDevice refusing = device;
+    refusing.refuseOutputs = false;
+    const auto calls = refusing.checkedCalls;
+    FormatMoveSteps steps;
+    bool restored = false;
+    steps.activate = [] { return false; };
+    steps.syncOutputs = [&] {
+        ++refusing.checkedCalls;
+        return true;
+    };
+    steps.restoreFormat = [&] { restored = true; };
+    steps.restoreOutputs = [] {};
+    require(moveFormat(steps) == FormatMove::formatRefused && restored && refusing.checkedCalls == calls,
+            "a refused format leaves the outputs alone and puts the format back in case it changed in part");
+}
+
+void aFormatThatListsNoPhotoLeavesTheOutputMaximum()
+{
+    const OutputSizes none = outputSizesFor(format(1920, 1080, {}), 1920, 1080);
+    require(!none.frame && !none.photoMaximum, "the format's own size and no photo size to set");
+    const OutputSizes scaled = outputSizesFor(format(1920, 1080, {{1920, 1080}}), 640, 480);
+    require(scaled.frame == std::optional<FrameSize>(FrameSize {864, 486}) && scaled.photoMaximum == CameraStillSize({1920, 1080}),
+            "864x486 and the format's largest");
+    require(!outputSizesFor(format(1920, 1080, {}), 0, 0).frame, "a camera with no stream has no video output to size");
+}
+
 // The platform raises for a scaled size of another aspect, so the delivered
 // size is compared with the format's by cross multiplication.
 bool keepsAspect(FrameSize delivered, std::uint32_t formatWidth, std::uint32_t formatHeight)
@@ -488,6 +606,9 @@ int main()
     aConcurrentCameraOffersWhatAMultiCameraFormatMakes();
     aStillWithoutAStreamSelectsTheFormatThatMakesItsSize();
     aCameraWithoutStreamsOffersNothing();
+    aFormatChangeSetsTheOutputsForTheNewFormat();
+    aRejectedChangeRestoresTheFormatAndTheOutputs();
+    aFormatThatListsNoPhotoLeavesTheOutputMaximum();
     aStreamSmallerThanItsFormatIsDeliveredScaled();
     aStreamOfAnotherAspectIsDeliveredAtTheFormatsAspect();
     everyStandardSizeIsDeliveredAtEveryFormatsAspect();

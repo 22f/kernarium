@@ -228,6 +228,29 @@ FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeig
     return {std::uint32_t(multiple * ratioWidth), std::uint32_t(multiple * ratioHeight)};
 }
 
+OutputSizes outputSizesFor(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height)
+{
+    OutputSizes sizes;
+    if (width != 0 && height != 0) {
+        const FrameSize delivered = deliveredFrameSize(format.width, format.height, width, height);
+        if (delivered.width != format.width || delivered.height != format.height) sizes.frame = delivered;
+    }
+    sizes.photoMaximum = largestPhotoSize(format.photoSizes);
+    return sizes;
+}
+
+FormatMove moveFormat(const FormatMoveSteps& steps)
+{
+    if (!steps.activate()) {
+        steps.restoreFormat();
+        return FormatMove::formatRefused;
+    }
+    if (steps.syncOutputs()) return FormatMove::moved;
+    steps.restoreFormat();
+    steps.restoreOutputs();
+    return FormatMove::outputsRefused;
+}
+
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept
 {
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;

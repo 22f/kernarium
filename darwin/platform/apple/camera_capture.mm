@@ -122,40 +122,51 @@ struct FormatSet {
     std::vector<AVCaptureDeviceFormat*> formats;
 };
 
+// A 4:2:0 device format as data; nothing for any other.
+std::optional<VideoFormatFacts> factsOf(AVCaptureDeviceFormat* format)
+{
+    const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
+    if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange && subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        return std::nullopt;
+    const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+    if (dimensions.width <= 0 || dimensions.height <= 0) return std::nullopt;
+    VideoFormatFacts facts;
+    facts.width = std::uint32_t(dimensions.width);
+    facts.height = std::uint32_t(dimensions.height);
+    for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges)
+        facts.frameRates.push_back({range.minFrameRate, range.maxFrameRate});
+    facts.photoSizes = listedPhotoSizes(format);
+    facts.fullRange = subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    facts.multiCamera = formatTakenByMultiCameraSession(format);
+    return facts;
+}
+
 FormatSet formatSetOf(AVCaptureDevice* device)
 {
     FormatSet set;
     for (AVCaptureDeviceFormat* format in device.formats) {
-        const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
-        if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange && subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-            continue;
-        const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
-        if (dimensions.width <= 0 || dimensions.height <= 0) continue;
-        VideoFormatFacts facts;
-        facts.width = std::uint32_t(dimensions.width);
-        facts.height = std::uint32_t(dimensions.height);
-        for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges)
-            facts.frameRates.push_back({range.minFrameRate, range.maxFrameRate});
-        facts.photoSizes = listedPhotoSizes(format);
-        facts.fullRange = subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-        facts.multiCamera = formatTakenByMultiCameraSession(format);
-        set.facts.push_back(std::move(facts));
+        auto facts = factsOf(format);
+        if (!facts) continue;
+        set.facts.push_back(std::move(*facts));
         set.formats.push_back(format);
     }
     return set;
 }
 
-// What a video output delivers: NV12, at the size the stream needs (see
-// deliveredFrameSize). Without a scaling the format's own size arrives.
+// What a video output delivers: NV12, at the size the stream needs. The
+// format's own size arrives unless the format decides another (outputSizesFor:
+// the format's aspect ratio, so that it follows every change of format).
 NSDictionary* videoSettingsOf(AVCaptureDeviceFormat* format, std::uint32_t width, std::uint32_t height)
 {
     NSMutableDictionary* settings = [NSMutableDictionary dictionaryWithObject:@(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
                                                                       forKey:(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey];
     const CMVideoDimensions native = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
-    const FrameSize delivered = deliveredFrameSize(std::uint32_t(native.width), std::uint32_t(native.height), width, height);
-    if (delivered.width != std::uint32_t(native.width) || delivered.height != std::uint32_t(native.height)) {
-        settings[(__bridge NSString*)kCVPixelBufferWidthKey] = @(delivered.width);
-        settings[(__bridge NSString*)kCVPixelBufferHeightKey] = @(delivered.height);
+    VideoFormatFacts facts;
+    facts.width = std::uint32_t(native.width);
+    facts.height = std::uint32_t(native.height);
+    if (const auto frame = outputSizesFor(facts, width, height).frame) {
+        settings[(__bridge NSString*)kCVPixelBufferWidthKey] = @(frame->width);
+        settings[(__bridge NSString*)kCVPixelBufferHeightKey] = @(frame->height);
     }
     return settings;
 }
@@ -1011,21 +1022,94 @@ private:
         return true;
     }
 
+    // The explicit sizes a camera's outputs hold, to put back when a change of
+    // format is undone.
+    struct OutputState {
+        NSDictionary* video {};
+        CMVideoDimensions photo {};
+        bool hasVideo {};
+        bool hasPhoto {};
+    };
+    static OutputState outputsOf(const RunningCamera& running)
+    {
+        OutputState state;
+        if (running.videoOutput != nil) {
+            state.video = [running.videoOutput.videoSettings copy];
+            state.hasVideo = true;
+        }
+        if (running.photoOutput != nil) {
+            state.photo = running.photoOutput.maxPhotoDimensions;
+            state.hasPhoto = true;
+        }
+        return state;
+    }
+    static void restoreOutputs(RunningCamera& running, const OutputState& state)
+    {
+        @try {
+            if (state.hasVideo && running.videoOutput != nil && state.video != nil) running.videoOutput.videoSettings = state.video;
+            if (state.hasPhoto && running.photoOutput != nil) running.photoOutput.maxPhotoDimensions = state.photo;
+        } @catch (NSException* exception) {
+            std::fprintf(stderr, "Camera: the outputs' sizes could not be put back after a refused format change: %s\n",
+                         exception.reason.UTF8String);
+        }
+    }
+
+    // Sets the explicit sizes of a camera's outputs for the format it runs in
+    // (outputSizesFor): the video output's delivered size, which AVFoundation
+    // checks against the device's active format, and the photo output's
+    // maximum, which must be one of that format's sizes. Every change of the
+    // active format needs it, whichever path makes the change. `video` is the
+    // camera's video output (a new one is not in `running` yet).
+    static bool syncOutputs(const RunningCamera& running, AVCaptureVideoDataOutput* video, AVCaptureDeviceFormat* format,
+                            std::uint32_t width, std::uint32_t height)
+    {
+        @try {
+            if (video != nil) video.videoSettings = videoSettingsOf(format, width, height);
+            if (running.photoOutput != nil)
+                if (const auto largest = uml::platform::largestPhotoSize(listedPhotoSizes(format)))
+                    running.photoOutput.maxPhotoDimensions = CMVideoDimensions {std::int32_t(largest->width), std::int32_t(largest->height)};
+            return true;
+        } @catch (NSException* exception) {
+            std::fprintf(stderr, "Camera: the outputs refused the sizes of a new format: %s\n", exception.reason.UTF8String);
+            return false;
+        }
+    }
+
+    // Moves a camera that is in the session to `format`: the device's format
+    // and rate, and its outputs' sizes with them (uml::platform::moveFormat).
+    // A refusal puts the old format and the old sizes back.
+    bool moveCamera(std::size_t index, AVCaptureDeviceFormat* format)
+    {
+        const Entry& entry = entries_[index];
+        auto& running = cameras_[index];
+        AVCaptureDevice* device = entry.device;
+        AVCaptureDeviceFormat* const previous = running.format != nil ? running.format : device.activeFormat;
+        const OutputState outputsBefore = outputsOf(running);
+        const bool video = running.video;
+        if (video) running.throttle->requestedRate = running.frameRate;
+        FormatMoveSteps steps;
+        steps.activate = [&] {
+            return video ? setFormat(device, format, throttledRate(*running.throttle, format)) : setActiveFormat(device, format);
+        };
+        steps.syncOutputs = [&] { return syncOutputs(running, running.videoOutput, format, running.width, running.height); };
+        steps.restoreFormat = [&] {
+            (void)(video ? setFormat(device, previous, throttledRate(*running.throttle, previous)) : setActiveFormat(device, previous));
+        };
+        steps.restoreOutputs = [&] { restoreOutputs(running, outputsBefore); };
+        [session_ beginConfiguration];
+        const FormatMove result = moveFormat(steps);
+        [session_ commitConfiguration];
+        if (result != FormatMove::moved) return false;
+        running.format = format;
+        return true;
+    }
+
     // Moves the cameras to their formats; the cameras it moved are put back
     // their settings, which a format change reverts in part.
     bool applyMoves(const std::vector<Move>& moves, std::vector<std::size_t>& moved)
     {
         for (const auto& [index, format] : moves) {
-            auto& other = cameras_[index];
-            bool ok;
-            if (other.video) {
-                other.throttle->requestedRate = other.frameRate;
-                ok = setFormat(entries_[index].device, format, throttledRate(*other.throttle, format));
-            } else {
-                ok = setActiveFormat(entries_[index].device, format);
-            }
-            if (!ok) return false;
-            other.format = format;
+            if (!moveCamera(index, format)) return false;
             moved.push_back(index);
         }
         return true;
@@ -1060,6 +1144,9 @@ private:
         if (ok) ok = configureVideo(camera, entry, running, format, width, height, frameRate);
         if (ok) startSession();
         reapply(moved);
+        // A join that was refused leaves the cameras that moved for it in the
+        // formats a multi-camera session takes; one left alone goes back.
+        if (!ok) returnAlone();
         return ok;
     }
 
@@ -1141,8 +1228,7 @@ private:
         if (!last.video) return;
         AVCaptureDeviceFormat* best = chooseFormat(entries_[index], last.width, last.height, last.frameRate, false);
         if (best == nil || best == last.format) return;
-        if (!setFormat(entries_[index].device, best, throttledRate(*last.throttle, best))) return;
-        last.format = best;
+        if (!moveCamera(index, best)) return;
         reapply({index});
     }
 
@@ -1162,62 +1248,77 @@ private:
     {
         const bool newInput = running.input == nil;
         AVCaptureDeviceFormat* const previousFormat = running.format;
+        const OutputState outputsBefore = outputsOf(running);
         AVCaptureVideoDataOutput* newOutput = nil;
         UMLCameraOutputDelegate* newDelegate = nil;
         AVCaptureConnection* newConnection = nil;
-        bool ok = true;
-        [session_ beginConfiguration];
-        // Every change here can raise; the configuration is committed either way.
-        @try {
-            if (running.input == nil) ok = addInput(entry, running);
-            if (ok) {
-                running.throttle->requestedRate = frameRate;
-                ok = setFormat(entry.device, format, throttledRate(*running.throttle, format));
-            }
-            if (ok && running.videoOutput == nil) {
+        // The stream is configured as every change of format is: the device
+        // takes the format and the outputs the sizes it decides, together, and
+        // a refusal puts both back (a stream that was resized has its old
+        // format and its old sizes again).
+        FormatMoveSteps steps;
+        steps.activate = [&] {
+            if (running.input == nil && !addInput(entry, running)) return false;
+            running.throttle->requestedRate = frameRate;
+            return setFormat(entry.device, format, throttledRate(*running.throttle, format));
+        };
+        steps.syncOutputs = [&] {
+            if (running.videoOutput == nil) {
                 AVCaptureVideoDataOutput* output = [[AVCaptureVideoDataOutput alloc] init];
                 output.videoSettings = @{(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey:
                                              @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
                 output.alwaysDiscardsLateVideoFrames = YES;
                 UMLCameraOutputDelegate* delegate = [[UMLCameraOutputDelegate alloc] initWithCamera:camera state:state_];
                 [output setSampleBufferDelegate:delegate queue:outputQueue_];
+                newDelegate = delegate;
                 if (multiCamera_) {
 #if TARGET_OS_IOS
                     AVCaptureInputPort* port = [running.input portsWithMediaType:AVMediaTypeVideo
                                                                  sourceDeviceType:entry.device.deviceType
                                                              sourceDevicePosition:entry.device.position].firstObject;
-                    if (port != nil && [session_ canAddOutput:output]) {
-                        [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
-                        newOutput = output;
-                        AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
-                        if ([session_ canAddConnection:connection]) {
-                            [session_ addConnection:connection];
-                            newConnection = connection;
-                        } else {
-                            ok = false;
-                        }
-                    } else {
-                        ok = false;
-                    }
+                    if (port == nil || ![session_ canAddOutput:output]) return false;
+                    [(AVCaptureMultiCamSession*)session_ addOutputWithNoConnections:output];
+                    newOutput = output;
+                    AVCaptureConnection* connection = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:output];
+                    if (![session_ canAddConnection:connection]) return false;
+                    [session_ addConnection:connection];
+                    newConnection = connection;
+#else
+                    return false;
 #endif
-                } else if ([session_ canAddOutput:output]) {
+                } else {
+                    if (![session_ canAddOutput:output]) return false;
                     [session_ addOutput:output];
                     newOutput = output;
                     newConnection = [output connectionWithMediaType:AVMediaTypeVideo];
-                } else {
-                    ok = false;
                 }
-                newDelegate = delegate;
             }
-            // The stream's size, scaled by the platform from the format's: a
-            // format chosen for the photos it lists is larger than the preview.
-            AVCaptureVideoDataOutput* const delivering = running.videoOutput != nil ? running.videoOutput : newOutput;
-            if (ok && delivering != nil) delivering.videoSettings = videoSettingsOf(format, width, height);
-        } @catch (NSException*) {
+            // The stream's size, scaled by the platform from the format's at
+            // the format's aspect ratio, and the photo output's maximum.
+            return syncOutputs(running, running.videoOutput != nil ? running.videoOutput : newOutput, format, width, height);
+        };
+        steps.restoreFormat = [&] {
+            if (newInput || !running.video || previousFormat == nil) return;
+            running.throttle->requestedRate = running.frameRate;
+            (void)setFormat(entry.device, previousFormat, throttledRate(*running.throttle, previousFormat));
+        };
+        steps.restoreOutputs = [&] { restoreOutputs(running, outputsBefore); };
+        bool ok = true;
+        bool moved = false;
+        [session_ beginConfiguration];
+        // Every change here can raise; the configuration is committed either way.
+        @try {
+            moved = moveFormat(steps) == FormatMove::moved;
+            ok = moved;
+        } @catch (NSException* exception) {
+            std::fprintf(stderr, "Camera: configuring a stream raised: %s\n", exception.reason.UTF8String);
             ok = false;
         }
         [session_ commitConfiguration];
-        if (ok && overBudget()) ok = false;
+        if (ok && overBudget()) {
+            std::fprintf(stderr, "Camera: the stream would take the multi-camera session over its hardware budget\n");
+            ok = false;
+        }
         if (ok) {
             if (newOutput != nil) {
                 running.videoOutput = newOutput;
@@ -1233,19 +1334,20 @@ private:
             return true;
         }
         // The join is undone: what it added leaves again, and a stream that
-        // was resized has its old format back.
+        // was resized has its old format and its old sizes back (the change
+        // that went through and then went over budget is undone here).
         [session_ beginConfiguration];
         @try {
             if (newOutput != nil) [session_ removeOutput:newOutput];
         } @catch (NSException*) {
         }
+        if (moved) {
+            steps.restoreFormat();
+            steps.restoreOutputs();
+        }
         [session_ commitConfiguration];
         if (newInput && running.input != nil && running.videoOutput == nil && running.photoOutput == nil)
             removeFromSession(running, false, false);
-        if (!newInput && newOutput == nil && running.video && previousFormat != nil) {
-            running.throttle->requestedRate = running.frameRate;
-            (void)setFormat(entry.device, previousFormat, throttledRate(*running.throttle, previousFormat));
-        }
         return false;
     }
 
@@ -1404,6 +1506,8 @@ private:
                 removeFromSession(running, false, false);
         }
         reapply(moved);
+        // As for a stream: a refused join leaves no camera in a format only it needed.
+        if (!ok) returnAlone();
         return ok;
     }
 

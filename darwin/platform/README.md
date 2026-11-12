@@ -95,20 +95,25 @@ interface to the wire.
   One session is a single `AVCaptureMultiCamSession` on iOS (an
   `AVCaptureSession` on macOS) with an input and a video data output per running
   camera and a photo output once a still is asked for. Frames are NV12, full
-  range, at the stream's size scaled by the platform from the format's
-  (`deliveredFrameSize`), delivered through `CameraSessionDelegate` with the
-  exposure that made them; holding a frame's `owner` holds the capture's buffer,
-  and its `native` is the platform's own handle to the picture. A camera alone
-  may run any format; every camera with an input in the session, one that only
-  takes stills as well, runs a format a multi-camera session takes
-  (`multiCamera`) while another is in it: `startVideo()` and `takeStill()` move
-  the cameras already in the session to such a format, or fail and change
-  nothing, and fail and undo the join when the session's hardware cost goes over
-  its budget. A camera that only takes stills leaves the session, with its photo
+  range, at the stream's size scaled by the platform from the format's at its
+  aspect ratio (`deliveredFrameSize`), delivered through `CameraSessionDelegate`
+  with the exposure that made them; holding a frame's `owner` holds the
+  capture's buffer, and its `native` is the platform's own handle to the
+  picture. A camera alone may run any format; every camera with an input in the
+  session, one that only takes stills as well, runs a format a multi-camera
+  session takes (`multiCamera`) while another is in it: `startVideo()` and
+  `takeStill()` move the cameras already in the session to such a format, or
+  fail and change nothing, and fail and undo the join when the session's
+  hardware cost goes over its budget. A camera that only takes stills leaves the session, with its photo
   output, when its last still is delivered, and a camera left alone goes back to
-  the smallest format of any kind; a camera whose format changed has its
-  settings applied again. A photo output's delegate is held by the session until
-  its capture ends.
+  the smallest format of any kind (also after a join that was refused); a camera
+  whose format changed has its settings applied again. The format and the
+  explicit sizes of the camera's outputs change together, on every path (a
+  stream's first configuration, a camera moved for a peer, one returning alone):
+  the video output's delivered size at the new format's aspect ratio and the
+  photo output's maximum from the new format's sizes (`moveFormat`), both put
+  back when the change is refused. A photo output's delegate is held by the
+  session until its capture ends.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
   exposure, focus and white balance only.
