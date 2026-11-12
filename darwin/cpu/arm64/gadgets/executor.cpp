@@ -598,6 +598,7 @@ std::atomic<std::size_t> stress_renewal_floor{renewal_floor_bytes};
 std::atomic<unsigned> stress_renewal_period{64};
 std::atomic<std::size_t> stress_live_spaces{};
 std::atomic<std::uint64_t> stress_closes{};
+std::atomic<std::uint64_t> stress_limbo_pushes{};
 #endif
 
 [[nodiscard]] inline std::size_t renewal_floor() noexcept
@@ -720,6 +721,18 @@ public:
 	[[nodiscard]] bool shedding() const noexcept
 	{
 		return account_.shedding();
+	}
+
+	/* Whether no executor will run this space again once those holding it
+	 * have let go of it, which is certain for one that is private to its
+	 * cache, closed, or being shed, and stays so: none of these ever clears,
+	 * and a closed or shed space is not handed out again (SpaceRegistry).
+	 * Its storage goes with its last holder, so what an executor that lets go
+	 * of it does to tell the space about each body is lost on it: it has no
+	 * later use for a record, a held-bytes figure or a limbo. */
+	[[nodiscard]] bool doomed() const noexcept
+	{
+		return key_.owner != nullptr || closed() || shedding();
 	}
 
 	/* What the space charges the budget. */
@@ -931,6 +944,9 @@ public:
 		 * them in limbo. */
 		if (record != nullptr && record->names(*body))
 			record->reset();
+#if UML_GADGET_SWEEP_STRESS
+		stress_limbo_pushes.fetch_add(1, std::memory_order_relaxed);
+#endif
 		limbo_.push(body);
 	}
 
@@ -1514,7 +1530,9 @@ public:
 			for (auto &slot : slab->slots) {
 				if (slot.body() == nullptr)
 					continue;
-				space_of(slot).release(slot.body(), false);
+				auto &space = space_of(slot);
+				if (!space.doomed())
+					space.release(slot.body(), false);
 				slot.vacate();
 			}
 		}
@@ -2303,6 +2321,19 @@ private:
 	 * storing, so this is proportional to what it owned rather than to the
 	 * size of the cache.
 	 *
+	 * A space that is doomed (Space::doomed()) is let go of by emptying the
+	 * slots alone: nothing will run it again once its holders have let go,
+	 * and its storage goes with the last of them, so the cost of telling it
+	 * about each body (a lock, a hash probe, an atomic, a push to limbo, for
+	 * every body, behind the locks of every other executor doing the same)
+	 * buys nothing. The bodies stay as they are for the executors still
+	 * running the space, which may adopt one this cache held or release the
+	 * slot of one it shares; a count of holders above the slots that hold it
+	 * only keeps the body until the space goes. A space still open is let
+	 * go of body by body: it may stay in use and have its arena renewed,
+	 * which counts the bodies released. A generation the MMU destroyed is
+	 * never entered again, so its space is let go of like a doomed one.
+	 *
 	 * The generation's number leaves the window's order unless `tombstone`
 	 * keeps its place there (leave_gone). A number in the order that names
 	 * no address space is such a tombstone: retiring it only drops the
@@ -2315,26 +2346,27 @@ private:
 			return;
 		}
 		const auto id = owner->second.id;
+		auto *space = owner->second.space;
+		/* Everything that can fail comes before anything changes,
+		 * so that a failure leaves the address space held and
+		 * retirable again. */
+		window_.reserve_id();
+		const bool doomed = tombstone || space->doomed();
 		if (owner->second.slots_complete) {
 			for (const auto index : owner->second.slots)
-				release(slot_at(index), id);
+				release(slot_at(index), id, doomed);
 		} else {
 			for (auto &slab : slabs_) {
 				if (!slab)
 					continue;
 				for (auto &slot : slab->slots)
-					release(slot, id);
+					release(slot, id, doomed);
 			}
 		}
 		if (link_memo_)
 			for (auto &entry : *link_memo_)
 				if (entry.generation == generation)
 					entry = {};
-		auto *space = owner->second.space;
-		/* Everything that can fail comes before anything changes,
-		 * so that a failure leaves the address space held and
-		 * retirable again. */
-		window_.reserve_id();
 		/* Letting go of its slots may have left a shared space
 		 * mostly freed arena. This cache still holds the space,
 		 * which is what makes it safe to close. */
@@ -2357,7 +2389,10 @@ private:
 			SpaceRegistry::instance().close(&space);
 	}
 
-	void release(Slot &slot, std::uint16_t owner)
+	/* Let go of the translation in `slot` if it is one of the address space
+	 * `owner`'s: the slot is emptied and, unless the space is `doomed`
+	 * (retire()), the space is told. */
+	void release(Slot &slot, std::uint16_t owner, bool doomed)
 	{
 		if (slot.body() == nullptr || slot.owner() != owner)
 			return;
@@ -2366,7 +2401,8 @@ private:
 			body_digest(*slot.body()), body_bytes(*slot.body()),
 			census::Departure::retired);
 #endif
-		space_of(slot).release(slot.body(), false);
+		if (!doomed)
+			space_of(slot).release(slot.body(), false);
 		slot.vacate();
 	}
 
@@ -3838,6 +3874,11 @@ std::size_t live_spaces() noexcept
 std::uint64_t closes() noexcept
 {
 	return stress_closes.load(std::memory_order_relaxed);
+}
+
+std::uint64_t limbo_pushes() noexcept
+{
+	return stress_limbo_pushes.load(std::memory_order_relaxed);
 }
 
 void set_renewal_period(unsigned stores) noexcept

@@ -239,6 +239,10 @@ namespace stress {
  * shared ones have been closed. */
 [[nodiscard]] std::size_t live_spaces() noexcept;
 [[nodiscard]] std::uint64_t closes() noexcept;
+/* Bodies a slot's release left in no slot's hands, so that a space queued
+ * them to free: what a space's last holder frees after it. A holder that lets
+ * go of a space nobody will run again does not add to it. */
+[[nodiscard]] std::uint64_t limbo_pushes() noexcept;
 /* Renew a shared address space on every Nth body stored in it, 0 for never;
  * the variant starts at every 64th. */
 void set_renewal_period(unsigned stores) noexcept;

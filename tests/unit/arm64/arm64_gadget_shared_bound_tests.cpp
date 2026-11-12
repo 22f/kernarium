@@ -503,6 +503,211 @@ void a_running_holder_leaves_a_shed_space_at_its_next_return(
 		"the next run did not free the space it was asked to let go of");
 }
 
+/* An executor that lets go of a space that nobody will run again does not tell
+ * the space of each body: the space dies with its last holder, which frees the
+ * bodies with the arena, and a body queued for the limbo is a lock, a probe and
+ * a push each, behind every other executor doing the same. Such a space is one
+ * the budget shed, one closed for renewal, one private to the cache and one
+ * whose generation the MMU destroyed; the open one of an executor whose window
+ * retires it, which other executors may go on running and renew, is let go of
+ * body by body (a_mostly_free_space_is_renewed). The ledger gets a shed space's
+ * bytes back with its last holder as ever. */
+enum class Doomed { shed, closed };
+
+void a_doomed_space_is_let_go_of_without_telling_it_of_each_body(
+	unsigned long generation, Doomed how)
+{
+	constexpr std::size_t blocks = 200;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{pages_for((blocks + 1) * 4)};
+	put_chain(backing, blocks);
+	JitMapping mapping{generation, code_base, backing,
+		pages_for((blocks + 1) * 4)};
+	const auto vcpu = std::make_unique<Vcpu>();
+	auto &executor = vcpu->executor;
+	auto &memory = vcpu->memory;
+	auto &cpu = vcpu->cpu;
+	const auto base = cache::ledger_state();
+	require(run_to_system_call(executor, memory, generation, cpu, code_base,
+		blocks + 4) != 0);
+	const auto built = executor.cache_diagnostics().translations;
+	require(built >= blocks);
+	const auto pushes = stress::limbo_pushes();
+	if (how == Doomed::shed) {
+		cache::set_budget(1);
+		cache::relieve();
+		cache::set_budget(cache::fallback_budget);
+		require(cache::ledger_state().shedding > base.shedding);
+	} else {
+		require(stress::close_spaces(generation) == 1);
+	}
+
+	/* The next entry lets go of the space as its last holder, and builds the
+	 * chain again in a new one. */
+	require(run_to_system_call(executor, memory, generation, cpu, code_base,
+		blocks + 4) != 0);
+	require(cache::ledger_state().shedding == base.shedding,
+		"the space was not freed with its last holder");
+	require(executor.cache_diagnostics().translations >= built + blocks,
+		"the executor did not translate in a space of its own again");
+	require(stress::limbo_pushes() == pushes,
+		"letting go of a doomed space queued its bodies one by one");
+}
+
+/* A private cache's window retires its space, whichever way it is used: no
+ * other executor holds it. */
+void a_private_space_is_let_go_of_without_telling_it_of_each_body()
+{
+	constexpr unsigned long generation = 1260;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{1};
+	put_program(backing, 4, 5);
+	JitMapping mapping{generation, code_base, backing, 1};
+	std::vector<std::unique_ptr<JitBacking>> others;
+	std::vector<std::unique_ptr<JitMapping>> mappings;
+	for (unsigned long other = 0;
+	     other <= UML_GADGET_RESIDENT_GENERATIONS; ++other) {
+		others.push_back(std::make_unique<JitBacking>(1));
+		put_program(*others.back(), 1, 2);
+		mappings.push_back(std::make_unique<JitMapping>(
+			generation + 1 + other, code_base, *others.back(), 1));
+	}
+	require(setenv("DARWIN_UML_GADGET_SHARED_BODIES", "0", 1) == 0);
+	const auto vcpu = std::make_unique<Vcpu>();
+	require(setenv("DARWIN_UML_GADGET_SHARED_BODIES", "1", 1) == 0);
+	auto &memory = vcpu->memory;
+	auto &executor = vcpu->executor;
+	auto &cpu = vcpu->cpu;
+	require(run_to_system_call(executor, memory, generation, cpu,
+		code_base) == 4);
+	const auto spaces = stress::live_spaces();
+	const auto pushes = stress::limbo_pushes();
+	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
+	     ++other)
+		require(run_to_system_call(executor, memory,
+			generation + 1 + other, cpu, code_base) == 4);
+	/* The window went past it, and the oldest of the others: those spaces
+	 * went, and queued nothing. */
+	require(stress::live_spaces() ==
+		spaces + UML_GADGET_RESIDENT_GENERATIONS - 1,
+		"the window did not retire the private space");
+	require(stress::limbo_pushes() == pushes,
+		"retiring a private space queued its bodies one by one");
+}
+
+enum class Ends { next_run, teardown };
+
+/* Executors A and B hold a space, B in the middle of a run, and the budget
+ * sheds it. A lets go of it at its next entry and B does not yet, which is
+ * what a running holder does until its next return to the run loop, or one
+ * that sits in a host wait for much longer. B goes on in the space A let go
+ * of, and what A held must still be there for it: its bodies are indexed and
+ * linked, so B chains into them and takes the one at its entry without
+ * translating; the count of holders of a body keeps A's hold, so that B
+ * releasing it (its code changed under it) does not queue it for freeing
+ * while another executor, or B itself in a chain, may run it. Then B lets go
+ * as the last holder, at its next run or as it ends. None of this queues a
+ * body for the limbo, and the ledger gets the space's bytes back. */
+void a_holder_runs_on_in_a_space_another_holder_let_go_of(
+	unsigned long generation, Ends ends)
+{
+	constexpr std::size_t blocks = 300;
+	constexpr std::size_t entry = 5;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{pages_for((blocks + 1) * 4)};
+	put_chain(backing, blocks);
+	JitMapping mapping{generation, code_base, backing,
+		pages_for((blocks + 1) * 4)};
+	auto a_vcpu = std::make_unique<Vcpu>();
+	auto b_vcpu = std::make_unique<Vcpu>();
+	auto &a = a_vcpu->executor;
+	auto &a_memory = a_vcpu->memory;
+	auto &a_cpu = a_vcpu->cpu;
+	auto &b = b_vcpu->executor;
+	auto &b_memory = b_vcpu->memory;
+	auto &b_cpu = b_vcpu->cpu;
+	const auto base = cache::ledger_state();
+
+	/* A builds the chain. B is inside a run, holding the one block of it its
+	 * run began at, and follows the links the rest of the way. */
+	require(run_to_system_call(a, a_memory, generation, a_cpu, code_base,
+		blocks + 4) != 0);
+	const auto entry_pc = code_base + entry * 4;
+	b_cpu = {};
+	b_cpu.pc = entry_pc;
+	require(b.begin_execution(generation, b_cpu.pc));
+	std::size_t executed = 0;
+	require(b.run_block(b_cpu, b_memory, generation, executed) ==
+		EngineEvent::system_call);
+	require(b.cache_diagnostics().translations == 0 &&
+		b.cache_diagnostics().adoptions == 1,
+		"B did not take the block it entered at from A");
+
+	cache::set_budget(1);
+	cache::relieve();
+	cache::set_budget(cache::fallback_budget);
+	require(cache::ledger_state().shedding > base.shedding);
+	require(a.renewal_pending() && b.renewal_pending(),
+		"the budget did not ask both holders to let go");
+
+	/* A lets go at its next entry, B is still in its run: the space stays,
+	 * with what A held in it. */
+	const auto pushes = stress::limbo_pushes();
+	a_cpu = {};
+	a_cpu.pc = code_base;
+	(void)run_once(a, a_memory, generation, a_cpu);
+	require(stress::limbo_pushes() == pushes,
+		"a holder that let go of a shed space queued its bodies");
+	require(cache::ledger_state().shedding > base.shedding,
+		"the space went while a holder still held it");
+
+	/* B follows the links into bodies only A held, without translating. */
+	b_cpu = {};
+	b_cpu.pc = entry_pc;
+	require(b.run_block(b_cpu, b_memory, generation, executed) ==
+		EngineEvent::system_call,
+		"B did not reach the system call through the bodies A held");
+	require(b.cache_diagnostics().translations == 0,
+		"B translated what A had held in the space");
+
+	/* B's code changes under it: the block it holds is stale, B lets go of
+	 * that one through the space, which must not queue the body, and takes
+	 * the rest of the chain from A's bodies, one miss at a time. */
+	backing.put32(entry * 4, branch(entry_pc, entry_pc + 8));
+	require(darwin_uml_static_vm_invalidate_code_generation(
+		generation, entry_pc, 4) == 0);
+	b_cpu = {};
+	b_cpu.pc = entry_pc;
+	EngineEvent event = EngineEvent::continued;
+	for (std::size_t run = 0; run < blocks && event != EngineEvent::system_call;
+	     ++run)
+		event = b.run_block(b_cpu, b_memory, generation, executed);
+	require(event == EngineEvent::system_call,
+		"B did not finish the chain after its code changed");
+	require(b.cache_diagnostics().translations == 1 &&
+		b.cache_diagnostics().adoptions > 1,
+		"B did not translate just the block that changed");
+	require(stress::limbo_pushes() == pushes,
+		"B released a body A had held and it was queued for freeing");
+	require(cache::ledger_state().shedding > base.shedding);
+	b.end_execution();
+
+	/* B lets go as the last holder: at its next run, or as it ends. */
+	if (ends == Ends::next_run) {
+		require(run_to_system_call(b, b_memory, generation, b_cpu,
+			code_base, blocks + 4) != 0);
+	} else {
+		b_vcpu.reset();
+	}
+	require(stress::limbo_pushes() == pushes,
+		"the last holder queued the bodies of the space it let go of");
+	require(cache::ledger_state().shedding == base.shedding,
+		"the shed space was not freed with its last holder");
+}
+
 /* A let-go that runs out of memory leaves the ask standing, and the runs go
  * on as they did: the executor does not end every run at its first block
  * because a flag it cannot clear is set. Whichever allocation of the let-go
@@ -760,6 +965,15 @@ int main()
 	relief_sheds_a_space_the_window_leaves(1200);
 	a_running_holder_leaves_a_shed_space_at_its_next_return(1210);
 	a_failed_let_go_does_not_end_runs_early(1220);
+	a_doomed_space_is_let_go_of_without_telling_it_of_each_body(1230,
+		Doomed::shed);
+	a_doomed_space_is_let_go_of_without_telling_it_of_each_body(1235,
+		Doomed::closed);
+	a_private_space_is_let_go_of_without_telling_it_of_each_body();
+	a_holder_runs_on_in_a_space_another_holder_let_go_of(1240,
+		Ends::next_run);
+	a_holder_runs_on_in_a_space_another_holder_let_go_of(1250,
+		Ends::teardown);
 	a_window_retires_a_space_no_other_executor_holds();
 	a_private_cache_is_never_renewed();
 	renewal_reaches_every_executor();
