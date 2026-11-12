@@ -108,7 +108,9 @@ reports no hinge keeps every layout it has.
   display: Welcome, the boot, the busy, low-space and end cards, and the cards
   inside a sheet, which is the system's. While it is bent they keep to the half
   where the system puts its alerts, and the boot of a standing device to the
-  upper half. A sheet turned and bent rises to a little below the fold, and
+  upper half; Welcome and the end card scroll there when a half is too short
+  for them. System alerts stay where iOS puts them, inside the device's own
+  safe area. A sheet turned and bent rises to a little below the fold, and
   keeps its presentation, and what has been typed in it, when the display
   turns. On the cover the file browser's Import is a round button in the
   toolbar's column beside the camera, between More and Done, and the bar keeps
