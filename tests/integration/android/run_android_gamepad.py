@@ -1142,6 +1142,9 @@ def measure_cost(session: Session, options: argparse.Namespace) -> None:
     """The guest's CPU per report, the relay's PSS, the relay's counters and the latency."""
     guest = session.guest
     family = session.families["dualsense"]
+    # A connection of its own: the relay's counters are per connection, and the connection of the protocol check
+    # carries that check's deliberate input report for an empty slot, which the relay counts as dropped.
+    session.connect()
     session.create_all([(0, "dualsense")])
     state = guest.wait_devices("before measuring", 1)
     device_id = state.devices[0].id

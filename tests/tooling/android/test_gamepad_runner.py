@@ -617,6 +617,27 @@ u:r:untrusted_app_34:s0:c122,c256,c512,c768 u0_a122 2182 419 17367492 165132 0  
             runner.Guest.clock_offset_ms(Shell(["date: bad"]))  # type: ignore[arg-type]
 
 
+class CostConnectionTests(unittest.TestCase):
+    def test_the_cost_step_measures_on_a_connection_of_its_own(self) -> None:
+        """The protocol check leaves a connection that has counted one deliberate drop; the cost step's counters
+        must not include it."""
+        calls: list[str] = []
+
+        class Stop(Exception):
+            pass
+
+        def create_all(plan) -> None:
+            calls.append("create_all")
+            raise Stop
+
+        session = types.SimpleNamespace(
+            guest=object(), families={"dualsense": families.DualSenseFamily()},
+            connect=lambda: calls.append("connect"), create_all=create_all)
+        with self.assertRaises(Stop):
+            runner.measure_cost(session, types.SimpleNamespace(report_interval_ms=4.0, reports=10))
+        self.assertEqual(calls, ["connect", "create_all"])
+
+
 class LateArrivalTests(unittest.TestCase):
     """The identity and the events of a controller are read again until they are right; a controller that never is
     still fails, with the last problem."""
