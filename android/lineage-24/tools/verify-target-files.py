@@ -2621,14 +2621,16 @@ def check_network_stack(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipIn
 
 
 # The p0033 topic makes WifiTrackerLib show a failed check of a validated network: the Wi-Fi mark in
-# the status bar and "Limited connection" in the Wi-Fi list. Settings and SystemUI link the library
-# statically and store their dex files uncompressed, and R8 keeps method names there, so the topic's
-# predicate is named in each. A build without it would show nothing for a network whose check failed.
+# the status bar and in the Wi-Fi list. Settings and SystemUI link the library statically and store
+# their dex files uncompressed. The optimizer inlines a small method away, so the check looks for the
+# key of the connectivity report that the topic's predicate reads (the bitmask of the probes
+# attempted): a string constant of the live code, which no other code of either application holds.
+# A build without the topic would show nothing for a network whose check failed.
 WIFI_TRACKER_APKS = (
     "SYSTEM_EXT/priv-app/Settings/Settings.apk",
     "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
 )
-WIFI_TRACKER_MARKERS = (b"isInternetCheckFailed",)
+WIFI_TRACKER_MARKERS = (b"networkProbesAttempted",)
 WIFI_TRACKER_LIMIT = 192 << 20
 
 
