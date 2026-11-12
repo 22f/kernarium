@@ -61,8 +61,11 @@ public struct MotionSample: Sendable {
         MotionSample(sensor: sensor, x: x, y: y, z: z, status: sensor == .magnetometer ? min(status, 3) : 0)
     }
 
+    /// The reading can be sent: its components are finite.
+    public var isUsable: Bool { x.isFinite && y.isFinite && z.isFinite }
+
     public var encoded: Data? {
-        guard x.isFinite, y.isFinite, z.isFinite else { return nil }
+        guard isUsable else { return nil }
         var data = Data([0x41, 0x4e, 0x53, 0x31])
         for word in [sensor.rawValue | UInt32(status) << 16, x.bitPattern, y.bitPattern, z.bitPattern] {
             var little = word.littleEndian
@@ -80,6 +83,13 @@ public struct MotionSample: Sendable {
 /// closes the connection and a connection completing after a stop cannot
 /// revive it. The opener must bound its connect wait (the app uses 250 ms). A
 /// connection that fails or drops is tried again after `retryDelay`.
+///
+/// A magnetic-field record is sent only while the guest's latest frame on the
+/// connection in use says the field is wanted (it has bit 3 of an "ANC3"
+/// frame). That is decided where the frames are read and the record is sent,
+/// under one lock, so no reading captured earlier reaches a guest that has
+/// since said otherwise, or a connection to another service: an older guest
+/// ends its connection on a type-2 record.
 public final class MotionStream: @unchecked Sendable {
     public static let port: UInt32 = 5556
     private let opener: any GuestStreamOpener
@@ -94,6 +104,8 @@ public final class MotionStream: @unchecked Sendable {
     private var reader: DispatchSourceRead?
     /// The start of a frame that has not all arrived.
     private var partial = Data()
+    /// The guest's latest frame on this connection asks for the magnetic field.
+    private var magneticWanted = false
 
     public init(
         opener: any GuestStreamOpener,
@@ -130,27 +142,38 @@ public final class MotionStream: @unchecked Sendable {
         }
     }
 
-    public func submit(_ sample: MotionSample, epoch: UInt64) {
-        guard let packet = sample.encoded else { return }
-        send(packet, epoch: epoch)
+    /// Sends a reading. Answers whether it was sent: it is not when the stream
+    /// has stopped or another run's, when there is no connection, when the
+    /// reading cannot be encoded, and for a magnetic field when the guest's
+    /// latest frame does not ask for one.
+    @discardableResult
+    public func submit(_ sample: MotionSample, epoch: UInt64) -> Bool {
+        guard let packet = sample.encoded else { return false }
+        return send(packet, epoch: epoch, magnetic: sample.sensor == .magnetometer)
     }
 
     /// Gives the guest the device's orientation. Only for a guest whose
     /// "ANC2" frame has arrived (`MotionDemand.acceptsOrientation`).
     public func submit(_ orientation: GuestOrientation, epoch: UInt64) {
-        send(OrientationRecord.encoded(orientation), epoch: epoch)
+        send(OrientationRecord.encoded(orientation), epoch: epoch, magnetic: false)
     }
 
-    private func send(_ packet: Data, epoch: UInt64) {
+    @discardableResult
+    private func send(_ packet: Data, epoch: UInt64, magnetic: Bool) -> Bool {
+        var delivered = false
         let dropped = lock.withLock { () -> Bool in
-            guard running, generation == epoch, descriptor >= 0 else { return false }
+            guard running, generation == epoch, descriptor >= 0, !magnetic || magneticWanted else { return false }
             let sent = packet.withUnsafeBytes { Darwin.send(descriptor, $0.baseAddress, $0.count, MSG_DONTWAIT) }
-            guard sent != packet.count else { return false }
+            guard sent != packet.count else {
+                delivered = true
+                return false
+            }
             // Closing discards a partial record and avoids queuing old motion
             // behind a stalled or paused guest.
             return closeStream()
         }
         if dropped { lost(epoch: epoch) }
+        return delivered
     }
 
     // Called only with the lock held. The descriptor is closed by the reader's
@@ -161,6 +184,7 @@ public final class MotionStream: @unchecked Sendable {
         guard descriptor >= 0 else { return false }
         let closing = descriptor
         descriptor = -1
+        magneticWanted = false
         if let reader {
             self.reader = nil
             reader.cancel()
@@ -194,6 +218,7 @@ public final class MotionStream: @unchecked Sendable {
             }
             descriptor = opened
             partial.removeAll()
+            magneticWanted = false
             let source = DispatchSource.makeReadSource(fileDescriptor: opened, queue: queue)
             source.setEventHandler { [weak self] in self?.readFrames(from: opened, epoch: epoch) }
             source.setCancelHandler { Darwin.close(opened) }
@@ -241,6 +266,7 @@ public final class MotionStream: @unchecked Sendable {
                     let frame = Data(partial.prefix(length))
                     partial.removeFirst(length)
                     guard let demand = MotionDemand(frame: frame) else { return closeStream() }
+                    magneticWanted = demand.magnetometer != nil
                     frames.append(demand)
                 }
             }

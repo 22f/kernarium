@@ -136,21 +136,28 @@ struct MotionDemandTests {
     final class FakeDevice: MotionDevice, @unchecked Sendable {
         let hasAccelerometer: Bool
         let hasGyroscope: Bool
-        let hasMagnetometer: Bool
+        private let magnetometer: Bool
         private let lock = NSLock()
+        private var reads = 0
+        var hasMagnetometer: Bool { lock.withLock { reads += 1 }; return magnetometer }
+        /// How often the session asked whether the device has a magnetometer.
+        var magnetometerReads: Int { lock.withLock { reads } }
         private var running: [MotionSample.Sensor: TimeInterval] = [:]
         private var handlers: [MotionSample.Sensor: @Sendable (Double, Double, Double) -> Void] = [:]
         private var failures: [@Sendable () -> Void] = []
         private var fieldInterval: TimeInterval?
         private var fieldHandler: (@Sendable (Double, Double, Double, UInt8) -> Void)?
         private var fieldFailures: [@Sendable () -> Void] = []
+        /// Every handler a start gave, kept after a stop: a reading that Core
+        /// Motion had already taken can still be delivered to it.
+        private var fieldHandlersGiven: [@Sendable (Double, Double, Double, UInt8) -> Void] = []
         private(set) var starts = 0
         private(set) var magnetometerStarts = 0
 
         init(accelerometer: Bool = true, gyroscope: Bool = true, magnetometer: Bool = false) {
             hasAccelerometer = accelerometer
             hasGyroscope = gyroscope
-            hasMagnetometer = magnetometer
+            self.magnetometer = magnetometer
         }
 
         func startMagnetometer(
@@ -161,6 +168,7 @@ struct MotionDemandTests {
             lock.withLock {
                 fieldInterval = interval
                 fieldHandler = handler
+                fieldHandlersGiven.append(handler)
                 fieldFailures.append(failure)
                 magnetometerStarts += 1
             }
@@ -182,6 +190,16 @@ struct MotionDemandTests {
         func failMagnetometer() {
             let failure = lock.withLock { fieldFailures.last }
             failure?()
+        }
+        /// A reading, or a failure, that the start number `start` (from 0) was
+        /// given to deliver, whatever has happened since.
+        func emitField(fromStart start: Int, _ x: Double, _ y: Double, _ z: Double, status: UInt8) {
+            let handler = lock.withLock { fieldHandlersGiven[start] }
+            handler(x, y, z, status)
+        }
+        func failMagnetometer(fromStart start: Int) {
+            let failure = lock.withLock { fieldFailures[start] }
+            failure()
         }
 
         func start(

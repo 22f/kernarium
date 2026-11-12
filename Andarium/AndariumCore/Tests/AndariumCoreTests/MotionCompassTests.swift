@@ -367,6 +367,12 @@ struct MotionCompassTests {
         guest.send([UInt8](anc3(mask: 0b01000, magnetometer: 20_000)) + [UInt8](older(magic: 0x31, mask: 0b01)))
         #expect(eventually { session.demand == MotionDemand(accelerometer: 10_000) })
         #expect(guest.connections == 1)
+        // The older frame is the one in force: the field the first one began is
+        // stopped, and nothing of it reaches the guest.
+        session.settle()
+        #expect(device.magnetometerInterval == nil)
+        if device.magnetometerStarts == 1 { device.emitField(fromStart: 0, 20, -5, -40, status: 3) }
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
         session.update(foreground: false, axes: .portrait)
     }
 
@@ -432,8 +438,8 @@ struct MotionCompassTests {
         guest.sayCompass(MotionDemand(magnetometer: 20_000))
         #expect(eventually { device.magnetometerInterval == 0.01 })
         device.failMagnetometer()
-        let gone = try #require(
-            MotionSample(sensor: .magnetometer, x: 0, y: 0, z: 0, axes: .landscapeRight, status: 0).encoded)
+        // Zeros are zeros whatever the mount (all three positive, not a turned -0).
+        let gone = try #require(MotionSample(sensor: .magnetometer, x: 0, y: 0, z: 0, status: 0).encoded)
         #expect(guest.receive(count: 20) == gone)
         #expect(eventually { device.magnetometerInterval == nil })
         session.update(foreground: false, axes: .landscapeRight)
@@ -455,6 +461,178 @@ struct MotionCompassTests {
         guest.sayCompass(MotionDemand(accelerometer: 20_000, magnetometer: 20_000))
         #expect(eventually { device.intervals == [.accelerometer: 0.01] })
         session.update(foreground: false, axes: .portrait)
+    }
+
+    // MARK: A reading or a failure already on its way
+
+    /// A guest that has been given the field, and the session running on it.
+    private func subscribed(
+        axes: MotionSample.Axes = .portrait, period: UInt32 = 20_000
+    ) -> (guest: Guest, device: Device, session: MotionSession) {
+        let guest = Guest()
+        let device = Device(magnetometer: true)
+        let session = session(guest, device)
+        session.update(foreground: true, axes: axes)
+        #expect(eventually { guest.connections == 1 })
+        guest.sayCompass(MotionDemand(magnetometer: period))
+        #expect(eventually { device.magnetometerInterval != nil })
+        return (guest, device, session)
+    }
+
+    @Test(arguments: [(UInt8(0x31), UInt32(0b001)), (UInt8(0x32), UInt32(0b111))])
+    func aReadingOrAFailureOnItsWayAfterTheGuestFallsBackToAnOlderFrameIsDropped(
+        magic: UInt8, mask: UInt32
+    ) throws {
+        let (guest, device, session) = subscribed()
+        device.emitField(20, -5, -40, status: 3)
+        #expect(guest.receive(count: 20) == (try #require(MotionSample(sensor: .magnetometer, x: 20, y: -5, z: -40, status: 3).encoded)))
+        // The guest's service lost its magnetometer, or this is another one: an
+        // older frame, after which no application has the field.
+        guest.send([UInt8](older(magic: magic, mask: mask)))
+        #expect(eventually { device.magnetometerInterval == nil && session.demand?.magnetometer == nil })
+        session.settle()
+        // Core Motion had already handed these to the first start's callbacks.
+        device.emitField(fromStart: 0, 21, -4, -39, status: 3)
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
+        device.failMagnetometer(fromStart: 0)
+        session.settle()
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
+        // The late failure ended nothing: the guest asks again and gets the field.
+        guest.sayCompass(MotionDemand(magnetometer: 20_000))
+        #expect(eventually { device.magnetometerInterval == 0.01 && device.magnetometerStarts == 2 })
+        device.emitField(1, 2, 3, status: 2)
+        #expect(guest.receive(count: 20) == (try #require(MotionSample(sensor: .magnetometer, x: 1, y: 2, z: 3, status: 2).encoded)))
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func aReadingOrAFailureOnItsWayAfterAReconnectToAnOlderServiceIsDropped() {
+        let (guest, device, session) = subscribed()
+        guest.hangUp()
+        #expect(eventually { guest.connections == 2 })
+        // On the new connection the service has said nothing yet: no field is wanted.
+        device.emitField(fromStart: 0, 20, -5, -40, status: 3)
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
+        // It says what an older image says.
+        guest.say(MotionDemand(accelerometer: 20_000))
+        #expect(eventually { session.demand == MotionDemand(accelerometer: 20_000) })
+        session.settle()
+        #expect(device.magnetometerInterval == nil)
+        device.emitField(fromStart: 0, 20, -5, -40, status: 3)
+        device.failMagnetometer(fromStart: 0)
+        session.settle()
+        #expect(guest.connections == 2)
+        // Neither a type-2 record nor a closed connection (an older guest closes on one).
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
+        #expect(guest.isQuiet())
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func aReadingOfAnEarlierSubscriptionOnTheSameConnectionIsDropped() {
+        let (guest, device, session) = subscribed()
+        guest.sayCompass(MotionDemand())
+        #expect(eventually { device.magnetometerInterval == nil })
+        guest.sayCompass(MotionDemand(magnetometer: 20_000))
+        #expect(eventually { device.magnetometerStarts == 2 && device.magnetometerInterval == 0.01 })
+        // The first subscription ended; its readings do not count for the second.
+        device.emitField(fromStart: 0, 20, -5, -40, status: 3)
+        device.failMagnetometer(fromStart: 0)
+        session.settle()
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty && device.magnetometerInterval == 0.01)
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func aRetimeStaysInTheSubscriptionItBegan() throws {
+        let (guest, device, session) = subscribed()
+        guest.sayCompass(MotionDemand(magnetometer: 100_000))
+        #expect(eventually { device.magnetometerInterval == 0.05 })
+        // Core Motion may still be delivering to the handler of the first call.
+        device.emitField(fromStart: 0, 20, -5, -40, status: 3)
+        #expect(guest.receive(count: 20) == (try #require(MotionSample(sensor: .magnetometer, x: 20, y: -5, z: -40, status: 3).encoded)))
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func aReadingOfThePreviousRunCannotBecomeTheNextRunsLastField() throws {
+        let (guest, device, session) = subscribed()
+        device.emitField(20, -5, -40, status: 3)
+        _ = guest.receive(count: 20)
+        // The run ends (the guest went to the background) and another begins, on another mount.
+        session.update(foreground: false, axes: .portrait)
+        #expect(eventually { device.magnetometerInterval == nil })
+        session.update(foreground: true, axes: .landscapeLeft)
+        #expect(eventually { guest.connections == 2 })
+        guest.sayCompass(MotionDemand(magnetometer: 20_000))
+        #expect(eventually { device.magnetometerStarts == 2 && device.magnetometerInterval == 0.01 })
+        // The first run's reading arrives late: it is dropped and cached nowhere.
+        device.emitField(fromStart: 0, 20, -5, -40, status: 3)
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
+        // The second run's field fails before it delivered anything: zeros, not the old field.
+        device.failMagnetometer(fromStart: 1)
+        let zeros = try #require(MotionSample(sensor: .magnetometer, x: 0, y: 0, z: 0, status: 0).encoded)
+        #expect(guest.receive(count: 20) == zeros)
+        session.update(foreground: false, axes: .landscapeLeft)
+    }
+
+    @Test func aFieldThatCannotBeSentDoesNotReplaceTheLastOne() throws {
+        let (guest, device, session) = subscribed()
+        device.emitField(20, -5, -40, status: 3)
+        _ = guest.receive(count: 20)
+        device.emitField(.nan, -5, -40, status: 3)
+        device.emitField(1, 2, 1e39, status: 3)
+        #expect(guest.receive(count: 20, timeout: 80).isEmpty)
+        device.failMagnetometer()
+        // The last field that could be sent, with status 0.
+        let gone = try #require(MotionSample(sensor: .magnetometer, x: 20, y: -5, z: -40, status: 0).encoded)
+        #expect(guest.receive(count: 20) == gone)
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func theFieldIsNeverSentToAConnectionWhoseLatestFrameDoesNotAskForIt() throws {
+        // The stream's own rule, with no session in between: where a frame is
+        // read and a record is sent, under one lock.
+        final class Seen: @unchecked Sendable {
+            private let lock = NSLock()
+            private var connected = false
+            private var frames = 0
+            func connection(_ value: Bool) { lock.withLock { connected = value } }
+            func frame() { lock.withLock { frames += 1 } }
+            var isConnected: Bool { lock.withLock { connected } }
+            var frameCount: Int { lock.withLock { frames } }
+        }
+        let guest = Guest()
+        let seen = Seen()
+        let stream = MotionStream(
+            opener: guest, retryDelay: .milliseconds(40),
+            connectionChanged: { seen.connection($0) }, demandChanged: { _ in seen.frame() })
+        let epoch = stream.start()
+        #expect(eventually { seen.isConnected })
+        let field = MotionSample(sensor: .magnetometer, x: 20, y: -5, z: -40, status: 3)
+        let acceleration = MotionSample(sensor: .accelerometer, x: 0, y: 0, z: -1)
+        // A service that has said nothing wants no field.
+        #expect(!stream.submit(field, epoch: epoch))
+        guest.sayCompass(MotionDemand(magnetometer: 20_000))
+        #expect(eventually { seen.frameCount == 1 })
+        #expect(stream.submit(field, epoch: epoch))
+        #expect(guest.receive(count: 20) == field.encoded)
+        // The older frames say it is no longer wanted; the other sensors are not affected.
+        guest.send([UInt8](older(magic: 0x32, mask: 0b101)))
+        #expect(eventually { seen.frameCount == 2 })
+        #expect(!stream.submit(field, epoch: epoch))
+        #expect(stream.submit(acceleration, epoch: epoch))
+        #expect(guest.receive(count: 20) == acceleration.encoded)
+        // A frame asking for it again, then another connection, which starts from nothing.
+        guest.sayCompass(MotionDemand(magnetometer: 20_000))
+        #expect(eventually { seen.frameCount == 3 })
+        #expect(stream.submit(field, epoch: epoch))
+        _ = guest.receive(count: 20)
+        guest.hangUp()
+        #expect(eventually { guest.connections == 2 && seen.isConnected })
+        #expect(!stream.submit(field, epoch: epoch))
+        // A frame that does not list the field, in the same read as one that does, says no.
+        guest.send([UInt8](anc3(mask: 0b01000, magnetometer: 20_000)) + [UInt8](anc3(mask: 0b00001)))
+        #expect(eventually { seen.frameCount == 5 })
+        #expect(!stream.submit(field, epoch: epoch))
+        stream.stop()
+        #expect(!stream.submit(field, epoch: epoch))
     }
 
     // MARK: The orientation sensor in the same frame
