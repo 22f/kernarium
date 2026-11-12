@@ -122,8 +122,9 @@ struct HomeMenuTests {
         #expect(!buttons.isEmpty && buttons.allSatisfy { $0.label == "Info" }, "the bar: \(top.map(\.description))")
     }
 
-    /// Opened as a tap opens it, the menu offers Info and Send feedback as buttons, which is what
-    /// VoiceOver finds in it, in the order the menu holds them.
+    /// Opened as a tap opens it, the menu offers exactly Info and then Send feedback as buttons,
+    /// which is what VoiceOver finds in it. The bar's own buttons are labelled Info too and the host
+    /// window holds buttons of its own, so only what the opening adds to the scene is read.
     @Test func theOpenMenuOffersEachItemToVoiceOver() async throws {
         let model = model()
         let (controller, lease) = try await host(model)
@@ -131,6 +132,14 @@ struct HomeMenuTests {
         let shown = await eventually { ToolbarProbe.barItems(under: controller).contains { $0.menu != nil } }
         try #require(shown, "the toolbar shows a menu")
         try await Task.sleep(for: .milliseconds(600))
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        func buttons() -> [ToolbarProbe.Element] {
+            scenes.flatMap(\.windows).flatMap { ToolbarProbe.elements(in: $0, above: 4000) }
+                .filter { $0.traits.contains(.button) }
+        }
+        // Kept alive, so that no object of the opening can take the identity of one that went.
+        let beforeElements = buttons()
+        let before = Set(beforeElements.map { ObjectIdentifier($0.object) })
         var pending: [UIView] = [lease.window]
         var interaction: UIContextMenuInteraction?
         while let view = pending.popLast(), interaction == nil {
@@ -143,17 +152,20 @@ struct HomeMenuTests {
         }
         try #require(interaction != nil, "a control of the bar carries the menu")
         defer { interaction?.dismissMenu() }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let found = await eventually {
-            let labels = scenes.flatMap(\.windows).flatMap { ToolbarProbe.elements(in: $0, above: 4000) }
-                .filter { $0.traits.contains(.button) }.map(\.label)
-            return labels.contains("Send feedback")
+        func added() -> [ToolbarProbe.Element] {
+            withExtendedLifetime(beforeElements) { buttons().filter { !before.contains(ObjectIdentifier($0.object)) } }
         }
-        let labels = scenes.flatMap(\.windows).flatMap { ToolbarProbe.elements(in: $0, above: 4000) }
-            .filter { $0.traits.contains(.button) }.map(\.label)
-        #expect(found, "the open menu: \(labels)")
-        #expect(labels.contains("Info") && labels.contains("Send feedback"), "\(labels)")
-        if let info = labels.firstIndex(of: "Send feedback") { #expect(info > 0) }
+        // The system lays an open menu's item out twice (two elements, one label and one frame), so
+        // an item is counted once per place on the screen, and the items are read top to bottom.
+        func items() -> [String] {
+            var places = Set<String>()
+            return added().sorted { $0.top < $1.top }
+                .filter { places.insert("\($0.label) \($0.object.accessibilityFrame)").inserted }.map(\.label)
+        }
+        let found = await eventually { items().contains("Send feedback") }
+        try #require(found, "the open menu offers Send feedback: \(added().map(\.description))")
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(items() == ["Info", "Send feedback"], "the open menu: \(added().map { "\($0.description) \($0.object.accessibilityFrame)" })")
     }
 
     /// With no receiver there is nothing for a menu to hold beside Info: the plain button again.
