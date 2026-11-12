@@ -386,7 +386,8 @@ struct AppEntry {
             memory: memoryPolicy(processorCount: limit),
             freeStorageBytes: freeStorageBytes(),
             runsGuestGraphics: drawsGuestGraphics(),
-            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone
+            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
+            hasCompass: MotionSensors().compassAvailable
         )
     }
 

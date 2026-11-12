@@ -3,7 +3,7 @@
 import Foundation
 
 /// What the guest's sensor service tells the host over the motion connection:
-/// which of the two sensors an application has active, and the sampling period
+/// which of its sensors an application has active, and the sampling period
 /// each asked for. The service sends one frame when the host connects and
 /// another at every change; the host answers only with sensor readings and,
 /// to a service that has one, the device's orientation.
@@ -20,6 +20,15 @@ import Foundation
 /// Only such a service takes orientation records (`OrientationRecord`): an
 /// older one ends the connection on one, so the host sends none before an
 /// "ANC2" frame has arrived on the connection.
+///
+/// A service that lists a magnetometer sends "ANC3", 20 bytes: the mask has
+/// bit 0 and bit 1 as above, bit 2 for the device-orientation sensor being
+/// enabled, bit 3 for the magnetometer being active and bit 4 for the
+/// device-orientation sensor being listed at all (bit 2 without bit 4 is a
+/// protocol error); the periods follow as before and a third, the
+/// magnetometer's, which is brought into 20 ms to 1 s. Only such a service
+/// takes magnetic-field records, and only while its latest frame has bit 3
+/// set; every older service sends "ANC1" or "ANC2" and never gets one.
 public struct MotionDemand: Equatable, Sendable {
     /// Whether the guest has the device-orientation sensor, and whether the
     /// window manager has it enabled.
@@ -32,50 +41,89 @@ public struct MotionDemand: Equatable, Sendable {
         case active
     }
 
+    /// The length of an "ANC1" or "ANC2" frame; an "ANC3" frame is
+    /// `compassFrameSize`.
     public static let frameSize = 16
+    public static let compassFrameSize = 20
     public static let minimumPeriod: UInt32 = 10_000
     public static let maximumPeriod: UInt32 = 1_000_000
+    /// The magnetometer's own limits: the sub-HAL lists it at 20 ms to 1 s.
+    public static let minimumMagnetometerPeriod: UInt32 = 20_000
 
     /// The requested sampling period of each sensor an application has
     /// active, in microseconds; nil for a sensor nobody uses.
     public var accelerometer: UInt32?
     public var gyroscope: UInt32?
+    /// Only a service that lists a magnetometer ("ANC3") can say it is in use.
+    public var magnetometer: UInt32?
     public var orientationSensor: OrientationSensor
 
     public init(
-        accelerometer: UInt32? = nil, gyroscope: UInt32? = nil, orientationSensor: OrientationSensor = .absent
+        accelerometer: UInt32? = nil, gyroscope: UInt32? = nil, magnetometer: UInt32? = nil,
+        orientationSensor: OrientationSensor = .absent
     ) {
         self.accelerometer = accelerometer.map(Self.clamped)
         self.gyroscope = gyroscope.map(Self.clamped)
+        self.magnetometer = magnetometer.map { min(max($0, Self.minimumMagnetometerPeriod), Self.maximumPeriod) }
         self.orientationSensor = orientationSensor
     }
 
-    /// No application uses the accelerometer or the gyroscope.
-    public var isIdle: Bool { accelerometer == nil && gyroscope == nil }
+    /// No application uses the accelerometer, the gyroscope or the magnetometer.
+    public var isIdle: Bool { accelerometer == nil && gyroscope == nil && magnetometer == nil }
 
     /// The guest takes orientation records.
     public var acceptsOrientation: Bool { orientationSensor != .absent }
 
-    public init?(frame: Data) {
-        guard frame.count == Self.frameSize else { return nil }
-        let bytes = [UInt8](frame)
-        guard bytes[0] == 0x41, bytes[1] == 0x4e, bytes[2] == 0x43 else { return nil }
-        let withOrientation: Bool
+    /// How long the frame is that begins with `prefix`, going by its magic.
+    public enum Framing: Equatable, Sendable {
+        /// Fewer than four bytes: the magic has not all arrived.
+        case incomplete
+        /// A frame of this many bytes begins here, whether or not all of it has arrived.
+        case frame(length: Int)
+        /// No frame has this magic.
+        case invalid
+    }
+
+    public static func framing(of prefix: Data) -> Framing {
+        guard prefix.count >= 4 else { return .incomplete }
+        let bytes = [UInt8](prefix.prefix(4))
+        guard bytes[0] == 0x41, bytes[1] == 0x4e, bytes[2] == 0x43 else { return .invalid }
         switch bytes[3] {
-        case 0x31: withOrientation = false
-        case 0x32: withOrientation = true
-        default: return nil
+        case 0x31, 0x32: return .frame(length: frameSize)
+        case 0x33: return .frame(length: compassFrameSize)
+        default: return .invalid
         }
+    }
+
+    public init?(frame: Data) {
+        guard case .frame(let length) = Self.framing(of: frame), frame.count == length else { return nil }
+        let bytes = [UInt8](frame)
         func word(_ offset: Int) -> UInt32 {
             (0..<4).reduce(0) { $0 | UInt32(bytes[offset + $1]) << UInt32(8 * $1) }
         }
         let mask = word(4)
-        guard mask & ~(withOrientation ? 0b111 : 0b11) == 0 else { return nil }
-        self.init(
-            accelerometer: mask & 1 != 0 ? word(8) : nil,
-            gyroscope: mask & 2 != 0 ? word(12) : nil,
-            orientationSensor: !withOrientation ? .absent : mask & 4 != 0 ? .active : .idle
-        )
+        switch bytes[3] {
+        case 0x31:
+            guard mask & ~0b11 == 0 else { return nil }
+            self.init(
+                accelerometer: mask & 1 != 0 ? word(8) : nil,
+                gyroscope: mask & 2 != 0 ? word(12) : nil)
+        case 0x32:
+            guard mask & ~0b111 == 0 else { return nil }
+            self.init(
+                accelerometer: mask & 1 != 0 ? word(8) : nil,
+                gyroscope: mask & 2 != 0 ? word(12) : nil,
+                orientationSensor: mask & 4 != 0 ? .active : .idle)
+        default:
+            // Bit 2 is the sensor enabled and bit 4 the sensor listed: enabled
+            // without listed is no state a service has.
+            guard mask & ~0b11111 == 0, mask & 0b100 == 0 || mask & 0b10000 != 0 else { return nil }
+            self.init(
+                accelerometer: mask & 1 != 0 ? word(8) : nil,
+                gyroscope: mask & 2 != 0 ? word(12) : nil,
+                magnetometer: mask & 8 != 0 ? word(16) : nil,
+                orientationSensor: mask & 0b10000 == 0 ? .absent : mask & 4 != 0 ? .active : .idle)
+        }
     }
 
     private static func clamped(_ period: UInt32) -> UInt32 {
@@ -87,10 +135,12 @@ public struct MotionDemand: Equatable, Sendable {
 public struct MotionPlan: Equatable, Sendable {
     public var accelerometer: TimeInterval?
     public var gyroscope: TimeInterval?
+    public var magnetometer: TimeInterval?
 
-    public init(accelerometer: TimeInterval? = nil, gyroscope: TimeInterval? = nil) {
+    public init(accelerometer: TimeInterval? = nil, gyroscope: TimeInterval? = nil, magnetometer: TimeInterval? = nil) {
         self.accelerometer = accelerometer
         self.gyroscope = gyroscope
+        self.magnetometer = magnetometer
     }
 
     public static let off = MotionPlan()
@@ -99,6 +149,7 @@ public struct MotionPlan: Equatable, Sendable {
         switch sensor {
         case .accelerometer: accelerometer
         case .gyroscope: gyroscope
+        case .magnetometer: magnetometer
         }
     }
 }
@@ -114,8 +165,10 @@ public struct MotionPlan: Equatable, Sendable {
 ///
 /// A guest image whose service never sends a frame (the one before the
 /// service learned to) is served as it always was: until a frame arrives,
-/// both sensors are read continuously at 100 Hz. A lost connection forgets
-/// what the last service said, since the next connection may be to another.
+/// the accelerometer and the gyroscope are read continuously at 100 Hz, and
+/// the magnetometer not at all, since only a service that lists one ("ANC3")
+/// can ask for it. A lost connection forgets what the last service said,
+/// since the next connection may be to another.
 public struct MotionSampling: Equatable, Sendable {
     /// The continuous rate of a service that does not say what it needs.
     public static let legacyInterval: TimeInterval = 0.01
@@ -124,9 +177,9 @@ public struct MotionSampling: Equatable, Sendable {
     /// rate applications see.
     public static let oversample = 2.0
 
-    /// The device has sensors to share: an accelerometer or a gyroscope. A
-    /// device without (a Mac, the Simulator) reads nothing and holds no
-    /// connection for them.
+    /// The device has sensors to share: an accelerometer, a gyroscope or a
+    /// magnetometer. A device without (a Mac, the Simulator) reads nothing and
+    /// holds no connection for them.
     public var hasSensors = false
     /// The guest runs a normal boot, in front, and has settled its rotation.
     public var foreground = false
@@ -184,7 +237,8 @@ public struct MotionSampling: Equatable, Sendable {
         }
         return MotionPlan(
             accelerometer: demand.accelerometer.map(Self.interval(forPeriod:)),
-            gyroscope: demand.gyroscope.map(Self.interval(forPeriod:))
+            gyroscope: demand.gyroscope.map(Self.interval(forPeriod:)),
+            magnetometer: demand.magnetometer.map(Self.interval(forPeriod:))
         )
     }
 

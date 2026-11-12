@@ -78,5 +78,7 @@ reject-control-v1-orientation: 41 4e 43 31 04 00 00 00 10 27 00 00 10 27 00 00
 # Bit 3 is reserved.
 reject-control-reserved: 41 4e 43 32 08 00 00 00 10 27 00 00 10 27 00 00
 
-# The magic's last byte is 3, not a version this protocol has.
-reject-control-magic: 41 4e 43 33 00 00 00 00 10 27 00 00 10 27 00 00
+# The magic's last byte is 0x21 ("!"), a version this protocol never assigns:
+# the versions are 1, 2 and 3 (the magnetometer's "ANC3", 20 bytes, whose own
+# frames are not in this file).
+reject-control-magic: 41 4e 43 21 00 00 00 00 10 27 00 00 10 27 00 00

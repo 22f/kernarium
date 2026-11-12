@@ -465,7 +465,8 @@ final class LiveRuntime: RuntimeDriver {
         inputRunReady = false
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(
-            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true)
+            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true,
+            compassAvailable: motion.compassAvailable)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -550,11 +551,15 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     /// What the boot request tells the guest the host has
-    /// (`android_host_features`): a vibrator, on a device with haptics, and a
-    /// device orientation to follow, where the guest follows it.
-    nonisolated static func hostFeatures(hapticsAvailable: Bool, followsDeviceOrientation: Bool = false) -> UInt32 {
+    /// (`android_host_features`): a vibrator, on a device with haptics, a
+    /// device orientation to follow, where the guest follows it, and a
+    /// magnetic field, on a device that can give one.
+    nonisolated static func hostFeatures(
+        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false
+    ) -> UInt32 {
         (hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0)
             | (followsDeviceOrientation ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) : 0)
+            | (compassAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) : 0)
     }
 
     // MARK: Android operations
