@@ -260,7 +260,7 @@ struct CameraFlowTests {
         #expect(LiveRuntime.cameraRuntimeMode(.blocked) != LiveRuntime.cameraRuntimeMode(.live))
     }
 
-    @Test func theStartPutsTheModelsModeInTheBootRequestAndReadsIOSAgain() throws {
+    @Test func theCameraModeAStartStatesIsWhatIOSAllowsThen() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let systemDirectory = try #require(Bundle.main.resourceURL).appendingPathComponent(SystemFolder.name)
@@ -297,8 +297,17 @@ struct CameraFlowTests {
         for budget: UInt32 in [384, 534, 1249, 2048, 4096, 9152] {
             #expect(kernarium_runtime_loader_camera_reserve_mib(budget) == 106, "budget \(budget) MiB")
         }
-        // An iPad mini 6 (B 534) is left 428 MiB, a 4 GiB iPhone (B 1249) 1143 MiB.
-        #expect(534 - 106 == 428 && 1249 - 106 == 1143)
+        // The model's policy takes that reserve out of the budget the runtime
+        // computes: an iPad mini 6 (B 534) is left 428 MiB, a 4 GiB iPhone
+        // (B 1249) 1143 MiB, and the figure is the budget's while Camera is off.
+        for (budget, pool) in [(534, 428), (1249, 1143)] {
+            let policy = MemoryPolicy(
+                processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
+                graphicsMemory: { _, _ in budget },
+                cameraReserve: { Int(kernarium_runtime_loader_camera_reserve_mib(UInt32(clamping: $0))) })
+            #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1, cameraLive: true) == pool)
+            #expect(policy.graphicsMemoryMiB(forMemory: 2048, vCPUs: 1) == budget)
+        }
     }
 
     @Test func theCalibrationFolderIsMadeAndKeptOutOfBackups() throws {
