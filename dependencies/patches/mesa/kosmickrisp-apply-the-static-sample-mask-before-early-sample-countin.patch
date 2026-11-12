@@ -99,7 +99,7 @@ index 25d7aecc45c04ad280e222555cd1271b5edaf963..92ae55f0bf63d4bedddc67b24a96dd38
        struct {
           uint32_t base_group[3];
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-index 05651ddbf68437be772a4d954b230ca5fd7ba69f..a8172ce5124e78cabcb6a7bccbc79eb4c2e2321b 100644
+index a1457b264e611f9f164c7781f920b54d6e1d05b6..97e3d22466c81d39e5f91ea4c25e91aa7b6dfaed 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 @@ -1825,8 +1825,17 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
