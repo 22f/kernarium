@@ -1147,6 +1147,45 @@ class ForcedEvaluationReadingTests(unittest.TestCase):
         self.assertEqual(len(runner.forced_request_problems([], late, checked=False)), 1)
 
 
+class FirstCompletionReadingTests(unittest.TestCase):
+    URL = "http://127.0.0.1:41000/s1/generate_204"
+    HELD = f"PROBE_HTTP {URL} time=3ms ret=200 request={{}} headers={{}}"
+    FAILED = f"PROBE_HTTP {URL} Probe failed with exception java.net.ConnectException: Connection refused"
+
+    def test_a_log_with_no_completed_probe_or_check_has_no_problem_while_the_request_is_held(self) -> None:
+        for messages in ([], [runner.VALIDATED_FIRST_LINE],
+                         [runner.VALIDATED_FIRST_LINE, "PROBE_DNS 127.0.0.1 3ms: [/127.0.0.1]",
+                          "PROBE_PRIVDNS 1a2b3c4d-dnsotls-ds.metric.gstatic.com 12ms: [/8.8.8.8]"]):
+            with self.subTest(messages=messages):
+                self.assertEqual(runner.completed_before_problems(messages), [])
+
+    def test_a_probe_or_check_that_completed_before_the_held_request_is_a_problem(self) -> None:
+        for line in (self.FAILED, self.HELD, "PROBE_HTTPS https://192.0.2.1/generate_204 Probe failed with exception x",
+                     "PROBE_FALLBACK http://127.0.0.1:41000/s1/gen_204 time=2ms ret=204", runner.CHECK_FAILED_LINE,
+                     runner.CHECK_PASSED_LINE):
+            with self.subTest(line=line):
+                problems = runner.completed_before_problems([runner.VALIDATED_FIRST_LINE, line])
+                self.assertIn("completed before the held request, so it is not the first", problems[0])
+
+    def test_the_first_probe_to_complete_must_be_the_held_requests(self) -> None:
+        good = [runner.VALIDATED_FIRST_LINE, self.HELD, runner.CHECK_FAILED_LINE]
+        self.assertEqual(runner.first_completion_problems(good, "/s1", 200), [])
+        for messages in ([runner.VALIDATED_FIRST_LINE, self.FAILED, self.HELD, runner.CHECK_FAILED_LINE],
+                         [self.HELD.replace("ret=200", "ret=204"), runner.CHECK_FAILED_LINE],
+                         [self.HELD.replace("/s1/", "/s2/"), runner.CHECK_FAILED_LINE]):
+            with self.subTest(messages=messages):
+                self.assertIn("the first probe to complete is not the held request's",
+                              runner.first_completion_problems(messages, "/s1", 200)[0])
+
+    def test_a_check_result_before_the_first_probe_is_a_problem(self) -> None:
+        problems = runner.first_completion_problems([runner.CHECK_FAILED_LINE, self.HELD], "/s1", 200)
+        self.assertIn("a check result is logged before the first probe completed", problems)
+
+    def test_a_log_without_a_completed_probe_is_a_problem(self) -> None:
+        self.assertEqual(runner.first_completion_problems([runner.VALIDATED_FIRST_LINE], "/s1", 200),
+                         ["the validation log shows no probe that completed"])
+
+
 def log_line(pid: int, tid: int, priority: str, tag: str, message: str, when: str = "03:10:01.000") -> str:
     """One line of `logcat -v threadtime`."""
     return f"11-13 {when} {pid:5d} {tid:5d} {priority} {tag:<8s}: {message}\n"
@@ -1835,7 +1874,8 @@ class SimulatedGuest(StubbedGuest):
             self.add(probe)
         if self.strict and not self.faults.get("no_private_dns_probe"):
             self.add("PROBE_PRIVDNS 1a2b3c4d-dnsotls-ds.metric.gstatic.com 12ms: [/8.8.8.8]")
-        self.add(runner.VALIDATED_FIRST_LINE)
+        if not self.faults.get("explanation_late"):
+            self.add(runner.VALIDATED_FIRST_LINE)
         self.next_check: float | None = None if self.faults.get("no_checks") else self.clock.now + 0.5
 
     def advance(self) -> None:
@@ -1845,7 +1885,10 @@ class SimulatedGuest(StubbedGuest):
             if not self.server.is_open(self.scenario) or self.clock.now - arrived >= runner.HELD_ANSWER_SECONDS:
                 self.server.release()
                 self.in_flight = None
-                self.answered(self.clock.now, status)
+                if self.faults.get("earlier_completes_late"):
+                    self.answered_after_an_earlier_attempt(self.clock.now, status)
+                else:
+                    self.answered(self.clock.now, status)
         while self.next_check is not None and self.next_check <= self.clock.now:
             when, self.next_check = self.next_check, None
             self.check(when)
@@ -1873,7 +1916,16 @@ class SimulatedGuest(StubbedGuest):
         else:
             self.add(f"PROBE_HTTP {url} time=3ms ret={status} request={{}} headers={{}}")
             passed = status == 204
+        if self.faults.get("explanation_late") and self.checks_done == 1:
+            self.add(runner.VALIDATED_FIRST_LINE)
         self.conclude(when, passed)
+
+    def answered_after_an_earlier_attempt(self, when: float, status: int) -> None:
+        """The held request's answer goes out, and an attempt that was in flight before it logs its failure just
+        before the answer's own line (nothing had completed when the runner looked)."""
+        self.add(f"PROBE_HTTP http://127.0.0.1:41000{self.scenario}/generate_204 Probe failed with exception "
+                 "java.net.ConnectException: Connection refused")
+        self.answered(when, status)
 
     def conclude(self, when: float, passed: bool) -> None:
         if self.faults.get("capability_late") and not self.validated and not self.broken:
@@ -2006,6 +2058,19 @@ class SimulatedGuest(StubbedGuest):
         return answers[command]()
 
 
+class RetryIsFirstArrival(SimulatedGuest):
+    """A platform whose first attempt at the check fails with a connection error before it reaches the server."""
+
+    def check(self, when: float) -> None:
+        if self.scenario is not None and self.checks_done == 0:
+            self.checks_done += 1
+            self.add(f"PROBE_HTTP http://127.0.0.1:41000{self.scenario}/generate_204 Probe failed with exception "
+                     "java.net.ConnectException: Connection refused")
+            self.conclude(when, False)
+            return
+        super().check(when)
+
+
 class SimulatedSectionTests(unittest.TestCase):
     """The sections that follow one network over time, against a guest that behaves as the platform should, and
     against one that is wrong in each way the sections are there to catch."""
@@ -2061,8 +2126,13 @@ class SimulatedSectionTests(unittest.TestCase):
     def test_checks_that_come_back_before_the_back_off_fail_the_section(self) -> None:
         self.fails(self.recovery, self.guest(delays=[0.1]), "under the back-off of 1.8 s")
 
-    def test_a_network_that_validates_after_its_first_probe_fails_the_section(self) -> None:
-        self.fails(self.recovery, self.guest(probe_first=True), "a probe of the check completed before the network was validated")
+    def test_a_probe_that_completed_before_the_held_request_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(probe_first=True), "a probe or check had completed before the held request")
+
+    def test_an_explanation_logged_after_the_first_probe_fails_the_section(self) -> None:
+        # Nothing completed while the request was held; the explanation line comes after the probe's own line.
+        self.fails(self.recovery, self.guest(explanation_late=True),
+                   "a probe of the check completed before the network was validated")
 
     def test_a_refused_forced_re_evaluation_fails_the_section(self) -> None:
         self.fails(self.recovery, self.guest(reevaluate_fails=True), "cmd connectivity reevaluate 102 .rc 255.: Permission denied")
@@ -2263,6 +2333,23 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
             self.recovery(guest)
         self.assertFalse(self.server.is_open(guest.scenario))
 
+    def test_a_retry_that_the_server_holds_in_place_of_a_first_attempt_that_failed_fails_the_section(self) -> None:
+        # The first attempt fails with a connection error before it reaches the server, and only that
+        # completion makes the network validated. The retry is the first request the server sees: holding it
+        # does not keep the platform's real first check unanswered.
+        for faults in ({"capability_late": True}, {}):
+            with self.subTest(faults=faults):
+                self.server.clear()
+                guest = RetryIsFirstArrival(self.server, self.clock, **faults)
+                with self.assertRaisesRegex(runner.Failure, "a probe or check had completed before the held "
+                                                            "request, so it is not the first"):
+                    self.recovery(guest)
+                self.assertGreater(guest.checks_done, len(self.server.checks(guest.scenario)))
+
+    def test_an_earlier_attempt_that_completes_after_the_look_is_not_the_held_requests_answer(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "the first probe to complete is not the held request's"):
+            self.recovery(self.guest(earlier_completes_late=True))
+
     def test_a_look_that_does_not_fit_in_the_hold_fails_the_section(self) -> None:
         guest = self.guest(slow_look=runner.HELD_ANSWER_SECONDS + 1)
         with self.assertRaisesRegex(runner.Failure, "the held answer was out before the look at the network"):
@@ -2271,7 +2358,7 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
     def test_a_request_that_arrives_between_two_looks_at_the_hold_is_not_an_answer_that_is_out(self) -> None:
         # The reviewer's interleaving: the hold is read as not arrived, and the request arrives right after. Read
         # as one state, that is "no check yet" and the next look finds it open, so the section goes on.
-        guest = self.guest()
+        guest = self.guest(no_checks=True)
         scenario = "/race"
         self.server.hold_first(scenario)
         read = self.server.hold_state

@@ -446,6 +446,40 @@ def first_validation_problems(messages: list[str]) -> list[str]:
     return []
 
 
+# The line the validation log has for an internet probe that completed (an answer or a failure; the DNS probe that
+# comes before a request is not one).
+PROBE_COMPLETION = re.compile(r"PROBE_(?:HTTP|HTTPS|FALLBACK) ")
+
+
+def completed_before_problems(messages: list[str]) -> list[str]:
+    """While the first request of the section is held, the network's log holds no internet probe or check that
+    completed: an attempt that completed or failed before the held one means the held request is a retry, not
+    the first check."""
+    done = [message for message in messages
+            if PROBE_COMPLETION.match(message) or CHECK_PASSED_LINE in message or CHECK_FAILED_LINE in message]
+    return [f"a probe or check had completed before the held request, so it is not the first: {done[0][:160]!r}"] \
+        if done else []
+
+
+def first_completion_problems(messages: list[str], scenario: str, code: int) -> list[str]:
+    """After the held request is answered, the first probe that completed in the network's log is that request's
+    (an HTTP probe of the scenario's URL that received `code`), and no check result comes before it."""
+    completions = [index for index, message in enumerate(messages) if PROBE_COMPLETION.match(message)]
+    if not completions:
+        return ["the validation log shows no probe that completed"]
+    first = messages[completions[0]]
+    problems = []
+    if not (first.startswith("PROBE_HTTP ") and f"{scenario}/generate_204" in first and f" ret={code} " in first
+            and "Probe failed" not in first):
+        problems.append(f"the first probe to complete is not the held request's ({code} for {scenario}): "
+                        f"{first[:160]}")
+    results = [index for index, message in enumerate(messages)
+               if CHECK_PASSED_LINE in message or CHECK_FAILED_LINE in message]
+    if results and results[0] < completions[0]:
+        problems.append("a check result is logged before the first probe completed")
+    return problems
+
+
 def passed_after_failed_problems(messages: list[str]) -> list[str]:
     """A new passing check after the failed ones: the last passing line comes after the last failed one."""
     passed = [index for index, message in enumerate(messages) if CHECK_PASSED_LINE in message]
@@ -1882,7 +1916,8 @@ def validated_while_unanswered(guest: Guest, server: "ProbeServer", scenario: st
     """Waits for the first check of the network (the scenario's first HTTP probe, which the server holds) to be
     at the server, looks at `dumpsys connectivity` while that request is open and unanswered (open before the
     look and still open after it, so the whole look fell inside), and requires the newest network to be
-    validated then, not partial, not behind a sign-in page, its private DNS not broken. It then answers the
+    validated then, not partial, not behind a sign-in page, its private DNS not broken, and its validation
+    log to hold no probe or check that completed before the held request. It then answers the
     request and pins that network. A network that is validated only when its check is answered fails here, as
     does a look that did not fit in the hold (the hold is HELD_ANSWER_SECONDS, below the probe's own timeout)."""
     found: list[Pin] = []
@@ -1896,11 +1931,13 @@ def validated_while_unanswered(guest: Guest, server: "ProbeServer", scenario: st
             raise Failure("the first check's answer was out before a look at the network was made: "
                           f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
         dump = guest.connectivity()
+        net_id = newest_wifi_network(dump)
+        messages = [] if net_id is None else guest.validation_log(net_id)
         if server.hold_state(scenario) != "open":
             raise Failure("the held answer was out before the look at the network was complete: "
                           f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
-        net_id = newest_wifi_network(dump)
         problems = validation_problems(None if net_id is None else wifi_networks(dump)[net_id])
+        problems += completed_before_problems(messages)
         when = None if net_id is None else last_validated(dump).get(net_id)
         if when is None and not problems:
             problems = [f"network {net_id} shows no lastValidated"]
@@ -1936,7 +1973,8 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         # The answer is out: the check's result is logged, and the network was validated before any probe of it.
         wait_problems("the first check's result is logged", WARNING_SECONDS, guest,
                       lambda: check_log_problems(guest.validation_log(pin.net_id), CHECK_FAILED_LINE), interval=1.0)
-        first = first_validation_problems(guest.validation_log(pin.net_id))
+        messages = guest.validation_log(pin.net_id)
+        first = first_validation_problems(messages) + first_completion_problems(messages, scenario, 200)
         if first:
             raise Failure("; ".join(first))
         wait_watching("the failed check shows in Settings and in the status bar, with no other action",
