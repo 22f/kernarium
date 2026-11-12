@@ -50,7 +50,15 @@ final class AndariumProcess {
         // From launch: a purchase the store delivers outside the sheet (an
         // approval, an interrupted purchase) is finished, whether or not the
         // sheet is ever opened.
+        #if !APP_STORE
+        // A hosted test owns StoreKit's queue, and the launch's own listener
+        // would finish its transactions before the test looks.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            TipJarUpdates.listen(model.tipJarServices.store)
+        }
+        #else
         TipJarUpdates.listen(model.tipJarServices.store)
+        #endif
         #endif
     }
 }

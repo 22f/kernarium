@@ -27,7 +27,14 @@ struct TipJarStoreKitTests {
     /// alive, so the suite's instance (one per test) holds it for the test.
     private let session: SKTestSession
 
+    /// StoreKit wants `Transaction.updates` iterated before a purchase is made (it says so, and
+    /// the purchase does not complete otherwise). The application's own launch does that where it
+    /// finishes what it hears, which would race the tests, so under a test it does not run, and
+    /// the suite iterates the updates itself, finishing nothing, for the life of the process.
+    private static let updatesIterated = Task { for await _ in StoreKit.Transaction.updates {} }
+
     init() throws {
+        _ = Self.updatesIterated
         let bundle = Bundle(for: BundleMarker.self)
         let file = bundle.url(forResource: "TipJar", withExtension: "storekit")
             ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("TipJar.storekit")
@@ -143,13 +150,14 @@ struct TipJarStoreKitTests {
 
     @Test func aTransactionLeftUnfinishedIsFinishedAtLaunch() async throws {
         try await serving()
-        // A purchase made outside the app, which nobody finished. The application's own
-        // listener, running since its launch in this hosted run, may finish it before the test
-        // looks, so what is checked is the end: nothing is left, and the purchase happened.
+        // A purchase made outside the app, which nobody finished. The application's own launch
+        // listener does not run under a test, so it is the one this test starts that finishes it.
         try await session.buyProduct(identifier: "com.example.andarium.tip.ultra")
+        #expect(
+            await unfinished() == ["com.example.andarium.tip.ultra"], "the purchase is open until a listener finishes it")
         let listener = TipJarUpdates.listen(.live)
         defer { listener.cancel() }
-        #expect(await eventually { await unfinished().isEmpty })
+        #expect(await eventually { await unfinished().isEmpty }, "the listener finished what was open at launch")
         #expect(session.allTransactions().contains { $0.productIdentifier == "com.example.andarium.tip.ultra" && $0.state == .purchased })
     }
 
