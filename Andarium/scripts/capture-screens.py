@@ -54,7 +54,10 @@ the local file:
         FEEDBACK_ADDRESS=feedback@example.com build
 
 Without it the Preview has no Send feedback, its shots are skipped and said
-so, and the rest is unaffected.
+so, and the rest is unaffected. The Info shots show Follow developer on X in a
+Preview built with `FOLLOW_X_HANDLE=example_handle` (and
+`FOLLOW_X_LOGO_SOURCE=local` for the real logo from `Config/Local/`); without
+it the row is absent from them.
 
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard

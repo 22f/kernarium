@@ -87,8 +87,7 @@ struct RetinaMemoryTests {
             try installed.stdout.write(to: directory.appendingPathComponent("installed-apps.txt"))
             print("RETINA_MEMORY: installed apps \(installed.text)")
             if webGL {
-                let bytes = try apk.resourceValues(forKeys: [.fileSizeKey]).fileSize!
-                try await operations.installApk(at: apk, sizeBytes: bytes, update: { _ in })
+                try await operations.installApk(at: apk, update: { _ in })
             }
             try await Task.sleep(for: .seconds(10))
             try snapshot("booted")

@@ -74,7 +74,7 @@ struct MotionOverVsockTests {
         defer { try? FileManager.default.removeItem(at: probeURL) }
         try await withAndroidGuest(cleanupCommand: "pm uninstall org.example.andarium.motionprobe >/dev/null 2>&1") { model, operations in
             try #require(model.motionSensorsAvailable)
-            try await operations.installApk(at: probeURL, sizeBytes: probe.count, update: { _ in })
+            try await operations.installApk(at: probeURL, update: { _ in })
             try await body(model, operations)
         }
     }

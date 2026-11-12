@@ -204,7 +204,7 @@ struct AdbOverVsockTests {
         else { return }
         let apk = FileManager.default.temporaryDirectory.appendingPathComponent("AndariumStorageTests.apk")
         defer { try? FileManager.default.removeItem(at: apk) }
-        let bytes = try #require(try apk.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        _ = try #require(try apk.resourceValues(forKeys: [.fileSizeKey]).fileSize)
         let operations = try await readyOperations()
         // The APK is test-key signed, so its one hidden API call needs the
         // policy; the guest's own value (unset: "null") is put back.
@@ -216,7 +216,7 @@ struct AdbOverVsockTests {
                 : "settings put global hidden_api_policy \(policy)")
         }
         do {
-            try await operations.installApk(at: apk, sizeBytes: bytes) { _ in }
+            try await operations.installApk(at: apk) { _ in }
             let enabled = try await operations.shell("settings put global hidden_api_policy 1")
             #expect(enabled.exitCode == 0, "\(enabled.text)")
             let result = try await operations.shell(
@@ -878,7 +878,7 @@ struct AdbOverVsockTests {
             try await pull(candidate.path, to: local, operations: operations)
             do {
                 let started = ContinuousClock.now
-                try await operations.installApk(at: local, sizeBytes: candidate.size) { _ in }
+                try await operations.installApk(at: local) { _ in }
                 let elapsed = ContinuousClock.now - started
                 let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
                 print("ADBVSOCK: install of \(candidate.size) bytes took \(String(format: "%.1f", seconds)) s")
