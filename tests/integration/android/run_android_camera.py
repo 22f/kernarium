@@ -81,6 +81,7 @@ STILL_DIRECTORY = "/sdcard/DCIM/Camera"
 # and how long it may run after the last camera is closed: the service manager tells a lazy service that it
 # has no clients on a timer of seconds.
 PROVIDER_PROCESS = "android.hardware.camera.provider"
+PROVIDER_START_SECONDS = 60
 PROVIDER_EXIT_SECONDS = 240
 COMMAND_SECONDS = 120
 PREVIEW_SECONDS = 90
@@ -114,13 +115,16 @@ PROFILE_CAMERAS = {
     "tablet": ("back+front", ("0", "1")),
     "laptop": ("front", ("0",)),
 }
-# The layout each synthetic profile earns (darwin/platform/synthetic_camera): the phone's back lenses
-# have flash, manual control and RAW, its zoom and front cameras stream together, and its front
-# camera records 2160p; the tablet's back camera has flash, manual control and RAW, and its front
-# camera cannot make the guaranteed concurrent stream sizes; the laptop has one front camera.
+# The layout each synthetic profile earns on a host that has not learnt its lenses' colour data: the phone's
+# back lenses have flash and manual control, its zoom and front cameras stream together, and its front camera
+# records 2160p; the tablet's back camera has flash and manual control, and its front camera cannot make the
+# guaranteed concurrent stream sizes; the laptop has one front camera (darwin/platform/synthetic_camera). The
+# host offers RAW only for a lens whose colour data an earlier still has kept (darwin/device/camera/README.md,
+# Calibration), so a fresh host composes these layouts and the same host after a still the -raw ones, which
+# --layout states for a host that has a calibration directory.
 DEFAULT_LAYOUTS = {
-    "phone": "bf-large-flash-manual-raw-concurrent-front2160",
-    "tablet": "bf-small-flash-manual-raw",
+    "phone": "bf-large-flash-manual-concurrent-front2160",
+    "tablet": "bf-small-flash-manual",
     "laptop": "front",
 }
 MODES = ("live", "blocked", "none")
@@ -232,6 +236,9 @@ class StaticInfo:
 # as `name (tag): type[count]` and the values on the lines under it in brackets (enum values by name).
 # The entries follow the order the HAL's metadata was built in, not the tag order, so only the header
 # starts the next camera; the next `== ` header of another kind ends the camera.
+# Android 17 prints the autofocus modes of the dump as numbers, the capabilities and the facing as names.
+AF_MODE_NAMES = {"0": "OFF", "1": "AUTO", "2": "MACRO", "3": "CONTINUOUS_VIDEO", "4": "CONTINUOUS_PICTURE",
+                 "5": "EDOF"}
 STATIC_INFO_HEADER = re.compile(r"^\s*== Camera HAL device .* static information: ==\s*$")
 STATIC_INFO_ENTRY = re.compile(r"^\s*(android\.[A-Za-z0-9_.]+) \(([0-9a-f]+)\): ")
 STATIC_INFO_VALUES = re.compile(r"^\s*\[([^\]]*)\]\s*$")
@@ -262,7 +269,7 @@ def parse_static_info(text: str) -> list[StaticInfo]:
         facing=camera["android.lens.facing"][0],
         capabilities=frozenset(camera.get("android.request.availableCapabilities", ())),
         flash=camera.get("android.flash.info.available", ["FALSE"])[:1] == ["TRUE"],
-        af_modes=frozenset(camera.get("android.control.afAvailableModes", ())))
+        af_modes=frozenset(AF_MODE_NAMES.get(mode, mode) for mode in camera.get("android.control.afAvailableModes", ())))
         for camera in cameras if camera.get("android.lens.facing")]
 
 
@@ -683,6 +690,35 @@ def run_checks(guest: Guest, plan: Plan) -> None:
     print(f"  provider: gone {exited:.0f} s after the application stopped")
     check_camera_list(guest, plan)
     print("  the cameras are still listed with the provider gone")
+    check_cameraserver_restart(guest, plan)
+
+
+def cameraserver_restart_skip(debuggable: str) -> str | None:
+    """Why a restart of cameraserver cannot be run on this build, or None when it can: stopping a system
+    service needs root, which only a debuggable build gives the shell."""
+    if debuggable == "1":
+        return None
+    return "not run on a user build (stopping cameraserver needs root); the action that restarts the " \
+        "provider is in the image, which the target-files verifier checks"
+
+
+def check_cameraserver_restart(guest: Guest, plan: Plan) -> None:
+    """cameraserver starts again with the provider gone: the action restarts the provider and the cameras are
+    listed again."""
+    skipped = cameraserver_restart_skip(guest.prop("ro.debuggable"))
+    if skipped:
+        print(f"  skip: cameraserver restarted with the provider gone: {skipped}")
+        return
+    guest.shell("su 0 stop cameraserver")
+    wait_for("cameraserver to be stopped", COMMAND_SECONDS, lambda: None if guest.prop(
+        "init.svc.cameraserver") == "stopped" else "it is not stopped", guest)
+    exited = wait_provider_exit(guest, "after cameraserver stopped")
+    guest.shell("su 0 start cameraserver")
+    wait_for("the camera provider to be started by cameraserver's start", PROVIDER_START_SECONDS,
+             lambda: None if guest.provider_pids() else "no provider process", guest)
+    check_camera_list(guest, plan)
+    print(f"  cameraserver restarted {exited:.0f} s after the provider was gone: the provider started again "
+          "and the cameras are listed again")
 
 
 # ---- Starting and stopping the guest.
@@ -756,7 +792,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-profile", choices=sorted(PROFILE_CAMERAS), default="phone",
                         help="the cameras the synthetic source presents")
     parser.add_argument("--layout", help="the camera layout to state on the vendor SKU "
-                        "(default: the profile's, or none for --mode none)")
+                        "(default: the profile's on a host without RAW calibration, or none for --mode none)")
     parser.add_argument("--mode", choices=MODES, default="live",
                         help="live: the synthetic chart; blocked: a session started with Camera off; "
                         "none: no camera device")

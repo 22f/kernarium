@@ -206,17 +206,23 @@ class PlanTests(unittest.TestCase):
                 runner.make_plan(name, profile, "blocked")
 
     def test_the_default_layout_of_a_profile_is_the_synthetic_camera_it_presents(self) -> None:
-        # darwin/platform/synthetic_camera: the phone's back lenses have flash, manual control and RAW
-        # and its zoom and front cameras stream together; the tablet's front camera cannot make the
-        # guaranteed concurrent sizes; the laptop has one front camera.
+        # darwin/platform/synthetic_camera: the phone's back lenses have flash and manual control and its
+        # zoom and front cameras stream together; the tablet's front camera cannot make the guaranteed
+        # concurrent sizes; the laptop has one front camera. A fresh host offers no RAW: it comes with the
+        # colour data a first still keeps (darwin/device/camera/README.md, Calibration).
         phone = layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]]
         self.assertEqual((phone.flash, phone.manual, phone.raw, phone.concurrent, phone.front2160),
-                         (True, True, True, True, True))
+                         (True, True, False, True, True))
         tablet = layouts.by_name()[runner.DEFAULT_LAYOUTS["tablet"]]
         self.assertEqual((tablet.flash, tablet.manual, tablet.raw, tablet.concurrent),
-                         (True, True, True, False))
+                         (True, True, False, False))
         self.assertEqual(layouts.by_name()[runner.DEFAULT_LAYOUTS["laptop"]].features,
                          ("android.hardware.camera.any", "android.hardware.camera.front"))
+        for name in runner.DEFAULT_LAYOUTS.values():
+            self.assertFalse(layouts.by_name()[name].raw, name)
+            # the layout a calibrated host composes is the same with RAW, and it exists
+            if layouts.by_name()[name].manual:
+                self.assertTrue(name.replace("manual", "manual-raw", 1) in layouts.by_name(), name)
 
     def test_the_camera_ids_follow_the_hals_plan(self) -> None:
         header = (REPOSITORY / "android/lineage-24/overlay/camera/hal/camera_ids.hpp").read_text(encoding="utf-8")
@@ -325,9 +331,10 @@ class GuestReaderTests(unittest.TestCase):
             "android.hardware.camera", "android.hardware.camera.any", "android.hardware.camera.autofocus",
             "android.hardware.camera.capability.manual_sensor", "android.hardware.camera.capability.raw",
             "android.hardware.camera.flash", "android.hardware.camera.front"})
-        # They are what the phone's default layout states, bar the combination feature.
+        # The phone's default layout states them, bar RAW (a fresh host has no calibration) and the combination feature.
         stated = set(layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]].features)
         self.assertEqual(stated - earned, {runner.CONCURRENT_FEATURE})
+        self.assertEqual(earned - stated, {"android.hardware.camera.capability.raw"})
         # A back camera without flash or RAW, and a layout that says it has them, differ.
         plain = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "OFF AUTO"))
         self.assertEqual(runner.features_of(plain), {"android.hardware.camera", "android.hardware.camera.any",
@@ -337,6 +344,17 @@ class GuestReaderTests(unittest.TestCase):
         self.assertEqual(runner.features_of(front), {"android.hardware.camera.any", "android.hardware.camera.front",
                                                      "android.hardware.camera.capability.manual_sensor"})
         self.assertEqual(runner.features_of([]), set())
+        # Android 17 prints the autofocus modes as numbers: 1 is AUTO.
+        numbered = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "0 1 2 3 4"))
+        self.assertEqual(numbered[0].af_modes, {"OFF", "AUTO", "MACRO", "CONTINUOUS_VIDEO", "CONTINUOUS_PICTURE"})
+        self.assertIn("android.hardware.camera.autofocus", runner.features_of(numbered))
+        unfocused = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "0"))
+        self.assertNotIn("android.hardware.camera.autofocus", runner.features_of(unfocused))
+
+    def test_the_cameraserver_restart_needs_a_debuggable_build(self) -> None:
+        self.assertIsNone(runner.cameraserver_restart_skip("1"))
+        for value in ("0", "", "unknown"):
+            self.assertIn("user build", runner.cameraserver_restart_skip(value) or "")
 
     def test_the_blocked_preview_is_sampled_twice(self) -> None:
         chart, black = (120.0, 60.0), (2.0, 1.0)
