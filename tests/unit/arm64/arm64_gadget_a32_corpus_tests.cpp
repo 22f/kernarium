@@ -361,18 +361,7 @@ struct Options final {
 	 * by commas; none selects every record. */
 	[[nodiscard]] bool selects(std::string_view name) const
 	{
-		if (record.empty())
-			return true;
-		std::string_view rest = record;
-		while (!rest.empty()) {
-			const auto comma = rest.find(',');
-			if (rest.substr(0, comma) == name)
-				return true;
-			if (comma == std::string_view::npos)
-				break;
-			rest.remove_prefix(comma + 1);
-		}
-		return false;
+		return corpus::record_listed(record, name);
 	}
 };
 
@@ -467,7 +456,8 @@ void explain(const corpus::Case &test, std::size_t target)
 struct Attempt final {
 	std::string diffs;
 	/* The only differences are a store-exclusive that reported failure where
-	 * the oracle's succeeded and the store it therefore did not make. */
+	 * the oracle's succeeded and the store it therefore did not make, the
+	 * rest of the data being as the pack has it. */
 	bool reservation_lost = false;
 };
 
@@ -499,7 +489,8 @@ struct Attempt final {
 
 	Attempt attempt;
 	auto &diffs = attempt.diffs;
-	std::size_t notes = 0, lost_status = 0, unwritten = 0;
+	std::size_t notes = 0, lost_status = 0, data_notes = 0;
+	bool unwritten = false;
 	const auto note = [&](const char *format, auto... values) {
 		char text[200];
 		std::snprintf(text, sizeof(text), format, values...);
@@ -584,8 +575,8 @@ struct Attempt final {
 		if (static_cast<std::uint32_t>(cpu.tls) != test.final.tpidrurw)
 			note("tpidrurw %#x vs %#x", test.final.tpidrurw,
 			     static_cast<std::uint32_t>(cpu.tls));
-		if (machine.data() != expected_data) {
-			const auto actual = machine.data();
+		const auto actual = machine.data();
+		if (actual != expected_data) {
 			std::size_t count = 0, first = 0;
 			for (std::size_t index = 0; index < actual.size(); ++index)
 				if (actual[index] != expected_data[index]) {
@@ -593,11 +584,16 @@ struct Attempt final {
 						first = index;
 				}
 			note("data differs in %zu bytes, first at %#zx", count, first);
-			unwritten = actual == initial_data ? 1 : 0;
+			data_notes = 1;
 		}
+		/* The store-exclusive's own bytes are what the case started with
+		 * and the others are the pack's, the program's other stores
+		 * (a spill between the pair) included. */
+		unwritten = corpus::lost_exclusive_data(test, initial_data,
+							expected_data, actual);
 	}
 	attempt.reservation_lost = is_store_exclusive(test) && lost_status == 1 &&
-		unwritten == 1 && notes == 2;
+		unwritten && notes == 1 + data_notes;
 	return attempt;
 }
 

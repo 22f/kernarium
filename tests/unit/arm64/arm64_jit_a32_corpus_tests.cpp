@@ -31,9 +31,9 @@
  * subnormal input, which exercises the correction for a host whose FJCVTZS
  * reports it as exact.
  *
- *   uml_arm64_jit_a32_corpus_tests PACK [--record NAME] [--case NAME]
- *       [--form PREFIX] [--list-failures] [--passes N] [--interrupt]
- *       [--attempts N]
+ *   uml_arm64_jit_a32_corpus_tests PACK [--record NAME[,NAME...]]
+ *       [--case NAME] [--form PREFIX] [--list-failures] [--passes N]
+ *       [--interrupt] [--attempts N]
  */
 #include "aarch32_corpus_cpu_state.hpp"
 #include "aarch32_corpus_pack.hpp"
@@ -225,7 +225,9 @@ struct Attempt final {
 
 /* Whether the disagreement at register `index` is the whole of it: the
  * store-exclusive's status reads 1 where the pack has 0, and nothing else
- * differs, the data being what the case started from. */
+ * differs, the data being the pack's except the bytes the store-exclusive
+ * did not write, which hold what the case started with (a spill the case
+ * makes before the store is in the pack's data). */
 [[nodiscard]] bool lost_reservation(const Machine &machine, const Case &test,
                                     const arm64::CpuState &cpu,
                                     unsigned index) {
@@ -241,7 +243,9 @@ struct Attempt final {
     if (value != test.final.d[d])
       return false;
   }
-  return machine.read_data() == machine.initial_data();
+  return lost_exclusive_data(test, machine.initial_data(),
+                             data_after(test, machine.initial_data()),
+                             machine.read_data());
 }
 
 /* Runs one attempt at a case. */
@@ -617,7 +621,7 @@ int main(int argc, char **argv) {
   for (std::size_t pass = 0; pass < passes; ++pass) {
     for (const auto &record : pack.records) {
       if ((record.profiles & kProfileBit) == 0 ||
-          (!only_record.empty() && record.name != only_record))
+          !record_listed(only_record, record.name))
         continue;
       for (const auto &test : record.cases) {
         if (!only_case.empty() && test.name != only_case)

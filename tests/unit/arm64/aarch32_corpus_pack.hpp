@@ -26,7 +26,9 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace uml::testing::aarch32_corpus {
@@ -401,6 +403,98 @@ ProgramEnd for_each_instruction(const Case &test, const ::uml::cpu::arm64::aarch
 		half += length / 2;
 	}
 	return ProgramEnd::whole;
+}
+
+/* Whether `list`, a name or names separated by commas, holds `name`: how a
+ * lane's --record chooses records. An empty list holds every name. */
+[[nodiscard]] inline bool record_listed(std::string_view list, std::string_view name)
+{
+	if (list.empty())
+		return true;
+	while (!list.empty()) {
+		const auto comma = list.find(',');
+		if (list.substr(0, comma) == name)
+			return true;
+		if (comma == std::string_view::npos)
+			break;
+		list.remove_prefix(comma + 1);
+	}
+	return false;
+}
+
+/* Store-exclusives -------------------------------------------------------------- */
+
+/* A store-exclusive's place in the data region: the bytes it writes when it
+ * succeeds, and the instruction. */
+struct ExclusiveStore final {
+	std::uint32_t offset;
+	std::uint32_t size;
+	::uml::cpu::arm64::aarch32::Instruction instruction;
+};
+
+/* The store-exclusive that `test` targets, or nothing when its place cannot
+ * be named from the pack alone. A store-exclusive is a form of STREX or STLEX
+ * (the byte, halfword and doubleword ones add B, H or D), and writes 1, 2, 4
+ * or 8 bytes at its base register plus an offset that only STREX_T1 has
+ * (imm8 << 2, decoded into imm32). The decoded instruction must be the form
+ * the case names, the base register must hold the same value before the
+ * program and after it so that the final state names the address, and the
+ * bytes must lie in the data region. */
+[[nodiscard]] inline std::optional<ExclusiveStore> exclusive_store(const Case &test)
+{
+	namespace dec = ::uml::cpu::arm64::aarch32;
+	struct Width final {
+		std::string_view mnemonic;
+		std::uint32_t size;
+	};
+	static constexpr Width kWidths[] = {
+		{"STREX", 4}, {"STREXB", 1}, {"STREXH", 2}, {"STREXD", 8},
+		{"STLEX", 4}, {"STLEXB", 1}, {"STLEXH", 2}, {"STLEXD", 8},
+	};
+	std::optional<dec::Instruction> target;
+	unsigned index = 0;
+	for_each_instruction(test, dec::Profile{}, [&](const ProgramStep &step) {
+		if (index++ != test.target)
+			return true;
+		target = step.instruction;
+		return false;
+	});
+	if (!target || target->status != dec::Status::ok || test.form != target->info().name)
+		return std::nullopt;
+	std::uint32_t size = 0;
+	for (const auto &width : kWidths)
+		if (width.mnemonic == target->info().mnemonic)
+			size = width.size;
+	const auto base = target->operands.n;
+	if (size == 0 || base < 0 || static_cast<unsigned>(base) >= kRegisters ||
+	    test.initial.r[base] != test.final.r[base])
+		return std::nullopt;
+	const std::uint32_t address = test.final.r[base] + static_cast<std::uint32_t>(target->operands.imm32);
+	if (address < kDataBase || address - kDataBase > kDataSize - size)
+		return std::nullopt;
+	return ExclusiveStore{address - kDataBase, size, *target};
+}
+
+/* Whether the data region `actual` is what a lost reservation leaves of
+ * `expected`, the region the pack has after the case: its store-exclusive
+ * wrote nothing, so the bytes it would have written hold what the case
+ * started with (`initial`), and every other byte, a spill the case makes
+ * before the store included, is as `expected` has it. A store-exclusive that
+ * reports failure and has written, and any other difference, are not a loss,
+ * and nor is a case that is no store-exclusive. */
+[[nodiscard]] inline bool lost_exclusive_data(const Case &test, const std::vector<std::uint8_t> &initial,
+					      const std::vector<std::uint8_t> &expected,
+					      const std::vector<std::uint8_t> &actual)
+{
+	const auto store = exclusive_store(test);
+	if (!store || initial.size() != kDataSize || expected.size() != kDataSize || actual.size() != kDataSize)
+		return false;
+	for (std::uint32_t byte = 0; byte < kDataSize; ++byte) {
+		const bool written = byte >= store->offset && byte - store->offset < store->size;
+		if (actual[byte] != (written ? initial[byte] : expected[byte]))
+			return false;
+	}
+	return true;
 }
 
 } // namespace uml::testing::aarch32_corpus
