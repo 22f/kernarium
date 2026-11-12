@@ -82,9 +82,14 @@ struct TipJarSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) { TipJarTitle() }
+                // The close symbol, as Settings and the file browser have their Done: an icon-only
+                // toolbar button, which the folding iPhone's cover moves into the column beside its
+                // camera, with the word for VoiceOver.
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(action: close) { Text(TipJarWords.done) }
-                        .accessibilityIdentifier("tipjar-done-bar")
+                    Button(action: close) {
+                        Label { Text(TipJarWords.done) } icon: { Image(systemName: "xmark") }
+                    }
+                    .accessibilityIdentifier("tipjar-done-bar")
                 }
             }
             .safeAreaBar(edge: .bottom) {

@@ -185,9 +185,10 @@ struct TipJarHeaderTests {
         #expect(opened.map(\.absoluteString).sorted() == brands.map { addresses[$0]! }.sorted())
     }
 
-    /// At the largest text size the logos stay a touch target each, no larger than the target, and
-    /// keep a gap between them: they used to grow with the text until they touched and rivalled the name.
-    @Test func atTheLargestTextSizeTheLogosKeepTheirSizeAndTheirDistance() async throws {
+    /// At the largest text size the logos stay a touch target each, 44 pt tall, no larger than the
+    /// target, and no two of them overlap: they used to grow with the text until they touched and
+    /// rivalled the name.
+    @Test func atTheLargestTextSizeTheLogosKeepTheirSizeAndTheirTargets() async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = UIHostingController(
@@ -208,12 +209,143 @@ struct TipJarHeaderTests {
         }
         try #require(drawn, "the logos were not drawn; is ApplicationAccessibilityEnabled on?")
         for frame in links {
-            #expect(frame.width <= 48 && frame.height <= 48, "a logo grew with the text: \(frame)")
+            #expect(frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48, "a logo's target: \(frame)")
         }
         for (first, second) in zip(links, links.dropFirst()) {
-            let apart = second.minY >= first.maxY || second.minX - first.maxX >= 8
-            #expect(apart, "the logos touch: \(first) \(second)")
+            #expect(!first.insetBy(dx: 0.5, dy: 0.5).intersects(second.insetBy(dx: 0.5, dy: 0.5)),
+                    "two targets overlap: \(first) \(second)")
         }
+    }
+
+    // MARK: The gaps
+
+    /// A solid logo, so that its drawn edges are its frame's.
+    private static func solid() -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 24, height: 20)).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 24, height: 20))
+        }
+    }
+
+    /// The runs of columns (or rows) of `image` that hold a black pixel, in points, inside `area`.
+    private static func inkRuns(in image: UIImage, area: CGRect, columns: Bool) -> [ClosedRange<CGFloat>] {
+        guard let cgImage = image.cgImage, let data = cgImage.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { return [] }
+        let scale = image.scale
+        let perRow = cgImage.bytesPerRow
+        let perPixel = cgImage.bitsPerPixel / 8
+        func isInk(_ x: Int, _ y: Int) -> Bool {
+            let at = y * perRow + x * perPixel
+            return bytes[at] < 48 && bytes[at + 1] < 48 && bytes[at + 2] < 48
+        }
+        let x0 = max(0, Int(area.minX * scale)), x1 = min(cgImage.width, Int(area.maxX * scale))
+        let y0 = max(0, Int(area.minY * scale)), y1 = min(cgImage.height, Int(area.maxY * scale))
+        guard x0 < x1, y0 < y1 else { return [] }
+        let range = columns ? x0..<x1 : y0..<y1
+        var runs: [ClosedRange<CGFloat>] = []
+        var start: Int?
+        for position in range {
+            let hit = columns ? (y0..<y1).contains { isInk(position, $0) } : (x0..<x1).contains { isInk($0, position) }
+            if hit, start == nil { start = position }
+            if !hit, let from = start {
+                runs.append(CGFloat(from) / scale ... CGFloat(position) / scale)
+                start = nil
+            }
+        }
+        if let from = start { runs.append(CGFloat(from) / scale ... CGFloat(range.upperBound) / scale) }
+        return runs
+    }
+
+    /// The name, the GitHub mark and the X mark read as one tight group: the gap from the name to the
+    /// first mark and between the marks is one inline gap (8 pt), at the default size, where the line
+    /// holds them all, and at the largest, where the marks go under the name. The touch targets are
+    /// 44 pt tall and do not space the glyphs.
+    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
+    func theNameAndTheMarksAreOneTightGroup(size: DynamicTypeSize) async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let developer = TipJarDeveloper(name: "example", githubHandle: "example", xHandle: "example_x")
+        let content = TipJarSenderContent(
+            developer: developer, avatar: nil, githubLogo: Self.solid(), xLogo: Self.solid())
+        let controller = UIHostingController(
+            rootView: TipJarSender(content: content)
+                .dynamicTypeSize(size)
+                .padding(16)
+                .frame(width: 380)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .background(Color.white))
+        controller.overrideUserInterfaceStyle = .light
+        lease.window.rootViewController = controller
+        var name: CGRect = .null
+        let drawn = await eventually {
+            controller.view.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            let elements = ToolbarProbe.elements(in: lease.window, above: 5000, includeUnlabelled: true)
+            name = elements.first { $0.traits.contains(.header) }?.object.accessibilityFrame ?? .null
+            return !name.isNull && elements.filter { $0.traits.contains(.link) }.count == Self.sites.count
+        }
+        try #require(drawn, "the header was not drawn; is ApplicationAccessibilityEnabled on?")
+        try await Task.sleep(for: .milliseconds(300))
+        let view = controller.view!
+        let line = try #require(view.window).screen.coordinateSpace.convert(name, to: view)
+        let picture = UIGraphicsImageRenderer(bounds: view.bounds).image { _ in
+            view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
+        }
+        let wrapped = size.isAccessibilitySize
+        // The marks are the ink right of the name (one line) or under it (wrapped).
+        let area = wrapped
+            ? CGRect(x: 0, y: line.maxY, width: view.bounds.width, height: 120)
+            : CGRect(x: line.maxX, y: line.minY - 12, width: view.bounds.width - line.maxX, height: line.height + 24)
+        let marks = Self.inkRuns(in: picture, area: area, columns: true)
+        try #require(marks.count == Self.sites.count, "the marks drawn: \(marks) in \(area), the name at \(line)")
+        let gap = 8.0
+        if wrapped {
+            let rows = Self.inkRuns(in: picture, area: area, columns: false)
+            let top = try #require(rows.first?.lowerBound)
+            #expect(top - line.maxY <= 8, "the marks sit \(top - line.maxY) pt under the name")
+            #expect(abs(marks[0].lowerBound - line.minX) <= 1.5, "the first mark lines up with the name: \(marks[0]) \(line)")
+        } else {
+            #expect(abs(marks[0].lowerBound - line.maxX - gap) <= 1.5, "the name to the first mark: \(marks[0].lowerBound - line.maxX) pt")
+        }
+        for (first, second) in zip(marks, marks.dropFirst()) {
+            #expect(abs(second.lowerBound - first.upperBound - gap) <= 1.5, "between the marks: \(second.lowerBound - first.upperBound) pt")
+        }
+    }
+
+    // MARK: The close control
+
+    /// Every view under `root` of the given type.
+    private static func views<V: UIView>(of type: V.Type, under root: UIView) -> [V] {
+        var found: [V] = []
+        if let match = root as? V { found.append(match) }
+        for child in root.subviews { found += views(of: type, under: child) }
+        return found
+    }
+
+    /// The sheet closes with the close symbol, an icon-only toolbar button (which the folding iPhone's
+    /// cover moves into the column beside its camera, as it does Settings' Done), that VoiceOver reads
+    /// as "Done", and no text button of that name is left in the bar.
+    @Test func theSheetClosesWithTheCloseSymbolAndVoiceOverSaysDone() async throws {
+        let model = app()
+        model.tipJarServices.sender = { Self.content() }
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (controller, elements) = try await openSheet(model, lease: lease)
+        let done = String(localized: TipJarWords.done)
+        // A bar button is two nested views, each an element: one control.
+        let buttons = elements.filter { $0.label == done && $0.traits.contains(.button) }
+        let views = buttons.compactMap { $0.object as? UIView }
+        let outer = views.first { outer in views.allSatisfy { $0 === outer || $0.isDescendant(of: outer) } }
+        try #require(!buttons.isEmpty && views.count == buttons.count && outer != nil,
+                     "one Done in the sheet: \(buttons.map(\.description))")
+        let symbols = Self.views(of: UIImageView.self, under: outer!).compactMap(\.image).filter(\.isSymbolImage)
+        #expect(!symbols.isEmpty, "the bar's button draws a symbol: \(buttons.map(\.description))")
+        let texts = Self.views(of: UILabel.self, under: outer!).compactMap(\.text)
+        #expect(!texts.contains(done), "the word is not drawn in the bar: \(texts)")
+        _ = controller
+        // It closes the sheet.
+        let control = try #require(views.compactMap { $0 as? UIControl }.first, "a control: \(views)")
+        control.performPrimaryAction()
+        #expect(await eventually { !model.tipJarSheetOpen })
     }
 
     @Test func withoutTheDeveloperTheHeaderIsTheRoleAlone() async throws {

@@ -82,8 +82,9 @@ struct TipJarSender: View {
     @ScaledMetric(relativeTo: .caption) private var avatarMetric = 28.0
     @ScaledMetric(relativeTo: .caption) private var glyphMetric = 15.0
 
-    /// A touch target no smaller than the system's.
+    /// The system's touch target, which a logo keeps without letting it space the glyphs.
     private let target = 44.0
+    /// The gap between the name and the first logo, and between the logos, as text has between words.
     private let spacing = 8.0
 
     private var avatarSize: Double { min(avatarMetric, 56) }
@@ -105,7 +106,7 @@ struct TipJarSender: View {
                     avatar
                     line
                 }
-                logos.padding(.leading, avatarSize + spacing - logoInset)
+                logos.padding(.leading, avatarSize + spacing)
             }
         }
     }
@@ -144,7 +145,9 @@ struct TipJarSender: View {
 
     private var logos: some View {
         HStack(spacing: spacing) {
-            ForEach(shownLinks) { link in
+            ForEach(Array(shownLinks.enumerated()), id: \.element.id) { index, link in
+                let reach = reach(ofLinkAt: index)
+                let across = (target - glyphSize) / 2
                 SwiftUI.Link(destination: link.url) {
                     // The label colour, black or white as the appearance says, never the tint.
                     Image(uiImage: link.logo)
@@ -153,21 +156,26 @@ struct TipJarSender: View {
                         .aspectRatio(link.aspectRatio, contentMode: .fit)
                         .foregroundStyle(Color(.label))
                         .frame(height: glyphSize)
-                        // The logo is small; the touch target is not.
-                        .frame(minWidth: target, minHeight: target)
+                        // The touch target is the glyph and the space around it...
+                        .padding(EdgeInsets(top: across, leading: reach.leading, bottom: across, trailing: reach.trailing))
                         .contentShape(.rect)
                 }
+                // ...which the layout does not count, so the glyphs sit one gap apart.
+                .padding(EdgeInsets(top: -across, leading: -reach.leading, bottom: -across, trailing: -reach.trailing))
                 .accessibilityLabel(Text(verbatim: link.name))
                 .accessibilityIdentifier("tipjar-link-\(link.site.rawValue)")
             }
         }
     }
 
-    /// The space between a logo's edge and its touch target's, so that the first
-    /// logo under the text lines up with it.
-    private var logoInset: Double {
-        guard let first = shownLinks.first else { return 0 }
-        return max(0, (target - glyphSize * first.aspectRatio) / 2)
+    /// How far a logo's touch target reaches past its glyph on each side: 44 pt tall, and wide enough
+    /// to make 44 pt where nothing is next to it. Two logos one gap apart cannot each have 44 pt of
+    /// width, so they share the gap between them, and no tap lands on the wrong glyph.
+    private func reach(ofLinkAt index: Int) -> (leading: Double, trailing: Double) {
+        let width = glyphSize * shownLinks[index].aspectRatio
+        let outer = max(0, (target - width) / 2)
+        let inner = spacing / 2
+        return (index == 0 ? outer : inner, index == shownLinks.count - 1 ? outer : inner)
     }
 }
 
