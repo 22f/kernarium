@@ -10,7 +10,8 @@
 // a refused storage meets, so that the renderer gives back what it can and
 // makes the texture again; a request that still fails is refused, and the
 // guest never gets a texture the fill left partly written. A texture that was
-// created holds zero blocks in every byte.
+// created holds zero blocks in every byte, whether it has a few layers or
+// hundreds.
 //
 // The refusals are injected into the GL calls the renderer makes, because a
 // real budget refuses the storage of the texture before it refuses any of the
@@ -218,6 +219,15 @@ constexpr std::array cases {
     Case {"copy from the tile always refused", Step::firstLayerCopy, true, 1},
     Case {"copy into a later layer always refused", Step::laterLayerCopy, true,
         3},
+    // A texture of many layers has more operations to refuse and to repeat.
+    Case {"many layers control", Step::none, false, 200},
+    Case {"many layers, part block upload refused", Step::partUpload, false,
+        200},
+    Case {"many layers, copy into a later layer refused", Step::laterLayerCopy,
+        false, 200},
+    Case {"many layers control after a retry", Step::none, false, 200},
+    Case {"many layers, part block upload always refused", Step::partUpload,
+        true, 200},
 };
 
 int failures = 0;
