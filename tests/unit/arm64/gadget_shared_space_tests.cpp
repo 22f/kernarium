@@ -215,6 +215,85 @@ void a_renewal_is_counted_when_the_space_is_closed_for_it()
 	registry.detach(shed, &executor);
 }
 
+/* A space the budget sheds while an executor attaches to it, at a point a
+ * test chooses: relieve_at() sets the account's flag and then asks the
+ * executors attached, which is what shed_now() does, under no lock of the
+ * registry. */
+class RacingSpace final {
+public:
+	/* Where the next attach() is raced: the budget acts just before this
+	 * executor is among those attached, or just after. */
+	enum class When { never, before_the_push, after_the_push };
+	static inline When race = When::never;
+
+	RacingSpace(FakeKey key, std::uint64_t) : key_{key} {}
+
+	[[nodiscard]] const FakeKey &key() const noexcept { return key_; }
+	void attach(const cache::ExecutorAnnouncement *announcement)
+	{
+		if (race == When::before_the_push)
+			shed_now();
+		attached_.attach(announcement);
+		if (race == When::after_the_push)
+			shed_now();
+	}
+	[[nodiscard]] bool detach(const cache::ExecutorAnnouncement *announcement)
+	{
+		return attached_.detach(announcement);
+	}
+	[[nodiscard]] bool close() noexcept { return !closed_.exchange(true); }
+	[[nodiscard]] bool closed() const noexcept { return closed_.load(); }
+	[[nodiscard]] bool shedding() const noexcept { return shedding_.load(); }
+	void request_renewal() { attached_.request_renewal(); }
+	static void note_closed() noexcept {}
+
+private:
+	void shed_now()
+	{
+		race = When::never;
+		shedding_.store(true);
+		attached_.request_renewal();
+	}
+
+	FakeKey key_;
+	cache::AttachedExecutors attached_;
+	std::atomic<bool> closed_{};
+	std::atomic<bool> shedding_{};
+};
+
+/* An executor that attaches to a shared space as the budget sheds it is never
+ * left in it with nothing to ask it to let go: what attach() returns is a
+ * space that is not being shed, or the executor's announcement is set. The
+ * budget's ask reaches the executors attached when it is made, so one that
+ * attaches between the registry's check of the space and its own entry in the
+ * list is not among them. Raced before its entry, the old registry handed out
+ * the shed space and nobody asked the executor to let go of it; raced after,
+ * the ask reaches it, and the registry has no more to do than not to lose
+ * it. */
+void an_executor_attaching_as_the_budget_sheds_is_asked_to_let_go(
+	RacingSpace::When when, unsigned long generation)
+{
+	using Registry = cache::SpaceRegistry<RacingSpace, FakeKey>;
+	auto &registry = Registry::instance();
+	cache::ExecutorAnnouncement first;
+	cache::ExecutorAnnouncement second;
+	auto *held = registry.attach({generation, 0, 0, nullptr}, 0, &first);
+	RacingSpace::race = when;
+	auto *got = registry.attach({generation, 0, 0, nullptr}, 0, &second);
+	require(RacingSpace::race == RacingSpace::When::never,
+		"the attach was not raced");
+	require(held->shedding() && first.renew.load(),
+		"the first executor was not asked to let go");
+	require((!got->shedding() && !got->closed()) || second.renew.load(),
+		"an executor was left in a shed space with no ask to let go of it");
+	/* The shed space is closed for the others to let go of, and the
+	 * executor goes on in a space of its own. */
+	require(got != held && !got->shedding() && held->closed(),
+		"the shed space was handed out or left open");
+	registry.detach(held, &first);
+	registry.detach(got, &second);
+}
+
 /* The three ways a window sees an address space it holds. */
 void a_window_tells_idle_from_held_here_from_running_elsewhere()
 {
@@ -271,5 +350,9 @@ int main()
 	a_body_that_cannot_be_queued_is_never_freed();
 	a_renewal_is_counted_when_the_space_is_closed_for_it();
 	a_window_tells_idle_from_held_here_from_running_elsewhere();
+	an_executor_attaching_as_the_budget_sheds_is_asked_to_let_go(
+		RacingSpace::When::before_the_push, 31);
+	an_executor_attaching_as_the_budget_sheds_is_asked_to_let_go(
+		RacingSpace::When::after_the_push, 32);
 	return 0;
 }

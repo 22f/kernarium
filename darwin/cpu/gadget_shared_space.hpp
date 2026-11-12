@@ -455,17 +455,31 @@ public:
 			/* One the budget asked to shed is closed here instead, as
 			 * close() would, if no executor holding it has yet. */
 			if (space->shedding()) {
-				if (space->close()) {
-					Space::note_closed();
-					space->request_renewal();
-				}
+				close_shed(space);
 				candidates.erase(candidates.begin() +
 					static_cast<std::ptrdiff_t>(index));
 				continue;
 			}
 			if (space->key().options == key.options) {
 				space->attach(announcement);
-				return space;
+				/* The budget may have asked the space to shed after
+				 * the check above and before this executor was among
+				 * those it asks, and nothing would then ask this one
+				 * to let go: a shed that reached the attached list
+				 * first is seen here, since attaching and asking
+				 * both hold the list's lock and the flag is set
+				 * before the ask. Another executor holds the space,
+				 * since a registered space always has one, so this
+				 * detach destroys nothing. */
+				if (!space->shedding())
+					return space;
+				const bool last = space->detach(announcement);
+				assert(!last);
+				(void)last;
+				close_shed(space);
+				candidates.erase(candidates.begin() +
+					static_cast<std::ptrdiff_t>(index));
+				continue;
 			}
 			++index;
 		}
@@ -534,6 +548,18 @@ private:
 				(std::size_t{key.mode} << 56);
 		}
 	};
+
+	/* Close a space the budget asked to shed, if no executor has, and ask
+	 * its executors to let go of it: they are asked once by the budget, but
+	 * an executor that attached after that was not among them. The caller
+	 * holds mutex_ and erases the space from its candidates. */
+	static void close_shed(Space *space)
+	{
+		if (space->close()) {
+			Space::note_closed();
+			space->request_renewal();
+		}
+	}
 
 	/* Stop handing a space out. It may already be gone, when it was closed.
 	 * The caller holds mutex_. */
