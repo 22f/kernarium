@@ -14,7 +14,9 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import re
 import struct
@@ -485,14 +487,27 @@ def box(kind: bytes, payload: bytes) -> bytes:
     return struct.pack(">I4s", len(payload) + 8, kind) + payload
 
 
-def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0) -> bytes:
+MEDIA_SCALE = 90000
+
+
+def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0, fps: float = 30.0,
+          samples: bool = True) -> bytes:
+    """A finished movie: `mvhd`, and one track whose `mdhd` has MEDIA_SCALE ticks a second and, for a video
+    track with `samples`, an `stts` of one entry of seconds * fps frames."""
     if version == 1:
         mvhd = struct.pack(">B3xQQIQ", 1, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
     else:
         mvhd = struct.pack(">B3xIIII", 0, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
+    frames, delta = int(seconds * fps), round(MEDIA_SCALE / fps)
+    if version == 1:
+        mdhd = struct.pack(">B3xQQIQ", 1, 0, 0, MEDIA_SCALE, frames * delta) + b"\x00" * 4
+    else:
+        mdhd = struct.pack(">B3xIIII", 0, 0, 0, MEDIA_SCALE, frames * delta) + b"\x00" * 4
     handler = box(b"hdlr", b"\x00\x00\x00\x00\x00\x00\x00\x00" + (b"vide" if video else b"soun") + b"\x00" * 12)
+    stts = box(b"stts", struct.pack(">BxxxI", 0, 1) + struct.pack(">II", frames, delta))
+    track = box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", box(b"stbl", stts)) if video and samples else b""))
     return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * 40)
-            + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", box(b"mdia", handler))))
+            + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", track)))
 
 
 class VideoAndFrontTests(unittest.TestCase):
@@ -519,6 +534,25 @@ class VideoAndFrontTests(unittest.TestCase):
             self.assertFalse(info.audio)
         self.assertFalse(runner.parse_mp4(movie(2.0, video=False)).video)
         self.assertAlmostEqual(runner.parse_mp4(movie(1.5, scale=90000)).seconds, 1.5)
+
+    def test_the_average_frame_rate_of_a_movie(self) -> None:
+        for version in (0, 1):
+            for fps in (15.0, 24.0, 30.0):
+                with self.subTest(version=version, fps=fps):
+                    info = runner.parse_mp4(movie(4.0, version=version, fps=fps))
+                    self.assertEqual(info.frames, int(4.0 * fps))
+                    self.assertAlmostEqual(info.video_seconds, 4.0, places=2)
+                    self.assertAlmostEqual(info.fps, fps, places=1)
+        self.assertEqual(runner.parse_mp4(movie(3.0, video=False)).fps, 0.0)
+        no_samples = runner.parse_mp4(movie(3.0, samples=False))
+        self.assertEqual((no_samples.frames, no_samples.fps), (0, 0.0))
+
+    def test_a_sample_table_that_does_not_fit_is_refused(self) -> None:
+        whole = bytearray(movie(2.0))
+        at = bytes(whole).index(b"stts") + 8
+        whole[at:at + 4] = struct.pack(">I", 1000)  # entry count: far more than the box holds
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            runner.parse_mp4(bytes(whole))
 
     def test_an_unfinished_movie_is_refused(self) -> None:
         whole = movie(3.0)
@@ -601,11 +635,34 @@ class VideoAndFrontFlowTests(unittest.TestCase):
     def test_the_video_step_records_with_the_shutter_key_in_video_mode(self) -> None:
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
         guest = FakeGuest(plan)
-        self.run_step(runner.check_video, plan, guest)
+        sleeps: list[float] = []
+        with mock.patch.object(runner.time, "sleep", sleeps.append):
+            runner.check_video(guest, plan)
         starts = [command for command in guest.commands if command.startswith("am start")]
         self.assertEqual(starts, [f"am start -a {runner.VIDEO_ACTION} --ez {runner.FRONT_EXTRA} false"])
         self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 2)
         self.assertIn(f"am force-stop {runner.CAMERA_PACKAGE}", guest.commands)
+        self.assertEqual(runner.VIDEO_HOLD_SECONDS, 5)
+        self.assertIn(runner.VIDEO_HOLD_SECONDS, sleeps)
+
+    def test_the_video_step_prints_the_average_frame_rate(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, fps=29.97)))
+        self.assertRegex(out.getvalue(), r"video: new\.mp4 4\.00 s, 119 frames over 3\.97 s = 30\.0 fps average")
+
+    def test_a_movie_below_the_frame_rate_floor_fails_after_it_is_printed(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaisesRegex(runner.Failure, r"averages 15\.0 fps .*below 20"):
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, fps=15.0)))
+        self.assertIn("= 15.0 fps average", out.getvalue())
+
+    def test_a_movie_without_a_sample_table_fails(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        with self.assertRaisesRegex(runner.Failure, "no sample table"):
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, samples=False)))
 
     def test_a_movie_that_is_too_short_or_has_no_video_fails(self) -> None:
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")

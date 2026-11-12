@@ -114,12 +114,15 @@ CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
 # The camera application's intents: its video mode, and the extra that picks the front camera.
 VIDEO_ACTION = "android.media.action.VIDEO_CAMERA"
 FRONT_EXTRA = "android.intent.extra.USE_FRONT_CAMERA"
-# Video: how long the shutter key's recording runs, how long the file may take to appear, and the movie
-# duration it must have (the recording is shorter than the hold by the application's start-up).
-VIDEO_HOLD_SECONDS = 4
+# Video: how long the shutter key's recording runs, how long the file may take to appear, the movie
+# duration it must have (the recording is shorter than the hold by the application's start-up), and the
+# average frame rate of its video track (the preview and the recording share one camera exposure: a rate
+# near half of the camera's means they took an exposure each).
+VIDEO_HOLD_SECONDS = 5
 VIDEO_SECONDS = 90
 VIDEO_MINIMUM_SECONDS = 1.0
 VIDEO_MAXIMUM_SECONDS = 15.0
+VIDEO_MINIMUM_FPS = 20.0
 VIDEO_URI = "content://media/external/video/media"
 # The camera HAL's own tags: a failed buffer is an error or a warning of one of these.
 HAL_TAGS = ("V4l2Stream", "V4l2FrameSource", "EmulatedSensorHost")
@@ -241,6 +244,13 @@ class Movie:
     seconds: float
     video: bool
     audio: bool
+    frames: int = 0
+    video_seconds: float = 0.0
+
+    @property
+    def fps(self) -> float:
+        """The average frame rate of the video track: its frames over its duration, 0 without a sample table."""
+        return self.frames / self.video_seconds if self.video_seconds > 0 else 0.0
 
 
 def mp4_boxes(data: bytes, start: int, end: int):
@@ -257,6 +267,33 @@ def mp4_boxes(data: bytes, start: int, end: int):
             raise ValueError(f"a box of {size} bytes at {position} does not fit")
         yield kind, position + header, position + size
         position += size
+
+
+def video_samples(data: bytes, start: int, end: int) -> tuple[int, float]:
+    """(frames, seconds) of the first video track of a `moov` box: the sample count and the total sample duration
+    of its `stts`, in the time scale of its `mdhd`; (0, 0.0) when the track has neither."""
+    for kind, payload, stop in mp4_boxes(data, start, end):
+        if kind != b"trak":
+            continue
+        mdia = {k: (p, s) for k, p, s in mp4_boxes(data, payload, stop)}.get(b"mdia")
+        if mdia is None:
+            continue
+        parts = {k: (p, s) for k, p, s in mp4_boxes(data, *mdia)}
+        handler, header = parts.get(b"hdlr"), parts.get(b"mdhd")
+        if handler is None or header is None or data[handler[0] + 8:handler[0] + 12] != b"vide":
+            continue
+        scale = struct.unpack_from(">I", data, header[0] + (20 if data[header[0]] == 1 else 12))[0]
+        minf = {k: (p, s) for k, p, s in mp4_boxes(data, *parts[b"minf"])} if b"minf" in parts else {}
+        stbl = {k: (p, s) for k, p, s in mp4_boxes(data, *minf[b"stbl"])} if b"stbl" in minf else {}
+        if scale == 0 or b"stts" not in stbl:
+            return 0, 0.0
+        table, table_end = stbl[b"stts"]
+        entries = struct.unpack_from(">I", data, table + 4)[0]
+        if table + 8 + 8 * entries > table_end:
+            raise ValueError("an stts table that does not fit its box")
+        samples = [struct.unpack_from(">II", data, table + 8 + 8 * index) for index in range(entries)]
+        return sum(count for count, _ in samples), sum(count * delta for count, delta in samples) / scale
+    return 0, 0.0
 
 
 def parse_mp4(data: bytes) -> Movie:
@@ -276,7 +313,8 @@ def parse_mp4(data: bytes) -> Movie:
     if scale == 0:
         raise ValueError("a time scale of zero")
     moov = data[start:end]
-    return Movie(duration / scale, b"vide" in moov, b"soun" in moov)
+    frames, video_seconds = video_samples(data, start, end)
+    return Movie(duration / scale, b"vide" in moov, b"soun" in moov, frames, video_seconds)
 
 
 def hal_failures(text: str) -> list[str]:
@@ -816,7 +854,13 @@ def check_video(guest: Guest, plan: Plan) -> None:
     if not VIDEO_MINIMUM_SECONDS <= movie.seconds <= VIDEO_MAXIMUM_SECONDS:
         raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {VIDEO_HOLD_SECONDS} s "
                       f"and must last between {VIDEO_MINIMUM_SECONDS} and {VIDEO_MAXIMUM_SECONDS} s")
-    print(f"  video: {found[-1].get('_display_name', path)} {movie.seconds:.2f} s, audio {'yes' if movie.audio else 'no'}")
+    print(f"  video: {found[-1].get('_display_name', path)} {movie.seconds:.2f} s, {movie.frames} frames over "
+          f"{movie.video_seconds:.2f} s = {movie.fps:.1f} fps average, audio {'yes' if movie.audio else 'no'}")
+    if movie.frames == 0:
+        raise Failure(f"{path} has no sample table for its video track: the frame rate cannot be told")
+    if movie.fps < VIDEO_MINIMUM_FPS:
+        raise Failure(f"{path} averages {movie.fps:.1f} fps ({movie.frames} frames over {movie.video_seconds:.2f} s), "
+                      f"below {VIDEO_MINIMUM_FPS:.0f}: the preview and the recording do not share one exposure")
 
 
 def check_front(guest: Guest, plan: Plan) -> None:
