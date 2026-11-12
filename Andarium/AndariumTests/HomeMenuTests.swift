@@ -122,6 +122,40 @@ struct HomeMenuTests {
         #expect(!buttons.isEmpty && buttons.allSatisfy { $0.label == "Info" }, "the bar: \(top.map(\.description))")
     }
 
+    /// Opened as a tap opens it, the menu offers Info and Send feedback as buttons, which is what
+    /// VoiceOver finds in it, in the order the menu holds them.
+    @Test func theOpenMenuOffersEachItemToVoiceOver() async throws {
+        let model = model()
+        let (controller, lease) = try await host(model)
+        defer { lease.give() }
+        let shown = await eventually { ToolbarProbe.barItems(under: controller).contains { $0.menu != nil } }
+        try #require(shown, "the toolbar shows a menu")
+        try await Task.sleep(for: .milliseconds(600))
+        var pending: [UIView] = [lease.window]
+        var interaction: UIContextMenuInteraction?
+        while let view = pending.popLast(), interaction == nil {
+            if let control = view as? UIControl,
+               let menu = control.interactions.compactMap({ $0 as? UIContextMenuInteraction }).first {
+                control.performPrimaryAction()
+                interaction = menu
+            }
+            pending += view.subviews
+        }
+        try #require(interaction != nil, "a control of the bar carries the menu")
+        defer { interaction?.dismissMenu() }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let found = await eventually {
+            let labels = scenes.flatMap(\.windows).flatMap { ToolbarProbe.elements(in: $0, above: 4000) }
+                .filter { $0.traits.contains(.button) }.map(\.label)
+            return labels.contains("Send feedback")
+        }
+        let labels = scenes.flatMap(\.windows).flatMap { ToolbarProbe.elements(in: $0, above: 4000) }
+            .filter { $0.traits.contains(.button) }.map(\.label)
+        #expect(found, "the open menu: \(labels)")
+        #expect(labels.contains("Info") && labels.contains("Send feedback"), "\(labels)")
+        if let info = labels.firstIndex(of: "Send feedback") { #expect(info > 0) }
+    }
+
     /// With no receiver there is nothing for a menu to hold beside Info: the plain button again.
     @Test func withoutAReceiverInfoIsThePlainButtonAgain() async throws {
         let model = model(feedback: false)
