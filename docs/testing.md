@@ -336,7 +336,11 @@ the watcher's start and stop on a fake path source);
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
 motion wire format (its device-orientation records and control frames against
 the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
-too) and what the orientation sensor reports and when, the vibrator
+too) and what the orientation sensor reports and when (`andarium-core` also
+covers the magnetometer: its records, the control frame that asks for them, the
+frame and status mapping and the failure it keeps for the run, on a fake
+device; the hosted `CompassHostTests` cover the Core Motion gate and the boot
+request's compass bit, and no test reads the manager itself), the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
