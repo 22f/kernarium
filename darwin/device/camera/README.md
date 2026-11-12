@@ -76,8 +76,9 @@ application's statements (the sensor orientation, the rotation that
   its formats (`CameraInfo::captureFormats`) runs each camera in one of them,
   its **anchor**, and offers only what the anchor makes: its stills up to the
   tier's cap, the video sizes inside it whose capture buffers fit the reserve (one
-  byte count, `alignedFrameBytes`, for the offer's bound and the reserve), and its
-  whole frame rates up to 30 (`videoRateCap`: photos win over fast streams).
+  byte count, `alignedFrameBytes` in `platform/frame_bytes.hpp`, for the offer's
+  bound and the reserve), and its whole frame rates up to 30 (`videoRateCap`:
+  photos win over fast streams).
   The anchor is chosen once when the cameras are arranged, by the key in
   `photo_dimensions.hpp`: a whole rate within 30, then the largest still, then
   the largest video box, then the smaller format, the lower minimum rate, a

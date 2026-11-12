@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "photo_dimensions.hpp"
+// The application's runtime loader includes this header with no include path.
+#include "../../platform/frame_bytes.hpp"
 
 #include <cstdint>
 
