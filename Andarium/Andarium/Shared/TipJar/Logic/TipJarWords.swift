@@ -76,11 +76,6 @@ nonisolated enum TipJarWords {
             "Purchases aren\u{2019}t allowed on this \(device)", table: "TipJar",
             comment: "Title of the note when this device may not make purchases. The placeholder is iPhone or iPad.")
     }
-    static func restrictedText(device: String) -> LocalizedStringResource {
-        LocalizedStringResource(
-            "In-app purchases are restricted on this \(device).", table: "TipJar",
-            comment: "The note under the restricted title. The placeholder is iPhone or iPad.")
-    }
 
     // Controls and VoiceOver.
     static let done = LocalizedStringResource(
@@ -102,7 +97,7 @@ nonisolated enum TipJarWords {
         [
             name, menuHint, sender, coffee, tokens, invitation, statement, thanksTitle, thanksText, pendingTitle,
             pendingText, failedTitle, unavailableTitle, unavailableText, retry, restrictedTitle(device: "iPhone"),
-            restrictedText(device: "iPhone"), done, chipHint, waiting, loadingPrice,
+            done, chipHint, waiting, loadingPrice,
         ]
     }
 

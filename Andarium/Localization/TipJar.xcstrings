@@ -204,35 +204,6 @@
         }
       }
     },
-    "In-app purchases are restricted on this %@.": {
-      "comment": "The note under the restricted title. The placeholder is iPhone or iPad.",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "In-app purchases are restricted on this %@."
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "この%@ではApp内課金が制限されています。"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此%@已限制App内购买。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "此%@已限制App內購買。"
-          }
-        }
-      }
-    },
     "Loading prices": {
       "comment": "VoiceOver label of the spinner that stands where a price will be.",
       "localizations": {

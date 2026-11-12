@@ -348,6 +348,21 @@ struct TipJarHeaderTests {
         #expect(await eventually { !model.tipJarSheetOpen })
     }
 
+    /// Where purchases are not allowed the sheet says so once, in the title, over the dimmed tiers: no
+    /// second line says it again, and VoiceOver reads the title one time.
+    @Test func whereTipsAreNotAllowedTheTitleAloneSaysSo() async throws {
+        let model = app()
+        model.tipJarServices.sender = { Self.content() }
+        model.tipJarServices.store.canMakePayments = { false }
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let (_, elements) = try await openSheet(model, lease: lease)
+        let title = String(localized: TipJarWords.restrictedTitle(device: "iPhone"))
+        #expect(elements.filter { $0.label == title }.count == 1, "the title once: \(elements.map(\.description))")
+        #expect(!elements.contains { $0.label.localizedCaseInsensitiveContains("restricted") },
+                "no second line: \(elements.map(\.description))")
+    }
+
     @Test func withoutTheDeveloperTheHeaderIsTheRoleAlone() async throws {
         let model = app()
         model.tipJarServices.sender = { TipJarSenderContent() }

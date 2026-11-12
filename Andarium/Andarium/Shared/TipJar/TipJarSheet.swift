@@ -137,7 +137,6 @@ struct TipJarSheet: View {
         case nil:
             if !jar.canMakePayments {
                 TipJarNote(
-                    text: Text(TipJarWords.restrictedText(device: device)),
                     title: Text(TipJarWords.restrictedTitle(device: device)), symbol: "hand.raised.fill",
                     color: .secondary)
             } else if jar.phase == .unavailable {
@@ -204,7 +203,7 @@ private struct TipJarReply: View {
 
 /// A centred note: the plain statement, and every problem or wait.
 private struct TipJarNote: View {
-    let text: Text
+    var text: Text?
     var title: Text?
     var symbol: String?
     var color: Color = .secondary
@@ -222,9 +221,11 @@ private struct TipJarNote: View {
                 }
                 .font(.footnote.weight(.semibold))
             }
-            text
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            if let text {
+                text
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .multilineTextAlignment(.center)
         .fixedSize(horizontal: false, vertical: true)
