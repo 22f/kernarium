@@ -212,8 +212,8 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     /// asks for the update, and SwiftUI lays the root out after each redraw. An
     /// update that would find every input where the last one did has nothing
     /// to do, so it is not scheduled: what else the guest follows (the
-    /// foreground, its boot, the overlays, the sensors' switch, the location)
-    /// reaches it by its own trigger, not through the root.
+    /// foreground, its boot, the overlays, the location) reaches it by its own
+    /// trigger, not through the root.
     private func scheduleUpdate() {
         guard !updateScheduled else { return }
         if let inputs = currentInputs(), inputs == appliedInputs { return }

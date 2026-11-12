@@ -9,9 +9,6 @@ import Testing
 /// result is a share sheet, a row or an alert. A stub stands for the runtime.
 /// The tests share the staging folder, which one of them sweeps, so they run
 /// one at a time.
-///
-/// The motion toggle persists and reaches the runtime driver
-/// (`motionSensorsAreOnUntilChosenOffAndTheChoiceIsPersisted`).
 @Suite(.serialized)
 @MainActor
 struct AndroidOperationTests {
@@ -57,28 +54,6 @@ struct AndroidOperationTests {
         private var open = false
         func release() { lock.withLock { open = true } }
         var isOpen: Bool { lock.withLock { open } }
-    }
-
-    @Test func motionSensorsAreOnUntilChosenOffAndTheChoiceIsPersisted() {
-        let (model, driver) = running()
-        // No choice yet: on where the device has sensors, and nothing stored.
-        #expect(model.guest?.motionChoice == nil)
-        #expect(model.motionSensorsOn)
-        model.setMotionSensors(false)
-        #expect(model.guest?.motionChoice == false)
-        #expect(driver.savedGuest?.motionChoice == false)
-        #expect(!model.motionSensorsOn)
-        #expect(!driver.motionSensors)
-        model.setMotionSensors(true)
-        #expect(model.guest?.motionChoice == true)
-        #expect(driver.savedGuest?.motionChoice == true)
-        #expect(model.motionSensorsOn)
-        #expect(driver.motionSensors)
-        // Where the device has no sensors the switch shows off, whatever was chosen.
-        model.motionSensorsAvailable = false
-        #expect(!model.motionSensorsOn)
-        model.setMotionSensors(true)
-        #expect(model.guest?.motionChoice == true && !model.motionSensorsOn)
     }
 
     // MARK: Bug report

@@ -105,12 +105,12 @@ public struct MotionPlan: Equatable, Sendable {
 
 /// When the device's sensors are read, and how often.
 ///
-/// The host reads a sensor only while the person's switch is on, the guest is
-/// in the foreground, the guest's sensor service is connected and an
-/// application in the guest has the sensor active. The connection itself is
-/// held while the first two are true, or while the guest follows the device's
-/// orientation and is in the foreground, even when nothing is active, because
-/// the guest says what it needs over it.
+/// The host reads a sensor only while the device has it, the guest is in the
+/// foreground, the guest's sensor service is connected and an application in
+/// the guest has the sensor active. The connection itself is held while the
+/// device has sensors and the guest is in the foreground, or while the guest
+/// follows the device's orientation and is in the foreground, even when
+/// nothing is active, because the guest says what it needs over it.
 ///
 /// A guest image whose service never sends a frame (the one before the
 /// service learned to) is served as it always was: until a frame arrives,
@@ -124,13 +124,16 @@ public struct MotionSampling: Equatable, Sendable {
     /// rate applications see.
     public static let oversample = 2.0
 
-    /// The person's switch is on and the device has the sensors.
-    public var enabled = false
+    /// The device has sensors to share: an accelerometer or a gyroscope. A
+    /// device without (a Mac, the Simulator) reads nothing and holds no
+    /// connection for them.
+    public var hasSensors = false
     /// The guest runs a normal boot, in front, and has settled its rotation.
     public var foreground = false
     /// The guest follows the device's orientation (an iPhone): the connection
-    /// is held for it whether or not the switch is on, because the orientation
-    /// is the display's behaviour and not a reading an application takes.
+    /// is held for it whether or not the device has sensors, because the
+    /// orientation is the display's behaviour and not a reading an application
+    /// takes.
     public var followsOrientation = false
     /// The device's orientation now; nil until the device reports one, and
     /// again nil when it stops reporting (the foreground ended).
@@ -144,7 +147,7 @@ public struct MotionSampling: Equatable, Sendable {
     public init() {}
 
     /// The connection to the service is wanted.
-    public var wantsConnection: Bool { (enabled || followsOrientation) && foreground }
+    public var wantsConnection: Bool { (hasSensors || followsOrientation) && foreground }
 
     public mutating func connectionChanged(_ connected: Bool) {
         self.connected = connected
@@ -175,7 +178,7 @@ public struct MotionSampling: Equatable, Sendable {
     }
 
     public var plan: MotionPlan {
-        guard enabled, foreground, connected else { return .off }
+        guard hasSensors, foreground, connected else { return .off }
         guard let demand else {
             return MotionPlan(accelerometer: Self.legacyInterval, gyroscope: Self.legacyInterval)
         }

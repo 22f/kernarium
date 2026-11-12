@@ -211,9 +211,7 @@ final class LiveRuntime: RuntimeDriver {
         kernarium_runtime_loader_set_location_receiver_handler { @Sendable [weak self] powered in
             MainActor.assumeIsolated { self?.location.receiverPower(powered) }
         }
-        model.motionSensorsAvailable = motion.available
         model.hapticsAvailable = hapticsAvailable
-        motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
         observeRotationPolicy()
@@ -817,21 +815,19 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    func setMotionSensors(_ on: Bool) {
-        model?.motionSensorsProblem = nil
-        updateMotionSensors()
-    }
-
+    /// The sensors are the guest's wherever the device has them, while the
+    /// guest is in front; a sensor is read only while an application in the
+    /// guest uses it (`MotionSession`).
     private func updateMotionSensors() {
         let foreground = normalRun && reachedBootCompleted && active && !holdsGuestStill
             && rotation.applied == rotationPolicy
         // Where the interface does not turn and the guest owns rotation, Android
         // follows the device's orientation as iOS reports it, which already
-        // includes the person's Portrait Orientation Lock. The Gyroscope switch
-        // is about the readings applications take, so it does not decide this.
+        // includes the person's Portrait Orientation Lock. That is the display's
+        // own behaviour, not a reading an application takes, so the sensors do
+        // not decide it.
         let follows = model?.followsDeviceOrientation == true && rotationPolicy == .guest
         motion.update(
-            enabled: model?.motionSensorsOn == true,
             foreground: foreground,
             axes: motionMount.axes,
             followsOrientation: follows
