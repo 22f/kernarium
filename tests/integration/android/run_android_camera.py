@@ -1111,7 +1111,8 @@ def build_parser() -> argparse.ArgumentParser:
 # composer's per-frame lines, adb's own polling of the camera folder) is left out.
 FAILURE_LOG_PATTERN = ("V4l2Stream|V4l2FrameSource|EmulatedSensor|EmulatedRequest|CameraService|Camera2Client|Camera3|"
                        "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue")
-FAILURE_LOG_NOISE = "SurfaceFlinger|adbd|out of bounds transparent region"
+FAILURE_LOG_NOISE = ("SurfaceFlinger|adbd|out of bounds transparent region|minigbm:virtgpu_init|minigbm:virgl_get_caps|"
+                     "minigbm:virgl_add_combination|vendor.minigbm.debug")
 FAILURE_LOG_LINES = 120
 
 def print_camera_log(guest: Guest) -> None:

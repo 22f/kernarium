@@ -789,6 +789,10 @@ class FailureLogTests(unittest.TestCase):
         self.assertIn("logcat -d -b all | grep -a -E", commands[0])
         self.assertIn("vrend", commands[0])
         self.assertIn("grep -a -v -E 'SurfaceFlinger|adbd", commands[0])
+        # Every screenshot allocates a buffer, and each allocation logs the allocator's start-up lines; with them
+        # the last 120 lines of a failed run held nothing of the camera.
+        for flood in ("minigbm:virtgpu_init", "minigbm:virgl_get_caps", "minigbm:virgl_add_combination"):
+            self.assertIn(flood, commands[0])
 
     def test_a_guest_that_is_gone_does_not_hide_the_failure(self) -> None:
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
