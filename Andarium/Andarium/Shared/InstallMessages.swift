@@ -114,7 +114,7 @@ nonisolated enum LegacyInstallWords {
             localized: "This app was built for a much older version of Android. Android blocks apps like this because they predate its newer privacy and security protections. If you install it anyway, it may not work properly.")
         guard let app = target.appLevel, let required = target.requiredLevel else { return body }
         let detail = String(
-            localized: "The app was built for API level \(app). This virtual machine installs apps built for API level \(required) or later.",
+            localized: "This app was built for API level \(app). Android in this virtual machine normally installs only apps built for API level \(required) or later.",
             comment: "API level is Android's number for a version; both are plain numbers (7, 24).")
         return body + "\n\n" + detail
     }
