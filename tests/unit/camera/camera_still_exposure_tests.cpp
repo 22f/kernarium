@@ -131,12 +131,22 @@ void aReadingThatCannotBeAMeasurementIsAbsent()
         require(exposure.aperture == 1.5f, "the lens's fixed aperture, since the photo's f-number is not one");
         require(exposure.focalLengthMillimetres == 0.0f);
     }
-    // The longest exposure and the largest sensitivity still fit their fields.
+    // The longest exposure and the sensitivities at the ends of the range are read.
     PhotoReadings extreme;
     extreme.exposureSeconds = 3600.0;
-    extreme.iso = 4.0e9;
-    const auto exposure = stillExposureOf(device(), extreme, std::nullopt, {});
-    require(exposure.exposureNanoseconds == 3'600'000'000'000ull && exposure.iso == 4'000'000'000u);
+    extreme.iso = 1'000'000.0;
+    auto exposure = stillExposureOf(device(), extreme, std::nullopt, {});
+    require(exposure.exposureNanoseconds == 3'600'000'000'000ull && exposure.iso == 1'000'000u, "the ends of the range");
+    extreme.iso = 1.0;
+    require(stillExposureOf(device(), extreme, std::nullopt, {}).iso == 1u);
+    // A sensitivity outside 1 to 1,000,000 is no measurement: the guest's HAL
+    // holds it as a signed 32-bit number, and no sensor has less than ISO 1.
+    for (const double outside : {0.5, 0.999, 1'000'001.0, 4.0e9, 2.2e9}) {
+        extreme.iso = outside;
+        require(stillExposureOf(device(), extreme, std::nullopt, {}).iso == 0, "an ISO outside 1 to 1,000,000 is none");
+    }
+    extreme.exposureSeconds = 3601.0;
+    require(stillExposureOf(device(), extreme, std::nullopt, {}).exposureNanoseconds == 0, "over an hour is none");
 }
 
 void theFlashIsTheMetadatasWordThenThePlatformsDecision()
@@ -149,6 +159,20 @@ void theFlashIsTheMetadatasWordThenThePlatformsDecision()
     require(stillExposureOf(device(), silent, true, {}).flashFired, "no word in the metadata: the resolved settings decide");
     require(!stillExposureOf(device(), silent, false, {}).flashFired);
     require(!stillExposureOf(device(), silent, std::nullopt, {}).flashFired, "no word anywhere: not fired");
+
+    // An Exif Flash field is 16 bits: a negative or wider number is not one,
+    // says nothing, and leaves the decision to the resolved settings.
+    PhotoReadings negative, wide, last, zero;
+    negative.flash = -1;
+    wide.flash = 0x10001;
+    last.flash = 0xffff;
+    zero.flash = 0;
+    require(!stillExposureOf(device(), negative, false, {}).flashFired && stillExposureOf(device(), negative, true, {}).flashFired,
+            "a negative Flash value says nothing");
+    require(!stillExposureOf(device(), wide, false, {}).flashFired && stillExposureOf(device(), wide, true, {}).flashFired,
+            "nor does a Flash value wider than 16 bits");
+    require(stillExposureOf(device(), last, false, {}).flashFired, "the widest Flash field is read");
+    require(!stillExposureOf(device(), zero, true, {}).flashFired, "0 is the metadata's word that it did not fire");
 }
 
 void aBayerStillCarriesItsOwnNeutralAndNoise()
@@ -202,6 +226,17 @@ void aDictionaryThatLacksKeysOrHoldsOtherTypesGivesNothing()
     const auto metadata = dictionary({{kCGImagePropertyExifDictionary, exif.get()}});
     const auto odd = photoReadingsOf(metadata.get());
     require(!odd.exposureSeconds && !odd.iso && !odd.fNumber && !odd.flash, "a string is not a number, an empty list has no rating");
+
+    // A Flash number that is not an integer is no Exif Flash.
+    const auto fraction = real(1.5);
+    const auto fractional = dictionary({{kCGImagePropertyExifFlash, fraction.get()}});
+    const auto fractionalMetadata = dictionary({{kCGImagePropertyExifDictionary, fractional.get()}});
+    require(!photoReadingsOf(fractionalMetadata.get()).flash, "a non-integer Flash is none");
+    const auto negativeFlash = integer(-1);
+    const auto negativeExif = dictionary({{kCGImagePropertyExifFlash, negativeFlash.get()}});
+    const auto negativeMetadata = dictionary({{kCGImagePropertyExifDictionary, negativeExif.get()}});
+    const auto passed = photoReadingsOf(negativeMetadata.get()).flash;
+    require(passed && *passed == -1, "a negative integer is passed on for stillExposureOf to judge");
 
     // {Exif} that is not a dictionary.
     const auto wrong = dictionary({{kCGImagePropertyExifDictionary, text.get()}});

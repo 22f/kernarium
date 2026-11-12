@@ -126,10 +126,11 @@ interface to the wire.
   zoom and lens are the session's as it reports them at delivery, not as they
   were at the exposure, and on macOS the session reports none of them, so they
   keep their defaults. A reading the photo does not give, or gives as a number
-  that cannot be a measurement (zero, negative, not finite, beyond any
-  camera), is zero: the photo gave none, never a made-up value. A lens has one
-  aperture and one focal length, so the lens's own is used when the photo
-  names none. The flash fired is the Exif's word, then the resolved settings'.
+  that cannot be a measurement (an ISO outside 1 to 1,000,000, an exposure
+  time of zero or over an hour, a negative or wider Flash field, not finite),
+  is zero: the photo gave none, never a made-up value. A lens has one aperture
+  and one focal length, so the lens's own is used when the photo names none.
+  The flash fired is the Exif's word, then the resolved settings'.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at
