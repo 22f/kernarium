@@ -700,8 +700,8 @@ is on. `AndariumCore/Adb` speaks the protocol.
   built for a much older version (`INSTALL_FAILED_DEPRECATED_SDK_VERSION`),
   and for no other answer, an alert asks whether to install it anyway, and
   Install anyway sends the same file again with the package manager's
-  `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Only Settings'
-  Install APK can send that flag, and the choice is kept nowhere.
+  `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
+  Andarium sends that flag, and the choice is kept nowhere.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
