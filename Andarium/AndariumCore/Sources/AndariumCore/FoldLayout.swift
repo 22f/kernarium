@@ -253,8 +253,8 @@ public struct SessionPlan: Equatable, Sendable {
     }
 }
 
-/// A screen outside the session that sits on the inner display of a folding
-/// iPhone, and so on one side of the fold or across it.
+/// A screen outside the session that sits on one half of the inner display of
+/// a folding iPhone while the device is bent, so never across the fold.
 public enum FoldScreen: Equatable, Sendable {
     /// A card, an overlay or a step that has no rule of its own: it sits where
     /// the system puts its alerts.
