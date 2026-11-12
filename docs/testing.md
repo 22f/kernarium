@@ -274,6 +274,10 @@ the run never starts, so the first build phase of each application's target
 one. The shared schemes gather no code coverage; a coverage run passes
 `-enableCodeCoverage YES`.
 
+A change to the guest memory the applications offer is proven by a start through
+the applications' runtime (`kernarium_runtime_loader_run`) at the largest offered
+size, in the Simulator or on a Mac, not by a command-line launcher.
+
 On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
@@ -326,21 +330,27 @@ the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol`,
 `andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image` and
-`andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
+`andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
-ranges of every field and the frame reader), system image staging and the
-screenshot script, and `kernarium-host-features` (unit)
-the table of host features the boot request carries to an Android guest. The
-application builds with Xcode (`AndariumPreview` is the Simulator build with
-mock data, `Andarium` the device application,
+ranges of every field and the frame reader), system image staging, the
+screenshot script, the String Catalogs' check and their sync with the
+compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
+and `kernarium-host-features` (unit) the table of host features the boot
+request carries to an Android guest. The application builds with Xcode
+(`AndariumPreview` is the Simulator build with mock data, `Andarium` the
+device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
 FEEDBACK_ADDRESS=feedback@example.com`; the scheme without the filter also runs
-`AndariumUITests`). `SnapshotFileApiTests`
+`AndariumUITests`). The scheme's Test
+action pins English, so the tests that read the application's words do not
+depend on the language of the device; `LocalizationTests` names a lost pin and
+looks each language up by name, and the language a `-testLanguage` run asks
+for fails only the tests that read the English words. `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not

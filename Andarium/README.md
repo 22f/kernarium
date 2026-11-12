@@ -210,9 +210,10 @@ bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
 only, never the local receiver, and its hooks into the sheet are not in the
 AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
 tested, by AndariumCore's tests through a symlinked target no product links.
-The feature's words are looked up in the `Feedback` string table; the mail's
-subject prefix and its information block are English whatever the interface
-language, and the bug report's overlay text is the app's own.
+The feature's words are looked up in the `Feedback` string table (zh-Hans,
+zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
+its information block are English whatever the interface language, and the bug
+report's overlay text is the app's own.
 
 ## Model and storage
 
@@ -233,7 +234,10 @@ control out.
   from 1.5 GiB, so a guest has at least that (`Limits.minimumMemoryMiB`,
   Andarium's own: the runtime still accepts less for Kernarium's guests); a
   stored smaller size is raised to it on load, and a device whose bound is
-  lower offers the bound alone. `MemoryPolicy` holds those bounds, defaults
+  lower offers the bound alone. The runtime starts every size the picker
+  offers: a start whose memory the loader refuses
+  (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
+  that reason. `MemoryPolicy` holds those bounds, defaults
   and the estimates and no formula of its own. A guest with more than the
   runtime's conservative size for its vCPU count (`safeMemoryMiB`) is likely
   to be closed by iOS: Home shows a notice and the memory ruler a line and red
@@ -269,7 +273,7 @@ control out.
   [Android README](../android/lineage-24/README.md#guest-instance-storage) and
   `StartPlan` is what Home shows of them before Start. An update clones
   `data.img` first (the update's copy, until the updated Android has booted),
-  and Erase guest deletes everything the guest has stored, its snapshots and
+  and Erase virtual machine deletes everything the guest has stored, its snapshots and
   the adb key included.
 - **Backup.** The guest is left out of iCloud and computer backups unless the
   user turns on Back up guest data. Its snapshots are never backed up.
@@ -301,7 +305,7 @@ control out.
   nothing and is waited for. A listing is never older than the last finished
   operation (`revision`), can come without its figures, and names the release
   the data is on; a cancelled one stops measuring.
-  Home's Guest system section has a Snapshots row (how many, the space they
+  Home's Virtual machine section has a Snapshots row (how many, the space they
   use, Manage) that opens the Snapshots sheet: the list newest first, a page
   per snapshot (Restore, its name, Delete) and a page on the space they use,
   with Take snapshot at the foot as Start is on Home. `SnapshotsModel` holds
@@ -392,7 +396,7 @@ requires reopening Andarium.
   of access or of Precise Location drops the held position first. An
   approximate position is passed as approximate; the guest owns what apps see
   of it. The row is dimmed and off when iOS refuses, the device restricts
-  location or Location Services are off, and says Approximate, with an
+  location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
@@ -649,6 +653,37 @@ them). A tooling test fails when the Andarium project embeds a framework, or an
 iOS device prefix contract declares a component, that no entry covers
 ([`docs/testing.md`](../docs/testing.md#andarium)). Adding a library therefore
 means adding its entry to the script's table and running it.
+
+## Languages
+
+Andarium is in English, Simplified Chinese, Traditional Chinese (Taiwan usage)
+and Japanese, and follows the language of iOS and the per-app language setting.
+The strings are String Catalogs in `Localization/` (screens, permission texts,
+What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
+catalog, table `JIT`, which the App Store configuration leaves out of the
+bundle and its check asserts is absent. The Send feedback texts are another,
+table `Feedback`, built only where Send feedback is compiled in
+(`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle check
+refuses the table, by its file name, in a product without the feature and
+asks for it in every language of one with it. English is the key (a readout or a
+joined list has a named key whose comment says which readout it serves), and
+the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
+and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
+number keeps its space before its unit. Bug report and session record text, log
+lines and technical names stay English. Text shown on a card, an alert or an
+overlay passes `String.keepingTogether`, so a number stays with its unit and a
+short quoted Chinese or Japanese name is not cut across two lines.
+
+`scripts/localization.py check` is the catalogs' gate. After a build with
+`SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
+--stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
+or the reverse. It runs on a development build made with
+`FEEDBACK_ADDRESS=feedback@example.com` (the output of `Andarium` and
+`AndariumPreview` together; one without Send feedback has no `Feedback` strings
+and fails) and on an App Store build with `--app-store`. A
+string no catalog reaches (a `String` built in code) shows as English under
+Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
+screen.
 
 ## Automation
 
