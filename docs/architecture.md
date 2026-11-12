@@ -127,8 +127,14 @@ signed 14 GiB envelope (`device_window_guest_memory_maximum_mib`, pinned by the
 layout tests against `runtime/native_kernel_layout.hpp`), and the host's RAM
 (at most 1 TiB, the largest limit a launch states) in a macOS window, which a
 Mac and an iOS application on a Mac use; where the host sets no limit `G_max`
-is C. The settings of Kernarium and Andarium offer no more than `G_max(v)`
-under a set that counts none of A, E_rest and S (`maximum_memory_set`). The
+is C. A run starts exactly the sizes from 512 MiB through C in 64 MiB steps
+(`guest_memory_admitted`, with `process_guest_memory_ceiling_mib` for a
+process): the runtime refuses any other, and the loader answers both
+applications with the same two functions. The settings of Kernarium and
+Andarium offer no more than `G_max(v)` under a set that counts none of A,
+E_rest and S (`maximum_memory_set`), so every size they offer is one a run
+starts; each application's own copy of the range is held to the loader's by a
+hosted test. The
 conservative size is `G_max(v)` under the conservative launch set, in 0.5 GiB
 steps from 1.5 GiB and never above that maximum
 (`conservative_guest_memory_mib`); a guest with more is likely to be ended by
