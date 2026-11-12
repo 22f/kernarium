@@ -767,6 +767,8 @@ int main(int argc, char **)
 	// Two seconds of flips, one in flight at a time.
 	std::vector<double> arrivals;
 	std::vector<double> stamps;
+	std::vector<double> issues;
+	std::vector<int64_t> stamp_ns;
 	int flipped = 0;
 	bool flip_ok = true;
 	int flip_errno = 0;
@@ -781,6 +783,8 @@ int main(int argc, char **)
 			break;
 		}
 		stamps.push_back(static_cast<double>(event.ns) / 1e6);
+		stamp_ns.push_back(event.ns);
+		issues.push_back(static_cast<double>(issued) / 1e6);
 		arrivals.push_back(static_cast<double>(received) / 1e6);
 		++flipped;
 	}
@@ -797,6 +801,18 @@ int main(int argc, char **)
 		      gaps.empty() ? 0.0 : *std::max_element(gaps.begin(), gaps.end()));
 	report("flip-paced", flip_ok && flip_hz > refresh_hz * 0.9 && flip_hz < refresh_hz * 1.1,
 	       flip_ok ? summary : errno_text(flip_errno));
+	// Which side was late in the largest gap: the probe issuing the flip, the
+	// commit and the tick completing it, or the event being read. The ticks the
+	// kernel traced inside the gap are printed with the trace, below.
+	int64_t flip_gap_from = 0, flip_gap_to = 0;
+	if (flip_ok && !gaps.empty()) {
+		size_t i = static_cast<size_t>(std::max_element(gaps.begin(), gaps.end()) - gaps.begin()) + 1;
+		std::printf("INFO largest flip gap %.2f ms at flip %zu: issued %.2f ms after the previous event was read, stamped %.2f ms after it was issued, read %.2f ms after its stamp\n",
+			    gaps[i - 1], i, issues[i] - arrivals[i - 1], stamps[i] - issues[i],
+			    arrivals[i] - stamps[i]);
+		flip_gap_from = stamp_ns[i - 1];
+		flip_gap_to = stamp_ns[i];
+	}
 	int shown = flipped % 2; // the buffer the display shows now is buffers[shown]
 
 	// Restarts after a gap. A gap of 1.5 periods ends between the tick at
@@ -913,6 +929,20 @@ int main(int argc, char **)
 	if (!trace_dir.empty()) {
 		std::vector<TraceEvent> events = read_trace(trace_dir);
 		std::printf("INFO traced %zu vblank events\n", events.size());
+		if (flip_gap_to > flip_gap_from) {
+			// The flip events carry microsecond stamps, the trace nanoseconds.
+			int inside = 0;
+			for (const TraceEvent &event : events)
+				if (event.ns >= flip_gap_from - stamp_tolerance_ns &&
+				    event.ns <= flip_gap_to + stamp_tolerance_ns) {
+					std::printf("INFO traced tick in the largest flip gap: sequence %lld at %+.3f ms\n",
+						    static_cast<long long>(event.seq),
+						    static_cast<double>(event.ns - flip_gap_from) / 1e6);
+					++inside;
+				}
+			std::printf("INFO %d traced ticks in the largest flip gap of %.2f ms\n", inside,
+				    static_cast<double>(flip_gap_to - flip_gap_from) / 1e6);
+		}
 		int64_t guard = 2 * 1000 * 1000;
 		int64_t longest = period;
 		for (const drm_mode_modeinfo &candidate : output.modes)
