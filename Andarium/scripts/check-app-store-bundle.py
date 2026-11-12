@@ -415,7 +415,10 @@ DEBUG_SYMBOLS = (
     # namespace uml::platform, its class and entries.
     ("synthetic camera", (b"15SyntheticCamera", b"19SyntheticCameraImpl",
                           b"19makeSyntheticCamera", b"19encodeSyntheticJpeg",
-                          b"17decodeChartMarker")),
+                          b"17decodeChartMarker",
+                          # The runtime's choice of it from the environment
+                          # (Kernarium/Runtime/KernariumCamera.hpp).
+                          b"6camera11parseSource")),
     # Simulated game controllers: the scripted input and the guest end of the
     # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
     # tool link) and the host reader that moved there.
@@ -444,7 +447,8 @@ DEBUG_STRINGS = (
     ("remote framebuffer", (b"RFB 003.00",)),
     ("input probe", (b"inputProbeLog", b"inputProbeField")),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
-                          b"SyntheticLaptop1,1", b"synthetic-back-wide")),
+                          b"SyntheticLaptop1,1", b"synthetic-back-wide",
+                          b"KERNARIUM_CAMERA_SOURCE")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
              b"running on gadgets, not the JIT", b"open Andarium from StikDebug",
              b"Started without JIT")),

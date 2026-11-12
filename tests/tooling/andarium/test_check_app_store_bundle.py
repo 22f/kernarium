@@ -90,6 +90,9 @@ DEBUG_SUPPORT = (
     ("synthetic camera", "int _ZN3uml8platform17decodeChartMarkerEPKhmjj(void) { return 1; }\n"),
     ("synthetic camera", 'const char *fixture(void) { return "SyntheticPhone1,1"; }\n'),
     ("synthetic camera", 'const char *fixture(void) { return "synthetic-back-wide"; }\n'),
+    # The runtime's environment knob for it and the function that reads it.
+    ("synthetic camera", 'const char *knob(void) { return "KERNARIUM_CAMERA_SOURCE"; }\n'),
+    ("synthetic camera", "int _ZN9kernarium6camera11parseSourceEPKc(void) { return 1; }\n"),
     # The simulated controllers: the scripted input, the guest end of the wire
     # and the test-support module that holds them.
     ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),
