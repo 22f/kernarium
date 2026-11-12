@@ -570,6 +570,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
     wifi_permanent, wifi_temporary = tool.WIFI_NO_INTERNET_THRESHOLDS
     statistics_apks = tool.STATISTICS_APKS
+    wifi_tracker_apks = tool.WIFI_TRACKER_APKS
     # The Setup Wizard overlay's artwork, as the build would carry it: the raw animation unchanged and
     # the compiled vector holding its path data as strings.
     wizard_art_root = verifier.parents[1] / "overlay/overlay/packages/apps/SetupWizard/app/src/main/res"
@@ -1002,6 +1003,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           services_jar_variant: str | None = None,
                           input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
+                          wifi_tracker_variant: str | None = None,
                           ota_certificates: str | None = None,
                           signed: bool = False,
                           adbd_launch_unreadable: bool = False,
@@ -2164,6 +2166,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     '<manifest version="1.0" type="device"/>\n',
                 )
                 def application_payload(apk: str) -> bytes:
+                    # Settings and SystemUI store their dex files uncompressed; the p0033
+                    # WifiTrackerLib topic's predicate is named in the bytes.
+                    if apk in wifi_tracker_apks:
+                        variant = "settings-no-marker" if "/Settings/" in apk else "systemui-no-marker"
+                        users = io.BytesIO()
+                        with zipfile.ZipFile(users, "w", zipfile.ZIP_STORED) as application:
+                            application.writestr("AndroidManifest.xml", release_manifest)
+                            application.writestr(
+                                "classes.dex",
+                                b"dex\n039\x00"
+                                + (b"" if wifi_tracker_variant == variant else b"isInternetCheckFailed\x00"),
+                            )
+                        return users.getvalue()
                     # LineageParts and the Setup Wizard are real archives, so the check that
                     # LineageOS's statistics uploader is gone has members to search; the other
                     # applications stay the placeholder release archive.
@@ -3431,6 +3446,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-input-flinger", {"input_flinger_variant": "missing"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
             ("network-stack-without-the-wifi-check-report", {"network_stack_variant": "no-check-marker"}),
+            ("settings-without-the-wifi-tracker-topic", {"wifi_tracker_variant": "settings-no-marker"}),
+            ("system-ui-without-the-wifi-tracker-topic", {"wifi_tracker_variant": "systemui-no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
             ("signed-with-an-extra-certificate", {"signed": True, "ota_certificates": "extra"}),
@@ -4180,6 +4197,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lacks the NetworkMonitor topic of route p0029"),
             ("network-stack-without-the-wifi-check-report-cause", {"network_stack_variant": "no-check-marker"},
              "'Wi-Fi internet check failed, the network stays validated' is not in its dex files"),
+            ("settings-without-the-wifi-tracker-topic-cause", {"wifi_tracker_variant": "settings-no-marker"},
+             "SYSTEM_EXT/priv-app/Settings/Settings.apk lacks the WifiTrackerLib topic of route p0033"),
+            ("system-ui-without-the-wifi-tracker-topic-cause", {"wifi_tracker_variant": "systemui-no-marker"},
+             "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk lacks the WifiTrackerLib topic of route p0033"),
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},
              "SYSTEM/priv-app/NetworkStack/NetworkStack.apk is missing"),
             ("adbd-cannot-read-launch-properties-cause", {"adbd_launch_unreadable": True},
@@ -7048,6 +7069,99 @@ def verify_network_stack_topic(android_root: Path) -> None:
             fail(f"the NetworkMonitor topic check accepted {label}")
 
 
+WIFI_TRACKER_PROJECT = "platform/frameworks/opt/net/wifi"
+WIFI_TRACKER_FILES = [
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/Utils.java",
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiEntry.java",
+]
+
+
+def wifi_tracker_topic_problems(patch: str, markers: list[str]) -> list[str]:
+    """What the p0033 patch lacks of the warning: it changes the library's Utils and WifiEntry alone, it
+    names what the verifier looks for, it reads a report that says valid with the HTTPS probe attempted
+    and not succeeded, leaves a network that is not validated, partial or behind a sign-in page to the
+    stock rules, and the icon and the summary both take it."""
+    problems = []
+    touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
+    if touched != WIFI_TRACKER_FILES:
+        problems.append(f"it changes {touched}, not {WIFI_TRACKER_FILES}")
+    added = "\n".join(
+        line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")
+    )
+    for marker in markers:
+        if marker not in added:
+            problems.append(f"it does not add the name {marker!r} that the verifier requires")
+    for needle, what in (
+        ("NET_CAPABILITY_VALIDATED", "require a validated network"),
+        ("NET_CAPABILITY_CAPTIVE_PORTAL", "leave a network behind a sign-in page to the stock rules"),
+        ("NET_CAPABILITY_PARTIAL_CONNECTIVITY", "leave a partial network to the stock rules"),
+        ("NETWORK_VALIDATION_RESULT_VALID", "require a report that says valid, not skipped"),
+        ("KEY_NETWORK_PROBES_ATTEMPTED_BITMASK", "read the probes the report says were attempted"),
+        ("KEY_NETWORK_PROBES_SUCCEEDED_BITMASK", "read the probes the report says succeeded"),
+        ("(attempted & NETWORK_PROBE_HTTPS) != 0 && (succeeded & NETWORK_PROBE_HTTPS) == 0",
+         "ask for the HTTPS probe attempted and not succeeded"),
+        ("|| isInternetCheckFailed() ||", "show the exclamation mark for a failed check"),
+        ("isPartialConnectivity || isInternetCheckFailed", "write the limited connection summary for a failed check"),
+    ):
+        if needle not in added:
+            problems.append(f"it does not {what}")
+    return problems
+
+
+def verify_wifi_tracker_topic(android_root: Path) -> None:
+    """The routed WifiTrackerLib topic and the verifier agree on the warning for a failed check.
+
+    The target-files fixtures prove what the verifier rejects; this proves that the topic puts in
+    Settings and SystemUI the name the verifier looks for, and that the predicate holds for the
+    report a failed check leaves and for no other."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    rows = [
+        line.split("\t")
+        for line in (android_root / "patches/projects.tsv").read_text().splitlines()
+        if line and not line.startswith("#")
+    ][1:]
+    routes = [row for row in rows if row[3] == WIFI_TRACKER_PROJECT]
+    if [(row[1], row[4]) for row in routes] != [("p0033", "frameworks/opt/net/wifi")]:
+        fail("the route table does not route frameworks/opt/net/wifi once, as p0033")
+    patches = sorted((android_root / "patches/projects/p0033/series").glob("*.patch"))
+    if len(patches) != 1:
+        fail(f"p0033 has {len(patches)} patches, not one")
+    patch = patches[0].read_text()
+    markers = [marker.decode() for marker in verifier.WIFI_TRACKER_MARKERS]
+    if markers != ["isInternetCheckFailed"]:
+        fail("the verifier no longer names the WifiTrackerLib predicate")
+    if tuple(verifier.WIFI_TRACKER_APKS) != (
+        "SYSTEM_EXT/priv-app/Settings/Settings.apk",
+        "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
+    ):
+        fail("the verifier no longer checks Settings and SystemUI for the WifiTrackerLib topic")
+    problems = wifi_tracker_topic_problems(patch, markers)
+    if problems:
+        fail("the WifiTrackerLib topic: " + "; ".join(problems))
+    for label, edited in (
+        ("a topic without the verifier's name", patch.replace("isInternetCheckFailed", "isChecked")),
+        ("a topic that shows an unvalidated network",
+         patch.replace("NET_CAPABILITY_VALIDATED", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a sign-in network",
+         patch.replace("NET_CAPABILITY_CAPTIVE_PORTAL", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a partial network",
+         patch.replace("NET_CAPABILITY_PARTIAL_CONNECTIVITY", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a skipped report",
+         patch.replace("NETWORK_VALIDATION_RESULT_VALID", "NETWORK_VALIDATION_RESULT_SKIPPED")),
+        ("a topic that ignores the attempted probes",
+         patch.replace("(attempted & NETWORK_PROBE_HTTPS) != 0 &&", "")),
+        ("a topic that shows a network whose HTTPS probe succeeded",
+         patch.replace("(succeeded & NETWORK_PROBE_HTTPS) == 0", "(succeeded & NETWORK_PROBE_HTTPS) != 0")),
+        ("a topic whose icon ignores the check", patch.replace("|| isInternetCheckFailed() ||", "||")),
+        ("a topic whose summary ignores the check",
+         patch.replace("isPartialConnectivity || isInternetCheckFailed", "isPartialConnectivity")),
+        ("a topic that also changes another file",
+         patch + "diff --git a/libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java b/x\n"),
+    ):
+        if not wifi_tracker_topic_problems(edited, markers):
+            fail(f"the WifiTrackerLib topic check accepted {label}")
+
+
 def verify_media_codecs_overlay(android_root: Path) -> None:
     """The tracked software decoder update satisfies the verifier that checks the image."""
     verifier = load_tool(android_root / "tools/verify-target-files.py")
@@ -8449,6 +8563,7 @@ def main() -> None:
     verify_overlay_sepolicy(android_root)
     verify_lmkd_gpu_reclaim(android_root)
     verify_network_stack_topic(android_root)
+    verify_wifi_tracker_topic(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)
     verify_debugging_defaults(android_root)

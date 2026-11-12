@@ -2620,6 +2620,42 @@ def check_network_stack(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipIn
         fail(f"cannot inspect {NETWORK_STACK_APK}: {problem}")
 
 
+# The p0033 topic makes WifiTrackerLib show a failed check of a validated network: the Wi-Fi mark in
+# the status bar and "Limited connection" in the Wi-Fi list. Settings and SystemUI link the library
+# statically and store their dex files uncompressed, and R8 keeps method names there, so the topic's
+# predicate is named in each. A build without it would show nothing for a network whose check failed.
+WIFI_TRACKER_APKS = (
+    "SYSTEM_EXT/priv-app/Settings/Settings.apk",
+    "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
+)
+WIFI_TRACKER_MARKERS = (b"isInternetCheckFailed",)
+WIFI_TRACKER_LIMIT = 192 << 20
+
+
+def check_wifi_tracker_users(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for apk_path in WIFI_TRACKER_APKS:
+        info = infos.get(apk_path)
+        if info is None:
+            fail(f"{apk_path} is missing")
+        try:
+            with zipfile.ZipFile(io.BytesIO(read_small(archive, info, WIFI_TRACKER_LIMIT))) as apk:
+                dex = [
+                    name for name in apk.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)
+                ]
+                if not dex:
+                    fail(f"{apk_path} holds no dex file")
+                contents = [apk.read(name) for name in dex]
+                for marker in WIFI_TRACKER_MARKERS:
+                    if not any(marker in content for content in contents):
+                        fail(
+                            f"{apk_path} lacks the WifiTrackerLib topic of route p0033 "
+                            f"({marker.decode()!r} is not in its dex files): a Wi-Fi network whose "
+                            "internet check failed would show no warning"
+                        )
+        except (OSError, zipfile.BadZipFile) as problem:
+            fail(f"cannot inspect {apk_path}: {problem}")
+
+
 def check_ota_certificates(
     archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo], build_variant: str, signed: bool
 ) -> None:
@@ -5285,6 +5321,7 @@ def main() -> None:
         check_services_jar(archive, infos)
         check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
+        check_wifi_tracker_users(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)
         check_video_encoders(archive, infos)
