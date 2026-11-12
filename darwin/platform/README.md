@@ -119,15 +119,17 @@ interface to the wire.
   another. A photo output gets its maximum size only after it is attached to
   the session, as AVFoundation requires. Discovery lists the sizes of every
   format, since the format a camera runs is not known until a session asks for
-  it. A still's `exposure` is the photo's own: the exposure time, ISO,
-  f-number, focal length and flash come from the photo's Exif
-  (`apple/photo_metadata.hpp`, `still_exposure.hpp`), the 3A states, white
-  balance, zoom and lens from the session when the photo is delivered, and a
-  Bayer still's neutral point and noise profile from its DNG. A reading the
-  platform does not give, or gives as a number that cannot be a measurement
-  (zero, negative, not finite, beyond any camera), is zero: absent, never a
-  made-up value. The flash fired is the Exif's word, then the resolved
-  settings'.
+  it. A still's `exposure` is the photo's own where the photo states it: the
+  exposure time, ISO, f-number, focal length and flash come from the photo's
+  Exif (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's
+  neutral point and noise profile from its DNG. The 3A states, white balance,
+  zoom and lens are the session's as it reports them at delivery, not as they
+  were at the exposure, and on macOS the session reports none of them, so they
+  keep their defaults. A reading the photo does not give, or gives as a number
+  that cannot be a measurement (zero, negative, not finite, beyond any
+  camera), is zero: the photo gave none, never a made-up value. A lens has one
+  aperture and one focal length, so the lens's own is used when the photo
+  names none. The flash fired is the Exif's word, then the resolved settings'.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at

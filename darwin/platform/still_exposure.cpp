@@ -32,8 +32,13 @@ CameraExposure stillExposureOf(const CameraExposure& device, const PhotoReadings
     if (const auto seconds = measured(readings.exposureSeconds, 3600.0))
         exposure.exposureNanoseconds = std::uint64_t(std::llround(*seconds * 1e9));
     if (const auto iso = measured(readings.iso, 4.0e9)) exposure.iso = std::uint32_t(std::llround(*iso));
+    // A lens has one aperture: when the photo names no f-number, the lens's own
+    // (the session's lensAperture) is a true reading; a lens that states none
+    // has none.
     if (const auto fNumber = measured(readings.fNumber, 1000.0)) exposure.aperture = float(*fNumber);
     else if (!std::isfinite(exposure.aperture) || exposure.aperture <= 0.0f) exposure.aperture = 0.0f;
+    // The focal length stays zero when the photo names none; the camera device
+    // then states the lens's own, which is fixed too.
     if (const auto focal = measured(readings.focalLengthMillimetres, 10000.0)) exposure.focalLengthMillimetres = float(*focal);
 
     if (readings.flash) exposure.flashFired = (*readings.flash & 1) != 0;

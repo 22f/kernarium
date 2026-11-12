@@ -65,11 +65,11 @@ application's statements (the sensor orientation, the rotation that
   platform is asked for exactly that size.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
-  record too. The record has no flag for an absent reading: zero is absent for
-  the exposure time, ISO, aperture, focal length, and a still's neutral point
-  and noise profile, since none of them can be zero. A still's record carries
-  the photo's own exposure time, ISO, aperture and focal length, and the
-  device states the lens's focal length when the reading is absent.
+  record too. The exposure time, ISO, aperture, focal length, neutral point and
+  noise profile use zero for "the photo gave none" (none of them can be zero),
+  and the 3A and flash states have no such value. A still's record carries the
+  photo's own exposure time, ISO, aperture and focal length; the device states
+  the lens's focal length when the photo gave none.
 - **Black and interruptions.** Blocked, interrupted, restarting and test-pattern
   frames are black (`fillNv12Black`) and flagged; they are timed by the device,
   so a stalled platform camera does not stall the guest. A stream's frames are

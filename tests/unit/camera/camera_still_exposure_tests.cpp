@@ -99,13 +99,13 @@ void aTypicalPhotoReportsItsOwnExposure()
     for (const float value : exposure.noiseProfile) require(value == 0.0f);
 }
 
-void aMissingReadingIsAbsentNotThePreviews()
+void aMissingReadingIsTheLensesFixedValueOrNoneNeverThePreviews()
 {
     const auto exposure = stillExposureOf(device(), {}, std::nullopt, {});
     require(exposure.exposureNanoseconds == 0, "the preview's 1/30 s is not the photo's");
     require(exposure.iso == 0, "the preview's ISO is not the photo's");
-    require(exposure.focalLengthMillimetres == 0.0f, "the device falls back to the lens's own focal length");
-    require(exposure.aperture == 1.5f, "the lens's aperture is a property of the lens");
+    require(exposure.focalLengthMillimetres == 0.0f, "none from the photo: the camera device states the lens's fixed focal length");
+    require(exposure.aperture == 1.5f, "the lens's fixed aperture when the photo names none");
     require(!exposure.flashFired);
     // A lens that does not state its aperture has none.
     auto unknown = device();
@@ -128,7 +128,7 @@ void aReadingThatCannotBeAMeasurementIsAbsent()
         const auto exposure = stillExposureOf(device(), readings, std::nullopt, {});
         require(exposure.exposureNanoseconds == 0, "no exposure time");
         require(exposure.iso == 0, "no sensitivity");
-        require(exposure.aperture == 1.5f, "the lens's aperture, not a bad f-number");
+        require(exposure.aperture == 1.5f, "the lens's fixed aperture, since the photo's f-number is not one");
         require(exposure.focalLengthMillimetres == 0.0f);
     }
     // The longest exposure and the largest sensitivity still fit their fields.
@@ -279,7 +279,7 @@ void anImageWithoutExifAndBytesWithoutAnImageGiveNothing()
 int main()
 {
     aTypicalPhotoReportsItsOwnExposure();
-    aMissingReadingIsAbsentNotThePreviews();
+    aMissingReadingIsTheLensesFixedValueOrNoneNeverThePreviews();
     aReadingThatCannotBeAMeasurementIsAbsent();
     theFlashIsTheMetadatasWordThenThePlatformsDecision();
     aBayerStillCarriesItsOwnNeutralAndNoise();

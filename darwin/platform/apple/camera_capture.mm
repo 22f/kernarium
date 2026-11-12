@@ -1610,6 +1610,10 @@ std::unique_ptr<Camera> makeAppleCamera()
     auto* session = static_cast<uml::platform::AppleSession*>(_state->session);
     const bool haveJpegReadings = _jpegReadings.exposureSeconds || _jpegReadings.iso || _jpegReadings.fNumber ||
         _jpegReadings.focalLengthMillimetres || _jpegReadings.flash;
+    // The photo's own readings come from its Exif. The 3A states, white balance,
+    // zoom and lens are read from the session now, at delivery: they are what it
+    // reports then, not what they were at the exposure, and on macOS the session
+    // reports none of them, so they keep their defaults.
     _result.exposure = uml::platform::stillExposureOf(
         session->deviceExposureOf(_camera), haveJpegReadings ? _jpegReadings : _rawReadings, flashResolved, _dng);
     session->deliverStill(_camera, std::move(_result));
