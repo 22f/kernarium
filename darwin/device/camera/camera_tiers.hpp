@@ -91,6 +91,11 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
  *    (concurrentCameras);
  *  - the device's staging: one NV12 frame of the largest video size, where a frame is
  *    cropped, rotated and scaled before it is copied to the guest;
+ *  - the transformer's own scratch, which the platform's transformer keeps between
+ *    frames and which the staging does not cover: a scaled pixel buffer and a rotation
+ *    scratch of one such frame each, and vImage's temporaries, measured at 3,691,696
+ *    bytes for the largest scale of the small tier (a 1080p frame turned a quarter),
+ *    which is 1.19 frames and counted as 1.2;
  *  - the still's transients, for one 12 MP RAW still with its DNG: the RAW
  *    pixels (2 bytes each) three times, the platform's buffer, the device's
  *    copy and the DNG that comes with it;
@@ -99,12 +104,13 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
 struct CameraHostMemory {
     std::uint64_t capturePools {};
     std::uint64_t staging {};
+    std::uint64_t transformerScratch {};
     std::uint64_t rawStill {};
     std::uint64_t jpegStill {};
 
     [[nodiscard]] constexpr std::uint64_t total() const noexcept
     {
-        return capturePools + staging + rawStill + jpegStill;
+        return capturePools + staging + transformerScratch + rawStill + jpegStill;
     }
 };
 
@@ -115,6 +121,7 @@ struct CameraHostMemory {
     return {
         .capturePools = maximumDeliveredFrameBytes(limits) * heldFramesPerCamera * concurrentCameras,
         .staging = frame,
+        .transformerScratch = frame * 2 + frame * 6 / 5,
         .rawStill = limits.maximumStillPixels * 2 * 3,
         .jpegStill = limits.maximumStillPixels / 2 * 3,
     };

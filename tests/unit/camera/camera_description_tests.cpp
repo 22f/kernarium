@@ -473,16 +473,20 @@ void testHostMemoryReserve()
     require(heldFramesPerCamera == 6 && concurrentCameras == 2, "six frames of each of two cameras are held");
     require(small.capturePools == 4'423'680ull * 6 * 2, "the aligned buffer, six held, two cameras");
     require(small.staging == 1920ull * 1080 * 3 / 2, "one frame");
+    require(small.transformerScratch == 3'110'400ull * 2 + 3'732'480ull,
+            "the transformer's scratch: a scaled buffer and a rotation scratch of a frame each, and vImage's temporaries (3,691,696 bytes measured, counted as 1.2 frames)");
+    require(small.transformerScratch >= 3'110'400ull * 2 + 3'691'696ull, "which is at least what was measured");
     require(small.rawStill == 12'700'000ull * 2 * 3, "the RAW pixels three times: the platform's, the copy, the DNG");
     require(small.jpegStill == 12'700'000ull / 2 * 3, "three copies of the JPEG");
-    require(small.total() == 53'084'160ull + 3'110'400ull + 76'200'000ull + 19'050'000ull, "the parts add up");
-    require(cameraHostMemoryReserveMiB(CameraTier::small) == 145, "144.4 MiB, rounded up");
+    require(small.total() == 53'084'160ull + 3'110'400ull + 9'953'280ull + 76'200'000ull + 19'050'000ull, "the parts add up");
+    require(cameraHostMemoryReserveMiB(CameraTier::small) == 154, "153.9 MiB, rounded up");
     // The tier every host gets is the small one, whatever its budget, and so is the reserve it holds.
-    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 145);
-    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 145);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 154);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 154);
     const auto large = cameraHostMemory(CameraTier::large);
     require(large.capturePools == alignedFrameBytes(3840, 2880) * 6 * 2 && large.staging == 3840ull * 2160 * 3 / 2);
-    require(cameraHostMemoryReserveMiB(CameraTier::large) == 560 && large.total() > small.total(),
+    require(large.transformerScratch == 12'441'600ull * 2 + 14'929'920ull);
+    require(cameraHostMemoryReserveMiB(CameraTier::large) == 598 && large.total() > small.total(),
             "lifting the cap raises it with the tier");
 }
 

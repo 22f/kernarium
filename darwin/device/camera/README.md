@@ -40,8 +40,9 @@ application's statements (the sensor orientation, the rotation that
   capture pools (six frames a camera is holding, `heldFramesPerCamera`, of the
   largest buffer the platform delivers, for two cameras: the 4:3 frame of the
   tier's width at the capture buffer's 256-byte row alignment), the device's
-  staging and the transients of a 12 MP RAW still with its DNG and JPEG, 145
-  MiB at the small tier (`cameraHostMemoryReserveMiB`). The figure is one a
+  staging, the platform transformer's scratch (a scaled buffer, a rotation
+  scratch and vImage's temporaries) and the transients of a 12 MP RAW still
+  with its DNG and JPEG, 154 MiB at the small tier (`cameraHostMemoryReserveMiB`). The figure is one a
   tier, for the layout with the most in it; the loader states it from the
   budget alone. The six are a maximum of the code: the inbox keeps a camera's
   newest three, the pump takes the newest frame of a camera and frees the older
