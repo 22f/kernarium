@@ -456,16 +456,17 @@ requires reopening Andarium.
   camera's sensor orientation from it, and a later turn turns the picture
   ([orientation](../darwin/device/camera/README.md#orientation)). The colour
   data a Bayer still teaches is kept in a folder of Application Support that
-  backups leave out. The memory a live
-  session's cameras hold comes out of the graphics budget
-  ([camera device](../darwin/device/camera/README.md)): with Camera on, the
-  VRAM the System sheet and the statistics show is the pool, the budget less
-  that reserve, and the memory offered and the default are unchanged. The Simulator has no camera: the
-  preview states the access (`-systemCamera` reads the Simulator's own
-  permission) and the non-App Store runtime serves a synthetic camera
-  (`KERNARIUM_CAMERA_SOURCE`) that tests use, and no camera at all for a value
-  it does not know; an App Store build has neither. No test captures a real
-  camera.
+  backups leave out. The memory a live session's cameras hold comes out of the
+  graphics budget ([camera device](../darwin/device/camera/README.md)): with
+  Camera on, the VRAM the System sheet and the statistics show is the pool,
+  the budget less that reserve, and the memory offered and the default are
+  unchanged. The Simulator has no camera: the preview states the access
+  (`-systemCamera` reads the Simulator's own permission) and the non-App Store
+  runtime serves a synthetic camera (`KERNARIUM_CAMERA_SOURCE`) to a run that
+  has none, and no camera at all for a value it does not know; an App Store
+  build has neither. No test captures a real camera, and no automated run
+  boots an Android guest through this runtime's camera wiring: a device check
+  does.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches
