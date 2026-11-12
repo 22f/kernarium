@@ -130,6 +130,20 @@ void theLayoutFollowsTheCamerasAndTheTier()
         require(std::find(names.begin(), names.end(), *layout) != names.end(), *layout);
 }
 
+void everyHostComposesTheSmallTierForNow()
+{
+    // A budget that would have earned the large tier composes the small layout:
+    // no 2160p front camera, and no layout of the large tier.
+    const auto tierOf = [](std::uint64_t gpuBudgetBytes) { return uml::camera::cameraTierForBudget(gpuBudgetBytes); };
+    for (const std::uint64_t budget : {std::uint64_t {534} << 20, std::uint64_t {1249} << 20, std::uint64_t {4096} << 20}) {
+        const auto phone = present(
+            uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tierOf(budget), "");
+        require(phone.tier == CameraTier::small, "the small tier");
+        require(phone.layout == "bf-small-flash-manual", phone.layout);
+        require(phone.layout.find("large") == std::string::npos && phone.layout.find("front2160") == std::string::npos);
+    }
+}
+
 void theLensCoverFollowsTheSession()
 {
     using uml::camera::lensCoverAdvertised;
@@ -376,6 +390,7 @@ int main()
         {"the-enums-are-the-applications-words", theEnumsAreTheApplicationsWords},
         {"a-host-without-cameras-presents-none", aHostWithoutCamerasPresentsNone},
         {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
+        {"every-host-composes-the-small-tier-for-now", everyHostComposesTheSmallTierForNow},
         {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
         {"a-later-boot-composes-the-layout-again", aLaterBootComposesTheLayoutAgain},
         {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},

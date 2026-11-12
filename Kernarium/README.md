@@ -224,7 +224,8 @@ Kernarium attaches:
   black frames, never opens a session and reports Android's camera lens cover
   on the side keys. The application asks the system for access and states live
   only when it has it, and nothing changes the mode before the guest powers
-  off. The camera tier follows the launch's GPU budget, the colour data a Bayer
+  off. The camera tier follows the launch's GPU budget within the cap (the small
+  tier for every host), the colour data a Bayer
   still teaches is kept in `android_camera_calibration_path`, the state of the
   capture (idle, streaming, interrupted, interrupted by iPad multitasking, by
   system pressure) comes back through `set_camera_state_callback` (a blocked

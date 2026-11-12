@@ -646,11 +646,20 @@ CAMERA_SOURCES = {"live": "synthetic", "blocked": "blocked", "none": "none"}
 AUTO_LAYOUT = "auto"
 
 
+# The layout the launcher composes for each profile's cameras: every host is given the small tier for now
+# (darwin/device/camera/camera_tiers.hpp, largestOfferedTier), so the phone has no 2160p front camera and no
+# concurrent stream pair, whatever the launcher's graphics budget.
+AUTO_LAYOUTS = {
+    "phone": "bf-small-flash-manual-raw",
+    "tablet": "bf-small-flash-manual-raw",
+    "laptop": "front",
+}
+
+
 def auto_layout(profile: str, taught: bool) -> str:
-    """The layout the launcher composes for the profile's cameras: the profile's own at the large tier (the
-    launcher's default graphics budget is over 1 GiB), without RAW until a Bayer still has taught the colour
-    data (the first session of a calibration directory)."""
-    name = DEFAULT_LAYOUTS[profile].replace("-small", "-large")
+    """The layout the launcher composes for the profile's cameras at the tier every host is given, without
+    RAW until a Bayer still has taught the colour data (the first session of a calibration directory)."""
+    name = AUTO_LAYOUTS[profile]
     if taught:
         return name
     plain = "-".join(part for part in name.split("-") if part != "raw")
@@ -669,6 +678,8 @@ def launcher_arguments(plan: Plan, auto: bool = False, calibration: pathlib.Path
         f"--camera={CAMERA_SOURCES[plan.mode]}",
         *([] if plan.mode == "none" else [f"--camera-profile={plan.profile}"]),
         "--camera-layout=auto" if auto else f"{camera_layouts.SKU_BOOT_ARGUMENT}{plan.layout.name}",
+        # Every host is given the small tier for now; a layout of the large tier is exercised with it.
+        *(["--camera-tier=large"] if plan.mode != "none" and plan.layout.tier == "large" else []),
         *([f"--camera-calibration-dir={calibration}"] if calibration else []),
     ]
 

@@ -176,9 +176,11 @@ void testTiers()
     };
     require(largest(small[2]) == std::make_pair(1920u, 1080u), "1080p video at most in the small tier");
     require(largest(large[2]) == std::make_pair(3840u, 2160u), "4K video in the large tier");
-    require(cameraTierForBudget(0) == CameraTier::small && cameraTierForBudget((1ull << 30) - 1) == CameraTier::small &&
-                cameraTierForBudget(1ull << 30) == CameraTier::large,
-            "the tier follows the budget at 1 GiB");
+    // Every host is given the small tier for now, whatever its GPU budget: the cap is one constant, and the
+    // tier the budget would earn is still the large one at 1 GiB.
+    require(largestOfferedTier == CameraTier::small, "the cap");
+    for (const std::uint64_t budget : {std::uint64_t {0}, (1ull << 30) - 1, 1ull << 30, 4ull << 30, ~std::uint64_t {0}})
+        require(cameraTierForBudget(budget) == CameraTier::small, "every host composes the small tier");
     require(limitsOf(CameraTier::small).buffers == 4 && limitsOf(CameraTier::large).buffers == 6, "buffers");
 
     // The sizes include the usual ones the device scales to, never above the camera's own.

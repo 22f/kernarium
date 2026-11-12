@@ -385,6 +385,10 @@ struct PreparedArguments {
 	 * cameras the source presents and passed as the vendor SKU, as the iOS
 	 * runtime does. Without it a run passes the layout itself. */
 	bool camera_layout_auto {};
+	/* --camera-tier=: the camera device's tier in place of the one every
+	 * host is given (uml::camera::largestOfferedTier), to exercise the
+	 * layouts of a tier the cap keeps from the hosts. */
+	std::optional<uml::camera::CameraTier> camera_tier;
 	/* --camera-calibration-dir=: where the colour data a Bayer still teaches
 	 * is kept; in memory when empty. */
 	std::string camera_calibration_directory;
@@ -434,8 +438,8 @@ struct PreparedArguments {
 		return std::tie(gpu, gpu_budget, audio, audio_output,
 				audio_input_host, battery, gnss, location, video,
 				video_encoder, hardware_input, camera, camera_profile,
-				camera_layout_auto, camera_calibration_directory,
-				console_socket,
+				camera_layout_auto, camera_tier,
+				camera_calibration_directory, console_socket,
 				serial_socket, net_forwards, vsock_forwards) ==
 			std::tie(other.gpu, other.gpu_budget, other.audio,
 				 other.audio_output, other.audio_input_host,
@@ -443,7 +447,7 @@ struct PreparedArguments {
 				 other.video, other.video_encoder,
 				 other.hardware_input, other.camera,
 				 other.camera_profile, other.camera_layout_auto,
-				 other.camera_calibration_directory,
+				 other.camera_tier, other.camera_calibration_directory,
 				 other.console_socket, other.serial_socket,
 				 other.net_forwards, other.vsock_forwards);
 	}
@@ -618,6 +622,14 @@ PreparedArguments prepare_host_arguments(
 				throw std::invalid_argument(
 					"--camera-layout must be auto");
 			prepared.camera_layout_auto = true;
+		} else if (valued("--camera-tier=")) {
+			if (value == "small")
+				prepared.camera_tier = uml::camera::CameraTier::small;
+			else if (value == "large")
+				prepared.camera_tier = uml::camera::CameraTier::large;
+			else
+				throw std::invalid_argument(
+					"--camera-tier must be small or large");
 		} else if (valued("--camera-calibration-dir=")) {
 			if (value.empty())
 				throw std::invalid_argument(
@@ -769,6 +781,8 @@ PreparedArguments prepare_host_arguments(
 			"--camera=blocked");
 	if (prepared.camera_layout_auto && prepared.camera == CameraSource::none)
 		throw std::invalid_argument("--camera-layout requires --camera");
+	if (prepared.camera_tier && prepared.camera == CameraSource::none)
+		throw std::invalid_argument("--camera-tier requires --camera");
 	if (!prepared.camera_calibration_directory.empty() &&
 	    prepared.camera == CameraSource::none)
 		throw std::invalid_argument(
@@ -1164,6 +1178,9 @@ public:
 		const auto plan = uml::emulator::plan_gpu_budget(
 			prepared_.kernel, prepared_.gpu_budget);
 		device_memory_limit_ = plan.budget.bytes;
+		/* The cameras' tier follows the budget within the cap. */
+		camera_tier_ = prepared_.camera_tier.value_or(
+			uml::camera::cameraTierForBudget(plan.budget.bytes));
 		if (prepared_.gpu.enabled && !information_only_) {
 			if (plan.budget.short_of_floor)
 				std::fprintf(stderr, "uml-darwin: %s\n",
@@ -1654,8 +1671,7 @@ private:
 		options.mode = prepared_.camera == CameraSource::blocked ?
 			uml::camera::CameraMode::blocked :
 			uml::camera::CameraMode::live;
-		options.tier =
-			uml::camera::cameraTierForBudget(device_memory_limit_);
+		options.tier = camera_tier_;
 		if (!camera_calibration_)
 			camera_calibration_ =
 				std::make_shared<uml::camera::CalibrationStore>(
@@ -1840,6 +1856,9 @@ private:
 	 * boots, so a restarted guest keeps it. */
 	std::shared_ptr<uml::camera::CalibrationStore> camera_calibration_;
 	std::uint64_t device_memory_limit_{};
+	/* The cameras' tier: what the GPU budget and the cap give, or the tier
+	 * --camera-tier= states. */
+	uml::camera::CameraTier camera_tier_{uml::camera::CameraTier::small};
 	std::atomic<bool> stop_requested_{};
 };
 

@@ -25,9 +25,15 @@ struct CameraTierLimits {
 
 inline constexpr std::uint64_t largeTierBudgetBytes = 1ull << 30;
 
+/* The largest tier any host is given for now: 1080p video and 12 MP stills,
+ * whatever its GPU budget. The tier code and the layouts of the larger tier
+ * stay, so lifting the cap is changing this constant. */
+inline constexpr CameraTier largestOfferedTier = CameraTier::small;
+
 [[nodiscard]] constexpr CameraTier cameraTierForBudget(std::uint64_t gpuBudgetBytes) noexcept
 {
-    return gpuBudgetBytes < largeTierBudgetBytes ? CameraTier::small : CameraTier::large;
+    const CameraTier byBudget = gpuBudgetBytes < largeTierBudgetBytes ? CameraTier::small : CameraTier::large;
+    return byBudget > largestOfferedTier ? largestOfferedTier : byBudget;
 }
 
 [[nodiscard]] constexpr CameraTierLimits limitsOf(CameraTier tier) noexcept
