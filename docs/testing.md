@@ -344,8 +344,9 @@ and `kernarium-host-features` (unit) the table of host features the boot
 request carries to an Android guest. `kernarium-camera` (unit) checks
 what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
-boot, the lens cover, the camera state and rotation, and that an unknown
-`KERNARIUM_CAMERA_SOURCE` never reaches the host's camera), `camera-layout`
+boot, the lens cover, the host memory a live session reserves (none for a
+host with no cameras), the camera state and rotation, and that an unknown or
+empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera), `camera-layout`
 (unit) that the layout name composed from a host's cameras is one of the
 image's layouts, and `camera-orientation` (unit) the sensor orientation of
 every interface orientation and facing

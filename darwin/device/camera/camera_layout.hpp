@@ -99,6 +99,16 @@ inline constexpr std::string_view noCameraLayout = "none";
     return mode == CameraMode::blocked && layoutHasCameras(layout);
 }
 
+/* The host memory, in whole mebibytes, that a session's cameras hold outside
+ * the GPU's pool (`cameraHostMemoryReserveMiB`): only a live session whose
+ * layout has cameras holds any. A blocked session opens no capture session,
+ * and a host with no cameras gets no device. The launcher and the
+ * application's runtime both decide it here, once the layout is composed. */
+[[nodiscard]] constexpr std::uint64_t liveCameraReserveMiB(CameraMode mode, std::string_view layout, CameraTier tier) noexcept
+{
+    return mode == CameraMode::live && layoutHasCameras(layout) ? cameraHostMemoryReserveMiB(tier) : 0;
+}
+
 /* The dimensions a host's cameras (in wire order, `arrangeCameras`) earn at a
  * tier. A host with a back camera and no front one, or with no camera that is
  * front or back, has none: the set has no layout that says so, and a front

@@ -1492,6 +1492,15 @@ public:
     /* The handle every boot runs on; it outlives the guest's last boot. */
     void attach(uml_emulator* emulator) noexcept { emulator_ = emulator; }
 
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+    /* The run's cameras, discovered before the first boot (the GPU's pool
+     * follows them); each boot composes the layout again. */
+    void adoptCameras(kernarium::camera::Presentation cameras)
+    {
+        cameras_ = std::move(cameras);
+    }
+#endif
+
     bool startBoot(unsigned restarts) override
     {
         boot_.reset();
@@ -1801,23 +1810,20 @@ private:
          * lists the same cameras and delivers black frames, and its side keys
          * report Android's camera lens cover; a host with no camera gets no
          * device and no cover. */
-        if (!cameras_)
-            cameras_.emplace(presentCameras(request_));
-        else
-            kernarium::camera::recompose(*cameras_);
+        kernarium::camera::recompose(cameras_);
         std::printf(
             "Kernarium: cameras: layout %s, %s, %s, device turned %u degrees\n",
-            cameras_->layout.c_str(),
-            cameras_->tier == uml::camera::CameraTier::small
+            cameras_.layout.c_str(),
+            cameras_.tier == uml::camera::CameraTier::small
                 ? "small tier" : "large tier",
             request_.camera.mode == uml::camera::CameraMode::live
                 ? "live" : "blocked",
             cameraRotation().degrees());
-        if (cameras_->hasCameras()) {
+        if (cameras_.hasCameras()) {
             boot->camera = uml::camera::makeInProcessCameraService(
-                cameras_->source,
+                cameras_.source,
                 kernarium::camera::deviceOptions(
-                    *cameras_, request_.camera.mode,
+                    cameras_, request_.camera.mode,
                     cameraStateReceiver(), cameraRotation()),
                 sharedMemoryRegions_);
             arguments.emplace_back(uml::gpu::virtioDeviceArgument(
@@ -1825,7 +1831,7 @@ private:
                 uml::camera::cameraDeviceId));
         }
         if (uml::camera::lensCoverAdvertised(
-                request_.camera.mode, cameras_->layout))
+                request_.camera.mode, cameras_.layout))
             boot->keyboard->setSwitch(
                 {uml::input::virtio::protocol::switchCameraLensCover, true});
         /* The hardware keyboard, mouse and pointer come last and stay
@@ -1869,7 +1875,7 @@ private:
             request_.adbPublicKey,
             request_.timeZone,
             request_.hostFeatures,
-            cameras_->layout);
+            cameras_.layout);
 #else
         /* A sealed ext4 derivative is attached read-only; the per-run /init
          * mounts either kind of image beneath the overlay. */
@@ -1937,8 +1943,8 @@ private:
     }
 
     uml::android::BootSelection androidBoot_ {};
-    /* The run's cameras, discovered at the first boot. */
-    std::optional<kernarium::camera::Presentation> cameras_;
+    /* The run's cameras, discovered before the first boot (`adoptCameras`). */
+    kernarium::camera::Presentation cameras_;
 #endif
 
     const GuestRequest request_;
@@ -2332,13 +2338,16 @@ int runtimeRun(
              * memory of a live camera session, which the same limit holds. */
             std::uint64_t cameraReserve = 0;
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
-            /* The cameras' memory tier follows the launch's fixed GPU budget. */
+            /* The cameras' memory tier follows the launch's fixed GPU budget.
+             * The cameras are discovered here, before the pool is set, because
+             * only a live session whose layout has cameras holds host memory;
+             * the guest takes the presentation over for its boots. */
             request.gpuBudgetBytes = gpuBudget.budget.bytes;
-            if (request.camera.mode == uml::camera::CameraMode::live)
-                cameraReserve = uml::camera::cameraHostMemoryReserveMiB(
-                                    uml::camera::cameraTierForBudget(
-                                        gpuBudget.budget.bytes)) *
-                    mebibyte;
+            auto cameras = presentCameras(request);
+            cameraReserve = uml::camera::liveCameraReserveMiB(
+                                request.camera.mode, cameras.layout,
+                                cameras.tier) *
+                mebibyte;
 #endif
             const std::uint64_t deviceMemoryLimit =
                 uml::platform::gpu_pool_bytes(gpuBudget.budget, cameraReserve);
@@ -2417,6 +2426,9 @@ int runtimeRun(
                 gpuService,
                 sharedMemoryRegions,
                 network};
+#if KERNARIUM_RUNTIME_ANDROID_GUEST
+            guest.adoptCameras(std::move(cameras));
+#endif
             const uml_emulator_config config {
                 .abi_version = UML_EMULATOR_ABI_VERSION,
                 .struct_size = sizeof(uml_emulator_config),

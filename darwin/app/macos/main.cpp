@@ -1181,16 +1181,27 @@ public:
 		 * live cameras, which the same limit holds. */
 		camera_tier_ = prepared_.camera_tier.value_or(
 			uml::camera::cameraTierForBudget(plan.budget.bytes));
-		const bool cameras_live =
-			prepared_.camera == CameraSource::synthetic ||
-			prepared_.camera == CameraSource::host;
-		const std::uint64_t camera_reserve = cameras_live ?
-			uml::camera::cameraHostMemoryReserveMiB(camera_tier_) << 20 :
-			0;
+		/* Only a live session whose layout has cameras holds that memory, so
+		 * the layout is composed here, before the pool is set; each boot
+		 * composes it again (`start_camera`). */
+		std::uint64_t camera_reserve = 0;
+		if (!information_only_ &&
+		    (prepared_.camera == CameraSource::synthetic ||
+		     prepared_.camera == CameraSource::host)) {
+			uml::camera::CameraSourceHandle source;
+			std::string layout;
+			if (!make_camera_source(source) ||
+			    !camera_layout_of(prepared_.kernel, *source, layout))
+				return false;
+			camera_reserve = uml::camera::liveCameraReserveMiB(
+						 uml::camera::CameraMode::live, layout,
+						 camera_tier_)
+				<< 20;
+		}
 		device_memory_limit_ =
 			uml::platform::gpu_pool_bytes(plan.budget, camera_reserve);
 		if (prepared_.gpu.enabled && !information_only_) {
-			if (cameras_live)
+			if (camera_reserve != 0)
 				std::fprintf(stderr,
 					"uml-darwin: live cameras hold %llu MiB of the "
 					"GPU budget: GPU pool %llu MiB\n",
@@ -1674,31 +1685,24 @@ private:
 		return true;
 	}
 
-	/* Starts the Virtio camera device on the source --camera= names. Live
-	 * sources open a platform capture session only when the guest streams;
-	 * the blocked source never opens one. Nothing here asks the system for
-	 * access: `host` needs the camera permission granted to this program (or
-	 * to the terminal it runs in) beforehand, and is refused here, with the
-	 * way to grant it, when it is not. */
-	[[nodiscard]] bool start_camera(std::vector<std::string> &kernel)
+	/* The store the run's cameras keep their colour data in. */
+	[[nodiscard]] std::shared_ptr<uml::camera::CalibrationStore>
+	camera_calibration()
 	{
-		uml::camera::CameraDeviceOptions options;
-		options.mode = prepared_.camera == CameraSource::blocked ?
-			uml::camera::CameraMode::blocked :
-			uml::camera::CameraMode::live;
-		options.tier = camera_tier_;
 		if (!camera_calibration_)
 			camera_calibration_ =
 				std::make_shared<uml::camera::CalibrationStore>(
 					prepared_.camera_calibration_directory);
-		options.calibration = camera_calibration_;
-		options.onState = [](uml::camera::CameraState state) {
-			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
-		};
-		/* A development run reads what reaches the host and what it costs. */
-		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
-		options.onCheckpoint = uml::camera::printCheckpoint;
-		uml::camera::CameraSourceHandle source;
+		return camera_calibration_;
+	}
+
+	/* The source --camera= names: the synthetic camera, or the host's, which
+	 * needs the system's camera permission granted beforehand and is refused,
+	 * with the way to grant it, when it is not. False, with the reason on
+	 * stderr, when there is none. */
+	[[nodiscard]] bool make_camera_source(
+		uml::camera::CameraSourceHandle &source)
+	{
 		try {
 			if (prepared_.camera == CameraSource::synthetic ||
 			    (prepared_.camera == CameraSource::blocked &&
@@ -1740,11 +1744,18 @@ private:
 				error.what());
 			return false;
 		}
-		/* The layout the guest is told: composed here as the iOS runtime
-		 * composes it, or stated by the kernel arguments, or not stated. */
-		std::string layout;
+		return true;
+	}
+
+	/* The layout the guest is told: composed from `source` as the iOS runtime
+	 * composes it (--camera-layout=auto), or stated by the kernel arguments,
+	 * or not stated (empty). The same function, the same tier and
+	 * calibration. */
+	[[nodiscard]] bool camera_layout_of(
+		const std::vector<std::string> &kernel,
+		const uml::platform::Camera &source, std::string &layout)
+	{
 		if (prepared_.camera_layout_auto) {
-			/* The same function, the same tier and calibration. */
 			for (const auto &argument : kernel) {
 				if (argument.starts_with(uml::camera::layoutArgumentPrefix)) {
 					std::fputs("--camera-layout=auto cannot be combined "
@@ -1754,23 +1765,56 @@ private:
 			}
 			try {
 				uml::camera::ArrangementOptions arrangement;
-				arrangement.tier = options.tier;
+				arrangement.tier = camera_tier_;
 				layout = uml::camera::composeLayout(
-					*source, *camera_calibration_, arrangement);
-				kernel.emplace_back(
-					std::string{uml::camera::layoutArgumentPrefix} + layout);
-				std::fprintf(stderr, "Camera layout: %s\n", layout.c_str());
+					source, *camera_calibration(), arrangement);
 			} catch (const std::exception &error) {
 				std::fprintf(stderr, "Unable to compose the camera layout: %s\n",
 					error.what());
 				return false;
 			}
-		} else {
-			for (const auto &argument : kernel) {
-				if (argument.starts_with(uml::camera::layoutArgumentPrefix))
-					layout = argument.substr(
-						uml::camera::layoutArgumentPrefix.size());
-			}
+			return true;
+		}
+		for (const auto &argument : kernel) {
+			if (argument.starts_with(uml::camera::layoutArgumentPrefix))
+				layout = argument.substr(
+					uml::camera::layoutArgumentPrefix.size());
+		}
+		return true;
+	}
+
+	/* Starts the Virtio camera device on the source --camera= names. Live
+	 * sources open a platform capture session only when the guest streams;
+	 * the blocked source never opens one. Nothing here asks the system for
+	 * access: `host` needs the camera permission granted to this program (or
+	 * to the terminal it runs in) beforehand, and is refused here, with the
+	 * way to grant it, when it is not. */
+	[[nodiscard]] bool start_camera(std::vector<std::string> &kernel)
+	{
+		uml::camera::CameraDeviceOptions options;
+		options.mode = prepared_.camera == CameraSource::blocked ?
+			uml::camera::CameraMode::blocked :
+			uml::camera::CameraMode::live;
+		options.tier = camera_tier_;
+		options.calibration = camera_calibration();
+		options.onState = [](uml::camera::CameraState state) {
+			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
+		};
+		/* A development run reads what reaches the host and what it costs. */
+		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
+		options.onCheckpoint = uml::camera::printCheckpoint;
+		uml::camera::CameraSourceHandle source;
+		if (!make_camera_source(source))
+			return false;
+		/* The layout the guest is told: composed here as the iOS runtime
+		 * composes it, or stated by the kernel arguments, or not stated. */
+		std::string layout;
+		if (!camera_layout_of(kernel, *source, layout))
+			return false;
+		if (prepared_.camera_layout_auto) {
+			kernel.emplace_back(
+				std::string{uml::camera::layoutArgumentPrefix} + layout);
+			std::fprintf(stderr, "Camera layout: %s\n", layout.c_str());
 		}
 		/* A host with no camera the image can describe gets no camera device,
 		 * as the iOS runtime gives it none. */

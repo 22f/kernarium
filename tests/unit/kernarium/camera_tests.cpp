@@ -144,6 +144,27 @@ void everyHostComposesTheSmallTierForNow()
     }
 }
 
+void aLiveSessionReservesMemoryOnlyForCamerasItHas()
+{
+    using uml::camera::liveCameraReserveMiB;
+    const auto tier = CameraTier::small;
+    const auto reserve = uml::camera::cameraHostMemoryReserveMiB(tier);
+    const auto phone = present(
+        uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tier, "");
+    require(phone.hasCameras() && liveCameraReserveMiB(CameraMode::live, phone.layout, tier) == reserve,
+        "a live session with cameras holds the tier's reserve");
+    require(reserve == 106, "the figure the budget gives up");
+    require(liveCameraReserveMiB(CameraMode::blocked, phone.layout, tier) == 0, "a blocked session opens none");
+    // A live session that composes `none` (a host whose cameras the image cannot describe, or a source that is
+    // not a name) has no device, so it holds nothing.
+    const auto none = present(nullptr, tier, "");
+    require(!none.hasCameras());
+    require(liveCameraReserveMiB(CameraMode::live, none.layout, tier) == 0, "a live session without cameras");
+    require(liveCameraReserveMiB(CameraMode::blocked, none.layout, tier) == 0);
+    // An unstated layout counts as having cameras, as everywhere else.
+    require(liveCameraReserveMiB(CameraMode::live, "", tier) == reserve);
+}
+
 void theLensCoverFollowsTheSession()
 {
     using uml::camera::lensCoverAdvertised;
@@ -391,6 +412,7 @@ int main()
         {"a-host-without-cameras-presents-none", aHostWithoutCamerasPresentsNone},
         {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
         {"every-host-composes-the-small-tier-for-now", everyHostComposesTheSmallTierForNow},
+        {"a-live-session-reserves-memory-only-for-cameras-it-has", aLiveSessionReservesMemoryOnlyForCamerasItHas},
         {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
         {"a-later-boot-composes-the-layout-again", aLaterBootComposesTheLayoutAgain},
         {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},
