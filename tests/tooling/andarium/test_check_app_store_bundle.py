@@ -94,11 +94,13 @@ DEBUG_SUPPORT = (
     ("synthetic camera", 'const char *knob(void) { return "KERNARIUM_CAMERA_SOURCE"; }\n'),
     ("synthetic camera", "int _ZN9kernarium6camera11parseSourceEPKc(void) { return 1; }\n"),
     ("synthetic camera", "int _ZN9kernarium6camera12chooseSourceIPFvvEEENSt3__110shared_ptrIN3uml8platform6CameraEEERKNS0_12SourceChoiceEOT_(void) { return 1; }\n"),
-    # The camera's development lines.
+    # The camera's development lines and the preview's camera and thermal notices.
     ("camera diagnostics", "int _ZN3uml6camera17printRotateAndCropEjjj(void) { return 1; }\n"),
     ("camera diagnostics", "int _ZN3uml6camera15printCheckpointENS0_16CameraCheckpointE(void) { return 1; }\n"),
     ("camera diagnostics", 'const char *fixture(void) { return "Camera: camera %u: ROTATE_AND_CROP %u"; }\n'),
     ("camera diagnostics", 'const char *fixture(void) { return "Camera: memory: %s, footprint"; }\n'),
+    ("camera diagnostics", "int _s8Andarium8AppModelC19previewCameraNoticeyyF(void) { return 1; }\n"),
+    ("camera diagnostics", "int _s8Andarium8AppModelC20previewThermalNoticeyyF(void) { return 1; }\n"),
     # The simulated controllers: the scripted input, the guest end of the wire
     # and the test-support module that holds them.
     ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),

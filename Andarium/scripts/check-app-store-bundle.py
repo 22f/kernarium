@@ -437,8 +437,10 @@ DEBUG_SYMBOLS = (
     # The camera's development lines (darwin/device/camera/camera_diagnostics.hpp):
     # what ROTATE_AND_CROP asks of the host and the footprint at each capture
     # checkpoint, printed by a launcher or a runtime that is not an App Store
-    # build.
-    ("camera diagnostics", (b"17printRotateAndCrop", b"15printCheckpoint")),
+    # build, and the Simulator preview's camera and thermal notices
+    # (Model.previewCameraNotice and previewThermalNotice).
+    ("camera diagnostics", (b"17printRotateAndCrop", b"15printCheckpoint",
+                            b"19previewCameraNotice", b"20previewThermalNotice")),
     # Simulated game controllers: the scripted input and the guest end of the
     # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
     # tool link) and the host reader that moved there.

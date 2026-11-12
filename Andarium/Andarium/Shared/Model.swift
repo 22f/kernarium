@@ -1666,10 +1666,13 @@ final class AppModel {
         cameraNoticeDismissed = true
     }
 
+    #if !APP_STORE
     /// The Simulator preview plays the notice: it has no runtime to interrupt.
+    /// The App Store configuration leaves this out.
     func previewCameraNotice() {
         cameraCapture = .interruptedByMultitasking
     }
+    #endif
 
     // MARK: Statistics
 
@@ -1860,10 +1863,13 @@ final class AppModel {
         thermalNotice.dismiss()
     }
 
+    #if !APP_STORE
     /// The Simulator preview plays the notice: it has no runtime to start a cap.
+    /// The App Store configuration leaves this out.
     func previewThermalNotice() {
         thermalNotice.show()
     }
+    #endif
 
     // MARK: Network notice
 
