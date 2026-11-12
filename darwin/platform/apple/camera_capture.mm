@@ -78,6 +78,9 @@ struct Entry {
     CameraInfo info;
     // AVFoundation's zoom factor times this is the ratio Android sees.
     float zoomMultiplier {1.0f};
+    // The largest photo any format lists: the video format is chosen among
+    // those that list it, so the photos offered can be made while it streams.
+    CameraStillSize preferredStill;
 };
 
 [[maybe_unused]] BayerOrder bayerOrderOf(OSType format)
@@ -89,6 +92,59 @@ struct Entry {
     case kCVPixelFormatType_14Bayer_BGGR: return BayerOrder::bggr;
     default: return BayerOrder::none;
     }
+}
+
+// The photo sizes a device format lists (supportedMaxPhotoDimensions).
+std::vector<CameraStillSize> listedPhotoSizes(AVCaptureDeviceFormat* format)
+{
+    std::vector<CameraStillSize> listed;
+    for (NSValue* value in format.supportedMaxPhotoDimensions) {
+        CMVideoDimensions candidate;
+        [value getValue:&candidate];
+        if (candidate.width > 0 && candidate.height > 0)
+            listed.push_back({std::uint32_t(candidate.width), std::uint32_t(candidate.height)});
+    }
+    return listed;
+}
+
+[[nodiscard]] bool formatTakenByMultiCameraSession(AVCaptureDeviceFormat* format)
+{
+#if TARGET_OS_IOS
+    return format != nil && format.multiCamSupported;
+#else
+    (void)format;
+    return true;
+#endif
+}
+
+// A camera's 4:2:0 formats as data for the choice of the one it runs in, with
+// the device formats they stand for in the same order.
+struct FormatSet {
+    std::vector<VideoFormatFacts> facts;
+    std::vector<AVCaptureDeviceFormat*> formats;
+};
+
+FormatSet formatSetOf(AVCaptureDevice* device)
+{
+    FormatSet set;
+    for (AVCaptureDeviceFormat* format in device.formats) {
+        const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
+        if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange && subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+            continue;
+        const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+        if (dimensions.width <= 0 || dimensions.height <= 0) continue;
+        VideoFormatFacts facts;
+        facts.width = std::uint32_t(dimensions.width);
+        facts.height = std::uint32_t(dimensions.height);
+        for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges)
+            facts.frameRates.push_back({range.minFrameRate, range.maxFrameRate});
+        facts.photoSizes = listedPhotoSizes(format);
+        facts.fullRange = subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+        facts.multiCamera = formatTakenByMultiCameraSession(format);
+        set.facts.push_back(std::move(facts));
+        set.formats.push_back(format);
+    }
+    return set;
 }
 
 std::vector<Entry> discover()
@@ -174,8 +230,6 @@ std::vector<Entry> discover()
                 [value getValue:&photo];
                 if (photo.width <= 0 || photo.height <= 0) continue;
                 const CameraStillSize size {std::uint32_t(photo.width), std::uint32_t(photo.height)};
-                if (std::find(info.stillSizes.begin(), info.stillSizes.end(), size) == info.stillSizes.end())
-                    info.stillSizes.push_back(size);
                 if (std::uint64_t(size.width) * size.height > std::uint64_t(largestPhoto.width) * largestPhoto.height)
                     largestPhoto = size;
             }
@@ -196,9 +250,25 @@ std::vector<Entry> discover()
             }
         }
         if (info.videoFormats.empty()) continue;
-        std::sort(info.stillSizes.begin(), info.stillSizes.end(), [](const auto& a, const auto& b) {
-            return std::uint64_t(a.width) * a.height > std::uint64_t(b.width) * b.height;
-        });
+        // The photos offered are the ones the camera makes in every format it
+        // streams in: a size that only another format lists would be refused
+        // whenever the camera runs in this one.
+        entry.preferredStill = largestPhoto;
+        {
+            const FormatSet set = formatSetOf(device);
+            std::vector<VideoRequest> requests;
+            for (const auto& format : info.videoFormats)
+                requests.push_back({format.width, format.height, format.minimumFrameRate, format.maximumFrameRate});
+            info.stillSizes = photoSizesOfEveryRun(set.facts, requests, largestPhoto);
+            if (info.stillSizes.empty() && !requests.empty()) {
+                // No size is common to every run: the camera offers what the
+                // format of its largest stream makes.
+                const auto largest = *std::max_element(requests.begin(), requests.end(), [](const VideoRequest& a, const VideoRequest& b) {
+                    return std::uint64_t(a.width) * a.height < std::uint64_t(b.width) * b.height;
+                });
+                info.stillSizes = photoSizesOfEveryRun(set.facts, std::span<const VideoRequest>(&largest, 1), largestPhoto);
+            }
+        }
         info.pixelArrayWidth = std::max(pixelWidth, largestPhoto.width);
         info.pixelArrayHeight = std::max(pixelHeight, largestPhoto.height);
         info.horizontalFieldOfView = fieldOfView;
@@ -295,18 +365,6 @@ using uml::platform::SessionState;
 namespace uml::platform {
 namespace {
 
-// The photo sizes a device format lists (supportedMaxPhotoDimensions).
-std::vector<CameraStillSize> listedPhotoSizes(AVCaptureDeviceFormat* format)
-{
-    std::vector<CameraStillSize> listed;
-    for (NSValue* value in format.supportedMaxPhotoDimensions) {
-        CMVideoDimensions candidate;
-        [value getValue:&candidate];
-        if (candidate.width > 0 && candidate.height > 0)
-            listed.push_back({std::uint32_t(candidate.width), std::uint32_t(candidate.height)});
-    }
-    return listed;
-}
 
 // What the system's pressure leaves of the rate a camera was asked for. The
 // pressure observer reads and writes it on any thread.
@@ -878,42 +936,17 @@ public:
     const Entry& entry(std::size_t camera) const { return entries_[camera]; }
 
 private:
-    static bool formatTakenByMultiCamera(AVCaptureDeviceFormat* format)
-    {
-#if TARGET_OS_IOS
-        return format != nil && format.multiCamSupported;
-#else
-        (void)format;
-        return true;
-#endif
-    }
+    static bool formatTakenByMultiCamera(AVCaptureDeviceFormat* format) { return formatTakenByMultiCameraSession(format); }
 
+    // The format a stream runs in (uml::platform::chooseVideoFormat): the
+    // smallest that covers it and takes its rate, among those that list the
+    // camera's largest photo when there are any.
     AVCaptureDeviceFormat* chooseFormat(const Entry& entry, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate,
                                         bool multiCameraOnly) const
     {
-        AVCaptureDeviceFormat* best = nil;
-        std::uint64_t bestArea = 0;
-        for (AVCaptureDeviceFormat* format in entry.device.formats) {
-            const FourCharCode subtype = CMFormatDescriptionGetMediaSubType(format.formatDescription);
-            if (subtype != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
-                subtype != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
-                continue;
-            const CMVideoDimensions dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
-            if (std::uint32_t(dimensions.width) < width || std::uint32_t(dimensions.height) < height) continue;
-            if (multiCameraOnly && !formatTakenByMultiCamera(format)) continue;
-            bool rate = false;
-            for (AVFrameRateRange* range in format.videoSupportedFrameRateRanges)
-                rate |= range.minFrameRate <= frameRate + 1e-3 && range.maxFrameRate >= frameRate - 1e-3;
-            if (!rate) continue;
-            const std::uint64_t area = std::uint64_t(dimensions.width) * dimensions.height;
-            // The smallest covering format; the full-range one among equals.
-            if (best == nil || area < bestArea ||
-                (area == bestArea && subtype == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)) {
-                best = format;
-                bestArea = area;
-            }
-        }
-        return best;
+        const FormatSet set = formatSetOf(entry.device);
+        const auto index = chooseVideoFormat(set.facts, width, height, frameRate, multiCameraOnly, entry.preferredStill);
+        return index ? set.formats[*index] : nil;
     }
 
     using Move = std::pair<std::size_t, AVCaptureDeviceFormat*>;

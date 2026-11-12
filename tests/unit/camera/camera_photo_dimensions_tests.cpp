@@ -4,6 +4,7 @@
 #include "photo_dimensions.hpp"
 #include "require.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -171,6 +172,103 @@ void aMaximumSetBeforeAttachIsRefused()
     require(steps.attach() && steps.setMaximum({4032, 3024}), "and takes it once attached");
 }
 
+// An iPad mini's back camera as the platform lists it: the binned format the
+// smallest covering choice picks for a 1440x1080 stream lists photos up to
+// 2016x1512 only; the 12 MP photo sizes belong to the larger formats.
+VideoFormatFacts format(std::uint32_t width, std::uint32_t height, Sizes photos, double fastest = 30, bool full = true,
+                        bool multi = false)
+{
+    VideoFormatFacts facts;
+    facts.width = width;
+    facts.height = height;
+    facts.frameRates = {{1, fastest}};
+    facts.photoSizes = std::move(photos);
+    facts.fullRange = full;
+    facts.multiCamera = multi;
+    return facts;
+}
+const std::vector<VideoFormatFacts> tabletFormats {
+    format(1440, 1080, {{1440, 1080}, {2016, 1512}}),
+    format(1920, 1440, {{1920, 1440}, {4032, 3024}}),
+    format(4032, 3024, {{4032, 3024}, {4224, 2376}}, 30),
+    format(1920, 1080, {{1920, 1080}, {2016, 1134}}, 60),
+};
+const CameraStillSize twelveMegapixels {4032, 3024};
+
+void theStreamRunsInTheSmallestFormatThatListsTheLargestStill()
+{
+    const auto chosen = chooseVideoFormat(tabletFormats, 1440, 1080, 30, false, twelveMegapixels);
+    require(chosen && *chosen == 1, "1920x1440 is the smallest covering format that lists 12 MP");
+    const auto plain = chooseVideoFormat(tabletFormats, 1440, 1080, 30, false, {});
+    require(plain && *plain == 0, "without a preferred still it is the smallest covering format");
+}
+
+void aFormatThatCannotTakeTheRateOrTheSizeIsNotChosen()
+{
+    // 60 fps: only the 1080p format takes it, and it lists no 12 MP; the
+    // preference does not reach past a format that cannot carry the stream.
+    const auto fast = chooseVideoFormat(tabletFormats, 1280, 720, 60, false, twelveMegapixels);
+    require(fast && *fast == 3, "the only format that takes 60 fps is chosen without the large still");
+    require(!chooseVideoFormat(tabletFormats, 4096, 3072, 30, false, twelveMegapixels), "nothing covers 4096x3072");
+    require(!chooseVideoFormat(tabletFormats, 640, 480, 120, false, twelveMegapixels), "nothing takes 120 fps");
+}
+
+void aMultiCameraSessionChoosesAmongItsFormatsOnly()
+{
+    auto formats = tabletFormats;
+    formats[1].multiCamera = true;  // only the 1920x1440 format joins
+    const auto chosen = chooseVideoFormat(formats, 1440, 1080, 30, true, twelveMegapixels);
+    require(chosen && *chosen == 1, "the multi-camera format is chosen");
+    formats[1].multiCamera = false;
+    require(!chooseVideoFormat(formats, 1440, 1080, 30, true, twelveMegapixels), "none joins: nothing is chosen");
+}
+
+void theFullRangeFormatWinsAmongEqualOnes()
+{
+    std::vector<VideoFormatFacts> formats {format(1920, 1440, {{4032, 3024}}, 30, false), format(1920, 1440, {{4032, 3024}}, 30, true)};
+    const auto chosen = chooseVideoFormat(formats, 1920, 1440, 30, false, twelveMegapixels);
+    require(chosen && *chosen == 1, "the full-range format of the same size and sizes");
+}
+
+void theSizesOfferedAreTheOnesEveryRunMakes()
+{
+    // Streams the guest may configure: preview sizes at 30 fps, and 1080p
+    // video up to 60 fps, which runs in the 1080p format.
+    const std::vector<VideoRequest> requests {{1440, 1080, 1, 30}, {1920, 1080, 1, 60}};
+    const auto offered = photoSizesOfEveryRun(tabletFormats, requests, twelveMegapixels);
+    // 1440x1080 runs in 1920x1440 {1920x1440, 4032x3024}; 1920x1080 at 60 fps
+    // runs in the 1080p format {1920x1080, 2016x1134}: nothing is common.
+    require(offered.empty(), "a size one run cannot make is not offered");
+    const std::vector<VideoRequest> previews {{1440, 1080, 1, 30}, {640, 480, 1, 30}, {1920, 1440, 1, 30}};
+    const auto previewSizes = photoSizesOfEveryRun(tabletFormats, previews, twelveMegapixels);
+    require(previewSizes == Sizes({{4032, 3024}, {1920, 1440}}), "the sizes of the shared format, largest first");
+}
+
+void aSizeOnlyAnotherFormatListsIsNotOffered()
+{
+    // 4224x2376 is listed by the 12 MP video format only; the camera's streams
+    // run in 1920x1440, so it is not offered, while 4032x3024 is.
+    const std::vector<VideoRequest> requests {{1440, 1080, 1, 30}, {1920, 1440, 1, 30}};
+    const auto offered = photoSizesOfEveryRun(tabletFormats, requests, twelveMegapixels);
+    require(std::find(offered.begin(), offered.end(), CameraStillSize {4224, 2376}) == offered.end(), "the 16:9 size is not offered");
+    require(!offered.empty() && offered.front() == twelveMegapixels, "the 12 MP size is");
+}
+
+void aCameraWithoutTheLargestStillOffersWhatItsFormatMakes()
+{
+    // No format lists 12 MP: the preference finds nothing and the smallest
+    // covering format decides, so the offer shrinks to its sizes.
+    std::vector<VideoFormatFacts> formats {format(1440, 1080, {{1440, 1080}, {2016, 1512}}), format(1920, 1440, {{1920, 1440}})};
+    const std::vector<VideoRequest> requests {{1440, 1080, 1, 30}};
+    const auto offered = photoSizesOfEveryRun(formats, requests, {5712, 4284});
+    require(offered == Sizes({{2016, 1512}, {1440, 1080}}), "the running format's own sizes");
+}
+
+void aCameraWithoutRequestsOffersNothing()
+{
+    require(photoSizesOfEveryRun(tabletFormats, {}, twelveMegapixels).empty(), "no stream, no run");
+}
+
 } // namespace
 
 int main()
@@ -187,5 +285,13 @@ int main()
     anOutputThatCannotBeAttachedGetsNoMaximum();
     aFormatThatListsNothingLeavesTheDefault();
     aMaximumSetBeforeAttachIsRefused();
+    theStreamRunsInTheSmallestFormatThatListsTheLargestStill();
+    aFormatThatCannotTakeTheRateOrTheSizeIsNotChosen();
+    aMultiCameraSessionChoosesAmongItsFormatsOnly();
+    theFullRangeFormatWinsAmongEqualOnes();
+    theSizesOfferedAreTheOnesEveryRunMakes();
+    aSizeOnlyAnotherFormatListsIsNotOffered();
+    aCameraWithoutTheLargestStillOffersWhatItsFormatMakes();
+    aCameraWithoutRequestsOffersNothing();
     return 0;
 }

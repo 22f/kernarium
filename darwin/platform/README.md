@@ -110,27 +110,31 @@ interface to the wire.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
   exposure, focus and white balance only.
-- **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer
-  still carries its DNG's colour data (`dng_color.hpp`), the only place the
-  host reveals it. A part that fails leaves the others: a capture fails only
-  when nothing it asked for arrived. A JPEG is made at exactly the size asked
-  for (`photo_dimensions.hpp`): the capture is refused when the active format
-  does not list that size, and the photo is dropped when the platform resolved
-  another. A photo output gets its maximum size only after it is attached to
-  the session, as AVFoundation requires. Discovery lists the sizes of every
-  format, since the format a camera runs is not known until a session asks for
-  it. A still's `exposure` is the photo's own where the photo states it: the
-  exposure time, ISO, f-number, focal length and flash come from the photo's
-  Exif (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's
+- **Stills** are a JPEG, a Bayer still, or both from one capture. A Bayer still
+  carries its DNG's colour data (`dng_color.hpp`), the only place the host
+  reveals it. A part that fails leaves the others: a capture fails only when
+  nothing it asked for arrived. A JPEG is made at exactly the size asked for
+  (`photo_dimensions.hpp`): the capture is refused when the active format does
+  not list that size, and the photo is dropped when the platform resolved
+  another. A photo output gets its maximum size only after it is attached to the
+  session, as AVFoundation requires. A stream runs in the smallest format that
+  covers it and takes its rate, among those that list the camera's largest photo
+  when there are any (`chooseVideoFormat`), and discovery offers the photo sizes
+  that every such format lists (`photoSizesOfEveryRun`), so a size offered is
+  one the running format makes; a camera in a multi-camera session runs in a
+  format that session takes and can be refused a size that format lacks. A
+  still's `exposure` is the photo's own where the photo states it: the exposure
+  time, ISO, f-number, focal length and flash come from the photo's Exif
+  (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's
   neutral point and noise profile from its DNG. The 3A states, white balance,
   zoom and lens are the session's as it reports them at delivery, not as they
   were at the exposure, and on macOS the session reports none of them, so they
   keep their defaults. A reading the photo does not give, or gives as a number
-  that cannot be a measurement (an ISO outside 1 to 1,000,000, an exposure
-  time of zero or over an hour, a negative or wider Flash field, not finite),
-  is zero: the photo gave none, never a made-up value. A lens has one aperture
-  and one focal length, so the lens's own is used when the photo names none.
-  The flash fired is the Exif's word, then the resolved settings'.
+  that cannot be a measurement (an ISO outside 1 to 1,000,000, an exposure time
+  of zero or over an hour, a negative or wider Flash field, not finite), is
+  zero: the photo gave none, never a made-up value. A lens has one aperture and
+  one focal length, so the lens's own is used when the photo names none. The
+  flash fired is the Exif's word, then the resolved settings'.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at
