@@ -13,7 +13,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "チップは、Andariumの独立した開発を支える任意の1回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。"
+            "value": "チップは、Andariumの個人開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。"
           }
         },
         "zh-Hans": {
@@ -129,7 +129,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "デベロッパはコーヒーで動いていました。"
+            "value": "デベロッパはかつて、コーヒーで動いていました。"
           }
         },
         "zh-Hans": {
@@ -193,13 +193,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果Andarium对你有用，可以请我喝点。"
+            "value": "如果Andarium对你有帮助，不妨请我来点。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果Andarium對你有用，可以請我喝點。"
+            "value": "如果Andarium對你有幫助，不妨請我來點。"
           }
         }
       }
@@ -216,7 +216,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "この%@ではアプリ内購入が制限されています。すべての機能は引き続き無料です。"
+            "value": "この%@ではApp内課金が制限されています。すべての機能は引き続き無料です。"
           }
         },
         "zh-Hans": {
@@ -361,19 +361,19 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "このトークンは、まさに感謝のしるし。Andariumを続ける力になります。"
+            "value": "このトークン、まさに感謝のしるしです。Andariumを続けていく力になります。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "这份Token是实实在在的心意，让Andarium得以继续前行。"
+            "value": "这份Token是实打实的心意，也让Andarium能继续做下去。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "這份Token是實實在在的心意，讓Andarium得以繼續前行。"
+            "value": "這份Token滿滿都是心意，也讓Andarium能繼續走下去。"
           }
         }
       }
@@ -512,13 +512,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "目前无法使用小费"
+            "value": "暂时无法给小费"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "目前無法使用小費"
+            "value": "暫時無法給小費"
           }
         }
       }
@@ -535,7 +535,7 @@
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "やり直す"
+            "value": "再試行"
           }
         },
         "zh-Hans": {
