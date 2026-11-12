@@ -2847,7 +2847,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                            else b"      PointerCaptureLed: %s\n\x00"),
                     )
                 # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
-                # validation log line is in the bytes.
+                # validation log lines are in the bytes.
                 if network_stack_variant != "missing":
                     network_stack = io.BytesIO()
                     with zipfile.ZipFile(network_stack, "w", zipfile.ZIP_STORED) as apk:
@@ -2856,7 +2856,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             "classes.dex",
                             b"dex\n039\x00"
                             + (b"" if network_stack_variant == "no-marker"
-                               else b"Wi-Fi is validated without probes\x00"),
+                               else b"Wi-Fi is validated before its internet check\x00")
+                            + (b"" if network_stack_variant in ("no-marker", "no-check-marker")
+                               else b"Wi-Fi internet check failed, the network stays validated\x00"),
                         )
                     archive.writestr("SYSTEM/priv-app/NetworkStack/NetworkStack.apk", network_stack.getvalue())
                 # The OTA certificates, the system's and the recovery's: an unsigned build of either variant holds
@@ -3428,6 +3430,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("input-flinger-without-the-pointer-capture-led", {"input_flinger_variant": "no-marker"}),
             ("missing-input-flinger", {"input_flinger_variant": "missing"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
+            ("network-stack-without-the-wifi-check-report", {"network_stack_variant": "no-check-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
             ("signed-with-an-extra-certificate", {"signed": True, "ota_certificates": "extra"}),
@@ -4175,6 +4178,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "SYSTEM/lib64/libinputflinger.so is missing"),
             ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
              "lacks the NetworkMonitor topic of route p0029"),
+            ("network-stack-without-the-wifi-check-report-cause", {"network_stack_variant": "no-check-marker"},
+             "'Wi-Fi internet check failed, the network stays validated' is not in its dex files"),
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},
              "SYSTEM/priv-app/NetworkStack/NetworkStack.apk is missing"),
             ("adbd-cannot-read-launch-properties-cause", {"adbd_launch_unreadable": True},
@@ -6944,10 +6949,12 @@ NETWORK_STACK_PROJECT = "platform/packages/modules/NetworkStack"
 NETWORK_MONITOR_FILE = "src/com/android/server/connectivity/NetworkMonitor.java"
 
 
-def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
-    """What the p0029 patch lacks of the Wi-Fi exemption: it changes NetworkMonitor alone, it holds the
-    name the verifier looks for, it applies to the Wi-Fi transport and to nothing else, and it takes no
-    transition out of the evaluation."""
+def network_stack_topic_problems(patch: str, markers: list[str]) -> list[str]:
+    """What the p0029 patch lacks of the Wi-Fi check: it changes NetworkMonitor alone, it holds the
+    names the verifier looks for, it applies to the Wi-Fi transport and to nothing else (not to a
+    network under the test URLs that CTS sets), it posts the check after validation, it takes the
+    check's result apart from the portal states, it notes the HTTPS probe of a failed check, and it
+    takes no transition out of the evaluation."""
     problems = []
     touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
     if touched != [NETWORK_MONITOR_FILE]:
@@ -6958,12 +6965,21 @@ def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
     removed = "\n".join(
         line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")
     )
-    if f'"{marker}"' not in added:
-        problems.append(f"it does not add the string {marker!r} that the verifier requires")
+    for marker in markers:
+        if f'"{marker}"' not in added:
+            problems.append(f"it does not add the string {marker!r} that the verifier requires")
     for needle, what in (
         ("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "apply to the Wi-Fi transport"),
         ("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "leave a test network alone"),
         ("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "leave a VPN alone"),
+        ("mTestCaptivePortalHttpsUrl == null", "leave a network under the HTTPS test URL alone"),
+        ("mTestCaptivePortalHttpUrl == null", "leave a network under the HTTP test URL alone"),
+        ("mTestCaptivePortalFallbackUrl == null", "leave a network under the fallback test URL alone"),
+        ("sendMessage(CMD_WIFI_CHECK)", "post the check once the network is validated"),
+        ("transitionTo(mProbingState)", "probe the network when a check is due"),
+        ("handleWifiCheckResult(probeResult)", "take a check's result apart from the portal states"),
+        ("noteProbeResult(NETWORK_VALIDATION_PROBE_HTTPS", "note the HTTPS probe of a failed check"),
+        ("&& !isWifiExemptFromValidation()", "keep a Terms and Conditions page from entering the portal state"),
     ):
         if needle not in added:
             problems.append(f"it does not {what}")
@@ -6973,10 +6989,10 @@ def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
 
 
 def verify_network_stack_topic(android_root: Path) -> None:
-    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi exemption.
+    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi check.
 
     The target-files fixtures prove what the verifier rejects; this proves that the topic puts in the
-    APK the name the verifier looks for, and that its exemption reaches a Wi-Fi network and no other."""
+    APK the names the verifier looks for, and that its check reaches a Wi-Fi network and no other."""
     verifier = load_tool(android_root / "tools/verify-target-files.py")
     rows = [
         line.split("\t")
@@ -6990,26 +7006,45 @@ def verify_network_stack_topic(android_root: Path) -> None:
     if len(patches) != 1:
         fail(f"p0029 has {len(patches)} patches, not one")
     patch = patches[0].read_text()
-    if len(verifier.NETWORK_STACK_MARKERS) != 1:
-        fail("the verifier no longer names exactly one NetworkMonitor marker")
-    marker = verifier.NETWORK_STACK_MARKERS[0].decode()
-    problems = network_stack_topic_problems(patch, marker)
+    markers = [marker.decode() for marker in verifier.NETWORK_STACK_MARKERS]
+    if len(markers) != 2:
+        fail("the verifier no longer names exactly two NetworkMonitor markers")
+    problems = network_stack_topic_problems(patch, markers)
     if problems:
         fail("the NetworkMonitor topic: " + "; ".join(problems))
-    for label, edited in (
-        ("a topic without the verifier's string", patch.replace(marker, "Wi-Fi is checked")),
+    mutations = [
+        (f"a topic without the verifier's string {marker!r}", patch.replace(marker, "Wi-Fi is checked"))
+        for marker in markers
+    ]
+    mutations += [
         ("a topic that skips every transport",
          patch.replace("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "hasTransport(0)")),
         ("a topic that exempts test networks",
          patch.replace("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "true")),
         ("a topic that exempts a VPN",
          patch.replace("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "isEmpty()")),
+        ("a topic that exempts a network under the HTTPS test URL",
+         patch.replace("mTestCaptivePortalHttpsUrl == null", "true")),
+        ("a topic that exempts a network under the HTTP test URL",
+         patch.replace("mTestCaptivePortalHttpUrl == null", "true")),
+        ("a topic that exempts a network under the fallback test URL",
+         patch.replace("mTestCaptivePortalFallbackUrl == null", "true")),
+        ("a topic that never posts the check", patch.replace("sendMessage(CMD_WIFI_CHECK)", "sendMessage(0)")),
+        ("a topic that never probes for a check", patch.replace("transitionTo(mProbingState)", "")),
+        ("a topic that gives the check's result the portal states",
+         patch.replace("handleWifiCheckResult(probeResult)", "probeResult.isPortal()")),
+        ("a topic that leaves a failed check's HTTPS probe unnoted",
+         patch.replace("noteProbeResult(NETWORK_VALIDATION_PROBE_HTTPS",
+                       "noteProbeResult(NETWORK_VALIDATION_PROBE_HTTP")),
+        ("a topic that lets a Terms and Conditions page enter the portal state",
+         patch.replace("&& !isWifiExemptFromValidation()", "")),
         ("a topic that also changes another file",
          patch + "diff --git a/src/com/android/networkstack/util/NetworkStackUtils.java b/x\n"),
         ("a topic that removes a transition",
          patch + "-                            transitionTo(mEvaluatingPrivateDnsState);\n"),
-    ):
-        if not network_stack_topic_problems(edited, marker):
+    ]
+    for label, edited in mutations:
+        if not network_stack_topic_problems(edited, markers):
             fail(f"the NetworkMonitor topic check accepted {label}")
 
 
