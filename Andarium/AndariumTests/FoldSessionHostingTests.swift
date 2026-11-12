@@ -809,10 +809,12 @@ struct FoldSessionHostingTests {
     /// the foot has the trail alone until something is selected; in every
     /// other pose, and on a display that does not fold, it is the labelled
     /// button in the bar and the toolbar has none.
-    @Test(arguments: Pose.allCases)
-    func importIsARoundToolbarButtonOnTheCoverAndLabelledInTheBarElsewhere(_ pose: Pose) async throws {
+    /// A nil pose is a display that reports no hinge.
+    @Test(arguments: [Pose?.none] + Pose.allCases.map { Pose?.some($0) })
+    func importIsARoundToolbarButtonOnTheCoverAndLabelledInTheBarElsewhere(_ pose: Pose?) async throws {
         let (model, browser) = await browsing()
-        model.fold = pose.reading
+        model.fold = pose?.reading
+        let window = (pose ?? .uprightFlat).reading.window
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let container = UIViewController()
@@ -821,7 +823,7 @@ struct FoldSessionHostingTests {
         func present<Root: View>(_ root: Root) async throws -> ([String], () -> Void) {
             let host = UIHostingController(rootView: root.environment(model))
             container.addChild(host)
-            host.view.frame = pose.reading.window
+            host.view.frame = window
             container.view.addSubview(host.view)
             host.didMove(toParent: container)
             try await Task.sleep(for: .milliseconds(900))
@@ -834,6 +836,7 @@ struct FoldSessionHostingTests {
         }
         let importLabel = "Import"
         let cover = pose == .cover
+        let pose = pose.map { "\($0)" } ?? "no hinge"
         // The toolbar.
         let (page, removePage) = try await present(NavigationStack {
             FolderPage(browser: browser, route: FolderRoute(path: download), close: {})
@@ -846,16 +849,15 @@ struct FoldSessionHostingTests {
         #expect(!bar.contains("Export"), "\(pose): nothing is selected: \(bar)")
         removeBar()
         // Something selected: Export replaces Import, and stays in the bar.
-        if let file = browser.entries(in: download).first(where: { !$0.isFolder }) {
-            browser.selection = [file]
-            let (selected, removeSelected) = try await present(FilesBar(browser: browser, usable: true, bottomInset: 0))
-            #expect(selected.contains("Export"), "\(pose): with a selection the bar's labels are \(selected)")
-            #expect(!selected.contains(importLabel), "\(pose): with a selection the bar's labels are \(selected)")
-            removeSelected()
-            browser.selection = []
-        }
+        let file = try #require(
+            browser.entries(in: download).first(where: { !$0.isFolder }), "the folder has no file to select")
+        browser.selection = [file]
+        let (selected, removeSelected) = try await present(FilesBar(browser: browser, usable: true, bottomInset: 0))
+        #expect(selected.contains("Export"), "\(pose): with a selection the bar's labels are \(selected)")
+        #expect(!selected.contains(importLabel), "\(pose): with a selection the bar's labels are \(selected)")
+        removeSelected()
+        browser.selection = []
     }
-}
 
 /// The Simulator's own display, in the pose the harness put it in
 /// (`TEST_RUNNER_ANDARIUM_FOLD_POSE`: `cover`, `upright-book`, `upright-flat`,
