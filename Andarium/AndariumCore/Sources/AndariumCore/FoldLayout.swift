@@ -305,18 +305,18 @@ public struct FoldHalves: Equatable, Sendable {
         return area
     }
 
-    /// Where `screen` goes.
-    /// - Welcome: centred on the display, across the fold, while the device is
-    ///   flat, as on an iPad (`centred`); on a half, as a card, while it is
-    ///   bent.
-    /// - Boot: on the upper half when the device stands turned and bent, the
-    ///   half that faces the person; as a card in every other pose.
-    /// - Anything else: as a card.
+    /// Where `screen` goes. While the device is flat every screen is placed
+    /// as it is on an iPad: the popups (the boot, a card, an overlay) and
+    /// Welcome span the display, centred on the fold and across it (`centred`).
+    /// While it is bent they keep to a half, so the fold never crosses them:
+    /// - Welcome and a card: on the half where the system puts its own alerts.
+    /// - Boot: on the upper half when the device stands turned, the half that
+    ///   faces the person; on the alerts' half upright.
     public func area(for screen: FoldScreen) -> CGRect {
+        guard bent else { return centred }
         switch screen {
-        case .card: card
-        case .welcome: bent ? card : centred
-        case .boot: !upright && bent ? first : card
+        case .card, .welcome: return card
+        case .boot: return upright ? card : first
         }
     }
 
@@ -385,13 +385,16 @@ public struct HomePages: Equatable, Sendable {
     }
 }
 
-/// A sheet on the turned inner display, which rises to a little below the fold
-/// band and stops, so the upper half stays in sight.
+/// A sheet on the turned inner display while the device stands bent, which
+/// rises to a little below the fold band and stops, so the upper half stays in
+/// sight. Flat, a sheet is placed as on an iPad, by the system.
 public enum FoldSheet {
     /// The detent's height; nil where the system's own placement stands (the
-    /// cover, the upright inner display and every other screen).
+    /// cover, the upright inner display, the turned one while it is flat and
+    /// every other screen).
     public static func detentHeight(_ reading: FoldReading) -> CGFloat? {
-        guard case .turned = reading.pose, let band = reading.division?.frame else { return nil }
+        guard case .turned = reading.pose, let division = reading.division, division.isActive else { return nil }
+        let band = division.frame
         // A detent leaves out the home indicator's inset and the sheet's own
         // top margin, so the height is measured from the bottom of the safe
         // area.

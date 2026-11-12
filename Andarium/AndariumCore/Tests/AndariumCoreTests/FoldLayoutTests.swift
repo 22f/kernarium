@@ -360,53 +360,74 @@ struct FoldScreensTests {
         #expect(standing.area(for: .welcome) == standing.card)
     }
 
-    @Test func flatWelcomeReachesPastTheSpaceABarLeavesAndAHalfIsNeverPaddedOutward() throws {
+    @Test func flatWelcomeReachesPastTheSpaceABarLeavesAndACardIsNeverPaddedOutward() throws {
         let flat = try #require(FoldHalves(reading(.upright(bent: false), statusBarHidden: false)))
         // A navigation bar takes the top 60 points of the space: Welcome reaches
         // past it to centre on the display, and keeps off the strip's side.
         let space = CGRect(x: 0, y: 60, width: 867, height: 575)
         #expect(flat.insets(for: .welcome, in: space) == FoldInsets(top: -60, leading: 84, bottom: 0, trailing: 0))
-        // A card keeps to its half and is never padded outward.
+        // A card keeps to its area and is never padded outward, flat or bent.
         let inside = flat.insets(for: .card, in: space)
         #expect(inside.top >= 0 && inside.leading >= 0 && inside.bottom >= 0 && inside.trailing >= 0)
-        #expect(inside.trailing == space.maxX - flat.card.maxX)
         let bent = try #require(FoldHalves(reading(.upright(bent: true), statusBarHidden: false)))
+        #expect(bent.insets(for: .card, in: space).trailing == space.maxX - bent.card.maxX)
         let around = bent.insets(for: .welcome, in: space)
         #expect(around.top >= 0 && around.leading >= 0 && around.bottom >= 0 && around.trailing >= 0)
         // A space of the half's own leaves no padding.
         #expect(bent.insets(for: .card, in: bent.card) == FoldInsets())
     }
 
-    @Test func theBootSitsOnTheUpperHalfWhenStandingAndAsACardInEveryOtherPose() throws {
+    @Test func theBootSitsOnTheUpperHalfWhenStandingAndOnTheAlertsHalfWhileBentUpright() throws {
         let standing = try #require(FoldHalves(reading(.turned(bent: true), statusBarHidden: false)))
         #expect(standing.area(for: .boot) == rect(0, 82, 669, 373.5))
         #expect(standing.area(for: .boot) == standing.first)
-        for pose in [Pose.upright(bent: true), .upright(bent: false), .turned(bent: false)] {
-            let halves = try #require(FoldHalves(reading(pose, statusBarHidden: false)))
-            #expect(halves.area(for: .boot) == halves.card)
-        }
+        let book = try #require(FoldHalves(reading(.upright(bent: true), statusBarHidden: false)))
+        #expect(book.area(for: .boot) == book.card)
     }
 
-    @Test func aCardKeepsTheHalfWhereTheSystemPutsItsAlertsInEveryPose() throws {
-        for pose in [Pose.upright(bent: true), .upright(bent: false), .turned(bent: true), .turned(bent: false)] {
+    @Test func everyPopupSpansTheDisplayWhileFlatAsItDoesOnAnIPad() throws {
+        for hidden in [true, false] {
+            for pose in [Pose.upright(bent: false), .turned(bent: false)] {
+                let halves = try #require(FoldHalves(reading(pose, statusBarHidden: hidden)))
+                // One place: a card, the boot and Welcome are all the display's
+                // centred area, across the fold, and no half.
+                for screen in [FoldScreen.card, .boot, .welcome] {
+                    #expect(halves.area(for: screen) == halves.centred, "\(screen) \(pose)")
+                }
+                #expect(halves.centred != halves.card)
+            }
+        }
+        // A card in a sheet, a space the system centres on the display, is
+        // centred in it: nothing pads it to a side.
+        let flat = try #require(FoldHalves(reading(.upright(bent: false), statusBarHidden: true)))
+        let sheet = rect(150, 0, 651, 635)
+        #expect(flat.insets(for: .card, in: sheet) == FoldInsets())
+        // A card over the whole window is centred on the fold by the status
+        // bar's strip.
+        let strip = try #require(FoldHalves(reading(.upright(bent: false), statusBarHidden: false)))
+        #expect(strip.insets(for: .card, in: strip.safe) == FoldInsets(top: 0, leading: 84, bottom: 0, trailing: 0))
+    }
+
+    @Test func aCardKeepsTheHalfWhereTheSystemPutsItsAlertsWhileBent() throws {
+        for pose in [Pose.upright(bent: true), .turned(bent: true)] {
             let halves = try #require(FoldHalves(reading(pose, statusBarHidden: false)))
             #expect(halves.area(for: .card) == halves.card)
+            #expect(halves.area(for: .welcome) == halves.card)
         }
     }
 
-    @Test func noPlaceOfAScreenCrossesTheFoldBandExceptWelcomeFlat() throws {
+    @Test func noPlaceOfAScreenCrossesTheFoldBandWhileBentAndEveryOneDoesWhileFlat() throws {
         for pose in [Pose.upright(bent: true), .upright(bent: false), .turned(bent: true), .turned(bent: false)] {
             let read = reading(pose, statusBarHidden: false)
             let band = try #require(read.division?.frame)
             let halves = try #require(FoldHalves(read))
-            for screen in [FoldScreen.card, .boot] {
-                #expect(!halves.area(for: screen).intersects(band), "\(screen) \(pose)")
-            }
-            let welcome = halves.area(for: .welcome)
-            if read.division?.isActive == true {
-                #expect(!welcome.intersects(band), "welcome bent \(pose)")
-            } else {
-                #expect(welcome.intersects(band), "welcome flat \(pose) is across the fold")
+            for screen in [FoldScreen.card, .boot, .welcome] {
+                let area = halves.area(for: screen)
+                if read.division?.isActive == true {
+                    #expect(!area.intersects(band), "\(screen) bent \(pose)")
+                } else {
+                    #expect(area.intersects(band), "\(screen) flat \(pose) is across the fold")
+                }
             }
         }
     }
@@ -418,20 +439,19 @@ struct FoldScreensTests {
         }
     }
 
-    @Test func aSheetTurnedRisesToTwelvePointsBelowTheFoldAndStops() {
-        for bent in [true, false] {
-            for hidden in [true, false] {
-                let reading = reading(.turned(bent: bent), statusBarHidden: hidden)
-                // The safe area ends at 917 whether or not the status bar shows.
-                #expect(FoldSheet.detentHeight(reading) == 917 - 495.5 - 12)
-            }
+    @Test func aSheetTurnedAndBentRisesToTwelvePointsBelowTheFoldAndStops() {
+        for hidden in [true, false] {
+            let reading = reading(.turned(bent: true), statusBarHidden: hidden)
+            // The safe area ends at 917 whether or not the status bar shows.
+            #expect(FoldSheet.detentHeight(reading) == 917 - 495.5 - 12)
         }
     }
 
-    @Test func aSheetKeepsTheSystemsPlacementOnTheCoverAndUpright() {
+    @Test func aSheetKeepsTheSystemsPlacementOnTheCoverUprightAndWhileFlat() {
         #expect(FoldSheet.detentHeight(reading(.cover)) == nil)
         #expect(FoldSheet.detentHeight(reading(.upright(bent: true))) == nil)
         #expect(FoldSheet.detentHeight(reading(.upright(bent: false))) == nil)
+        #expect(FoldSheet.detentHeight(reading(.turned(bent: false))) == nil)
     }
 
     @Test func aSheetNeverShrinksBelowTwoHundredPoints() {
