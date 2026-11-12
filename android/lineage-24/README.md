@@ -161,6 +161,16 @@ multiplied by -9.80665, and events carry the guest's `CLOCK_BOOTTIME` at receipt
 a live input path, not a synchronized recording. Andarium's
 [scene policy](../../Andarium/README.md#devices) describes windowed operation.
 
+When the launch passes `androidboot.kernarium.orientation=1` (the host's
+`orientation` feature) the sub-HAL also lists an on-change, non-wake-up
+`TYPE_DEVICE_ORIENTATION` sensor. The window manager then follows the host's
+orientation (0 to 3, Android's rotation numbers) instead of judging the
+accelerometer, so Android turns when the host's device does; it reports the
+host's last value when it enables the sensor and keeps its rotation until the
+host has said one. The image sends `ANC2` control frames (bit 2 of the mask is
+this sensor) and the host sends an orientation only after one; without the
+argument the sub-HAL lists the two sensors and sends `ANC1`, as before.
+
 ### Haptics
 
 The vibrator exists only on a device with haptics. The host passes
