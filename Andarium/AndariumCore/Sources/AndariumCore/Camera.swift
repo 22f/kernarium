@@ -80,23 +80,26 @@ public enum CameraFootnote {
     }
 }
 
-/// How far the host turns the guest's camera picture, for Android's
-/// ROTATE_AND_CROP automatic setting. Where the host owns the guest's rotation
-/// (an iPad window) the guest stays upright in the window while the device
-/// turns under it, so the picture, which is fixed to the device, shows turned
-/// by the window's orientation; the host turns it back. Where the guest owns the
-/// rotation it compensates itself.
+/// The turn of the device body the guest is told, for its cameras. Where the
+/// host owns the guest's rotation (an iPad window) the guest stays upright in
+/// the window while the device, which carries every built-in sensor, turns under
+/// it. The runtime derives each camera's SENSOR_ORIENTATION from this turn when
+/// the guest starts (a back camera adds it, a front camera subtracts it) and
+/// turns the picture by the change since, so the guest's photos and previews
+/// come out upright. Where the guest owns the rotation it compensates itself
+/// and the turn is zero.
 public enum CameraRotation {
-    /// The clockwise degrees to turn the picture: 0, 90, 180 or 270.
+    /// The device body's clockwise turn from portrait, as its user sees it:
+    /// 0, 90, 180 or 270.
     public static func degrees(policy: GuestRotationPolicy, interface: MotionSample.Axes) -> UInt32 {
         guard policy == .host else { return 0 }
         switch interface {
         case .portrait: return 0
-        // The window is held with the device turned clockwise a quarter, so
-        // the picture shows turned clockwise: three quarters turn it back.
-        case .landscapeLeft: return 270
+        // The window's home button is on the left: the device is turned
+        // clockwise a quarter.
+        case .landscapeLeft: return 90
         case .portraitUpsideDown: return 180
-        case .landscapeRight: return 90
+        case .landscapeRight: return 270
         }
     }
 }

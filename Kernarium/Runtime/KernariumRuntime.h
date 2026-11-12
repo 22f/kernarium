@@ -835,15 +835,18 @@ typedef void (*kernarium_runtime_set_camera_state_callback_function)(
     kernarium_runtime_camera_state_callback callback,
     void* context);
 
-/* Tells the camera how far the host turns the guest's picture from upright
- * (runtime API 37): the clockwise rotation, in degrees, that Android's
- * ROTATE_AND_CROP automatic setting applies, 0, 90, 180 or 270. It matters
- * when the host owns the rotation (an iPad window): the guest stays at
- * rotation 0 and the host draws it turned, so an app that does not rotate its
- * own camera preview would show the camera turned. A guest whose display the
- * guest rotates itself (an iPhone, a full-screen iPad) keeps 0. Zero until the
- * application says otherwise. Returns 0, or -EINVAL for another value. Any
- * thread, with or without a guest. */
+/* Tells the cameras how the device body is turned (runtime API 37): the
+ * clockwise degrees from portrait, 0, 90, 180 or 270, as the device's user
+ * sees it. It matters when the host owns the rotation (an iPad window): the
+ * guest's display stays upright at rotation 0 while the device, which carries
+ * every built-in sensor, turns under it, so the sensors' mounting turns with
+ * it. Each boot reads it once and states every camera's SENSOR_ORIENTATION
+ * from it (a back camera's turned the same way, a front camera's the other
+ * way, an external camera's not at all); a later change turns the picture by
+ * the difference, as ROTATE_AND_CROP's automatic setting does. A guest whose
+ * display the guest rotates itself (an iPhone, a full-screen iPad) keeps 0.
+ * Zero until the application says otherwise. Returns 0, or -EINVAL for another
+ * value. Any thread, with or without a guest. */
 typedef int (*kernarium_runtime_set_camera_rotation_function)(
     uint32_t degrees);
 

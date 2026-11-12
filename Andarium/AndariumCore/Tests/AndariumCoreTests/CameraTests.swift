@@ -70,13 +70,15 @@ struct CameraTests {
         }
     }
 
-    @Test func theHostTurnsThePictureBackOnlyWhereItOwnsTheRotation() {
+    @Test func theGuestIsToldTheDeviceBodysTurnOnlyWhereTheHostOwnsTheRotation() {
         let axes: [MotionSample.Axes] = [.portrait, .landscapeLeft, .portraitUpsideDown, .landscapeRight]
         for interface in axes {
             #expect(CameraRotation.degrees(policy: .guest, interface: interface) == 0)
         }
-        #expect(axes.map { CameraRotation.degrees(policy: .host, interface: $0) } == [0, 270, 180, 90])
-        // The two landscape orientations turn it in opposite directions.
+        // The clockwise turn of the device from portrait: with the home button
+        // on the left the device has turned a quarter clockwise.
+        #expect(axes.map { CameraRotation.degrees(policy: .host, interface: $0) } == [0, 90, 180, 270])
+        // The two landscape orientations are opposite turns.
         let left = CameraRotation.degrees(policy: .host, interface: .landscapeLeft)
         let right = CameraRotation.degrees(policy: .host, interface: .landscapeRight)
         #expect((left + right) % 360 == 0)

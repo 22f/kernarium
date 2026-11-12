@@ -205,9 +205,9 @@ void theDeviceOptionsCarryTheSessionsStatements()
     const auto options = deviceOptions(presentation, CameraMode::blocked, receiver, rotation);
     require(options.mode == CameraMode::blocked && options.tier == CameraTier::large);
     require(options.calibration == presentation.calibration, "the one store of the run");
-    require(options.automaticRotation && options.onState);
-    require(options.automaticRotation() == 0);
-    require(rotation.set(270) && options.automaticRotation() == 270, "the rotation is read when it is asked");
+    require(options.automaticRotation && options.onState && options.sensorOrientation);
+    require(options.sensorOrientation(back) == 90 && options.sensorOrientation(front) == 270);
+    require(options.automaticRotation(back) == 0 && options.automaticRotation(front) == 0);
     options.onState(CameraState::interruptedByMultitasking);
     require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING);
     require(deviceOptions(presentation, CameraMode::live, receiver, rotation).mode == CameraMode::live);
@@ -238,15 +238,27 @@ void theEnvironmentNamesTheSyntheticCamera()
     }
 }
 #endif
+uml::platform::CameraInfo lens(uml::platform::CameraPosition position, std::uint32_t sensorOrientation)
+{
+    uml::platform::CameraInfo info;
+    info.position = position;
+    info.sensorOrientation = sensorOrientation;
+    return info;
+}
+
 
 } // namespace
+    using uml::platform::CameraPosition;
 
 int main()
 {
     static constexpr uml::testing::NamedTest tests[] = {
         {"a-request-that-states-nothing-is-blocked", aRequestThatStatesNothingIsBlocked},
         {"the-request-states-the-mode-and-the-path", theRequestStatesTheModeAndThePath},
+    const auto back = lens(CameraPosition::back, 90);
+    const auto front = lens(CameraPosition::front, 270);
         {"a-camera-never-fails-a-boot", aCameraNeverFailsABoot},
+    // A phone, whose guest rotates itself, states no turn: the platform's values.
         {"the-enums-are-the-applications-words", theEnumsAreTheApplicationsWords},
         {"a-host-without-cameras-presents-none", aHostWithoutCamerasPresentsNone},
         {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
@@ -258,5 +270,45 @@ int main()
         {"the-environment-names-the-synthetic-camera", theEnvironmentNamesTheSyntheticCamera},
 #endif
     };
+void aBootStatesTheOrientationAndALaterTurnIsADelta()
+{
+    using uml::platform::CameraPosition;
+    const auto presentation =
+        present(uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::tablet), CameraTier::small, "");
+    StateReceiver receiver;
+    Rotation rotation;
+    const auto back = lens(CameraPosition::back, 90);
+    const auto front = lens(CameraPosition::front, 270);
+    const auto external = lens(CameraPosition::external, 0);
+
+    // The iPad held in landscape (home button on the left, a quarter turn
+    // clockwise) at Start: the guest is told that.
+    require(rotation.set(90));
+    const auto options = deviceOptions(presentation, CameraMode::live, receiver, rotation);
+    require(options.sensorOrientation(back) == 180 && options.sensorOrientation(front) == 180);
+    require(options.sensorOrientation(external) == 0, "an external camera does not turn with the body");
+    require(options.automaticRotation(back) == 0 && options.automaticRotation(front) == 0,
+        "nothing has changed since the boot");
+
+    // Later turns reach the picture as the difference from the boot's.
+    require(rotation.set(270));
+    require(options.sensorOrientation(back) == 180, "the guest keeps the figure it was told");
+    require(options.automaticRotation(back) == 180 && options.automaticRotation(front) == 180);
+    require(rotation.set(180));
+    require(options.automaticRotation(back) == 90 && options.automaticRotation(front) == 270);
+    require(options.automaticRotation(external) == 0);
+    require(rotation.set(0));
+    require(options.automaticRotation(back) == 270 && options.automaticRotation(front) == 90);
+    require(rotation.set(90));
+    require(options.automaticRotation(back) == 0, "back to the boot's turn, no turn");
+
+    // The next boot is told the turn then.
+    require(rotation.set(270));
+    const auto next = deviceOptions(presentation, CameraMode::live, receiver, rotation);
+    require(next.sensorOrientation(back) == 0 && next.sensorOrientation(front) == 0);
+    require(next.automaticRotation(back) == 0);
+}
+
     return uml::testing::runNamedTests(tests);
 }
+        {"a-boot-states-the-orientation-and-a-later-turn-is-a-delta", aBootStatesTheOrientationAndALaterTurnIsADelta},

@@ -124,7 +124,7 @@ final class LiveRuntime: RuntimeDriver {
                 message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
         })
     private var normalRun = false
-    /// The rotation last given to the camera in this run
+    /// The device body's turn last given to the camera in this run
     /// (`updateCameraRotation`).
     private var cameraRotationSent: UInt32?
     /// The runtime runs a guest, from its start until its run returns.
@@ -470,7 +470,7 @@ final class LiveRuntime: RuntimeDriver {
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
         cameraRotationSent = nil
-        updateCameraRotation(policy: rotationPolicy)
+        updateCameraRotation(policy: rotationPolicy, starting: true)
         updateHaptics()
         updateGameControllers()
         updateLocation()
@@ -842,12 +842,23 @@ final class LiveRuntime: RuntimeDriver {
         updateKeyboardMouse()
     }
 
-    /// Tells the camera how far the host turns the guest's picture: where the
-    /// host owns the rotation (an iPad window) the window's orientation, else
-    /// none. The runtime keeps the figure, so only a change is sent.
-    private func updateCameraRotation(policy: GuestRotationPolicy) {
-        guard runActive, let axes = interfaceMotionAxes else { return }
-        let degrees = CameraRotation.degrees(policy: policy, interface: axes)
+    /// Tells the camera the turn of the device body: where the host owns the
+    /// rotation (an iPad window) the window's orientation says it, else it is
+    /// zero (`CameraRotation`). The guest hears the turn at its start, for each
+    /// camera's SENSOR_ORIENTATION, and a later change turns the picture. The
+    /// runtime keeps the figure across runs, so a run that starts without a
+    /// scene to read says zero rather than leave an earlier run's turn; only a
+    /// change is sent.
+    private func updateCameraRotation(policy: GuestRotationPolicy, starting: Bool = false) {
+        guard runActive else { return }
+        let degrees: UInt32
+        if let axes = interfaceMotionAxes {
+            degrees = CameraRotation.degrees(policy: policy, interface: axes)
+        } else if starting {
+            degrees = 0
+        } else {
+            return
+        }
         guard degrees != cameraRotationSent else { return }
         if kernarium_runtime_loader_set_camera_rotation(degrees) == 0 { cameraRotationSent = degrees }
     }

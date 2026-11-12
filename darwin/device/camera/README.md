@@ -103,7 +103,8 @@ The `host` source needs the system's camera permission granted to the program
 (or the terminal it runs in) beforehand: nothing in the launcher or the device
 asks for it, and the launcher refuses to start, saying how to grant it, when it
 is not. The tier follows the launch's GPU budget, and a state line goes to
-stderr when the host starts or stops capturing.
+stderr when the host starts or stops capturing, and a line for each change of
+the ROTATE_AND_CROP setting a camera's frames get.
 
 ## Layout
 
@@ -120,11 +121,27 @@ layout itself. A release's own command line may not carry the argument. A
 blocked guest also reports Android's camera lens cover on the side-key input
 device (`SW_CAMERA_LENS_COVER`) when its layout has cameras.
 
+## Orientation
+
+Where the host owns the guest's rotation (an iPad window) the guest's display
+stays upright at rotation 0 while the device body, which carries every built-in
+sensor, turns under it. The application states the body's clockwise turn from
+portrait (`turn`: 0, 90, 180 or 270; the interface orientation's landscapeLeft
+is 90) and a boot states each camera's SENSOR_ORIENTATION from it
+(`camera_orientation.hpp`): a back camera's base orientation plus `turn`, a
+front camera's minus `turn`, an external camera's unchanged. With `turn` 0,
+where the guest rotates itself, the platform's values stand (90 back, 270
+front). A turn after the boot reaches the guest only as a turn of the picture
+by the difference of the two orientations, which ROTATE_AND_CROP's automatic
+setting applies (`CameraDeviceOptions::automaticRotation`, per camera).
+
 ## Tests
 
 `camera-controls`, `camera-description`, `camera-jpeg-gap` and
-`camera-calibration` check the pure parts, `camera-layout` the layout names,
-their fallbacks and the composition (against the image's table), and
+`camera-calibration` check the pure parts, `camera-orientation` the sensor
+orientation and picture turn of every interface orientation and facing,
+`camera-layout` the layout names, their fallbacks and the composition (against
+the image's table), and
 `camera-source` the launcher's factories (nothing opened, no prompt).
 `camera-device` drives the device
 over both queues in front of the synthetic camera, including the invariant that

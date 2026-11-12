@@ -84,7 +84,10 @@ struct Rig final {
         options.tier = rigOptions.tier;
         options.calibration = store;
         options.onState = [this](CameraState state) { states.push_back(state); };
-        options.automaticRotation = [this] { return automaticDegrees ? *automaticDegrees : 0u; };
+        options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
+        options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
+            rotations.push_back({camera, setting, degrees});
+        };
         device = std::make_unique<VirtioCameraDevice>(camera, std::move(options));
         device->setGuestMapper([this](std::uint64_t offset, std::size_t size) {
             if (offset > memory.size() || size > memory.size() - offset) return std::span<std::uint8_t> {};
@@ -98,6 +101,8 @@ struct Rig final {
     std::shared_ptr<CalibrationStore> store;
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
+    /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
+    std::vector<std::array<std::uint32_t, 3>> rotations;
     std::uint32_t* automaticDegrees {};
     std::vector<std::uint8_t> memory;
     std::size_t bump {16 * page};
@@ -680,6 +685,10 @@ void testPipeline()
     rig.step();
     require(rig.bytes(1, 1, nv12Size(480, 640)) == expectedNv12(recorder.frames[0], 480, 640, 90), "automatic: 90 degrees");
     require(rig.bytes(1, 2, nv12Size(480, 640)) == expectedNv12(recorder.frames[1], 480, 640, 270), "automatic: now 270 degrees");
+    // What reaches the diagnostic hook: the automatic setting (4) and its turn, once per change.
+    require(rig.rotations.size() == 2 && rig.rotations[0] == std::array<std::uint32_t, 3> {0, 4, 90} &&
+                rig.rotations[1] == std::array<std::uint32_t, 3> {0, 4, 270},
+            "the rotation hook says automatic with 90 and then 270 degrees, once each");
     reference->stop();
 }
 

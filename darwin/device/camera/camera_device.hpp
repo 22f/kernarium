@@ -49,8 +49,16 @@ struct CameraDeviceOptions {
      * platform's where empty. */
     std::function<std::uint32_t(const uml::platform::CameraInfo&)> sensorOrientation;
     /* The clockwise rotation, in degrees, that ROTATE_AND_CROP's automatic
-     * setting applies; none where empty. */
-    std::function<std::uint32_t()> automaticRotation;
+     * setting applies to a camera's picture; none where empty. It differs per
+     * camera because a front and a back camera turn opposite ways
+     * (camera_orientation.hpp). */
+    std::function<std::uint32_t(const uml::platform::CameraInfo&)> automaticRotation;
+    /* Told on the transport thread, for a diagnostic line, when the setting
+     * and the turn a camera's frames get change: the camera's wire index, the
+     * guest's ROTATE_AND_CROP setting (0 none, 1 to 3 the quarter turns, 4
+     * automatic) and the clockwise degrees applied. It shows what reaches the
+     * host; it changes nothing. */
+    std::function<void(std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees)> onRotateAndCrop;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;
     /* The clock frame ages are measured on; the platform's where empty. */

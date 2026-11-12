@@ -227,10 +227,15 @@ Kernarium attaches:
   still teaches is kept in `android_camera_calibration_path`, the state of the
   capture (idle, streaming, interrupted, interrupted by iPad multitasking, by
   system pressure) comes back through `set_camera_state_callback` and
-  `set_camera_rotation` gives ROTATE_AND_CROP's automatic setting the host's
-  rotation. A runtime that is not an App Store build serves the synthetic
-  camera when `KERNARIUM_CAMERA_SOURCE` names it. The Linux runtime keeps both
-  entries and never calls back;
+  `set_camera_rotation` states how the device body is turned from portrait
+  where the host owns the guest's rotation: each boot derives every camera's
+  sensor orientation from it, and a change after the boot turns the picture by
+  the difference
+  ([orientation](../darwin/device/camera/README.md#orientation)). A runtime
+  that is not an App Store build serves the synthetic camera when
+  `KERNARIUM_CAMERA_SOURCE` names it and prints the ROTATE_AND_CROP settings
+  that reach the cameras. The Linux runtime keeps both entries and never calls
+  back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then

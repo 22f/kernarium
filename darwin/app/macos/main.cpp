@@ -4,6 +4,7 @@
 #include "audio/protocol.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
+#include "camera/camera_diagnostics.hpp"
 #include "camera/camera_layout.hpp"
 #include "camera/camera_source.hpp"
 #include "camera/in_process_service.hpp"
@@ -1663,6 +1664,8 @@ private:
 		options.onState = [](uml::camera::CameraState state) {
 			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
 		};
+		/* A development run reads what reaches the host. */
+		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
 		uml::camera::CameraSourceHandle source;
 		try {
 			if (prepared_.camera == CameraSource::synthetic ||

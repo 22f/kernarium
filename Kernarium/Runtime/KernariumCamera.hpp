@@ -4,7 +4,9 @@
 #include "KernariumRuntime.h"
 #include "camera/calibration_store.hpp"
 #include "camera/camera_device.hpp"
+#include "camera/camera_diagnostics.hpp"
 #include "camera/camera_layout.hpp"
+#include "camera/camera_orientation.hpp"
 #include "camera/camera_source.hpp"
 #include "camera/camera_tiers.hpp"
 
@@ -185,7 +187,14 @@ private:
     int state_ {KERNARIUM_RUNTIME_CAMERA_STATE_IDLE};
 };
 
-/* The rotation the application states for ROTATE_AND_CROP's automatic setting. */
+/* The turn of the device body the application states: the clockwise degrees
+ * from portrait, as its user sees it, where the host owns the guest's rotation
+ * (an iPad window: the guest stays upright in the window while the device,
+ * which carries every built-in sensor, turns under it); 0 where the guest owns
+ * the rotation, which leaves every camera as the platform states it. A boot
+ * reads it once, to derive each camera's SENSOR_ORIENTATION; a change after
+ * the boot reaches the cameras as a turn of the picture from that figure
+ * (camera_orientation.hpp). */
 class Rotation final {
 public:
     /* 0, 90, 180 or 270; false for another value, which changes nothing. */
@@ -206,8 +215,10 @@ private:
     std::atomic<std::uint32_t> degrees_ {0};
 };
 
-/* The device's options for a session of `mode`. The receiver and the rotation
- * outlive every device. */
+/* The device's options for a boot of a session of `mode`. The receiver and the
+ * rotation outlive every device. The turn the application has stated now is the
+ * boot's: the guest's SENSOR_ORIENTATIONs follow it, and the picture turns by
+ * the change since. */
 [[nodiscard]] inline uml::camera::CameraDeviceOptions deviceOptions(
     const Presentation& presentation,
     uml::camera::CameraMode mode,
@@ -218,10 +229,21 @@ private:
     options.mode = mode;
     options.tier = presentation.tier;
     options.calibration = presentation.calibration;
-    options.automaticRotation = [&rotation] { return rotation.degrees(); };
+    const auto bootTurn = rotation.degrees();
+    options.sensorOrientation = [bootTurn](const uml::platform::CameraInfo& info) {
+        return uml::camera::turnedSensorOrientation(
+            info.position, info.sensorOrientation, bootTurn);
+    };
+    options.automaticRotation = [&rotation, bootTurn](const uml::platform::CameraInfo& info) {
+        return uml::camera::pictureTurn(info.position, bootTurn, rotation.degrees());
+    };
     options.onState = [&receiver](uml::camera::CameraState state) {
         receiver.publish(state);
     };
+#ifndef UML_APP_STORE_RUNTIME
+    /* What reaches the host, for a development run to read. */
+    options.onRotateAndCrop = uml::camera::printRotateAndCrop;
+#endif
     return options;
 }
 

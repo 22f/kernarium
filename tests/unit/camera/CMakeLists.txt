@@ -61,6 +61,13 @@ target_link_libraries(uml_camera_jpeg_gap_tests PRIVATE UML::CameraDevice)
 uml_add_unit_test(NAME camera-jpeg-gap COMMAND uml_camera_jpeg_gap_tests
     LABELS "device;camera")
 
+# How the guest's camera orientation follows the device where the host owns the
+# rotation: pure arithmetic on the platform's camera description.
+add_executable(uml_camera_orientation_tests camera_orientation_tests.cpp)
+target_link_libraries(uml_camera_orientation_tests PRIVATE UML::CameraDevice)
+uml_add_unit_test(NAME camera-orientation COMMAND uml_camera_orientation_tests
+    LABELS "device;camera")
+
 add_executable(uml_camera_calibration_tests camera_calibration_tests.cpp)
 target_link_libraries(uml_camera_calibration_tests PRIVATE UML::CameraDevice)
 uml_add_unit_test(NAME camera-calibration COMMAND uml_camera_calibration_tests

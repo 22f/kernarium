@@ -186,6 +186,10 @@ public:
         std::uint32_t runHeight {};
         std::uint32_t runRate {};
         std::uint32_t calibrationAttempts {};
+        /* The ROTATE_AND_CROP setting and the turn last reported to
+         * `onRotateAndCrop`. */
+        std::uint32_t reportedSetting {~0u};
+        std::uint32_t reportedTurn {~0u};
     };
     struct InboxFrame {
         std::size_t camera {};
@@ -701,12 +705,20 @@ public:
         return transferSegments(mapper, regions.get(), resource.planes[0], staging, true);
     }
 
-    [[nodiscard]] std::uint32_t rotationOf(const Runtime& runtime) const
+    [[nodiscard]] std::uint32_t rotationOf(Runtime& runtime) const
     {
         const auto setting = runtime.controls.rotateAndCrop(runtime.values);
-        if (setting >= 1 && setting <= 3) return setting * 90;
-        if (setting == 4 && options.automaticRotation) return options.automaticRotation() % 360 / 90 * 90;
-        return 0;
+        std::uint32_t degrees = 0;
+        if (setting >= 1 && setting <= 3)
+            degrees = setting * 90;
+        else if (setting == 4 && options.automaticRotation)
+            degrees = options.automaticRotation(runtime.description.info) % 360 / 90 * 90;
+        if (options.onRotateAndCrop && (setting != runtime.reportedSetting || degrees != runtime.reportedTurn)) {
+            runtime.reportedSetting = setting;
+            runtime.reportedTurn = degrees;
+            options.onRotateAndCrop(runtime.description.index, setting, degrees);
+        }
+        return degrees;
     }
 
     void deliverFrame(Runtime& runtime, const CameraFrame& frame)
