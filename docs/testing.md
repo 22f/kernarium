@@ -345,8 +345,8 @@ device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com`; the scheme without the filter also runs
-`AndariumUITests`). The scheme's Test
+FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle`; the scheme
+without the filter also runs `AndariumUITests`). The scheme's Test
 action pins English, so the tests that read the application's words do not
 depend on the language of the device; `LocalizationTests` names a lost pin and
 looks each language up by name, and the language a `-testLanguage` run asks
@@ -357,8 +357,10 @@ map, backup attribute) on a small sparse file and prints their answers on a
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
 exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
-a run without it does not build them. The Mail composer, the picker and the
+command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback)),
+and `FollowXRowTests` only with `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
+without them does not build them. The Mail composer, the picker and the
 guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none

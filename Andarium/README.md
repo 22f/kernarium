@@ -176,7 +176,10 @@ everything that exists for automation or only pretends:
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
 - It alone can carry [Send feedback](#send-feedback), and only when the
-  receiver's address is in the ignored `Config/Feedback.local.xcconfig`.
+  receiver's address is in the ignored `Config/Feedback.local.xcconfig`, and
+  [Follow developer on X](#follow-developer-on-x), and only when the handle is
+  in the ignored `Config/Developer.local.xcconfig` and the logo in the ignored
+  `Config/Local/`.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -214,6 +217,37 @@ The feature's words are looked up in the `Feedback` string table (zh-Hans,
 zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
 its information block are English whatever the interface language, and the bug
 report's overlay text is the app's own.
+
+### Follow developer on X
+
+Info has one passive outward link more: Follow developer on X, a row in the
+section of Project on GitHub, which opens the developer's profile through the
+system (`openURL`: the X app when it is installed, the browser otherwise;
+`Shared/FollowX/`). It has no badge, prompt or counter, and nothing is
+remembered about a tap. The name X in its text is the service's logo, drawn
+inline at the text's size and colour as a template image, and the same logo is
+the row's leading icon; VoiceOver reads "Follow developer on X" with the link
+trait. The profile and the logo belong to the developer and are tracked
+nowhere: the row is compiled in, under the `FOLLOW_X` condition, only in an
+AppStore build whose ignored `Config/Developer.local.xcconfig` (from
+`Developer.local.xcconfig.example`) names the handle (`DEVELOPER_X_HANDLE`: a
+handle, never an address, as `//` starts an xcconfig comment; the code builds
+the address) and whose ignored `Config/Local/` directory holds `x-logo.svg`, a
+single-colour vector that `XLogoLocal.xcassets` links to. A build with the
+handle and without the logo fails its first build phase. A fork, a sideload
+or a Debug or Release build holds none of it (no row, handle, logo or
+`FollowX` strings table), and the bundle check asserts both directions as it
+does for Send feedback: it also fails on the local handle as a profile
+address, or as a whole string of a property list, in any file of a bundle that
+does not name it (never printing it), and on the arranged handle in any
+product that does not arrange it. Tests and captures turn the row on in a
+Debug build with `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line,
+with a glyph drawn for them (`XLogoGlyph.xcassets`) in place of the logo;
+adding `FOLLOW_X_LOGO_SOURCE=local` takes the logo from `Config/Local/`.
+`AndariumPreview` takes the arrangement only, never the local handle. The
+handle's shape and the address are in `Shared/FollowX/Logic`, which
+AndariumCore's tests build through a symlinked target no product links, and
+the words are in the `FollowX` string table.
 
 ## Model and storage
 
@@ -671,7 +705,8 @@ bundle and its check asserts is absent. The Send feedback texts are another,
 table `Feedback`, built only where Send feedback is compiled in
 (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle check
 refuses the table, by its file name, in a product without the feature and
-asks for it in every language of one with it. English is the key (a readout or a
+asks for it in every language of one with it. The text of Follow developer on X
+is the same, table `FollowX`. English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
@@ -684,9 +719,9 @@ short quoted Chinese or Japanese name is not cut across two lines.
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
-`FEEDBACK_ADDRESS=feedback@example.com` (the output of `Andarium` and
-`AndariumPreview` together; one without Send feedback has no `Feedback` strings
-and fails) and on an App Store build with `--app-store`. A
+`FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle` (the
+output of `Andarium` and `AndariumPreview` together; one without Send feedback
+or the row has no `Feedback` or `FollowX` strings and fails) and on an App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.
