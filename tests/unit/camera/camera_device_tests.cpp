@@ -266,18 +266,21 @@ struct Rig final {
         }
         serveEvents();
     }
-    /* A guest suspend, as the server sees it: the rings are disabled, and a
-     * device that holds a request is reset first (the held requests are dropped,
-     * the buffers waiting in the ring are not). */
-    void disableRings()
+    /* A guest suspend, as the server sees it: the rings are disabled. The device
+     * keeps its deferred requests across the disable (it says so), so nothing is
+     * reset and what it completes meanwhile waits for the enable. */
+    void disableRings() { collect(); }
+    void enableRings() { collect(); }
+    /* What does reset the device: a change of the guest's memory or of a ring, a
+     * teardown, or the end of the connection. The requests it held are dropped,
+     * the buffers waiting in the ring are not. */
+    void resetByTransport()
     {
         collect();
-        if (held.empty()) return;
         device->reset();
         held.clear();
         ++resets;
     }
-    void enableRings() { collect(); }
     void step()
     {
         device->drainEventSource();
@@ -383,6 +386,7 @@ void testHandshake()
     Rig rig;
     const auto& device = *rig.device;
     require(device.queueCount() == 2, "commands and events");
+    require(device.keepsDeferredRequestsWhileDisabled(), "a camera stream outlives a guest suspend");
     const std::uint64_t features = device.features();
     require((features >> VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES & 1) && (features >> VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG & 1) &&
                 (features >> VIRTIO_VIDEO_F_V4L2_CONTROLS & 1) && !(features >> VIRTIO_VIDEO_F_RESOURCE_SHM_REGION & 1),
@@ -1486,7 +1490,7 @@ void testSystemPressure()
  * frames are black and flagged as resuming until the capture delivers. The
  * event buffers the guest posted are not held by the device: they are still in
  * the ring, and the first event after the resume reaches them. */
-void testSuspendResetsAndTheDriverRecreates()
+void testResetAndTheDriverRecreates()
 {
     Rig rig;
     const auto build = [&](std::uint32_t firstResource) {
@@ -1506,7 +1510,9 @@ void testSuspendResetsAndTheDriverRecreates()
     require(rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 1 && !rig.done(still), "streams and a still are in flight");
     require(rig.held.size() == 4, "the device holds the four buffers, and no event buffer");
     rig.disableRings();
-    require(rig.resets == 1, "the suspend found requests held and reset the device");
+    require(rig.resets == 0 && rig.held.size() == 4, "a suspend resets nothing and the device keeps what it holds");
+    rig.resetByTransport();
+    require(rig.resets == 1, "a change of the guest's memory resets the device");
     require(rig.camera->sessionsOpen() == 0 && !rig.camera->videoRunning(0) && rig.states.back() == CameraState::idle,
             "the capture is stopped");
     rig.camera->pump(0, 1);  // nothing of the old capture is left to deliver
@@ -1584,7 +1590,7 @@ void testEventQueueRetries()
 /* A guest whose driver stopped its streams holds nothing at a suspend: the
  * rings are disabled and enabled again with no reset, the device keeps what the
  * driver set, and an event after the resume reaches the buffer posted before. */
-void testSuspendWithNoStreamResetsNothing()
+void testSuspendResetsNothing()
 {
     Rig rig;
     EventQueue events(rig, 2);
@@ -1621,7 +1627,7 @@ void testSuspendWithNoStreamResetsNothing()
     rig.queue(1, 2);
     require(rig.held.size() == 1, "the stream's buffer is the one request the device holds now");
     rig.disableRings();
-    require(rig.resets == 1, "a suspend that finds it held still resets the device, as the fallback");
+    require(rig.resets == 0 && rig.held.size() == 1, "a suspend that finds a request held keeps it");
 }
 
 /* A group has two seconds to assemble; a capture that has started has ten. */
@@ -1864,9 +1870,9 @@ int main()
     testCalibrationRawIsACourtesy();
     testInterruptionEndsWithTheSession();
     testSystemPressure();
-    testSuspendResetsAndTheDriverRecreates();
+    testResetAndTheDriverRecreates();
     testEventQueueRetries();
-    testSuspendWithNoStreamResetsNothing();
+    testSuspendResetsNothing();
     testFailingStartTellsOnce();
     testStillOnAnotherCamera();
     testHardwareBudget();

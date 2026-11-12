@@ -148,6 +148,17 @@ condition on a per-frame or per-bind path reports once.
 each of 64 hand-backs nothing the test kernel left behind may remain, and the
 process must be as it was before the first run.
 
+`guest-irq-takeover` models a host that does not run a vCPU: its runner inserts
+a library into the launcher (`DYLD_INSERT_LIBRARIES`, as `runtime-restart-*` does
+its process audit) which suspends CPU0's carrier thread for a while every second,
+and the test requires a vsock echo that begins in a hold to return soon after the
+slowest echo without one, with every CPU busy, with only CPU0 busy and with
+every CPU idle. An echo already under way when a hold begins is not judged, and
+a hold that lands inside CPU0's dispatch stays with CPU0, so a few holds per
+phase may fail. A phase with too few judged holds, and a host so busy that an
+echo without a hold is already slow, fail the run. The library is test support
+and nothing in the product loads it.
+
 ## Integration prerequisites and workflows
 
 Integration needs four local inputs: the accepted kernel bundle below
@@ -170,7 +181,19 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable.
+disable. A driver path that only a misbehaving device reaches, such as a device
+that was reset during a suspend (`guest-video-camera-reset`) or is late to stop
+a stream (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is
+reached by serving the guest the production device behind the test-only shim of
+`tests/support/vhost_user`; no production target carries a switch for it.
+A test that needs what only an earlier session leaves behind boots more than
+once: `guest-v4l2-capture` first lets the host learn the synthetic camera's
+colour data into a calibration directory of the run, because Bayer stills are
+offered from the next session on.
+`guest-hardware-input` (needs a GPU slot) checks that a Linux guest started
+with `--hardware-input` registers and unregisters the keyboard, mouse and
+pointer input devices as a VNC client plugs and unplugs them
+([contract](../kernel/common/input/README.md)).
 
 The serial harness boots each guest through the launcher's per-run initramfs
 and the [harness session](../tools/rootfs/boot-ramdisk/README.md#harness-session).
@@ -588,11 +611,12 @@ anywhere is a blocker. The candidate must show:
   hardware codecs, which the host's video activity log confirms, and the
   software `c2.android.*` results do not regress. Run the decoder performance
   classes on a quiet host.
-- **Hardware keyboard and mouse** (a guest started with `--hardware-input`).
-  `android-keymouse` passes, and `CtsInputTestCases`, `CtsHardwareTestCases`,
-  `CtsViewTestCases` and `CtsInputMethodTestCases` pass with the launcher's
-  default devices and again with the option and a connected client; a result
-  that differs from the accepted release's is explained
+- **Hardware keyboard and mouse** (a guest started with `--hardware-input`;
+  `guest-hardware-input` is the Linux guest's check). `android-keymouse`
+  passes, and `CtsInputTestCases`, `CtsHardwareTestCases`, `CtsViewTestCases`
+  and `CtsInputMethodTestCases` pass with the launcher's default devices and
+  again with the option and a connected client; a result that differs from the
+  accepted release's is explained
   ([Keyboard and mouse](../android/lineage-24/README.md#keyboard-and-mouse)).
 - **Cameras** (a guest started with `--camera=synthetic` and a camera layout on
   `androidboot.product.vendor.sku`). `android-camera` passes for the layouts
@@ -636,8 +660,9 @@ wheel, pass pointer capture both ways and unplug; `--instance` names the
 previous release's data disk to check the one-time on-screen keyboard change.
 `android-video-suspend` (integration) registers when
 `UML_ANDROID_VIDEO_SUSPEND_RELEASE` names the release: the gallery's decoder and
-`screenrecord`'s encoder run across a suspend by the host's route and by the
-guest's own on one stream each, and the host closes no stream by a reset.
+`screenrecord`'s encoder run across a suspend by the host's route (asked again
+while the guest is busy, as the host does) and by the guest's own on one stream
+each, and the host closes no stream by a reset.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled and joined while the internet checks fail, joins again

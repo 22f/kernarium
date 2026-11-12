@@ -888,6 +888,10 @@ struct virtio_video_camera_query_formats {
    host application states). */
 #define VIRTIO_VIDEO_CAMERA_CID_ROTATE_AND_CROP (VIRTIO_VIDEO_CAMERA_CID_BASE + 9)
 #define VIRTIO_VIDEO_CAMERA_ROTATE_AUTOMATIC 4
+/* A read-only compound control (U8[328]) that the guest driver answers, not the
+   device: the struct virtio_video_camera_desc of the camera behind the node, as
+   VIRTIO_VIDEO_CMD_CAMERA_QUERY gave it. The device never lists it. */
+#define VIRTIO_VIDEO_CAMERA_CID_DESCRIPTION (VIRTIO_VIDEO_CAMERA_CID_BASE + 16)
 
 /* VIRTIO_VIDEO_CMD_CAMERA_QUERY_CONTROLS: the controls of one camera, in the
    answer of VIRTIO_VIDEO_CMD_QUERY_V4L2_CONTROLS. The values belong to the
