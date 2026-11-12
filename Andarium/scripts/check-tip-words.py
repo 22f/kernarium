@@ -6,8 +6,9 @@ A tip is a voluntary one-time purchase, so no string of the tip jar's table
 names a donation, a plan or a subscription, promises an unlock, an upgrade or
 premium access, or quotes a token amount or balance, in any language the table
 has: the English words, and the Chinese and Japanese ones that say the same.
-The table also says plainly, in its English source, that a tip is a voluntary
-one-time purchase and that every feature is free either way.
+The table also says plainly, in the statement string, that a tip is a voluntary
+one-time purchase and that every feature is free either way, and the statement
+says it in every language the table has: each storefront reads its own.
 
 The table is a String Catalog (`Localization/TipJar.xcstrings`) or a compiled
 strings file (`TipJar.strings` of an application's language directory); every
@@ -51,14 +52,57 @@ FORBIDDEN = (
     ("credits", re.compile("积分|積分|点数|點數|クレジット")),
     ("a balance", re.compile("余额|余額|餘額|残高")),
 )
-# A number, or a placeholder for one, beside the word token.
+# A number, or a placeholder for one, beside the word token: Western, full-width
+# and Chinese or Japanese numerals, with the counters 个, 個, 枚 and つ between.
+NUMBER = r"(?:[0-9０-９]|%(?:\d+\$)?(?:l{0,2}d|f|@))"
+NUMERAL = "[〇零一二三四五六七八九十百千万萬两兩]"
+TOKEN = r"(?:tokens?|トークン)"
+COUNTER = r"(?:个|個|枚|つ)?\s*(?:的|の)?\s*"
 AMOUNT = re.compile(
-    r"(?:\d|%(?:\d+\$)?(?:l{0,2}d|f|@))[\d.,]*\s*[kKmM]?\s*(?:tokens?|トークン)"
-    r"|(?:tokens?|トークン)\s*[:：]?\s*(?:\d|%(?:\d+\$)?(?:l{0,2}d|f|@))",
+    NUMBER + r"[0-9０-９.,，．]*\s*[kKmM万萬]?\s*" + COUNTER + TOKEN
+    + "|" + NUMERAL + r"+\s*" + COUNTER + TOKEN
+    + "|" + TOKEN + r"\s*[:：]?\s*" + NUMBER,
     re.IGNORECASE)
-# What the English source must say, each word in one string: voluntary, one-time,
-# a purchase, and free either way.
-REQUIRED = ("voluntary", "one-time", "purchase", "free")
+# What the statement must say in each language, each idea in one of the words of its
+# group: voluntary, one-time, a purchase, and free either way.
+REQUIRED = {
+    "en": (("voluntary",), ("one-time",), ("purchase",), ("free",)),
+    "zh-Hans": (("自愿",), ("一次性",), ("购买",), ("免费",)),
+    "zh-Hant": (("自願",), ("一次性",), ("購買",), ("免費",)),
+    "ja": (("任意",), ("1回限り", "一回限り"), ("購入",), ("無料",)),
+}
+
+
+def statement_key(texts: list[tuple[str, str, str]]) -> str | None:
+    """The statement is the key whose English text says most of its ideas, and at least two."""
+    best, score = None, 1
+    for key in sorted({key for key, _language, _text in texts}):
+        said = sum(any(word in key.lower() for word in group) for group in REQUIRED["en"])
+        if said > score:
+            best, score = key, said
+    return best
+
+
+def statement_problems(texts: list[tuple[str, str, str]], name: str, languages: set[str]) -> list[str]:
+    """The statement, in each of the languages, with each of its ideas. A language the check
+    holds no words for is itself a problem: it is added here with the table."""
+    key = statement_key(texts)
+    if key is None:
+        return [f"{name}: no string says that a tip is a voluntary one-time purchase, and that every "
+                "feature is free either way"]
+    found = []
+    for language in sorted(languages):
+        words = REQUIRED.get(language)
+        if words is None:
+            found.append(f"{name}: [{language}] has no required words in this check; add the ones that say "
+                         "voluntary, one-time, purchase and free")
+            continue
+        values = [text.lower() for k, lang, text in texts if lang == language and k == key]
+        for group in words:
+            if not any(word.lower() in value for value in values for word in group):
+                found.append(f"{name}: no statement [{language}] says {group[0]!r}: a tip is a voluntary "
+                             "one-time purchase, and every feature is free either way")
+    return found
 
 
 def texts_of_catalog(data: dict) -> list[tuple[str, str, str]]:
@@ -126,18 +170,14 @@ def problems_in(texts: list[tuple[str, str, str]], name: str) -> list[str]:
 def check(path: Path) -> tuple[list[str], int]:
     """The problems of one table and how many texts it has."""
     if path.suffix == ".xcstrings":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        texts = texts_of_catalog(data)
-        source = data.get("sourceLanguage", "en")
-        found = problems_in(texts, path.name)
-        english = [text for key, language, text in texts if language == source == "en"]
-        for word in REQUIRED:
-            if not any(word in text.lower() for text in english):
-                found.append(f"{path.name}: no English string says {word!r}: a tip is a voluntary one-time "
-                             "purchase, and every feature is free either way")
-        return found, len(texts)
-    texts = texts_of_strings(path)
-    return problems_in(texts, str(path)), len(texts)
+        texts = texts_of_catalog(json.loads(path.read_text(encoding="utf-8")))
+        name = path.name
+    else:
+        texts = texts_of_strings(path)
+        name = str(path)
+    found = problems_in(texts, name)
+    found.extend(statement_problems(texts, name, {language for _key, language, _text in texts}))
+    return found, len(texts)
 
 
 def main() -> int:
@@ -158,7 +198,8 @@ def main() -> int:
         print(line, file=sys.stderr)
     if found:
         return 1
-    print(f"{len(options.tables)} table(s), {count} texts: no forbidden word, no token amount")
+    print(f"{len(options.tables)} table(s), {count} texts: no forbidden word, no token amount, "
+          "the statement in every language")
     return 0
 
 

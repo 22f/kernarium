@@ -16,6 +16,18 @@ from pathlib import Path
 
 STATEMENT = ("A tip is a voluntary one-time purchase that supports Andarium’s independent development. "
              "Every feature is free either way.")
+# The statement in each language, as the table says it; each idea is one word of it.
+STATEMENTS = {
+    "zh-Hans": "小费是自愿的一次性购买，用于支持Andarium的独立开发。无论是否给小费，所有功能都免费。",
+    "zh-Hant": "小費是自願的一次性購買，用於支持Andarium的獨立開發。無論是否給小費，所有功能都免費。",
+    "ja": "チップは、Andariumの独立した開発を支える任意の1回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。",
+}
+# Each language's ideas, one word that says each in STATEMENTS.
+IDEAS = {
+    "zh-Hans": ("自愿", "一次性", "购买", "免费"),
+    "zh-Hant": ("自願", "一次性", "購買", "免費"),
+    "ja": ("任意", "1回限り", "購入", "無料"),
+}
 
 
 def catalog(strings: dict[str, dict[str, str]]) -> str:
@@ -50,10 +62,17 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="andarium-tip-words-") as directory:
         root = Path(directory)
 
-        def table(name: str, strings: dict[str, dict[str, str]], *, statement: bool = True) -> Path:
+        def table(name: str, strings: dict[str, dict[str, str]], *, statement: bool = True,
+                  said: dict[str, str] | None = None) -> Path:
+            """A table with the statement said in every language (`said` changes a language's
+            words) or, without `statement`, with none; only the languages the table localizes."""
             path = root / name / "TipJar.xcstrings"
             path.parent.mkdir()
-            everything = {STATEMENT: {}, **strings} if statement else strings
+            everything = dict(strings)
+            if statement:
+                languages = {language for values in strings.values() for language in values} | set(said or {})
+                everything = {STATEMENT: {language: (said or {}).get(language) or STATEMENTS.get(language, "x")
+                                          for language in languages if language != "en"}, **strings}
             path.write_text(catalog(everything), encoding="utf-8")
             return path
 
@@ -98,24 +117,52 @@ def main() -> int:
         for index, text in enumerate((
                 "You have 500 tokens", "You have 1,000 Tokens", "500k tokens", "2.5M tokens", "%lld tokens",
                 "%d token", "%1$lld tokens", "Tokens: 12", "tokens 5", "%@ tokens", "トークン 500",
-                "12トークン")):
+                "12トークン",
+                # Counters, full-width digits and Chinese or Japanese numerals.
+                "100个Token", "100個のトークン", "１００トークン", "Token：５００", "五十枚トークン",
+                "10万Token", "三つのトークン", "一百个Token", "twelve 12 tokens")):
             expect(f"amount-{index}", run(table(f"amount-{index}", {text: {}})), passes=False, said="token amount")
 
-        # The statement is required, in the English source: each of its ideas.
+        # The statement is required in English and in every language the table localizes: each of its
+        # ideas, said in that language.
         expect("no-statement", run(table("no-statement", {"Buy me tokens": {}}, statement=False)),
-               passes=False, said="'voluntary'")
+               passes=False, said="no string says that a tip is a voluntary")
         for index, word in enumerate(("voluntary", "one-time", "purchase", "free")):
             expect(f"missing-{word}", run(table(f"missing-{index}", {
                 STATEMENT.lower().replace(word, "x"): {}}, statement=False)), passes=False, said=f"{word!r}")
+        for language, ideas in IDEAS.items():
+            expect(f"{language}-statement", run(table(f"say-{language}", {"Done": {language: "x"}})), passes=True)
+            for index, idea in enumerate(ideas):
+                expect(f"{language}-without-{idea}", run(table(f"without-{language}-{index}", {"Done": {language: "x"}},
+                                                                said={language: STATEMENTS[language].replace(idea, "〇")})),
+                       passes=False, said=f"[{language}] says")
+            # A language that has strings and no statement of its own.
+            plain = {"Done": {language: "x"}}
+            path = root / f"unsaid-{language}" / "TipJar.xcstrings"
+            path.parent.mkdir()
+            path.write_text(catalog({STATEMENT: {}, **plain}), encoding="utf-8")
+            expect(f"{language}-unsaid", run(path), passes=False, said=f"no statement [{language}] says")
+        # Either way of writing Japanese's "one time", and a language the check has no words for.
+        expect("ja-kanji", run(table("ja-kanji", {"Done": {"ja": "x"}}, said={
+            "ja": STATEMENTS["ja"].replace("1回限り", "一回限り")})), passes=True)
+        expect("other-language", run(table("other-language", {"Done": {"ko": "완료"}}, said={"ko": "x"})),
+               passes=False, said="[ko] has no required words")
 
-        # A compiled strings table of a language: the same words, by the directory's language.
+        # A compiled strings table of a language: the same words, by the directory's language, and
+        # the statement in that language.
         compiled = root / "ja.lproj" / "TipJar.strings"
         compiled.parent.mkdir()
-        compiled.write_bytes(plistlib.dumps({"Done": "寄付"}, fmt=plistlib.FMT_BINARY))
+        say = {STATEMENT: STATEMENTS["ja"]}
+        compiled.write_bytes(plistlib.dumps({**say, "Done": "寄付"}, fmt=plistlib.FMT_BINARY))
         expect("compiled-bad", run(compiled), passes=False, said="[ja]")
-        compiled.write_bytes(plistlib.dumps({"Done": "完了", "Try again": "もう一度"}, fmt=plistlib.FMT_BINARY))
+        compiled.write_bytes(plistlib.dumps({**say, "Done": "完了", "Try again": "もう一度"}, fmt=plistlib.FMT_BINARY))
         expect("compiled-ok", run(compiled), passes=True)
-        compiled.write_bytes('"Done" = "Please subscribe";\n'.encode())
+        compiled.write_bytes(plistlib.dumps({"Done": "完了"}, fmt=plistlib.FMT_BINARY))
+        expect("compiled-no-statement", run(compiled), passes=False, said="no string says")
+        compiled.write_bytes(plistlib.dumps({STATEMENT: STATEMENTS["ja"].replace("無料", "有料")},
+                                            fmt=plistlib.FMT_BINARY))
+        expect("compiled-not-free", run(compiled), passes=False, said="[ja] says '無料'")
+        compiled.write_bytes(f'"Done" = "Please subscribe";\n"{STATEMENT}" = "{STATEMENTS["ja"]}";\n'.encode())
         expect("compiled-text", run(compiled), passes=False, said="uses")
         expect("both", run(options.table, compiled), passes=False, said="uses")
 
