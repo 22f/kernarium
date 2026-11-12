@@ -100,9 +100,12 @@ struct Subnet final {
 
 /*
  * Whether classify_host_bound_frame needs the host's current addresses for
- * `frame`: an IPv4 TCP connect attempt or UDP datagram to an address outside
- * the virtual network `network`. The provider reads the addresses again for
- * such a frame only, so it asks the system nothing while the guest is quiet.
+ * `frame`: an IPv4 frame to an address outside the virtual network `network`
+ * that the table can change the fate of. That is every such frame but an
+ * unfragmented TCP segment that is not a connect attempt: a connect attempt,
+ * every fragment, every UDP datagram, ICMP and the other protocols. The
+ * provider reads the addresses again for such a frame only, so it asks the
+ * system nothing while the guest is quiet.
  */
 [[nodiscard]] bool needs_host_check(std::span<const std::uint8_t> frame,
 				    const Subnet &network);

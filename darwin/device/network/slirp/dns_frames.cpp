@@ -309,10 +309,15 @@ bool needs_host_check(std::span<const std::uint8_t> frame,
 	if (header < 20 || header > ip.size() ||
 	    within(network, {ip[16], ip[17], ip[18], ip[19]}))
 		return false;
-	if (ip[9] == protocol_udp)
-		return true;
-	return ip[9] == protocol_tcp && ip.size() >= header + 14 &&
-		is_connect_attempt(ip[header + 13]);
+	/* The one frame the table never changes the fate of is an unfragmented
+	 * TCP segment that is not a connect attempt, which is passed whatever
+	 * the table holds. A fragment is judged by the table, whatever it
+	 * carries (the flags byte of a first fragment is not the segment's),
+	 * and so are UDP, ICMP and the other protocols. */
+	if (ip[9] == protocol_tcp && (read16(ip, 6) & 0x3fff) == 0 &&
+	    ip.size() >= header + 14)
+		return is_connect_attempt(ip[header + 13]);
+	return true;
 }
 
 std::vector<std::uint8_t> udp_reply_frame(const Endpoints &endpoints,

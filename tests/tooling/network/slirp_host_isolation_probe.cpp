@@ -668,6 +668,26 @@ void check_other_machines_are_reached()
 		fail("another machine", "SLiRP was not handed the SYN");
 }
 
+/* Two IPv4 fragments of a frame from tcp_frame(): the first carries the first
+ * `first` bytes of the segment (a multiple of 8) with More Fragments set, the
+ * second the rest at its offset. */
+std::pair<Bytes, Bytes> fragments_of(const Bytes &frame, std::size_t first)
+{
+	constexpr std::size_t segment = 34;
+	Bytes head(frame.begin(), frame.begin() + segment + first);
+	Bytes tail(frame.begin(), frame.begin() + segment);
+	tail.insert(tail.end(), frame.begin() + segment + first, frame.end());
+	const auto finish = [](Bytes &fragment, std::uint16_t flags_and_offset) {
+		put16(fragment, 16, static_cast<std::uint16_t>(fragment.size() - 14));
+		put16(fragment, 20, flags_and_offset);
+		put16(fragment, 24, 0);
+		put16(fragment, 24, checksum_fold(checksum_add(0, &fragment[14], 20)));
+	};
+	finish(head, 0x2000);
+	finish(tail, static_cast<std::uint16_t>(first / 8));
+	return {std::move(head), std::move(tail)};
+}
+
 /* A host client that connects through one of the host's own addresses to a
  * forward bound to every address is served: the guest's SYN-ACK and its data
  * go to that address, and the provider passes them to SLiRP instead of
@@ -723,6 +743,12 @@ void check_a_forward_is_reached_through_the_hosts_own_address()
 		    return true;
 	    })) {
 		finish("the host's connection did not reach the guest");
+		return;
+	}
+	/* Through the host's own address the SYN carries that address, not the
+	 * gateway's: the case cannot pass through SLiRP's loopback mapping. */
+	if (syn->source != lan->address) {
+		finish("the SYN did not come from the host's LAN address");
 		return;
 	}
 	/* The guest answers the SYN-ACK to the address the SYN came from, which
@@ -819,48 +845,63 @@ void check_the_table_is_read_for_the_frames_that_need_it()
 	const auto reads = [&] {
 		return rig.provider.host_address_reads_for_testing();
 	};
-	/* All the frames the guest sent so far have been looked at: a DNS query
-	 * is answered after them, in order. */
+	/* What the provider made of everything the guest sent so far: a DNS
+	 * query is answered after the frames before it, in order, so the frames
+	 * that arrive before its answer are all there is, and nothing waits for
+	 * a refusal by the clock. Nothing when the answer never comes. */
 	std::uint16_t marker = 47000;
-	const auto drained = [&] {
+	const auto flush = [&]() -> std::optional<std::vector<Bytes>> {
 		const std::uint16_t id = marker++;
+		std::vector<Bytes> before;
 		(void)rig.guest.send(
 			udp_frame(guest_ip, name_server, id, 53, dns_query(id)));
-		return rig.guest
-			.receive([&](const Bytes &frame) {
-				return frame.size() > 46 && frame[23] == IPPROTO_UDP &&
-					get16(frame, 34) == 53 &&
-					get16(frame, 36) == id;
-			})
-			.has_value();
+		if (!rig.guest.receive([&](const Bytes &frame) {
+			    if (frame.size() > 46 && frame[23] == IPPROTO_UDP &&
+				get16(frame, 34) == 53 && get16(frame, 36) == id)
+				    return true;
+			    before.push_back(frame);
+			    return false;
+		    }))
+			return std::nullopt;
+		return before;
 	};
-	const auto refused = [&](std::uint16_t port) {
-		return rig.guest
-			.receive(
-				[&](const Bytes &frame) {
-					const auto segment = parse_tcp(frame);
-					return segment && segment->source_port == 0 &&
-						segment->destination_port == port &&
-						(segment->flags & tcp_rst) != 0;
-				},
-				400)
-			.has_value();
+	const auto has_reset = [](const std::vector<Bytes> &frames,
+				  std::uint16_t port) {
+		return std::ranges::any_of(frames, [&](const Bytes &frame) {
+			const auto segment = parse_tcp(frame);
+			return segment && segment->source_port == 0 &&
+				segment->destination_port == port &&
+				(segment->flags & tcp_rst) != 0;
+		});
 	};
-	const auto expect_reads = [&](const char *what, std::uint64_t expected) {
-		if (!drained())
+	enum class Refusal { not_checked, refused, passed };
+	/* After the frames of a step: the reads so far, and whether the connect
+	 * attempt from `port` was refused before the marker's answer. */
+	const auto expect = [&](const char *what, std::uint64_t expected_reads,
+				Refusal refusal = Refusal::not_checked,
+				std::uint16_t port = 0) {
+		const auto frames = flush();
+		if (!frames) {
 			fail(what, "the marker query was not answered");
-		if (reads() != expected)
-			fail(what, "expected " + std::to_string(expected) +
+			return;
+		}
+		if (refusal == Refusal::refused && !has_reset(*frames, port))
+			fail(what, "the connect attempt was not refused before the "
+				   "marker's answer");
+		if (refusal == Refusal::passed && has_reset(*frames, port))
+			fail(what, "an address that is not the host's was refused");
+		if (reads() != expected_reads)
+			fail(what, "expected " + std::to_string(expected_reads) +
 					   " reads of the host's addresses, found " +
 					   std::to_string(reads()));
 	};
 
 	/* open() reads once, because it cannot come up without the table. A
 	 * quiet guest causes no read, however long it is quiet. */
-	expect_reads("open", 1);
+	expect("open", 1);
 	advance(std::chrono::seconds{30});
 	(void)rig.guest.receive([](const Bytes &) { return false; }, 300);
-	expect_reads("a quiet guest", 1);
+	expect("a quiet guest", 1);
 
 	/* Frames the table is not asked about cause none either, though the
 	 * table is old: the virtual network, a segment of a flow, an echo. */
@@ -868,58 +909,74 @@ void check_the_table_is_read_for_the_frames_that_need_it()
 	(void)rig.guest.send(tcp_frame(guest_ip, elsewhere, 47101, 80, 7, 8,
 				       tcp_ack, 65535));
 	(void)rig.guest.send(icmp_echo_frame(gateway));
-	expect_reads("frames the table does not judge", 1);
+	expect("frames the table does not judge", 1);
 
 	/* The first frame that needs the table finds it old and reads it, and is
 	 * judged by what it read: another machine's address is not the host's. */
 	rig.syn(elsewhere, 0, 47200);
-	if (refused(47200))
-		fail("a connect attempt", "an address that is not the host's "
-					  "was refused");
-	expect_reads("a connect attempt after a quiet period", 2);
+	expect("a connect attempt after a quiet period", 2, Refusal::passed,
+	       47200);
 
 	/* A burst inside the second reads nothing more. */
 	for (std::uint16_t port = 47210; port < 47310; ++port)
 		rig.syn(elsewhere, 0, port);
-	expect_reads("a burst", 2);
+	expect("a burst", 2);
 
 	/* The host gains the address. Nothing has asked yet, and inside the
 	 * second the old table still stands. */
 	set_addresses({value(loopback), value(elsewhere)});
 	advance(std::chrono::milliseconds{400});
 	rig.syn(elsewhere, 0, 47400);
-	if (refused(47400))
-		fail("inside the second", "the table changed before it was "
-					  "read again");
-	expect_reads("inside the second", 2);
+	expect("inside the second", 2, Refusal::passed, 47400);
 	/* Past it, the next frame that needs the table reads the new one. */
 	advance(std::chrono::milliseconds{700});
 	rig.syn(elsewhere, 0, 47401);
-	if (!refused(47401))
-		fail("past the second", "the host's new address was not refused");
-	expect_reads("past the second", 3);
+	expect("past the second", 3, Refusal::refused, 47401);
 
 	/* A read that fails keeps the table, and is not repeated for every
 	 * frame: the next try waits for the second as well. */
 	set_failing(true);
 	advance(std::chrono::milliseconds{1100});
 	rig.syn(elsewhere, 0, 47500);
-	if (!refused(47500))
-		fail("a failing read", "the table was lost with the failed read");
-	expect_reads("a failing read", 4);
+	expect("a failing read", 4, Refusal::refused, 47500);
 	for (std::uint16_t port = 47510; port < 47520; ++port)
 		rig.syn(elsewhere, 0, port);
-	expect_reads("a failing read, inside the second", 4);
+	expect("a failing read, inside the second", 4);
 	/* It succeeds the next time it is tried, and the host has lost the
 	 * address meanwhile. */
 	set_failing(false);
 	set_addresses({value(loopback)});
 	advance(std::chrono::milliseconds{1100});
 	rig.syn(elsewhere, 0, 47600);
-	if (refused(47600))
-		fail("a retried read", "an address the host gave up was still "
-				       "refused");
-	expect_reads("a retried read", 5);
+	expect("a retried read", 5, Refusal::passed, 47600);
+
+	/* A fragment is judged by the table like any other frame to the host,
+	 * so a first fragment that stops before the flags byte cannot hide a
+	 * connect attempt from a table that is old: the host has gained the address
+	 * since the last read, the fragments of a SYN follow past the second,
+	 * the provider reads the table and drops them. SLiRP, reassembling
+	 * them, would connect to the host's listener. */
+	const auto lan = find_lan();
+	const Address target = lan ? lan->address : elsewhere;
+	std::optional<HostSockets> listener;
+	if (lan)
+		listener.emplace(lan->address);
+	if (lan && !listener->ready()) {
+		fail("fragments", "the probe could not listen");
+		return;
+	}
+	set_addresses({value(loopback), value(target)});
+	advance(std::chrono::milliseconds{1100});
+	const auto [head, tail] = fragments_of(
+		tcp_frame(guest_ip, target, 47700,
+			  lan ? listener->tcp_port() : std::uint16_t{0}, 1000, 0,
+			  tcp_syn, 65535, 8),
+		8);
+	(void)rig.guest.send(head);
+	(void)rig.guest.send(tail);
+	expect("a fragmented connect attempt", 6);
+	if (listener && listener->saw_connection())
+		fail("fragments", "a fragmented SYN reached a host listener");
 }
 
 /* A network that cannot list the host's addresses does not come up: the

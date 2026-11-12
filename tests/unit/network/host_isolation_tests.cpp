@@ -321,6 +321,11 @@ void whateverElseIsAddressedToTheHostIsDropped()
 				  0x2000), host).action == FrameAction::drop);
 	require(classify(ip_frame(lan_host, protocol_udp, udp_datagram(1, 2),
 				  0x00b9), host).action == FrameAction::drop);
+	require(classify(ip_frame(lan_host, protocol_tcp,
+				  tcp_segment(1, 2, 3, 0, tcp_syn), 0x2000),
+			 host).action == FrameAction::drop);
+	require(classify(ip_frame(lan_host, protocol_tcp, Bytes(8, 0), 0x0003),
+			 host).action == FrameAction::drop);
 	/* A packet SLiRP would refuse is no reason to pass it on. */
 	auto bad_checksum = ip_frame(lan_host, protocol_tcp,
 		tcp_segment(1, 2, 3, 4, tcp_syn));
@@ -418,9 +423,33 @@ void onlyAFrameJudgedByTheTableMakesTheProviderLookItUp()
 	      static_cast<std::uint8_t>(tcp_fin | tcp_ack)})
 		require(!needs_check(ip_frame(lan_host, protocol_tcp,
 					      tcp_segment(1, 2, 3, 4, flags))));
-	/* Neither does anything that is not TCP or UDP over IPv4. */
-	require(!needs_check(ip_frame(lan_host, protocol_icmp, Bytes(8, 0))));
-	require(!needs_check(ip_frame(lan_host, 47, Bytes(16, 0))));
+	/* Everything the table decides about does: ICMP, the other protocols,
+	 * and every fragment, whatever the first fragment's flags byte holds. */
+	require(needs_check(ip_frame(lan_host, protocol_icmp, Bytes(8, 0))));
+	require(needs_check(ip_frame(lan_host, 47, Bytes(16, 0))));
+	for (const std::uint16_t fragment : {0x2000, 0x00b9, 0x20b9, 0x6000}) {
+		require(needs_check(ip_frame(lan_host, protocol_tcp,
+					     tcp_segment(1, 2, 3, 4, tcp_ack),
+					     fragment)));
+		require(needs_check(ip_frame(lan_host, protocol_tcp,
+					     tcp_segment(1, 2, 3, 4, tcp_syn),
+					     fragment)));
+		require(needs_check(ip_frame(lan_host, protocol_tcp, Bytes(8, 0),
+					     fragment)));
+		require(needs_check(ip_frame(lan_host, protocol_udp,
+					     udp_datagram(1, 2), fragment)));
+		require(needs_check(ip_frame(lan_host, protocol_icmp, Bytes(8, 0),
+					     fragment)));
+		/* A fragment to the virtual network is not judged by the table. */
+		require(!needs_check(ip_frame(gateway, protocol_tcp,
+					      tcp_segment(1, 2, 3, 4, tcp_syn),
+					      fragment)));
+	}
+	/* The Don't Fragment bit is not a fragment. */
+	require(!needs_check(ip_frame(lan_host, protocol_tcp,
+				      tcp_segment(1, 2, 3, 4, tcp_ack), 0x4000)));
+	require(!needs_check(ip_frame(lan_host, protocol_tcp,
+				      tcp_segment(1, 2, 3, 4, tcp_ack), 0)));
 	Bytes arp(42, 0);
 	put16(arp, 12, 0x0806);
 	require(!needs_check(arp));
@@ -429,8 +458,44 @@ void onlyAFrameJudgedByTheTableMakesTheProviderLookItUp()
 	auto cut = ip_frame(lan_host, protocol_udp, udp_datagram(1, 2));
 	cut.resize(14 + 12);
 	require(!needs_check(cut));
-	Bytes short_segment = ip_frame(lan_host, protocol_tcp, Bytes(10, 0));
-	require(!needs_check(short_segment));
+	/* A segment too short to carry its flags is judged by the table. */
+	require(needs_check(ip_frame(lan_host, protocol_tcp, Bytes(10, 0))));
+}
+
+void aFrameThatNeedsNoLookUpIsJudgedAlikeWhateverTheTableHolds()
+{
+	/* The two rules agree: when needs_host_check says the table is not
+	 * consulted, classify_host_bound_frame gives the same answer with the
+	 * host's addresses and without them. */
+	std::vector<Bytes> frames;
+	for (const auto &destination : {lan_host, other_machine, gateway, loopback}) {
+		for (unsigned int flags = 0; flags < 256; ++flags)
+			for (const std::uint16_t fragment : {0x4000, 0x0000})
+				frames.push_back(ip_frame(
+					destination, protocol_tcp,
+					tcp_segment(1, 2, 3, 4,
+						    static_cast<std::uint8_t>(flags), 6),
+					fragment));
+		for (const std::uint16_t fragment :
+		     {0x2000, 0x00b9, 0x20b9, 0x6000, 0x4000, 0x0000}) {
+			frames.push_back(ip_frame(destination, protocol_udp,
+						  udp_datagram(1, 2), fragment));
+			frames.push_back(ip_frame(destination, protocol_icmp,
+						  Bytes(8, 0), fragment));
+			frames.push_back(ip_frame(destination, protocol_tcp,
+						  Bytes(8, 0), fragment));
+		}
+	}
+	std::size_t unjudged = 0;
+	for (const auto &frame : frames) {
+		if (needs_check(frame))
+			continue;
+		++unjudged;
+		require(classify(frame, the_host()).action ==
+			classify(frame, HostAddresses{}).action);
+	}
+	/* A third of the frames at least are in the class this test is about. */
+	require(unjudged > frames.size() / 3);
 }
 
 } // namespace
@@ -450,5 +515,6 @@ int main()
 	theVirtualNetworkIsNeverTheHost();
 	framesThatAreNotIpv4AreLeftToSlirp();
 	onlyAFrameJudgedByTheTableMakesTheProviderLookItUp();
+	aFrameThatNeedsNoLookUpIsJudgedAlikeWhateverTheTableHolds();
 	return EXIT_SUCCESS;
 }
