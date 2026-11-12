@@ -526,6 +526,9 @@ project's Mesa series patches it; the series and its regression suites are in
   with the in-flight work of every process on the GPU.
 - A buffer load never covers more than sixteen bytes, because Apple's backend
   compiler can crash on a wider vector.
+- A render pass that only loads its attachments may start its Metal render
+  encoder late and stop it between draws; consecutive such passes share one
+  main command buffer (`gpu-kosmickrisp-transform-feedback-passes`).
 
 ### Apple8 (A15) device behaviour
 

@@ -233,6 +233,14 @@ if(TARGET uml_gpu_vulkan_draw_test_support)
         LIBRARIES uml_gpu_vulkan_draw_test_support
             "-framework Foundation" "-framework Metal"
         VULKAN)
+    # The transform feedback pass guard counts the Metal command buffers and
+    # encoders a chain of render passes costs, which is Objective-C++ as well.
+    uml_add_gpu_unit_test(gpu-kosmickrisp-transform-feedback-passes
+        uml_gpu_kosmickrisp_transform_feedback_passes_tests
+        kosmickrisp_transform_feedback_passes_tests.mm
+        LIBRARIES uml_gpu_vulkan_draw_test_support
+            "-framework Foundation" "-framework Metal"
+        VULKAN)
     foreach(stem geometry_invocations raster_line geometry_side_effects)
         target_link_libraries(uml_gpu_kosmickrisp_${stem}_tests PRIVATE
             Threads::Threads)
