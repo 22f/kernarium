@@ -2827,6 +2827,16 @@ def check_cas_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -
             fail(f"the ClearKey CAS plugin is missing: {plugin}")
 
 
+# The motion sub-HAL lists a device-orientation sensor, which the window manager then follows instead of
+# judging the accelerometer, when the launch passes androidboot.kernarium.orientation=1. The sub-HAL logs
+# the property when it lists its sensors, and the format string of that line is in the library's bytes.
+# A build whose sub-HAL lacks it never offers the sensor, and no other check would notice: Andarium's
+# host would wait for a guest that does not say it takes orientations.
+MOTION_SUB_HAL = "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so"
+MOTION_SUB_HAL_MARKER = b"Andarium motion: ro.boot.kernarium.orientation="
+MOTION_SUB_HAL_LIMIT = 16 << 20
+
+
 def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     configuration = read_small(archive, infos["VENDOR/etc/sensors/hals.conf"]).decode().strip()
     if configuration != "/vendor/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
@@ -2843,6 +2853,11 @@ def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipI
     ]).decode()
     if not re.search(r"^service \S+ /vendor/bin/hw/android\.hardware\.sensors-service\.multihal$", script, re.M):
         fail("motion sensor HAL service does not start the multi-HAL binary")
+    if MOTION_SUB_HAL_MARKER not in read_small(archive, infos[MOTION_SUB_HAL], MOTION_SUB_HAL_LIMIT):
+        fail(
+            f"{MOTION_SUB_HAL} lacks the device-orientation sensor ({MOTION_SUB_HAL_MARKER.decode()!r} "
+            "is not in it): a launch that asks for the sensor would find none"
+        )
 
 
 # The vibrator HAL exists only on a device with haptics. The host passes the "haptics" ODM SKU for

@@ -2585,7 +2585,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         archive.writestr(f"{artifact}.odex", b"odex")
                         archive.writestr(f"{artifact}.vdex", b"vdex")
                 archive.writestr("VENDOR/bin/hw/android.hardware.sensors-service.multihal", synthetic_aarch64_elf())
-                archive.writestr("VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so", synthetic_aarch64_elf())
+                archive.writestr("VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so",
+                                 synthetic_aarch64_elf() + b"Andarium motion: ro.boot.kernarium.orientation=%d\0")
                 archive.writestr("VENDOR/etc/sensors/hals.conf",
                                  "/vendor/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so\n")
                 archive.writestr("VENDOR/etc/init/android.hardware.sensors-service-multihal.rc",
@@ -3264,6 +3265,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"VENDOR/bin/hw/android.hardware.fixture-service": synthetic_arm_elf()}}),
             ("missing-motion-backend", {"entries": {
                 "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": None}}),
+            ("motion-backend-without-orientation", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": synthetic_aarch64_elf()}}),
             ("foreign-motion-backend", {"entries": {
                 "VENDOR/etc/sensors/hals.conf": b"/vendor/lib64/hw/other.so\n"}}),
             ("missing-motion-instance", {"entries": {
