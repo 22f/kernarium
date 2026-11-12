@@ -915,6 +915,86 @@ void theApplicationLimitIsThePhysicalCoresAtMostTheMeasuredCount()
 	}
 }
 
+/* A run starts exactly the sizes from 512 MiB through the ceiling in 64 MiB
+ * steps: the runtime refuses a size by guest_memory_admitted under
+ * process_guest_memory_ceiling_mib, as the loader answers the applications.
+ * The ceiling is the first size past it that is refused. */
+void aRunStartsTheSizesFromTheMinimumThroughTheCeilingOnTheSteps()
+{
+	static_assert(budget::guest_memory_admitted(512, 4096));
+	static_assert(budget::guest_memory_admitted(4096, 4096));
+	static_assert(budget::guest_memory_admitted(4160, 9152),
+		"a size past 4 GiB is no longer refused");
+	static_assert(budget::guest_memory_admitted(9152, 9152));
+	static_assert(!budget::guest_memory_admitted(9216, 9152));
+	static_assert(!budget::guest_memory_admitted(4160, 4096));
+	static_assert(!budget::guest_memory_admitted(0, 9152));
+	static_assert(!budget::guest_memory_admitted(448, 9152));
+	static_assert(!budget::guest_memory_admitted(513, 9152));
+	static_assert(!budget::guest_memory_admitted(4097, 9152));
+	static_assert(!budget::guest_memory_admitted(
+		std::numeric_limits<std::uint64_t>::max(), 9152));
+	/* A process: the device window's ceiling (the iPad mini 6's RAM is
+	 * under 4 GiB, a 16 GB iPad's over the window) and a macOS window's. */
+	static_assert(budget::process_guest_memory_ceiling_mib(false, 0) == 9152);
+	static_assert(budget::process_guest_memory_ceiling_mib(false,
+		16384 * mib) == 9152);
+	static_assert(budget::process_guest_memory_ceiling_mib(false,
+		3862 * mib) == 4096);
+	static_assert(budget::process_guest_memory_ceiling_mib(true,
+		65536 * mib) == 65536);
+	static_assert(budget::process_guest_memory_ceiling_mib(true, 0) ==
+		budget::guest_memory_range_maximum_mib);
+	constexpr std::uint32_t ceiling = 9152;
+	for (std::uint64_t size = 0; size <= ceiling + 256; ++size) {
+		const bool on_steps = size >= 512 && size <= ceiling &&
+			(size - 512) % 64 == 0;
+		require(budget::guest_memory_admitted(size, ceiling) == on_steps,
+			std::to_string(size) + " MiB");
+	}
+}
+
+/* The settings offer no size the runtime refuses: for each window, the host's
+ * RAM (the iPad mini 6, 6, 8, 12 and 16 GB devices, Macs, unknown), limit
+ * (none through 20 GiB) and vCPU count, the offered maximum, the conservative
+ * size and the default are sizes the run admits under the same ceiling, the
+ * ceiling is the largest the run admits, and the step past it is refused. */
+void everyOfferedSizeIsOneTheRunAdmits()
+{
+	constexpr std::array<std::uint64_t, 9> rams{
+		3862, 6144, 8192, 12288, 16384, 24576, 65536, 196608, 0};
+	for (const bool macos_window : {false, true})
+		for (const auto ram : rams) {
+			const auto ceiling = budget::process_guest_memory_ceiling_mib(
+				macos_window, ram * mib);
+			require(budget::guest_memory_admitted(ceiling, ceiling));
+			require(!budget::guest_memory_admitted(
+				ceiling + budget::guest_memory_step_mib, ceiling));
+			require(!budget::guest_memory_admitted(ceiling - 1U, ceiling));
+			for (std::uint64_t limit_mib = 0; limit_mib <= 20480;
+			     limit_mib += limit_mib == 0 ? 1536 : 61) {
+				const auto limit = limit_mib * mib;
+				for (unsigned vcpus = 1; vcpus <= 8; ++vcpus) {
+					const auto maximum = budget::maximum_guest_memory_mib(
+						limit, vcpus, budget::maximum_memory_set, ceiling);
+					require(budget::guest_memory_admitted(maximum, ceiling),
+						"the offered maximum " + std::to_string(maximum) +
+							" MiB at " + std::to_string(limit_mib) +
+							" MiB and " + std::to_string(vcpus) +
+							" vCPUs is refused under " +
+							std::to_string(ceiling));
+					require(budget::guest_memory_admitted(
+						budget::conservative_guest_memory_mib(limit, vcpus,
+							budget::launch_memory_set, ceiling),
+						ceiling));
+					require(budget::guest_memory_admitted(
+						budget::default_guest_memory_mib(limit, vcpus),
+						ceiling));
+				}
+			}
+		}
+}
+
 } // namespace
 
 int main()
@@ -969,6 +1049,10 @@ int main()
 			theCeilingIsTheWindowAndTheHostsRAMWhicheverIsLess},
 		{"the-application-limit-is-the-physical-cores-at-most-the-measured-count",
 			theApplicationLimitIsThePhysicalCoresAtMostTheMeasuredCount},
+		{"a-run-starts-the-sizes-from-the-minimum-through-the-ceiling-on-the-steps",
+			aRunStartsTheSizesFromTheMinimumThroughTheCeilingOnTheSteps},
+		{"every-offered-size-is-one-the-run-admits",
+			everyOfferedSizeIsOneTheRunAdmits},
 	};
 	return uml::testing::runNamedTests(tests);
 }
