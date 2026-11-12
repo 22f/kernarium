@@ -524,7 +524,7 @@ struct MemoryPolicyTests {
     }
 
     @Test func theGraphicsMemoryWhileCameraIsLiveIsTheBudgetLessTheCamerasReserve() {
-        // The runtime's figures: a reserve for every budget (106 MiB at the tier every host gets), asked once each.
+        // The runtime's figures: a reserve for every budget (one fixed figure at the tier every host gets), asked once each.
         var reserveAsked = 0
         let policy = MemoryPolicy(
             processorCount: 2,

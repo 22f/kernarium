@@ -69,8 +69,13 @@ using VideoFormatFacts = CameraCaptureFormat;
 [[nodiscard]] std::optional<CameraStillSize> preferredPhotoSize(std::span<const VideoFormatFacts> formats,
                                                                 const CameraLimits& limits);
 
+// The NV12 bytes of a frame a format delivers for a stream of `width` by
+// `height` (deliveredFrameSize), tightly packed.
+[[nodiscard]] std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height) noexcept;
+
 // The format a stream of `width` by `height` at `frameRate` runs in: one that
-// covers the stream and takes its rate. Of those, the ones that make the
+// covers the stream, takes its rate and delivers a frame within the limits'
+// maximumFrameBytes. Of those, the ones that make the
 // preferred photo come first, so that the photos the guest is offered can be
 // made while it streams; among equals the smallest, and the full-range one
 // among those of one size. Nothing when no format takes the stream. A camera

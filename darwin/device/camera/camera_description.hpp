@@ -19,6 +19,14 @@ namespace uml::camera {
  * wire. Every function here is a pure function of the platform's description,
  * the tier and the calibration, so a test checks it without a device. */
 
+/* What a guest of a tier may ask of the platform's cameras, which the formats
+ * the platform runs them in must serve: the offered stills and the frames
+ * delivered. */
+[[nodiscard]] constexpr uml::platform::CameraLimits cameraLimitsOf(const CameraTierLimits& limits) noexcept
+{
+    return {limits.maximumStillPixels, maximumDeliveredFrameBytes(limits)};
+}
+
 /* A video size and the frame rates it runs at. */
 struct VideoMode {
     std::uint32_t width {};

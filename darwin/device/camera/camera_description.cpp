@@ -229,7 +229,7 @@ void offerCameraStills(CameraDescription& camera, const CameraTierLimits& limits
         return set.size() > 1 && std::find(set.begin(), set.end(), camera.platformIndex) != set.end();
     });
     const auto offer = uml::platform::offerStills(camera.info.captureFormats, requests, concurrent,
-                                                  uml::platform::CameraLimits {limits.maximumStillPixels}, stillsHoldUntilRate);
+                                                  cameraLimitsOf(limits), stillsHoldUntilRate);
     camera.jpegSizes = offer.sizes;
     camera.info.stillSizes = offer.sizes;
     if (offer.maximumRate >= fastest) return;

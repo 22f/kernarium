@@ -100,6 +100,12 @@ std::vector<CameraStillSize> photoSizesMade(std::span<const VideoFormatFacts> fo
     return sizes;
 }
 
+std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height) noexcept
+{
+    const FrameSize frame = deliveredFrameSize(format.width, format.height, width, height);
+    return std::uint64_t(frame.width) * frame.height * 3 / 2;
+}
+
 std::optional<CameraStillSize> preferredPhotoSize(std::span<const VideoFormatFacts> formats, const CameraLimits& limits)
 {
     const auto sizes = photoSizesMade(formats, limits);
@@ -119,6 +125,7 @@ std::optional<std::size_t> chooseVideoFormat(std::span<const VideoFormatFacts> f
         if (format.width < width || format.height < height) continue;
         if (multiCameraOnly && !format.multiCamera) continue;
         if (!takesRate(format, frameRate)) continue;
+        if (limits.maximumFrameBytes != 0 && deliveredFrameBytes(format, width, height) > limits.maximumFrameBytes) continue;
         const std::uint64_t area = std::uint64_t(format.width) * format.height;
         const bool makes = preferred && formatMakesPhoto(format, *preferred);
         const bool better = !best || (makes && !bestMakes) ||

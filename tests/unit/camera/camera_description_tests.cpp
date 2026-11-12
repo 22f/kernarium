@@ -5,6 +5,7 @@
 #include "calibration_store.hpp"
 #include "camera_description.hpp"
 #include "require.hpp"
+#include "photo_dimensions.hpp"
 #include "synthetic_camera.hpp"
 #include "wire_bytes.hpp"
 
@@ -250,6 +251,45 @@ void testOfferedStillsFollowTheFormats()
             "a camera that lists no 48 MP offers none");
 }
 
+// The reserve holds for what the platform delivers: for every stream a tier permits, in every rate, the format a
+// camera runs in delivers a frame the capture pools were counted for.
+void testTheFormatsADeliveryNeverExceedsTheReservesFrame()
+{
+    // A camera whose only 12 MP format is square, and which has a 1080p format that makes none: a 1080p stream from the
+    // square one is delivered 1920x1920, more than a buffer of the reserve holds, so it runs in the other.
+    CameraInfo square;
+    square.identifier = "square";
+    square.captureFormats = {
+        {1920, 1920, {{1, 30}}, {{4032, 3024}}, true, true},
+        {1920, 1080, {{1, 60}}, {{1920, 1080}}, true, true},
+    };
+    for (const auto& format : square.captureFormats)
+        square.videoFormats.push_back({format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), true});
+    square.stillSizes = {{4032, 3024}, {1920, 1080}};
+    for (const auto tier : {CameraTier::small, CameraTier::large}) {
+        const auto limits = limitsOf(tier);
+        const auto pool = cameraHostMemory(tier).capturePools / limits.buffers;
+        for (const auto& info : {tabletCamera(), square}) {
+            const auto cameras = arrangeCameras(std::vector<CameraInfo> {info}, {}, "tablet", CalibrationStore(), [&] {
+                ArrangementOptions options;
+                options.tier = tier;
+                return options;
+            }());
+            require(cameras.size() == 1 && !cameras[0].video.empty());
+            for (const auto& mode : cameras[0].video)
+                for (std::uint32_t rate = mode.minimumFrameRate; rate <= mode.maximumFrameRate; ++rate) {
+                    const auto chosen = chooseVideoFormat(info.captureFormats, mode.width, mode.height, rate, false, cameraLimitsOf(limits));
+                    if (!chosen) continue;
+                    require(deliveredFrameBytes(info.captureFormats[*chosen], mode.width, mode.height) <= pool,
+                            "the frame delivered to a permitted stream fits one buffer of the reserve's capture pools");
+                }
+        }
+    }
+    require(cameraHostMemory(CameraTier::small).capturePools / limitsOf(CameraTier::small).buffers ==
+                deliveredFrameBytes(tabletCamera().captureFormats[1], 1920, 1080),
+            "and the iPad mini's 4:3 format at 1080p is exactly what a buffer holds");
+}
+
 // A camera that runs with others streams in a multi-camera session's formats then, and a still taken beside another
 // camera is made in one: both are what the offer holds for.
 void testConcurrentCamerasOfferWhatAMultiCameraSessionMakes()
@@ -320,18 +360,20 @@ void testRawNeedsCalibration()
 void testHostMemoryReserve()
 {
     const auto small = cameraHostMemory(CameraTier::small);
-    require(small.capturePools == 4ull * 1920 * 1080 * 3 / 2, "four 1080p NV12 frames");
+    require(maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) == 1920ull * 1440 * 3 / 2,
+            "the frame a 4:3 format delivers to a 1080p stream");
+    require(small.capturePools == 4ull * 1920 * 1440 * 3 / 2, "four such NV12 frames");
     require(small.staging == 1920ull * 1080 * 3 / 2, "one frame");
     require(small.rawStill == 12'700'000ull * 2 * 3, "the RAW pixels three times: the platform's, the copy, the DNG");
     require(small.jpegStill == 12'700'000ull / 2 * 3, "three copies of the JPEG");
-    require(small.total() == 12'441'600ull + 3'110'400ull + 76'200'000ull + 19'050'000ull, "the parts add up");
-    require(cameraHostMemoryReserveMiB(CameraTier::small) == 106, "105.7 MiB, rounded up");
+    require(small.total() == 16'588'800ull + 3'110'400ull + 76'200'000ull + 19'050'000ull, "the parts add up");
+    require(cameraHostMemoryReserveMiB(CameraTier::small) == 110, "109.6 MiB, rounded up");
     // The tier every host gets is the small one, whatever its budget, and so is the reserve it holds.
-    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 106);
-    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 106);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(534ull << 20)) == 110);
+    require(cameraHostMemoryReserveMiB(cameraTierForBudget(1249ull << 20)) == 110);
     const auto large = cameraHostMemory(CameraTier::large);
-    require(large.capturePools == 6ull * 3840 * 2160 * 3 / 2 && large.staging == 3840ull * 2160 * 3 / 2);
-    require(cameraHostMemoryReserveMiB(CameraTier::large) == 441 && large.total() > small.total(),
+    require(large.capturePools == 6ull * 3840 * 2880 * 3 / 2 && large.staging == 3840ull * 2160 * 3 / 2);
+    require(cameraHostMemoryReserveMiB(CameraTier::large) == 465 && large.total() > small.total(),
             "lifting the cap raises it with the tier");
 }
 
@@ -489,6 +531,7 @@ int main()
     testOtherHosts();
     testTiers();
     testOfferedStillsFollowTheFormats();
+    testTheFormatsADeliveryNeverExceedsTheReservesFrame();
     testConcurrentCamerasOfferWhatAMultiCameraSessionMakes();
     testHostsWithoutCaptureFormatsOfferTheirSizesUpToTheCap();
     testHostMemoryReserve();

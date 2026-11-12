@@ -143,26 +143,26 @@ void theConservativeSumLeavesTheGPUWhatIsLeft()
 }
 
 /* A live camera session holds host memory outside the GPU (the camera
- * device's reserve, 106 MiB at the tier every host is offered:
+ * device's reserve, 110 MiB at the tier every host is offered:
  * camera_tiers.hpp), and the GPU's pool is B less it, taken after B is clamped
  * to the floor. */
 void aLiveCameraTakesItsReserveOutOfTheBudget()
 {
-	constexpr std::uint64_t reserve = 106 * mib;
+	constexpr std::uint64_t reserve = 110 * mib;
 	/* An iPad mini 6 with the default guest: B is 534 MiB. */
 	const auto mini = budgetOf(2867, 1536, 64, 240 + 24 + 320, 149);
 	require(mini.bytes == 534 * mib);
 	require(platform::gpu_pool_bytes(mini, 0) == 534 * mib,
 		"blocked cameras and none take nothing");
-	require(platform::gpu_pool_bytes(mini, reserve) == 428 * mib);
+	require(platform::gpu_pool_bytes(mini, reserve) == 424 * mib);
 	require(mini.bytes == 534 * mib, "B itself is unchanged");
 	/* A budget at the floor gives the pool less than the floor: the reserve is
 	 * taken after the clamp. */
 	const auto floor = budgetOf(2867, 2048, 64, 240 + 24 + 320, 149);
 	require(floor.bytes == 384 * mib && floor.short_of_floor);
-	require(platform::gpu_pool_bytes(floor, reserve) == 278 * mib);
+	require(platform::gpu_pool_bytes(floor, reserve) == 274 * mib);
 	/* Without a limit the budget is the guest's RAM. */
-	require(platform::gpu_pool_bytes(budgetOf(0, 2048), reserve) == (2048 - 106) * mib);
+	require(platform::gpu_pool_bytes(budgetOf(0, 2048), reserve) == (2048 - 110) * mib);
 	/* The pool is never negative. */
 	require(platform::gpu_pool_bytes(floor, floor.bytes) == 0);
 	require(platform::gpu_pool_bytes(floor, floor.bytes + 1) == 0);

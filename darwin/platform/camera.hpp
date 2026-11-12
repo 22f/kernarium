@@ -73,6 +73,9 @@ struct CameraCaptureFormat {
 struct CameraLimits {
     // The largest JPEG the guest is offered, in pixels.
     std::uint64_t maximumStillPixels {};
+    // The largest frame the host may deliver for a stream, in NV12 bytes: a
+    // format whose frame for the stream is larger is not run.
+    std::uint64_t maximumFrameBytes {};
 };
 
 // What a Bayer still teaches about a sensor. The matrices are DNG's, row-major.

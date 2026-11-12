@@ -37,8 +37,10 @@ application's statements (the sensor orientation, the rotation that
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
   exercises them.
 - **Memory.** A live session holds host memory outside the guest's RAM: the
-  capture pools, the device's staging and the transients of a 12 MP RAW still
-  with its DNG and JPEG, 106 MiB at the small tier
+  capture pools (four frames of the 4:3 frame of the tier's width, which is the
+  largest the platform delivers: a format that would deliver more to a stream
+  is not run for it), the device's staging and the transients of a 12 MP RAW
+  still with its DNG and JPEG, 110 MiB at the small tier
   (`cameraHostMemoryReserveMiB`). The GPU's pool is the budget B less that
   while the cameras are live and B otherwise, in the runtime, the launcher and
   the applications' figure alike.

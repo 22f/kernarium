@@ -43,13 +43,24 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
                                      : CameraTierLimits {3840, 2160, 50'000'000, 6};
 }
 
+/* The largest frame the platform delivers to the device, in NV12 bytes: a frame
+ * of the tier's width at 4:3, the tallest aspect ratio a camera format has. The
+ * platform scales a format's frames to the stream's size at the format's own
+ * aspect ratio, so a 4:3 format delivers a 1920x1440 frame to a 1080p stream;
+ * a format that would deliver more is not run for the stream. */
+[[nodiscard]] constexpr std::uint64_t maximumDeliveredFrameBytes(const CameraTierLimits& limits) noexcept
+{
+    return std::uint64_t {limits.maximumVideoWidth} * ((std::uint64_t {limits.maximumVideoWidth} * 3 + 3) / 4) * 3 / 2;
+}
+
 /* The host-side memory a live session of a tier can hold at its worst, in
  * bytes, outside the guest's RAM. A live session takes it out of the GPU
  * budget B (gpu_pool_bytes in platform/gpu_budget.hpp), so the application's
  * memory limit holds it. Each part is derived from the tier's limits:
- *  - the capture pools: one NV12 frame of the largest video size for each of
- *    the tier's buffers, which the platform's capture session holds;
- *  - the device's staging: one NV12 frame of that size, where a frame is
+ *  - the capture pools: one NV12 frame of the largest size the platform
+ *    delivers (maximumDeliveredFrameBytes) for each of the tier's buffers,
+ *    which the platform's capture session holds;
+ *  - the device's staging: one NV12 frame of the largest video size, where a frame is
  *    cropped, rotated and scaled before it is copied to the guest;
  *  - the still's transients, for one 12 MP RAW still with its DNG: the RAW
  *    pixels (2 bytes each) three times, the platform's buffer, the device's
@@ -73,7 +84,7 @@ struct CameraHostMemory {
     const CameraTierLimits limits = limitsOf(tier);
     const std::uint64_t frame = std::uint64_t {limits.maximumVideoWidth} * limits.maximumVideoHeight * 3 / 2;
     return {
-        .capturePools = frame * limits.buffers,
+        .capturePools = maximumDeliveredFrameBytes(limits) * limits.buffers,
         .staging = frame,
         .rawStill = limits.maximumStillPixels * 2 * 3,
         .jpegStill = limits.maximumStillPixels / 2 * 3,

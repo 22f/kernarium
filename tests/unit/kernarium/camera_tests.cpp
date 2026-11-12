@@ -154,7 +154,7 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
         uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tier, "");
     require(phone.hasCameras() && liveCameraReserveMiB(CameraMode::live, phone.layout, tier) == reserve,
         "a live session with cameras holds the tier's reserve");
-    require(reserve == 106, "the figure the budget gives up");
+    require(reserve == 110, "the figure the budget gives up");
     require(liveCameraReserveMiB(CameraMode::blocked, phone.layout, tier) == 0, "a blocked session opens none");
     // A live session that composes `none` (a host whose cameras the image cannot describe, or a source that is
     // not a name) has no device, so it holds nothing.

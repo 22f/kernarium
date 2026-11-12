@@ -238,6 +238,29 @@ void theFullRangeFormatWinsAmongEqualOnes()
 // The guest never asks for more than its cap, so a format is not chosen for a
 // size above it: the cheaper format that makes the largest permitted still wins
 // over the larger one that makes more.
+void aFormatThatWouldDeliverMoreThanTheBoundIsNotChosen()
+{
+    // A 1:1 format that makes 12 MP and a 16:9 one that makes none: a 1080p
+    // stream from the square one is delivered 1920x1920, more than the
+    // reserve's frame (the 4:3 frame of the tier's width, 1920x1440).
+    const std::vector<VideoFormatFacts> formats {
+        format(1920, 1920, {{4032, 3024}}),
+        format(1920, 1080, {{1920, 1080}}),
+    };
+    const CameraLimits bounded {12'700'000, 1920ull * 1440 * 3 / 2};
+    const auto unbounded = chooseVideoFormat(formats, 1920, 1080, 30, false, capped);
+    require(unbounded && *unbounded == 0, "with no bound the square format that makes 12 MP is chosen");
+    const auto chosen = chooseVideoFormat(formats, 1920, 1080, 30, false, bounded);
+    require(chosen && *chosen == 1, "the bound chooses the format whose frame fits");
+    require(deliveredFrameBytes(formats[0], 1920, 1080) == 1920ull * 1920 * 3 / 2, "1920x1920 NV12");
+    require(!chooseVideoFormat({formats.data(), 1}, 1920, 1080, 30, false, bounded), "and where none fits nothing runs");
+    // The frame a 4:3 format delivers to a 1080p stream is the bound itself.
+    require(deliveredFrameBytes(tabletFormats[1], 1920, 1080) == 1920ull * 1440 * 3 / 2, "4:3 at 1080p is 4147200 bytes");
+    require(deliveredFrameBytes(format(1920, 1080, {}), 640, 480) == 864ull * 486 * 3 / 2, "scaled, 864x486");
+    require(chooseVideoFormat(tabletFormats, 1920, 1080, 30, false, bounded) == std::optional<std::size_t>(1),
+            "the 4:3 format the iPad mini streams 1080p from fits the bound");
+}
+
 void theCapDecidesWhichStillAFormatIsChosenFor()
 {
     const std::vector<VideoFormatFacts> formats {
@@ -454,6 +477,7 @@ int main()
     aFormatThatCannotTakeTheRateOrTheSizeIsNotChosen();
     aMultiCameraSessionChoosesAmongItsFormatsOnly();
     theFullRangeFormatWinsAmongEqualOnes();
+    aFormatThatWouldDeliverMoreThanTheBoundIsNotChosen();
     theCapDecidesWhichStillAFormatIsChosenFor();
     aSizeWiderThanTheOutputMaximumIsNotMade();
     theOfferIsWhatEveryRunMakes();
