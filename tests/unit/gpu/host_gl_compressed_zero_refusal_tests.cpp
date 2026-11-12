@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -308,7 +309,9 @@ void run(VirglRenderer& renderer, const Case& test, std::uint32_t resourceId)
     }
     check(injection.injected > 0, test.name, "no refusal was injected");
     if (test.always) {
-        check(result != 0 && !exists, test.name,
+        check(result == ENOMEM || result == -ENOMEM, test.name,
+            "a fill refused every time was not answered with ENOMEM");
+        check(!exists, test.name,
             "a texture whose fill was refused every time was created");
     } else {
         check(result == 0 && injection.attempts == 2, test.name,

@@ -82,7 +82,8 @@ Guest-visible guarantees:
   copy, and the next fence tries again; a read-back into a pinned segment is
   not checked. The read-back of the first export leaves the texture clean when
   it is refused, because the importer may write the segment before any fence:
-  an importer that reads the segment first sees zeros, and its own frame is
+  an importer that reads the segment first, and GL's own next read of the
+  texture, see zeros until GL draws it again, and an importer's own frame is
   never replaced by an older texture. The retry cannot see an importer write,
   so a buffer with a GL writer and an importer writer can lose the importer's
   frame to the retry.
