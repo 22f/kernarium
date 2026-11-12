@@ -1239,10 +1239,12 @@ final class AppModel {
             ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                if let driver {
-                    try await self.installAskingAboutLegacyApps(url, with: driver, detail: detail)
-                } else {
-                    try await Self.playInstall(update)
+                try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                    if let driver {
+                        try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                    } else {
+                        try await self.playInstall(bypassLowTargetSdkBlock: bypass, update)
+                    }
                 }
                 // 100% for a moment, then the result.
                 update(BusyUpdate(progress: 1))
@@ -1259,7 +1261,8 @@ final class AppModel {
     /// The file's security scope is the caller's and spans the question; each
     /// attempt reads the file and checks the room afresh.
     private func installAskingAboutLegacyApps(
-        _ url: URL, with driver: any RuntimeDriver, detail: String
+        detail: String,
+        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> Void
     ) async throws {
         let epoch = operationEpoch
         var flow = LegacyInstallFlow()
@@ -1275,7 +1278,7 @@ final class AppModel {
                     }
                 }
                 do {
-                    try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                    try await attempt(bypass, update)
                     flow.attemptEnded(.installed)
                 } catch let refused as LegacyApkRefused {
                     flow.attemptEnded(.tooOldTarget(refused.target))
@@ -1340,6 +1343,24 @@ final class AppModel {
 
     /// The title of an install that did not happen.
     static let installFailure = String(localized: "App not installed")
+
+    #if !APP_STORE
+    /// What one attempt of the preview's install does instead of
+    /// `playInstall`, for a preview that plays how the install can end.
+    /// The App Store configuration leaves this out.
+    @ObservationIgnored
+    var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    #endif
+
+    private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {
+        #if !APP_STORE
+        if let previewInstallAttempt {
+            try await previewInstallAttempt(bypassLowTargetSdkBlock, update)
+            return
+        }
+        #endif
+        try await Self.playInstall(update)
+    }
 
     /// The preview's install: the file goes over, the guest takes its time.
     private static func playInstall(_ update: @Sendable (BusyUpdate) -> Void) async throws {

@@ -111,7 +111,8 @@ struct AppEntry {
     /// datastore says; other session screenshots leave it out.
     func configureTips() {
         if resetTips { try? Tips.resetDatastore() }
-        if screen == "session-tip" {
+        // The legacy install, played, shows the tip as a real session may.
+        if screen == "session-tip" || (screen == "install-legacy" && play) {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
@@ -515,6 +516,26 @@ struct AppEntry {
             try? await Task.sleep(for: .milliseconds(450))
             model.createBugReport()
         case "install-apk" where play:
+            try? await Task.sleep(for: .milliseconds(450))
+            model.installPicked(PreviewData.sampleApk())
+        case "install-legacy" where play:
+            // The whole install: Android takes its time over the first
+            // attempt (`-legacyRefusalSeconds`, 8 by default: long enough to
+            // unfold a folding iPhone meanwhile) and refuses the app for its
+            // version; the answer decides the rest.
+            let refusalSeconds = UserDefaults.standard.string(forKey: "legacyRefusalSeconds").flatMap { Double($0) } ?? 8
+            model.previewInstallAttempt = { bypass, update in
+                for step in 1...10 {
+                    try await Task.sleep(for: .milliseconds(100))
+                    update(BusyUpdate(progress: Double(step) / 10 * 0.8))
+                }
+                guard bypass else {
+                    update(BusyUpdate(detail: String(localized: "The virtual machine is installing the app\u{2026}"), cancellable: false))
+                    try await Task.sleep(for: .seconds(refusalSeconds))
+                    throw LegacyApkRefused(target: LegacyTarget(appLevel: 7, requiredLevel: 24))
+                }
+                try await Task.sleep(for: .milliseconds(1200))
+            }
             try? await Task.sleep(for: .milliseconds(450))
             model.installPicked(PreviewData.sampleApk())
         case "install-legacy":
