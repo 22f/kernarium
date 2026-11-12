@@ -14,12 +14,15 @@ from __future__ import annotations
 
 __import__("sys").dont_write_bytecode = True
 
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import re
 import struct
 import sys
 import unittest
+from unittest import mock
 import zlib
 
 TESTS = Path(__file__).resolve().parents[2]
@@ -205,17 +208,23 @@ class PlanTests(unittest.TestCase):
                 runner.make_plan(name, profile, "blocked")
 
     def test_the_default_layout_of_a_profile_is_the_synthetic_camera_it_presents(self) -> None:
-        # darwin/platform/synthetic_camera: the phone's back lenses have flash, manual control and RAW
-        # and its zoom and front cameras stream together; the tablet's front camera cannot make the
-        # guaranteed concurrent sizes; the laptop has one front camera.
+        # darwin/platform/synthetic_camera: the phone's back lenses have flash and manual control and its
+        # zoom and front cameras stream together; the tablet's front camera cannot make the guaranteed
+        # concurrent sizes; the laptop has one front camera. A fresh host offers no RAW: it comes with the
+        # colour data a first still keeps (darwin/device/camera/README.md, Calibration).
         phone = layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]]
         self.assertEqual((phone.flash, phone.manual, phone.raw, phone.concurrent, phone.front2160),
-                         (True, True, True, True, True))
+                         (True, True, False, True, True))
         tablet = layouts.by_name()[runner.DEFAULT_LAYOUTS["tablet"]]
         self.assertEqual((tablet.flash, tablet.manual, tablet.raw, tablet.concurrent),
-                         (True, True, True, False))
+                         (True, True, False, False))
         self.assertEqual(layouts.by_name()[runner.DEFAULT_LAYOUTS["laptop"]].features,
                          ("android.hardware.camera.any", "android.hardware.camera.front"))
+        for name in runner.DEFAULT_LAYOUTS.values():
+            self.assertFalse(layouts.by_name()[name].raw, name)
+            # the layout a calibrated host composes is the same with RAW, and it exists
+            if layouts.by_name()[name].manual:
+                self.assertTrue(name.replace("manual", "manual-raw", 1) in layouts.by_name(), name)
 
     def test_the_camera_ids_follow_the_hals_plan(self) -> None:
         header = (REPOSITORY / "android/lineage-24/overlay/camera/hal/camera_ids.hpp").read_text(encoding="utf-8")
@@ -324,9 +333,10 @@ class GuestReaderTests(unittest.TestCase):
             "android.hardware.camera", "android.hardware.camera.any", "android.hardware.camera.autofocus",
             "android.hardware.camera.capability.manual_sensor", "android.hardware.camera.capability.raw",
             "android.hardware.camera.flash", "android.hardware.camera.front"})
-        # They are what the phone's default layout states, bar the combination feature.
+        # The phone's default layout states them, bar RAW (a fresh host has no calibration) and the combination feature.
         stated = set(layouts.by_name()[runner.DEFAULT_LAYOUTS["phone"]].features)
         self.assertEqual(stated - earned, {runner.CONCURRENT_FEATURE})
+        self.assertEqual(earned - stated, {"android.hardware.camera.capability.raw"})
         # A back camera without flash or RAW, and a layout that says it has them, differ.
         plain = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "OFF AUTO"))
         self.assertEqual(runner.features_of(plain), {"android.hardware.camera", "android.hardware.camera.any",
@@ -336,6 +346,17 @@ class GuestReaderTests(unittest.TestCase):
         self.assertEqual(runner.features_of(front), {"android.hardware.camera.any", "android.hardware.camera.front",
                                                      "android.hardware.camera.capability.manual_sensor"})
         self.assertEqual(runner.features_of([]), set())
+        # Android 17 prints the autofocus modes as numbers: 1 is AUTO.
+        numbered = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "0 1 2 3 4"))
+        self.assertEqual(numbered[0].af_modes, {"OFF", "AUTO", "MACRO", "CONTINUOUS_VIDEO", "CONTINUOUS_PICTURE"})
+        self.assertIn("android.hardware.camera.autofocus", runner.features_of(numbered))
+        unfocused = runner.parse_static_info(static_info("0", "BACK", "BACKWARD_COMPATIBLE", "FALSE", "0"))
+        self.assertNotIn("android.hardware.camera.autofocus", runner.features_of(unfocused))
+
+    def test_the_cameraserver_restart_needs_a_debuggable_build(self) -> None:
+        self.assertIsNone(runner.cameraserver_restart_skip("1"))
+        for value in ("0", "", "unknown"):
+            self.assertIn("user build", runner.cameraserver_restart_skip(value) or "")
 
     def test_the_blocked_preview_is_sampled_twice(self) -> None:
         chart, black = (120.0, 60.0), (2.0, 1.0)
@@ -355,6 +376,42 @@ class GuestReaderTests(unittest.TestCase):
         self.assertEqual(runner.parse_listing("IMG_1.jpg\nIMG_2.jpg\n"), {"IMG_1.jpg", "IMG_2.jpg"})
         self.assertEqual(runner.parse_listing("ls: /sdcard/DCIM/Camera: No such file or directory\n"), set())
         self.assertEqual(runner.parse_listing(""), set())
+
+
+class ProviderLifeTests(unittest.TestCase):
+    PS = """\
+  PID NAME
+    1 init
+  612 cameraserver
+ 1480 android.hardware.camera.provider@2.7-service-google-lazy
+ 1500 org.lineageos.aperture
+"""
+
+    def test_the_provider_process_is_read_from_the_process_listing(self) -> None:
+        self.assertEqual(runner.parse_provider_pids(self.PS), [1480])
+        self.assertEqual(runner.parse_provider_pids("  PID NAME\n  612 cameraserver\n"), [])
+        self.assertEqual(runner.parse_provider_pids(""), [])
+
+    class Guest:
+        def __init__(self, listings: list[list[int]]) -> None:
+            self.listings = listings
+
+        def alive(self) -> None:
+            pass
+
+        def provider_pids(self) -> list[int]:
+            return self.listings.pop(0) if len(self.listings) > 1 else self.listings[0]
+
+    def test_the_wait_ends_when_the_provider_is_gone(self) -> None:
+        guest = self.Guest([[1480], [1480], []])
+        with mock.patch.object(runner.time, "sleep"):
+            self.assertGreaterEqual(runner.wait_provider_exit(guest, "after the listing"), 0)
+
+    def test_a_provider_that_never_exits_fails_the_wait(self) -> None:
+        guest = self.Guest([[1480]])
+        with mock.patch.object(runner.time, "sleep"), mock.patch.object(runner, "PROVIDER_EXIT_SECONDS", 0.05):
+            with self.assertRaisesRegex(runner.Failure, "camera provider to exit after the listing: it still runs as \\[1480\\]"):
+                runner.wait_provider_exit(guest, "after the listing")
 
 
 class PngTests(unittest.TestCase):
@@ -404,6 +461,498 @@ class JpegTests(unittest.TestCase):
         for data in (b"", b"\x89PNG\r\n", b"\xff\xd8\x00"):
             with self.subTest(data=data), self.assertRaises(ValueError):
                 runner.parse_jpeg(data)
+
+
+REAL_DUMP_CLIENT = (
+    "Active Camera Clients:\n(Camera ID: 1, Cost: 100, PID: 2131, Score: 0, State: 2User Id: 0, "
+    "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {2, 3, 4, })\n"
+    "Active Client listener PIDs: 605, 876, 2131\n")
+CONTENT_ROWS = (
+    "Row: 0 _id=33, _display_name=VID_20261112_123456.mp4, _data=/storage/emulated/0/Movies/Aperture/"
+    "VID_20261112_123456.mp4, duration=4021, _size=912345\n"
+    "Row: 1 _id=34, _display_name=a, b.mp4, _data=/storage/emulated/0/Movies/x.mp4, duration=NULL, _size=0\n")
+HAL_LOG = """\
+11-12 12:38:31.955  2194  2215 I GCH_AidlCameraDeviceSession: ProcessBatchCaptureResult: First frame done
+11-12 12:38:32.059  2194  2204 E V4l2Stream: Queue: every buffer of the stream is in flight
+11-12 12:38:32.059  2194  2204 E V4l2FrameSource: BeginRequest: cannot queue a 1008x756 buffer of format 23
+11-12 12:38:32.059  2194  2204 W EmulatedSensorHost: CaptureFromHost: frame 2 was not queued completely (-2)
+11-12 12:38:32.100  2194  2204 W V4l2FrameSource: BeginRequest: 1 buffers of earlier requests were never collected
+11-12 12:38:32.200  2194  2204 W V4l2Stream: Wait: the camera did not deliver the buffer of slot 0; the stream starts over
+11-12 12:38:32.300  2194  2204 W V4l2FrameSource: QueueBuffer: the node refused the dma-buf; the 1x1 stream copies
+11-12 12:38:32.400  2194  2204 E SomeOtherTag: unrelated error
+"""
+
+
+def box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I4s", len(payload) + 8, kind) + payload
+
+
+MEDIA_SCALE = 90000
+
+
+def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0, fps: float = 30.0,
+          samples: bool = True) -> bytes:
+    """A finished movie: `mvhd`, and one track whose `mdhd` has MEDIA_SCALE ticks a second and, for a video
+    track with `samples`, an `stts` of one entry of seconds * fps frames."""
+    if version == 1:
+        mvhd = struct.pack(">B3xQQIQ", 1, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
+    else:
+        mvhd = struct.pack(">B3xIIII", 0, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
+    frames, delta = int(seconds * fps), round(MEDIA_SCALE / fps)
+    if version == 1:
+        mdhd = struct.pack(">B3xQQIQ", 1, 0, 0, MEDIA_SCALE, frames * delta) + b"\x00" * 4
+    else:
+        mdhd = struct.pack(">B3xIIII", 0, 0, 0, MEDIA_SCALE, frames * delta) + b"\x00" * 4
+    handler = box(b"hdlr", b"\x00\x00\x00\x00\x00\x00\x00\x00" + (b"vide" if video else b"soun") + b"\x00" * 12)
+    stts = box(b"stts", struct.pack(">BxxxI", 0, 1) + struct.pack(">II", frames, delta))
+    track = box(b"mdia", box(b"mdhd", mdhd) + handler + (box(b"minf", box(b"stbl", stts)) if video and samples else b""))
+    return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * 40)
+            + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", track)))
+
+
+class VideoAndFrontTests(unittest.TestCase):
+    def test_the_cameras_a_package_holds(self) -> None:
+        package = "org.lineageos.aperture"
+        self.assertEqual(runner.active_client_camera_ids(REAL_DUMP_CLIENT, package), {"1"})
+        self.assertEqual(runner.active_client_camera_ids(MEDIA_CAMERA_ACTIVE, package), {"0"})
+        self.assertEqual(runner.active_client_camera_ids(MEDIA_CAMERA_IDLE, package), set())
+        self.assertEqual(runner.active_client_camera_ids(MEDIA_CAMERA_OTHER_ACTIVE, package), set())
+
+    def test_the_rows_of_a_content_query(self) -> None:
+        rows = runner.parse_content_rows(CONTENT_ROWS + "No result found.\n")
+        self.assertEqual([row["_id"] for row in rows], ["33", "34"])
+        self.assertEqual(rows[0]["duration"], "4021")
+        self.assertTrue(rows[0]["_data"].endswith("VID_20261112_123456.mp4"))
+        self.assertEqual(rows[1]["_display_name"], "a, b.mp4")
+        self.assertEqual(runner.parse_content_rows("No result found.\n"), [])
+
+    def test_the_duration_and_tracks_of_a_movie(self) -> None:
+        for version in (0, 1):
+            info = runner.parse_mp4(movie(4.0, version=version))
+            self.assertAlmostEqual(info.seconds, 4.0)
+            self.assertTrue(info.video)
+            self.assertFalse(info.audio)
+        self.assertFalse(runner.parse_mp4(movie(2.0, video=False)).video)
+        self.assertAlmostEqual(runner.parse_mp4(movie(1.5, scale=90000)).seconds, 1.5)
+
+    def test_the_average_frame_rate_of_a_movie(self) -> None:
+        for version in (0, 1):
+            for fps in (15.0, 24.0, 30.0):
+                with self.subTest(version=version, fps=fps):
+                    info = runner.parse_mp4(movie(4.0, version=version, fps=fps))
+                    self.assertEqual(info.frames, int(4.0 * fps))
+                    self.assertAlmostEqual(info.video_seconds, 4.0, places=2)
+                    self.assertAlmostEqual(info.fps, fps, places=1)
+        self.assertEqual(runner.parse_mp4(movie(3.0, video=False)).fps, 0.0)
+        no_samples = runner.parse_mp4(movie(3.0, samples=False))
+        self.assertEqual((no_samples.frames, no_samples.fps), (0, 0.0))
+
+    def test_a_sample_table_that_does_not_fit_is_refused(self) -> None:
+        whole = bytearray(movie(2.0))
+        at = bytes(whole).index(b"stts") + 8
+        whole[at:at + 4] = struct.pack(">I", 1000)  # entry count: far more than the box holds
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            runner.parse_mp4(bytes(whole))
+
+    def test_an_unfinished_movie_is_refused(self) -> None:
+        whole = movie(3.0)
+        for data in (b"", b"\x00\x00\x00\x18ftypisom", whole[:-30], box(b"ftyp", b"isom") + box(b"mdat", b"\x00" * 8)):
+            with self.subTest(length=len(data)), self.assertRaises(ValueError):
+                runner.parse_mp4(data)
+
+    def test_the_hal_log_failures(self) -> None:
+        failures = runner.hal_failures(HAL_LOG)
+        self.assertEqual(len(failures), 5)
+        self.assertTrue(all("SomeOtherTag" not in line and "dma-buf" not in line for line in failures))
+        self.assertEqual(runner.hal_failures(HAL_LOG.split("\n")[0] + "\n"), [])
+        self.assertEqual(runner.hal_failures(""), [])
+
+
+class FakeGuest:
+    """A guest that answers the runner's commands from a script and records them."""
+
+    def __init__(self, plan, front_holds: bool = True, movies=None) -> None:
+        self.plan = plan
+        self.commands: list[str] = []
+        self.held = {"0"}
+        self.front_holds = front_holds
+        self.rows: dict[str, dict[str, str]] = {"1": {"_id": "1", "_data": "/sdcard/old.mp4"}}
+        self.recording = False
+        self.movie = movies if movies is not None else movie(3.5)
+        self.still_files = {"IMG_old.jpg"}
+        self.log = ""
+        chart = [bytes(value for x in range(40) for value in ((255,) * 4 if (x // 5 + y // 5) % 2 else (20, 20, 20, 255)))
+                 for y in range(40)]
+        self.chart = runner.decode_png(png(40, 40, 6, chart, [0]))
+
+    def alive(self) -> None:
+        pass
+
+    def shell(self, command: str, timeout: float = 0) -> str:
+        self.commands.append(command)
+        if command.startswith("am start") and "USE_FRONT_CAMERA true" in command:
+            # The laptop's only camera is the front one, camera 0.
+            front = "0" if self.plan.profile == "laptop" else "1"
+            self.held = {front} if self.front_holds else {"0"}
+        elif command.startswith("am start"):
+            self.held = {"0"}
+        if command == f"input keyevent {runner.CAMERA_KEYCODE}":
+            if "VIDEO_CAMERA" in " ".join(self.commands):
+                if self.recording:
+                    self.rows["2"] = {"_id": "2", "_data": "/sdcard/new.mp4", "_display_name": "new.mp4"}
+                self.recording = not self.recording
+            else:
+                self.still_files.add("IMG_new%d.jpg" % len(self.still_files))
+        return ""
+
+    def media_camera(self) -> str:
+        clients = "".join(
+            f"(Camera ID: {camera}, Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
+            "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n" for camera in sorted(self.held))
+        return "Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
+
+    def screenshot(self):
+        return self.chart
+
+    def videos(self):
+        return dict(self.rows), "Row: 0 ..."
+
+    def stills(self) -> set[str]:
+        return set(self.still_files)
+
+    def hal_log(self) -> str:
+        return self.log
+
+    def pull(self, remote: str) -> bytes:
+        return jpeg(4000, 3000) if remote.endswith(".jpg") else self.movie
+
+
+CAMERA_RESUMED = "topResumedActivity=ActivityRecord{1a2b3c u0 org.lineageos.aperture/.CameraActivity t12}"
+CAMERA_FOCUS = "mCurrentFocus=Window{4d5e6f u0 org.lineageos.aperture/org.lineageos.aperture.CameraActivity}"
+
+
+def foreground_text(resumed: str = CAMERA_RESUMED, focus: str = CAMERA_FOCUS, wakefulness: str = "Awake") -> str:
+    return f"  {resumed}\n  {focus}\n  mWakefulness={wakefulness}\n"
+
+
+class BlockedSamplerTests(unittest.TestCase):
+    """A blocked preview sample counts only while the camera application is the resumed activity and the
+    device is awake."""
+
+    BLACK, PICTURE = (0.0, 0.0), (128.2, 21.5)
+    FRONT = runner.parse_foreground(foreground_text())
+    LAUNCHER = runner.parse_foreground(foreground_text(
+        "topResumedActivity=ActivityRecord{7a8b9c u0 org.lineageos.trebuchet/.Launcher t1}",
+        "mCurrentFocus=Window{9d8e7f u0 org.lineageos.trebuchet/org.lineageos.trebuchet.Launcher}"))
+    ASLEEP = runner.parse_foreground(foreground_text(wakefulness="Asleep"))
+
+    def sampler(self, states: list, values: list, calls: dict):
+        """A sampler over scripted foreground states and sample values; `calls` records the screenshots, the
+        bring-backs and the settle sleeps."""
+        shown, taken = iter(states), iter(values)
+        calls.update(screenshots=0, brought=0, slept=[])
+
+        def take():
+            calls["screenshots"] += 1
+            return next(taken)
+
+        def bring_back():
+            calls["brought"] += 1
+
+        return runner.BlockedSampler(lambda: next(shown), take, bring_back, calls["slept"].append)
+
+    def test_the_foreground_is_read_from_the_guest_dump(self) -> None:
+        front = runner.parse_foreground(foreground_text())
+        self.assertEqual((front.resumed, front.wakefulness), ("org.lineageos.aperture/.CameraActivity", "Awake"))
+        self.assertEqual(front.focus, "org.lineageos.aperture/org.lineageos.aperture.CameraActivity")
+        self.assertTrue(front.camera_in_front())
+        older = runner.parse_foreground(foreground_text(
+            "mResumedActivity: ActivityRecord{1a2b3c u0 org.lineageos.aperture/.CameraActivity t12}"))
+        self.assertTrue(older.camera_in_front())
+        both = runner.parse_foreground("ResumedActivity: ActivityRecord{1 u0 other.app/.Main t2}\n"
+                                       + foreground_text())
+        self.assertEqual(both.resumed, "org.lineageos.aperture/.CameraActivity")
+        self.assertFalse(self.LAUNCHER.camera_in_front())
+        self.assertFalse(self.ASLEEP.camera_in_front())
+        nothing = runner.parse_foreground("")
+        self.assertEqual((nothing.resumed, nothing.focus, nothing.wakefulness), ("", "", ""))
+        self.assertFalse(nothing.camera_in_front())
+        # A package that only starts like the camera application's is not it.
+        self.assertFalse(runner.parse_foreground(foreground_text(
+            "topResumedActivity=ActivityRecord{1 u0 org.lineageos.aperture.other/.Main t2}")).camera_in_front())
+
+    def test_in_front_and_black_passes(self) -> None:
+        calls: dict = {}
+        sampler = self.sampler([self.FRONT] * 4, [self.BLACK, self.BLACK], calls)
+        self.assertIsNone(runner.blocked_preview(sampler, lambda seconds: None))
+        self.assertEqual((calls["screenshots"], calls["brought"]), (2, 0))
+
+    def test_in_front_and_a_picture_fails_the_picture_check(self) -> None:
+        calls: dict = {}
+        sampler = self.sampler([self.FRONT] * 4, [self.BLACK, self.PICTURE], calls)
+        self.assertEqual(runner.blocked_preview(sampler, lambda seconds: None),
+                         "the preview shows a picture (mean 128.2, deviation 21.5, sample 2)")
+        self.assertEqual(calls["brought"], 0)
+
+    def test_not_in_front_twice_is_its_own_failure(self) -> None:
+        for gone in (self.LAUNCHER, self.ASLEEP):
+            with self.subTest(gone=gone):
+                calls: dict = {}
+                sampler = self.sampler([gone, gone], [], calls)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), self.assertRaises(runner.Failure) as raised:
+                    runner.blocked_preview(sampler, lambda seconds: None)
+                message = str(raised.exception)
+                self.assertIn("a blocked session cannot be judged: the camera application is not in front", message)
+                self.assertIn(f"resumed activity {gone.resumed}", message)
+                self.assertIn(f"focused window {gone.focus}", message)
+                self.assertIn(f"wakefulness {gone.wakefulness}", message)
+                self.assertEqual((calls["screenshots"], calls["brought"]), (0, 1))
+                self.assertEqual(calls["slept"], [runner.BRING_BACK_SETTLE_SECONDS])
+
+    def test_nothing_known_about_the_foreground_is_a_failure_not_a_pass(self) -> None:
+        calls: dict = {}
+        empty = runner.parse_foreground("")
+        sampler = self.sampler([empty, empty], [self.BLACK], calls)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                runner.Failure, r"resumed activity none, focused window none, wakefulness unknown"):
+            runner.blocked_preview(sampler, lambda seconds: None)
+        self.assertEqual(calls["screenshots"], 0)
+
+    def test_brought_back_once_and_sampled_again(self) -> None:
+        calls: dict = {}
+        sampler = self.sampler([self.LAUNCHER, self.FRONT, self.FRONT, self.FRONT, self.FRONT], [self.BLACK, self.BLACK], calls)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(runner.blocked_preview(sampler, lambda seconds: None))
+        self.assertIn("the camera application is not in front (resumed activity org.lineageos.trebuchet/.Launcher", out.getvalue())
+        self.assertEqual((calls["screenshots"], calls["brought"]), (2, 1))
+
+    def test_an_application_that_leaves_during_the_screenshot_does_not_count(self) -> None:
+        calls: dict = {}
+        # In front before the first screenshot, gone after it (that picture is dropped), back and in front after bring-back.
+        sampler = self.sampler([self.FRONT, self.LAUNCHER, self.FRONT, self.FRONT, self.FRONT, self.FRONT],
+                               [self.PICTURE, self.BLACK, self.BLACK], calls)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(runner.blocked_preview(sampler, lambda seconds: None))
+        self.assertEqual((calls["screenshots"], calls["brought"]), (3, 1))
+
+    def test_the_bring_back_is_once_for_the_whole_step(self) -> None:
+        calls: dict = {}
+        # Sample 1 needs the bring-back; the application is gone again at sample 2: the step fails, no second bring-back.
+        sampler = self.sampler([self.LAUNCHER, self.FRONT, self.FRONT, self.LAUNCHER], [self.BLACK], calls)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(runner.Failure, "cannot be judged"):
+            runner.blocked_preview(sampler, lambda seconds: None)
+        self.assertEqual((calls["screenshots"], calls["brought"]), (1, 1))
+
+    def test_check_preview_asks_the_guest_and_starts_the_application_again(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        black = runner.decode_png(png(40, 40, 6, [bytes((0, 0, 0, 255)) * 40] * 40, [0]))
+        guest.screenshot = lambda: black
+        answers = iter([foreground_text(CAMERA_RESUMED.replace("aperture", "trebuchet"), wakefulness="Awake")]
+                       + [foreground_text()] * 4)
+        base_shell = guest.shell
+
+        def shell(command: str, timeout: float = 0) -> str:
+            if command == runner.FOREGROUND_COMMAND:
+                guest.commands.append(command)
+                return next(answers)
+            return base_shell(command, timeout)
+
+        guest.shell = shell
+        out = io.StringIO()
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None), contextlib.redirect_stdout(out):
+            runner.check_preview(guest, plan)
+        starts = [command for command in guest.commands if command.startswith("am start")]
+        self.assertEqual(len(starts), 2)
+        self.assertIn("bringing it back", out.getvalue())
+        # The application's own events are read before the second start, and printed with the line that says it left.
+        events = [index for index, command in enumerate(guest.commands) if "FATAL EXCEPTION" in command]
+        second_start = [index for index, command in enumerate(guest.commands) if command.startswith("am start")][1]
+        self.assertEqual(len(events), 1)
+        self.assertLess(events[0], second_start)
+        self.assertIn("events of the camera application and its windows:", out.getvalue())
+        self.assertIn("blocked preview (2 samples): mean 0.0, deviation 0.0", out.getvalue())
+
+
+class FailureLogTests(unittest.TestCase):
+    def test_the_camera_log_lines_are_printed_at_a_failure(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        commands: list[str] = []
+        guest.shell = lambda command, timeout=0: (commands.append(command), "E V4l2FrameSource: a line\n")[1]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        self.assertIn("camera log lines of the guest:\nE V4l2FrameSource: a line", err.getvalue())
+        self.assertIn("logcat -d -b all | grep -a -E", commands[0])
+        self.assertIn("vrend", commands[0])
+        self.assertIn("grep -a -v -E 'SurfaceFlinger|adbd", commands[0])
+        # Every screenshot allocates a buffer, and each allocation logs the allocator's start-up lines; with them
+        # the last 120 lines of a failed run held nothing of the camera.
+        for flood in ("minigbm:virtgpu_init", "minigbm:virgl_get_caps", "minigbm:virgl_add_combination"):
+            self.assertIn(flood, commands[0])
+
+    def test_a_guest_that_is_gone_does_not_hide_the_failure(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+
+        def gone(command: str, timeout: float = 0) -> str:
+            raise OSError("adb: device offline")
+
+        guest.shell = gone
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        self.assertIn("no camera log lines: adb: device offline", err.getvalue())
+
+    def test_what_was_in_front_is_printed_after_the_log(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        commands: list[str] = []
+        answers = ["E CameraService: a line\n",
+                   "topResumedActivity=ActivityRecord{x u0 org.lineageos.aperture/.CameraActivity}\n",
+                   "I ActivityTaskManager: Displayed org.lineageos.aperture\n",
+                   "E Aperture: its own line, which does not name the package\n"]
+        guest.shell = lambda command, timeout=0: (commands.append(command), answers[len(commands) - 1])[1]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        text = err.getvalue()
+        self.assertLess(text.index("camera log lines of the guest"), text.index("in front at the failure"))
+        self.assertLess(text.index("in front at the failure"), text.index("events of the camera application"))
+        self.assertIn("in front at the failure:\ntopResumedActivity=ActivityRecord{x u0 org.lineageos.aperture", text)
+        self.assertIn("events of the camera application and its windows:\nI ActivityTaskManager", text)
+        self.assertIn("dumpsys activity activities", commands[1])
+        self.assertIn("mCurrentFocus", commands[1])
+        for what in ("FATAL EXCEPTION", "ANR in", "am_crash", "am_anr", "am_proc_died", "org.lineageos.aperture"):
+            self.assertIn(what, commands[2])
+        # The application's own lines name no package: they come by process id.
+        self.assertIn("the camera application's own log lines (by process id):\nE Aperture: its own line", text)
+        self.assertIn("pidof org.lineageos.aperture", commands[3])
+        self.assertIn("logcat -d -b all --pid=$pid", commands[3])
+        self.assertIn("grep -a -v -E", commands[3])
+
+    def test_an_application_without_a_process_has_no_own_lines(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        guest.shell = lambda command, timeout=0: ""
+        out = io.StringIO()
+        runner.print_application_events(guest, out)
+        self.assertIn("the camera application's own log lines (by process id):\n(none: no process)", out.getvalue())
+
+    def test_a_guest_lost_after_the_log_keeps_the_log(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        calls: list[str] = []
+
+        def second_fails(command: str, timeout: float = 0) -> str:
+            calls.append(command)
+            if len(calls) == 2:
+                raise OSError("adb: device offline")
+            return "E CameraService: a line\n"
+
+        guest.shell = second_fails
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        self.assertIn("E CameraService: a line", err.getvalue())
+        self.assertIn("no foreground state: adb: device offline", err.getvalue())
+        self.assertIn("events of the camera application and its windows:", err.getvalue())
+
+
+class VideoAndFrontFlowTests(unittest.TestCase):
+    def run_step(self, step, plan, guest) -> None:
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            step(guest, plan)
+
+    def test_the_video_step_records_with_the_shutter_key_in_video_mode(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        sleeps: list[float] = []
+        with mock.patch.object(runner.time, "sleep", sleeps.append):
+            runner.check_video(guest, plan)
+        starts = [command for command in guest.commands if command.startswith("am start")]
+        self.assertEqual(starts, [f"am start -a {runner.VIDEO_ACTION} --ez {runner.FRONT_EXTRA} false"])
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 2)
+        self.assertIn(f"am force-stop {runner.CAMERA_PACKAGE}", guest.commands)
+        self.assertEqual(runner.VIDEO_HOLD_SECONDS, 5)
+        self.assertIn(runner.VIDEO_HOLD_SECONDS, sleeps)
+
+    def test_the_video_step_prints_the_average_frame_rate(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, fps=29.97)))
+        self.assertRegex(out.getvalue(), r"video: new\.mp4 4\.00 s, 119 frames over 3\.97 s = 30\.0 fps average")
+
+    def test_a_movie_below_the_frame_rate_floor_fails_after_it_is_printed(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaisesRegex(runner.Failure, r"averages 15\.0 fps .*below 20"):
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, fps=15.0)))
+        self.assertIn("= 15.0 fps average", out.getvalue())
+
+    def test_a_movie_without_a_sample_table_fails(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        with self.assertRaisesRegex(runner.Failure, "no sample table"):
+            self.run_step(runner.check_video, plan, FakeGuest(plan, movies=movie(4.0, samples=False)))
+
+    def test_a_movie_that_is_too_short_or_has_no_video_fails(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        for data, what in ((movie(0.4), "lasts 0.40 s"), (movie(3.0, video=False), "no video track"),
+                           (b"junk", "not a finished movie")):
+            with self.subTest(what=what), self.assertRaisesRegex(runner.Failure, what):
+                self.run_step(runner.check_video, plan, FakeGuest(plan, movies=data))
+
+    def test_no_new_movie_fails_with_the_query(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        guest.rows = {"1": {"_id": "1"}}
+        guest.shell = lambda command, timeout=0: ""  # the shutter key records nothing
+        with mock.patch.object(runner, "VIDEO_SECONDS", 0.2), self.assertRaisesRegex(
+                runner.Failure, "MediaStore lists no new movie"):
+            self.run_step(runner.check_video, plan, guest)
+
+    def test_the_laptop_records_with_its_front_camera(self) -> None:
+        plan = runner.make_plan("front", "laptop", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_video, plan, guest)
+        self.assertIn(f"am start -a {runner.VIDEO_ACTION} --ez {runner.FRONT_EXTRA} true", guest.commands)
+
+    def test_the_front_step_opens_camera_1_and_takes_a_still(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_front, plan, guest)
+        self.assertIn(f"am start -a android.media.action.STILL_IMAGE_CAMERA --ez {runner.FRONT_EXTRA} true",
+                      guest.commands)
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 1)
+
+    def test_the_front_step_fails_when_the_application_holds_the_back_camera(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        with mock.patch.object(runner, "PREVIEW_SECONDS", 0.2), self.assertRaisesRegex(
+                runner.Failure, r"holding camera 1 \(front\).*it holds \['0'\]"):
+            self.run_step(runner.check_front, plan, FakeGuest(plan, front_holds=False))
+
+    def test_a_front_only_profile_has_no_second_facing(self) -> None:
+        plan = runner.make_plan("front", "laptop", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_front, plan, guest)
+        self.assertEqual(guest.commands, [])
+
+    def test_the_hal_log_check(self) -> None:
+        guest = FakeGuest(None)
+        runner.check_hal_log(guest)
+        guest.log = HAL_LOG
+        with self.assertRaisesRegex(runner.Failure, "5 failed buffer lines; the first: .*every buffer"):
+            runner.check_hal_log(guest)
+
+    def test_the_new_steps_run_in_live_mode_only(self) -> None:
+        source = SCRIPT.read_text()
+        run_checks = source[source.index("def run_checks"):source.index("def cameraserver_restart_skip")]
+        self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_video\(guest, plan\)\n\s+check_front\(guest, plan\)\n'
+                         r'\s+check_hal_log\(guest\)')
 
 
 if __name__ == "__main__":
