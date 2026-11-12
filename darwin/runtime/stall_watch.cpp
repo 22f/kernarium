@@ -297,9 +297,12 @@ struct StallWatch::State final {
 	{
 		auto *self = static_cast<State *>(argument);
 		const HostThermalState reading = self->thermal->state();
-		if (observed() != reading)
-			watch_poke();
+		const bool moved = observed() != reading;
+		/* Published before the poke, so that the watch, woken by it, reads
+		 * the new state and not the old. */
 		::uml::platform::publishHostThermal(reading);
+		if (moved)
+			watch_poke();
 		send_main_queue_ping(continuous_ns());
 	}
 
