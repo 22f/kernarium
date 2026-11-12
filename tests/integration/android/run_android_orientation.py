@@ -292,10 +292,12 @@ BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
 
 def parse_hierarchy(text: str) -> tuple[int | None, list[Node]]:
-    """`uiautomator dump`: the display rotation it states and every node with a position."""
+    """`uiautomator dump` (or ``--windows``, whose root is ``displays``): the display rotation it states and every
+    node with a position."""
     start = text.find("<?xml")
     root = ElementTree.fromstring(text[start:] if start >= 0 else text)
-    rotation = root.get("rotation")
+    hierarchy = root if root.tag == "hierarchy" else root.find(".//hierarchy")
+    rotation = hierarchy.get("rotation") if hierarchy is not None else None
     nodes = []
     for element in root.iter("node"):
         bounds = BOUNDS.fullmatch(element.get("bounds", ""))
@@ -308,9 +310,12 @@ def parse_hierarchy(text: str) -> tuple[int | None, list[Node]]:
 
 
 def suggestion_button(nodes: list[Node]) -> Node | None:
-    """The rotation suggestion button of the navigation bar: "Rotate screen" in SystemUI."""
+    """The rotation suggestion button: ``rotate_suggestion``, "Rotate screen". SystemUI's navigation bar hosts it,
+    and so does the launcher's taskbar on a large screen (this image's 720x1280 at 213 dpi is one)."""
     for node in nodes:
-        if node.package == "com.android.systemui" and re.search(r"rotat", node.description, re.IGNORECASE):
+        if node.package in ("com.android.systemui", "com.android.launcher3") and (
+                node.resource.endswith(":id/rotate_suggestion")
+                or re.search(r"rotate screen", node.description, re.IGNORECASE)):
             return node
     return None
 
@@ -601,7 +606,8 @@ class Guest:
         return self.shell("pidof system_server").strip()
 
     def hierarchy(self) -> tuple[int | None, list[Node]]:
-        self.shell("uiautomator dump /data/local/tmp/orientation.xml >/dev/null 2>&1", timeout=60)
+        # --windows: the navigation bar and the taskbar are windows of their own, outside the active one.
+        self.shell("uiautomator dump --windows /data/local/tmp/orientation.xml >/dev/null 2>&1", timeout=60)
         return parse_hierarchy(self.shell("cat /data/local/tmp/orientation.xml"))
 
     def start(self, component: str) -> None:
@@ -890,26 +896,44 @@ def auto_rotate_off(guest: Guest, host: Host) -> str:
     guest.auto_rotate(False)
     wait_for("the lock", 20, lambda: None if guest.rotation_state().user_mode == "USER_ROTATION_LOCKED"
              else "the user rotation mode is not locked", guest)
-    host.push(COUNTER_CLOCKWISE)
-    hold_rotation(guest, UPRIGHT, "auto-rotate off, value 1", 5)
-    notes = []
+    found: list[Node] = []
+    attempts = 0
 
-    def button() -> str | None:
-        rotation, nodes = guest.hierarchy()
-        found = suggestion_button(nodes)
-        if found is None:
-            return "no rotation suggestion button in the hierarchy"
-        notes.append(found)
+    def propose() -> str | None:
+        # The button stays for a few seconds and a dump takes about four; a proposal that equals the display's
+        # turns nothing, so a miss leaves the value and comes again.
+        nonlocal attempts
+        if attempts:
+            host.push(UPRIGHT)
+            time.sleep(2)
+        attempts += 1
+        host.push(COUNTER_CLOCKWISE)
+        _, nodes = guest.hierarchy()
+        shown = guest.rotation()
+        if shown != UPRIGHT:
+            raise Failure(f"auto-rotate off: the display turned to {shown} before the button was used")
+        button = suggestion_button(nodes)
+        if button is None:
+            return "no rotation suggestion button in the windows' hierarchy"
+        found.append(button)
         return None
 
     try:
-        wait_for("the rotation suggestion button", 30, button, guest)
-    except Failure:
+        wait_for("the rotation suggestion button", 90, propose, guest)
+    except Failure as problem:
+        if "no rotation suggestion button" not in str(problem):
+            raise
         _, nodes = guest.hierarchy()
         sample = [(node.package, node.description or node.text or node.resource) for node in nodes
-                  if node.package == "com.android.systemui"][:12]
-        raise Failure(f"no rotation suggestion button; SystemUI nodes: {sample}")
-    x, y = notes[-1].centre
+                  if node.description][:12]
+        raise Failure(f"no rotation suggestion button after {attempts} proposals; nodes with a description: {sample}")
+    x, y = found[-1].centre
+    # The button hides a few seconds after the proposal and a dump takes about four, so the tap follows a fresh
+    # proposal (the value 0 takes the button away, the value 1 brings it back) once its animation has begun.
+    host.push(UPRIGHT)
+    time.sleep(2)
+    host.push(COUNTER_CLOCKWISE)
+    time.sleep(1.5)
     guest.shell(f"input tap {x} {y}")
     wait_rotation(guest, COUNTER_CLOCKWISE, "after the suggestion button")
     state = guest.rotation_state()
@@ -919,7 +943,8 @@ def auto_rotate_off(guest: Guest, host: Host) -> str:
     hold_rotation(guest, COUNTER_CLOCKWISE, "auto-rotate off, value 0", 4)
     guest.auto_rotate(True)
     wait_rotation(guest, UPRIGHT, "auto-rotate on again follows the newest value")
-    return f"value 1 held at 0 until the button at {x},{y} turned it to 1, and the user rotation locked at 1; on again: 0"
+    return (f"value 1 left the display at 0 and offered the button ({found[-1].package}) at {x},{y}, which turned it to 1 "
+            f"with the user rotation locked at 1 (proposals: {attempts}); auto-rotate on again: 0")
 
 
 def probe_requests(guest: Guest, push: Callable[[int], None], private: pathlib.Path) -> str:

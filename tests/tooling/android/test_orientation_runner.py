@@ -116,6 +116,20 @@ HIERARCHY = """\
 """
 
 
+# `uiautomator dump --windows`: a root of displays, each window with a hierarchy; the button is a window of the
+# launcher's taskbar on a large screen.
+HIERARCHY_WINDOWS = """\
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><displays><display id="0">
+<window index="0" title="" bounds="[0,1184][96,1280]" active="false" id="20" type="TYPE_SYSTEM"><hierarchy rotation="0">
+<node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.android.launcher3" content-desc="" bounds="[0,1184][96,1280]">
+<node index="0" text="" resource-id="com.android.launcher3:id/rotate_suggestion" class="android.widget.ImageView" package="com.android.launcher3" content-desc="Rotate screen" bounds="[0,1184][96,1280]"/>
+</node></hierarchy></window>
+<window index="1" title="Settings" bounds="[0,0][720,1280]" active="true" id="7" type="TYPE_APPLICATION"><hierarchy rotation="0">
+<node index="0" text="Settings" resource-id="" class="android.widget.TextView" package="com.android.settings" content-desc="" bounds="[0,0][720,80]"/>
+</hierarchy></window></display></displays>
+"""
+
+
 class WireTests(unittest.TestCase):
     def test_the_records_are_the_golden_frames(self) -> None:
         frames = golden()
@@ -214,6 +228,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(runner.sensors_hal_denials(unrelated), [])
         self.assertEqual(runner.sensors_hal_denials(f"{unrelated}\n{sensors}\n"), [sensors])
         self.assertEqual(runner.sensors_hal_denials("avc: granted { read } for hal_sensors_default"), [])
+
+    def test_the_windows_dump_has_the_taskbars_button_whose_package_is_the_launchers(self) -> None:
+        rotation, nodes = runner.parse_hierarchy(HIERARCHY_WINDOWS)
+        self.assertEqual(rotation, 0)
+        button = runner.suggestion_button(nodes)
+        self.assertIsNotNone(button)
+        self.assertEqual((button.package, button.centre), ("com.android.launcher3", (48, 1232)))
+        self.assertIsNone(runner.suggestion_button([node for node in nodes if node.package == "com.android.settings"]))
 
     def test_the_rotation_suggestion_button_is_systemuis_rotate_screen(self) -> None:
         rotation, nodes = runner.parse_hierarchy(HIERARCHY)
