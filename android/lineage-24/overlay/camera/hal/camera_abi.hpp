@@ -168,8 +168,6 @@ constexpr std::uint32_t flash_led_mode = 0x009c0901;
 constexpr std::uint32_t test_pattern = 0x009f0903;
 constexpr std::uint32_t jpeg_compression_quality = 0x009d0903;
 
-// The camera's description is a read-only compound control at private_base + 16
-// (V4l2Utils.h); its canonical definition follows with the driver.
 constexpr std::uint32_t private_base = 0x00981c00;
 constexpr std::uint32_t exposure_ns = private_base + 0;
 constexpr std::uint32_t iso = private_base + 1;
@@ -181,6 +179,9 @@ constexpr std::uint32_t ae_region = private_base + 6;
 constexpr std::uint32_t af_region = private_base + 7;
 constexpr std::uint32_t still_flash = private_base + 8;
 constexpr std::uint32_t rotate_and_crop = private_base + 9;
+// The camera's description: a read-only compound control (U8[328]) that the
+// guest driver answers, not the device (V4l2Utils.h reads it).
+constexpr std::uint32_t description = private_base + 16;
 } // namespace cid
 
 // V4L2 menu values and bits the HAL writes to those controls.

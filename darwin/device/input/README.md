@@ -103,3 +103,6 @@ descriptor with no guest, behind the real vhost-user transport for its
 configuration changes, and the launcher's bridge from a display's events to
 them. `run_launcher_refusals.py` (`tests/integration/boot`) covers the
 launcher option's refusals.
+`guest-hardware-input` (`tests/integration/input`) boots a Linux guest with the
+option and plays a VNC client: the guest's driver must register and unregister
+each device's input device as the client plugs and unplugs it.

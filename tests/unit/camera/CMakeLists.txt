@@ -78,6 +78,18 @@ if(TARGET UML::SyntheticCamera)
     uml_add_unit_test(NAME camera-description COMMAND uml_camera_description_tests
         LABELS "device;camera")
 
+    # The device behind the real transport across a guest's suspend. The front
+    # end is the GPU tests', so their support header and protocol header are on
+    # the path.
+    add_executable(uml_camera_held_requests_tests camera_held_requests_tests.cpp)
+    target_include_directories(uml_camera_held_requests_tests BEFORE PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests/unit/gpu
+        ${PROJECT_SOURCE_DIR}/darwin/device/gpu)
+    target_link_libraries(uml_camera_held_requests_tests PRIVATE
+        UML::CameraDevice UML::SyntheticCamera UML::VhostUserTransport)
+    uml_add_unit_test(NAME camera-held-requests COMMAND uml_camera_held_requests_tests
+        LABELS "device;camera;vhost-user" TIMEOUT 120)
+
     add_executable(uml_camera_device_tests camera_device_tests.cpp)
     target_link_libraries(uml_camera_device_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
     uml_add_unit_test(NAME camera-device COMMAND uml_camera_device_tests
