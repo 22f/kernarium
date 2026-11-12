@@ -101,9 +101,9 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
             if name.last == 0 { name.removeLast() }
             let service = String(decoding: name, as: UTF8.self)
             lock.withLock { opened.append(service) }
-            let stream = Channel(adbd: self, transport: transport, local: nextRemote, peer: message.arg0)
+            let stream = Channel(adbd: self, transport: transport, ownId: nextRemote, peerId: message.arg0)
             nextRemote += 1
-            try send(transport, AdbMessage(command: AdbWire.okay, arg0: stream.local, arg1: stream.peer))
+            try send(transport, AdbMessage(command: AdbWire.okay, arg0: stream.ownId, arg1: stream.peerId))
             if service.hasPrefix("abb_exec:") {
                 try serveInstall(stream, service: service)
             } else if service == "sync:" {
@@ -197,17 +197,17 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private nonisolated final class Channel {
         unowned let adbd: DiscardingAdbd
         let transport: DescriptorTransport
-        let local: UInt32
-        let peer: UInt32
+        let ownId: UInt32
+        let peerId: UInt32
         private var closed = false
         private var payload = Data()
         private var offset = 0
 
-        init(adbd: DiscardingAdbd, transport: DescriptorTransport, local: UInt32, peer: UInt32) {
+        init(adbd: DiscardingAdbd, transport: DescriptorTransport, ownId: UInt32, peerId: UInt32) {
             self.adbd = adbd
             self.transport = transport
-            self.local = local
-            self.peer = peer
+            self.ownId = ownId
+            self.peerId = peerId
         }
 
         /// The next write of the client, acknowledged; nil when it closed.
@@ -215,7 +215,7 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
             while !closed {
                 let message = try adbd.receive(transport)
                 if message.command == AdbWire.write {
-                    try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: local, arg1: peer))
+                    try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: ownId, arg1: peerId))
                     return message.payload
                 }
                 if message.command == AdbWire.close { closed = true }
@@ -261,12 +261,12 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
         /// client writes meanwhile is acknowledged and dropped.
         func send(_ data: Data) throws {
             guard !closed else { return }
-            try adbd.send(transport, AdbMessage(command: AdbWire.write, arg0: local, arg1: peer, payload: data))
+            try adbd.send(transport, AdbMessage(command: AdbWire.write, arg0: ownId, arg1: peerId, payload: data))
             while true {
                 let message = try adbd.receive(transport)
                 if message.command == AdbWire.okay { return }
                 if message.command == AdbWire.write {
-                    try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: local, arg1: peer))
+                    try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: ownId, arg1: peerId))
                 }
                 if message.command == AdbWire.close {
                     closed = true
@@ -278,7 +278,7 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
         func close() throws {
             guard !closed else { return }
             closed = true
-            try adbd.send(transport, AdbMessage(command: AdbWire.close, arg0: local, arg1: peer))
+            try adbd.send(transport, AdbMessage(command: AdbWire.close, arg0: ownId, arg1: peerId))
         }
     }
 }
