@@ -28,6 +28,18 @@ struct InstallRefusalTests {
             == "Apps that come in several files can\u{2019}t be installed yet. Choose a single .apk file.")
     }
 
+    @Test func aSingleApkOfFourGibibytesOrMoreIsTurnedAwayWithItsOwnWords() {
+        let limit = InstallRefusal.singleApkLimit
+        #expect(limit == 4 * Bytes.gib)
+        for size in [0, 1, 3 * Bytes.gib, limit - 1] {
+            #expect(InstallRefusal(sizeBytes: size) == nil, "\(size)")
+        }
+        for size in [limit, limit + 1, 4_509_714_371, .max] {
+            #expect(InstallRefusal(sizeBytes: size) == .tooLarge, "\(size)")
+        }
+        #expect(InstallRefusal.tooLarge.message == "Android can\u{2019}t install an app from a single .apk file of 4 GiB or more.")
+    }
+
     /// The type the system gives a file name, as the picker's rows have it.
     private func type(of name: String) -> UTType? {
         UTType(filenameExtension: URL(fileURLWithPath: name).pathExtension)
