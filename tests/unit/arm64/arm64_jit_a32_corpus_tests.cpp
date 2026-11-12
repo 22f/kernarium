@@ -17,6 +17,11 @@
  * this happens on purpose: it repeats the selected records, at most --passes
  * N times, until kReservationsWanted cases have lost a reservation, and fails
  * if none did. --attempts N replaces the limit (1 makes the storm fail).
+ * --inject makes the first attempt at chosen exclusive cases end as if the JIT
+ * had committed a fault (kFaultPlans), and checks that a plain loss is retried
+ * and that a loss with another register or TPIDRURO wrong, a store that
+ * reports success and did not write, and a store the pack has fail with
+ * another register wrong each fail on that attempt.
  *
  * The corpus also holds every lowered form out of the slow helper from a
  * clean state: each event-free case runs twice (the first run warms the
@@ -33,7 +38,7 @@
  *
  *   uml_arm64_jit_a32_corpus_tests PACK [--record NAME] [--case NAME]
  *       [--form PREFIX] [--list-failures] [--passes N] [--interrupt]
- *       [--attempts N]
+ *       [--attempts N] [--inject]
  */
 #include "aarch32_corpus_cpu_state.hpp"
 #include "aarch32_corpus_pack.hpp"
@@ -134,6 +139,9 @@ public:
     data_.get(0, std::as_writable_bytes(std::span{bytes}));
     return bytes;
   }
+  void write_data(const std::vector<std::uint8_t> &bytes) {
+    data_.put(0, std::as_bytes(std::span{bytes}));
+  }
 
   ::uml::cpu::ExecutionResult run(arm64::CpuState &cpu) {
     ::uml::memory::StaticGuestMemory memory;
@@ -223,16 +231,14 @@ struct Attempt final {
   return test.form.starts_with("STREX") || test.form.starts_with("STLEX");
 }
 
-/* Whether the disagreement at register `index` is the whole of it: the
- * store-exclusive's status reads 1 where the pack has 0, and nothing else
- * differs, the data being the pack's except the bytes the store-exclusive
- * did not write, which hold what the case started with (a spill the case
- * makes before the store is in the pack's data). */
+/* Whether the disagreement in the registers is the whole of it: the
+ * store-exclusive's status reads 1 where the pack has 0, no other register
+ * differs, nothing else differs, and the data is the pack's except the bytes
+ * the store-exclusive did not write, which hold what the case started with (a
+ * spill the case makes before the store is in the pack's data). */
 [[nodiscard]] bool lost_reservation(const Machine &machine, const Case &test,
-                                    const arm64::CpuState &cpu,
-                                    unsigned index) {
-  if (!is_store_exclusive(test) || test.final.r[index] != 0U ||
-      cpu.registers[index] != 1U)
+                                    const arm64::CpuState &cpu) {
+  if (!is_store_exclusive(test))
     return false;
   if (apsr_of(cpu) != test.final.apsr || fpscr_of(cpu) != test.final.fpscr ||
       cpu.a32_tpidruro != test.final.tpidruro || cpu.tls != test.final.tpidrurw)
@@ -243,17 +249,31 @@ struct Attempt final {
     if (value != test.final.d[d])
       return false;
   }
-  return lost_exclusive_data(test, machine.initial_data(),
-                             data_after(test, machine.initial_data()),
-                             machine.read_data());
+  return lost_exclusive_attempt(test, cpu.registers.data(),
+                                machine.initial_data(),
+                                data_after(test, machine.initial_data()),
+                                machine.read_data());
 }
 
-/* Runs one attempt at a case. */
-Attempt check(Machine &machine, const Case &test) {
+/* Runs one attempt at a case. `fault`, for --inject, makes it end as if the
+ * JIT had committed it. */
+Attempt check(Machine &machine, const Case &test,
+              const FaultPlan *fault = nullptr) {
   const bool thumb = test.flags & kFlagThumb;
   const bool padded = machine.load(test);
   auto cpu = cpu_from(test.initial, thumb, kCodeBase + test.origin);
   const auto result = machine.run(cpu);
+  if (fault != nullptr) {
+    const auto effect = inject_fault(fault->fault, test, cpu.registers.data());
+    require(effect.has_value());
+    if (effect->put_back) {
+      auto bytes = machine.read_data();
+      std::copy_n(machine.initial_data().begin() + effect->offset, effect->size,
+                  bytes.begin() + effect->offset);
+      machine.write_data(bytes);
+    }
+    cpu.a32_tpidruro ^= effect->tpidruro_xor;
+  }
 
   char text[512];
   const auto fail = [&](const char *what) {
@@ -363,8 +383,7 @@ Attempt check(Machine &machine, const Case &test) {
                   static_cast<unsigned long long>(cpu.registers[first_register]),
                   test.final.r[first_register]);
     Attempt attempt{text};
-    attempt.reservation_lost =
-        differing == 1 && lost_reservation(machine, test, cpu, first_register);
+    attempt.reservation_lost = lost_reservation(machine, test, cpu);
     return attempt;
   }
   if (const auto difference =
@@ -562,6 +581,7 @@ int main(int argc, char **argv) {
   bool all_failures = false;
   bool exit_report = false;
   bool interrupt = false;
+  bool inject = false;
   std::size_t passes = 1;
   unsigned attempts_limit = kExclusiveAttempts;
   std::string only_form;
@@ -588,6 +608,8 @@ int main(int argc, char **argv) {
           static_cast<unsigned>(std::strtoul(argv[++index], nullptr, 10));
     else if (argument == "--interrupt")
       interrupt = true;
+    else if (argument == "--inject")
+      inject = true;
     else if (argument == "--dump" && index + 1 < argc) {
       const std::uint32_t word =
           static_cast<std::uint32_t>(std::strtoul(argv[++index], nullptr, 16));
@@ -613,6 +635,41 @@ int main(int argc, char **argv) {
         std::printf("%s: %zu of %zu cases clean\n", form.c_str(), tally.clean,
                     tally.cases);
     return 0;
+  }
+  if (inject) {
+    /* Each fault plan over its cases: a lost reservation must be retried
+     * until the case agrees, and anything else must fail on the first
+     * attempt, unretried. */
+    bool good = true;
+    for (const auto &plan : kFaultPlans) {
+      std::size_t run = 0, failed = 0, retried = 0, lost = 0;
+      for (const auto &record : pack.records)
+        for (const auto &test : record.cases) {
+          if ((record.profiles & kProfileBit) == 0 ||
+              !plan_selects(plan, record, test) || !jit_accepts(test, profile))
+            continue;
+          ++run;
+          auto attempt = check(machine, test, &plan);
+          unsigned attempts = 1;
+          lost += attempt.reservation_lost ? 1 : 0;
+          while (attempt.reservation_lost && attempts < attempts_limit) {
+            attempt = check(machine, test);
+            ++attempts;
+          }
+          if (!attempt.problem.empty())
+            ++failed;
+          else if (attempts > 1)
+            ++retried;
+        }
+      const bool as_planned =
+          run != 0 && (plan.retried ? failed == 0 && retried == run && lost == run
+                                    : failed == run && retried == 0 && lost == 0);
+      std::printf("  inject %-20s %-22s run %3zu  failed %3zu  retried %3zu  %s\n",
+                  plan.name, plan.record, run, failed, retried,
+                  as_planned ? "as planned" : "NOT AS PLANNED");
+      good = good && as_planned;
+    }
+    return good ? 0 : 1;
   }
   Totals totals;
   std::optional<InterruptStorm> storm;

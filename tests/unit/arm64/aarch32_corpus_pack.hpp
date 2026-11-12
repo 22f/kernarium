@@ -480,4 +480,106 @@ struct ExclusiveStore final {
 	return true;
 }
 
+/* Whether an attempt at `test` is a store-exclusive that lost its reservation
+ * and nothing else: the register the pack holds the status in (the decoded
+ * destination) reads 1 where the pack has 0, every other register is as the
+ * pack has it, and the data is what lost_exclusive_data() accepts. A case
+ * whose store-exclusive was to fail, or a register other than the status that
+ * differs, is not one. `registers` are the engine's r0-r14 whole, so that a
+ * slot that is not zero-extended differs. The caller has already found
+ * everything else (the event, the exit state, the retired count, the flags,
+ * D0-D31, FPSCR and both thread registers) as the pack has it. */
+[[nodiscard]] inline bool lost_exclusive_attempt(const Case &test, const std::uint64_t *registers,
+						 const std::vector<std::uint8_t> &initial,
+						 const std::vector<std::uint8_t> &expected,
+						 const std::vector<std::uint8_t> &actual)
+{
+	const auto store = exclusive_store(test);
+	if (!store)
+		return false;
+	const auto status = store->instruction.operands.d;
+	if (status < 0 || static_cast<unsigned>(status) >= kRegisters || test.final.r[status] != 0)
+		return false;
+	for (unsigned index = 0; index < kRegisters; ++index)
+		if (registers[index] != (index == static_cast<unsigned>(status) ? 1U : test.final.r[index]))
+			return false;
+	return lost_exclusive_data(test, initial, expected, actual);
+}
+
+/* Faults --inject makes an engine lane commit on purpose, in the first attempt
+ * at each case of one shape, to prove that its handling of a lost reservation
+ * refuses what is not one. A plan whose `retried` is set must be taken for a
+ * lost reservation, retried and pass; any other must fail on that attempt. */
+enum class Fault { lost, lost_and_register, lost_and_tpidruro, unwritten_and_register, failed_and_register };
+
+struct FaultPlan final {
+	Fault fault;
+	const char *name;
+	const char *record;
+	std::string_view shape; /* the end of the names of the cases it applies to */
+	bool retried;
+};
+
+inline constexpr FaultPlan kFaultPlans[] = {
+	/* A store-exclusive reports failure without writing, nothing else wrong: a loss. */
+	{Fault::lost, "lost", "exclusive-qemu", "/pair.a", true},
+	{Fault::lost, "lost", "exclusive-spill-qemu", "/spill_pair.a", true},
+	/* A loss with another register wrong: r0 = 1 where the pack has 0. */
+	{Fault::lost_and_register, "lost+register", "exclusive-spill-qemu", "/spill_pair.a", false},
+	/* A loss with TPIDRURO wrong. */
+	{Fault::lost_and_tpidruro, "lost+tpidruro", "exclusive-spill-qemu", "/spill_pair.a", false},
+	/* The store reports success and did not write, and another register is wrong: no status
+	 * reads 1, so the 1 in the other register is not one. */
+	{Fault::unwritten_and_register, "unwritten+register", "exclusive-spill-qemu", "/spill_pair.a", false},
+	/* A store-exclusive the pack has fail, with another register wrong. */
+	{Fault::failed_and_register, "failed+register", "exclusive-qemu", "/lone.a", false},
+};
+
+/* What a fault changes beyond the registers. */
+struct FaultEffect final {
+	bool put_back;                /* the store's bytes go back to what the case started with */
+	std::uint32_t offset, size;   /* the store's bytes */
+	std::uint32_t tpidruro_xor;
+};
+
+/* Makes `registers`, the engine's r0-r14 after a correct run of `test`, those
+ * of an attempt with `fault`; nothing when the fault does not fit the case. */
+[[nodiscard]] inline std::optional<FaultEffect> inject_fault(Fault fault, const Case &test, std::uint64_t *registers)
+{
+	const auto store = exclusive_store(test);
+	if (!store || store->instruction.operands.d < 0 ||
+	    static_cast<unsigned>(store->instruction.operands.d) >= kRegisters)
+		return std::nullopt;
+	const auto status = static_cast<unsigned>(store->instruction.operands.d);
+	/* A register the pack has at 0, to make 1. */
+	unsigned other = kRegisters;
+	for (unsigned index = 0; index < kRegisters && other == kRegisters; ++index)
+		if (index != status && test.final.r[index] == 0)
+			other = index;
+	const bool succeeded = test.final.r[status] == 0;
+	FaultEffect effect{false, store->offset, store->size, 0};
+	if (fault == Fault::lost_and_register || fault == Fault::unwritten_and_register ||
+	    fault == Fault::failed_and_register) {
+		if (other == kRegisters)
+			return std::nullopt;
+		registers[other] = 1;
+	}
+	if (fault == Fault::failed_and_register)
+		return succeeded ? std::nullopt : std::optional{effect};
+	if (!succeeded)
+		return std::nullopt;
+	effect.put_back = true;
+	if (fault != Fault::unwritten_and_register)
+		registers[status] = 1;
+	if (fault == Fault::lost_and_tpidruro)
+		effect.tpidruro_xor = 0x100;
+	return effect;
+}
+
+/* Whether a plan applies to this case of this record. */
+[[nodiscard]] inline bool plan_selects(const FaultPlan &plan, const Record &record, const Case &test)
+{
+	return record.name == plan.record && std::string_view(test.name).ends_with(plan.shape);
+}
+
 } // namespace uml::testing::aarch32_corpus

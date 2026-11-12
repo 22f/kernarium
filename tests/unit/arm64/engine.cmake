@@ -356,6 +356,10 @@
     uml_add_unit_test(NAME arm64-jit-a32-corpus-interrupted TIMEOUT 1200
         COMMAND uml_arm64_jit_a32_corpus_tests ${UML_ARM64_AARCH32_CORPUS}
             --record exclusive-qemu --passes 3000 --interrupt)
+    # The same faults on purpose, as the gadgets' lane has them.
+    uml_add_unit_test(NAME arm64-jit-a32-corpus-injected
+        COMMAND uml_arm64_jit_a32_corpus_tests ${UML_ARM64_AARCH32_CORPUS}
+            --inject)
 
     # The JIT's SME support (cpu/arm64/jit, sme_support).
     uml_add_arm64_unit_test(jit_sme_mode WITHOUT_HARNESS
@@ -474,6 +478,14 @@
         COMMAND uml_arm64_gadget_a32_corpus_tests ${UML_ARM64_AARCH32_CORPUS}
             --record exclusive-qemu,exclusive-spill-qemu,sequences-qemu
             --passes 200 --interrupt)
+    # What the retry must refuse, made on purpose: the first attempt at
+    # chosen exclusive cases ends as a lost reservation with another
+    # register or TPIDRURO wrong, as a store that reports success and wrote
+    # nothing, or as an expected failure with a register wrong, and each must
+    # fail unretried while a plain loss is retried and passes.
+    uml_add_unit_test(NAME arm64-gadget-a32-corpus-injected
+        COMMAND uml_arm64_gadget_a32_corpus_tests ${UML_ARM64_AARCH32_CORPUS}
+            --inject)
     target_compile_definitions(uml_arm64_gadget_cache_validation_tests PRIVATE
         UML_GADGET_CACHE_SLOTS=${UML_GADGET_CACHE_SLOT_COUNT})
     # Executors sharing one address space's translations, from several

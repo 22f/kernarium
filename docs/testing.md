@@ -577,7 +577,9 @@ blocker in every one of them.
   unwritten, the case's other stores in the data), and the `-interrupted`
   tests provoke that failure on purpose. Only the gadget one runs the spill
   suite, whose cases store between the pair: the JIT does not lose a
-  reservation there.
+  reservation there. The `-injected` tests make an attempt end as a lost
+  reservation with another register or a thread register wrong, and as other
+  faults, and require that only a plain loss is retried.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 
