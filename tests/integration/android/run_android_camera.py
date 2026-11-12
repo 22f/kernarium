@@ -15,6 +15,11 @@ The runner checks, in this order:
 - the cameras Android lists (``dumpsys media.camera``) are the profile's: "0" the back zoom camera (the
   primary back lens of a host without one, the front camera of a host without a back camera), "1" the
   front camera, and "2", "3" and "4" the wide, ultra wide and telephoto lenses a phone has;
+- the provider's life (live and blocked): it is a lazy service that init starts with cameraserver, so it
+  exits once cameraserver has listed the cameras and holds none, an open of the camera starts it again
+  through its interface, and it exits again when the application is stopped, with the cameras still listed
+  (``ps -A`` is all a user build offers; a restart of cameraserver itself needs root, so that path is
+  the init action the target-files verifier requires, not something this runner exercises);
 - live: the camera application previews the synthetic chart (a screenshot is not black), and the camera
   key takes one still, a complete JPEG with Exif data inside the layout's size cap;
 - blocked: the same cameras are listed, the preview is not the chart on two samples, and the camera key
@@ -72,6 +77,11 @@ CAMERA_PACKAGE = "org.lineageos.aperture"
 CAMERA_PERMISSIONS = ("android.permission.CAMERA", "android.permission.RECORD_AUDIO")
 CAMERA_KEYCODE = 27  # KEYCODE_CAMERA: the camera application's default shutter key
 STILL_DIRECTORY = "/sdcard/DCIM/Camera"
+# The lazy provider's process, as `ps -A` names it (its binary: android.hardware.camera.provider@2.7-service-google-lazy),
+# and how long it may run after the last camera is closed: the service manager tells a lazy service that it
+# has no clients on a timer of seconds.
+PROVIDER_PROCESS = "android.hardware.camera.provider"
+PROVIDER_EXIT_SECONDS = 240
 COMMAND_SECONDS = 120
 PREVIEW_SECONDS = 90
 STILL_SECONDS = 60
@@ -279,6 +289,16 @@ def features_of(infos: list[StaticInfo]) -> set[str]:
     return features
 
 
+def parse_provider_pids(text: str) -> list[int]:
+    """`ps -A -o PID,NAME`: the pids of the camera provider (its binary's name holds PROVIDER_PROCESS)."""
+    pids = []
+    for line in text.splitlines():
+        words = line.split(None, 1)
+        if len(words) == 2 and words[0].isdecimal() and PROVIDER_PROCESS in words[1]:
+            pids.append(int(words[0]))
+    return pids
+
+
 def parse_listing(text: str) -> set[str]:
     """`ls`: the names it prints, none for a directory that is not there."""
     return {line.strip() for line in text.splitlines()
@@ -451,6 +471,9 @@ class Guest:
     def media_camera(self) -> str:
         return self.shell("dumpsys media.camera")
 
+    def provider_pids(self) -> list[int]:
+        return parse_provider_pids(self.shell("ps -A -o PID,NAME"))
+
     def stills(self) -> set[str]:
         return {name for name in parse_listing(self.shell(f"ls {STILL_DIRECTORY} 2>&1 || true"))
                 if name.lower().endswith((".jpg", ".jpeg"))}
@@ -513,6 +536,15 @@ def check_camera_list(guest: Guest, plan: Plan) -> None:
 
     # The lazy provider starts when cameraserver first asks, and the cameras appear after it enumerates.
     wait_for("the cameras Android lists", SETTLE_SECONDS if plan.camera_ids else 5, listed, guest)
+
+
+def wait_provider_exit(guest: Guest, when: str) -> float:
+    """Waits for the lazy provider to be gone; returns how long it took. `dumpsys media.camera` can wake the provider,
+    so nothing that asks cameraserver runs between the close and this wait."""
+    began = time.monotonic()
+    wait_for(f"the camera provider to exit {when}", PROVIDER_EXIT_SECONDS,
+             lambda: None if not guest.provider_pids() else f"it still runs as {guest.provider_pids()}", guest)
+    return time.monotonic() - began
 
 
 def check_characteristics(guest: Guest, plan: Plan) -> None:
@@ -632,10 +664,25 @@ def run_checks(guest: Guest, plan: Plan) -> None:
         check_characteristics(guest, plan)
     print(f"  cameras {list(plan.camera_ids)} and features {sorted(plan.features)}")
     if plan.mode == "none":
+        if guest.provider_pids():
+            raise Failure(f"a layout without cameras runs the camera provider: {guest.provider_pids()}")
         return
+    # The provider was started with cameraserver, which listed the cameras, and holds none: it exits. The wait
+    # asks cameraserver nothing (a dump can wake it), so the open below is what starts it again.
+    exited = wait_provider_exit(guest, "once cameraserver has listed the cameras and none is open")
+    print(f"  provider: gone {exited:.0f} s after the listing and the characteristics (host load {os.getloadavg()[0]:.1f})")
     before = guest.stills()
     check_preview(guest, plan)
+    running = guest.provider_pids()
+    if not running:
+        raise Failure("the camera application holds a camera and no camera provider runs: the open did not start it")
+    print(f"  provider: started again by the open, pid {running}")
     check_still(guest, plan, before)
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    exited = wait_provider_exit(guest, "after the camera application is stopped")
+    print(f"  provider: gone {exited:.0f} s after the application stopped")
+    check_camera_list(guest, plan)
+    print("  the cameras are still listed with the provider gone")
 
 
 # ---- Starting and stopping the guest.

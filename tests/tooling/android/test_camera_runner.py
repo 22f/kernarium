@@ -20,6 +20,7 @@ import re
 import struct
 import sys
 import unittest
+from unittest import mock
 import zlib
 
 TESTS = Path(__file__).resolve().parents[2]
@@ -355,6 +356,42 @@ class GuestReaderTests(unittest.TestCase):
         self.assertEqual(runner.parse_listing("IMG_1.jpg\nIMG_2.jpg\n"), {"IMG_1.jpg", "IMG_2.jpg"})
         self.assertEqual(runner.parse_listing("ls: /sdcard/DCIM/Camera: No such file or directory\n"), set())
         self.assertEqual(runner.parse_listing(""), set())
+
+
+class ProviderLifeTests(unittest.TestCase):
+    PS = """\
+  PID NAME
+    1 init
+  612 cameraserver
+ 1480 android.hardware.camera.provider@2.7-service-google-lazy
+ 1500 org.lineageos.aperture
+"""
+
+    def test_the_provider_process_is_read_from_the_process_listing(self) -> None:
+        self.assertEqual(runner.parse_provider_pids(self.PS), [1480])
+        self.assertEqual(runner.parse_provider_pids("  PID NAME\n  612 cameraserver\n"), [])
+        self.assertEqual(runner.parse_provider_pids(""), [])
+
+    class Guest:
+        def __init__(self, listings: list[list[int]]) -> None:
+            self.listings = listings
+
+        def alive(self) -> None:
+            pass
+
+        def provider_pids(self) -> list[int]:
+            return self.listings.pop(0) if len(self.listings) > 1 else self.listings[0]
+
+    def test_the_wait_ends_when_the_provider_is_gone(self) -> None:
+        guest = self.Guest([[1480], [1480], []])
+        with mock.patch.object(runner.time, "sleep"):
+            self.assertGreaterEqual(runner.wait_provider_exit(guest, "after the listing"), 0)
+
+    def test_a_provider_that_never_exits_fails_the_wait(self) -> None:
+        guest = self.Guest([[1480]])
+        with mock.patch.object(runner.time, "sleep"), mock.patch.object(runner, "PROVIDER_EXIT_SECONDS", 0.05):
+            with self.assertRaisesRegex(runner.Failure, "camera provider to exit after the listing: it still runs as \\[1480\\]"):
+                runner.wait_provider_exit(guest, "after the listing")
 
 
 class PngTests(unittest.TestCase):
