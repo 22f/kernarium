@@ -222,7 +222,7 @@ struct HomeMenuTests {
         case .reviewOnAppStore: "Review on the App Store"
         #endif
         #if TIP_JAR
-        case .buyMeTokens: TipJarWords.name
+        case .buyMeTokens: String(localized: TipJarWords.name)
         #endif
         }
     }
