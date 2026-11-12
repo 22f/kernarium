@@ -1285,20 +1285,20 @@ final class AppModel {
                 }
             case let .ask(target):
                 // The file is not being sent while the person thinks: the
-                // overlay says which file, and has no Cancel (the alert's is).
+                // overlay says which file. Its Cancel stays, though the alert
+                // covers it: an alert that cannot present (another one, or
+                // a popover, is in its way) must not leave the install with
+                // no way out. That Cancel closes the question too.
                 installAttemptTag += 1
-                busy?.cancel = nil
+                busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
                 busy?.detail = detail
                 guard let installAnyway = await askAboutLegacyInstall(target) else {
                     flow.stopped()
                     continue
                 }
                 flow.answered(installAnyway: installAnyway)
-                if installAnyway {
-                    // The bar starts over for the second attempt.
-                    busy?.progress = 0
-                    busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
-                }
+                // The bar starts over for the second attempt.
+                if installAnyway { busy?.progress = 0 }
             case let .finished(ending):
                 switch ending {
                 case .installed: return
