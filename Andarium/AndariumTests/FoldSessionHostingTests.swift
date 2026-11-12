@@ -761,6 +761,51 @@ struct FoldSessionHostingTests {
         holder.removeFromSuperview()
     }
 
+    /// A card taller than its place is centred on it where nothing places it
+    /// by a hinge (a display with none, the cover and a flat inner display),
+    /// as it always was, and overflows from the top of the half it keeps to
+    /// only while the device is bent, where it is the first thing read.
+    @Test(arguments: [Pose?.none, .cover, .uprightFlat, .turnedFlat, .turnedBook])
+    func aCardTallerThanItsPlaceIsCentredOnItExceptOnABentHalf(_ pose: Pose?) async throws {
+        final class Frame: @unchecked Sendable { var rect = CGRect.zero }
+        let seen = Frame()
+        let model = AppEntry.fromArguments().makeModel()
+        model.fold = pose?.reading
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let container = UIViewController()
+        lease.window.rootViewController = container
+        let tall = Color.red.frame(width: 200, height: 900)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { seen.rect = $0 }
+        let host = UIHostingController(rootView: tall.onCardHalf().environment(model))
+        host.safeAreaRegions = []
+        container.addChild(host)
+        let holder = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 500))
+        container.view.addSubview(holder)
+        host.view.frame = holder.bounds
+        holder.addSubview(host.view)
+        host.didMove(toParent: container)
+        defer {
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+            holder.removeFromSuperview()
+        }
+        try await Task.sleep(for: .milliseconds(700))
+        host.view.layoutIfNeeded()
+        let card = seen.rect
+        let name = pose.map(String.init(describing:)) ?? "no hinge"
+        #expect(card.height > 880, "\(name): the card is \(card)")
+        if let pose, pose == .turnedBook {
+            // A bent half: the overflow goes off the bottom, the top stays at
+            // the half's.
+            let top = try #require(FoldHalves(pose.reading)).insets(for: .card, in: holder.bounds).top
+            #expect(abs(card.minY - top) < 1, "\(name): the card \(card) does not start at the half's top, \(top)")
+        } else {
+            #expect(abs(card.midY - holder.bounds.midY) < 1, "\(name): the card \(card) is not centred on \(holder.bounds)")
+        }
+    }
+
     /// Turning the display with a sheet open leaves the sheet's content as it
     /// is: a sheet decides its presentation once, when it is presented.
     @Test(arguments: [(from: Pose.uprightBook, to: Pose.turnedFlat), (from: Pose.turnedBook, to: Pose.uprightFlat)])

@@ -58,12 +58,16 @@ private struct OnCardHalf: ViewModifier {
         // own padding would otherwise keep changing). The view fills the space,
         // then keeps to the place of its screen: a card in a stack centres on
         // its place and not on that space. Until the space is measured the
-        // window's safe area stands for it.
+        // window's safe area stands for it. A view taller than its place
+        // overflows from the top of a half while the device is bent, so that
+        // what a person reads first stays on it; everywhere else (flat, the
+        // cover, a display with no hinge) it overflows both ends equally, as
+        // it always did.
         GeometryReader { geo in
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(Self.padding(halves?.insets(for: screen, in: (measured ?? fold?.safeArea) ?? .zero)))
-                .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: halves?.bent == true ? .topLeading : .center)
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             if folds, measured != frame { measured = frame }
