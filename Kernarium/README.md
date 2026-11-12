@@ -217,7 +217,8 @@ Kernarium attaches:
   made after the GNSS receiver when the host has a front camera. The runtime
   discovers the host's cameras, which needs no permission, and names the layout
   that describes them as `androidboot.product.vendor.sku`, a kernel argument a
-  release's command-line file cannot set. The boot request states the mode
+  release's command-line file cannot set; it composes it again at each boot,
+  from the colour data the run has learned since. The boot request states the mode
   (`android_camera_mode`, runtime API 37): live opens a capture session only
   while a guest app has a camera open, and blocked lists the same cameras with
   black frames, never opens a session and reports Android's camera lens cover
@@ -226,18 +227,18 @@ Kernarium attaches:
   off. The camera tier follows the launch's GPU budget, the colour data a Bayer
   still teaches is kept in `android_camera_calibration_path`, the state of the
   capture (idle, streaming, interrupted, interrupted by iPad multitasking, by
-  system pressure) comes back through `set_camera_state_callback` and
-  `set_camera_rotation` states how the device body is turned from portrait
-  where the host owns the guest's rotation: each boot derives every camera's
-  sensor orientation from it, and a change after the boot turns the picture by
-  the difference
+  system pressure) comes back through `set_camera_state_callback` (a blocked
+  guest stays idle) and `set_camera_rotation` states how the device body is
+  turned from portrait where the host owns the guest's rotation: each boot
+  derives every camera's sensor orientation from it, and a change after the
+  boot turns the picture by the difference
   ([orientation](../darwin/device/camera/README.md#orientation)). A runtime
   that is not an App Store build serves the synthetic camera when
   `KERNARIUM_CAMERA_SOURCE` names it, gives the guest no cameras for any other
-  value (never the host's), and prints the ROTATE_AND_CROP settings
-  that reach the cameras and the process's footprint when a capture session
-  opens, closes and after each still. The Linux runtime keeps both entries and
-  never calls back;
+  value (never the host's), and prints the ROTATE_AND_CROP settings that reach
+  the cameras and the process's footprint when a capture session opens, closes
+  and after each still. The Linux runtime keeps both entries and never calls
+  back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then

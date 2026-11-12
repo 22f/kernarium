@@ -1429,8 +1429,9 @@ void sayBootloaderConsumed()
 /* The cameras this run presents: the host's, discovered once for the run, or,
  * in a runtime that is not an App Store build, the synthetic ones its
  * environment names (a value that names none gives the guest no cameras, never
- * the host's). A host whose cameras cannot be discovered has none, and a
- * camera never fails a boot. */
+ * the host's). The layout is composed again at each boot
+ * (`kernarium::camera::recompose`). A host whose cameras cannot be discovered
+ * has none, and a camera never fails a boot. */
 kernarium::camera::Presentation presentCameras(const GuestRequest& request)
 {
     const auto tier = uml::camera::cameraTierForBudget(request.gpuBudgetBytes);
@@ -1449,15 +1450,8 @@ kernarium::camera::Presentation presentCameras(const GuestRequest& request)
 #else
         auto source = uml::camera::makeHostCameraSource();
 #endif
-        auto cameras = kernarium::camera::present(
+        return kernarium::camera::present(
             std::move(source), tier, request.camera.calibrationDirectory);
-        std::printf(
-            "Kernarium: cameras: layout %s, %s, %s\n",
-            cameras.layout.c_str(),
-            tier == uml::camera::CameraTier::small ? "small tier" : "large tier",
-            request.camera.mode == uml::camera::CameraMode::live
-                ? "live" : "blocked");
-        return cameras;
     } catch (const std::exception& error) {
         std::fprintf(
             stderr, "Kernarium: the guest gets no cameras: %s\n",
@@ -1809,6 +1803,16 @@ private:
          * device and no cover. */
         if (!cameras_)
             cameras_.emplace(presentCameras(request_));
+        else
+            kernarium::camera::recompose(*cameras_);
+        std::printf(
+            "Kernarium: cameras: layout %s, %s, %s, device turned %u degrees\n",
+            cameras_->layout.c_str(),
+            cameras_->tier == uml::camera::CameraTier::small
+                ? "small tier" : "large tier",
+            request_.camera.mode == uml::camera::CameraMode::live
+                ? "live" : "blocked",
+            cameraRotation().degrees());
         if (cameras_->hasCameras()) {
             boot->camera = uml::camera::makeInProcessCameraService(
                 cameras_->source,

@@ -144,6 +144,45 @@ void theLensCoverFollowsTheSession()
     require(!uml::camera::layoutHasCameras("none"));
 }
 
+void aLaterBootComposesTheLayoutAgain()
+{
+    const auto phone = uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone);
+    auto presentation = present(phone, CameraTier::small, "");
+    require(presentation.layout == "bf-small-flash-manual", presentation.layout);
+    recompose(presentation);
+    require(presentation.layout == "bf-small-flash-manual", "nothing learned, nothing changed");
+
+    // A Bayer still teaches the run's store a lens's colour data, and RAW is in
+    // the layout only once the store has it: the next boot offers it.
+    for (const auto& info : phone->cameras()) {
+        if (!info.rawStills)
+            continue;
+        uml::platform::CameraColorData data;
+        data.bayer = uml::platform::BayerOrder::grbg;
+        data.blackLevel = 64;
+        data.whiteLevel = 1023;
+        data.rawWidth = info.rawStillSize.width;
+        data.rawHeight = info.rawStillSize.height;
+        data.illuminant1 = 17;
+        data.illuminant2 = 21;
+        data.colorMatrix1 = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        data.focalLengthMillimetres = 6.9;
+        data.intrinsics = {3000, 3000, 1008, 756};
+        presentation.calibration->save(phone->hostModel(), uml::camera::CalibrationStore::lensKey(info), data);
+    }
+    require(presentation.layout == "bf-small-flash-manual", "the layout is composed when asked");
+    recompose(presentation);
+    require(presentation.layout == "bf-small-flash-manual-raw", presentation.layout);
+    const auto names = uml::camera::allLayoutNames();
+    require(std::find(names.begin(), names.end(), presentation.layout) != names.end(),
+        "a layout of the image's closed set");
+
+    // A presentation with no cameras stays as it is.
+    auto none = present(nullptr, CameraTier::small, "");
+    recompose(none);
+    require(none.layout == "none" && none.source == nullptr && !none.hasCameras());
+}
+
 struct Reports {
     std::vector<int> states;
     static void callback(void* context, int state) { static_cast<Reports*>(context)->states.push_back(state); }
@@ -295,7 +334,6 @@ void theEnvironmentNamesTheSyntheticCamera()
     }
 }
 
-
 void anUnknownSourceNeverFallsBackToTheHostsCamera()
 {
     // The host's source is made only for a value that names it: a test knob
@@ -339,6 +377,7 @@ int main()
         {"a-host-without-cameras-presents-none", aHostWithoutCamerasPresentsNone},
         {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
         {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
+        {"a-later-boot-composes-the-layout-again", aLaterBootComposesTheLayoutAgain},
         {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},
         {"the-rotation-takes-quarter-turns", theRotationTakesQuarterTurns},
         {"the-device-options-carry-the-sessions-statements", theDeviceOptionsCarryTheSessionsStatements},

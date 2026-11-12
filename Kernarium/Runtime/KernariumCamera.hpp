@@ -93,6 +93,15 @@ struct Presentation {
     [[nodiscard]] bool hasCameras() const noexcept { return uml::camera::layoutHasCameras(layout); }
 };
 
+/* The layout of `presentation`'s cameras now: what the calibration store has
+ * learned since decides whether RAW is among them. */
+[[nodiscard]] inline std::string composeNow(const Presentation& presentation)
+{
+    uml::camera::ArrangementOptions arrangement;
+    arrangement.tier = presentation.tier;
+    return uml::camera::composeLayout(*presentation.source, *presentation.calibration, arrangement);
+}
+
 /* Discovers `source`'s cameras at `tier` and composes the layout. A null
  * source is a host with no camera. */
 [[nodiscard]] inline Presentation present(
@@ -106,12 +115,19 @@ struct Presentation {
         calibrationDirectory);
     if (source == nullptr)
         return presentation;
-    uml::camera::ArrangementOptions arrangement;
-    arrangement.tier = tier;
-    presentation.layout =
-        uml::camera::composeLayout(*source, *presentation.calibration, arrangement);
     presentation.source = std::move(source);
+    presentation.layout = composeNow(presentation);
     return presentation;
+}
+
+/* Composes the layout again, at each boot of a run: the device is made anew
+ * from the same store, and a Bayer still taught it a lens's colour data after
+ * the last boot, so the guest has to be told of the RAW the camera device now
+ * offers. A presentation with no cameras stays as it is. */
+inline void recompose(Presentation& presentation)
+{
+    if (presentation.source != nullptr)
+        presentation.layout = composeNow(presentation);
 }
 
 /* The runtime's state value of the device's. */
@@ -276,6 +292,7 @@ struct SourceChoice {
     }
     return choice;
 }
+
 /* The source the choice names: the synthetic camera, the host's (made by
  * `host`, which is not called for any other choice), or none, a host with no
  * cameras, for a value that is not a name. */
