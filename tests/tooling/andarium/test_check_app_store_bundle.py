@@ -7,6 +7,9 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import contextlib
+import importlib.util
+import io
 import plistlib
 import shutil
 import subprocess
@@ -303,6 +306,18 @@ MANIFEST = {
     "NSPrivacyCollectedDataTypes": [],
     "NSPrivacyAccessedAPITypes": [],
 }
+
+
+def encoded_forms(text: str) -> tuple[tuple[str, bytes], ...]:
+    """A text as a binary stores it besides UTF-8: UTF-16 of either byte order, in capitals (the scan
+    ignores the case of ASCII letters), and the string of a binary property list that also holds a
+    non-ASCII character, which a property list stores as UTF-16."""
+    return (
+        ("utf16le", b"\0" + text.encode("utf-16-le") + b"\0"),
+        ("utf16be", b"\0" + text.encode("utf-16-be") + b"\0"),
+        ("utf16-capitals", text.upper().encode("utf-16-le")),
+        ("plist-utf16", plistlib.dumps({"Note": "购买 " + text}, fmt=plistlib.FMT_BINARY)),
+    )
 
 
 def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -674,6 +689,24 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
     (named_leak / "Data.bin").write_bytes(secret.encode())
     check(named_leak, passes=True, expect="Buy me tokens is compiled in", args=named_args)
 
+    # The identifiers as a binary stores a string besides UTF-8, in files up to the size the UTF-16
+    # search covers; a larger file (the staged system image) is searched as UTF-8 alone.
+    for form, content in encoded_forms(secret):
+        stray = tip_app(root, f"tip-leak-{form}", clean, app_info(), table=False)
+        (stray / "Data.bin").write_bytes(content)
+        for arguments in (local_args, [*other, "Debug", *local_args]):
+            check(stray, passes=False, expect="Data.bin: holds a product identifier of the local configuration",
+                  never=secret, args=arguments)
+    large = tip_app(root, "tip-leak-large", clean, app_info(), table=False)
+    with (large / "Data.bin").open("wb") as stream:
+        stream.write(secret.encode("utf-16-le"))
+        stream.truncate(129 << 20)
+    check(large, passes=True, expect="ready for the App Store", args=local_args)
+    with (large / "Data.bin").open("r+b") as stream:
+        stream.write(secret.encode())
+    check(large, passes=False, expect="Data.bin: holds a product identifier of the local configuration",
+          never=secret, args=local_args)
+
     # Both features, alone and together: each says its own line and neither disturbs the other.
     both_code = build(root, "both", FEEDBACK_FEATURE + TIP_FEATURE.replace("fixture", "tip_fixture"),
                       ["-framework", "MessageUI", "-framework", "StoreKit"])
@@ -843,6 +876,14 @@ def check_review(root: Path, check, clean: Path, feedback_info: dict, tip_info: 
     (named_leak / "Data.bin").write_bytes(digits.encode())
     check(named_leak, passes=True, expect="Review on the App Store is compiled in", args=named_args)
 
+    # The digits as a binary stores a string besides UTF-8.
+    for form, content in encoded_forms(digits):
+        stray = review_app(root, f"review-leak-{form}", clean, app_info(), table=False)
+        (stray / "Data.bin").write_bytes(content)
+        for arguments in (local_args, [*other, "Debug", *local_args]):
+            check(stray, passes=False, expect="Data.bin: holds the App Store identifier of the local configuration",
+                  never=digits, args=arguments)
+
     # All three features, alone and together: each says its own line and none disturbs another.
     # The fixture sources are renamed so one binary can hold all three.
     all_code = build(
@@ -987,6 +1028,20 @@ def check_developer(root: Path, check, clean: Path) -> None:
               if kind == "github" else "holds the handle of the local configuration",
               never=address.rpartition("/")[2], args=handles)
         check(app, passes=True, expect="ready for the App Store")
+    # The same addresses as a binary stores a string besides UTF-8. An address that goes on (the project's own
+    # repository under the account) is another address, in each encoding.
+    github = "https://github.com/fixturehub"
+    for kind, address, phrase in (("github", github, "holds a profile address of the local configuration"),
+                                  ("x", "https://x.com/FixtureX", "holds the handle of the local configuration")):
+        for form, content in encoded_forms(address):
+            stray = developer_app(f"dev-address-{kind}-{form}", app_info(), clean)
+            (stray / "Data.bin").write_bytes(content)
+            check(stray, passes=False, expect=f"Data.bin: {phrase}", never=address.rpartition("/")[2], args=handles)
+    for index, suffix in enumerate(("/repository", "hub", ".io")):
+        for encoding in ("utf-8", "utf-16-le", "utf-16-be"):
+            goes_on = developer_app(f"dev-address-goes-on-{encoding}-{index}", app_info(), clean)
+            (goes_on / "Data.bin").write_bytes(b"\0" + (github + suffix).encode(encoding) + b"\0")
+            check(goes_on, passes=True, expect="ready for the App Store", args=handles)
     # A local handle the build names is the build's to hold.
     check(developer_app("dev-address-named", info, build(
         root, "dev-address-named", 'const char *fixture(void) { return "https://x.com/fixturex"; }\n')),
@@ -1142,6 +1197,68 @@ def check_icp(root: Path, check, clean: Path) -> None:
     check(make_app(root, "icp-source-absent", clean, app_info(**base)), passes=True,
           expect="ICP filing number is not compiled in (Release)",
           args=[*other, "Release", "--info-source", str(source)])
+
+
+def check_one_walk(checker: Path, root: Path, clean: Path, failures: list[str]) -> None:
+    """A run asks every leak question in one walk over the bundle (a gigabyte with the staged system
+    image), whichever phase of the build it is: the run of the App Store, and the phases of the other
+    configurations. A question the plan lacks would walk again, which this test counts."""
+    spec = importlib.util.spec_from_file_location("check_app_store_bundle_under_test", checker)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    walk = module.scan_bundle
+    app = make_app(root, "one-walk", clean, app_info())
+    values = ["--feedback-receiver", "local@receiver.fixture",
+              "--tip-local-products", "one.fixture,two.fixture,three.fixture,four.fixture",
+              "--review-local-id", "id4815162342", "--developer-local-github", "fixturehub",
+              "--developer-x-handle", "fixturex", "--icp-local-number", "示例ICP备12345678号-1",
+              "--icp-number", "示例ICP备87654321号-1"]
+    runs = (
+        ("the App Store run", values),
+        ("the feedback, X and ICP phase", ["--configuration", "Debug", "--feedback", "--follow-x", "--icp", *values]),
+        ("the tip phase", ["--configuration", "Debug", "--tip-jar", *values]),
+        ("the review phase", ["--configuration", "Debug", "--review", *values]),
+    )
+    for label, arguments in runs:
+        walks: list[int] = []
+
+        def counted(path: Path, scans: set, walks: list[int] = walks) -> dict:
+            walks.append(len(scans))
+            return walk(path, scans)
+
+        module.scan_bundle = counted
+        stdout, stderr = io.StringIO(), io.StringIO()
+        saved = sys.argv
+        sys.argv = [str(checker), *arguments, str(app)]
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                module.main()
+        finally:
+            sys.argv = saved
+            module.scan_bundle = walk
+        if len(walks) != 1:
+            failures.append(f"{label}: {len(walks)} walks over the bundle, expected one")
+        elif not walks[0]:
+            failures.append(f"{label}: the one walk asks nothing")
+    # The checks of a framework ask no leak question, so its path is not walked for one.
+    walks = []
+
+    def idle(path: Path, scans: set) -> dict:
+        walks.append(len(scans))
+        return walk(path, scans)
+
+    module.scan_bundle = idle
+    sys.argv = [str(checker), "--runtime", *values, str(app)]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            module.main()
+    finally:
+        sys.argv = saved
+        module.scan_bundle = walk
+    if any(walks):
+        failures.append("the check of a framework walks its path for a leak")
 
 
 def check_examples(root: Path, check, clean: Path, config: Path, failures: list[str]) -> None:
@@ -1606,6 +1723,14 @@ def main() -> int:
         (named_leak / "Data.bin").write_bytes(receiver.encode())
         check(named_leak, passes=True, expect="Send feedback is compiled in", args=appstore)
 
+        # The receiver as a binary stores a string besides UTF-8.
+        for form, content in encoded_forms(receiver):
+            stray = make_app(root, f"leak-{form}", clean, app_info())
+            (stray / "Data.bin").write_bytes(content)
+            for arguments in (local, [*other, "Debug", *local]):
+                check(stray, passes=False, expect="Data.bin: holds the receiver of the local configuration",
+                      never=receiver, args=arguments)
+
         check_tip_jar(root, check, clean, feature, feedback_info, receiver, appstore, local, arranged)
         tip_ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
         tip_list = ",".join(tip_ids.values())
@@ -1613,6 +1738,7 @@ def main() -> int:
                      ["--tip-products", tip_list, "--tip-local-products", tip_list])
         check_developer(root, check, clean)
         check_icp(root, check, clean)
+        check_one_walk(options.checker, root, clean, failures)
         check_examples(root, check, clean, options.checker.parent.parent / "Config", failures)
         # Follow developer on X is compiled in only where the build names a handle,
         # by the same rule. The fixtures stand for the application with it (the

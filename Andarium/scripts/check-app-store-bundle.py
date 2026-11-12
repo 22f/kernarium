@@ -117,6 +117,12 @@ The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
 The launch names stay out of the application because the configuration
 compiles Live/LaunchEnvironment.swift out, and the scan covers the longer names.
+The leak scans read bytes too, so a local value of up to 15 bytes written as a
+Swift literal in code would be out of their sight; a local value reaches the
+product through a build setting and the Info.plist, never through source. A
+run walks the bundle once for all of its leak scans, and looks for a value as
+UTF-8 and as UTF-16 (the latter in files up to 128 MiB; the staged system
+image is searched as UTF-8 alone).
 The console lines are long enough to be text in the binary, so a build whose
 code still holds one fails, whether or not anything calls it.
 
@@ -137,6 +143,8 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import contextlib
+import dataclasses
 import os
 import plistlib
 import re
@@ -711,37 +719,139 @@ def feedback_address_problems(configuration: str, address: str) -> list[str]:
     return []
 
 
-def value_leaks(app: Path, values: list[str]) -> list[str]:
-    """The files of the bundle whose bytes hold any of the values of a local
-    configuration, in either case; named by path, never by the value."""
-    return bytes_leaks(app, [value.encode() for value in values if value])
+# The leak scans. Each asks whether a file of the bundle holds a value of the
+# local configuration that the build does not name; the answer names the
+# files, never the value. A value is searched in the encodings a binary stores
+# a string in: UTF-8 (the ASCII of a property list, the bytes of Mach-O code)
+# and the UTF-16 of a binary property list's or a CFString's non-ASCII string,
+# in either case of the ASCII letters. The UTF-16 forms are searched in files
+# up to UTF16_FILE_LIMIT: the strings of a table, a property list or code live
+# in files that size, and the staged system image (a gigabyte of compressed
+# filesystem that no build setting reaches) is searched as UTF-8 alone, which
+# keeps the cost of the scan a walk of the bytes and not three. A run asks all
+# of its questions in one walk over the bundle (`one_walk`); a question outside
+# that walk walks for itself.
+@dataclasses.dataclass(frozen=True)
+class Scan:
+    """One question of a walk: whether the bytes of a file hold `needle`
+    (lowercase) and, where `unless` is given, are not followed by a byte
+    pattern of it (an address that goes on with a path is another address);
+    or, for `whole`, whether a string of a property list or strings table is
+    exactly that text (lowercase). Where `within` is given, only files up to
+    that many bytes are searched."""
+    needle: bytes = b""
+    unless: bytes = b""
+    whole: str = ""
+    within: int = 0
 
 
-def bytes_leaks(app: Path, values: list[bytes]) -> list[str]:
-    """The files of the bundle whose bytes hold any of `values`, in either case
-    of the ASCII letters; named by path, never by the value."""
-    needles = [value.lower() for value in values if value]
-    if not needles:
-        return []
-    keep = max(len(needle) for needle in needles) - 1
-    found = []
+# Property lists and strings tables, whose strings `Scan.whole` compares.
+WHOLE_STRING_SUFFIXES = (".plist", ".strings", ".stringsdict")
+WHOLE_STRING_LIMIT = 16 << 20
+UTF16_FILE_LIMIT = 128 << 20
+CHUNK = 8 << 20
+# The byte that follows a value of an address in each encoding, and means the
+# address goes on: a letter, digit or one of . _ / - of the next character.
+ADDRESS_GOES_ON = {
+    "utf-8": rb"[a-z0-9._/-]",
+    "utf-16-be": rb"\x00[a-z0-9._/-]",
+    "utf-16-le": rb"[a-z0-9._/-]\x00",
+}
+ENCODINGS = ("utf-8", "utf-16-be", "utf-16-le")
+
+
+def value_scans(values: list[str]) -> set[Scan]:
+    return {Scan(needle=value.encode(encoding).lower(), within=0 if encoding == "utf-8" else UTF16_FILE_LIMIT)
+            for value in values if value for encoding in ENCODINGS}
+
+
+def address_scans(addresses: list[str]) -> set[Scan]:
+    return {Scan(needle=address.encode(encoding).lower(), unless=ADDRESS_GOES_ON[encoding],
+                 within=0 if encoding == "utf-8" else UTF16_FILE_LIMIT)
+            for address in addresses if address for encoding in ENCODINGS}
+
+
+def scan_bundle(app: Path, scans: set[Scan]) -> dict[Scan, list[str]]:
+    """The files of the bundle that answer each scan, by path, in one walk.
+    A file is read in chunks, with the tail of the last one kept so that a
+    match across the border is found, until each of its byte scans has
+    answered or it ends. Nothing to ask is no walk."""
+    found: dict[Scan, list[str]] = {scan: [] for scan in scans}
+    if not scans:
+        return found
+    plain = [scan for scan in scans if scan.needle and not scan.unless]
+    guarded = [(scan, re.compile(re.escape(scan.needle) + b"(?!" + scan.unless + b")"))
+               for scan in scans if scan.needle and scan.unless]
+    wholes = [scan for scan in scans if scan.whole]
+    keep = max([len(scan.needle) + 2 for scan in scans if scan.needle], default=0)
     for directory, _directories, files in os.walk(app):
         for name in sorted(files):
             path = Path(directory) / name
             if path.is_symlink() or not path.is_file():
                 continue
-            tail = b""
+            relative = str(path.relative_to(app))
             try:
+                size = path.stat().st_size
+                pending_plain = [scan for scan in plain if not scan.within or size <= scan.within]
+                pending_guarded = [item for item in guarded if not item[0].within or size <= item[0].within]
                 with path.open("rb") as handle:
-                    while chunk := handle.read(8 << 20):
+                    tail = b""
+                    while (pending_plain or pending_guarded) and (chunk := handle.read(CHUNK)):
                         window = (tail + chunk).lower()
-                        if any(needle in window for needle in needles):
-                            found.append(str(path.relative_to(app)))
-                            break
+                        for scan in [scan for scan in pending_plain if scan.needle in window]:
+                            found[scan].append(relative)
+                            pending_plain.remove(scan)
+                        for item in [item for item in pending_guarded if item[1].search(window)]:
+                            found[item[0]].append(relative)
+                            pending_guarded.remove(item)
                         tail = window[-keep:] if keep > 0 else b""
+                if wholes and path.suffix in WHOLE_STRING_SUFFIXES and size <= WHOLE_STRING_LIMIT:
+                    try:
+                        texts = {text.lower() for text in strings_in(plistlib.loads(path.read_bytes()))}
+                    except (plistlib.InvalidFileException, ValueError, OverflowError):
+                        texts = set()
+                    for scan in wholes:
+                        if scan.whole in texts:
+                            found[scan].append(relative)
             except OSError:
                 continue
-    return sorted(found)
+    return found
+
+
+# The answers of the walk the run made, and the bundle they are for.
+_SHARED: tuple[Path, dict[Scan, list[str]]] | None = None
+
+
+@contextlib.contextmanager
+def one_walk(app: Path, scans: set[Scan]):
+    """Answer `scans` in one walk, for every leak question the run asks of
+    `app` meanwhile. A question the walk did not plan is walked for itself."""
+    global _SHARED
+    _SHARED = (app, scan_bundle(app, scans))
+    try:
+        yield
+    finally:
+        _SHARED = None
+
+
+def leaks(app: Path, scans: set[Scan]) -> list[str]:
+    """The files of the bundle that answer any of `scans`; named by path, never by the value."""
+    if not scans:
+        return []
+    if _SHARED is not None and _SHARED[0] == app:
+        answers = _SHARED[1]
+        missing = scans - answers.keys()
+        if missing:
+            answers.update(scan_bundle(app, missing))
+    else:
+        answers = scan_bundle(app, scans)
+    return sorted({name for scan in scans for name in answers[scan]})
+
+
+def value_leaks(app: Path, values: list[str]) -> list[str]:
+    """The files of the bundle whose bytes hold any of the values of a local
+    configuration, in either case and in the encodings above."""
+    return leaks(app, value_scans(values))
 
 
 def address_leaks(app: Path, addresses: list[str]) -> list[str]:
@@ -749,29 +859,7 @@ def address_leaks(app: Path, addresses: list[str]) -> list[str]:
     account, in either case; named by path, never by the address. An address
     that goes on with a path (the project's own repository under the same
     account) is another address."""
-    expressions = [re.compile(re.escape(address.lower().encode()) + rb"(?![A-Za-z0-9._/-])")
-                   for address in addresses if address]
-    if not expressions:
-        return []
-    keep = max(len(address) for address in addresses) + 1
-    found = []
-    for directory, _directories, files in os.walk(app):
-        for name in sorted(files):
-            path = Path(directory) / name
-            if path.is_symlink() or not path.is_file():
-                continue
-            tail = b""
-            try:
-                with path.open("rb") as handle:
-                    while chunk := handle.read(8 << 20):
-                        window = (tail + chunk).lower()
-                        if any(expression.search(window) for expression in expressions):
-                            found.append(str(path.relative_to(app)))
-                            break
-                        tail = window[-keep:]
-            except OSError:
-                continue
-    return sorted(found)
+    return leaks(app, address_scans(addresses))
 
 
 def receiver_leaks(app: Path, receiver: str) -> list[str]:
@@ -1185,7 +1273,7 @@ def icp_number_problems(configuration: str, number: str) -> list[str]:
 def icp_leaks(app: Path, number: str) -> list[str]:
     """The files of the bundle whose bytes hold the number, as UTF-8 or as the
     UTF-16 a binary property list stores a non-ASCII string in; by path."""
-    return bytes_leaks(app, [number.encode(), number.encode("utf-16-be"), number.encode("utf-16-le")])
+    return value_leaks(app, [number])
 
 
 def icp_problems(
@@ -1349,42 +1437,18 @@ def follow_x_handle_problems(configuration: str, handle: str) -> list[str]:
     return []
 
 
+def follow_x_scans(handle: str) -> set[Scan]:
+    return (value_scans([f"{host}/{handle}" for host in FOLLOW_X_HOSTS])
+            | {Scan(whole=handle.lower())})
+
+
 def follow_x_leaks(app: Path, handle: str) -> list[str]:
     """The files of the bundle that hold the local configuration's handle as
     a profile address (in either case, in any file), or as the whole of a
     string of a property list or strings table. The bare word is no leak:
     the bundle identifier holds the same one. Named by path, never by the
     handle."""
-    needles = [f"{host}/{handle}".lower().encode() for host in FOLLOW_X_HOSTS]
-    longest = max(len(needle) for needle in needles)
-    wanted = handle.lower()
-    found = []
-    for directory, _directories, files in os.walk(app):
-        for name in sorted(files):
-            path = Path(directory) / name
-            if path.is_symlink() or not path.is_file():
-                continue
-            relative = str(path.relative_to(app))
-            try:
-                tail = b""
-                with path.open("rb") as stream:
-                    while chunk := stream.read(8 << 20):
-                        window = (tail + chunk).lower()
-                        if any(needle in window for needle in needles):
-                            found.append(relative)
-                            break
-                        tail = window[-(longest - 1):]
-                    else:
-                        if path.suffix in (".plist", ".strings", ".stringsdict") and path.stat().st_size <= 16 << 20:
-                            try:
-                                texts = strings_in(plistlib.loads(path.read_bytes()))
-                            except (plistlib.InvalidFileException, ValueError, OverflowError):
-                                texts = []
-                            if any(text.lower() == wanted for text in texts):
-                                found.append(relative)
-            except OSError:
-                continue
-    return sorted(found)
+    return leaks(app, follow_x_scans(handle))
 
 
 def follow_x_tables(app: Path) -> list[Path]:
@@ -1505,6 +1569,43 @@ def follow_x_problems(
     return problems, compiled
 
 
+def planned_scans(options: argparse.Namespace) -> set[Scan]:
+    """Every leak question the checks this run makes can ask, so that one walk
+    answers them. The checks decide which they ask; a question this list lacks
+    is walked for itself, so a drift costs a walk and never an answer."""
+    if options.runtime or options.host_traces:
+        return set()
+    if options.feedback or options.follow_x or options.icp:
+        feedback, follow_x, icp, tip, review = options.feedback, options.follow_x, options.icp, False, False
+    elif options.tip_jar:
+        feedback = follow_x = icp = review = False
+        tip = True
+    elif options.review:
+        feedback = follow_x = icp = tip = False
+        review = True
+    else:
+        feedback = follow_x = icp = tip = review = True
+    scans: set[Scan] = set()
+    if feedback:
+        scans |= value_scans([options.feedback_receiver])
+    if follow_x:
+        scans |= value_scans([FOLLOW_X_ARRANGED])
+        if options.developer_x_handle:
+            scans |= follow_x_scans(options.developer_x_handle)
+    if icp:
+        scans |= value_scans([ICP_ARRANGED, options.icp_local_number])
+        if options.configuration == "AppStore":
+            scans |= value_scans([options.icp_number])
+    if tip:
+        scans |= value_scans(list(split_products(options.tip_local_products).values()))
+        if options.developer_local_github:
+            scans |= address_scans([f"github.com/{options.developer_local_github}"])
+    if review:
+        local = options.review_local_id
+        scans |= value_scans([local[2:] if local.startswith("id") else local])
+    return scans
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("app", type=Path)
@@ -1595,7 +1696,11 @@ def main() -> int:
         "--host-traces", action="store_true",
         help="the path is one framework: check the traces of its build host alone")
     options = parser.parse_args()
+    with one_walk(options.app, planned_scans(options)):
+        return check(options)
 
+
+def check(options: argparse.Namespace) -> int:
     app = options.app
     products = split_products(options.tip_products)
     developer = {"name": options.developer_name, "github": options.developer_github, "x": options.developer_x}
