@@ -350,7 +350,8 @@ an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTe
 FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 FOLLOW_X_HANDLE=example_handle
 TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
-SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle`;
+SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle
+ICP_NUMBER=示例ICP备00000000号-0A`;
 the scheme without the filter also runs `AndariumUITests`). The scheme's Test
 action pins English, so the tests that read the application's words do not
 depend on the language of the device; `LocalizationTests` names a lost pin and
@@ -365,7 +366,9 @@ exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
 command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
 a run without it does not build them. `FollowXRowTests` need
 `FOLLOW_X_HANDLE=example_handle`
-([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)), and
+`ICPFootnoteTests` need `ICP_NUMBER=示例ICP备00000000号-0A`
+([ICP filing number](../Andarium/README.md#icp-filing-number)).
 `TipJarScreenTests` and
 `TipJarStoreKitTests` ([Buy me tokens](../Andarium/README.md#buy-me-tokens)) need
 the four `TIP_` settings the same way; the second plays purchases, Ask to Buy

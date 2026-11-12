@@ -37,8 +37,9 @@ uml_add_tooling_test(
 # feedback present only where the build names a receiver, Buy me tokens only
 # where it names its four product identifiers, Review on the App Store only where
 # it names the application's identifier, Follow developer on X only where it names
-# a handle, and the tip header's developer only where the product has Buy me
-# tokens and the build names the value, in either direction.
+# a handle, the ICP filing number only where it names the number, and the tip
+# header's developer only where the product has Buy me tokens and the build names
+# the value, in either direction.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B

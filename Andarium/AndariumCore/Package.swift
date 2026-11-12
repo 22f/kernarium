@@ -66,6 +66,12 @@ let package = Package(
             name: "AndariumFollowXLogic",
             swiftSettings: [.define("FOLLOW_X")]
         ),
+        // The ICP filing footnote's logic, for the package's tests only, by the same
+        // rule (a symlink to Andarium/Shared/ICP/Logic).
+        .target(
+            name: "AndariumICPLogic",
+            swiftSettings: [.define("ICP_FILING")]
+        ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
@@ -73,7 +79,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic", "AndariumTipJarLogic", "AndariumReviewLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic", "AndariumICPLogic", "AndariumTipJarLogic", "AndariumReviewLogic"]
         ),
     ]
 )

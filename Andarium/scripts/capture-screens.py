@@ -67,6 +67,12 @@ SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle` (and
 `SHEET_ARTWORK_SOURCE=local` with `FOLLOW_X_LOGO_SOURCE=local` for the files of
 `Config/Local/`); without them it reads the role alone.
 
+The shots of Info's filing number (`info-icp…`) need a Preview built with
+`ICP_NUMBER=示例ICP备00000000号-0A`, which is the placeholder and never the
+local file's number; without it they are skipped and said so. The storefront is
+the Preview's own (`-icpStorefront CHN|USA|none`), so that a shot does not depend
+on the Simulator's account.
+
 The Info shots show Follow developer on X in a Preview built with
 `FOLLOW_X_HANDLE=example_handle` (and `FOLLOW_X_LOGO_SOURCE=local` for the real
 logo from `Config/Local/`); without it the row is absent from them.
@@ -129,6 +135,8 @@ class Shot:
     feedback: bool = False
     # The screen is Buy me tokens', which only a Preview built with the four TIP_ settings has.
     tipjar: bool = False
+    # The screen shows the ICP filing number, which only a Preview built with ICP_NUMBER has.
+    icp: bool = False
 
     def launch_arguments(self, language: str | None = None) -> list[str]:
         arguments = ["-screen", self.screen, *self.args]
@@ -149,6 +157,11 @@ def feedback(id: str, screen: str, description: str, *args: str, dark: bool = Fa
 def tipjar(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 8.0) -> Shot:
     """A shot of Buy me tokens, which exists only in a Preview built with the arrangement of the four `TIP_` settings."""
     return Shot(id, "Buy me tokens", screen, description, tuple(args), dark, wait, tipjar=True)
+
+
+def icp(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 4.0) -> Shot:
+    """A shot of Info's filing number, which exists only in a Preview built with the arranged `ICP_NUMBER`."""
+    return Shot(id, "Info", screen, description, tuple(args), dark, wait, icp=True)
 
 
 SYSTEM = ("-systemMicrophone", "YES")
@@ -245,6 +258,9 @@ SHOTS: list[Shot] = [
     s("resolution-sheet-native-2-61", "Sheets", "resolution-sheet", "The sheet on a screen whose native scale is 2.61: 2.5 is left out for being near native, so 1.0, 1.5, 2.0 and 2.61.", "-displayNative", "2.61"),
     s("erase-alert", "Alerts", "erase", "Erase virtual machine: the standard destructive confirmation over Home. Confirming returns to the first-launch screen (home-welcome).", dark=True),
     s("info", "Info", "info", "Info: the app and version, System info (Build, Android version, Security patch, Kernel, Architecture, Supported architectures), Project on GitHub and Acknowledgements.", dark=True),
+    icp("info-icp", "info-bottom", "Info scrolled to its end in mainland China's storefront: the filing number as one centred footnote line in the secondary colour, below every section, a link to MIIT's filing site.", "-icpStorefront", "CHN", dark=True),
+    icp("info-icp-other-storefront", "info-bottom", "Info scrolled to its end in another storefront: no footnote.", "-icpStorefront", "USA"),
+    icp("info-icp-unknown-storefront", "info-bottom", "Info scrolled to its end while the storefront is not known: no footnote.", "-icpStorefront", "none"),
     s("info-acknowledgements", "Info", "info-acknowledgements", "Acknowledgements: projects by group; the names and marks line is at the bottom.", dark=True),
     s("info-license", "Info", "info-license", "A project's page: copyright holders, the license name and the license text (Mesa, MIT).", dark=True),
     s("info-license-long", "Info", "info-license-gpl", "A page with a long license text (Linux: syscall exception and GPL v2)."),
@@ -437,6 +453,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
     if shot.tipjar and state.get("tipjar") is not True:
         return "this Preview has no Buy me tokens: build it with the four TIP_ settings of the arrangement on the command line"
+    if shot.icp and state.get("icp") is not True:
+        return "this Preview has no filing number: build it with ICP_NUMBER of the arrangement on the command line"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None
@@ -687,9 +705,12 @@ def capture_all(args: argparse.Namespace) -> int:
         reported = app_state(udid) or {}
         has_feedback = reported.get("feedback") is True
         has_tipjar = reported.get("tipjar") is True
-        wanted = [shot for shot in selected if (has_feedback or not shot.feedback) and (has_tipjar or not shot.tipjar)]
+        has_icp = reported.get("icp") is True
+        wanted = [shot for shot in selected
+                  if (has_feedback or not shot.feedback) and (has_tipjar or not shot.tipjar) and (has_icp or not shot.icp)]
         for label, present, flagged in (("Send feedback", has_feedback, lambda shot: shot.feedback),
-                                        ("Buy me tokens", has_tipjar, lambda shot: shot.tipjar)):
+                                        ("Buy me tokens", has_tipjar, lambda shot: shot.tipjar),
+                                        ("the filing number", has_icp, lambda shot: shot.icp)):
             skipped = sum(1 for shot in selected if flagged(shot) and not present)
             if skipped:
                 print(

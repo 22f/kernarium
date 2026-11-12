@@ -35,6 +35,10 @@
 	<key>AndariumFollowXHandle</key>
 	<string>$(FOLLOW_X_HANDLE)</string>
 #endif
+#ifdef ICP_FILING
+	<key>AndariumICPNumber</key>
+	<string>$(ICP_NUMBER)</string>
+#endif
 #ifdef APP_REVIEW
 	<key>AndariumReviewID</key>
 	<string>$(REVIEW_ID)</string>

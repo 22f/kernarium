@@ -193,6 +193,14 @@ FOLLOW_X_PROFILE_ONLY = (
     '  return "AndariumTipProducts" "_$s8Andarium11TipJarModelC" "_$s8Andarium14FollowXProfileO";\n'
     "}\n"
 )
+# The ICP filing number as a binary holds it: its types, the Info.plist key and the
+# host of the filing site. The partial one has lost the types and the host.
+ICP_FEATURE = (
+    "const char *fixture(void) {\n"
+    '  return "_$s8Andarium9ICPFilingO" "_$s8Andarium11ICPFootnoteV" "AndariumICPNumber" "beian.miit.gov.cn";\n'
+    "}\n"
+)
+ICP_PARTIAL = 'const char *fixture(void) { return "AndariumICPNumber"; }\n'
 # Config/Info.plist as a fixture: the optional blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -235,6 +243,10 @@ INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 #ifdef FOLLOW_X
 \t<key>AndariumFollowXHandle</key>
 \t<string>$(FOLLOW_X_HANDLE)</string>
+#endif
+#ifdef ICP_FILING
+\t<key>AndariumICPNumber</key>
+\t<string>$(ICP_NUMBER)</string>
 #endif
 \t<key>CFBundleName</key>
 \t<string>Fixture</string>
@@ -1013,6 +1025,125 @@ def check_developer(root: Path, check, clean: Path) -> None:
           args=[*other, "Release", *arranged_tip, *arranged_values])
 
 
+def check_icp(root: Path, check, clean: Path) -> None:
+    """The ICP filing number is in the product exactly where the build names it, in either
+    direction and alone, and the local number is in no other file. Every number here is made up."""
+    number = "示例ICP备12345678号-1"
+    placeholder = "示例ICP备00000000号-0A"
+    feature = build(root, "icp-feature", ICP_FEATURE)
+    partial = build(root, "icp-partial", ICP_PARTIAL)
+    named = ["--icp-number", number, "--icp-local-number", number]
+    local = ["--icp-local-number", number]
+    other = ["--icp", "--configuration"]
+    info = app_info(AndariumICPNumber=number)
+
+    # With the number: the code, the key and the filing site's host, and the number the build named.
+    check(make_app(root, "icp-built", feature, info), passes=True,
+          expect="ICP filing number is compiled in", args=named)
+    check(make_app(root, "icp-absent", clean, app_info()), passes=True,
+          expect="ICP filing number is not compiled in", args=local)
+    check(make_app(root, "icp-no-key", feature, app_info()), passes=False,
+          expect="AndariumICPNumber must be the number the build names", args=named)
+    check(make_app(root, "icp-other-key", feature, app_info(AndariumICPNumber="示例ICP备99999999号-1")),
+          passes=False, expect="must be the number the build names", never="99999999", args=named)
+    check(make_app(root, "icp-not-built", clean, info), passes=False,
+          expect="lacks the ICP filing number", args=named)
+    check(make_app(root, "icp-partial", partial, info), passes=False,
+          expect="lacks the ICP filing number (ICPFiling, beian.miit.gov.cn)", args=named)
+    # The switch is its own: the other features are absent from a product with only the number.
+    check(make_app(root, "icp-alone", feature, info), passes=True, expect="Buy me tokens is not compiled in",
+          args=named)
+
+    # No number, so nothing of it: not the code, not the key.
+    check(make_app(root, "icp-code-without", feature, app_info()), passes=False,
+          expect="carries the ICP filing number (", args=local)
+    check(make_app(root, "icp-key-without", clean, info), passes=False,
+          expect="has AndariumICPNumber though the build names no number")
+    check(make_app(root, "icp-framework-without", clean, app_info(), framework=feature), passes=False,
+          expect="Runtime.framework/Runtime: carries the ICP filing number")
+
+    # The number is in Info.plist and in no other file; the local one is in no file of a product that
+    # does not name it, however it is stored.
+    elsewhere = make_app(root, "icp-elsewhere", feature, info)
+    (elsewhere / "Data.bin").write_bytes(number.encode())
+    check(elsewhere, passes=False, expect="Data.bin: holds the filing number outside Info.plist",
+          never="12345678", args=named)
+    in_plist = make_app(root, "icp-elsewhere-plist", feature, info)
+    (in_plist / "Other.plist").write_bytes(plistlib.dumps({"Note": number}, fmt=plistlib.FMT_BINARY))
+    check(in_plist, passes=False, expect="Other.plist: holds the filing number outside Info.plist",
+          never="12345678", args=named)
+    for form, content in (("utf8", number.encode()), ("utf16", number.encode("utf-16-le")),
+                          ("plist", plistlib.dumps({"Note": number}, fmt=plistlib.FMT_BINARY)),
+                          ("xml", plistlib.dumps({"Note": number}, fmt=plistlib.FMT_XML))):
+        leak = make_app(root, f"icp-leak-{form}", clean, app_info())
+        (leak / "Data.bin").write_bytes(b"\0" + content + b"\0")
+        check(leak, passes=False, expect="Data.bin: holds the filing number of the local configuration",
+              never="12345678", args=local)
+        check(leak, passes=True, expect="ready for the App Store")
+    check(make_app(root, "icp-leak-key", clean, info), passes=False,
+          expect="Info.plist: holds the filing number of the local configuration", never="12345678", args=local)
+
+    # The shape of the number in the local configuration.
+    for index, bad in enumerate(("has a space", "a/b", "tab\there", "x" * 101, placeholder)):
+        check(make_app(root, f"icp-shape-{index}", feature, app_info(AndariumICPNumber=bad)), passes=False,
+              expect="ICP filing number: the number in the local configuration", args=["--icp-number", bad])
+    check(make_app(root, "icp-shape-ok", feature, app_info(AndariumICPNumber="京ICP备12345678号")), passes=True,
+          expect="ICP filing number is compiled in", args=["--icp-number", "京ICP备12345678号"])
+
+    # The other configurations: absent, or the placeholder, which Debug alone takes.
+    arranged = ["--icp-number", placeholder]
+    arranged_info = app_info(AndariumICPNumber=placeholder)
+    for configuration in ("Debug", "Release"):
+        check(make_app(root, f"icp-{configuration}-absent", clean, app_info()), passes=True,
+              expect=f"ICP filing number is not compiled in ({configuration})",
+              args=[*other, configuration, *local])
+        # The local configuration's number never reaches them.
+        check(make_app(root, f"icp-{configuration}-number", feature, info), passes=False,
+              expect="not the arranged placeholder", never="12345678", args=[*other, configuration, *named])
+        check(make_app(root, f"icp-{configuration}-code", feature, app_info()), passes=False,
+              expect="carries the ICP filing number", args=[*other, configuration])
+        check(make_app(root, f"icp-{configuration}-key", clean, info), passes=False,
+              expect="though the build names no number", args=[*other, configuration])
+    check(make_app(root, "icp-Debug-arranged", feature, arranged_info), passes=True,
+          expect="ICP filing number is compiled in (Debug)", args=[*other, "Debug", *arranged])
+    # A development build's test bundle holds the placeholder in its tests.
+    with_tests = make_app(root, "icp-Debug-arranged-tests", feature, arranged_info)
+    (with_tests / "PlugIns").mkdir()
+    (with_tests / "PlugIns" / "Tests").write_bytes(b"\0" + placeholder.encode() + b"\0")
+    check(with_tests, passes=True, expect="ICP filing number is compiled in (Debug)",
+          args=[*other, "Debug", *arranged])
+    check(make_app(root, "icp-Release-arranged", feature, arranged_info), passes=False,
+          expect="only Debug takes the arrangement", args=[*other, "Release", *arranged])
+    check(make_app(root, "icp-Release-arranged-absent", clean, app_info()), passes=False,
+          expect="only Debug takes the arrangement", args=[*other, "Release", *arranged])
+    check(make_app(root, "icp-appstore-arranged", feature, arranged_info), passes=False,
+          expect="is the placeholder", args=arranged)
+    # The placeholder is in no product that does not arrange it, stored either way.
+    for form, content in (("utf8", placeholder.encode()),
+                          ("plist", plistlib.dumps({"Note": placeholder}, fmt=plistlib.FMT_BINARY))):
+        stray = make_app(root, f"icp-placeholder-{form}", clean, app_info())
+        (stray / "Data.bin").write_bytes(content)
+        check(stray, passes=False, expect="Data.bin: holds the placeholder filing number of the arrangement")
+        check(stray, passes=False, expect="Data.bin: holds the placeholder filing number of the arrangement",
+              args=[*other, "Debug"])
+    check(make_app(root, "icp-placeholder-key", clean, arranged_info), passes=False,
+          expect="Info.plist: holds the placeholder filing number of the arrangement")
+
+    # Config/Info.plist keeps every other value whichever way the number's block went.
+    source = root / "Info.plist.icp-source"
+    source.write_text(INFO_SOURCE, encoding="utf-8")
+    base = {"UIApplicationSceneManifest": {"UISceneConfigurations": {"Role": [
+        {"UISceneConfigurationName": "Fixture", "UISceneDelegateClassName": "Fixture.SceneDelegate"}]}}}
+    check(make_app(root, "icp-source-Debug", feature, app_info(AndariumICPNumber=placeholder, **base)), passes=True,
+          expect="ICP filing number is compiled in (Debug)",
+          args=[*other, "Debug", *arranged, "--info-source", str(source)])
+    check(make_app(root, "icp-source-appstore", feature, app_info(AndariumICPNumber=number, **base)), passes=True,
+          expect="ready for the App Store", args=[*named, "--info-source", str(source)])
+    check(make_app(root, "icp-source-absent", clean, app_info(**base)), passes=True,
+          expect="ICP filing number is not compiled in (Release)",
+          args=[*other, "Release", "--info-source", str(source)])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checker", type=Path, required=True)
@@ -1439,6 +1570,7 @@ def main() -> int:
         check_review(root, check, clean, feedback_info, app_info(AndariumTipProducts=tip_ids), appstore,
                      ["--tip-products", tip_list, "--tip-local-products", tip_list])
         check_developer(root, check, clean)
+        check_icp(root, check, clean)
         # Follow developer on X is compiled in only where the build names a handle,
         # by the same rule. The fixtures stand for the application with it (the
         # Info.plist key, a line of the row's text, a type, the FollowX table and the

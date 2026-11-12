@@ -43,6 +43,10 @@ enum CaptureState {
         // And those of Buy me tokens.
         record["tipjar"] = true
         #endif
+        #if ICP_FILING
+        // And the footnote of Info.
+        record["icp"] = true
+        #endif
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
               let data = try? JSONSerialization.data(withJSONObject: record) else { return }
         try? data.write(to: caches.appendingPathComponent("capture-state.json"), options: .atomic)

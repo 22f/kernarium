@@ -101,7 +101,17 @@ application that must:
     logo. The local handle is in no file of a bundle whose build does not name
     it, which the check finds as a profile address or as a property list's
     whole string (a bare scan of its bytes would match the bundle identifier,
-    which holds the same word), and never prints.
+    which holds the same word), and never prints; and
+  - carry the ICP filing number at the bottom of Info
+    (Andarium/README.md#icp-filing-number) only when the build names a number,
+    by the same rule and a switch of its own, which needs no tip, review or X
+    value: compiled in exactly where the ignored local configuration holds one,
+    in this configuration alone. A product without a number holds nothing of
+    it: no type, no Info.plist key. A product with one holds the type, the
+    address of MIIT's filing site and the key, whose value is the number the
+    build named, and the number in no other file. The local number is in no
+    file of a bundle whose build does not name it, as UTF-8 or as the UTF-16 of
+    a property list, and is never printed.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -114,10 +124,11 @@ The Xcode project runs it as the last build phase of the App Store
 configuration, so a build that breaks one of these rules fails. In every other
 configuration a phase runs `--feedback`, which checks Send feedback alone,
 another `--tip-jar`, which checks Buy me tokens alone, a third `--review`,
-which checks Review on the App Store alone, and a fourth `--follow-x`, which
-checks Follow developer on X alone: there the feature is absent unless a test
-or capture script arranged it with the example address, identifiers,
-placeholder or handle, in Debug alone. Each prints one line that says whether
+which checks Review on the App Store alone, a fourth `--follow-x`, which
+checks Follow developer on X alone, and a fifth `--icp`, which checks the ICP
+filing number alone: there the feature is absent unless a test or capture
+script arranged it with the example address, identifiers, placeholder, handle
+or number, in Debug alone. Each prints one line that says whether
 its feature is compiled in.
 """
 
@@ -264,6 +275,17 @@ FOLLOW_X_FILES = frozenset({"x-logo.svg", "glyph.svg"})
 FOLLOW_X_HANDLE_PATTERN = re.compile(r"[A-Za-z0-9_]{1,15}")
 # The hosts a profile address of the developer could name.
 FOLLOW_X_HOSTS = ("x.com", "twitter.com")
+# The ICP filing number at the bottom of Info. The build writes the number to
+# Info.plist under this key only where the footnote is compiled in
+# (Andarium/Config/Andarium.xcconfig).
+ICP_KEY = "AndariumICPNumber"
+# The only number a configuration other than AppStore may carry: the placeholder
+# the test and capture scripts arrange, and the one of Developer.local.xcconfig.example.
+ICP_ARRANGED = "示例ICP备00000000号-0A"
+# What the footnote leaves in a binary: its types, the Info.plist key it reads
+# and the host of the filing site its link opens.
+ICP_REQUIRED = (b"ICPFiling", ICP_KEY.encode(), b"beian.miit.gov.cn")
+ICP_FRAGMENTS = (b"ICPFootnote", b"ICPStorefront", *ICP_REQUIRED)
 # The tip header's developer (README: Buy me tokens). Its values reach the product
 # as Info.plist keys and its artwork as assets, only in an AppStore build that has the
 # sheet; the tests' arrangement states the placeholder `example` for the name and the
@@ -692,7 +714,13 @@ def feedback_address_problems(configuration: str, address: str) -> list[str]:
 def value_leaks(app: Path, values: list[str]) -> list[str]:
     """The files of the bundle whose bytes hold any of the values of a local
     configuration, in either case; named by path, never by the value."""
-    needles = [value.lower().encode() for value in values if value]
+    return bytes_leaks(app, [value.encode() for value in values if value])
+
+
+def bytes_leaks(app: Path, values: list[bytes]) -> list[str]:
+    """The files of the bundle whose bytes hold any of `values`, in either case
+    of the ASCII letters; named by path, never by the value."""
+    needles = [value.lower() for value in values if value]
     if not needles:
         return []
     keep = max(len(needle) for needle in needles) - 1
@@ -753,9 +781,9 @@ def receiver_leaks(app: Path, receiver: str) -> list[str]:
 
 # The optional features' blocks of Config/Info.plist, and the keys they write.
 OPTIONAL_BLOCKS = re.compile(
-    r"^#ifdef (?:FEEDBACK_MAIL|TIP_JAR|APP_REVIEW|SHEET_NAME|SHEET_GITHUB|SHEET_X|FOLLOW_X)\n.*?^#endif\n",
+    r"^#ifdef (?:FEEDBACK_MAIL|TIP_JAR|APP_REVIEW|SHEET_NAME|SHEET_GITHUB|SHEET_X|FOLLOW_X|ICP_FILING)\n.*?^#endif\n",
     re.S | re.M)
-OPTIONAL_KEYS = frozenset({FEEDBACK_KEY, TIP_KEY, REVIEW_KEY, FOLLOW_X_KEY, *DEVELOPER_KEYS.values()})
+OPTIONAL_KEYS = frozenset({FEEDBACK_KEY, TIP_KEY, REVIEW_KEY, FOLLOW_X_KEY, ICP_KEY, *DEVELOPER_KEYS.values()})
 
 
 def info_source_problems(app: Path, source: Path) -> list[str]:
@@ -1132,6 +1160,92 @@ def review_problems(
     return problems, compiled
 
 
+def icp_number_problems(configuration: str, number: str) -> list[str]:
+    """What is wrong with the number a build names, whatever the product holds.
+    The arranged placeholder is Debug's alone: Release, the build that
+    sideloads and forks make, never takes one."""
+    if not number:
+        return []
+    if configuration != "AppStore":
+        if number != ICP_ARRANGED:
+            return [f"ICP filing number: {configuration} names a number that is not the arranged placeholder; "
+                    "only the App Store configuration reads the local configuration"]
+        if configuration != "Debug":
+            return [f"ICP filing number: {configuration} names the arranged placeholder; "
+                    "only Debug takes the arrangement"]
+        return []
+    if number == ICP_ARRANGED:
+        return ["ICP filing number: the number in the local configuration is the placeholder"]
+    if len(number) > 100 or re.search(r"[\s/\x00-\x1f\x7f]", number):
+        return ["ICP filing number: the number in the local configuration is not one number "
+                "(no space, slash or control character, at most 100 characters)"]
+    return []
+
+
+def icp_leaks(app: Path, number: str) -> list[str]:
+    """The files of the bundle whose bytes hold the number, as UTF-8 or as the
+    UTF-16 a binary property list stores a non-ASCII string in; by path."""
+    return bytes_leaks(app, [number.encode(), number.encode("utf-16-be"), number.encode("utf-16-le")])
+
+
+def icp_problems(
+    app: Path, configuration: str, number: str, local: str = "",
+) -> tuple[list[str], bool]:
+    """Whether the product holds the ICP filing number as the build said it
+    would, and whether it holds it. `number` is the build setting ICP_NUMBER:
+    the local configuration's number in the App Store configuration, empty
+    otherwise, or the placeholder a test or capture script arranged. `local` is
+    the local configuration's own number, whatever the configuration: wherever
+    the build does not name it, no file of the bundle holds it. Where the build
+    names a number for the App Store, it is in Info.plist and in no other file. The
+    number is never printed."""
+    problems = icp_number_problems(configuration, number)
+    expected = bool(number) and not problems
+    if local and (not expected or local != number):
+        problems.extend(f"{name}: holds the filing number of the local configuration"
+                        for name in icp_leaks(app, local))
+    if number != ICP_ARRANGED or not expected:
+        problems.extend(f"{name}: holds the placeholder filing number of the arrangement"
+                        for name in icp_leaks(app, ICP_ARRANGED))
+    fragments: dict[str, set[bytes]] = {}
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        data = without_debug_map(*code, PATH_STABS)
+        present = {fragment for fragment in ICP_FRAGMENTS if fragment in data}
+        if present:
+            fragments[str(binary.relative_to(app))] = present
+    try:
+        with (app / "Info.plist").open("rb") as stream:
+            keyed = plistlib.load(stream).get(ICP_KEY)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        keyed = None
+    compiled = bool(fragments) or keyed is not None
+    if not expected:
+        if number:
+            problems.append("ICP filing number: the build names a number that cannot be used")
+        for name, present in fragments.items():
+            problems.append(
+                f"{name}: carries the ICP filing number ({', '.join(sorted(item.decode() for item in present))}) "
+                "though the build names no number")
+        if keyed is not None:
+            problems.append(f"Info.plist: has {ICP_KEY} though the build names no number")
+        return problems, compiled
+    if keyed != number:
+        problems.append(f"Info.plist: {ICP_KEY} must be the number the build names")
+    code = set().union(*fragments.values()) if fragments else set()
+    missing = [item.decode() for item in ICP_REQUIRED if item not in code]
+    if missing:
+        problems.append(
+            f"the application lacks the ICP filing number ({', '.join(missing)}) though the build names a number")
+    if configuration == "AppStore":
+        # (A development build's test bundle holds the arranged placeholder in its tests.)
+        problems.extend(f"{name}: holds the filing number outside Info.plist"
+                        for name in icp_leaks(app, number) if name != "Info.plist")
+    return problems, compiled
+
+
 def developer_problems(
     app: Path, configuration: str, tip_expected: bool, values: dict[str, str],
     local_github: str = "",
@@ -1413,12 +1527,23 @@ def main() -> int:
         help="the build setting DEVELOPER_X_HANDLE: the local configuration's handle, "
              "whose profile address no file of a bundle that does not name it may hold")
     parser.add_argument(
+        "--icp-number", default="",
+        help="the build setting ICP_NUMBER: the filing number the build names, empty when it names none")
+    parser.add_argument(
+        "--icp-local-number", default="",
+        help="the build setting DEVELOPER_ICP_NUMBER: the local configuration's number, which no file "
+             "of a bundle that does not name it may hold")
+    parser.add_argument(
         "--feedback", action="store_true",
         help="check Send feedback alone, for a configuration other than AppStore")
     parser.add_argument(
         "--follow-x", action="store_true",
         help="check Follow developer on X alone, for a configuration other than AppStore "
              "(with --feedback, the two)")
+    parser.add_argument(
+        "--icp", action="store_true",
+        help="check the ICP filing number alone, for a configuration other than AppStore "
+             "(with the options above, those too)")
     parser.add_argument(
         "--tip-products", default="",
         help="the build settings TIP_LITE, TIP_PRO, TIP_MAX and TIP_ULTRA, comma separated in that "
@@ -1475,7 +1600,7 @@ def main() -> int:
             app, options.configuration, tip_expected(options.configuration, products), developer,
             options.developer_local_github)
 
-    if options.feedback or options.follow_x:
+    if options.feedback or options.follow_x or options.icp:
         found = []
         if options.info_source is not None:
             found.extend(info_source_problems(app, options.info_source))
@@ -1492,6 +1617,11 @@ def main() -> int:
                 options.developer_x)
             found.extend(more)
             lines.append(f"{app.name}: Follow developer on X is {'compiled in' if compiled else 'not compiled in'}"
+                         f" ({options.configuration})")
+        if options.icp:
+            more, compiled = icp_problems(app, options.configuration, options.icp_number, options.icp_local_number)
+            found.extend(more)
+            lines.append(f"{app.name}: ICP filing number is {'compiled in' if compiled else 'not compiled in'}"
                          f" ({options.configuration})")
         for line in found:
             print(line, file=sys.stderr)
@@ -1581,6 +1711,10 @@ def main() -> int:
         app, options.configuration, options.review_id, options.review_local_id)
     problems.extend(review)
     print(f"{app.name}: Review on the App Store is {'compiled in' if review_compiled else 'not compiled in'}")
+
+    icp, icp_compiled = icp_problems(app, options.configuration, options.icp_number, options.icp_local_number)
+    problems.extend(icp)
+    print(f"{app.name}: ICP filing number is {'compiled in' if icp_compiled else 'not compiled in'}")
 
     privacy = subprocess.run(
         [sys.executable, "-B", str(options.privacy_checker), str(app)],

@@ -259,6 +259,32 @@ header's X button shares the logo and `FollowXProfile` and is keyed on a handle
 of its own, so a build with the button and without the row holds the logo and
 the address's builder and nothing else of the row.
 
+### ICP filing number
+
+For users whose App Store storefront is mainland China's, the last line of
+Info is the developer's ICP filing number, as the law asks: one centred
+footnote in the secondary colour, no icon or words around it, shown exactly as
+stored (it is not translated), as a link to MIIT's filing site through
+`openURL` (`Shared/ICP/`; VoiceOver reads the number with the link trait). It
+shows only when StoreKit 2's `Storefront.current` is `CHN`, kept current through
+`Storefront.updates` while Info is open; an unknown storefront (not loaded,
+offline, no account) hides it, and nothing else decides: no request of its own,
+no locale, region setting, time zone or address. The number is the developer's
+own and is tracked nowhere: the line is compiled in, under the `ICP_FILING`
+condition, only in an AppStore build whose ignored
+`Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`)
+names it (`DEVELOPER_ICP_NUMBER`), with a switch of its own that needs no tip,
+review or X value. A fork, a sideload or a Debug or Release build holds none of
+it, and the bundle check asserts both directions as it does for Follow
+developer on X: the number and its Info.plist key (`AndariumICPNumber`) are in no
+other product, the number is in no other file of one that names it, the local
+number is in no file of one that does not (as UTF-8 or as a property list's
+UTF-16), and the arranged placeholder is in no product but Debug's; it never
+prints the number. Tests and captures turn it on in a Debug build with
+`ICP_NUMBER=示例ICP备00000000号-0A` on the `xcodebuild` line; the hosted tests
+inject the storefront. `AndariumPreview` takes the arrangement only, and its
+`-icpStorefront CHN|USA|none|later` states the storefront.
+
 ### Buy me tokens
 
 A sheet in the shape of a chat offers four one-time tips, Lite, Pro, Max and
@@ -894,7 +920,8 @@ short quoted Chinese or Japanese name is not cut across two lines.
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
 `FEEDBACK_ADDRESS=feedback@example.com`, the four `TIP_*` identifiers,
-`REVIEW_ID=id0000000000` and `FOLLOW_X_HANDLE=example_handle` (the output of
+`REVIEW_ID=id0000000000`, `FOLLOW_X_HANDLE=example_handle` and
+`ICP_NUMBER=示例ICP备00000000号-0A` (the output of
 `Andarium` and `AndariumPreview` together; one without a feature has none of its
 strings and fails) and on an App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under

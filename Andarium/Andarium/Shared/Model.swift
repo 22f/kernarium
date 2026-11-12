@@ -418,6 +418,13 @@ final class AppModel {
     /// build that names one has; a test replaces it.
     @ObservationIgnored var followXHandle: () -> String? = { FollowXProfile.handle }
     #endif
+    #if ICP_FILING
+    /// The filing number Info's footnote shows, from Info.plist, which only a
+    /// build that names one has, and the storefront that decides whether it
+    /// shows; a test replaces each.
+    @ObservationIgnored var icpNumber: () -> String? = { ICPFiling.number }
+    @ObservationIgnored var icpStorefront = ICPStorefrontServices.live
+    #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
     /// The guest is paused because the device is nearly out of space; the
