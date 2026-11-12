@@ -3086,12 +3086,14 @@ def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo
 
 # The host's cameras (overlay/camera; routes p0030 and p0031). The camera device gives the guest V4L2
 # nodes, and the emulated camera HAL of hardware/google/camera takes the cameras from them: the lazy
-# provider is started at boot by the init file of a layout that has cameras, runs while cameraserver
-# lists the cameras and while an application holds a camera or the torch, and exits otherwise (init
-# starts it again through its interface); its HWL library holds the V4L2 source of route p0030. The
-# host composes one camera layout from its cameras and passes it as the vendor SKU: the permission
-# directory of that name declares the camera features and an init trigger selects the media profiles
-# that match its size caps and starts the provider, all of them generated (camera_layouts.py).
+# provider is started by the init file of a layout that has cameras whenever cameraserver starts (a
+# restart finds no provider otherwise: cameraserver lists only a provider that has registered), runs
+# while cameraserver lists the cameras and while an application holds a camera or the torch, and exits
+# otherwise (init starts it again through its interface); its HWL library holds the V4L2 source of
+# route p0030. The host composes one camera layout from its cameras and passes it as the vendor SKU:
+# the permission directory of that name declares the camera features, an init trigger selects the
+# media profiles that match its size caps and a second one starts the provider, all of them generated
+# (camera_layouts.py).
 # Nothing here fails loudly when it is missing: a stock library lists no camera, a missing declaration
 # lists no feature, and a missing file leaves the default profiles.
 CAMERA_HAL_NAME = "android.hardware.camera.provider"
@@ -3182,25 +3184,25 @@ def check_camera_layout_files(archive: zipfile.ZipFile, infos: dict[str, zipfile
             fail(f"{entry} is a VINTF manifest of a camera layout: the layouts differ in features, not in HALs")
 
 
-def camera_provider_starts(script: str, service: str) -> set[str]:
-    """The camera layouts whose action in the init file starts the service."""
-    starting: set[str] = set()
-    layout = None
-    prefix = f"on property:{camera_layouts.SKU_PROPERTY}="
+def camera_init_starts(script: str, service: str) -> dict[str, list[str]]:
+    """The init file's actions that start the service: each trigger (the text after `on `) with the
+    `start` commands of its action. An action with no such command is not listed."""
+    starts: dict[str, list[str]] = {}
+    trigger = None
     for raw in script.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("on "):
-            layout = line[len(prefix):] if line.startswith(prefix) else None
-        elif line == f"start {service}" and layout is not None:
-            starting.add(layout)
-    return starting
+            trigger = line[len("on "):].strip()
+        elif line == f"start {service}" and trigger is not None:
+            starts.setdefault(trigger, []).append(line)
+    return starts
 
 
 def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The lazy provider is installed alone, declared once, started at boot by the layouts that have
-    cameras and by its interface afterwards, and loads the V4L2 HWL."""
+    """The lazy provider is installed alone, declared once, started by an action of each layout that has
+    cameras when cameraserver is running and by its interface afterwards, and loads the V4L2 HWL."""
     binary = f"VENDOR/bin/hw/{CAMERA_PROVIDER}"
     for entry in (binary, CAMERA_HWL):
         info = infos.get(entry)
@@ -3230,8 +3232,12 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
     if any(line.startswith("on ") for line in lines):
         fail("the camera provider init script may have no trigger: the layouts' init file starts the service "
              "and its interface line restarts it")
-    # cameraserver lists a lazy AIDL provider only if it registered, and nothing but an init action starts
-    # it the first time, so the service the layouts start must be this one, in the layouts that have cameras.
+    # cameraserver lists a lazy AIDL provider only if it registered when it looked or registers later, and
+    # nothing but an init action starts it: not the first time, and not when cameraserver starts again
+    # (a crash, a restart of the framework) after the provider has exited. So each layout that has cameras
+    # has the action that starts this service when cameraserver is running and the layout is the SKU, and
+    # no other action starts it (a start in the early profile action, or in a layout without cameras, or
+    # on a property other than cameraserver's state would list no camera after a restart).
     service_name = service[0].split()[1]
     if service_name != camera_layouts.PROVIDER_SERVICE:
         fail(f"the camera provider service is {service_name}, not {camera_layouts.PROVIDER_SERVICE}, "
@@ -3239,11 +3245,17 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
     init_info = infos.get(f"VENDOR/etc/init/{camera_layouts.INIT_FILE}")
     if init_info is None or init_info.is_dir():
         fail(f"VENDOR/etc/init/{camera_layouts.INIT_FILE} is missing: nothing starts the camera provider")
-    starting = camera_provider_starts(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
-    with_cameras = {layout.name for layout in camera_layouts.all_layouts() if layout.has_front}
-    if starting != with_cameras:
-        fail("the camera layouts that start the camera provider are not the layouts that have cameras: "
-             f"missing {sorted(with_cameras - starting)}, extra {sorted(starting - with_cameras)}")
+    starts = camera_init_starts(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
+    wanted = {camera_layouts.provider_trigger(layout.name): [f"start {service_name}"]
+              for layout in camera_layouts.all_layouts() if layout.has_front}
+    if starts != wanted:
+        missing = sorted(set(wanted) - set(starts))
+        extra = sorted(set(starts) - set(wanted))
+        repeated = sorted(trigger for trigger, commands in starts.items() if len(commands) != 1)
+        fail("the init file of the camera layouts must start the camera provider in one action for each layout "
+             "that has cameras, with the conditions cameraserver running and the layout's SKU, and nowhere else: "
+             f"missing {missing[:3]}{' ...' if len(missing) > 3 else ''} ({len(missing)}), "
+             f"extra {extra[:3]}{' ...' if len(extra) > 3 else ''} ({len(extra)}), repeated {repeated[:3]}")
     declarations = []
     for entry, info in sorted(infos.items()):
         path = PurePosixPath(entry)

@@ -286,10 +286,11 @@ metadata node, and the emulated camera HAL of `hardware/google/camera` (route
 from them and writes the controls back. Its provider is the lazy service
 `android.hardware.camera.provider@2.7-service-google-lazy`
 (`ICameraProvider/internal/0`, declared once in the vendor manifest): the init
-file of a camera layout starts it at boot, because cameraserver lists only a
-provider that has registered and nothing else starts a lazy AIDL provider the
-first time. It exits when cameraserver holds no camera, and init starts it again
-through its interface line when an application opens a camera or the torch.
+file of a camera layout starts it whenever cameraserver starts, because
+cameraserver lists only a provider that has registered and nothing else starts a
+lazy AIDL provider, the first time or after it has exited. It exits when
+cameraserver holds no camera, and init starts it again through its interface
+line when an application opens a camera or the torch.
 The image expects the driver to register the camera
 nodes as `/dev/video10` and above; the codec nodes stay in `video0` to
 `video9`, which the HAL never opens. The HAL's rules (the wire, camera IDs,
