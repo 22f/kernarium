@@ -51,9 +51,6 @@ inline constexpr const char *guest_address = "10.0.2.15";
 inline constexpr const char *nameserver_address = "10.0.2.3";
 inline constexpr dns::Ipv4Address nameserver_ipv4{10, 0, 2, 3};
 inline constexpr dns::Ipv4Address host_alias_ipv4{10, 0, 2, 2};
-/* The addresses SLiRP answers for itself; none of them is the host. */
-inline constexpr dns::Subnet virtual_network_ipv4{
-	{10, 0, 2, 0}, {255, 255, 255, 0}};
 /* A frame that needs the host's addresses (dns::needs_host_check) finds them
  * read again when the table is older than this. */
 inline constexpr std::chrono::seconds host_address_max_age{1};

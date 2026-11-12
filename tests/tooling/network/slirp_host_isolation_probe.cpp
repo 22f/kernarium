@@ -4,8 +4,10 @@
  * way a guest does, with sockets of its own on the host's loopback and on the
  * host's LAN address, and requires that a guest's TCP and UDP to the gateway
  * address (which SLiRP would map to the host's 127.0.0.1), to the broadcast
- * address, to the host's own addresses and to 127.0.0.1 itself are refused at
- * once and arrive at no host socket.
+ * address, to the host's own addresses (those inside the virtual network
+ * too: the gateway's and the name server's own, but for what SLiRP serves
+ * there) and to 127.0.0.1 itself are refused at once and arrive at no host
+ * socket.
  *
  * What the guest is meant to reach keeps working in the same configuration:
  * DNS at the name server (over UDP and TCP), DHCP, an ICMP echo to the
@@ -55,6 +57,9 @@ using uml::network::HostAddresses;
 
 constexpr Address gateway{10, 0, 2, 2};
 constexpr Address name_server{10, 0, 2, 3};
+/* An address of the virtual network that SLiRP serves nothing at, held by a
+ * host whose interface sits in 10.0.2.0/24. */
+constexpr Address virtual_host{10, 0, 2, 77};
 constexpr Address broadcast{255, 255, 255, 255};
 constexpr Address loopback{127, 0, 0, 1};
 /* TEST-NET-1: no host holds it; it stands for another machine. */
@@ -551,21 +556,31 @@ void check_host_addresses_are_closed()
 	}
 }
 
-/* What the guest is meant to reach, with the loopback closed. */
-void check_what_still_works()
+/* What the guest is meant to reach, with the loopback closed: `before` is how
+ * the scenario sets the provider up (a host that holds the gateway's and the
+ * name server's addresses, for one). */
+void check_what_still_works(
+	const std::string &scenario,
+	std::function<void(uml::network::SlirpProvider &)> before = {})
 {
-	Rig rig;
+	Rig rig{std::move(before)};
 	if (!rig.opened)
 		return;
+	const auto failed = [&](const char *what, const std::string &message) {
+		fail((scenario + ": " + what).c_str(), message);
+	};
 
-	/* DHCP: an offer. */
-	(void)rig.guest.send(udp_frame({0, 0, 0, 0}, broadcast, 68, 67,
-				       dhcp_discover()));
-	if (!rig.guest.receive([](const Bytes &frame) {
-		    return frame.size() > 42 + 240 && frame[23] == IPPROTO_UDP &&
-			    get16(frame, 34) == 67 && get16(frame, 36) == 68;
-	    }))
-		fail("DHCP", "no offer");
+	/* DHCP: an offer, to the broadcast address and, as a renewing client
+	 * asks, to the gateway itself. */
+	for (const auto &server : {broadcast, gateway}) {
+		(void)rig.guest.send(udp_frame({0, 0, 0, 0}, server, 68, 67,
+					       dhcp_discover()));
+		if (!rig.guest.receive([](const Bytes &frame) {
+			    return frame.size() > 42 + 240 && frame[23] == IPPROTO_UDP &&
+				    get16(frame, 34) == 67 && get16(frame, 36) == 68;
+		    }))
+			failed("DHCP", "no offer to " + text(server));
+	}
 
 	/* DNS over UDP at the name server and at the gateway. */
 	for (const auto &[server, port] :
@@ -579,7 +594,7 @@ void check_what_still_works()
 				    get16(frame, 36) == port &&
 				    (frame[45] & 0x0f) == 0;
 		    }))
-			fail("DNS over UDP", "no answer from " + text(server));
+			failed("DNS over UDP", "no answer from " + text(server));
 	}
 
 	/* DNS over TCP, through SLiRP's guest forward. */
@@ -595,16 +610,76 @@ void check_what_still_works()
 		if (!answer ||
 		    (parse_tcp(*answer)->flags & (tcp_syn | tcp_ack)) !=
 			    (tcp_syn | tcp_ack))
-			fail("DNS over TCP", "no SYN-ACK from " + text(server));
+			failed("DNS over TCP", "no SYN-ACK from " + text(server));
 	}
 
-	/* An echo to the gateway is answered by SLiRP itself. */
-	(void)rig.guest.send(icmp_echo_frame(gateway));
-	if (!rig.guest.receive([](const Bytes &frame) {
-		    return frame.size() >= 42 && frame[23] == IPPROTO_ICMP &&
-			    frame[34] == 0;
-	    }))
-		fail("ping", "no echo reply from the gateway");
+	/* An echo to the gateway and to the name server is answered by SLiRP
+	 * itself. */
+	for (const auto &server : {gateway, name_server}) {
+		(void)rig.guest.send(icmp_echo_frame(server));
+		if (!rig.guest.receive([&](const Bytes &frame) {
+			    return frame.size() >= 42 && frame[23] == IPPROTO_ICMP &&
+				    frame[34] == 0 &&
+				    std::equal(server.begin(), server.end(),
+					       frame.begin() + 26);
+		    }))
+			failed("ping", "no echo reply from " + text(server));
+	}
+}
+
+/* A host with an address of its own inside the virtual network: SLiRP connects
+ * a flow to any address of it but the gateway as given, so the address is the
+ * host's like any other, refused at once. The gateway's own address is the
+ * host's too, but for what SLiRP serves there, which keeps working
+ * (check_what_still_works with the same table, the name server's DNS and echo
+ * included; the provider answers every other flow to the name server by
+ * itself, table or not). */
+void inside_table(uml::network::SlirpProvider &provider)
+{
+	provider.set_host_address_reader_for_testing([] {
+		HostAddresses addresses;
+		addresses.assign_ipv4({value(loopback), value(gateway),
+				       value(name_server), value(virtual_host)});
+		return std::optional<HostAddresses>{addresses};
+	});
+}
+
+void check_a_host_address_in_the_virtual_network_is_closed()
+{
+	HostSockets sockets{loopback};
+	if (!sockets.ready()) {
+		fail("virtual network sockets", "the probe could not listen");
+		return;
+	}
+	{
+		Rig rig{inside_table};
+		if (!rig.opened)
+			return;
+		std::uint16_t source_port = 42000;
+		expect_refused(rig, "a host address in the virtual network",
+			       virtual_host, sockets, false, source_port);
+		expect_refused(rig, "the gateway, held by the host", gateway,
+			       sockets, false, source_port);
+		/* An echo to the other address is dropped: nothing answers it. */
+		(void)rig.guest.send(icmp_echo_frame(virtual_host));
+		if (rig.guest.receive([](const Bytes &frame) {
+			    return frame.size() >= 42 && frame[23] == IPPROTO_ICMP &&
+				    frame[34] == 0;
+		    }, quiet_ms))
+			fail("virtual network", "an echo to a host address was answered");
+		/* A destination in the network that no table holds is SLiRP's, which
+		 * Darwin refuses for port 0 before it sends anything. */
+		rig.syn({10, 0, 2, 78}, 0, 42100);
+		if (rig.guest.receive([](const Bytes &frame) {
+			    const auto segment = parse_tcp(frame);
+			    return segment && segment->destination_port == 42100;
+		    }, 300))
+			fail("virtual network", "an address nobody holds was refused");
+		if (rig.provider.counters().tcp_attempts != 1)
+			fail("virtual network", "SLiRP was not handed the SYN");
+	}
+	check_what_still_works("a host that holds the virtual network's addresses",
+			       inside_table);
 }
 
 /* A host forward still delivers a host connection to the guest. */
@@ -803,8 +878,9 @@ void check_a_forward_is_reached_through_the_hosts_own_address()
 
 /* The provider refuses what the table names, looks the table up again for a
  * frame that is judged by it once the table is a second old, and does not
- * otherwise: not when the guest is quiet, not for the virtual network, not
- * for a segment of a flow, not for a burst inside the second. */
+ * otherwise: not when the guest is quiet, not for what SLiRP serves at its
+ * own addresses, not for a segment of a flow, not for a burst inside the
+ * second. */
 void check_the_table_is_read_for_the_frames_that_need_it()
 {
 	using Nanoseconds = std::chrono::nanoseconds;
@@ -904,7 +980,7 @@ void check_the_table_is_read_for_the_frames_that_need_it()
 	expect("a quiet guest", 1);
 
 	/* Frames the table is not asked about cause none either, though the
-	 * table is old: the virtual network, a segment of a flow, an echo. */
+	 * table is old: DNS at the gateway, a segment of a flow, an echo. */
 	rig.syn(gateway, 53, 47100);
 	(void)rig.guest.send(tcp_frame(guest_ip, elsewhere, 47101, 80, 7, 8,
 				       tcp_ack, 65535));
@@ -1000,7 +1076,8 @@ int main(void)
 {
 	check_loopback_is_closed();
 	check_host_addresses_are_closed();
-	check_what_still_works();
+	check_what_still_works("the default table");
+	check_a_host_address_in_the_virtual_network_is_closed();
 	check_inbound_forward();
 	check_a_forward_is_reached_through_the_hosts_own_address();
 	check_other_machines_are_reached();

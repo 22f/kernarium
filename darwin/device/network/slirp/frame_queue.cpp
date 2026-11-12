@@ -145,18 +145,18 @@ bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 	const auto bytes = std::span<const std::uint8_t>{
 		reinterpret_cast<const std::uint8_t *>(frame.data()),
 		frame.size()};
-	auto classified = dns::classify_guest_frame(
-		bytes, {nameserver_ipv4, host_alias_ipv4, name_server_stream_,
-			gateway_stream_});
+	const dns::Servers servers{nameserver_ipv4, host_alias_ipv4,
+				   name_server_stream_, gateway_stream_};
+	auto classified = dns::classify_guest_frame(bytes, servers);
 	/* What SLiRP would connect to the machine the application runs on is
 	 * refused here instead: the guest gets the answer a closed port gives.
 	 * The host's addresses are looked up again only for a frame that is
 	 * judged by them, and not more than once in host_address_max_age. */
 	if (classified.action == dns::FrameAction::pass) {
-		if (dns::needs_host_check(bytes, virtual_network_ipv4))
+		if (dns::needs_host_check(bytes, servers))
 			refresh_host_addresses_if_stale();
 		classified = dns::classify_host_bound_frame(
-			bytes, host_addresses_, virtual_network_ipv4);
+			bytes, host_addresses_, servers);
 	}
 	switch (classified.action) {
 	case dns::FrameAction::pass:
