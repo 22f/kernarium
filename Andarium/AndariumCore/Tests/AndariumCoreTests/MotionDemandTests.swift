@@ -44,8 +44,12 @@ struct MotionDemandTests {
         #expect(MotionDemand(frame: good.dropLast()) == nil)
         #expect(MotionDemand(frame: good + [0]) == nil)
         var wrong = good
-        wrong[3] = 0x32
+        wrong[3] = 0x33
         #expect(MotionDemand(frame: wrong) == nil)
+        // "ANC2" is the service that has the orientation sensor (its own tests).
+        wrong[3] = 0x32
+        #expect(MotionDemand(frame: wrong) == MotionDemand(accelerometer: 20_000, orientationSensor: .idle))
+        wrong[3] = 0x33
         // The sample record's own magic is not a frame.
         wrong[2] = 0x53
         wrong[3] = 0x31

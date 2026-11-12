@@ -62,6 +62,26 @@ struct SessionOrientationHostingTests {
         #expect(!controller.prefersInterfaceOrientationLocked)
     }
 
+    /// The guest follows the device's orientation on an iPhone (whose interface stays
+    /// portrait), and a launch can ask the same of any device: the interface is then
+    /// portrait-only and the guest its own to rotate, as on an iPhone.
+    @Test func theGuestFollowsTheDeviceOnAnIPhoneAndALaunchCanAskItOfAnyDevice() async throws {
+        let model = AppEntry.fromArguments().makeModel()
+        let phone = UIDevice.current.userInterfaceIdiom == .phone
+        #expect(model.followsDeviceOrientation == phone)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        model.followsDeviceOrientation = true
+        let controller = AndariumHostingController(rootView: Color.black, model: model)
+        lease.window.rootViewController = controller
+        #expect(controller.supportedInterfaceOrientations == .portrait)
+        for phase in [Phase.booting(.normal), .running(.normal)] {
+            model.phase = phase
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(!model.hostDrivesGuestRotation, "\(phase)")
+        }
+    }
+
     /// Whatever a session presents (the side keys' tip is a popover, Settings
     /// a sheet, a notice an alert) leaves the policy as it was. The scene root
     /// once asked for an interface lock, which UIKit answered with

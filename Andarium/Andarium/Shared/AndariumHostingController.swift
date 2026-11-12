@@ -66,11 +66,14 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
 
     /// Whether the interface turns with the device: an iPad's does, an
     /// iPhone's is portrait-only, and a folding iPhone's inner display turns
-    /// while its cover does not (`FoldPose.interfaceRotates`). The one place
-    /// that decides it for this scene's display, for the supported
+    /// while its cover does not (`FoldPose.interfaceRotates`); a guest that
+    /// follows the device's orientation on a device that is no iPhone (a launch
+    /// states it) keeps a portrait-only interface as an iPhone does. The one
+    /// place that decides it for this scene's display, for the supported
     /// orientations and the guest's policy.
     private var interfaceRotates: Bool {
-        model.foldPose.interfaceRotates(idiomIsPhone: UIDevice.current.userInterfaceIdiom == .phone)
+        let phoneLike = UIDevice.current.userInterfaceIdiom == .phone || model.followsDeviceOrientation
+        return model.foldPose.interfaceRotates(idiomIsPhone: phoneLike)
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
