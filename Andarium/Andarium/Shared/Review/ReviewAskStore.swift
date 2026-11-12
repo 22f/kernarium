@@ -74,7 +74,9 @@ nonisolated struct ReviewAskKeychain: Sendable {
         case failed(OSStatus)
     }
 
-    static let defaultService = "com.imxieyi.andarium.review-ask"
+    /// The application's own bundle identifier names the item, so that a fork's
+    /// build, which has its own, carries nothing of another's.
+    static var defaultService: String { "\(Bundle.main.bundleIdentifier ?? "Andarium").review-ask" }
     static let account = "history"
 
     /// A test names a service of its own.
