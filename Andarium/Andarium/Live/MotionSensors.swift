@@ -86,6 +86,49 @@ nonisolated enum CompassSource {
     }
 }
 
+/// Core Motion's device motion in the magnetic-north frame, for the magnetic
+/// field's source (`MagneticFieldSource`): the calibrated field with its
+/// accuracy, and the errors told apart. It runs on a queue of its own,
+/// because stopping updates cancels every operation on the queue they were
+/// given, and the raw accelerometer and gyroscope have theirs.
+private final class CoreMotionFieldBackend: MagneticFieldBackend, @unchecked Sendable {
+    private let manager: CMMotionManager
+    private let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.name = "andarium-motion-field"
+        queue.maxConcurrentOperationCount = 1
+        return queue
+    }()
+
+    init(manager: CMMotionManager) { self.manager = manager }
+
+    func begin(interval: TimeInterval, events: @escaping @Sendable (MagneticFieldEvent) -> Void) {
+        manager.deviceMotionUpdateInterval = interval
+        manager.showsDeviceMovementDisplay = false
+        manager.startDeviceMotionUpdates(using: .xMagneticNorthZVertical, to: queue) { data, error in
+            if let error {
+                let nsError = error as NSError
+                events(
+                    CompassSource.isCalibrationNotice(error)
+                        ? .needsMovement : .failed(reason: "\(nsError.domain) \(nsError.code)"))
+            }
+            guard let data else { return }
+            // The field is "with respect to the device": the guest's as it is.
+            let calibrated = data.magneticField
+            events(
+                .reading(
+                    x: calibrated.field.x, y: calibrated.field.y, z: calibrated.field.z,
+                    status: MagneticField.status(accuracyRawValue: Int(calibrated.accuracy.rawValue))))
+        }
+    }
+
+    /// A run in flight is retimed in place: Core Motion follows the property
+    /// while it runs (checked on an iPad).
+    func retime(interval: TimeInterval) { manager.deviceMotionUpdateInterval = interval }
+
+    func end() { manager.stopDeviceMotionUpdates() }
+}
+
 /// The device's accelerometer, gyroscope and magnetic field. Core Motion needs
 /// no usage string for raw readings, and none is added for the field: the
 /// motion permission iOS 27.2 states is read, never requested
@@ -98,11 +141,9 @@ nonisolated enum CompassSource {
 /// starts and stops its sensors on the manager and stops the ones it started
 /// when it goes.
 ///
-/// The magnetic field is `CMDeviceMotion.magneticField` of device motion in the
-/// magnetic-north frame: calibrated, without the device's own magnets, with an
-/// accuracy. It runs on a queue of its own, because stopping updates cancels
-/// every operation on the queue they were given. The raw accelerometer and
-/// gyroscope keep their own handlers and intervals beside it.
+/// The magnetic field is `MagneticFieldSource` on `CoreMotionFieldBackend`;
+/// the raw accelerometer and gyroscope keep their own handlers and intervals
+/// beside it.
 private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
     private static let sharedManager = CMMotionManager()
     private var manager: CMMotionManager { Self.sharedManager }
@@ -112,32 +153,29 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
         queue.maxConcurrentOperationCount = 1
         return queue
     }()
-    private let fieldQueue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "andarium-motion-field"
-        queue.maxConcurrentOperationCount = 1
-        return queue
-    }()
     private let started = OSAllocatedUnfairLock(initialState: Set<MotionSample.Sensor>())
-    private let field = OSAllocatedUnfairLock(initialState: Field())
-
-    /// The magnetic field's run on the manager, shared with the handler on
-    /// `fieldQueue`. A start that delivers nothing in `silence` is a failure.
-    private struct Field {
-        var running = false
-        var failed = false
-        var delivered = false
-        var noticed = false
-        var generation: UInt64 = 0
-        var handler: (@Sendable (Double, Double, Double, UInt8) -> Void)?
-        var failure: (@Sendable () -> Void)?
-    }
-    private static let silence: DispatchTimeInterval = .seconds(5)
+    private let field = MagneticFieldSource(
+        backend: CoreMotionFieldBackend(manager: CoreMotionDevice.sharedManager),
+        log: { note in
+            switch note {
+            case .needsMovement:
+                // Not a failure: once, and the readings go on.
+                #if !APP_STORE
+                print("Andarium: compass: Core Motion asks the device to be moved to calibrate the field; "
+                    + "readings go on with status 0 until it is")
+                #endif
+                break
+            case .silent:
+                print("Andarium: compass: device motion delivered nothing in 5 s; the magnetometer stops for this run")
+            case .failed(let reason):
+                print("Andarium: compass: device motion failed (\(reason)); the magnetometer stops for this run")
+            }
+        })
     private static let reported = OSAllocatedUnfairLock(initialState: false)
 
     deinit {
         for sensor in started.withLock({ $0 }) { stop(sensor) }
-        stopMagnetometer()
+        field.stop()
     }
 
     var hasAccelerometer: Bool { manager.isAccelerometerAvailable }
@@ -167,6 +205,8 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
         handler: @escaping @Sendable (Double, Double, Double) -> Void,
         failure: @escaping @Sendable () -> Void
     ) {
+        // The field has its own start: it needs a status and its own failure rule.
+        if sensor == .magnetometer { return }
         stop(sensor)
         switch sensor {
         case .accelerometer:
@@ -188,7 +228,6 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
                 handler(g.x, g.y, g.z)
             }
         case .magnetometer:
-            // The field has its own start: it needs a status and its own failure rule.
             return
         }
     }
@@ -207,93 +246,10 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
         handler: @escaping @Sendable (Double, Double, Double, UInt8) -> Void,
         failure: @escaping @Sendable () -> Void
     ) {
-        let begun: UInt64? = field.withLock { field in
-            field.handler = handler
-            field.failure = failure
-            guard !field.running else { return nil }
-            field = Field(running: true, generation: field.generation &+ 1, handler: handler, failure: failure)
-            return field.generation
-        }
-        // A run in flight is retimed in place: Core Motion follows the property
-        // while it runs (checked on an iPad).
-        manager.deviceMotionUpdateInterval = interval
-        guard let generation = begun else { return }
-        manager.showsDeviceMovementDisplay = false
-        let field = field
-        manager.startDeviceMotionUpdates(using: .xMagneticNorthZVertical, to: fieldQueue) { data, error in
-            Self.deliver(data, error, generation: generation, field: field)
-        }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.silence) {
-            let failure = field.withLock { field -> (@Sendable () -> Void)? in
-                guard field.running, field.generation == generation, !field.delivered, !field.failed else { return nil }
-                field.failed = true
-                return field.failure
-            }
-            guard let failure else { return }
-            print("Andarium: compass: device motion delivered nothing in 5 s; the magnetometer stops for this run")
-            failure()
-        }
+        field.start(interval: interval, handler: handler, failure: failure)
     }
 
-    func stopMagnetometer() {
-        let wasRunning = field.withLock { field -> Bool in
-            let running = field.running
-            field = Field(generation: field.generation &+ 1)
-            return running
-        }
-        if wasRunning { manager.stopDeviceMotionUpdates() }
-    }
-
-    /// The handler of device motion, on `fieldQueue`: a sample of an older start,
-    /// or after a stop, is not delivered.
-    private static func deliver(
-        _ data: CMDeviceMotion?, _ error: (any Error)?, generation: UInt64, field: OSAllocatedUnfairLock<Field>
-    ) {
-        if let error {
-            if CompassSource.isCalibrationNotice(error) {
-                // Not a failure: once, and the readings go on.
-                #if !APP_STORE
-                let first = field.withLock { field -> Bool in
-                    guard field.generation == generation, !field.noticed else { return false }
-                    field.noticed = true
-                    return true
-                }
-                if first {
-                    print("Andarium: compass: Core Motion asks the device to be moved to calibrate the field; "
-                        + "readings go on with status 0 until it is")
-                }
-                #endif
-            } else {
-                let failure = field.withLock { field -> (@Sendable () -> Void)? in
-                    guard field.running, field.generation == generation, !field.failed else { return nil }
-                    field.failed = true
-                    return field.failure
-                }
-                if let failure {
-                    let nsError = error as NSError
-                    print("Andarium: compass: device motion failed (\(nsError.domain) \(nsError.code)); "
-                        + "the magnetometer stops for this run")
-                    failure()
-                }
-            }
-        }
-        guard let data else { return }
-        let deliver = field.withLock { field -> (@Sendable (Double, Double, Double, UInt8) -> Void)? in
-            guard field.running, field.generation == generation, !field.failed else { return nil }
-            field.delivered = true
-            return field.handler
-        }
-        guard let deliver else { return }
-        let calibrated = data.magneticField
-        let matrix = data.attitude.rotationMatrix
-        let reading = MagneticField.inDeviceAxes(
-            x: calibrated.field.x, y: calibrated.field.y, z: calibrated.field.z,
-            attitude: MagneticField.Rotation(
-                m11: matrix.m11, m12: matrix.m12, m13: matrix.m13,
-                m21: matrix.m21, m22: matrix.m22, m23: matrix.m23,
-                m31: matrix.m31, m32: matrix.m32, m33: matrix.m33))
-        deliver(reading.x, reading.y, reading.z, MagneticField.status(accuracyRawValue: Int(calibrated.accuracy.rawValue)))
-    }
+    func stopMagnetometer() { field.stop() }
 }
 
 /// The device's motion for the running guest. Core Motion runs only for a
