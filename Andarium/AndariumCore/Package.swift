@@ -43,6 +43,15 @@ let package = Package(
             dependencies: ["AndariumCore"],
             swiftSettings: [.define("FEEDBACK_MAIL")]
         ),
+        // Buy me tokens' logic, for the package's tests only, built the way
+        // Send feedback's is: its sources are the application's own (a symlink to
+        // Andarium/Shared/TipJar/Logic), which the application compiles only where
+        // the tip jar is compiled in, so no product of the package carries any of
+        // it; here the condition is always set. Neither application links it.
+        .target(
+            name: "AndariumTipJarLogic",
+            swiftSettings: [.define("TIP_JAR")]
+        ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
@@ -50,7 +59,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumTipJarLogic"]
         ),
     ]
 )

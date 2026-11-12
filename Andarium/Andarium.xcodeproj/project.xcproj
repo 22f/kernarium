@@ -37,6 +37,19 @@
         { "path": "PrivacyInfo.xcprivacy", "target-membership": [ "Andarium/resources" ] },
         { "path": "Andarium.xcconfig" },
         { "path": "Feedback.local.xcconfig.example" },
+        { "path": "TipJar.local.xcconfig.example" },
+      ],
+    }, {
+      "kind": "group",
+      "path": "Localization",
+      "children": [
+        {
+          "path": "TipJar.xcstrings",
+          "target-membership": [
+            "Andarium/resources",
+            "AndariumPreview/resources",
+          ],
+        },
       ],
     }, {
       "kind": "group",
@@ -164,7 +177,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -307,7 +320,7 @@
         "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone": "UIInterfaceOrientationPortrait",
         "INFOPLIST_OTHER_PREPROCESSOR_FLAGS": "-traditional -undef",
         "INFOPLIST_PREPROCESS": "YES",
-        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION)",
+        "INFOPLIST_PREPROCESSOR_DEFINITIONS": "$(FEEDBACK_PLIST_DEFINITION) $(TIP_JAR_PLIST_DEFINITION)",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
@@ -322,6 +335,10 @@
         "SWIFT_EMIT_LOC_STRINGS": "YES",
         "SWIFT_VERSION": "6.0",
         "TARGETED_DEVICE_FAMILY": "1,2",
+        "TIP_LITE": "",
+        "TIP_MAX": "",
+        "TIP_PRO": "",
+        "TIP_ULTRA": "",
       },
     },
   ],

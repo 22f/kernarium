@@ -6,6 +6,19 @@
 	<key>AndariumFeedbackAddress</key>
 	<string>$(FEEDBACK_ADDRESS)</string>
 #endif
+#ifdef TIP_JAR
+	<key>AndariumTipProducts</key>
+	<dict>
+		<key>lite</key>
+		<string>$(TIP_LITE)</string>
+		<key>max</key>
+		<string>$(TIP_MAX)</string>
+		<key>pro</key>
+		<string>$(TIP_PRO)</string>
+		<key>ultra</key>
+		<string>$(TIP_ULTRA)</string>
+	</dict>
+#endif
 	<key>GCSupportedGameControllers</key>
 	<array>
 		<dict>
