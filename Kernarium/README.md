@@ -191,7 +191,9 @@ API 31): the runtime turns each bit it knows into one kernel argument, from the
 table in `KernariumHostFeatures.hpp` (the haptics bit becomes the hardware SKU
 `haptics`, which declares the guest's vibrator; the orientation bit, API 37,
 becomes `androidboot.kernarium.orientation=1`, which lists the guest's
-device-orientation sensor), and ignores the others; Kernarium sends none. The
+device-orientation sensor; the compass bit, API 38, becomes
+`androidboot.kernarium.compass=1`, which lists its magnetometer), and ignores
+the others; Kernarium sends none. The
 runtime validates the values (`KernariumAdbChannel.hpp`,
 `KernariumGuestTimeZone.hpp`).
 
