@@ -34,10 +34,10 @@
 // truncated; the difference of two truncations is under 1 us, so a stamp is on
 // the grid when it is within 2 us of a grid point.
 // Last, the vblank events the kernel traced (tracefs, drm_vblank_event) show
-// that the timer was off while the display was idle, with at most one tick
-// after the first period of a gap longer than three (a host that holds the
-// timer's callback up reports the tick at which it stops late), and that every
-// tick of a grid is exactly on it.
+// that the timer was off while the display was idle: between the end of an
+// activity and the next, in a gap longer than three periods, the kernel
+// reports at most one tick, the one at which the timer stops, however late the
+// host runs it, and that every tick of a grid is exactly on it.
 //
 // The probe prints one PASS or FAIL line per check and ends with
 // UML_DRM_VBLANK_PROBE: PASS or FAIL, exiting 0 only after PASS.
@@ -920,14 +920,14 @@ int main(int argc, char **)
 		int checked = 0, ticking = 0;
 		std::string first_ticking;
 		for (const IdleWindow &window : probe.idle) {
-			// The tick at which the timer stops is at most a period after the
-			// last activity. A host that held the timer's callback up past the
-			// next tick has it handle the two at once and report the later
-			// one, so one tick after that point can still be the stop. A
-			// running timer ticks at least twice in two periods.
-			int64_t from = window.from + longest + guard;
+			// The activity dropped its vblank reference before it ended, so
+			// the kernel reports one more tick, the one at which the timer
+			// stops: a callback the host holds up reports the latest grid
+			// point, once, and a tick handled earlier is stamped earlier. A
+			// timer that kept running reports two or more in three periods.
+			int64_t from = window.from;
 			int64_t to = window.to - guard;
-			if (to - from < 2 * longest)
+			if (to - from < 3 * longest)
 				continue;
 			++checked;
 			int count = 0;
@@ -956,7 +956,7 @@ int main(int argc, char **)
 			}
 		}
 		report("trace-idle", checked > 0 && ticking == 0 && !events.empty(),
-		       format("%d idle gaps longer than three periods, %d with ticks after the stop%s%s",
+		       format("%d idle gaps longer than three periods, %d with a tick beyond the stopping one%s%s",
 			      checked, ticking, first_ticking.empty() ? "" : ": ", first_ticking.c_str()));
 
 		// Segments between mode changes: within one, every tick is a whole
