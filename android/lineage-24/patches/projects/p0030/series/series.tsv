@@ -5,3 +5,4 @@ patch	let-a-frame-source-that-a-device-drives-capture-a-whole-request.patch
 patch	take-cameras-frames-stills-and-RAW-from-V4L2-camera-nodes.patch
 patch	run-the-torch-concurrency-and-conflicts-of-V4L2-cameras.patch
 patch	build-the-lazy-camera-provider-in-every-product.patch
+patch	call-the-camera-framework-without-the-provider-s-callbacks-lock.patch
