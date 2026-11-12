@@ -23,12 +23,14 @@ public enum Limits {
         return Array(stride(from: capacityRangeGiB.lowerBound, through: top, by: capacityStepGiB))
     }
 
-    /// What the runtime accepts for a guest's memory, in steps of 64 MiB: the
-    /// top is the largest range any host offers, 1 TiB
-    /// (`guest_memory_range_maximum_mib`). It is the runtime Kernarium's
-    /// guests use too, so the range is the runtime's and Andarium narrows it
-    /// only below, to what the host's memory leaves at a vCPU count
-    /// (`MemoryPolicy`).
+    /// The shape of what the runtime admits for a guest's memory, in steps of
+    /// 64 MiB: the top is the largest range any host offers, 1 TiB
+    /// (`guest_memory_range_maximum_mib`). A host admits the sizes of it up to
+    /// its own ceiling (`kernarium_runtime_loader_guest_memory_ceiling_mib`),
+    /// and Andarium narrows it below that, to what the host's memory leaves at
+    /// a vCPU count (`MemoryPolicy`). The runtime's rule is
+    /// `guest_memory_admitted` in `runtime/guest_memory_budget.hpp`; the hosted
+    /// `LiveTests` hold these figures to the loader's answers.
     public static let runtimeMemoryRangeMiB = 512...(1 << 20)
     public static let runtimeMemoryStepMiB = 64
     /// The least memory the application offers Android, the size below which

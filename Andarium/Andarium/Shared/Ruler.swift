@@ -239,14 +239,14 @@ struct SystemControls: View {
 
     private var processor: some View {
         ControlRow(
-            title: "Processor", symbol: "cpu",
-            value: Formats.vcpus(guest.cores)
+            title: String(localized: "Processor"), symbol: "cpu",
+            value: CountWords.vcpus(guest.cores)
         ) {
             Ruler(
                 index: Binding(get: { guest.cores - 1 }, set: { guest.setCores($0 + 1, on: host) }),
                 count: host.processorCount,
                 label: { "\($0 + 1)" },
-                accessibilityName: "Processor"
+                accessibilityName: String(localized: "Processor")
             )
         } note: {
             EmptyView()
@@ -271,7 +271,7 @@ struct SystemControls: View {
         let safeMiB = host.memory.safeMemoryMiB(vCPUs: guest.cores)
         let distinct = safeMiB > graphicsLineMiB
         let risk = host.memory.risk(guest.memoryMiB, vCPUs: guest.cores)
-        return ControlRow(title: "Memory", symbol: "memorychip", value: Formats.size(mib: guest.memoryMiB)) {
+        return ControlRow(title: String(localized: "Memory"), symbol: "memorychip", value: Formats.size(mib: guest.memoryMiB)) {
             Ruler(
                 index: Binding(
                     get: { stops.lastIndex(where: { $0 <= guest.memoryMiB }) ?? 0 },
@@ -286,7 +286,7 @@ struct SystemControls: View {
                 valueText: { Formats.size(mib: stops[$0]) },
                 warnFrom: stops.firstIndex { $0 > graphicsLineMiB },
                 severeFrom: distinct ? stops.firstIndex { $0 > safeMiB } : nil,
-                accessibilityName: "Memory"
+                accessibilityName: String(localized: "Memory")
             )
         } note: {
             switch risk {
@@ -314,7 +314,10 @@ struct GraphicsMemoryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ControlHeader(
-                title: GraphicsMemoryWarning.title, symbol: "cube", value: "\u{2248} " + Formats.size(mib: estimateMiB),
+                title: GraphicsMemoryWarning.title, symbol: "cube",
+                value: String(
+                    localized: "\u{2248} \(Formats.size(mib: estimateMiB))",
+                    comment: "An estimated size of graphics memory, as in ≈ 1.68 GiB: the sign for about, then the size."),
                 valueColor: warns ? .orange : .primary
             )
             Text(GraphicsMemoryWarning.separateNote)
@@ -337,7 +340,7 @@ struct StoragePanel: View {
     let stops: [Int]
 
     var body: some View {
-        ControlRow(title: "Storage", symbol: "internaldrive", value: Formats.size(gib: guest.capacityGiB)) {
+        ControlRow(title: String(localized: "Storage"), symbol: "internaldrive", value: Formats.size(gib: guest.capacityGiB)) {
             Ruler(
                 index: Binding(
                     get: { stops.firstIndex { $0 >= guest.capacityGiB } ?? stops.count - 1 },
@@ -348,7 +351,7 @@ struct StoragePanel: View {
                 majorOffset: 3,
                 label: { "\(stops[$0])" },
                 valueText: { Formats.size(gib: stops[$0]) },
-                accessibilityName: "Storage"
+                accessibilityName: String(localized: "Storage")
             )
         } note: {
             Text("\(Formats.size(bytes: host.freeStorageBytes)) free on this \(host.name)")
@@ -358,7 +361,7 @@ struct StoragePanel: View {
     }
 }
 
-/// An existing guest's storage, the second row of Home's Guest system
+/// An existing guest's storage, the second row of Home's Virtual machine
 /// section: what the guest holds of its capacity, as words and on a bar, a
 /// pending growth or the largest size as a note under the bar, and Resize.
 struct StorageRow: View {
@@ -374,10 +377,10 @@ struct StorageRow: View {
 
     var body: some View {
         SystemRow(
-            symbol: "internaldrive", title: "Storage",
-            subtitle: "\(Formats.size(bytes: guest.usedBytes)) of \(Formats.size(gib: guest.capacityGiB))",
+            symbol: "internaldrive", title: String(localized: "Storage"),
+            subtitle: MeterWords.storage(Formats.size(bytes: guest.usedBytes), of: Formats.size(gib: guest.capacityGiB)),
             button: SystemRowButton(
-                title: "Resize", identifier: "home-storage-resize", isEnabled: !atMaximum, action: resize
+                title: SystemRowButton.resize, identifier: "home-storage-resize", isEnabled: !atMaximum, action: resize
             )
         ) {
             UsageBar(
@@ -517,7 +520,7 @@ struct ResizeSheet: View {
                     majorOffset: 3,
                     label: { "\(stops[$0])" },
                     valueText: { Formats.size(gib: stops[$0]) },
-                    accessibilityName: "Storage"
+                    accessibilityName: String(localized: "Storage")
                 )
                 .padding(.horizontal, 6)
                 UsageBar(used: guest.usedGiB, capacity: Double(capacity))
@@ -552,15 +555,15 @@ struct ResizeSheet: View {
     private func status(_ guest: Guest) -> some View {
         if capacity > guest.capacityGiB {
             line("arrow.up.circle.fill", .accentColor,
-                 "Grows to \(Formats.size(gib: capacity)) at the next start", nil)
+                 String(localized: "Grows to \(Formats.size(gib: capacity)) at the next start"), nil)
         } else if let pending = guest.pendingCapacityGiB {
             line("arrow.uturn.backward.circle.fill", .secondary,
-                 "Stays at \(Formats.size(gib: guest.capacityGiB))",
-                 "The growth to \(Formats.size(gib: pending)) is cancelled.")
+                 String(localized: "Stays at \(Formats.size(gib: guest.capacityGiB))"),
+                 String(localized: "The growth to \(Formats.size(gib: pending)) is cancelled."))
         } else {
             line("internaldrive", .secondary,
-                 "\(Formats.size(bytes: guest.usedBytes)) used of \(Formats.size(gib: guest.capacityGiB))",
-                 "Storage can only grow. A larger size applies at the next start.")
+                 String(localized: "\(Formats.size(bytes: guest.usedBytes)) used of \(Formats.size(gib: guest.capacityGiB))"),
+                 String(localized: "Storage can only grow. A larger size applies at the next start."))
         }
     }
 

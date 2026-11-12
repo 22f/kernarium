@@ -11,6 +11,12 @@ public enum InstallRefusal: Equatable, Sendable {
     /// The file is an app in several parts (.apks, .xapk, .apkm), which the
     /// install does not take.
     case bundle
+    /// The file is a single .apk of `singleApkLimit` bytes or more.
+    case tooLarge
+
+    /// From this size a single .apk is a ZIP64 archive, which Android's
+    /// package parser cannot read.
+    public static let singleApkLimit: UInt64 = 4 * Bytes.gib
 
     /// nil for a file the install takes: one that ends in .apk.
     public init?(fileName: String) {
@@ -23,10 +29,20 @@ public enum InstallRefusal: Equatable, Sendable {
         }
     }
 
+    /// nil for a file whose size Android takes.
+    public init?(sizeBytes: UInt64) {
+        guard sizeBytes >= Self.singleApkLimit else { return nil }
+        self = .tooLarge
+    }
+
     public var message: String {
         switch self {
-        case .notApk: "This isn\u{2019}t an app. Choose a file that ends in .apk."
-        case .bundle: "Apps that come in several files can\u{2019}t be installed yet. Choose a single .apk file."
+        case .notApk: String(localized: "This isn\u{2019}t an app. Choose a file that ends in .apk.", bundle: .module)
+        case .bundle: String(localized: "Apps that come in several files can\u{2019}t be installed yet. Choose a single .apk file.", bundle: .module)
+        case .tooLarge:
+            String(
+                localized: "Android can\u{2019}t install an app from a single .apk file of \(Formats.size(bytes: Self.singleApkLimit)) or more.",
+                bundle: .module)
         }
     }
 }

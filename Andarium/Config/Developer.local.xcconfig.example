@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Copy to Developer.local.xcconfig, which Git ignores, and name the developer's
+// handles. Only an AppStore build made with this file has the rows they turn
+// on; every other build carries none of them and no handle. Store a handle,
+// never a whole address: `//` starts a comment in an xcconfig, and the code
+// builds the address.
+//
+// DEVELOPER_X_HANDLE turns on Follow developer on X, an Info row that opens the
+// developer's profile on X. The row also needs the logo in the ignored Local
+// directory beside this file: Local/x-logo.svg, a single-colour vector (one
+// path, any fill) that the row draws as a template image. A build made with the
+// handle and without the logo fails.
+
+DEVELOPER_X_HANDLE = example_handle

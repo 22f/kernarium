@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Andarium's base settings: the shared signing settings, and what decides
-// whether Send feedback is compiled in.
+// whether Send feedback and Follow developer on X are compiled in.
 //
 // Send feedback exists only in an AppStore build whose maker has the ignored
 // Feedback.local.xcconfig beside this file (Feedback.local.xcconfig.example)
@@ -28,8 +28,60 @@ FEEDBACK_ADDRESS[config=AppStore] = $(FEEDBACK_RECEIVER)
 FEEDBACK_ARRANGED_ = NO_FEEDBACK_MAIL
 FEEDBACK_CONDITION = $(FEEDBACK_ARRANGED_$(FEEDBACK_ADDRESS:identifier):default=FEEDBACK_MAIL)
 
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FEEDBACK_CONDITION)
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FEEDBACK_CONDITION) $(FOLLOW_X_CONDITION)
 
 // Info.plist is preprocessed, and holds the address only where FEEDBACK_MAIL is defined.
 FEEDBACK_PLIST_ = FEEDBACK_NO_MAIL=1
 FEEDBACK_PLIST_DEFINITION = $(FEEDBACK_PLIST_$(FEEDBACK_ADDRESS:identifier):default=FEEDBACK_MAIL=1)
+
+// The Feedback string table is compiled only where Send feedback is. An empty
+// address names the setting FEEDBACK_CATALOG_ and excludes the catalog; any
+// other lands on an undefined name and excludes nothing. The project's
+// AppStore setting of this name lists the JIT catalog and inherits this one.
+FEEDBACK_CATALOG_ = Feedback.xcstrings
+
+// Follow developer on X, an Info row, has the same shape. Its parts are the
+// FOLLOW_X compilation condition, the AndariumFollowXHandle key of Info.plist,
+// the FollowX string table and one asset catalog with the logo. It exists only
+// in an AppStore build whose maker has the ignored Developer.local.xcconfig
+// beside this file (Developer.local.xcconfig.example) with a handle and the
+// logo in the ignored Local directory (Local/x-logo.svg), so a fork, a
+// sideload or a Debug or Release build carries none of it. FOLLOW_X_HANDLE is
+// that handle in AppStore and empty elsewhere; a non-empty one turns the parts
+// on. The handle is stored, never the address (`//` starts a comment in an
+// xcconfig); the code builds the address. The tests and the screen captures
+// state `FOLLOW_X_HANDLE=example_handle` on the xcodebuild command line to
+// build the row into a Debug build, with a glyph drawn for the tests in place
+// of the logo; adding `FOLLOW_X_LOGO_SOURCE=local` takes the logo from Local
+// instead (for a capture). The bundle check refuses any other handle outside
+// AppStore, and the arranged one outside Debug. AndariumPreview sets
+// FOLLOW_X_HANDLE empty itself, so it takes that arrangement alone and never
+// the local file's handle.
+DEVELOPER_X_HANDLE =
+#include? "Developer.local.xcconfig"
+
+FOLLOW_X_HANDLE =
+FOLLOW_X_HANDLE[config=AppStore] = $(DEVELOPER_X_HANDLE)
+
+// Which catalog supplies the logo: the maker's, linked to Local/x-logo.svg
+// ("local"), or the tracked glyph the tests draw (empty).
+FOLLOW_X_LOGO_SOURCE =
+FOLLOW_X_LOGO_SOURCE[config=AppStore] = local
+
+// An empty handle names the setting FOLLOW_X_ARRANGED_ and gets NO_FOLLOW_X;
+// any other lands on an undefined name and gets FOLLOW_X.
+FOLLOW_X_ARRANGED_ = NO_FOLLOW_X
+FOLLOW_X_CONDITION = $(FOLLOW_X_ARRANGED_$(FOLLOW_X_HANDLE:identifier):default=FOLLOW_X)
+
+// Info.plist holds the handle only where FOLLOW_X is defined.
+FOLLOW_X_PLIST_ = FOLLOW_X_OFF=1
+FOLLOW_X_PLIST_DEFINITION = $(FOLLOW_X_PLIST_$(FOLLOW_X_HANDLE:identifier):default=FOLLOW_X=1)
+
+// What the feature adds is left out the same way: without a handle, its
+// string table and both logo catalogs; with one, the catalog the logo source
+// does not name.
+FOLLOW_X_ABSENT_ = FollowX.xcstrings XLogoLocal.xcassets XLogoGlyph.xcassets
+FOLLOW_X_UNUSED_ = XLogoLocal.xcassets
+FOLLOW_X_UNUSED_local = XLogoGlyph.xcassets
+
+EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=) $(FOLLOW_X_ABSENT_$(FOLLOW_X_HANDLE:identifier):default=) $(FOLLOW_X_UNUSED_$(FOLLOW_X_LOGO_SOURCE:identifier):default=)

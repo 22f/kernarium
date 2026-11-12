@@ -190,8 +190,9 @@ final class AppModel {
     /// The display options to keep; nil where the launch stated the
     /// resolution, so what the person chose stays stored.
     var displayOptionsToKeep: DisplayOptions? { launchScale != nil ? nil : displayOptions }
-    /// The host window owns display rotation until iPadOS grants the
-    /// full-screen session's orientation lock. Never a saved guest setting.
+    /// The host owns the guest's display rotation: in an iPad session the guest
+    /// is held at rotation zero and its display follows the scene. The scene's
+    /// root sets it (`SessionOrientationPolicy`). Never a saved guest setting.
     var hostDrivesGuestRotation = false
 
     var sessionPreset = SessionPreset()
@@ -328,7 +329,7 @@ final class AppModel {
         case .noDebugger, .failed, .otherSettings, .unsupported:
             // A fall-back is only worth a sentence to a person who asked for the JIT.
             jitLastStart = wanted ? answer : nil
-            if wanted { print("Andarium: \(answer.fallbackSentence ?? "started without JIT")") }
+            if wanted { print("Andarium: \(answer.fallbackLog ?? "started without JIT")") }
             return false
         }
     }
@@ -395,6 +396,11 @@ final class AppModel {
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
     /// The Send feedback sheet is open, over Info or over the session's Settings.
     var feedbackSheetOpen = false
+    #endif
+    #if FOLLOW_X
+    /// The handle Follow developer on X opens, from Info.plist, which only a
+    /// build that names one has; a test replaces it.
+    @ObservationIgnored var followXHandle: () -> String? = { FollowXProfile.handle }
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
@@ -652,7 +658,7 @@ final class AppModel {
         do {
             try driver.save(guest)
         } catch {
-            alert = AppAlert(title: "Settings not saved", message: error.localizedDescription)
+            alert = AppAlert(title: String(localized: "Settings not saved"), message: error.localizedDescription)
         }
     }
 
@@ -665,10 +671,10 @@ final class AppModel {
         }
         runBusy(
             BusyState(
-                title: "Creating guest",
-                detail: "Setting up Andarium with \(Formats.size(gib: guest.effectiveCapacityGiB)).", progress: 0
+                title: String(localized: "Creating virtual machine"),
+                detail: String(localized: "Setting up Andarium with \(Formats.size(gib: guest.effectiveCapacityGiB))."), progress: 0
             ),
-            failure: "The guest could not be created"
+            failure: String(localized: "The virtual machine could not be created")
         ) { progress in
             let made = try await driver.create(guest, progress: progress)
             self.lifecycle.create(made)
@@ -691,7 +697,7 @@ final class AppModel {
         do {
             try await driver.restoreUpdate()
         } catch {
-            alert = AppAlert(title: "The guest could not be restored", message: error.localizedDescription)
+            alert = AppAlert(title: String(localized: "The virtual machine could not be restored"), message: error.localizedDescription)
         }
         refreshPlan()
     }
@@ -706,8 +712,8 @@ final class AppModel {
             return
         }
         runBusy(
-            BusyState(title: "Erasing guest", detail: "Deleting everything the guest stored.", progress: 0),
-            failure: "The guest could not be erased"
+            BusyState(title: String(localized: "Erasing virtual machine"), detail: String(localized: "Deleting everything the virtual machine stored."), progress: 0),
+            failure: String(localized: "The virtual machine could not be erased")
         ) { progress in
             // A choice saved a moment after the last change must not come
             // back after the files are gone.
@@ -835,8 +841,8 @@ final class AppModel {
                 // screen comes back with the new figure if it is still short.
                 self.spacePause = nil
                 self.alert = AppAlert(
-                    title: "Android could not be shut down",
-                    message: "It could not be asked to power off. Try again, or close Andarium and open it again.")
+                    title: String(localized: "Android could not be shut down"),
+                    message: String(localized: "It could not be asked to power off. Try again, or close Andarium and open it again."))
             }
         }
     }
@@ -1064,7 +1070,7 @@ final class AppModel {
         guard operation != nil, !operationCancelled else { return }
         operationCancelled = true
         busy?.cancel = nil
-        busy?.detail = "Cancelling\u{2026}"
+        busy?.detail = String(localized: "Cancelling\u{2026}")
         operation?.cancel()
     }
 
@@ -1094,10 +1100,10 @@ final class AppModel {
 
     /// The overlay of a bug report under way, the same wherever it is asked for.
     static let bugReportState = BusyState(
-        title: "Creating bug report",
-        detail: "The guest is collecting its logs and state. This can take several minutes.", progress: 0
+        title: String(localized: "Creating bug report"),
+        detail: String(localized: "The virtual machine is collecting its logs and state. This can take several minutes."), progress: 0
     )
-    static let bugReportFailure = "Bug report not created"
+    static let bugReportFailure = String(localized: "Bug report not created")
 
     /// A normal session of a runtime that can make a bug report, with the
     /// guest's one adb channel free.
@@ -1161,7 +1167,7 @@ final class AppModel {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: Double(step) / 36 * 0.9))
         }
-        update(BusyUpdate(progress: 0.9, detail: "Copying the report\u{2026}"))
+        update(BusyUpdate(progress: 0.9, detail: String(localized: "Copying the report\u{2026}")))
         for step in 1...8 {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: 0.9 + 0.1 * Double(step) / 8))
@@ -1176,13 +1182,14 @@ final class AppModel {
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
     /// end with how it went until the person closes it. A file that is not a
-    /// single .apk is refused on the same overlay, at once. The file's security
-    /// scope is held to the end of the install.
+    /// single .apk, or is one Android cannot take by its size, is refused on the
+    /// same overlay, at once. The file's security scope is held to the end of
+    /// the install.
     func installPicked(_ url: URL) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
             alert = AppAlert(
-                title: Self.installFailure, message: "Wait for the file transfer to finish, then install the app.")
+                title: Self.installFailure, message: String(localized: "Wait for the file transfer to finish, then install the app."))
             return
         }
         let name = url.lastPathComponent
@@ -1191,19 +1198,26 @@ final class AppModel {
             return
         }
         let scoped = url.startAccessingSecurityScopedResource()
-        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        let size = UInt64(max(bytes, 0))
+        // The size here is what the picker can say: an iCloud file that is not
+        // down has none yet, and the install reads the real one when it has
+        // the file.
+        let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
+        if let refusal = InstallRefusal(sizeBytes: size) {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
+            return
+        }
         runOperation(
             BusyState(
-                title: "Installing app",
-                detail: "\(name) \u{00B7} \(Formats.size(bytes: size))", progress: 0
+                title: String(localized: "Installing app"),
+                detail: size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name, progress: 0
             ),
             failure: Self.installFailure,
-            ending: { _ in (title: "App installed", detail: "\(name) is installed in the guest.") },
+            ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 if let driver {
-                    try await driver.installApk(at: url, sizeBytes: bytes, update: update)
+                    try await driver.installApk(at: url, update: update)
                 } else {
                     try await Self.playInstall(update)
                 }
@@ -1215,7 +1229,7 @@ final class AppModel {
     }
 
     /// The title of an install that did not happen.
-    static let installFailure = "App not installed"
+    static let installFailure = String(localized: "App not installed")
 
     /// The preview's install: the file goes over, the guest takes its time.
     private static func playInstall(_ update: @Sendable (BusyUpdate) -> Void) async throws {
@@ -1223,7 +1237,7 @@ final class AppModel {
             try await Task.sleep(for: .milliseconds(100))
             update(BusyUpdate(progress: Double(step) / 20 * 0.8))
         }
-        update(BusyUpdate(detail: "The guest is installing the app\u{2026}", cancellable: false))
+        update(BusyUpdate(detail: String(localized: "The virtual machine is installing the app\u{2026}"), cancellable: false))
         try await Task.sleep(for: .milliseconds(1200))
     }
 

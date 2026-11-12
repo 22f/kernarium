@@ -22,14 +22,16 @@ extension Phase {
     }
 }
 
-/// The scene's root controller owns the orientation preference and, in a
+/// The scene's root controller owns the supported orientations and, in a
 /// run, the screen edges that defer system gestures. A child of SwiftUI's
 /// default root cannot reliably supply these scene-wide preferences. It also
 /// owns what shows wherever SwiftUI has not drawn: while the guest's display
-/// is shown that is black, in the light appearance too.
+/// is shown that is black, in the light appearance too. It never asks iPadOS
+/// to lock the interface: an iPad's interface turns with the device in a
+/// session as it does at Home, and the guest follows it
+/// (`SessionOrientationPolicy`).
 final class AndariumHostingController<Content: View>: UIHostingController<Content>, SceneGeometryObserver {
     private let model: AppModel
-    private var lockRequested = false
     /// The run's deferred edges; nil leaves SwiftUI's preference in charge.
     private var deferredEdges: ScreenEdges?
     private var updateScheduled = false
@@ -58,20 +60,21 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        UIDevice.current.userInterfaceIdiom == .phone ? .portrait : .all
+    /// Whether the interface turns with the device: an iPad's does, an
+    /// iPhone's is portrait-only. The one place that decides it for this
+    /// scene's display, for the supported orientations and the guest's policy.
+    private var interfaceRotates: Bool {
+        UIDevice.current.userInterfaceIdiom != .phone
     }
 
-    override var prefersInterfaceOrientationLocked: Bool { lockRequested }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        interfaceRotates ? .all : .portrait
+    }
 
     /// An Android application captured the pointer: iOS keeps the system's
     /// pointer where it is and delivers the mouse's raw motion only, which the
     /// guest takes. The system may refuse (a window that is not full screen).
     override var prefersPointerLocked: Bool { model.pointerLockWanted }
-
-    // The scene policy belongs to this root, including when SwiftUI embeds
-    // a UIKit display controller whose default lock preference is false.
-    override var childForInterfaceOrientationLock: UIViewController? { nil }
 
     // SwiftUI defers the left and right edges unless a view says otherwise,
     // and on Home it hands the choice to a navigation child. In a run the
@@ -162,8 +165,7 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
         return SceneUpdateInputs(
             scene: ObjectIdentifier(scene), driver: model.driver.map { ObjectIdentifier($0) },
             sceneSize: geometry.coordinateSpace.bounds.size, screenSize: scene.screen.bounds.size,
-            interfaceOrientation: geometry.interfaceOrientation.rawValue,
-            interfaceLocked: geometry.isInterfaceOrientationLocked, phase: model.phase)
+            interfaceOrientation: geometry.interfaceOrientation.rawValue, phase: model.phase)
     }
 
     /// Every layout of the root, every geometry change and every phase change
@@ -181,14 +183,8 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
             updateScheduled = false
             guard let inputs = currentInputs() else { return }
             appliedInputs = inputs
-            let policy = SessionOrientationPolicy(
-                phase: inputs.phase, isPhone: UIDevice.current.userInterfaceIdiom == .phone,
-                sceneSize: inputs.sceneSize, screenSize: inputs.screenSize, interfaceLocked: inputs.interfaceLocked)
-            if policy.requestInterfaceLock != lockRequested {
-                lockRequested = policy.requestInterfaceLock
-                setNeedsUpdateOfPrefersInterfaceOrientationLocked()
-            }
-            model.hostDrivesGuestRotation = policy.hostDrivesGuestRotation
+            model.hostDrivesGuestRotation = SessionOrientationPolicy(
+                phase: inputs.phase, interfaceRotates: interfaceRotates).hostDrivesGuestRotation
             let deferral = SessionGestureDeferral(
                 phase: inputs.phase, sceneSize: inputs.sceneSize, screenSize: inputs.screenSize)
             if deferral.deferredEdges != deferredEdges {

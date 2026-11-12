@@ -190,6 +190,8 @@ A test that needs what only an earlier session leaves behind boots more than
 once: `guest-v4l2-capture` first lets the host learn the synthetic camera's
 colour data into a calibration directory of the run, because Bayer stills are
 offered from the next session on.
+A guest reaches no listener on the host; the tests that need one, and the test
+that proves it, are described in [user network](../darwin/README.md#user-network).
 `guest-hardware-input` (needs a GPU slot) checks that a Linux guest started
 with `--hardware-input` registers and unregisters the keyboard, mouse and
 pointer input devices as a VNC client plugs and unplugs them
@@ -274,6 +276,10 @@ the run never starts, so the first build phase of each application's target
 one. The shared schemes gather no code coverage; a coverage run passes
 `-enableCodeCoverage YES`.
 
+A change to the guest memory the applications offer is proven by a start through
+the applications' runtime (`kernarium_runtime_loader_run`) at the largest offered
+size, in the Simulator or on a Mac, not by a command-line launcher.
+
 On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
@@ -326,29 +332,37 @@ the watcher's start and stop on a fake path source);
 `andarium-motion-protocol`, `andarium-haptics-protocol`,
 `andarium-haptics-player`, `andarium-thermal-protocol`,
 `andarium-thermal-levels` and `andarium-gamepad-protocol` (unit),
-`andarium-stage-system-image` and
-`andarium-capture-screens` (tooling) cover the motion wire format, the vibrator
+`andarium-stage-system-image`,
+`andarium-capture-screens` and `andarium-localization` (tooling) cover the motion wire format, the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
-ranges of every field and the frame reader), system image staging and the
-screenshot script, and `kernarium-host-features` (unit)
-the table of host features the boot request carries to an Android guest. The
-application builds with Xcode (`AndariumPreview` is the Simulator build with
-mock data, `Andarium` the device application,
+ranges of every field and the frame reader), system image staging, the
+screenshot script, the String Catalogs' check and their sync with the
+compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
+and `kernarium-host-features` (unit) the table of host features the boot
+request carries to an Android guest. The application builds with Xcode
+(`AndariumPreview` is the Simulator build with mock data, `Andarium` the
+device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com`; the scheme without the filter also runs
-`AndariumUITests`). `SnapshotFileApiTests`
+FEEDBACK_ADDRESS=feedback@example.com FOLLOW_X_HANDLE=example_handle`; the scheme
+without the filter also runs `AndariumUITests`). The scheme's Test
+action pins English, so the tests that read the application's words do not
+depend on the language of the device; `LocalizationTests` names a lost pin and
+looks each language up by name, and the language a `-testLanguage` run asks
+for fails only the tests that read the English words. `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
 exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
-a run without it does not build them. The Mail composer, the picker and the
+command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback)),
+and `FollowXRowTests` only with `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
+without them does not build them. The Mail composer, the picker and the
 guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
@@ -378,7 +392,9 @@ positions, the plug order, no software keyboard, a sheet's text field taking
 the keys while it is open and a sheet without one taking none from the guest,
 the pointer's hover, clicks, drag and scroll, "Use the pointer as touch" (the
 click is a touch of the touchscreen with it on, the mouse's without it), and a
-guest that never registers its mouse, whose pointer stays the touchscreen's. The
+guest that never registers its mouse, whose pointer stays the touchscreen's.
+`InterfaceRotationUITests` turns the Simulator through the four orientations in
+a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock.
@@ -439,8 +455,11 @@ Window layout follows iPadOS windowing, which only a device has. Whenever the
 guest view's layout changes, check on an iPad in Full Screen Apps, Windowed
 Apps and Stage Manager, switching Multitasking under the running application in
 both directions: the view must move at once, resize the guest display
-(`wm size`), keep touch coordinates mapped and show no lost GPU backend.
-Restore Full Screen Apps before releasing the lease.
+(`wm size`), keep touch coordinates mapped and show no lost GPU backend. In
+each mode also turn the iPad through its four orientations in a session: the
+interface and the guest's display follow, the last frame keeps its proportions
+meanwhile, and a game that asks for one orientation is letterboxed in the
+other. Restore Full Screen Apps before releasing the lease.
 
 ### Background lifecycle (device only)
 

@@ -142,7 +142,15 @@ FEEDBACK_FEATURE = (
 FEEDBACK_PARTIAL = (
     'const char *fixture(void) { return "Andarium feedback: AndariumFeedbackAddress"; }\n'
 )
-# Config/Info.plist as a fixture: the feedback block is conditional, and a value
+# Follow developer on X as a binary holds it: the Info.plist key, a line of
+# the row's text, and a type. The partial one has lost the text and the type.
+FOLLOW_X_FEATURE = (
+    "const char *fixture(void) {\n"
+    '  return "AndariumFollowXHandle" "Follow developer on %@" "_$s8Andarium11FollowXRowV";\n'
+    "}\n"
+)
+FOLLOW_X_PARTIAL = 'const char *fixture(void) { return "AndariumFollowXHandle"; }\n'
+# Config/Info.plist as a fixture: the optional blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -151,6 +159,10 @@ INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 #ifdef FEEDBACK_MAIL
 \t<key>AndariumFeedbackAddress</key>
 \t<string>$(FEEDBACK_ADDRESS)</string>
+#endif
+#ifdef FOLLOW_X
+\t<key>AndariumFollowXHandle</key>
+\t<string>$(FOLLOW_X_HANDLE)</string>
 #endif
 \t<key>CFBundleName</key>
 \t<string>Fixture</string>
@@ -300,14 +312,48 @@ def app_info(**overrides: object) -> dict:
     return {key: value for key, value in keys.items() if value is not None}
 
 
+def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
+    """The Feedback strings table the build compiles in with the feature, in each language."""
+    for language in languages:
+        lproj = app / f"{language}.lproj"
+        lproj.mkdir(exist_ok=True)
+        (lproj / "Feedback.strings").write_bytes(
+            plistlib.dumps({"Send feedback": "Feedback fixture"}, fmt=plistlib.FMT_BINARY))
+
+
+def write_follow_x_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
+    """The FollowX strings table the build compiles in with the row, in each language."""
+    for language in languages:
+        lproj = app / f"{language}.lproj"
+        lproj.mkdir(exist_ok=True)
+        (lproj / "FollowX.strings").write_bytes(
+            plistlib.dumps({"Follow developer on %@": "Row fixture %@"}, fmt=plistlib.FMT_BINARY))
+
+
 def make_app(
     root: Path, name: str, executable: Path, info: dict,
-    framework: Path | None = None, manifest: bool = True,
+    framework: Path | None = None, manifest: bool = True, feedback_tables: bool | None = None,
+    follow_x_tables: bool | None = None, follow_x_logo: bool | None = None,
 ) -> Path:
+    """A fixture application. A product whose Info.plist names a receiver holds the
+    Feedback strings table too (`feedback_tables` says otherwise), and one that
+    names a handle of X holds the FollowX table and the logo in its asset catalog
+    (`follow_x_tables` and `follow_x_logo`)."""
     app = root / name / "Fixture.app"
     app.mkdir(parents=True)
     shutil.copyfile(executable, app / "Fixture")
     (app / "Info.plist").write_bytes(plistlib.dumps(info))
+    if feedback_tables is None:
+        feedback_tables = "AndariumFeedbackAddress" in info
+    if feedback_tables:
+        write_feedback_tables(app)
+    named = "AndariumFollowXHandle" in info
+    if follow_x_tables is None:
+        follow_x_tables = named
+    if follow_x_tables:
+        write_follow_x_tables(app)
+    if named if follow_x_logo is None else follow_x_logo:
+        (app / "Assets.car").write_bytes(b"\0BOMStore\0GitHubMark\0XLogo\0")
     if manifest:
         (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(MANIFEST))
     if framework is not None:
@@ -370,6 +416,23 @@ def main() -> int:
         check(make_app(root, "ready", clean, app_info(), framework=clean),
               passes=True, expect="ready for the App Store")
         check(make_app(root, "guest-section", clean, app_info(), framework=carrier), passes=True)
+
+        # Localized text: the JIT table and any text that names JIT or StikDebug are for the other configurations.
+        def localized(name: str, tables: dict[str, dict]) -> Path:
+            app = make_app(root, name, clean, app_info())
+            lproj = app / "ja.lproj"
+            lproj.mkdir()
+            for table, content in tables.items():
+                (lproj / table).write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+            return app
+
+        check(localized("localized-clean", {"Localizable.strings": {"Start": "起動", "Note": "Preparing"}}), passes=True)
+        check(localized("jit-table", {"JIT.strings": {"Preparing JIT": "JITを準備中"}}),
+              passes=False, expect="the JIT strings table")
+        check(localized("jit-value", {"Localizable.strings": {"Note": "StikDebugからAndariumを開いてください"}}),
+              passes=False, expect="carries JIT text")
+        check(localized("jit-key", {"Localizable.strings": {"To use JIT, open Andarium": "x"}}),
+              passes=False, expect="carries JIT text")
 
         # Info.plist.
         check(make_app(root, "no-encryption-key", clean, app_info(ITSAppUsesNonExemptEncryption=None)),
@@ -578,6 +641,33 @@ def main() -> int:
         (words / "en.lproj" / "Localizable.strings").write_bytes(
             plistlib.dumps({"Send feedback": "Send feedback"}, fmt=plistlib.FMT_BINARY))
         check(words, passes=False, expect="has Send feedback strings")
+        # The feature's own strings table (Feedback.strings, and the stringsdict of
+        # its plurals) is the feature's: a product without the receiver holds none,
+        # found by the file name though the table says nothing of the feature.
+        for name, suffix, content in (
+                ("strings", "strings", {"Hello": "Hello"}), ("stringsdict", "stringsdict", {})):
+            table = make_app(root, f"feedback-table-{name}", clean, app_info())
+            (table / "en.lproj").mkdir()
+            (table / "en.lproj" / f"Feedback.{suffix}").write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+            expect = f"en.lproj/Feedback.{suffix}: is the Feedback strings table though the build names no receiver"
+            check(table, passes=False, expect=expect)
+            for configuration in ("Debug", "Release"):
+                check(table, passes=False, expect=expect, args=["--feedback", "--configuration", configuration])
+        # A product with the receiver holds the table in every language, or the sheet
+        # reads English in a language the product claims.
+        check(make_app(root, "feedback-table-missing", feature, feedback_info, feedback_tables=False),
+              passes=False, expect="lacks the Feedback strings table in ja, zh-Hans, zh-Hant", args=appstore)
+        partly = make_app(root, "feedback-table-partial", feature, feedback_info, feedback_tables=False)
+        write_feedback_tables(partly, ("ja", "zh-Hans"))
+        check(partly, passes=False, expect="lacks the Feedback strings table in zh-Hant", args=appstore)
+        check(make_app(root, "feedback-table-dict-only", feature, feedback_info, feedback_tables=False),
+              passes=False, expect="lacks the Feedback strings table in", args=appstore)
+        with_dict = make_app(root, "feedback-table-with-dict", feature, feedback_info)
+        (with_dict / "ja.lproj" / "Feedback.stringsdict").write_bytes(plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
+        check(with_dict, passes=True, expect="Send feedback is compiled in", args=appstore)
+        check(make_app(root, "feedback-table-arranged", feature, app_info(AndariumFeedbackAddress="feedback@example.com")),
+              passes=True, expect="Send feedback is compiled in (Debug)",
+              args=["--feedback", "--configuration", "Debug", "--feedback-address", "feedback@example.com"])
         # The receiver of the local configuration is one strict address, and a
         # real one: no quotes, angle brackets, trailing semicolon or second @,
         # no placeholder domain. (SendFeedbackMail.isWellFormed holds the same
@@ -703,6 +793,194 @@ def main() -> int:
         (named_leak / "Data.bin").write_bytes(receiver.encode())
         check(named_leak, passes=True, expect="Send feedback is compiled in", args=appstore)
 
+        # Follow developer on X is compiled in only where the build names a handle,
+        # by the same rule. The fixtures stand for the application with it (the
+        # Info.plist key, a line of the row's text, a type, the FollowX table and the
+        # logo in Assets.car); the handle is a made-up one that is also a word of
+        # the bundle identifier, as the real one is.
+        handle = "someone_real"
+        x_feature = build(root, "x-feature", FOLLOW_X_FEATURE)
+        x_partial = build(root, "x-partial", FOLLOW_X_PARTIAL)
+        x_info = app_info(AndariumFollowXHandle=handle)
+        x_appstore = ["--follow-x-handle", handle, "--developer-x-handle", handle]
+        x_local = ["--developer-x-handle", handle]
+        x_arranged = ["--follow-x-handle", "example_handle"]
+        x_other = ["--follow-x", "--configuration"]
+        check(make_app(root, "x-built", x_feature, x_info), passes=True,
+              expect="Follow developer on X is compiled in", args=x_appstore)
+        check(make_app(root, "x-absent", clean, app_info()), passes=True,
+              expect="Follow developer on X is not compiled in")
+        check(make_app(root, "x-no-key", x_feature, app_info()), passes=False,
+              expect="AndariumFollowXHandle must be the handle", args=x_appstore)
+        check(make_app(root, "x-other-key", x_feature, app_info(AndariumFollowXHandle="another_one")),
+              passes=False, expect="must be the handle the build names", args=x_appstore)
+        check(make_app(root, "x-not-built", clean, x_info), passes=False,
+              expect="lacks Follow developer on X", args=x_appstore)
+        check(make_app(root, "x-partial", x_partial, x_info), passes=False,
+              expect="Follow developer on", args=x_appstore)
+        # A row that lost its logo draws a blank: the asset catalog holds it.
+        check(make_app(root, "x-no-logo", x_feature, x_info, follow_x_logo=False), passes=False,
+              expect="Assets.car: lacks the logo", args=x_appstore)
+        # No handle, so nothing of it: not the code, key, strings, table or logo.
+        check(make_app(root, "x-code-without-handle", x_feature, app_info()), passes=False,
+              expect="carries Follow developer on X")
+        check(make_app(root, "x-key-without-handle", clean, x_info), passes=False,
+              expect="has AndariumFollowXHandle though the build names no handle")
+        check(make_app(root, "x-framework-without-handle", clean, app_info(), framework=x_feature),
+              passes=False, expect="Runtime.framework/Runtime: carries Follow developer on X")
+        x_words = make_app(root, "x-words", clean, app_info())
+        (x_words / "en.lproj").mkdir()
+        (x_words / "en.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Follow developer on %@": "Follow developer on %@"}, fmt=plistlib.FMT_BINARY))
+        check(x_words, passes=False, expect="has Follow developer on X strings")
+        for name, suffix, content in (
+                ("strings", "strings", {"Hello": "Hello"}), ("stringsdict", "stringsdict", {})):
+            table = make_app(root, f"x-table-{name}", clean, app_info())
+            (table / "en.lproj").mkdir()
+            (table / "en.lproj" / f"FollowX.{suffix}").write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+            expect = f"en.lproj/FollowX.{suffix}: is the FollowX strings table though the build names no handle"
+            check(table, passes=False, expect=expect)
+            for configuration in ("Debug", "Release"):
+                check(table, passes=False, expect=expect, args=[*x_other, configuration])
+        check(make_app(root, "x-logo-without-handle", clean, app_info(), follow_x_logo=True), passes=False,
+              expect="Assets.car: holds the logo of Follow developer on X though the build names no handle")
+        for artwork in ("x-logo.svg", "glyph.svg"):
+            loose = make_app(root, f"x-loose-{artwork}", clean, app_info())
+            (loose / artwork).write_bytes(b"<svg/>")
+            check(loose, passes=False, expect=f"{artwork}: is artwork of the row")
+            check(make_app(root, f"x-loose-named-{artwork}", x_feature, x_info), passes=True, args=x_appstore)
+        # A product with the handle holds the table in every language.
+        check(make_app(root, "x-table-missing", x_feature, x_info, follow_x_tables=False), passes=False,
+              expect="lacks the FollowX strings table in ja, zh-Hans, zh-Hant", args=x_appstore)
+        x_partly = make_app(root, "x-table-partial", x_feature, x_info, follow_x_tables=False)
+        write_follow_x_tables(x_partly, ("ja", "zh-Hans"))
+        check(x_partly, passes=False, expect="lacks the FollowX strings table in zh-Hant", args=x_appstore)
+        # The handle of the local configuration is one of X's: 1 to 15 letters,
+        # digits and underscores, and not the placeholder. (FollowXProfile.isWellFormed
+        # holds the same rules; AndariumCore's FollowXTests pin that side.)
+        for index, bad in enumerate((
+                "a" * 16, "has space", "dash-x", "@someone", "https://x.com/someone", "someone/", "so.meone",
+                "some\none", "\u00e9cole", "example_handle", "Example_Handle", "EXAMPLE_HANDLE")):
+            check(make_app(root, f"x-handle-{index}", x_feature, app_info(AndariumFollowXHandle=bad)),
+                  passes=False, expect="Follow developer on X: the handle in the local configuration",
+                  args=["--follow-x-handle", bad])
+        for index, good in enumerate(("a", "A_1", "_", "a" * 15, "someone_real", "Some_One_99")):
+            check(make_app(root, f"x-handle-ok-{index}", x_feature, app_info(AndariumFollowXHandle=good)),
+                  passes=True, expect="Follow developer on X is compiled in", args=["--follow-x-handle", good])
+        # A build that names no handle still has the row's file names in the linker's
+        # debug map of its Debug or Release product; the map's symbol names count.
+        mapped_x = build_with_debug_map(root, "mapped-x", "/Users/NAME/FollowXRow")
+        symbol_x = build_with_debug_map(
+            root, "symbol-x", "/Users/NAME/Project",
+            "__attribute__((visibility(\"hidden\"))) int plain_first(void) { return 2; }\n"
+            "__attribute__((visibility(\"hidden\"))) int _s8Andarium11FollowXRowV4bodyyF(void) { return 1; }\n")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"x-{configuration}-debug-map", mapped_x, app_info()),
+                  passes=True, expect=f"Follow developer on X is not compiled in ({configuration})",
+                  args=[*x_other, configuration])
+            check(make_app(root, f"x-{configuration}-symbol-only", symbol_x, app_info()),
+                  passes=False, expect="carries Follow developer on X (FollowX)", args=[*x_other, configuration])
+        check(make_app(root, "x-appstore-debug-map", mapped_x, app_info()), passes=True,
+              expect="Follow developer on X is not compiled in")
+        check(make_app(root, "x-appstore-symbol-only", symbol_x, app_info()),
+              passes=False, expect="carries Follow developer on X (FollowX)")
+        x_debug = make_app(root, "x-debug-library", clean, app_info())
+        shutil.copyfile(x_feature, x_debug / "Fixture.debug.dylib")
+        check(x_debug, passes=False, expect="Fixture.debug.dylib: carries Follow developer on X")
+        # The other configurations: absent, or the arranged placeholder, which Debug alone takes.
+        x_arranged_info = app_info(AndariumFollowXHandle="example_handle")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"x-{configuration}-absent", clean, app_info()), passes=True,
+                  expect=f"Follow developer on X is not compiled in ({configuration})", args=[*x_other, configuration])
+            # The local configuration's handle never reaches them.
+            check(make_app(root, f"x-{configuration}-handle", x_feature, x_info), passes=False,
+                  expect="not the arranged placeholder", args=[*x_other, configuration, *x_appstore])
+            check(make_app(root, f"x-{configuration}-code", x_feature, app_info()), passes=False,
+                  expect="carries Follow developer on X", args=[*x_other, configuration])
+            check(make_app(root, f"x-{configuration}-key", clean, x_info), passes=False,
+                  expect="though the build names no handle", args=[*x_other, configuration])
+        check(make_app(root, "x-Debug-arranged", x_feature, x_arranged_info), passes=True,
+              expect="Follow developer on X is compiled in (Debug)", args=[*x_other, "Debug", *x_arranged])
+        check(make_app(root, "x-Release-arranged", x_feature, x_arranged_info), passes=False,
+              expect="only Debug takes the arrangement", args=[*x_other, "Release", *x_arranged])
+        check(make_app(root, "x-Release-arranged-absent", clean, app_info()), passes=False,
+              expect="only Debug takes the arrangement", args=[*x_other, "Release", *x_arranged])
+        check(make_app(root, "x-appstore-arranged", x_feature, x_arranged_info), passes=False,
+              expect="placeholder handle", args=x_arranged)
+        # The arranged placeholder is in no product that does not arrange it.
+        x_stray = make_app(root, "x-placeholder-stray", clean, app_info())
+        (x_stray / "Data.bin").write_bytes(b"\0Example_Handle\0")
+        check(x_stray, passes=False, expect="Data.bin: holds the placeholder handle of the arrangement")
+        check(x_stray, passes=False, expect="Data.bin: holds the placeholder handle of the arrangement",
+              args=[*x_other, "Debug"])
+        check(make_app(root, "x-placeholder-key", clean, x_arranged_info), passes=False,
+              expect="Info.plist: holds the placeholder handle of the arrangement")
+        # Both features' phase in one run says both.
+        both = run([sys.executable, "-B", str(options.checker), "--feedback", "--follow-x", "--configuration", "Debug",
+                    str(make_app(root, "x-both", clean, app_info()))])
+        if both.returncode != 0 or "Send feedback is not compiled in (Debug)" not in both.stdout \
+                or "Follow developer on X is not compiled in (Debug)" not in both.stdout:
+            failures.append(f"x-both: expected both features reported:\n{both.stdout}")
+
+        # The local handle is in no file of a bundle that does not name it, as a
+        # profile address or as a whole string of a property list, and the check
+        # never prints it. The bare word is no leak: it is also in the bundle
+        # identifier, the name of a keychain item and the project's page.
+        x_address = build(root, "x-address", f'const char *fixture(void) {{ return "https://x.com/{handle}"; }}\n')
+        x_old_address = build(root, "x-old-address", f'const char *fixture(void) {{ return "twitter.com/{handle}"; }}\n')
+        x_data = make_app(root, "x-leak-data-file", clean, app_info())
+        (x_data / "Data.bin").write_bytes(b"\0\1HTTPS://X.COM/" + handle.upper().encode() + b"\2")
+        x_plist = make_app(root, "x-leak-plist-value", clean, app_info(Developer=handle.upper()))
+        x_strings = make_app(root, "x-leak-strings", clean, app_info())
+        (x_strings / "en.lproj").mkdir()
+        (x_strings / "en.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Contact": handle}, fmt=plistlib.FMT_BINARY))
+        x_straddle = make_app(root, "x-leak-straddle", clean, app_info())
+        (x_straddle / "Big.bin").write_bytes(b"\0" * ((8 << 20) - 5) + f"x.com/{handle}".encode() + b"\0")
+        x_leaks = (
+            ("executable", make_app(root, "x-leak-executable", x_address, app_info()), "Fixture"),
+            ("old-address", make_app(root, "x-leak-old", x_old_address, app_info()), "Fixture"),
+            ("framework", make_app(root, "x-leak-framework", clean, app_info(), framework=x_address),
+             "Frameworks/Runtime.framework/Runtime"),
+            ("data-file", x_data, "Data.bin"),
+            ("plist-value", x_plist, "Info.plist"),
+            ("strings", x_strings, "en.lproj/Localizable.strings"),
+            ("straddle", x_straddle, "Big.bin"),
+        )
+        for name, app, path in x_leaks:
+            for configuration in ("Debug", "Release"):
+                for arguments in (x_local, [*x_local, *x_arranged]):
+                    check(app, passes=False, expect=f"{path}: holds the handle of the local configuration",
+                          never=handle, args=[*x_other, configuration, *arguments])
+            check(app, passes=False, expect=f"{path}: holds the handle of the local configuration",
+                  never=handle, args=x_local)
+        # The bare word is in a bundle that does not name it, as the real one is.
+        word = make_app(
+            root, "x-word-only",
+            build(root, "x-word", f'const char *fixture(void) {{ return "https://github.com/{handle}/Project"; }}\n'),
+            app_info(CFBundleIdentifier=f"org.{handle}.Fixture"))
+        (word / "Data.bin").write_bytes(f"keychain org.{handle}.fixture.key".encode())
+        check(word, passes=True, expect="ready for the App Store", args=x_local)
+        check(word, passes=True, expect="Follow developer on X is not compiled in (Debug)",
+              args=[*x_other, "Debug", *x_local])
+        check(make_app(root, "x-leak-none", clean, app_info(), framework=clean), passes=True,
+              expect="ready for the App Store", args=x_local)
+        check(make_app(root, "x-leak-none-arranged", x_feature, x_arranged_info), passes=True,
+              expect="Follow developer on X is compiled in (Debug)", args=[*x_other, "Debug", *x_local, *x_arranged])
+        # An App Store build that names it holds it in Info.plist, and may hold the address too.
+        check(make_app(root, "x-leak-named", x_feature, x_info), passes=True,
+              expect="Follow developer on X is compiled in", args=x_appstore)
+        x_named = make_app(root, "x-leak-named-elsewhere", x_feature, x_info)
+        (x_named / "Data.bin").write_bytes(f"x.com/{handle}".encode())
+        check(x_named, passes=True, expect="Follow developer on X is compiled in", args=x_appstore)
+        # The two features are independent: each in its product, each absent from the other's.
+        check(make_app(root, "both-built", x_feature, {**feedback_info, **x_info}), passes=False,
+              expect="has AndariumFeedbackAddress though the build names no receiver", args=x_appstore)
+        check(make_app(root, "x-only-built", x_feature, x_info), passes=True,
+              expect="Send feedback is not compiled in", args=x_appstore)
+        check(make_app(root, "feedback-only-built", feature, feedback_info), passes=True,
+              expect="Follow developer on X is not compiled in", args=appstore)
+
         # The built Info.plist keeps every value of Config/Info.plist, whichever
         # way the feedback block went: the preprocessor changes the feedback key
         # alone. The source here has a build setting inside a nested value, as
@@ -723,6 +1001,11 @@ def main() -> int:
                   args=[*other, configuration, *extra, *info_args])
         check(make_app(root, "info-source-appstore", clean, app_info(**base_info)), passes=True,
               expect="ready for the App Store", args=info_args)
+        check(make_app(root, "info-source-x-Debug", x_feature,
+                       app_info(AndariumFollowXHandle="example_handle", **base_info)),
+              passes=True, expect="compiled in", args=[*x_other, "Debug", *x_arranged, *info_args])
+        check(make_app(root, "info-source-x-appstore", x_feature, app_info(AndariumFollowXHandle=handle, **base_info)),
+              passes=True, expect="ready for the App Store", args=[*x_appstore, *info_args])
         check(make_app(root, "info-source-appstore-named", feature,
                        app_info(AndariumFeedbackAddress=receiver, **base_info)),
               passes=True, expect="ready for the App Store", args=[*appstore, *info_args])

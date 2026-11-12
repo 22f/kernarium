@@ -9,6 +9,7 @@ import PackageDescription
 // applications decide the same way.
 let package = Package(
     name: "AndariumCore",
+    defaultLocalization: "en",
     platforms: [.macOS("27.0"), .iOS("27.0")],
     products: [
         .library(name: "AndariumCore", targets: ["AndariumCore"]),
@@ -24,7 +25,8 @@ let package = Package(
     targets: [
         .target(
             name: "AndariumCore",
-            dependencies: [.product(name: "GuestHostCore", package: "Core")]
+            dependencies: [.product(name: "GuestHostCore", package: "Core")],
+            resources: [.process("Resources/Localizable.xcstrings")]
         ),
         // Simulated controllers and the guest end of the gamepad wire, for tests
         // and the probe tool. The application never links it (the App Store
@@ -43,6 +45,12 @@ let package = Package(
             dependencies: ["AndariumCore"],
             swiftSettings: [.define("FEEDBACK_MAIL")]
         ),
+        // Follow developer on X's logic, for the package's tests only, by the same
+        // rule (a symlink to Andarium/Shared/FollowX/Logic).
+        .target(
+            name: "AndariumFollowXLogic",
+            swiftSettings: [.define("FOLLOW_X")]
+        ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
@@ -50,7 +58,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic"]
         ),
     ]
 )
