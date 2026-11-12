@@ -218,10 +218,14 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     /// The layer shows the last presented frame until the guest draws again,
     /// and its default `.resize` stretches that frame to whatever bounds the
     /// layer has meanwhile, which a rotation or a window resize makes another
-    /// shape for a moment. Aspect-fit keeps the frame's proportions; where the
-    /// frame and the view have the same shape it changes nothing.
+    /// shape for a moment. Aspect-fit keeps the frame's proportions, and the
+    /// bars it leaves beside the frame are black, as the guest's own bars are,
+    /// whatever lies behind the view. Where the frame and the view have the
+    /// same shape (the drawable is cleared to opaque black) nothing shows of
+    /// either, bar the sliver that rounding the drawable down can leave.
     private func keepAspectWhileResizing() {
         layer.contentsGravity = .resizeAspect
+        backgroundColor = .black
     }
 
     override var canBecomeFirstResponder: Bool { true }

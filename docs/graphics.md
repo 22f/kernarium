@@ -195,7 +195,8 @@ point and Retina geometry is in
   first use, released on a mode change or clear, and an allocation failure
   reaches the flush that needed it as an out-of-memory response.
 - Rendering and input share one centred aspect-fit rectangle, and iOS keeps
-  the last frame aspect-fit in its view while the view resizes. A pointer or
+  the last frame aspect-fit in its view, in black bars, while the view
+  resizes. A pointer or
   touch in a letterbox bar reaches the guest only as part of a gesture begun
   inside the rectangle, and a guest mode change releases held buttons and
   contacts.
