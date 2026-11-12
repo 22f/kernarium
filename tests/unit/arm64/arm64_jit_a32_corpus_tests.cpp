@@ -31,9 +31,9 @@
  * subnormal input, which exercises the correction for a host whose FJCVTZS
  * reports it as exact.
  *
- *   uml_arm64_jit_a32_corpus_tests PACK [--record NAME[,NAME...]]
- *       [--case NAME] [--form PREFIX] [--list-failures] [--passes N]
- *       [--interrupt] [--attempts N]
+ *   uml_arm64_jit_a32_corpus_tests PACK [--record NAME] [--case NAME]
+ *       [--form PREFIX] [--list-failures] [--passes N] [--interrupt]
+ *       [--attempts N]
  */
 #include "aarch32_corpus_cpu_state.hpp"
 #include "aarch32_corpus_pack.hpp"
@@ -621,7 +621,7 @@ int main(int argc, char **argv) {
   for (std::size_t pass = 0; pass < passes; ++pass) {
     for (const auto &record : pack.records) {
       if ((record.profiles & kProfileBit) == 0 ||
-          !record_listed(only_record, record.name))
+          (!only_record.empty() && record.name != only_record))
         continue;
       for (const auto &test : record.cases) {
         if (!only_case.empty() && test.name != only_case)

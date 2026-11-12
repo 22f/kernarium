@@ -405,23 +405,6 @@ ProgramEnd for_each_instruction(const Case &test, const ::uml::cpu::arm64::aarch
 	return ProgramEnd::whole;
 }
 
-/* Whether `list`, a name or names separated by commas, holds `name`: how a
- * lane's --record chooses records. An empty list holds every name. */
-[[nodiscard]] inline bool record_listed(std::string_view list, std::string_view name)
-{
-	if (list.empty())
-		return true;
-	while (!list.empty()) {
-		const auto comma = list.find(',');
-		if (list.substr(0, comma) == name)
-			return true;
-		if (comma == std::string_view::npos)
-			break;
-		list.remove_prefix(comma + 1);
-	}
-	return false;
-}
-
 /* Store-exclusives -------------------------------------------------------------- */
 
 /* A store-exclusive's place in the data region: the bytes it writes when it

@@ -575,7 +575,9 @@ blocker in every one of them.
   compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
   case that differs only by a spurious store-exclusive failure (its own bytes
   unwritten, the case's other stores in the data), and the `-interrupted`
-  tests provoke that failure on purpose, the spill suite's cases included.
+  tests provoke that failure on purpose. Only the gadget one runs the spill
+  suite, whose cases store between the pair: the JIT does not lose a
+  reservation there.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 

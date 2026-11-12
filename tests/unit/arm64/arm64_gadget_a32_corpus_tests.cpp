@@ -361,7 +361,18 @@ struct Options final {
 	 * by commas; none selects every record. */
 	[[nodiscard]] bool selects(std::string_view name) const
 	{
-		return corpus::record_listed(record, name);
+		if (record.empty())
+			return true;
+		std::string_view rest = record;
+		while (!rest.empty()) {
+			const auto comma = rest.find(',');
+			if (rest.substr(0, comma) == name)
+				return true;
+			if (comma == std::string_view::npos)
+				break;
+			rest.remove_prefix(comma + 1);
+		}
+		return false;
 	}
 };
 

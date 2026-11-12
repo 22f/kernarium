@@ -349,11 +349,13 @@
     # ends the monitor the JIT uses) and the corpus's single attempts must
     # tolerate it; this lane makes that happen so the tolerance is measured
     # and not left to the load a gate happens to run under. The spill suite
-    # is in it as well: its cases store between the pair.
+    # is not in it: the JIT puts a pair on the host monitor only with
+    # register instructions between, so a store between sends the pair
+    # through its helper, which lost no reservation in that suite under this
+    # storm, and the run would only take longer.
     uml_add_unit_test(NAME arm64-jit-a32-corpus-interrupted TIMEOUT 1200
         COMMAND uml_arm64_jit_a32_corpus_tests ${UML_ARM64_AARCH32_CORPUS}
-            --record exclusive-qemu,exclusive-spill-qemu --passes 3000
-            --interrupt)
+            --record exclusive-qemu --passes 3000 --interrupt)
 
     # The JIT's SME support (cpu/arm64/jit, sme_support).
     uml_add_arm64_unit_test(jit_sme_mode WITHOUT_HARNESS
