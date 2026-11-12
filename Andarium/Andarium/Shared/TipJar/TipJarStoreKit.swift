@@ -53,15 +53,15 @@ nonisolated enum TipJarStoreKit {
                 try await product.purchase()
             }
             switch result {
-            case .success(.verified(let transaction)):
+            case .success(let verification):
+                // The store took the payment; whether the signature check on
+                // this device passed does not change that, and nothing is
+                // delivered for a tip either way. So one that does not verify
+                // is finished and thanked as one that does is (left open, a
+                // consumable would be offered again at every launch, and
+                // saying it failed would invite a second payment).
+                let transaction = Self.transaction(of: verification)
                 return .purchased(TipJarTransaction(productIdentifier: transaction.productID) { await transaction.finish() })
-            case .success(.unverified(let transaction, let error)):
-                // Nothing is delivered for a tip, so an unverified one is
-                // finished as a verified one is (left open, a consumable would
-                // be offered again at every launch); the person is told it
-                // did not go through.
-                await transaction.finish()
-                return .failed(error.localizedDescription)
             case .userCancelled:
                 return .cancelled
             case .pending:
@@ -78,6 +78,13 @@ nonisolated enum TipJarStoreKit {
         }
     }
 
+    /// The transaction a verification result carries, verified or not.
+    private static func transaction(of result: VerificationResult<StoreKit.Transaction>) -> StoreKit.Transaction {
+        switch result {
+        case .verified(let transaction), .unverified(let transaction, _): transaction
+        }
+    }
+
     /// What the store has not been told the app finished, and then everything
     /// it delivers outside a purchase made here (an Ask to Buy approval, a
     /// purchase made on another device, one that was interrupted).
@@ -85,9 +92,7 @@ nonisolated enum TipJarStoreKit {
         AsyncStream { continuation in
             func deliver(_ result: VerificationResult<StoreKit.Transaction>) {
                 // Verified or not: see purchase(_:).
-                let transaction = switch result {
-                case .verified(let transaction), .unverified(let transaction, _): transaction
-                }
+                let transaction = Self.transaction(of: result)
                 continuation.yield(
                     TipJarTransaction(productIdentifier: transaction.productID) { await transaction.finish() })
             }
