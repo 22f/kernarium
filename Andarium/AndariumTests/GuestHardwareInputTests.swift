@@ -266,7 +266,9 @@ struct GuestHardwareInputTests {
             var white: CGFloat = 1
             var alpha: CGFloat = 0
             let background = view.layer.backgroundColor.map { UIColor(cgColor: $0) }
-            #expect(background?.getWhite(&white, alpha: &alpha) == true && white == 0 && alpha == 1)
+            #expect(
+                background?.getWhite(&white, alpha: &alpha) == true && white == 0 && alpha == 1,
+                "the layer's background is \(String(describing: view.layer.backgroundColor)), the view's \(String(describing: view.backgroundColor))")
         }
     }
 

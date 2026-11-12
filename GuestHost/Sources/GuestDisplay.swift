@@ -225,7 +225,7 @@ class GuestMetalView: MTKView, UIGestureRecognizerDelegate, UIPointerInteraction
     /// either, bar the sliver that rounding the drawable down can leave.
     private func keepAspectWhileResizing() {
         layer.contentsGravity = .resizeAspect
-        backgroundColor = .black
+        layer.backgroundColor = UIColor.black.cgColor
     }
 
     override var canBecomeFirstResponder: Bool { true }
