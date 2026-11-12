@@ -22,11 +22,6 @@ func withAndroidGuest(
         model.create(entry.overrides.applied(to: Guest.fresh(on: model.host), on: model.host))
         try await waitForAndroidGuest(until: { model.busy == nil }, seconds: 30)
     }
-    let previousChoice = model.motionSensorsOn
-    defer {
-        model.setMotionSensors(previousChoice)
-    }
-    model.setMotionSensors(false)
     model.start(.normal)
     try #require(model.alert == nil, "\(String(describing: model.alert))")
 
@@ -62,11 +57,9 @@ func withAndroidGuest(
             "settings put system screen_off_timeout 600000; input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard")
         try #require(awake.exitCode == 0)
         try await body(model, operations)
-        model.setMotionSensors(false)
         _ = try? await operations.shell("\(restoreDisplayTimeout); \(cleanupCommand); reboot -p")
         try await waitForAndroidGuest(until: { model.phase == .home && model.runEnd.poweredOff }, seconds: 60)
     } catch {
-        model.setMotionSensors(false)
         if let diagnostics = try? await operations.shell("dumpsys power; dumpsys sensorservice; logcat -d -t 120") {
             print("ANDROID diagnostics: \(diagnostics.text)")
         }

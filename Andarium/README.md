@@ -83,9 +83,10 @@ device's orientation as iOS reports it, which already includes the person's
 Portrait Orientation Lock: while a session is in front the application
 observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
 over the motion connection (`MotionOrientation.swift`), which Android treats as
-a rotation proposal that its own policy still decides on. The Gyroscope switch
-governs only the accelerometer and gyroscope data apps may read, not this. A
-guest whose image has no such sensor judges the accelerometer as before. On iPad
+a rotation proposal that its own policy still decides on. That is the display's
+own behaviour and uses no accelerometer or gyroscope reading, which are the
+guest's separately ([Runtime](#runtime), Motion). A guest whose image has no
+such sensor judges the accelerometer as before. On iPad
 the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
@@ -583,11 +584,17 @@ requires reopening Andarium.
   slower than on gadgets, and a long single-process computation runs faster. An
   App Store build carries none of this: its runtime has no JIT and the
   application has no row, preference, entries or sentences.
-- **Motion.** Gyroscope needs no permission. The host reads a sensor only while
-  a guest application uses it and sends samples over private vsock port 5556
-  from the process's one Core Motion manager, which is never released (a
-  released manager crashes inside Core Motion); the system image must include
-  the [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+- **Motion.** The guest has the device's accelerometer and gyroscope wherever
+  the device has them, with no setting and no permission. An iPad app on a Mac
+  and the Simulator have none, so nothing is read there, and Android still
+  lists both sensors. The host reads a sensor only while the guest is in front
+  and an application in it uses the sensor, and sends samples over private
+  vsock port 5556 from the process's one Core Motion manager, which is never
+  released (a released manager crashes inside Core Motion). A failure of the
+  device's sensors stops them and keeps the connection, which also carries the
+  orientation; they are tried again when the guest's demand changes or the
+  application next updates the session. The system image must include the
+  [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so

@@ -77,42 +77,36 @@ private final class CoreMotionDevice: MotionDevice, @unchecked Sendable {
     }
 }
 
-/// The device's motion for the running guest. Core Motion runs only for an
-/// enabled, booted, foreground guest, and then only for the sensors an
-/// application in the guest has active (`MotionSession`). The axes are set
-/// when a run begins and never change per sample (`MotionMount` decides when
-/// they move). No samples are retained across backgrounding, power-off, or a
-/// guest restart.
+/// The device's motion for the running guest. Core Motion runs only for a
+/// booted, foreground guest on a device that has the sensors, and then only
+/// for the sensors an application in the guest has active (`MotionSession`).
+/// The axes are set when a run begins and never change per sample
+/// (`MotionMount` decides when they move). No samples are retained across
+/// backgrounding, power-off, or a guest restart.
 @MainActor
 final class MotionSensors {
-    private let device = CoreMotionDevice()
+    private let device: any MotionDevice
     private let opener: any GuestStreamOpener
-    private lazy var session = MotionSession(opener: opener, device: device) { [weak self] problem in
-        let text: String? = switch problem {
-        case nil: nil
-        case .guestUnavailable?:
-            "The virtual machine’s motion sensor service is unavailable. Use a system image with motion sensor support."
-        case .deviceFailed?:
-            "The device’s motion sensors could not be read. Turn Gyroscope off and on to try again."
-        }
-        Task { @MainActor [weak self] in self?.problem?(text) }
-    }
-    var problem: ((String?) -> Void)?
+    private lazy var session = MotionSession(opener: opener, device: device)
     private var axes = MotionSample.Axes.portrait
 
-    /// The guest's motion service is reached over the runtime's vsock; a test gives another.
-    init(opener: any GuestStreamOpener = MotionConnector()) {
+    /// The guest's motion service is reached over the runtime's vsock, and the
+    /// sensors are the device's own; a test gives others.
+    init(opener: any GuestStreamOpener = MotionConnector(), device: any MotionDevice = CoreMotionDevice()) {
         self.opener = opener
+        self.device = device
     }
 
+    /// The device has sensors to share. A Mac and the Simulator have none, and
+    /// then nothing is read and no connection is held for the sensors.
     var available: Bool { device.hasAccelerometer || device.hasGyroscope }
 
-    /// What is wanted now: the person's switch, the guest being in front, the
-    /// axes the sensors are mounted to, and whether the guest follows the
-    /// device's orientation (which holds the connection with the switch off).
-    func update(enabled: Bool, foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false) {
+    /// What is wanted now: the guest being in front, the axes the sensors are
+    /// mounted to, and whether the guest follows the device's orientation
+    /// (which holds the connection on a device without sensors too).
+    func update(foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false) {
         self.axes = axes
-        session.update(enabled: enabled, foreground: foreground, axes: axes, followsOrientation: followsOrientation)
+        session.update(foreground: foreground, axes: axes, followsOrientation: followsOrientation)
     }
 
     /// The device's orientation, or nil once it is not being observed. The
@@ -124,7 +118,7 @@ final class MotionSensors {
     func restart() { session.restart() }
 
     func stop() {
-        session.update(enabled: false, foreground: false, axes: axes)
+        session.update(foreground: false, axes: axes)
         session.setOrientation(nil)
     }
 }

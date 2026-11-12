@@ -2062,10 +2062,11 @@ def resource_string_pool(table: bytes, offset: int) -> list[str]:
     return strings
 
 
-def resource_entries(table: bytes, type_name: str):
+def resource_entries(table: bytes, type_name: str, *, configurations: bool = False):
     """The (name, position, flags) of every entry of one resource type in a compiled resource
     table, in each of its configurations. The position is that of the ResTable_entry, or of the
-    compact entry whose key sits where a full entry keeps its size."""
+    compact entry whose key sits where a full entry keeps its size. With `configurations`, a
+    fourth item says whether the entry is in the default configuration (no qualifier set)."""
     position = struct.unpack_from("<H", table, 2)[0]
     chunk, _, size = struct.unpack_from("<HHI", table, position)
     if chunk != 0x0001:
@@ -2087,6 +2088,9 @@ def resource_entries(table: bytes, type_name: str):
                 if inner_chunk == 0x0201 and types[table[inner + 8] - 1] == type_name:
                     count, entries_start = struct.unpack_from("<II", table, inner + 12)
                     kind = table[inner + 9]
+                    # The ResTable_config at +20 starts with its own size; the default one sets nothing after it.
+                    config_size = struct.unpack_from("<I", table, inner + 20)[0]
+                    default = not any(table[inner + 24:inner + 20 + config_size])
                     if kind & 0x01:  # sparse: (index, offset / 4) pairs of 16 bits
                         offsets = [4 * pair[1] for pair in struct.iter_unpack("<HH", table[inner + inner_header:inner + inner_header + 4 * count])]
                     elif kind & 0x02:  # 16-bit offsets in units of 4 bytes
@@ -2101,9 +2105,18 @@ def resource_entries(table: bytes, type_name: str):
                         key, flags = struct.unpack_from("<HH", table, entry)
                         if not flags & 0x08:  # a full entry: size, flags, then a 32-bit key
                             key = struct.unpack_from("<I", table, entry + 4)[0]
-                        yield keys[key], entry, flags
+                        if configurations:
+                            yield keys[key], entry, flags, default
+                        else:
+                            yield keys[key], entry, flags
                 inner += inner_size
         position += size
+
+
+def resource_default_names(table: bytes, type_name: str) -> set[str]:
+    """The names of the resources of one type that a compiled resource table defines in its default
+    configuration: the definitions that apply whatever the device's qualifiers are."""
+    return {name for name, _, _, default in resource_entries(table, type_name, configurations=True) if default}
 
 
 def resource_arrays(table: bytes) -> dict[str, list[list[str]]]:
@@ -2154,6 +2167,86 @@ def resource_integers(table: bytes) -> dict[str, list[int]]:
         if data_type in (0x10, 0x11):  # TYPE_INT_DEC, TYPE_INT_HEX
             integers.setdefault(name, []).append(data - (1 << 32) if data >> 31 else data)
     return integers
+
+
+# The chunks of a compiled resource table that declare an <overlayable> section and its policies.
+RES_TABLE_PACKAGE_TYPE = 0x0200
+RES_TABLE_OVERLAYABLE_TYPES = (0x0204, 0x0205)
+
+
+RES_TABLE_TYPE = 0x0002
+
+
+def resource_chunks(table: bytes, start: int, end: int):
+    """The (type, header size, size, position) of each chunk that fills table[start:end] exactly.
+    A chunk that is smaller than its header, or does not fit, raises ValueError."""
+    position = start
+    while position < end:
+        if position + 8 > end:
+            raise ValueError(f"a chunk header at {position} runs past the end of its parent ({end})")
+        chunk, header_size, size = struct.unpack_from("<HHI", table, position)
+        if header_size < 8 or size < header_size or position + size > end:
+            raise ValueError(f"the chunk 0x{chunk:04x} at {position} declares header {header_size} and size {size} "
+                             f"in a parent that ends at {end}")
+        yield chunk, header_size, size, position
+        position += size
+
+
+def resource_table_defines_overlayable(table: bytes) -> bool:
+    """Whether a package of a compiled resource table declares an <overlayable> section. A table whose
+    header, declared size or chunks do not hold together raises ValueError instead of reading as one
+    without the section."""
+    if len(table) < 12:
+        raise ValueError(f"{len(table)} bytes are shorter than a resource table header")
+    chunk, header_size, size = struct.unpack_from("<HHI", table, 0)
+    if chunk != RES_TABLE_TYPE or header_size < 12 or size < header_size or size > len(table):
+        raise ValueError(f"not a resource table: type 0x{chunk:04x}, header {header_size}, size {size} of {len(table)} bytes")
+    for chunk, chunk_header, chunk_size, position in resource_chunks(table, header_size, size):
+        if chunk == RES_TABLE_PACKAGE_TYPE:
+            for inner_chunk, _, _, _ in resource_chunks(table, position + chunk_header, position + chunk_size):
+                if inner_chunk in RES_TABLE_OVERLAYABLE_TYPES:
+                    return True
+    return False
+
+
+def manifest_element_attributes(manifest: bytes, element_name: str) -> dict[str, str | int | bool | None] | None:
+    """The attributes, by name, of the first element of this name in a compiled manifest, or None when
+    it has no such element. A value is a string, an integer or a boolean as the manifest typed it, and
+    None for any other type."""
+    if len(manifest) < 8 or struct.unpack_from("<HH", manifest, 0)[0] != 0x0003:
+        raise ValueError("not a compiled XML file")
+    strings: list[str] = []
+    offset = struct.unpack_from("<H", manifest, 2)[0]
+    while offset + 8 <= len(manifest):
+        kind, header, size = struct.unpack_from("<HHI", manifest, offset)
+        if size < 8 or offset + size > len(manifest):
+            raise ValueError("truncated compiled XML chunk")
+        if kind == AXML_STRING_POOL:
+            strings = axml_strings(manifest, offset)
+        elif kind == AXML_START_ELEMENT:
+            body = offset + header
+            element = struct.unpack_from("<I", manifest, body + 4)[0]
+            if element < len(strings) and strings[element] == element_name:
+                attribute_start, attribute_size, count = struct.unpack_from("<HHH", manifest, body + 8)
+                attributes: dict[str, str | int | bool | None] = {}
+                for index in range(count):
+                    position = body + attribute_start + index * attribute_size
+                    name, _, _, data_type, data = struct.unpack_from("<IIHxBI", manifest, position + 4)
+                    if name >= len(strings):
+                        raise ValueError("an attribute name outside the string pool")
+                    if data_type == AXML_STRING_TYPE:
+                        if data >= len(strings):
+                            raise ValueError("an attribute value outside the string pool")
+                        attributes[strings[name]] = strings[data]
+                    elif data_type in AXML_INTEGER_TYPES:
+                        attributes[strings[name]] = data
+                    elif data_type == AXML_BOOLEAN_TYPE:
+                        attributes[strings[name]] = data != 0
+                    else:
+                        attributes[strings[name]] = None
+                return attributes
+        offset += size
+    return None
 
 
 def check_network_time(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -3054,10 +3147,14 @@ def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo
 
 # The host's cameras (overlay/camera; routes p0030 and p0031). The camera device gives the guest V4L2
 # nodes, and the emulated camera HAL of hardware/google/camera takes the cameras from them: the lazy
-# provider runs only while an application holds a camera or the torch, and its HWL library holds the
-# V4L2 source of route p0030. The host composes one camera layout from its cameras and passes it as
-# the vendor SKU: the permission directory of that name declares the camera features and an init
-# trigger selects the media profiles that match its size caps, all of them generated (camera_layouts.py).
+# provider is started by the init file of a layout that has cameras whenever cameraserver starts (a
+# restart finds no provider otherwise: cameraserver lists only a provider that has registered), runs
+# while cameraserver lists the cameras and while an application holds a camera or the torch, and exits
+# otherwise (init starts it again through its interface); its HWL library holds the V4L2 source of
+# route p0030. The host composes one camera layout from its cameras and passes it as the vendor SKU:
+# the permission directory of that name declares the camera features, an init trigger selects the
+# media profiles that match its size caps and a second one starts the provider, all of them generated
+# (camera_layouts.py).
 # Nothing here fails loudly when it is missing: a stock library lists no camera, a missing declaration
 # lists no feature, and a missing file leaves the default profiles.
 CAMERA_HAL_NAME = "android.hardware.camera.provider"
@@ -3088,6 +3185,13 @@ CAMERA_TEMPLATE = "VENDOR/etc/config/emu_camera_v4l2.json"
 CAMERA_CONFIG_DIRECTORY = "VENDOR/etc/config/"
 CAMERA_APP = "PRODUCT/app/Aperture/Aperture.apk"
 CAMERA_APP_LIMIT = 256 << 20
+# The product's overlay directory is enforced as runtime overlays: the build leaves the application's own
+# resources at their defaults and installs the product's values in a static overlay beside the others
+# (SimpleDeviceConfig, Launcher3QuickStep, framework-res). Android applies a preinstalled overlay to
+# an application that declares no overlayable section, so the check reads the overlay, and requires
+# the target to stay without such a section: one that defined it would bind the overlay to a policy.
+CAMERA_APP_PACKAGE = "org.lineageos.aperture"
+CAMERA_APP_OVERLAY = "PRODUCT/overlay/Aperture__lineage_andarium__auto_generated_rro_product.apk"
 CAMERA_AUX_CAMERAS = "config_enableAuxCameras"
 CAMERA_IGNORED_AUX_CAMERAS = "config_ignoredAuxCameraIds"
 CAMERA_IGNORED_AUX_IDS = ["2"]
@@ -3141,8 +3245,25 @@ def check_camera_layout_files(archive: zipfile.ZipFile, infos: dict[str, zipfile
             fail(f"{entry} is a VINTF manifest of a camera layout: the layouts differ in features, not in HALs")
 
 
+def camera_init_commands(script: str, service: str) -> dict[str, list[str]]:
+    """The init script's actions that start or restart the service: each trigger (the text after `on `) with
+    those commands of its action. An action with no such command is not listed."""
+    commands: dict[str, list[str]] = {}
+    trigger = None
+    for raw in script.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("on "):
+            trigger = line[len("on "):].strip()
+        elif line in (f"start {service}", f"restart {service}") and trigger is not None:
+            commands.setdefault(trigger, []).append(line)
+    return commands
+
+
 def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The lazy provider is installed alone, declared once, started on demand, and loads the V4L2 HWL."""
+    """The lazy provider is installed alone, declared once, restarted by an action of each layout that has
+    cameras when cameraserver is running and started by its interface afterwards, and loads the V4L2 HWL."""
     binary = f"VENDOR/bin/hw/{CAMERA_PROVIDER}"
     for entry in (binary, CAMERA_HWL):
         info = infos.get(entry)
@@ -3152,8 +3273,8 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
             fail(f"{entry} is not an ELF file")
     for entry in (f"VENDOR/bin/hw/{CAMERA_EAGER_PROVIDER}", f"VENDOR/etc/init/{CAMERA_EAGER_PROVIDER}.rc"):
         if entry in infos:
-            fail(f"{entry} is installed: only the lazy camera provider runs, so that no process exists "
-                 "while no application holds a camera")
+            fail(f"{entry} is installed: only the lazy camera provider runs, which exits when cameraserver "
+                 "holds no camera")
     library = read_small(archive, infos[CAMERA_HWL], CAMERA_HWL_LIMIT)
     for marker in CAMERA_HWL_MARKERS:
         if marker not in library:
@@ -3170,7 +3291,40 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
         if required not in lines:
             fail(f"the camera provider service must carry '{required}'")
     if any(line.startswith("on ") for line in lines):
-        fail("the camera provider init script may have no trigger: init starts the service when a client asks")
+        fail("the camera provider init script may have no trigger: the layouts' provider init file starts the "
+             "service and its interface line restarts it")
+    # cameraserver lists a lazy AIDL provider only if it registered when it looked or registers later, and
+    # nothing but an init action starts it: not the first time, and not when cameraserver starts again
+    # (a crash, a restart of the framework) after the provider has exited. So each layout that has cameras
+    # has the action that restarts this service when cameraserver is running and the layout is the SKU
+    # (restart, because start leaves a provider that has unregistered and is about to exit, and starts
+    # nothing again), and no other action starts or restarts it (one in the early profile action, in a
+    # layout without cameras, or on a property other than cameraserver's state would list no camera after
+    # a restart).
+    service_name = service[0].split()[1]
+    if service_name != camera_layouts.PROVIDER_SERVICE:
+        fail(f"the camera provider service is {service_name}, not {camera_layouts.PROVIDER_SERVICE}, "
+             "which the init file of the camera layouts starts")
+    profile_info = infos.get(f"VENDOR/etc/init/{camera_layouts.INIT_FILE}")
+    if profile_info is not None and camera_init_commands(
+            read_small(archive, profile_info).decode("utf-8", errors="strict"), service_name):
+        fail(f"VENDOR/etc/init/{camera_layouts.INIT_FILE} starts the camera provider: init reads a vendor script "
+             "in the vendor_init context and would drop the action on cameraserver's status, so the layouts' "
+             f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE} starts it")
+    init_info = infos.get(f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE}")
+    if init_info is None or init_info.is_dir():
+        fail(f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE} is missing: nothing starts the camera provider")
+    starts = camera_init_commands(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
+    wanted = {camera_layouts.provider_trigger(layout.name): [f"{camera_layouts.PROVIDER_COMMAND} {service_name}"]
+              for layout in camera_layouts.all_layouts() if layout.has_front}
+    if starts != wanted:
+        missing = sorted(set(wanted) - set(starts))
+        extra = sorted(set(starts) - set(wanted))
+        repeated = sorted(trigger for trigger, commands in starts.items() if len(commands) != 1)
+        fail("the init file of the camera provider must restart the camera provider in one action for each "
+             "layout that has cameras, with the conditions cameraserver running and the layout's SKU, and nowhere else: "
+             f"missing {missing[:3]}{' ...' if len(missing) > 3 else ''} ({len(missing)}), "
+             f"extra {extra[:3]}{' ...' if len(extra) > 3 else ''} ({len(extra)}), repeated {repeated[:3]}")
     declarations = []
     for entry, info in sorted(infos.items()):
         path = PurePosixPath(entry)
@@ -3229,25 +3383,69 @@ def check_camera_configuration(archive: zipfile.ZipFile, infos: dict[str, zipfil
 def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
     """The camera application lists each lens the host has, and the sensor privacy service reads
     the camera switch."""
-    table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
+    app_table = camera_resources(archive, infos, CAMERA_APP, CAMERA_APP_LIMIT)
     try:
-        booleans = resource_booleans(table)
-        arrays = resource_arrays(table)
+        defines_overlayable = resource_table_defines_overlayable(app_table)
+        app_defaults = {"bool": resource_default_names(app_table, "bool"),
+                        "array": resource_default_names(app_table, "array")}
     except (ValueError, struct.error, IndexError) as error:
         fail(f"{CAMERA_APP} has no readable resource table: {error}")
+    if defines_overlayable:
+        fail(
+            f"{CAMERA_APP} declares an overlayable section: Android would apply a product overlay to the "
+            "resources it names under its policies alone, and this check cannot tell which"
+        )
+    # An overlay replaces resources its target defines; one for a name the application lost (an uprev
+    # renamed it) applies to nothing, and the overlay's own values then look right.
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+        if name not in app_defaults[kind]:
+            fail(
+                f"{CAMERA_APP} does not define the {kind} resource {name} in its default configuration: "
+                "the overlay would apply to nothing"
+            )
+    info = infos.get(CAMERA_APP_OVERLAY)
+    if info is None or info.is_dir():
+        fail(
+            f"{CAMERA_APP_OVERLAY} is missing: the application's own resources keep the defaults that "
+            "hide each lens of the host as a camera of its own"
+        )
+    try:
+        with zipfile.ZipFile(io.BytesIO(read_small(archive, info, CAMERA_APP_LIMIT))) as overlay_apk:
+            manifest = overlay_apk.read("AndroidManifest.xml")
+            table = overlay_apk.read("resources.arsc")
+        overlay = manifest_element_attributes(manifest, "overlay")
+        booleans = resource_booleans(table)
+        arrays = resource_arrays(table)
+        overlay_defaults = {"bool": resource_default_names(table, "bool"),
+                            "array": resource_default_names(table, "array")}
+    except (KeyError, OSError, ValueError, struct.error, IndexError, zipfile.BadZipFile) as error:
+        fail(f"{CAMERA_APP_OVERLAY} has no readable manifest and resource table: {error}")
+    if overlay is None or overlay.get("targetPackage") != CAMERA_APP_PACKAGE or overlay.get("isStatic") is not True:
+        fail(
+            f"{CAMERA_APP_OVERLAY} must be a static overlay of {CAMERA_APP_PACKAGE}: Android would not "
+            f"apply it otherwise: {overlay}"
+        )
     if booleans.get(CAMERA_AUX_CAMERAS) != [True]:
         fail(
-            f"{CAMERA_APP} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
+            f"{CAMERA_APP_OVERLAY} must set {CAMERA_AUX_CAMERAS} to true: {booleans.get(CAMERA_AUX_CAMERAS)}; "
             "each lens of the host is its own camera device"
         )
     if arrays.get(CAMERA_IGNORED_AUX_CAMERAS) != [CAMERA_IGNORED_AUX_IDS]:
         fail(
-            f"{CAMERA_APP} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
+            f"{CAMERA_APP_OVERLAY} must list the camera IDs {CAMERA_IGNORED_AUX_IDS} in "
             f"{CAMERA_IGNORED_AUX_CAMERAS}: {arrays.get(CAMERA_IGNORED_AUX_CAMERAS)}; "
             "the wide lens is the zoom camera's 1x"
         )
+    # The one definition of each name is the sole one, and it carries no qualifier: a value under a
+    # resource configuration applies only on a device that matches it.
+    for name, kind in ((CAMERA_AUX_CAMERAS, "bool"), (CAMERA_IGNORED_AUX_CAMERAS, "array")):
+        if name not in overlay_defaults[kind]:
+            fail(f"{CAMERA_APP_OVERLAY} defines {name} only under a resource configuration: "
+                 "it must be in the default configuration")
     try:
-        toggle = resource_booleans(camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT))
+        toggle_table = camera_resources(archive, infos, FRAMEWORK_OVERLAY, FRAMEWORK_OVERLAY_LIMIT)
+        toggle = resource_booleans(toggle_table)
+        toggle_defaults = resource_default_names(toggle_table, "bool")
     except (ValueError, struct.error, IndexError) as error:
         fail(f"{FRAMEWORK_OVERLAY} has no readable resource table: {error}")
     if toggle.get(CAMERA_HARDWARE_TOGGLE) != [True]:
@@ -3255,11 +3453,16 @@ def check_camera_app(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]
             f"{FRAMEWORK_OVERLAY} must set {CAMERA_HARDWARE_TOGGLE} to true: {toggle.get(CAMERA_HARDWARE_TOGGLE)}; "
             "a session started with Camera off could not show the camera blocked"
         )
+    if CAMERA_HARDWARE_TOGGLE not in toggle_defaults:
+        fail(f"{FRAMEWORK_OVERLAY} defines {CAMERA_HARDWARE_TOGGLE} only under a resource configuration: "
+             "it must be in the default configuration")
 
 
 def check_camera(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    check_camera_layout_files(archive, infos)
+    # The provider's contract first: its message names what a changed init file broke, where the layout files'
+    # byte comparison only says that they differ.
     check_camera_provider(archive, infos)
+    check_camera_layout_files(archive, infos)
     check_camera_configuration(archive, infos)
     check_camera_app(archive, infos)
 
@@ -3562,15 +3765,18 @@ def check_kernel_policy(
         .decode("utf-8", errors="strict")
         .splitlines()
     ]
-    check_vendor_init_triggers(
-        init_actions(
-            read_small(archive, infos["VENDOR/etc/init/init.kernarium.rc"]).decode(
-                "utf-8", errors="strict"
+    for entry in sorted(infos):
+        if (
+            PurePosixPath(entry).parts[0] in ("VENDOR", "ODM")
+            and entry.endswith(".rc")
+            and not infos[entry].is_dir()
+        ):
+            check_vendor_init_triggers(
+                init_actions(read_small(archive, infos[entry]).decode("utf-8", errors="strict")),
+                contexts,
+                (platform_policy, vendor_policy, system_ext_policy),
+                f"{entry}: ",
             )
-        ),
-        contexts,
-        (platform_policy, vendor_policy, system_ext_policy),
-    )
     check_adbd_launch_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
     check_lmkd_gpu_policy(contexts, (platform_policy, vendor_policy, system_ext_policy), vendor_policy)
     check_venus_option_policy(contexts, (platform_policy, vendor_policy, system_ext_policy))
@@ -4376,22 +4582,33 @@ def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -
             fail(f"adbd may not read {name}, labelled {label}: it would ignore it")
 
 
-def check_vendor_init_triggers(
-    actions: dict[str, list[str]], contexts: list[str], policies: tuple[bytes, ...]
-) -> None:
-    """Every property that a product init trigger names is readable by vendor_init.
+# The prefixes that init accepts in a vendor script without asking the policy
+# (system/core/init/action_parser.cpp, IsActionableProperty).
+INIT_PARTNER_PREFIXES = (
+    "init.svc.vendor.", "ro.vendor.", "persist.vendor.", "vendor.", "init.svc.odm.", "ro.odm.",
+    "persist.odm.", "odm.", "ro.boot.",
+)
 
-    Init parses a vendor script in the vendor_init subcontext and drops a trigger
+
+def check_vendor_init_triggers(
+    actions: dict[str, list[str]], contexts: list[str], policies: tuple[bytes, ...], where: str = ""
+) -> None:
+    """Every property that an init trigger of a vendor or odm script names is readable by vendor_init.
+
+    Init parses such a script in the vendor_init subcontext and drops a trigger
     whose property that domain may not read ("unexported property trigger"), so a
     service that only such a trigger starts never runs. The platform's
-    neverallow keeps vendor_init off system_internal_prop types.
+    neverallow keeps vendor_init off system_internal_prop types, and init.svc.<name>
+    is one of them for every service but a few.
     """
     for trigger in actions:
         for name in INIT_PROPERTY_TRIGGER.findall(trigger):
+            if name.startswith(INIT_PARTNER_PREFIXES):
+                continue
             label = property_label(name, contexts) or "default_prop"
             if not cil_allows_file_read(policies, "vendor_init", label):
                 fail(
-                    f"the trigger 'on {trigger}' names {name}, labelled {label}, which "
+                    f"{where}the trigger 'on {trigger}' names {name}, labelled {label}, which "
                     "vendor_init may not read; init drops the trigger"
                 )
 

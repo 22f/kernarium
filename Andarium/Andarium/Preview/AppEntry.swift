@@ -76,7 +76,7 @@ struct AppEntry {
         "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
-        "home-mic-alert": "capabilities", "home-gyroscope-unavailable": "capabilities",
+        "home-mic-alert": "capabilities",
         "home-location-on": "capabilities", "home-location-denied": "capabilities",
         "home-location-approximate": "capabilities", "home-location-restricted": "capabilities",
         "home-location-services-off": "capabilities", "home-location-alert": "capabilities",
@@ -209,8 +209,6 @@ struct AppEntry {
             model.microphoneState = .granted
         case "home-mic-denied", "home-mic-alert":
             model.microphoneState = .denied
-        case "home-gyroscope-unavailable":
-            model.motionSensorsAvailable = false
         case "home-haptics-off":
             model.guest?.haptics = false
         case "home-location-on":
