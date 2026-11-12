@@ -26,8 +26,9 @@ The runner checks, in this order:
   with a video track), previews and takes a still with the front camera when the profile has one, and the
   camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a request "not
   queued completely", a buffer "never collected");
-- blocked: the same cameras are listed, the preview is not the chart on two samples, and the camera key
-  takes nothing;
+- blocked: the same cameras are listed, the preview is not the chart on two samples, each taken only while
+  the camera application is the resumed activity and the device is awake (the application is brought back
+  once; a second absence fails the step), and the camera key takes nothing;
 - none: no camera feature and no camera at all.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the
@@ -110,6 +111,17 @@ STILL_MINIMUM_SIDE = 480
 # (a camera that opened after all) is seen.
 BLOCKED_SAMPLES = 2
 BLOCKED_SAMPLE_GAP_SECONDS = 10
+# A blocked sample counts only while the camera application is in front; this long after it was brought back.
+BRING_BACK_SETTLE_SECONDS = 8
+# What is on the screen: the resumed activity, the focused window and the display's power state.
+FOREGROUND_COMMAND = ("dumpsys activity activities | grep -a -E 'ResumedActivity'; "
+                      "dumpsys window | grep -a -E 'mCurrentFocus|mFocusedApp'; "
+                      "dumpsys power | grep -a -E 'mWakefulness='")
+# The camera application's own events at a failure: its crashes, ANRs, process deaths and the windows
+# (dialogs) that came in front of it.
+APP_EVENTS_PATTERN = (f"{CAMERA_PACKAGE}|FATAL EXCEPTION|ANR in|am_crash|am_anr|am_proc_died|am_kill|"
+                      "ActivityTaskManager|WindowManager: (Resumed|Destroying|Changing focus)")
+APP_EVENTS_LINES = 80
 CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
 # The camera application's intents: its video mode, and the extra that picks the front camera.
 VIDEO_ACTION = "android.media.action.VIDEO_CAMERA"
@@ -718,6 +730,62 @@ def blocked_preview(sample: Callable[[], tuple[float, float]], sleep: Callable[[
     return None
 
 
+@dataclass(frozen=True)
+class Foreground:
+    """What the guest shows: the resumed activity ("package/.Class"), the focused window, the wakefulness."""
+    resumed: str
+    focus: str
+    wakefulness: str
+
+    def camera_in_front(self) -> bool:
+        return self.resumed.startswith(CAMERA_PACKAGE + "/") and self.wakefulness == "Awake"
+
+    def describe(self) -> str:
+        return (f"resumed activity {self.resumed or 'none'}, focused window {self.focus or 'none'}, "
+                f"wakefulness {self.wakefulness or 'unknown'}")
+
+
+def parse_foreground(text: str) -> Foreground:
+    """The `FOREGROUND_COMMAND` output. The top resumed activity is preferred, any resumed activity next."""
+    resumed = ""
+    for pattern in (r"topResumedActivity=ActivityRecord\{\S+ u\d+ (\S+)", r"ResumedActivity[=:] *ActivityRecord\{\S+ u\d+ (\S+)"):
+        match = re.search(pattern, text)
+        if match:
+            resumed = match.group(1)
+            break
+    focus = re.search(r"mCurrentFocus=Window\{\S+ u\d+ ([^}]*)\}", text)
+    wakefulness = re.search(r"mWakefulness=(\w+)", text)
+    return Foreground(resumed, focus.group(1) if focus else "", wakefulness.group(1) if wakefulness else "")
+
+
+class BlockedSampler:
+    """One blocked-preview sample: taken only while the camera application is the resumed activity and the
+    device is awake, checked before and after the screenshot. When it is not, the application is brought
+    back once for the whole step and the sample is taken again; a second absence is a Failure of its own
+    (never a pass and never a skip), naming what was in front."""
+
+    def __init__(self, read: Callable[[], Foreground], take: Callable[[], tuple[float, float]],
+                 bring_back: Callable[[], None], sleep: Callable[[float], None]) -> None:
+        self.read, self.take, self.bring_back, self.sleep = read, take, bring_back, sleep
+        self.brought_back = False
+
+    def __call__(self) -> tuple[float, float]:
+        while True:
+            state = self.read()
+            if state.camera_in_front():
+                value = self.take()
+                state = self.read()
+                if state.camera_in_front():
+                    return value
+            if self.brought_back:
+                raise Failure(f"a blocked session cannot be judged: the camera application is not in front "
+                              f"({state.describe()}) after it was brought back once")
+            print(f"  blocked: the camera application is not in front ({state.describe()}); bringing it back")
+            self.brought_back = True
+            self.bring_back()
+            self.sleep(BRING_BACK_SETTLE_SECONDS)
+
+
 def start_camera_application(guest: Guest, action: str = "android.media.action.STILL_IMAGE_CAMERA",
                              front: bool | None = None) -> None:
     """Starts the application: with its `front` extra (the application keeps its last choice otherwise)."""
@@ -754,11 +822,13 @@ def check_preview(guest: Guest, plan: Plan) -> None:
         wait_for("the preview showing the chart", PREVIEW_SECONDS, previewing, guest)
         print(f"  preview: mean {statistics[-1][0]:.1f}, deviation {statistics[-1][1]:.1f}")
     else:
-        def sample() -> tuple[float, float]:
+        def take() -> tuple[float, float]:
             guest.alive()
             statistics.append(luma_statistics(guest.screenshot()))
             return statistics[-1]
 
+        sample = BlockedSampler(lambda: parse_foreground(guest.shell(FOREGROUND_COMMAND, timeout=60)), take,
+                                lambda: start_camera_application(guest), time.sleep)
         message = blocked_preview(sample, time.sleep)
         if message:
             raise Failure(f"a blocked session {message}")
@@ -1037,16 +1107,11 @@ FAILURE_LOG_PATTERN = ("V4l2Stream|V4l2FrameSource|EmulatedSensor|EmulatedReques
                        "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue")
 FAILURE_LOG_NOISE = "SurfaceFlinger|adbd|out of bounds transparent region"
 FAILURE_LOG_LINES = 120
-# What was on the screen: the resumed activity, the focused window and the display's power state. A screenshot
-# that shows a picture in a blocked session is the camera's only when the camera application was in front.
-FOREGROUND_COMMAND = ("dumpsys activity activities | grep -a -E 'topResumedActivity|mResumedActivity'; "
-                      "dumpsys window | grep -a -E 'mCurrentFocus|mFocusedApp'; "
-                      "dumpsys power | grep -a -E 'mWakefulness='")
-
 
 def print_camera_log(guest: Guest) -> None:
-    """At a failure, the guest's own log lines about the camera path and its buffers, then what was in front
-    (nothing is asserted on them): they tell a failure of the image from one of the runner."""
+    """At a failure, the guest's own log lines about the camera path and its buffers, then what was in front and
+    the camera application's own events (nothing is asserted on them): they tell a failure of the image from
+    one of the runner."""
     try:
         text = guest.shell(f"logcat -d -b all | grep -a -E '{FAILURE_LOG_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
                            f"| tail -n {FAILURE_LOG_LINES}", timeout=120)
@@ -1056,10 +1121,15 @@ def print_camera_log(guest: Guest) -> None:
     print("camera log lines of the guest:\n" + text.rstrip(), file=sys.stderr)
     try:
         foreground = guest.shell(FOREGROUND_COMMAND, timeout=60)
+        print("in front at the failure:\n" + foreground.rstrip(), file=sys.stderr)
     except Exception as problem:
         print(f"(no foreground state: {problem})", file=sys.stderr)
-        return
-    print("in front at the failure:\n" + foreground.rstrip(), file=sys.stderr)
+    try:
+        events = guest.shell(f"logcat -d -b all | grep -a -E '{APP_EVENTS_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
+                             f"| tail -n {APP_EVENTS_LINES}", timeout=120)
+        print("events of the camera application and its windows:\n" + events.rstrip(), file=sys.stderr)
+    except Exception as problem:
+        print(f"(no application events: {problem})", file=sys.stderr)
 
 
 def main() -> int:
