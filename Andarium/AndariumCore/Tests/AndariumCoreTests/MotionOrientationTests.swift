@@ -6,31 +6,6 @@ import Testing
 
 @testable import AndariumCore
 
-/// The golden frames of the device-orientation part of the motion wire, which
-/// the guest's sub-HAL tests against too (`tests/unit/andarium/fixtures`).
-enum MotionOrientationFixture {
-    struct Frame {
-        var name: String
-        var bytes: [UInt8]
-    }
-
-    static func frames() throws -> [Frame] {
-        var url = URL(fileURLWithPath: #filePath)
-        for _ in 0..<5 { url.deleteLastPathComponent() }
-        url.append(path: "tests/unit/andarium/fixtures/motion-orientation-golden-frames.txt")
-        let text = try String(contentsOf: url, encoding: .utf8)
-        return text.split(separator: "\n").compactMap { line -> Frame? in
-            guard !line.hasPrefix("#"), let colon = line.firstIndex(of: ":") else { return nil }
-            let bytes = line[line.index(after: colon)...].split(separator: " ").map { UInt8($0, radix: 16)! }
-            return Frame(name: String(line[..<colon]), bytes: bytes)
-        }
-    }
-
-    static func bytes(_ name: String) throws -> [UInt8] {
-        try #require(frames().first { $0.name == name }, "the fixture has \(name)").bytes
-    }
-}
-
 /// What the host sends a guest that has the device-orientation sensor, and
 /// reads from one: the mapping from iOS's orientation, the record against the
 /// golden frames, the guest's "ANC2" frames, the rules for when a record is
@@ -255,6 +230,17 @@ struct MotionOrientationTests {
             if let end = current { _ = write(end, bytes, bytes.count) }
         }
 
+        /// The first `count` bytes of a frame of the service, as a connection that breaks off would leave them.
+        func sayPartly(_ name: String, count: Int) throws {
+            let bytes = Array(try MotionOrientationFixture.bytes(name).prefix(count))
+            if let end = current { _ = write(end, bytes, bytes.count) }
+        }
+
+        /// The service goes away without Android powering off: the connection ends, and a new one is made.
+        func hangUp() {
+            if let end = current { shutdown(end, SHUT_RDWR) }
+        }
+
         /// The next record the host wrote, or nil within `timeout` milliseconds.
         func record(timeout: Int = 1500) -> [UInt8]? {
             guard let end = current else { return nil }
@@ -402,6 +388,87 @@ struct MotionOrientationTests {
         #expect(guest.record(timeout: 100) == nil)
         session.setOrientation(.upsideDown)
         #expect(guest.record() == (try fixture(.upsideDown)))
+        session.update(enabled: false, foreground: false, axes: .portrait)
+    }
+
+    @Test func aNewConnectionStartsFromWhatTheServiceSaysOnIt() throws {
+        let guest = Guest()
+        let device = Device()
+        let session = session(guest, device)
+        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { guest.connections == 1 })
+        session.setOrientation(.turnedClockwise)
+        // The start of a frame ("ANC"), and the connection ends with it. Read as the start of the
+        // next connection's first frame it would be a bad one.
+        try guest.sayPartly("control-v2-orientation", count: 3)
+        session.settle()
+        guest.hangUp()
+        #expect(eventually { guest.connections == 2 })
+        // The new connection is not the old one: the start of the frame is gone, and nothing is
+        // sent until the service says it takes orientations on this connection.
+        #expect(guest.record(timeout: 100) == nil)
+        // Its first frame is a whole one, with a sensor in use and periods already set:
+        // it is read at once, and the orientation goes out.
+        try guest.say("control-v2-all")
+        #expect(guest.record() == (try fixture(.turnedClockwise)))
+        // The service says it takes orientations on one connection, and then ends it.
+        guest.hangUp()
+        #expect(eventually { guest.connections == 3 })
+        // A frame on the third connection is not read as the continuation of anything, and
+        // what the second said does not carry over.
+        #expect(guest.record(timeout: 100) == nil)
+        try guest.say("control-v2-idle")
+        #expect(guest.record() == (try fixture(.turnedClockwise)))
+        session.update(enabled: false, foreground: false, axes: .portrait)
+    }
+
+    @Test func theSwitchDecidesTheSensorsWhateverTheGuestAsksFor() throws {
+        let guest = Guest()
+        let device = Device()
+        let session = session(guest, device)
+        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { guest.connections == 1 })
+        try guest.say("control-v2-all")
+        session.settle()
+        // The service asks for the accelerometer and the gyroscope, and the switch is off:
+        // no reading is started, and the orientation still flows.
+        #expect(device.started.isEmpty)
+        session.setOrientation(.upsideDown)
+        #expect(guest.record() == (try fixture(.upsideDown)))
+        #expect(device.started.isEmpty)
+        // The switch comes on: the sensors the service asked for are read, and the orientation
+        // does not stop.
+        session.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { device.started == [.accelerometer, .gyroscope] })
+        session.setOrientation(.upright)
+        #expect(guest.record() == (try fixture(.upright)))
+        // And off again: the readings stop, the connection stays.
+        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { device.started.isEmpty })
+        session.setOrientation(.turnedCounterClockwise)
+        #expect(guest.record() == (try fixture(.turnedCounterClockwise)))
+        #expect(guest.connections == 1)
+        session.update(enabled: false, foreground: false, axes: .portrait)
+    }
+
+    @Test func anOlderServiceKeepsTheOldMotionPathAndGetsNoRecord() throws {
+        let guest = Guest()
+        let device = Device()
+        let problems = Problems()
+        let session = session(guest, device, problems)
+        session.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { guest.connections == 1 })
+        session.setOrientation(.turnedClockwise)
+        // "ANC1": the sensors it asks for are read, as before, and no orientation is sent.
+        try guest.say("control-v1-motion")
+        #expect(eventually { device.started == [.accelerometer, .gyroscope] })
+        #expect(guest.record(timeout: 100) == nil)
+        try guest.say("control-v1-idle")
+        #expect(eventually { device.started.isEmpty })
+        session.setOrientation(.upsideDown)
+        #expect(guest.record(timeout: 100) == nil)
+        #expect(guest.connections == 1)
+        #expect(problems.failures.isEmpty)
         session.update(enabled: false, foreground: false, axes: .portrait)
     }
 

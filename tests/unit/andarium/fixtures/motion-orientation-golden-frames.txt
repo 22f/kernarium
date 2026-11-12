@@ -1,6 +1,7 @@
 # Golden frames of the device-orientation part of the motion wire (vsock
 # 5556), the contract between the guest's motion sub-HAL
-# (android/lineage-24/overlay/sensors) and the host application.
+# (android/lineage-24/overlay/sensors) and the host (Andarium/AndariumCore,
+# whose MotionOrientationFixture.swift reads this file).
 #
 # One frame per line: `name: <hex bytes>`. A line that starts with `#` is a
 # comment, and the comment above a frame says what it means.
