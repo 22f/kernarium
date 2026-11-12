@@ -196,6 +196,28 @@
         }
       }
     },
+    "Android can’t install an app from a single .apk file of %@ or more." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidでは、%@以上の単一の.apkファイルからアプリをインストールできません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法安装大小为%@或以上的单个.apk文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法安裝大小為%@或以上的單一.apk檔案。"
+          }
+        }
+      }
+    },
     "Android could not resume" : {
       "comment" : "Title of Home's card after a start that could not bring back the memory Android saved when it was paused.",
       "localizations" : {
@@ -776,6 +798,28 @@
         }
       }
     },
+    "The virtual machine doesn’t have enough free space to install this app (%@ needed, %@ available). Free some up in the virtual machine, or give it more storage with Resize." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仮想マシンの空き容量が足りないため、このアプリをインストールできません（必要：%@、空き：%@）。仮想マシン内で容量を空けるか、“サイズを変更”でストレージを増やしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟机的可用空间不足，无法安装此应用（需要%@，可用%@）。请在虚拟机中释放一些空间，或使用“调整大小”为其增加储存空间。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虛擬機器的可用空間不足，無法安裝此應用程式（需要%@，可用%@）。請在虛擬機器中釋出一些空間，或使用「調整大小」為其增加儲存空間。"
+          }
+        }
+      }
+    },
     "The virtual machine's data uses a newer layout than this app version can open. Erase the virtual machine to start again with this one." : {
       "localizations" : {
         "ja" : {
@@ -838,6 +882,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "可用儲存空間不足，無法設定虛擬機器。"
+          }
+        }
+      }
+    },
+    "There isn’t enough free space on this %@ to install this app (%@ needed, %@ available). Free up space in Settings › General › %@ Storage and try again." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この%@の空き容量が足りないため、このアプリをインストールできません（必要：%@、空き：%@）。“設定”＞“一般”＞“%@ストレージ”で容量を空けてから、もう一度お試しください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%@的可用空间不足，无法安装此应用（需要%@，可用%@）。请在“设置”>“通用”>“%@储存空间”中释放空间，然后重试。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此%@的可用空間不足，無法安裝此應用程式（需要%@，可用%@）。請在「設定」>「一般」>「%@儲存空間」中釋出空間，然後再試一次。"
           }
         }
       }

@@ -134,7 +134,7 @@ final class StubDriver: RuntimeDriver {
     }
     var install: (@Sendable (@Sendable (BusyUpdate) -> Void) async throws -> Void) = { _ in }
     private(set) var installed = 0
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
         installed += 1
         try await install(update)
     }

@@ -185,6 +185,11 @@ struct InfoSheet: View {
                                 .accessibilityHidden(true)
                         }
                     }
+                    #if FOLLOW_X
+                    if let profile = model.followXProfile {
+                        FollowXRow(profile: profile)
+                    }
+                    #endif
                     NavigationLink(value: InfoPage.acknowledgements) {
                         HStack(spacing: 12) {
                             IconTile(symbol: "doc.text.fill")

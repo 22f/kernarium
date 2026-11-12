@@ -139,10 +139,7 @@ nonisolated enum BugReportOperation {
                     sink = made
                     return made
                 }
-                hooks.pulling = { received, total in
-                    let fraction = total == 0 ? 1 : Double(received) / Double(total)
-                    update(BusyUpdate(progress: generatingShare + (1 - generatingShare) * fraction))
-                }
+                hooks.pulling = pullingProgress(update: update).report
                 let pulled = try BugReport.pull(on: connection, remotePath: path, hooks: hooks)
                 sink?.close()
                 // The guest's copy and any an earlier run left: best effort.
@@ -156,6 +153,15 @@ nonisolated enum BugReportOperation {
             sink?.close()
             if let url = sink?.url { try? FileManager.default.removeItem(at: url) }
             throw error
+        }
+    }
+
+    /// The pull's share of the bar, passed on no more often than the screen
+    /// needs it (`ProgressThrottle`): the pull reports every 64 KiB.
+    static func pullingProgress(update: @escaping @Sendable (BusyUpdate) -> Void) -> ProgressThrottle {
+        ProgressThrottle { received, total in
+            let fraction = total == 0 ? 1 : Double(received) / Double(total)
+            update(BusyUpdate(progress: generatingShare + (1 - generatingShare) * fraction))
         }
     }
 
@@ -195,6 +201,10 @@ nonisolated struct AdbGuestOperations: Sendable {
     /// "iPad", "iPhone" or "Mac", for the words of a failure.
     var device: String
     var connector: any AdbConnector = VsockConnector()
+    /// The device's free space now, which an install or an import reads after
+    /// the file is in hand to see that the device has room for what it grows
+    /// the guest's data disk by (`TransferRoom`).
+    var hostFree: @Sendable () -> UInt64 = { HostStorage.freeBytes() }
     /// The guest run these operations belong to. Its mark is in the name of
     /// every partial file an import of this run writes, which is how the sweep
     /// of the guest's storage leaves them alone (`sweepPartialFiles`). A caller
@@ -285,17 +295,18 @@ nonisolated struct AdbGuestOperations: Sendable {
     }
 
     /// Installs the APK at `url` (readable by the caller), cancellable while
-    /// the file is being sent.
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+    /// the file is being sent. The file's size is read when it is in hand.
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
         guard let identity else { throw AdbFailure(.keyRejected, activity: .installApp) }
         let coordinator = FileCoordinatorBox()
-        let info = "\(url.lastPathComponent) \u{00B7} \(Formats.size(bytes: UInt64(max(sizeBytes, 0))))"
+        let device = device
+        let hostFree = hostFree
         do {
             try await AdbOperationRunner.run(
                 identity: identity, clock: clock, connector: connector, onCancel: { coordinator.cancel() }
             ) { session in
                 try ApkInstallOperation.run(
-                    session: session, coordinator: coordinator, url: url, size: sizeBytes, fileInfo: info,
+                    session: session, coordinator: coordinator, url: url, device: device, hostFree: hostFree,
                     update: update)
             }
         } catch {

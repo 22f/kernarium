@@ -399,6 +399,15 @@ public enum GuestFiles {
         return overflow ? nil : bytes
     }
 
+    /// The bytes available on the file system `path` is on, read with the
+    /// shell on `connection`; nil when the reading cannot be had (the shell
+    /// fails, or `df` prints nothing that reads).
+    public static func freeSpace(of path: String, on connection: AdbConnection) throws -> UInt64? {
+        let result = try connection.runShell(freeSpaceCommand(for: path))
+        guard result.exitCode == 0 else { return nil }
+        return parseFreeSpace(result.text)
+    }
+
     /// The room an import of `bytes` keeps free in the guest after it: the
     /// guest's data disk fails hard when it fills, and Android is unusable
     /// well before that.
