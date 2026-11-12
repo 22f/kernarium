@@ -185,15 +185,13 @@ struct TipJarHeaderTests {
         #expect(opened.map(\.absoluteString).sorted() == brands.map { addresses[$0]! }.sorted())
     }
 
-    /// At the largest text size the logos stay a touch target each, 44 pt tall, no larger than the
-    /// target, and no two of them overlap: they used to grow with the text until they touched and
-    /// rivalled the name.
-    @Test func atTheLargestTextSizeTheLogosKeepTheirSizeAndTheirTargets() async throws {
+    /// The link elements of a header drawn at a text size, in reading order, once there are `count`.
+    private func linkTargets(of content: TipJarSenderContent, at size: DynamicTypeSize, count: Int) async throws -> [CGRect] {
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = UIHostingController(
-            rootView: TipJarSender(content: Self.content())
-                .dynamicTypeSize(.accessibility5)
+            rootView: TipJarSender(content: content)
+                .dynamicTypeSize(size)
                 .padding(16)
                 .frame(width: 380)
                 .frame(maxHeight: .infinity, alignment: .top))
@@ -205,16 +203,35 @@ struct TipJarHeaderTests {
             links = ToolbarProbe.elements(in: lease.window, above: 5000, includeUnlabelled: true)
                 .filter { $0.traits.contains(.link) }.map { $0.object.accessibilityFrame }
                 .sorted { ($0.minY, $0.minX) < ($1.minY, $1.minX) }
-            return links.count == Self.sites.count
+            return links.count == count
         }
         try #require(drawn, "the logos were not drawn; is ApplicationAccessibilityEnabled on?")
+        lease.window.rootViewController = nil
+        return links
+    }
+
+    /// The logos are a touch target each, 44 pt tall, no larger than the target, and no two of them
+    /// overlap, at the default size and at the largest: they used to grow with the text until they
+    /// touched and rivalled the name.
+    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
+    func theLogosKeepTheirSizeAndTheirTargets(size: DynamicTypeSize) async throws {
+        let links = try await linkTargets(of: Self.content(), at: size, count: Self.sites.count)
         for frame in links {
-            #expect(frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48, "a logo's target: \(frame)")
+            #expect(frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48, "\(size): a logo's target: \(frame)")
         }
         for (first, second) in zip(links, links.dropFirst()) {
             #expect(!first.insetBy(dx: 0.5, dy: 0.5).intersects(second.insetBy(dx: 0.5, dy: 0.5)),
-                    "two targets overlap: \(first) \(second)")
+                    "\(size): two targets overlap: \(first) \(second)")
         }
+    }
+
+    /// A lone logo is a 44 pt square target (no neighbour shares its sides), at both sizes.
+    @Test(arguments: [DynamicTypeSize.large, .accessibility5])
+    func aLoneLogoIsA44PointTarget(size: DynamicTypeSize) async throws {
+        let links = try await linkTargets(of: Self.content(x: nil), at: size, count: 1)
+        let frame = try #require(links.first)
+        #expect(frame.width >= 43.5 && frame.width <= 48 && frame.height >= 43.5 && frame.height <= 48,
+                "\(size): the lone logo's target: \(frame)")
     }
 
     // MARK: The gaps
