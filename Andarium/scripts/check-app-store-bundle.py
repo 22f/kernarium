@@ -53,7 +53,7 @@ application that must:
     the build named. The local configuration's receiver is in no file of a
     bundle whose build does not name it, which the check finds by its bytes
     and never prints. Info.plist keeps every value of Config/Info.plist, as
-    its preprocessing is to change only the feedback and tip keys. The feature's
+    its preprocessing is to change only the feedback, tip, review and developer keys. The feature's
     texts are the String Catalog table Feedback, which the build compiles in
     with the feature and no other: a product without it has no Feedback
     strings table, found by the file name whatever it holds, and a product
@@ -66,7 +66,25 @@ application that must:
     the four identifiers the build named, each non-empty, well formed, distinct
     and no placeholder. The local configuration's identifiers are in no file of
     a bundle whose build does not name them, which the check finds by their
-    bytes and never prints.
+    bytes and never prints;
+  - carry the tip header's developer (name, GitHub and X handles, avatar and
+    the two marks) only where the product has Buy me tokens and the build
+    names the value: an Info.plist key for each value the build names and for
+    no other, and in a `DeveloperArtwork` folder the artwork files of the build's
+    folder (Config/Local for the App Store configuration, the drawn
+    Config/DeveloperExample for the tests' arrangement) and no other. No other
+    file of any bundle is a copy of an artwork file, found by content, and none
+    holds the profile address of a local handle. A handle is a part of the
+    bundle identifier, so the check compares keys and files, not bytes; and
+  - carry Review on the App Store (Andarium/README.md#review-on-the-app-store)
+    only when the build names the application's App Store identifier: the
+    feature is compiled in exactly where the ignored local configuration holds
+    one, in this configuration alone. A product without one holds nothing of
+    it: no type, address query, text, strings table or Info.plist key; a
+    product with one holds all of it, the strings table in Japanese and both
+    Chinese, and the identifier the build named (well formed, no placeholder).
+    The local configuration's identifier is in no file of a bundle whose build
+    does not name it, which the check finds by its digits and never prints.
 
 The knob scan reads bytes, so it does not see a Swift string of up to 15 bytes
 (ANDARIUM_START is one): the compiler keeps those in instruction immediates.
@@ -77,11 +95,12 @@ code still holds one fails, whether or not anything calls it.
 
 The Xcode project runs it as the last build phase of the App Store
 configuration, so a build that breaks one of these rules fails. In every other
-configuration a phase runs `--feedback`, which checks Send feedback alone, and
-another `--tip-jar`, which checks Buy me tokens alone: there the feature is
-absent unless a test or capture script arranged it with the example address
-or identifiers, in Debug alone. Each prints one line that says whether its
-feature is compiled in.
+configuration a phase runs `--feedback`, which checks Send feedback alone,
+another `--tip-jar`, which checks Buy me tokens alone, and a third `--review`,
+which checks Review on the App Store alone: there the feature is absent unless
+a test or capture script arranged it with the example address, identifiers or
+placeholder, in Debug alone. Each prints one line that says whether its feature
+is compiled in.
 """
 
 from __future__ import annotations
@@ -89,6 +108,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import hashlib
 import os
 import plistlib
 import re
@@ -177,7 +197,39 @@ TIP_FRAGMENTS = (b"TipJar", *TIP_REQUIRED)
 # it that no other table has.
 TIP_TABLE = "TipJar"
 TIP_WORDS = ("Buy me tokens",)
+# Review on the App Store. The build writes the application's App Store
+# identifier ("id" and digits) to Info.plist under this key only where the
+# feature is compiled in (Andarium/Config/Andarium.xcconfig).
+REVIEW_KEY = "AndariumReviewID"
+# The only identifier a configuration other than AppStore may carry: the
+# placeholder the test scripts arrange.
+REVIEW_ARRANGED = "id0000000000"
+# What the feature leaves in a binary: its types, the Info.plist key it reads
+# and the query that makes the address the write-review page.
+REVIEW_REQUIRED = (b"ReviewLink", REVIEW_KEY.encode(), b"action=write-review")
+REVIEW_FRAGMENTS = (b"ReviewServices", b"ReviewConfiguration", *REVIEW_REQUIRED)
+# The feature's own strings table (Localization/Review.xcstrings), and a word of
+# it that no other table has.
+REVIEW_TABLE = "Review"
+REVIEW_WORDS = ("Review on the App Store",)
 # Domains and top-level domains that name no mailbox (RFC 2606, RFC 6761).
+# The developer the Buy me tokens header shows (README: Buy me tokens). Its
+# values reach the product as Info.plist keys and its artwork as files of one
+# folder, only in an AppStore build that has the sheet; the tests' arrangement
+# states the placeholder `example` for each value and takes the drawn artwork
+# of Config/DeveloperExample.
+DEVELOPER_KEYS = {
+    "name": "AndariumDeveloperName", "github": "AndariumDeveloperGitHub", "x": "AndariumDeveloperX"}
+DEVELOPER_FOLDER = "DeveloperArtwork"
+# The local file of each piece, the name it has in the product, and the value
+# (if any) whose absence leaves the piece out.
+DEVELOPER_PIECES = (
+    ("developer-avatar.jpeg", "avatar", ""),
+    ("github-logo.svg", "github", "github"),
+    ("x-logo.svg", "x", "x"),
+)
+DEVELOPER_ARRANGED = "example"
+
 PLACEHOLDER_DOMAINS = ("example.com", "example.org", "example.net")
 PLACEHOLDER_TLDS = ("example", "invalid", "localhost", "test")
 
@@ -398,9 +450,12 @@ DEBUG_SYMBOLS = (
     # preview opens the sheet and fills a draft; the application never does.
     ("send feedback preview", (b"20previewOpensAtLaunch", b"14previewPrepare")),
     # The Simulator preview's hooks into the Buy me tokens sheet
-    # (TipJarServices.previewOpensSheet and previewPlays): the preview opens the
-    # sheet and plays a purchase; the application never does.
-    ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays")),
+    # (TipJarServices.previewOpensSheet, previewPlays, previewScrollsToTop and
+    # openLink, and the environment value that scrolls the sheet): the preview
+    # opens the sheet, plays a purchase, scrolls and sees which profile a tap
+    # opens; the application never does.
+    ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays", b"19previewScrollsToTop",
+                         b"14TipJarServicesV8openLink", b"21TipJarScrollsToTopKey")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording
     # runtime and the session that runs without a guest.
@@ -609,16 +664,47 @@ def value_leaks(app: Path, values: list[str]) -> list[str]:
     return sorted(found)
 
 
+def address_leaks(app: Path, addresses: list[str]) -> list[str]:
+    """The files of the bundle whose bytes hold the profile address of an
+    account, in either case; named by path, never by the address. An address
+    that goes on with a path (the project's own repository under the same
+    account) is another address."""
+    expressions = [re.compile(re.escape(address.lower().encode()) + rb"(?![A-Za-z0-9._/-])")
+                   for address in addresses if address]
+    if not expressions:
+        return []
+    keep = max(len(address) for address in addresses) + 1
+    found = []
+    for directory, _directories, files in os.walk(app):
+        for name in sorted(files):
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            tail = b""
+            try:
+                with path.open("rb") as handle:
+                    while chunk := handle.read(8 << 20):
+                        window = (tail + chunk).lower()
+                        if any(expression.search(window) for expression in expressions):
+                            found.append(str(path.relative_to(app)))
+                            break
+                        tail = window[-keep:]
+            except OSError:
+                continue
+    return sorted(found)
+
+
 def receiver_leaks(app: Path, receiver: str) -> list[str]:
     """The files of the bundle whose bytes hold the receiver of the local configuration."""
     return value_leaks(app, [receiver])
 
 
-FEEDBACK_BLOCK = re.compile(r"^#ifdef (?:FEEDBACK_MAIL|TIP_JAR)\n.*?^#endif\n", re.S | re.M)
+FEEDBACK_BLOCK = re.compile(
+    r"^#ifdef (?:FEEDBACK_MAIL|TIP_JAR|APP_REVIEW|SHEET_NAME|SHEET_GITHUB|SHEET_X)\n.*?^#endif\n", re.S | re.M)
 
 
 def info_source_problems(app: Path, source: Path) -> list[str]:
-    """Every key of Config/Info.plist but the feedback and tip ones, as the built
+    """Every key of Config/Info.plist but the feedback, tip, review and developer ones, as the built
     Info.plist has it. The source is preprocessed (its feedback block is
     conditional), and a build adds keys of its own and fills in build
     settings, so what is compared is each source key, a value naming a build
@@ -645,7 +731,7 @@ def info_source_problems(app: Path, source: Path) -> list[str]:
 
     found = []
     for key, value in wanted.items():
-        if key in (FEEDBACK_KEY, TIP_KEY):
+        if key in (FEEDBACK_KEY, TIP_KEY, REVIEW_KEY, *DEVELOPER_KEYS.values()):
             continue
         if key not in built:
             found.append(f"Info.plist: {key} of {source.name} is missing from the built one")
@@ -791,6 +877,11 @@ def tip_identifier_problems(configuration: str, products: dict[str, str]) -> lis
     return found
 
 
+def tip_expected(configuration: str, products: dict[str, str]) -> bool:
+    """The build names product identifiers that can be used."""
+    return any(products.values()) and not tip_identifier_problems(configuration, products)
+
+
 def tip_tables(app: Path) -> list[Path]:
     """The TipJar table of any language, found by its file name."""
     return sorted(path for path in app.glob("*.lproj/*")
@@ -872,9 +963,235 @@ def tip_problems(
     if missing:
         problems.append(
             f"the application lacks Buy me tokens ({', '.join(missing)}) though the build names the product identifiers")
-    if not tables:
-        problems.append("the application lacks the TipJar strings table though the build names the product identifiers")
+    absent = [language for language in FEEDBACK_LANGUAGES
+              if not (app / f"{language}.lproj" / f"{TIP_TABLE}.strings").is_file()]
+    if absent:
+        problems.append(
+            f"the application lacks the TipJar strings table in {', '.join(absent)} though the build names the "
+            "product identifiers")
     return problems, compiled
+
+
+def review_identifier_problems(configuration: str, identifier: str) -> list[str]:
+    """What is wrong with the identifier a build names, whatever the product
+    holds. The arranged placeholder is Debug's alone: Release, the build that
+    sideloads and forks make, never takes it."""
+    if not identifier:
+        return []
+    if configuration != "AppStore":
+        if identifier != REVIEW_ARRANGED:
+            return [f"Review on the App Store: {configuration} names an identifier that is not the arranged "
+                    "placeholder; only the App Store configuration reads the local configuration"]
+        if configuration != "Debug":
+            return [f"Review on the App Store: {configuration} names the arranged placeholder; "
+                    "only Debug takes the arrangement"]
+        return []
+    if re.fullmatch(r"id[0-9]{5,15}", identifier) is None:
+        return ["Review on the App Store: the identifier in the local configuration is not an App Store "
+                "identifier (id and digits)"]
+    if set(identifier[2:]) == {"0"}:
+        return ["Review on the App Store: the identifier in the local configuration is a placeholder"]
+    return []
+
+
+def review_tables(app: Path) -> list[Path]:
+    """The Review table of any language, found by its file name."""
+    return sorted(path for path in app.glob("*.lproj/*")
+                  if path.stem == REVIEW_TABLE and path.suffix in (".strings", ".stringsdict"))
+
+
+def review_strings(app: Path) -> list[str]:
+    """The String Catalog tables of the application that hold a word of Review on the App Store."""
+    found = []
+    for path in sorted(app.glob("*.lproj/*.strings")):
+        try:
+            with path.open("rb") as handle:
+                table = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            continue
+        if isinstance(table, dict) and any(
+                word in text for key, value in table.items() for text in (str(key), str(value))
+                for word in REVIEW_WORDS):
+            found.append(str(path.relative_to(app)))
+    return found
+
+
+def review_problems(
+    app: Path, configuration: str, identifier: str, local: str = "",
+) -> tuple[list[str], bool]:
+    """Whether the product holds Review on the App Store as the build said it
+    would, and whether it holds it. `identifier` is the build setting
+    REVIEW_ID: the local configuration's identifier in the App Store
+    configuration, empty otherwise, or the placeholder a test script arranged.
+    `local` is the local configuration's own identifier, whatever the
+    configuration: wherever the build does not name it, no file of the bundle
+    holds its digits. The identifier is never printed."""
+    problems = review_identifier_problems(configuration, identifier)
+    expected = bool(identifier) and not problems
+    if local and (not expected or local != identifier):
+        problems.extend(f"{name}: holds the App Store identifier of the local configuration"
+                        for name in value_leaks(app, [local[2:] if local.startswith("id") else local]))
+    fragments: dict[str, set[bytes]] = {}
+    for binary in feedback_files(app):
+        code = host_code(binary)
+        if code is None:
+            continue
+        data = without_debug_map(*code, PATH_STABS)
+        present = {fragment for fragment in REVIEW_FRAGMENTS if fragment in data}
+        if present:
+            fragments[str(binary.relative_to(app))] = present
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            keyed = plistlib.load(handle).get(REVIEW_KEY)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        keyed = None
+    tables = review_tables(app)
+    words = review_strings(app)
+    compiled = bool(fragments) or keyed is not None or bool(tables) or bool(words)
+    if not expected:
+        if identifier:
+            problems.append("Review on the App Store: the build names an identifier that cannot be used")
+        for name, present in fragments.items():
+            problems.append(
+                f"{name}: carries Review on the App Store ({', '.join(sorted(item.decode() for item in present))}) "
+                "though the build names no App Store identifier")
+        if keyed is not None:
+            problems.append(f"Info.plist: has {REVIEW_KEY} though the build names no App Store identifier")
+        problems.extend(f"{path.relative_to(app)}: is the Review strings table though the build names no "
+                        "App Store identifier" for path in tables)
+        problems.extend(f"{name}: has Review on the App Store strings though the build names no App Store "
+                        "identifier" for name in words)
+        return problems, compiled
+    if keyed != identifier:
+        problems.append(f"Info.plist: {REVIEW_KEY} must be the App Store identifier the build names")
+    code = set().union(*fragments.values()) if fragments else set()
+    missing = [item.decode() for item in REVIEW_REQUIRED if item not in code]
+    if missing:
+        problems.append(
+            f"the application lacks Review on the App Store ({', '.join(missing)}) though the build names "
+            "an App Store identifier")
+    absent = [language for language in FEEDBACK_LANGUAGES
+              if not (app / f"{language}.lproj" / f"{REVIEW_TABLE}.strings").is_file()]
+    if absent:
+        problems.append(
+            f"the application lacks the Review strings table in {', '.join(absent)} though the build names "
+            "an App Store identifier")
+    return problems, compiled
+
+
+def file_digest(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(8 << 20):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def developer_digests(*folders: Path | None) -> dict[int, set[str]]:
+    """The digests of the artwork files of the local folders, by size; a folder
+    that is not there holds none."""
+    found: dict[int, set[str]] = {}
+    for folder in folders:
+        if folder is None:
+            continue
+        for file_name, _piece, _value in DEVELOPER_PIECES:
+            path = folder / file_name
+            digest = file_digest(path) if path.is_file() else None
+            if digest:
+                found.setdefault(path.stat().st_size, set()).add(digest)
+    return found
+
+
+def developer_problems(
+    app: Path, configuration: str, tip_expected: bool, values: dict[str, str],
+    local_dir: Path | None = None, example_dir: Path | None = None, local_handles: dict[str, str] | None = None,
+) -> list[str]:
+    """Whether the product holds the tip header's developer as the build said
+    it would: nothing of it where the build names no product identifiers or no
+    value, the Info.plist key of each value the build names, the artwork the
+    build copies and no other copy of any artwork, in any file of the bundle.
+    `values` are the build settings SHEET_DEVELOPER_NAME, _GITHUB and _X (the
+    local configuration's in the App Store configuration, `example` for the
+    tests' arrangement, empty otherwise); `local_dir` and `example_dir` are the
+    artwork folders; `local_handles` are the local configuration's own handles
+    whose profile addresses no file may hold. No value is printed. Compared by
+    content: a handle is a part of a bundle identifier, so its bytes tell
+    nothing."""
+    problems = []
+    named = {piece: value for piece, value in values.items() if value}
+    usable = tip_expected
+    if named and not tip_expected:
+        problems.append("Buy me tokens: the build names developer values though it names no product identifiers")
+    elif named and configuration != "AppStore":
+        if any(value != DEVELOPER_ARRANGED for value in named.values()):
+            problems.append(f"Buy me tokens: {configuration} names developer values that are not the arranged "
+                            "placeholders; only the App Store configuration reads the local configuration")
+            usable = False
+        elif configuration != "Debug":
+            problems.append(f"Buy me tokens: {configuration} names the arranged developer placeholders; "
+                            "only Debug takes the arrangement")
+            usable = False
+    try:
+        with (app / "Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        info = {}
+    for piece, key in DEVELOPER_KEYS.items():
+        wanted = named.get(piece) if usable else None
+        if key in info and wanted is None:
+            problems.append(f"Info.plist: has {key} though the build names no such developer value")
+        elif wanted is not None and info.get(key) != wanted:
+            problems.append(f"Info.plist: {key} must be the developer value the build names")
+
+    # The artwork the build copies, by its name in the product.
+    source = None
+    if usable:
+        source = local_dir if configuration == "AppStore" else (example_dir if named.get("name") else None)
+    expected: dict[str, Path] = {}
+    for file_name, piece, value in DEVELOPER_PIECES:
+        if source is not None and (source / file_name).is_file() and (not value or named.get(value)):
+            expected[piece] = source / file_name
+    folder = app / DEVELOPER_FOLDER
+    present: set[str] = set()
+    if folder.is_dir():
+        present = {path.name for path in folder.iterdir()}
+    elif folder.exists() or folder.is_symlink():
+        problems.append(f"{DEVELOPER_FOLDER}: is not a folder")
+    for name in sorted(present - set(expected)):
+        problems.append(f"{DEVELOPER_FOLDER}/{name}: is developer artwork the build does not take")
+    for name in sorted(set(expected) - present):
+        problems.append(f"{DEVELOPER_FOLDER}/{name}: is missing though the build takes the developer artwork")
+    for name in sorted(present & set(expected)):
+        if file_digest(folder / name) != file_digest(expected[name]):
+            problems.append(f"{DEVELOPER_FOLDER}/{name}: is not the artwork file of the build's folder")
+
+    # No other file of the bundle is a copy of any artwork file of either folder.
+    banned = developer_digests(local_dir, example_dir)
+    if banned:
+        allowed = {folder / name for name in expected}
+        for directory, _directories, files in os.walk(app):
+            for name in sorted(files):
+                path = Path(directory) / name
+                if path in allowed or path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    digests = banned.get(path.stat().st_size)
+                except OSError:
+                    continue
+                if digests and file_digest(path) in digests:
+                    problems.append(f"{path.relative_to(app)}: is a copy of a developer artwork file")
+
+    # No profile address of the local configuration, whatever the build.
+    needles = []
+    for site, handle in (local_handles or {}).items():
+        if handle and handle != DEVELOPER_ARRANGED:
+            needles.append(f"{'github.com' if site == 'github' else 'x.com'}/{handle}")
+    problems.extend(f"{name}: holds a profile address of the local configuration"
+                    for name in address_leaks(app, needles))
+    return problems
 
 
 def main() -> int:
@@ -910,6 +1227,37 @@ def main() -> int:
     parser.add_argument(
         "--tip-jar", action="store_true",
         help="check Buy me tokens alone, for a configuration other than AppStore")
+    parser.add_argument(
+        "--review-id", default="",
+        help="the build setting REVIEW_ID: the App Store identifier the build names, "
+             "empty when it names none")
+    parser.add_argument(
+        "--review-local-id", default="",
+        help="the build setting REVIEW_APP_ID: the local configuration's own identifier, "
+             "whose digits no file of a bundle that does not name it may hold")
+    parser.add_argument(
+        "--review", action="store_true",
+        help="check Review on the App Store alone, for a configuration other than AppStore")
+    parser.add_argument(
+        "--developer-name", default="",
+        help="the build setting SHEET_DEVELOPER_NAME: the developer's name the tip header shows, empty when none")
+    parser.add_argument(
+        "--developer-github", default="",
+        help="the build setting SHEET_DEVELOPER_GITHUB: the GitHub handle of the tip header, empty when none")
+    parser.add_argument(
+        "--developer-x", default="",
+        help="the build setting SHEET_DEVELOPER_X: the X handle of the tip header, empty when none")
+    parser.add_argument(
+        "--developer-local-github", default="",
+        help="the build setting DEVELOPER_GITHUB_HANDLE: the local configuration's own GitHub handle, "
+             "whose profile address no file may hold")
+    parser.add_argument(
+        "--developer-local-x", default="",
+        help="the build setting DEVELOPER_X_HANDLE: the local configuration's own X handle, "
+             "whose profile address no file may hold")
+    parser.add_argument(
+        "--developer-artwork", type=Path, default=None,
+        help="Config/: its Local and DeveloperExample folders hold the developer artwork")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--runtime", action="store_true",
@@ -921,6 +1269,17 @@ def main() -> int:
     options = parser.parse_args()
 
     app = options.app
+    products = split_products(options.tip_products)
+    developer = {"name": options.developer_name, "github": options.developer_github, "x": options.developer_x}
+    local_handles = {"github": options.developer_local_github, "x": options.developer_local_x}
+    local_dir = options.developer_artwork / "Local" if options.developer_artwork else None
+    example_dir = options.developer_artwork / "DeveloperExample" if options.developer_artwork else None
+
+    def developer_found() -> list[str]:
+        return developer_problems(
+            app, options.configuration, tip_expected(options.configuration, products), developer,
+            local_dir, example_dir, local_handles)
+
     if options.feedback:
         found, compiled = feedback_problems(
             app, options.configuration, options.feedback_address, options.feedback_receiver, options.info_source)
@@ -931,11 +1290,19 @@ def main() -> int:
         return 1 if found else 0
     if options.tip_jar:
         found, compiled = tip_problems(
-            app, options.configuration, split_products(options.tip_products),
-            split_products(options.tip_local_products))
+            app, options.configuration, products, split_products(options.tip_local_products))
+        found.extend(developer_found())
         for line in found:
             print(line, file=sys.stderr)
         print(f"{app.name}: Buy me tokens is {'compiled in' if compiled else 'not compiled in'}"
+              f" ({options.configuration})")
+        return 1 if found else 0
+    if options.review:
+        found, compiled = review_problems(
+            app, options.configuration, options.review_id, options.review_local_id)
+        for line in found:
+            print(line, file=sys.stderr)
+        print(f"{app.name}: Review on the App Store is {'compiled in' if compiled else 'not compiled in'}"
               f" ({options.configuration})")
         return 1 if found else 0
     if options.runtime or options.host_traces:
@@ -989,10 +1356,15 @@ def main() -> int:
     print(f"{app.name}: Send feedback is {'compiled in' if compiled else 'not compiled in'}")
 
     tip, tip_compiled = tip_problems(
-        app, options.configuration, split_products(options.tip_products),
-        split_products(options.tip_local_products))
+        app, options.configuration, products, split_products(options.tip_local_products))
     problems.extend(tip)
+    problems.extend(developer_found())
     print(f"{app.name}: Buy me tokens is {'compiled in' if tip_compiled else 'not compiled in'}")
+
+    review, review_compiled = review_problems(
+        app, options.configuration, options.review_id, options.review_local_id)
+    problems.extend(review)
+    print(f"{app.name}: Review on the App Store is {'compiled in' if review_compiled else 'not compiled in'}")
 
     privacy = subprocess.run(
         [sys.executable, "-B", str(options.privacy_checker), str(app)],

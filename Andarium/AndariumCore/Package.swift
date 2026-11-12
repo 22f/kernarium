@@ -54,6 +54,12 @@ let package = Package(
             name: "AndariumTipJarLogic",
             swiftSettings: [.define("TIP_JAR")]
         ),
+        // Review on the App Store's logic, for the package's tests only, built the
+        // same way (a symlink to Andarium/Shared/Review/Logic).
+        .target(
+            name: "AndariumReviewLogic",
+            swiftSettings: [.define("APP_REVIEW")]
+        ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
@@ -61,7 +67,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumTipJarLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumTipJarLogic", "AndariumReviewLogic"]
         ),
     ]
 )

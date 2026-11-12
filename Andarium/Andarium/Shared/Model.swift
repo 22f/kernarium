@@ -405,6 +405,11 @@ final class AppModel {
     /// kept: the sheet's state belongs to one opening.
     var tipJarSheetOpen = false
     #endif
+    #if APP_REVIEW
+    /// What Review on the App Store asks of the build and of the system
+    /// (`ReviewServices`); a test replaces it.
+    @ObservationIgnored var reviewServices = ReviewServices()
+    #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
     /// The guest is paused because the device is nearly out of space; the

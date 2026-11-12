@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Copy to Developer.local.xcconfig, which Git ignores, and name the developer
+// the Buy me tokens sheet shows: a name (shown as it is), and the handles of
+// the GitHub and X profiles the two logo buttons open (the handle alone, never
+// an address: a double slash starts a comment here, and the code builds the
+// addresses). The avatar and the two logos are local files, never tracked:
+//
+//   Config/Local/developer-avatar.jpeg   the avatar, shown as a circle
+//   Config/Local/github-logo.svg         GitHub's mark (one path)
+//   Config/Local/x-logo.svg              X's mark (one path)
+//
+// Each piece is in an AppStore build only when its value and its file are
+// there; every other build carries none of it. DeveloperExample/ holds drawn
+// stand-ins the tests and screen captures use with the arrangement below.
+
+DEVELOPER_NAME = example
+DEVELOPER_GITHUB_HANDLE = example
+DEVELOPER_X_HANDLE = example

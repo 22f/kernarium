@@ -51,6 +51,9 @@ CMakeUserPresets.json
 /GuestHost/Config/Signing.local.xcconfig
 /Andarium/Config/Feedback.local.xcconfig
 /Andarium/Config/TipJar.local.xcconfig
+/Andarium/Config/Review.local.xcconfig
+/Andarium/Config/Developer.local.xcconfig
+/Andarium/Config/Local/
 
 # Per-line kernel source locations. The tracked examples document the required
 # format; real paths are host-specific and must name case-sensitive

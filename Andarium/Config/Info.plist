@@ -19,6 +19,22 @@
 		<string>$(TIP_ULTRA)</string>
 	</dict>
 #endif
+#ifdef SHEET_NAME
+	<key>AndariumDeveloperName</key>
+	<string>$(SHEET_DEVELOPER_NAME)</string>
+#endif
+#ifdef SHEET_GITHUB
+	<key>AndariumDeveloperGitHub</key>
+	<string>$(SHEET_DEVELOPER_GITHUB)</string>
+#endif
+#ifdef SHEET_X
+	<key>AndariumDeveloperX</key>
+	<string>$(SHEET_DEVELOPER_X)</string>
+#endif
+#ifdef APP_REVIEW
+	<key>AndariumReviewID</key>
+	<string>$(REVIEW_ID)</string>
+#endif
 	<key>GCSupportedGameControllers</key>
 	<array>
 		<dict>

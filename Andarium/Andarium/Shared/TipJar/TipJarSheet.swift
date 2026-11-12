@@ -12,12 +12,35 @@ import SwiftUI
 // Problems are centred notes, never the developer's voice. Nothing here is
 // kept when the sheet closes.
 
+#if !APP_STORE
+/// The Simulator preview scrolls the conversation to its top, where the sender line is at the largest
+/// text sizes (the conversation otherwise rests at its bottom, by the tiers).
+private struct TipJarScrollsToTopKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var tipJarScrollsToTop: Bool {
+        get { self[TipJarScrollsToTopKey.self] }
+        set { self[TipJarScrollsToTopKey.self] = newValue }
+    }
+}
+#endif
+
 struct TipJarSheet: View {
     let jar: TipJarModel
+    /// The developer the header shows.
+    let sender: TipJarSenderContent
     /// "iPhone" or "iPad", for the note when purchases are not allowed.
     let device: String
     let close: () -> Void
     @Environment(\.dynamicTypeSize) private var typeSize
+    #if !APP_STORE
+    @Environment(\.tipJarScrollsToTop) private var scrollsToTop
+    private var anchor: UnitPoint { scrollsToTop ? .top : .bottom }
+    #else
+    private var anchor: UnitPoint { .bottom }
+    #endif
     /// The conversation's and the bar's heights: the sheet is as tall as they
     /// are, and grows as the conversation does.
     @State private var conversationHeight: CGFloat = 400
@@ -30,7 +53,7 @@ struct TipJarSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    TipJarSender()
+                    TipJarSender(content: sender)
                         .padding(.bottom, 2)
                     TipJarBubble(text: TipJarWords.coffee, first: true)
                     TipJarBubble(text: TipJarWords.tokens)
@@ -50,7 +73,7 @@ struct TipJarSheet: View {
                     conversationHeight = height
                 }
             }
-            .defaultScrollAnchor(.bottom)
+            .defaultScrollAnchor(anchor)
             .background(Color(.systemBackground))
             .navigationTitle(Text(TipJarWords.name))
             .navigationBarTitleDisplayMode(.inline)
@@ -86,7 +109,7 @@ struct TipJarSheet: View {
         }
         switch jar.outcome {
         case .thanks?:
-            TipJarSender().padding(.top, 4)
+            TipJarSender(content: sender, links: false).padding(.top, 4)
             TipJarBubble(text: TipJarWords.thanksTitle, first: true)
                 .transition(.opacity)
             TipJarBubble(text: TipJarWords.thanksText)
@@ -111,23 +134,6 @@ struct TipJarSheet: View {
                     symbol: "icloud.slash", color: .secondary)
             }
         }
-    }
-}
-
-/// Who speaks: the app's mark and "Andarium's developer".
-private struct TipJarSender: View {
-    var body: some View {
-        HStack(spacing: 8) {
-            StackMark(lit: true, width: 18)
-                .frame(width: 26, height: 26)
-                .background(Color(.secondarySystemBackground), in: .circle)
-            Text(TipJarWords.sender)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(TipJarWords.sender))
-        .accessibilityAddTraits(.isHeader)
     }
 }
 

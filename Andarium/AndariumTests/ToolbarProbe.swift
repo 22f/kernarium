@@ -48,13 +48,14 @@ enum ToolbarProbe {
     }
 
     /// Every accessibility element of the window's views and their containers that has a label
-    /// and lies above `limit` on the screen.
-    static func elements(in window: UIWindow, above limit: CGFloat = 220) -> [Element] {
+    /// (or, when asked, is an element without one) and lies above `limit` on the screen.
+    static func elements(in window: UIWindow, above limit: CGFloat = 220, includeUnlabelled: Bool = false) -> [Element] {
         var found: [Element] = []
         var seen = Set<ObjectIdentifier>()
         func visit(_ object: NSObject, depth: Int) {
             guard depth < 60, seen.insert(ObjectIdentifier(object)).inserted else { return }
-            if let label = object.accessibilityLabel, !label.isEmpty {
+            let label = object.accessibilityLabel ?? ""
+            if !label.isEmpty || (includeUnlabelled && object.isAccessibilityElement) {
                 let frame = object.accessibilityFrame
                 if frame.minY < limit {
                     found.append(Element(object: object, label: label, traits: object.accessibilityTraits, top: frame.minY))

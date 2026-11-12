@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#if !FEEDBACK_MAIL && !TIP_JAR
+#if !FEEDBACK_MAIL && !TIP_JAR && !APP_REVIEW
 
 import AndariumCore
 import SwiftUI
@@ -8,8 +8,8 @@ import Testing
 import UIKit
 @testable import Andarium
 
-/// A build that has neither Send feedback nor Buy me tokens has no toolbar
-/// menu: Info is the plain button it has always been.
+/// A build that has none of Send feedback, Review on the App Store and Buy me
+/// tokens has no toolbar menu: Info is the plain button it has always been.
 @MainActor
 @Suite(.serialized)
 struct HomePlainInfoTests {

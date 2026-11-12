@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#if FEEDBACK_MAIL || TIP_JAR
+#if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
 
 import SwiftUI
 
@@ -14,6 +14,9 @@ enum HomeMenuItem: Equatable {
     #if FEEDBACK_MAIL
     case sendFeedback
     #endif
+    #if APP_REVIEW
+    case reviewOnAppStore
+    #endif
     #if TIP_JAR
     case buyMeTokens
     #endif
@@ -26,16 +29,22 @@ enum HomeMenuSymbols {
     #if FEEDBACK_MAIL
     static let sendFeedback = "envelope"
     #endif
+    #if APP_REVIEW
+    static let review = "star"
+    #endif
 }
 
 extension AppModel {
     /// The menu's items now: Info, then Send feedback when its receiver is
-    /// configured, then Buy me tokens when a virtual machine is set up and the
-    /// product identifiers are configured.
+    /// configured, then Review on the App Store and Buy me tokens when a virtual
+    /// machine is set up and their identifiers are configured.
     var homeMenuItems: [HomeMenuItem] {
         var items: [HomeMenuItem] = [.info]
         #if FEEDBACK_MAIL
         if feedbackAddress != nil { items.append(.sendFeedback) }
+        #endif
+        #if APP_REVIEW
+        if reviewOffered { items.append(.reviewOnAppStore) }
         #endif
         #if TIP_JAR
         if tipJarOffered { items.append(.buyMeTokens) }
@@ -49,6 +58,9 @@ extension AppModel {
         case .info: sheet = .info
         #if FEEDBACK_MAIL
         case .sendFeedback: feedbackSheetOpen = true
+        #endif
+        #if APP_REVIEW
+        case .reviewOnAppStore: openReview()
         #endif
         #if TIP_JAR
         case .buyMeTokens: tipJarSheetOpen = true
@@ -97,6 +109,9 @@ struct HomeToolbarMenu: View {
         #if FEEDBACK_MAIL
         case .sendFeedback: Label { Text("Send feedback", tableName: "Feedback") } icon: { Image(systemName: HomeMenuSymbols.sendFeedback) }
         #endif
+        #if APP_REVIEW
+        case .reviewOnAppStore: Label { Text("Review on the App Store", tableName: "Review") } icon: { Image(systemName: HomeMenuSymbols.review) }
+        #endif
         #if TIP_JAR
         case .buyMeTokens: Label { Text(TipJarWords.name) } icon: { Image(systemName: TipJarSymbols.menuItem) }
         #endif
@@ -117,6 +132,9 @@ struct HomeToolbarMenu: View {
         case .info: "home-menu-info"
         #if FEEDBACK_MAIL
         case .sendFeedback: "home-menu-send-feedback"
+        #endif
+        #if APP_REVIEW
+        case .reviewOnAppStore: "home-menu-review"
         #endif
         #if TIP_JAR
         case .buyMeTokens: "home-menu-buy-me-tokens"

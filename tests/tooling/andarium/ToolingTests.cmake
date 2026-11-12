@@ -34,8 +34,10 @@ uml_add_tooling_test(
 # The App Store configuration builds an application that passes this check as
 # its last build phase; the fixtures show it finds each problem the script's
 # header lists, and leaves the guest kernel image alone. They also show Send
-# feedback present only where the build names a receiver, and Buy me tokens only
-# where it names its four product identifiers, in either direction.
+# feedback present only where the build names a receiver, Buy me tokens only
+# where it names its four product identifiers, Review on the App Store only where
+# it names the application's identifier and the tip header's developer only where
+# the product has Buy me tokens and the build names the value, in either direction.
 uml_add_tooling_test(
     NAME andarium-app-store-bundle
     COMMAND ${Python3_EXECUTABLE} -B
@@ -55,6 +57,18 @@ uml_add_tooling_test(
         ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_check_tip_words.py
         --checker ${PROJECT_SOURCE_DIR}/Andarium/scripts/check-tip-words.py
         --table ${PROJECT_SOURCE_DIR}/Andarium/Localization/TipJar.xcstrings
+    LABELS andarium
+    TIMEOUT 120)
+
+# The tip sheet's header shows the developer's avatar and two profile marks, which
+# are local files: the build phase copies them only where the build has Buy me
+# tokens and the piece's value is set, from the maker's folder in the App Store
+# configuration and the drawn stand-ins in the tests' arrangement.
+uml_add_tooling_test(
+    NAME andarium-developer-artwork
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/andarium/test_copy_developer_artwork.py
+        --script ${PROJECT_SOURCE_DIR}/Andarium/scripts/copy-developer-artwork.py
     LABELS andarium
     TIMEOUT 120)
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Andarium's base settings: the shared signing settings, and what decides
-// whether Send feedback and Buy me tokens are compiled in.
+// whether Send feedback, Buy me tokens and Review on the App Store are
+// compiled in.
 //
 // Send feedback exists only in an AppStore build whose maker has the ignored
 // Feedback.local.xcconfig beside this file (Feedback.local.xcconfig.example)
@@ -28,7 +29,7 @@ FEEDBACK_ADDRESS[config=AppStore] = $(FEEDBACK_RECEIVER)
 FEEDBACK_ARRANGED_ = NO_FEEDBACK_MAIL
 FEEDBACK_CONDITION = $(FEEDBACK_ARRANGED_$(FEEDBACK_ADDRESS:identifier):default=FEEDBACK_MAIL)
 
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FEEDBACK_CONDITION) $(TIP_JAR_CONDITION)
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FEEDBACK_CONDITION) $(TIP_JAR_CONDITION) $(REVIEW_CONDITION)
 
 // Info.plist is preprocessed, and holds the address only where FEEDBACK_MAIL is defined.
 FEEDBACK_PLIST_ = FEEDBACK_NO_MAIL=1
@@ -71,13 +72,79 @@ TIP_JAR_CONDITION = $(TIP_JAR_ARRANGED_$(TIP_JAR_NAMED):default=TIP_JAR)
 TIP_JAR_PLIST_ = TIP_JAR_NONE=1
 TIP_JAR_PLIST_DEFINITION = $(TIP_JAR_PLIST_$(TIP_JAR_NAMED):default=TIP_JAR=1)
 
-// The TipJar string table is compiled only where the tip jar is: the same
-// names as above, an empty set excluding the catalog and any other excluding
-// nothing.
-TIP_JAR_CATALOG_ = TipJar.xcstrings
-// The Feedback string table is compiled only where Send feedback is. An empty
-// address names the setting FEEDBACK_CATALOG_ and excludes the catalog; any
-// other lands on an undefined name and excludes nothing. The project's
-// AppStore setting of this name lists the JIT catalog and inherits this one.
+
+// Review on the App Store exists only in an AppStore build whose maker has the
+// ignored Review.local.xcconfig beside this file (Review.local.xcconfig.example)
+// with the app's App Store identifier, so a fork, a sideload, or a Debug or
+// Release build, carries neither the item nor the address. REVIEW_ID is that
+// identifier in AppStore and empty elsewhere; a non-empty one adds the
+// APP_REVIEW compilation condition and puts the identifier in Info.plist. The
+// tests state REVIEW_ID=id0000000000 on the xcodebuild command line to build the
+// item into a Debug build; the bundle check refuses any other identifier
+// outside AppStore, and the arranged one outside Debug. AndariumPreview sets it
+// empty itself, so it takes that arrangement alone and never the local file's
+// identifier.
+REVIEW_APP_ID =
+#include? "Review.local.xcconfig"
+
+REVIEW_ID =
+REVIEW_ID[config=AppStore] = $(REVIEW_APP_ID)
+
+// An empty identifier names the setting REVIEW_ARRANGED_ and gets NO_APP_REVIEW;
+// any other lands on an undefined name and gets APP_REVIEW.
+REVIEW_ARRANGED_ = NO_APP_REVIEW
+REVIEW_NAMED = $(REVIEW_ID:identifier)
+REVIEW_CONDITION = $(REVIEW_ARRANGED_$(REVIEW_NAMED):default=APP_REVIEW)
+
+// Info.plist is preprocessed, and holds the identifier only where APP_REVIEW is defined.
+REVIEW_PLIST_ = APP_REVIEW_NONE=1
+REVIEW_PLIST_DEFINITION = $(REVIEW_PLIST_$(REVIEW_NAMED):default=APP_REVIEW=1)
+
+// The Feedback, TipJar and Review string tables are each compiled only where
+// their feature is. An empty value names the setting FEEDBACK_CATALOG_ (and so
+// on) and excludes the catalog; any other lands on an undefined name and
+// excludes nothing. The project's AppStore setting of this name lists the JIT
+// catalog and inherits this one.
 FEEDBACK_CATALOG_ = Feedback.xcstrings
-EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=) $(TIP_JAR_CATALOG_$(TIP_JAR_NAMED):default=)
+TIP_JAR_CATALOG_ = TipJar.xcstrings
+REVIEW_CATALOG_ = Review.xcstrings
+EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=) $(TIP_JAR_CATALOG_$(TIP_JAR_NAMED):default=) $(REVIEW_CATALOG_$(REVIEW_NAMED):default=)
+
+// The tip sheet's header shows its developer: a name, the handles of a GitHub
+// and an X profile, and an avatar and two logos that are local files
+// (Developer.local.xcconfig.example names them). They are in an AppStore build
+// that has Buy me tokens, and only the pieces the maker has: each value is
+// empty elsewhere, and the artwork is copied from Config/Local (Config/
+// DeveloperExample for the tests' arrangement, which states
+// SHEET_DEVELOPER_NAME=example and the two handles) by the Copy developer
+// artwork build phase. Nothing of them is in a tracked file or in any other
+// build; the bundle check asserts it.
+DEVELOPER_NAME =
+DEVELOPER_GITHUB_HANDLE =
+DEVELOPER_X_HANDLE =
+#include? "Developer.local.xcconfig"
+
+// The tip condition is NO_TIP_JAR without the identifiers and TIP_JAR with them,
+// and names the setting that holds the value: empty in the first case, the
+// local one in the second. (A `:default=` would also take an empty value.)
+SHEET_NAME_NO_TIP_JAR =
+SHEET_NAME_TIP_JAR = $(DEVELOPER_NAME)
+SHEET_GITHUB_NO_TIP_JAR =
+SHEET_GITHUB_TIP_JAR = $(DEVELOPER_GITHUB_HANDLE)
+SHEET_X_NO_TIP_JAR =
+SHEET_X_TIP_JAR = $(DEVELOPER_X_HANDLE)
+SHEET_DEVELOPER_NAME =
+SHEET_DEVELOPER_NAME[config=AppStore] = $(SHEET_NAME_$(TIP_JAR_CONDITION))
+SHEET_DEVELOPER_GITHUB =
+SHEET_DEVELOPER_GITHUB[config=AppStore] = $(SHEET_GITHUB_$(TIP_JAR_CONDITION))
+SHEET_DEVELOPER_X =
+SHEET_DEVELOPER_X[config=AppStore] = $(SHEET_X_$(TIP_JAR_CONDITION))
+
+// Info.plist is preprocessed, and holds a developer key only where its value is set.
+SHEET_NAME_PLIST_ = SHEET_NAME_NONE=1
+SHEET_NAME_PLIST_DEFINITION = $(SHEET_NAME_PLIST_$(SHEET_DEVELOPER_NAME:identifier):default=SHEET_NAME=1)
+SHEET_GITHUB_PLIST_ = SHEET_GITHUB_NONE=1
+SHEET_GITHUB_PLIST_DEFINITION = $(SHEET_GITHUB_PLIST_$(SHEET_DEVELOPER_GITHUB:identifier):default=SHEET_GITHUB=1)
+SHEET_X_PLIST_ = SHEET_X_NONE=1
+SHEET_X_PLIST_DEFINITION = $(SHEET_X_PLIST_$(SHEET_DEVELOPER_X:identifier):default=SHEET_X=1)
+DEVELOPER_PLIST_DEFINITIONS = $(SHEET_NAME_PLIST_DEFINITION) $(SHEET_GITHUB_PLIST_DEFINITION) $(SHEET_X_PLIST_DEFINITION)

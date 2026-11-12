@@ -3,6 +3,7 @@
 #if TIP_JAR
 
 import Foundation
+import SwiftUI
 
 /// What Buy me tokens asks of the build and of the App Store, in one place a
 /// test or the Simulator preview replaces. A launch of the application has the
@@ -12,6 +13,8 @@ struct TipJarServices {
     /// are not four well formed, distinct identifiers, which hides the entrance.
     var products: @MainActor () -> TipJarProducts? = { TipJarConfiguration.products }
     var store = TipJarStoreServices.live
+    /// The developer the sheet's header shows, from the build's values and artwork.
+    var sender: @MainActor () -> TipJarSenderContent = { .live }
     /// How long the store may take to answer before the sheet says it did not.
     var timeout = Duration.seconds(20)
     #if !APP_STORE
@@ -20,8 +23,13 @@ struct TipJarServices {
     /// Opens the sheet once Home has settled, as a launch of the Simulator
     /// preview asks; never in the application.
     var previewOpensSheet = false
+    /// Scrolls the conversation to its top instead of resting at its bottom.
+    var previewScrollsToTop = false
     /// Runs when the sheet appears: the Simulator preview plays a purchase with it.
     var previewPlays: @MainActor (TipJarModel) async -> Void = { _ in }
+    /// What a tap on a profile logo does: the system opens the page unless a
+    /// test replaces this to see the address.
+    var openLink: @MainActor (URL) -> OpenURLAction.Result = { _ in .systemAction }
     #endif
 }
 

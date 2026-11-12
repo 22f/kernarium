@@ -32,7 +32,8 @@ The project file is the JSON format Xcode 27 reads, kept in the canonical form
 after every hand edit. Every configuration takes its base settings from
 `Config/Andarium.xcconfig`, which includes
 `../GuestHost/Config/Signing.xcconfig` and sets what decides
-[Send feedback](#send-feedback) and [Buy me tokens](#buy-me-tokens); the
+[Send feedback](#send-feedback), [Buy me tokens](#buy-me-tokens) and
+[Review on the App Store](#review-on-the-app-store); the
 signer's team is only in the ignored `Signing.local.xcconfig` beside the
 signing file ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the
 project names no team.
@@ -176,9 +177,12 @@ everything that exists for automation or only pretends:
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
 - It alone can carry [Send feedback](#send-feedback), and only when the
-  receiver's address is in the ignored `Config/Feedback.local.xcconfig`, and
+  receiver's address is in the ignored `Config/Feedback.local.xcconfig`,
   [Buy me tokens](#buy-me-tokens), and only when the four product identifiers
-  are in the ignored `Config/TipJar.local.xcconfig`.
+  are in the ignored `Config/TipJar.local.xcconfig`, and
+  [Review on the App Store](#review-on-the-app-store), and only when the
+  application's App Store identifier is in the ignored
+  `Config/Review.local.xcconfig`. The three switches are independent.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -206,7 +210,7 @@ a Debug or Release build holds none of it, and every configuration's bundle
 check says whether it does: it also fails on the local receiver's bytes in any
 file of a bundle that does not name it (never printing it), and on an
 `Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
-changes the feedback and tip keys alone).
+changes the keys of these features alone).
 Tests and captures turn it on in a Debug build with
 `FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
 bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
@@ -260,18 +264,62 @@ of the hosted tests, with the example identifiers only. Purchase history is
 not collected, and no account, receipt or analytics leaves the device, so the
 privacy manifest declares nothing for it.
 
+The sheet opens on its sender line: the developer's circular avatar (a hairline
+border from the separator colour, hidden from accessibility), the name as a
+person wrote it and the role "Andarium's developer", then one logo button each
+for the developer's GitHub and X profiles, drawn in the label colour from the
+vector files and opened through `openURL` (no web view; a touch target of at
+least 44 pt; at larger text sizes they move under the text). VoiceOver reads the sender once, as "name, role", before the
+messages. Every piece follows what the build holds: no avatar keeps the
+application's mark, no name reads the role alone, and a logo button exists
+only where its handle and its logo file both do. The name, the two handles and
+the three files are the maker's own, in the ignored
+`Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`) and
+`Config/Local/` (`developer-avatar.jpeg`, `github-logo.svg`, `x-logo.svg`; the
+logos are single-path SVGs, parsed at run time by `TipJarGlyph` because UIKit
+cannot load an SVG file). They reach the product only in an AppStore build that
+has Buy me tokens: Info.plist keys for the values the build names and a
+`DeveloperArtwork` folder that `scripts/copy-developer-artwork.py` fills; the
+addresses are built in code from the handles. The bundle check compares keys
+and files by content (a handle is part of the bundle identifier, so its bytes
+prove nothing), fails on a copy of any artwork file elsewhere in any bundle,
+and on a local profile address in any file. The tests' arrangement states
+`SHEET_DEVELOPER_NAME`, `SHEET_DEVELOPER_GITHUB` and `SHEET_DEVELOPER_X` as
+`example` and takes the drawn stand-ins of `Config/DeveloperExample/`;
+`AndariumPreview` reads its header from `TIPJAR_DEVELOPER_*` environment
+variables instead, outside the AppStore product.
+
+### Review on the App Store
+
+An item of [Home's toolbar menu](#home-toolbar-menu), offered once a virtual
+machine is set up, opens this application's App Store page at its write-review
+address through the system (`Shared/Review/`); there is no in-app review prompt,
+no web view, nothing automatic and nothing remembered. It is compiled in, under
+the `APP_REVIEW` condition, only in an AppStore build whose ignored
+`Config/Review.local.xcconfig` (from `Review.local.xcconfig.example`) names the
+application's App Store identifier (`id` and its digits), so a fork, a sideload
+or a Debug or Release build holds no item, address or text; the page is built
+in code from the identifier, without a storefront. The bundle check says for
+every configuration whether it is compiled in, fails on the code without the
+identifier or the identifier without the code, refuses the all-zero
+placeholder in an App Store build, and fails on the identifier's digits in any
+file of a bundle that does not name it (never printing them). Tests turn it on
+in a Debug build with `REVIEW_ID=id0000000000`, which the check accepts in
+Debug alone. Its word is the `Review` string table.
+
 ### Home toolbar menu
 
-When Send feedback or Buy me tokens is compiled in, Home's toolbar holds one
-menu in place of the Info button: it keeps Info's glyph and accessibility
-label, so the toolbar looks as it does without a menu, and holds Info, a
-separator, then Send feedback, then Buy me tokens, each present only when its
-own feature is (`Shared/HomeMenu.swift`). Welcome has the menu too, so Send
-feedback is reachable before a virtual machine is set up; Buy me tokens needs
-one. Without either feature, or with only Info to offer, Info stays the plain
-button and the build holds no menu code that names a feature. A system menu
-drops its item icons at accessibility text sizes, so the tip's icon is then
-only in its sheet's title.
+When Send feedback, Review on the App Store or Buy me tokens is compiled in,
+Home's toolbar holds one menu in place of the Info button: it keeps Info's
+glyph and accessibility label, so the toolbar looks as it does without a menu,
+and holds Info, a separator, then Send feedback, Review on the App Store and
+Buy me tokens, each present only when its own feature is
+(`Shared/HomeMenu.swift`). Welcome has the menu too, so Send feedback is
+reachable before a virtual machine is set up; the other two need one. Without
+a feature, or with only Info to offer, Info stays the plain button and the
+build holds no menu code that names a feature. A system menu drops its item
+icons at accessibility text sizes, so the tip's icon is then only in its
+sheet's title.
 
 ## Model and storage
 
@@ -716,11 +764,14 @@ and Japanese, and follows the language of iOS and the per-app language setting.
 The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
 catalog, table `JIT`, which the App Store configuration leaves out of the
-bundle and its check asserts is absent. The Send feedback texts are another,
-table `Feedback`, built only where Send feedback is compiled in
-(`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle check
-refuses the table, by its file name, in a product without the feature and
-asks for it in every language of one with it. English is the key (a readout or a
+bundle and its check asserts is absent. The texts of Send feedback, Buy me
+tokens and Review on the App Store are catalogs of their own, tables
+`Feedback`, `TipJar` and `Review`, built only where their feature is compiled
+in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle
+check refuses a table, by its file name, in a product without its feature and
+asks for it in every language of one with it. The tip's words keep to its
+rules in each language (`scripts/check-tip-words.py`): no donation, plan or
+subscription word, the tier names untranslated. English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
@@ -733,9 +784,10 @@ short quoted Chinese or Japanese name is not cut across two lines.
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
-`FEEDBACK_ADDRESS=feedback@example.com` (the output of `Andarium` and
-`AndariumPreview` together; one without Send feedback has no `Feedback` strings
-and fails) and on an App Store build with `--app-store`. A
+`FEEDBACK_ADDRESS=feedback@example.com`, the four `TIP_*` identifiers and
+`REVIEW_ID=id0000000000` (the output of `Andarium` and `AndariumPreview`
+together; one without a feature has none of its strings and fails) and on an
+App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.

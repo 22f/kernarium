@@ -78,6 +78,9 @@ DEBUG_SUPPORT = (
     # The Simulator preview's hooks into the Buy me tokens sheet.
     ("tip jar preview", "int _s8Andarium14TipJarServicesV16previewOpensSheetSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV12previewPlaysyyAA0aB5ModelCYaYbcvg(void) { return 1; }\n"),
+    ("tip jar preview", "int _s8Andarium14TipJarServicesV19previewScrollsToTopSbvg(void) { return 1; }\n"),
+    ("tip jar preview", "int _s8Andarium14TipJarServicesV8openLinkySo17OpenURLActionResult(void) { return 1; }\n"),
+    ("tip jar preview", "int _s8Andarium21TipJarScrollsToTopKeyV12defaultValueSbvgZ(void) { return 1; }\n"),
     # The UI tests' probe of the guest's keyboard and mouse: its log, its launch,
     # the recording runtime, and the identifiers of its two elements.
     ("input probe", "int _s8Andarium10InputProbeC6recordyySSF(void) { return 1; }\n"),
@@ -154,7 +157,15 @@ TIP_FEATURE = (
 )
 # The same without StoreKit: a build that lost part of the feature.
 TIP_PARTIAL = 'const char *fixture(void) { return "AndariumTipProducts" "_$s8Andarium11TipJarModelC"; }\n'
-# Config/Info.plist as a fixture: the feedback and tip blocks are conditional, and a value
+# Review on the App Store: the code that builds the write-review address, and the key.
+REVIEW_FEATURE = (
+    "const char *fixture(void) {\n"
+    '  return "AndariumReviewID" "_$s8Andarium10ReviewLinkV" "action=write-review";\n'
+    "}\n"
+)
+# The same without the query that makes the address: a build that lost part of the feature.
+REVIEW_PARTIAL = 'const char *fixture(void) { return "AndariumReviewID" "_$s8Andarium10ReviewLinkV"; }\n'
+# Config/Info.plist as a fixture: the feedback, tip, review and developer blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -176,6 +187,22 @@ INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 \t\t<key>ultra</key>
 \t\t<string>$(TIP_ULTRA)</string>
 \t</dict>
+#endif
+#ifdef APP_REVIEW
+\t<key>AndariumReviewID</key>
+\t<string>$(REVIEW_ID)</string>
+#endif
+#ifdef SHEET_NAME
+\t<key>AndariumDeveloperName</key>
+\t<string>$(SHEET_DEVELOPER_NAME)</string>
+#endif
+#ifdef SHEET_GITHUB
+\t<key>AndariumDeveloperGitHub</key>
+\t<string>$(SHEET_DEVELOPER_GITHUB)</string>
+#endif
+#ifdef SHEET_X
+\t<key>AndariumDeveloperX</key>
+\t<string>$(SHEET_DEVELOPER_X)</string>
 #endif
 \t<key>CFBundleName</key>
 \t<string>Fixture</string>
@@ -373,9 +400,23 @@ def tip_app(root: Path, name: str, executable: Path, info: dict, *, table: bool 
     in with the feature, unless `table` is false."""
     app = make_app(root, name, executable, info, framework=framework)
     if table:
-        (app / "en.lproj").mkdir(exist_ok=True)
-        (app / "en.lproj" / "TipJar.strings").write_bytes(
-            plistlib.dumps({"Buy me tokens": "Buy me tokens"}, fmt=plistlib.FMT_BINARY))
+        for language in ("en", "ja", "zh-Hans", "zh-Hant"):
+            (app / f"{language}.lproj").mkdir(exist_ok=True)
+            (app / f"{language}.lproj" / "TipJar.strings").write_bytes(
+                plistlib.dumps({"Buy me tokens": "Buy me tokens"}, fmt=plistlib.FMT_BINARY))
+    return app
+
+
+def review_app(root: Path, name: str, executable: Path, info: dict, *, table: bool = True,
+               framework: Path | None = None) -> Path:
+    """An application with the String Catalog table of Review on the App Store, which the build
+    compiles in with the feature, in each language, unless `table` is false."""
+    app = make_app(root, name, executable, info, framework=framework)
+    if table:
+        for language in ("en", "ja", "zh-Hans", "zh-Hant"):
+            (app / f"{language}.lproj").mkdir(exist_ok=True)
+            (app / f"{language}.lproj" / "Review.strings").write_bytes(
+                plistlib.dumps({"Review on the App Store": "Review on the App Store"}, fmt=plistlib.FMT_BINARY))
     return app
 
 
@@ -414,6 +455,9 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
           expect="StoreKit.framework", args=named_args)
     check(tip_app(root, "tip-no-table", feature, tip_info, table=False), passes=False,
           expect="lacks the TipJar strings table", args=named_args)
+    no_japanese = tip_app(root, "tip-no-ja", feature, tip_info)
+    (no_japanese / "ja.lproj" / "TipJar.strings").unlink()
+    check(no_japanese, passes=False, expect="lacks the TipJar strings table in ja", args=named_args)
 
     # No identifiers, so nothing of it: not the code, the key, the table or its words.
     check(tip_app(root, "tip-code-without", feature, app_info(), table=False), passes=False,
@@ -576,6 +620,324 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
     check(tip_app(root, "both-Debug-arranged", both_code,
                   app_info(AndariumFeedbackAddress="feedback@example.com", AndariumTipProducts=arranged_ids)),
           passes=True, expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_args])
+
+
+def check_review(root: Path, check, clean: Path, feedback_info: dict, tip_info: dict,
+                 feedback_appstore: list[str], tip_named: list[str]) -> None:
+    """Review on the App Store is compiled in only where the build names the application's App
+    Store identifier, in either direction, alone and with the other two features. The identifier is
+    made up."""
+    identifier = "id1234567890"
+    named_args = ["--review-id", identifier, "--review-local-id", identifier]
+    local_args = ["--review-local-id", identifier]
+    arranged = "id0000000000"
+    arranged_args = ["--review-id", arranged]
+    review_info = app_info(AndariumReviewID=identifier)
+    feature = build(root, "review-feature", REVIEW_FEATURE)
+    partial = build(root, "review-partial", REVIEW_PARTIAL)
+
+    # With the identifier: the code, the key and the table in each language, and the identifier named.
+    check(review_app(root, "review-built", feature, review_info), passes=True,
+          expect="Review on the App Store is compiled in", args=named_args)
+    check(review_app(root, "review-absent", clean, app_info(), table=False), passes=True,
+          expect="Review on the App Store is not compiled in")
+    check(review_app(root, "review-no-key", feature, app_info()), passes=False,
+          expect="AndariumReviewID must be the App Store identifier", args=named_args)
+    check(review_app(root, "review-other-key", feature, app_info(AndariumReviewID="id1234567891")),
+          passes=False, expect="must be the App Store identifier the build names", args=named_args)
+    check(review_app(root, "review-not-built", clean, review_info), passes=False,
+          expect="lacks Review on the App Store", args=named_args)
+    check(review_app(root, "review-partial", partial, review_info), passes=False,
+          expect="action=write-review", args=named_args)
+    check(review_app(root, "review-no-table", feature, review_info, table=False), passes=False,
+          expect="lacks the Review strings table", args=named_args)
+    no_chinese = review_app(root, "review-no-zh-hant", feature, review_info)
+    (no_chinese / "zh-Hant.lproj" / "Review.strings").unlink()
+    check(no_chinese, passes=False, expect="lacks the Review strings table in zh-Hant", args=named_args)
+
+    # No identifier, so nothing of it: not the code, the key, the table or its words.
+    check(review_app(root, "review-code-without", feature, app_info(), table=False), passes=False,
+          expect="carries Review on the App Store")
+    check(review_app(root, "review-key-without", clean, review_info, table=False), passes=False,
+          expect="has AndariumReviewID though the build names no App Store identifier")
+    check(review_app(root, "review-framework-without", clean, app_info(), table=False, framework=feature),
+          passes=False, expect="Runtime.framework/Runtime: carries Review on the App Store")
+    check(review_app(root, "review-table-without", clean, app_info()), passes=False,
+          expect="is the Review strings table though the build names no App Store identifier")
+    words = make_app(root, "review-words", clean, app_info())
+    (words / "en.lproj").mkdir()
+    (words / "en.lproj" / "Localizable.strings").write_bytes(
+        plistlib.dumps({"Review on the App Store": "Review on the App Store"}, fmt=plistlib.FMT_BINARY))
+    check(words, passes=False, expect="has Review on the App Store strings")
+
+    # The identifier is well formed and no placeholder, in the App Store configuration.
+    for index, shape in enumerate(("", "1234567890", "ID1234567890", "id1234", "id12345678901234567",
+                                   "id12345a7890", "id123/456", "id 123456", "id123456?x=1")):
+        if not shape:
+            continue
+        check(review_app(root, f"review-shape-{index}", feature, app_info(AndariumReviewID=shape)), passes=False,
+              expect="is not an App Store identifier", args=["--review-id", shape])
+    check(review_app(root, "review-placeholder", feature, app_info(AndariumReviewID=arranged)), passes=False,
+          expect="is a placeholder", args=arranged_args)
+    for index, good in enumerate(("id12345", "id100000", "id123456789012345")):
+        check(review_app(root, f"review-shape-ok-{index}", feature, app_info(AndariumReviewID=good)),
+              passes=True, expect="Review on the App Store is compiled in", args=["--review-id", good])
+
+    # A Debug or Release product that names none has the feature's file names in the linker's debug
+    # map; the symbols of a function the feature defines are searched, though.
+    mapped = build_with_debug_map(root, "mapped-review", "/Users/NAME/ReviewServices")
+    symbol_only = build_with_debug_map(
+        root, "review-symbol-only", "/Users/NAME/Project",
+        "__attribute__((visibility(\"hidden\"))) int plain_first(void) { return 2; }\n"
+        "__attribute__((visibility(\"hidden\"))) int _s8Andarium10ReviewLinkV3urlyyF(void) { return 1; }\n")
+    other = ["--review", "--configuration"]
+    for configuration in ("Debug", "Release"):
+        check(review_app(root, f"review-{configuration}-debug-map", mapped, app_info(), table=False), passes=True,
+              expect=f"Review on the App Store is not compiled in ({configuration})", args=[*other, configuration])
+        check(review_app(root, f"review-{configuration}-symbol-only", symbol_only, app_info(), table=False),
+              passes=False, expect="carries Review on the App Store (ReviewLink", args=[*other, configuration])
+
+    # The other configurations: absent, or the arranged placeholder, which Debug alone takes.
+    arranged_info = app_info(AndariumReviewID=arranged)
+    for configuration in ("Debug", "Release"):
+        check(review_app(root, f"review-{configuration}-absent", clean, app_info(), table=False), passes=True,
+              expect=f"Review on the App Store is not compiled in ({configuration})", args=[*other, configuration])
+        # The local configuration's identifier never reaches them.
+        check(review_app(root, f"review-{configuration}-id", feature, review_info), passes=False,
+              expect="not the arranged placeholder", args=[*other, configuration, *named_args])
+        check(review_app(root, f"review-{configuration}-code", feature, app_info(), table=False), passes=False,
+              expect="carries Review on the App Store", args=[*other, configuration])
+        check(review_app(root, f"review-{configuration}-key", clean, review_info, table=False), passes=False,
+              expect="though the build names no App Store identifier", args=[*other, configuration])
+    check(review_app(root, "review-Debug-arranged", feature, arranged_info), passes=True,
+          expect="Review on the App Store is compiled in (Debug)", args=[*other, "Debug", *arranged_args])
+    check(review_app(root, "review-Release-arranged", feature, arranged_info), passes=False,
+          expect="only Debug takes the arrangement", args=[*other, "Release", *arranged_args])
+    check(review_app(root, "review-Release-arranged-absent", clean, app_info(), table=False), passes=False,
+          expect="only Debug takes the arrangement", args=[*other, "Release", *arranged_args])
+
+    # The local identifier's digits are in no file of a bundle that does not name it, and the check
+    # never prints them. Bytes anywhere count, with or without the leading "id".
+    digits = identifier[2:]
+    leaky = build(root, "review-leaky", f'const char *fixture(void) {{ return "{identifier}"; }}\n')
+    leaky_digits = build(root, "review-leaky-digits", f'const char *fixture(void) {{ return "{digits}"; }}\n')
+    data_file = review_app(root, "review-leak-data", clean, app_info(), table=False)
+    (data_file / "Data.bin").write_bytes(b"\0\1" + digits.encode() + b"\2")
+    nested = review_app(root, "review-leak-nested", clean, app_info(), table=False)
+    (nested / "en.lproj").mkdir()
+    (nested / "en.lproj" / "InfoPlist.strings").write_bytes(f'"CFBundleName" = "{identifier}";\n'.encode())
+    straddle = review_app(root, "review-leak-straddle", clean, app_info(), table=False)
+    (straddle / "Big.bin").write_bytes(b"\0" * ((8 << 20) - 5) + digits.encode() + b"\0")
+    leaks = (
+        ("executable", review_app(root, "review-leak-executable", leaky, app_info(), table=False), "Fixture"),
+        ("digits", review_app(root, "review-leak-digits", leaky_digits, app_info(), table=False), "Fixture"),
+        ("framework", review_app(root, "review-leak-framework", clean, app_info(), table=False, framework=leaky),
+         "Frameworks/Runtime.framework/Runtime"),
+        ("info-plist", review_app(root, "review-leak-info", clean, review_info, table=False), "Info.plist"),
+        ("data-file", data_file, "Data.bin"),
+        ("nested-file", nested, "en.lproj/InfoPlist.strings"),
+        ("straddle", straddle, "Big.bin"),
+    )
+    for name, app, path in leaks:
+        for configuration in ("Debug", "Release"):
+            for arguments in (local_args, [*local_args, *arranged_args]):
+                check(app, passes=False, expect=f"{path}: holds the App Store identifier of the local configuration",
+                      never=digits, args=[*other, configuration, *arguments])
+        check(app, passes=False, expect=f"{path}: holds the App Store identifier of the local configuration",
+              never=digits, args=local_args)
+    check(review_app(root, "review-leak-none", clean, app_info(), table=False, framework=clean), passes=True,
+          expect="ready for the App Store", args=local_args)
+    check(review_app(root, "review-leak-none-debug", clean, app_info(), table=False), passes=True,
+          expect="Review on the App Store is not compiled in (Debug)", args=[*other, "Debug", *local_args])
+    check(review_app(root, "review-leak-none-arranged", feature, arranged_info), passes=True,
+          expect="Review on the App Store is compiled in (Debug)", args=[*other, "Debug", *local_args, *arranged_args])
+    # An App Store build that names it holds it in Info.plist, and nowhere else.
+    check(review_app(root, "review-leak-named", feature, review_info), passes=True,
+          expect="Review on the App Store is compiled in", args=named_args)
+    named_leak = review_app(root, "review-leak-named-elsewhere", feature, review_info)
+    (named_leak / "Data.bin").write_bytes(digits.encode())
+    check(named_leak, passes=True, expect="Review on the App Store is compiled in", args=named_args)
+
+    # All three features, alone and together: each says its own line and none disturbs another.
+    # The fixture sources are renamed so one binary can hold all three.
+    all_code = build(
+        root, "all-three",
+        FEEDBACK_FEATURE + TIP_FEATURE.replace("fixture", "tip_fixture") + REVIEW_FEATURE.replace("fixture", "review_fixture"),
+        ["-framework", "MessageUI", "-framework", "StoreKit"])
+    all_info = app_info(**{**feedback_info, "AndariumTipProducts": tip_info["AndariumTipProducts"],
+                           "AndariumReviewID": identifier})
+    everything = review_app(root, "all-named", all_code, all_info)
+    for language in ("en", "ja", "zh-Hans", "zh-Hant"):
+        (everything / f"{language}.lproj" / "TipJar.strings").write_bytes(
+            plistlib.dumps({"Buy me tokens": "x"}, fmt=plistlib.FMT_BINARY))
+    for line in ("Send feedback is compiled in", "Buy me tokens is compiled in", "Review on the App Store is compiled in"):
+        check(everything, passes=True, expect=line, args=[*feedback_appstore, *tip_named, *named_args])
+    # The one that is not named cannot ride in another's product.
+    check(review_app(root, "all-review-in-feedback", all_code, app_info(**feedback_info), table=False,
+                     ), passes=False, expect="carries Review on the App Store", args=feedback_appstore)
+    check(review_app(root, "all-review-in-tip", all_code, tip_info, table=False), passes=False,
+          expect="carries Review on the App Store", args=tip_named)
+    check(review_app(root, "all-tip-in-review", all_code, review_info), passes=False,
+          expect="carries Buy me tokens", args=named_args)
+    check(review_app(root, "all-feedback-in-review", all_code, review_info), passes=False,
+          expect="carries Send feedback", args=named_args)
+    check(review_app(root, "all-none", clean, app_info(), table=False), passes=True, expect="ready for the App Store",
+          args=[*local_args])
+    # Debug takes the three arrangements together.
+    arranged_all = app_info(
+        AndariumFeedbackAddress="feedback@example.com", AndariumReviewID=arranged,
+        AndariumTipProducts={tier: f"com.example.andarium.tip.{tier}" for tier in ("lite", "pro", "max", "ultra")})
+    check(review_app(root, "all-Debug-arranged", all_code, arranged_all), passes=True,
+          expect="Review on the App Store is compiled in (Debug)", args=[*other, "Debug", *arranged_args])
+
+
+def check_developer(root: Path, check, clean: Path) -> None:
+    """The tip header's developer: its Info.plist keys and its artwork are in the product exactly
+    where the build names the value, and a copy of an artwork file or a local profile address is in
+    no other place. Every value and file here is made up."""
+    config = root / "developer-config"
+    local, example = config / "Local", config / "DeveloperExample"
+    local.mkdir(parents=True)
+    example.mkdir()
+    files = {"developer-avatar.jpeg": b"\xff\xd8local-avatar\xff\xd9", "github-logo.svg": b"<svg>local github</svg>",
+             "x-logo.svg": b"<svg>local x</svg>"}
+    for name, content in files.items():
+        (local / name).write_bytes(content)
+        (example / name).write_bytes(b"example " + content)
+    ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
+    named = ",".join(ids.values())
+    tip = ["--tip-products", named, "--tip-local-products", named]
+    artwork = ["--developer-artwork", str(config)]
+    handles = ["--developer-local-github", "fixturehub", "--developer-local-x", "fixturex"]
+    values = ["--developer-name", "Fixture Name", "--developer-github", "fixturehub", "--developer-x", "fixturex"]
+    feature = build(root, "developer-feature", TIP_FEATURE, ["-framework", "StoreKit"])
+    info = app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name",
+                    AndariumDeveloperGitHub="fixturehub", AndariumDeveloperX="fixturex")
+    pieces = {"avatar": "developer-avatar.jpeg", "github": "github-logo.svg", "x": "x-logo.svg"}
+
+    def developer_app(name: str, info: dict, copied: dict[str, Path] | None = None, **options) -> Path:
+        # The tip's strings tables come with the feature, which the Info.plist key stands for here.
+        app = tip_app(root, name, options.pop("executable", feature), info, table="AndariumTipProducts" in info)
+        if copied:
+            (app / "DeveloperArtwork").mkdir()
+            for piece, source in copied.items():
+                (app / "DeveloperArtwork" / piece).write_bytes(source.read_bytes())
+        return app
+
+    def artwork_of(folder: Path, *which: str) -> dict[str, Path]:
+        return {piece: folder / pieces[piece] for piece in which}
+
+    appstore = [*tip, *artwork, *handles]
+    everything = artwork_of(local, "avatar", "github", "x")
+    check(developer_app("dev-built", info, everything), passes=True,
+          expect="Buy me tokens is compiled in", args=[*appstore, *values])
+    # Each piece follows its value: no handle, no mark; no name, no key (the avatar stays).
+    name_only = app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name")
+    check(developer_app("dev-name-only", name_only, artwork_of(local, "avatar")), passes=True,
+          expect="Buy me tokens is compiled in", args=[*appstore, "--developer-name", "Fixture Name"])
+    github_only = app_info(AndariumTipProducts=ids, AndariumDeveloperGitHub="fixturehub")
+    check(developer_app("dev-github-only", github_only, artwork_of(local, "avatar", "github")), passes=True,
+          expect="Buy me tokens is compiled in", args=[*appstore, "--developer-github", "fixturehub"])
+    check(developer_app("dev-none-named", app_info(AndariumTipProducts=ids), artwork_of(local, "avatar")), passes=True,
+          expect="Buy me tokens is compiled in", args=appstore)
+    # A product without the folder of local files (a clone that has none): nothing is expected.
+    check(developer_app("dev-no-local-dir", info), passes=True, expect="Buy me tokens is compiled in",
+          args=[*tip, *values])
+    # With the maker's folder but no value, the avatar still goes in, and nothing else.
+    check(developer_app("dev-absent", app_info(AndariumTipProducts=ids)), passes=False,
+          expect="DeveloperArtwork/avatar: is missing", args=appstore)
+
+    # A key or a file that does not match the build.
+    check(developer_app("dev-no-key", app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name",
+                                               AndariumDeveloperX="fixturex"), everything),
+          passes=False, expect="AndariumDeveloperGitHub must be the developer value", args=[*appstore, *values])
+    check(developer_app("dev-other-key", app_info(**{**info, "AndariumDeveloperName": "Someone Else"}), everything),
+          passes=False, expect="AndariumDeveloperName must be the developer value", args=[*appstore, *values])
+    check(developer_app("dev-unnamed-key", info, artwork_of(local, "avatar", "github")), passes=False,
+          expect="has AndariumDeveloperX though the build names no such developer value",
+          args=[*appstore, "--developer-name", "Fixture Name", "--developer-github", "fixturehub"])
+    check(developer_app("dev-mark-unnamed", name_only, artwork_of(local, "avatar", "x")), passes=False,
+          expect="DeveloperArtwork/x: is developer artwork the build does not take",
+          args=[*appstore, "--developer-name", "Fixture Name"])
+    check(developer_app("dev-no-avatar", info, artwork_of(local, "github", "x")), passes=False,
+          expect="DeveloperArtwork/avatar: is missing", args=[*appstore, *values])
+    check(developer_app("dev-no-mark", info, artwork_of(local, "avatar", "x")), passes=False,
+          expect="DeveloperArtwork/github: is missing", args=[*appstore, *values])
+    check(developer_app("dev-example-in-appstore", info, artwork_of(example, "avatar", "github", "x")),
+          passes=False, expect="is not the artwork file of the build's folder", args=[*appstore, *values])
+    folder_file = developer_app("dev-folder-is-file", info)
+    (folder_file / "DeveloperArtwork").write_bytes(b"x")
+    check(folder_file, passes=False, expect="DeveloperArtwork: is not a folder", args=[*appstore, *values])
+
+    # No product identifiers: no developer at all, whatever the build says about it.
+    check(developer_app("dev-values-no-tip", app_info(AndariumDeveloperName="Fixture Name"), executable=clean),
+          passes=False, expect="names developer values though it names no product identifiers", args=values)
+    check(developer_app("dev-key-no-tip", app_info(AndariumDeveloperName="Fixture Name"), executable=clean),
+          passes=False, expect="has AndariumDeveloperName though the build names no such developer value")
+    check(developer_app("dev-folder-no-tip", app_info(), artwork_of(local, "avatar"), executable=clean),
+          passes=False, expect="DeveloperArtwork/avatar: is developer artwork the build does not take", args=artwork)
+    check(developer_app("dev-clean", app_info(), executable=clean), passes=True, expect="ready for the App Store",
+          args=[*artwork, *handles])
+
+    # A copy of an artwork file anywhere else, whichever folder it is from, in any product.
+    for source_name, source in (("local", local), ("example", example)):
+        for kind, piece in pieces.items():
+            leak = developer_app(f"dev-copy-{source_name}-{kind}", app_info(), executable=clean)
+            (leak / "en.lproj").mkdir(exist_ok=True)
+            (leak / "en.lproj" / "Copy.dat").write_bytes((source / piece).read_bytes())
+            check(leak, passes=False, expect="en.lproj/Copy.dat: is a copy of a developer artwork file", args=artwork)
+    copy_in_tip = developer_app("dev-copy-in-tip", info, everything)
+    (copy_in_tip / "Extra.dat").write_bytes((local / "x-logo.svg").read_bytes())
+    check(copy_in_tip, passes=False, expect="Extra.dat: is a copy of a developer artwork file",
+          args=[*appstore, *values])
+    check(developer_app("dev-copy-different", app_info(), executable=clean), passes=True,
+          expect="ready for the App Store", args=artwork)
+
+    # The profile addresses of the local handles are in no file of any product.
+    for kind, address in (("github", "https://github.com/fixturehub"), ("x", "https://x.com/FixtureX")):
+        leaky = build(root, f"dev-address-{kind}", f'const char *fixture(void) {{ return "{address}"; }}\n')
+        app = developer_app(f"dev-address-{kind}", app_info(), executable=leaky)
+        check(app, passes=False, expect="holds a profile address of the local configuration",
+              never=address.rpartition("/")[2], args=[*artwork, *handles])
+        check(app, passes=True, expect="ready for the App Store", args=artwork)
+
+    # The other configurations: nothing, or Debug's arrangement of `example` with the drawn artwork.
+    other = ["--tip-jar", "--configuration"]
+    arranged_ids = {tier: f"com.example.andarium.tip.{tier}" for tier in ids}
+    arranged_tip = ["--tip-products", ",".join(arranged_ids.values())]
+    arranged_values = ["--developer-name", "example", "--developer-github", "example", "--developer-x", "example"]
+    arranged_info = app_info(AndariumTipProducts=arranged_ids, AndariumDeveloperName="example",
+                             AndariumDeveloperGitHub="example", AndariumDeveloperX="example")
+    arranged_art = artwork_of(example, "avatar", "github", "x")
+    check(developer_app("dev-Debug-arranged", arranged_info, arranged_art), passes=True,
+          expect="Buy me tokens is compiled in (Debug)",
+          args=[*other, "Debug", *arranged_tip, *artwork, *arranged_values, *handles])
+    check(developer_app("dev-Debug-arranged-local-art", arranged_info, everything), passes=False,
+          expect="is not the artwork file of the build's folder",
+          args=[*other, "Debug", *arranged_tip, *artwork, *arranged_values])
+    check(developer_app("dev-Debug-tip-only", app_info(AndariumTipProducts=arranged_ids)), passes=True,
+          expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_tip, *artwork])
+    check(developer_app("dev-Debug-tip-only-art", app_info(AndariumTipProducts=arranged_ids), arranged_art),
+          passes=False, expect="is developer artwork the build does not take",
+          args=[*other, "Debug", *arranged_tip, *artwork])
+    # Only Debug takes the arrangement at all, so Release names no usable identifiers either.
+    for configuration, said in (("Debug", "not the arranged placeholders"),
+                                ("Release", "names developer values though it names no product identifiers")):
+        check(developer_app(f"dev-{configuration}-local-values", info, everything), passes=False,
+              expect=said, args=[*other, configuration, *arranged_tip, *artwork, *values])
+    for configuration in ("Debug", "Release"):
+        check(developer_app(f"dev-{configuration}-absent", app_info(), executable=clean), passes=True,
+              expect="Buy me tokens is not compiled in", args=[*other, configuration, *artwork, *handles])
+        check(developer_app(f"dev-{configuration}-folder", app_info(), artwork_of(example, "avatar"),
+                            executable=clean),
+              passes=False, expect="is developer artwork the build does not take",
+              args=[*other, configuration, *artwork])
+        check(developer_app(f"dev-{configuration}-key", app_info(AndariumDeveloperX="example"), executable=clean),
+              passes=False, expect="has AndariumDeveloperX though the build names no such developer value",
+              args=[*other, configuration, *artwork])
+    check(developer_app("dev-Release-arranged", arranged_info, arranged_art), passes=False,
+          expect="only Debug takes the arrangement",
+          args=[*other, "Release", *arranged_tip, *artwork, *arranged_values])
 
 
 def main() -> int:
@@ -999,6 +1361,11 @@ def main() -> int:
         check(named_leak, passes=True, expect="Send feedback is compiled in", args=appstore)
 
         check_tip_jar(root, check, clean, feature, feedback_info, receiver, appstore, local, arranged)
+        tip_ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
+        tip_list = ",".join(tip_ids.values())
+        check_review(root, check, clean, feedback_info, app_info(AndariumTipProducts=tip_ids), appstore,
+                     ["--tip-products", tip_list, "--tip-local-products", tip_list])
+        check_developer(root, check, clean)
 
         # The built Info.plist keeps every value of Config/Info.plist, whichever
         # way the feedback block went: the preprocessor changes the feedback key

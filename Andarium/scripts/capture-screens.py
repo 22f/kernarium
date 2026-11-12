@@ -312,8 +312,9 @@ SHOTS: list[Shot] = [
     feedback("feedback-home", "feedback-home", "Send feedback opened from Home's toolbar menu, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
     feedback("feedback-home-filled", "feedback-home-filled", "Feedback that is not a bug, from Home: a suggestion with a photo; Send is ready."),
     # Buy me tokens: needs a Preview built with the four TIP_ settings (see --help)
-    tipjar("tipjar-entrance-home", "tipjar-home", "Home's toolbar after a virtual machine is set up: the one menu button where Info was, which holds Info, Send feedback and Buy me tokens (the menu itself is not captured).", dark=True, wait=3.0),
-    tipjar("tipjar", "tipjar", "Buy me tokens over Home: the chat with Andarium's developer, the plain statement and the four tiers with the store's prices.", dark=True),
+    tipjar("tipjar-entrance-home", "tipjar-home", "Home's toolbar after a virtual machine is set up: the one menu button where Info was, which holds Info, Send feedback, Review on the App Store and Buy me tokens (the menu itself is not captured).", dark=True, wait=3.0),
+    tipjar("tipjar", "tipjar", "Buy me tokens over Home: the chat with Andarium's developer (the header shows the developer's avatar, name and two profile logos where the Preview is given them), the plain statement and the four tiers with the store's prices.", dark=True),
+    tipjar("tipjar-top", "tipjar", "Buy me tokens scrolled to its top, so that the sender line is in view at the largest text sizes.", "-tipScroll", "top", dark=True),
     tipjar("tipjar-loading", "tipjar-loading", "The store has not answered yet: the four tiers with a spinner for each price."),
     tipjar("tipjar-missing", "tipjar-missing", "The store knows three of the four: the others are offered, Max is left out."),
     tipjar("tipjar-unavailable", "tipjar-unavailable", "The store gave nothing: a note that tips are not available and Try again."),

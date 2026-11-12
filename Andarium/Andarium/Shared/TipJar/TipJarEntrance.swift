@@ -16,17 +16,21 @@ enum TipJarSymbols {
 private struct TipJarPresentation: View {
     let app: AppModel
     @State private var jar: TipJarModel?
+    @State private var sender: TipJarSenderContent
 
     init(app: AppModel) {
         self.app = app
         _jar = State(initialValue: app.makeTipJarModel())
+        _sender = State(initialValue: app.tipJarServices.sender())
     }
 
     var body: some View {
         if let jar {
-            TipJarSheet(jar: jar, device: app.host.name) { app.tipJarSheetOpen = false }
+            TipJarSheet(jar: jar, sender: sender, device: app.host.name) { app.tipJarSheetOpen = false }
                 .onDisappear { jar.close() }
                 #if !APP_STORE
+                .environment(\.openURL, OpenURLAction { app.tipJarServices.openLink($0) })
+                .environment(\.tipJarScrollsToTop, app.tipJarServices.previewScrollsToTop)
                 .task { await app.tipJarServices.previewPlays(jar) }
                 #endif
         }

@@ -47,7 +47,7 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    #if FEEDBACK_MAIL || TIP_JAR
+                    #if FEEDBACK_MAIL || TIP_JAR || APP_REVIEW
                     HomeToolbarMenu()
                     #else
                     HomeInfoButton()
