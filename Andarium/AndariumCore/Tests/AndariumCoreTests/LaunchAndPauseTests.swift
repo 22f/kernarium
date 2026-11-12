@@ -4,6 +4,7 @@ import Foundation
 import Testing
 
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The settings of a launch, answered as the application's environment
 /// reader would.

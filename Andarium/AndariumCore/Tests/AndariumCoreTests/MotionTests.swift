@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 // SI conversion of a sample and its wire form, the mount's axes as the window
 // and the owner of rotation change, the saved choice (unset follows the

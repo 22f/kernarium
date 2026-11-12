@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// The release the snapshot tests run on: a disk of 4 to 64 GiB.
 func snapshotRelease(

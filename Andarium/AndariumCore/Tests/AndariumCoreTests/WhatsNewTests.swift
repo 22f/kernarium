@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 /// A defaults database of its own for one test, removed after it.
 private func withDefaults<Result>(_ body: (UserDefaults) throws -> Result) rethrows -> Result {

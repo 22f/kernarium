@@ -2,6 +2,7 @@
 
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 struct FormatsTests {
     private func bytes(mib: Double) -> UInt64 { UInt64(mib * Double(Limits.bytesPerMiB)) }

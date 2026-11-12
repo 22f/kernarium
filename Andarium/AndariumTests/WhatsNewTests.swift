@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AndariumCore
+import AndariumCoreTestSupport
+import CoreHaptics
 import Foundation
 import Testing
 import UIKit
@@ -238,15 +240,22 @@ struct WhatsNewTests {
         #endif
     }
 
-    /// The host the application builds reports what the entries ask about.
+    /// The host the application builds reports what the entries ask about, and
+    /// not what a default would say: asked of the platform itself, so that an
+    /// iPad Simulator (which is not an iPhone) tells a missing report from a
+    /// right one. A Simulator has no Taptic Engine, so the haptics report is
+    /// the platform's `false`; that it is read at all is a device check.
     @Test func theHostReportsItsKindAndWhetherItHasHaptics() {
         let host = AppEntry.hostDevice()
-        switch host.name {
-        case "iPad": #expect(host.idiom == .pad)
-        case "Mac": #expect(host.idiom == .mac)
-        default: #expect(host.name == "iPhone" && host.idiom == .phone)
+        let platform = UIDevice.current.userInterfaceIdiom
+        if ProcessInfo.processInfo.isiOSAppOnMac {
+            #expect(host.idiom == .mac && host.name == "Mac")
+        } else if platform == .pad {
+            #expect(host.idiom == .pad && host.name == "iPad")
+        } else {
+            #expect(platform == .phone && host.idiom == .phone && host.name == "iPhone")
         }
-        #expect(host.hasHaptics == DeviceHaptics.isAvailable)
+        #expect(host.hasHaptics == CHHapticEngine.capabilitiesForHardware().supportsHaptics)
     }
 
     // MARK: The person's launch

@@ -37,12 +37,12 @@ enum PreviewData {
         case "ipad-mini-6":
             return HostDevice(
                 name: "iPad", processorCount: 6, memory: iPadMini6Memory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false
             )
         case "mac-64-gib":
             return HostDevice(
                 name: "Mac", processorCount: 8, memory: mac64GiBMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6), idiom: .mac
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6), idiom: .mac, hasHaptics: false
             )
         default:
             break
@@ -54,7 +54,7 @@ enum PreviewData {
                     maximumsMiB: Array(repeating: 4096, count: 8), defaultsMiB: Array(repeating: 3584, count: 8),
                     graphicsMiB: { memory, count in budget(limitMiB: 6144, memoryMiB: memory, vCPUs: count) }
                 ),
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad, hasHaptics: false
             )
         }
         return HostDevice(
