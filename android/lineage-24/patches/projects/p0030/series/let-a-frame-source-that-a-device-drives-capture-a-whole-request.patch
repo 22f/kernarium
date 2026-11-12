@@ -20,19 +20,25 @@ HostSettings member of the sensor settings.
 The sensor's limits are widened to what a host-driven camera can offer: frame durations from 4 ms, a
 sensitivity range of ISO 1 to 102400, and any of the four Bayer orders. An idle sensor, with no
 request, keeps its 33 ms cycle. A flush or a close interrupts the waits of a capture in progress
-(IFrameSource::Interrupt), so that they do not hold the thread up for the device's own timeout. A result reports the neutral color point that the source measured
-when it has one.
+(IFrameSource::Interrupt), so that they do not hold the thread up for the device's own timeout; the
+sensor takes the cancellation back (ClearInterrupt) under the control mutex when it takes the next
+request, so that a flush between that and the first wait still counts. A result reports the neutral
+color point that the source measured when it has one.
+
+A BLOB output that is not a JFIF picture, or has no result metadata, is not queued: the sensor does
+not collect it, and a buffer the source cannot take back must not be handed to the device. The
+settings also carry the top of the request's AE target frame rate range (HostSettings::ae_max_fps).
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
  devices/EmulatedCamera/hwl/Android.bp         |   1 +
- .../hwl/EmulatedRequestState.cpp              |  40 ++++++
- devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  53 +++++--
+ .../hwl/EmulatedRequestState.cpp              |  44 +++++
+ devices/EmulatedCamera/hwl/EmulatedSensor.cpp |  56 +++++--
  devices/EmulatedCamera/hwl/EmulatedSensor.h   |  10 ++
- .../EmulatedCamera/hwl/EmulatedSensorHost.cpp | 131 ++++++++++++++++++
- devices/EmulatedCamera/hwl/IFrameSource.h     |  44 ++++++
- .../hwl/SensorCharacteristics.h               |  24 ++++
- 7 files changed, 293 insertions(+), 10 deletions(-)
+ .../EmulatedCamera/hwl/EmulatedSensorHost.cpp | 150 ++++++++++++++++++
+ devices/EmulatedCamera/hwl/IFrameSource.h     |  51 ++++++
+ .../hwl/SensorCharacteristics.h               |  26 +++
+ 7 files changed, 328 insertions(+), 10 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
 
 diff --git a/devices/EmulatedCamera/hwl/Android.bp b/devices/EmulatedCamera/hwl/Android.bp
@@ -48,10 +54,10 @@ index 1fffe9da48ce3a68b30b185b58e282a5a6e505c8..15127af8299f24d4c1ec2beadabfb99d
          "utils/ExifUtils.cpp",
          "utils/HWLUtils.cpp",
 diff --git a/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp b/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
-index 15064556454db2c6c62c613e30a291ecb8758a53..f0746e745c81a0edf91a3815540f1a1586a69ea0 100644
+index 15064556454db2c6c62c613e30a291ecb8758a53..cb182a31dc2081bb53042cefc557d28e3aa227e9 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
-@@ -623,6 +623,45 @@ int EmulatedRequestState::GetExposureTimeClampToRange(uint32_t exposure) {
+@@ -623,6 +623,49 @@ int EmulatedRequestState::GetExposureTimeClampToRange(uint32_t exposure) {
    return std::max(min_exposure, std::min(max_exposure, exposure));
  }
  
@@ -90,6 +96,10 @@ index 15064556454db2c6c62c613e30a291ecb8758a53..f0746e745c81a0edf91a3815540f1a15
 +  if ((request.Get(ANDROID_JPEG_QUALITY, &entry) == OK) && (entry.count == 1)) {
 +    host->jpeg_quality = entry.data.u8[0];
 +  }
++  if ((request.Get(ANDROID_CONTROL_AE_TARGET_FPS_RANGE, &entry) == OK) && (entry.count == 2) &&
++      (entry.data.i32[1] > 0)) {
++    host->ae_max_fps = static_cast<uint32_t>(entry.data.i32[1]);
++  }
 +  memcpy(host->ae_regions, info.ae_metering_region_, sizeof(host->ae_regions));
 +  memcpy(host->af_regions, info.af_metering_region_, sizeof(host->af_regions));
 +}
@@ -97,7 +107,7 @@ index 15064556454db2c6c62c613e30a291ecb8758a53..f0746e745c81a0edf91a3815540f1a15
  status_t EmulatedRequestState::InitializeSensorSettings(
      std::unique_ptr<HalCameraMetadata> request_settings,
      uint32_t override_frame_number,
-@@ -920,6 +959,7 @@ status_t EmulatedRequestState::InitializeSensorSettings(
+@@ -920,6 +963,7 @@ status_t EmulatedRequestState::InitializeSensorSettings(
    sensor_settings->timestamp_source = info.timestamp_source_;
    memcpy(sensor_settings->test_pattern_data, test_pattern_data,
           sizeof(sensor_settings->test_pattern_data));
@@ -106,7 +116,7 @@ index 15064556454db2c6c62c613e30a291ecb8758a53..f0746e745c81a0edf91a3815540f1a15
    return OK;
  }
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
-index a474355af105c177dbe8cc7f005c7f482bfcc85d..33053fcb587022d25e66a692c4cd888c16cac43b 100644
+index a474355af105c177dbe8cc7f005c7f482bfcc85d..2e4b787abd8180e8db0772dcb2811cd40055a16f 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 @@ -60,11 +60,14 @@ using android::hardware::graphics::common::V1_2::Dataspace;
@@ -172,7 +182,17 @@ index a474355af105c177dbe8cc7f005c7f482bfcc85d..33053fcb587022d25e66a692c4cd888c
    auto ret = WaitForVSyncLocked(kSupportedFrameDurationRange[1]);
  
    // First recreate the jpeg compressor. This will abort any ongoing processing
-@@ -720,7 +741,8 @@ bool EmulatedSensor::threadLoop() {
+@@ -713,6 +734,9 @@ bool EmulatedSensor::threadLoop() {
+     std::swap(next_input_buffer, current_input_buffers_);
+     std::swap(next_result, current_result_);
+     std::swap(partial_result, partial_result_);
++    if (frame_source_ != nullptr) {
++      frame_source_->ClearInterrupt();
++    }
+ 
+     // Signal VSync for start of readout
+     ALOGVV("Sensor VSync");
+@@ -720,7 +744,8 @@ bool EmulatedSensor::threadLoop() {
      vsync_.signal();
    }
  
@@ -182,7 +202,7 @@ index a474355af105c177dbe8cc7f005c7f482bfcc85d..33053fcb587022d25e66a692c4cd888c
    auto exposure_time = EmulatedSensor::kSupportedExposureTimeRange[0];
    uint32_t timestamp_source = ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN;
    // Frame duration must always be the same among all physical devices
-@@ -778,7 +800,16 @@ bool EmulatedSensor::threadLoop() {
+@@ -778,7 +803,16 @@ bool EmulatedSensor::threadLoop() {
      std::vector<StreamGroupState> stream_group_state =
          GetStreamGroupState(*next_buffers);
      uint32_t frame_number = next_buffers->at(0)->frame_number;
@@ -200,7 +220,7 @@ index a474355af105c177dbe8cc7f005c7f482bfcc85d..33053fcb587022d25e66a692c4cd888c
        NotifyMessage msg = ShutterMessage{
            .frame_number = frame_number,
            .timestamp_ns = static_cast<uint64_t>(next_capture_time_),
-@@ -787,7 +818,7 @@ bool EmulatedSensor::threadLoop() {
+@@ -787,7 +821,7 @@ bool EmulatedSensor::threadLoop() {
        callback.notify(next_result->pipeline_id, msg);
      }
  
@@ -209,7 +229,7 @@ index a474355af105c177dbe8cc7f005c7f482bfcc85d..33053fcb587022d25e66a692c4cd888c
          stream_group_state.size() > 0) {
        callback.notify_override_pending_buffer(frame_number, stream_group_state);
      }
-@@ -1103,7 +1134,9 @@ void EmulatedSensor::ReturnResults(
+@@ -1103,7 +1137,9 @@ void EmulatedSensor::ReturnResults(
        result->result_metadata->Set(ANDROID_EDGE_MODE,
                                     &logical_settings->second.edge_mode, 1);
      }
@@ -243,10 +263,10 @@ index 8fa8954ed4cc310bf5efef77229df5b9f5385946..b7f8e622257551764d1b850a42176f3b
                       std::unique_ptr<HwlPipelineResult> result,
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp b/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..27f9653b3973cb1bffe6b97847a57bb8f923c102
+index 0000000000000000000000000000000000000000..659714e9858820eb7e82b0165881217a3015714f
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensorHost.cpp
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,150 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -300,6 +320,25 @@ index 0000000000000000000000000000000000000000..27f9653b3973cb1bffe6b97847a57bb8
 +  if (!settings.empty()) {
 +    timestamp_source = settings.begin()->second.timestamp_source;
 +    exposure_time = settings.begin()->second.exposure_time;
++  }
++
++  // The request processor hands every buffer over marked as failed, and the
++  // stock sensor flips the mark as it produces the buffer. Here the source's
++  // BeginRequest marks only the buffers it could not queue, so the others start
++  // out as good: a buffer left marked as failed is skipped below, never
++  // collected, and its slot stays with the device. A BLOB that is not a JFIF
++  // picture, or has no result metadata, is not collected below either, so it
++  // stays marked as failed and BeginRequest does not queue it.
++  for (auto& buffer : *buffers) {
++    if (buffer->is_input) {
++      continue;
++    }
++    const bool collected = buffer->format != PixelFormat::BLOB ||
++                           (buffer->dataSpace == HAL_DATASPACE_V0_JFIF && metadata != nullptr);
++    if (!collected) {
++      ALOGE("%s: Dataspace %x of a BLOB is not a JPEG", __FUNCTION__, buffer->dataSpace);
++    }
++    buffer->stream_buffer.status = collected ? BufferStatus::kOk : BufferStatus::kError;
 +  }
 +
 +  // The whole request is queued before any of it is collected, so that all of
@@ -379,10 +418,10 @@ index 0000000000000000000000000000000000000000..27f9653b3973cb1bffe6b97847a57bb8
 +
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/IFrameSource.h b/devices/EmulatedCamera/hwl/IFrameSource.h
-index a0f4d30206ae132f8594375203a44b50e66d1b73..c3c8e4d14bcaad4292ede135da6a638f2e61417f 100644
+index a0f4d30206ae132f8594375203a44b50e66d1b73..fa47c4f89328e87554a46970a13ff2c59c54d716 100644
 --- a/devices/EmulatedCamera/hwl/IFrameSource.h
 +++ b/devices/EmulatedCamera/hwl/IFrameSource.h
-@@ -54,6 +54,50 @@ class IFrameSource {
+@@ -54,6 +54,57 @@ class IFrameSource {
    virtual void CalculateAndAppendNoiseProfile(
        float gain /*in ISO*/, float max_raw_value,
        HalCameraMetadata* result /*out*/) = 0;
@@ -420,9 +459,16 @@ index a0f4d30206ae132f8594375203a44b50e66d1b73..c3c8e4d14bcaad4292ede135da6a638f
 +  }
 +
 +  // A flush or a close is under way: the waits of the capture in progress end
-+  // at once and fail their buffers. Callable from any thread. The next
-+  // BeginRequest takes it back.
++  // at once and fail their buffers. Callable from any thread. The sensor takes
++  // it back with ClearInterrupt when it starts the next capture.
 +  virtual void Interrupt() {
++  }
++
++  // Called by the sensor thread, under the control mutex that Flush holds when
++  // it calls Interrupt, as the sensor takes the next request. A flush that
++  // comes after this call belongs to that request, however soon BeginRequest
++  // follows.
++  virtual void ClearInterrupt() {
 +  }
 +
 +  // Adds the neutral color point that the last still measured, if there is one.
@@ -434,10 +480,10 @@ index a0f4d30206ae132f8594375203a44b50e66d1b73..c3c8e4d14bcaad4292ede135da6a638f
  
  }  // namespace framesource
 diff --git a/devices/EmulatedCamera/hwl/SensorCharacteristics.h b/devices/EmulatedCamera/hwl/SensorCharacteristics.h
-index fae9a5c39eeaeb99ac696b8a1d24baa4aa9a4485..77d146eb2d22947173eb4c0553bfa328ad361626 100644
+index fae9a5c39eeaeb99ac696b8a1d24baa4aa9a4485..355cee16c72667a672d317596d56e165bfb99a9a 100644
 --- a/devices/EmulatedCamera/hwl/SensorCharacteristics.h
 +++ b/devices/EmulatedCamera/hwl/SensorCharacteristics.h
-@@ -121,6 +121,29 @@ struct SensorCharacteristics {
+@@ -121,6 +121,31 @@ struct SensorCharacteristics {
  // Maps logical/physical camera ids to sensor characteristics
  typedef std::unordered_map<uint32_t, SensorCharacteristics> LogicalCharacteristics;
  
@@ -462,12 +508,14 @@ index fae9a5c39eeaeb99ac696b8a1d24baa4aa9a4485..77d146eb2d22947173eb4c0553bfa328
 +  // active array, the first one of the request.
 +  int32_t ae_regions[5] = {0, 0, 0, 0, 0};
 +  int32_t af_regions[5] = {0, 0, 0, 0, 0};
++  // The top of the request's AE target frame rate range; 0 when it gave none.
++  uint32_t ae_max_fps = 0;
 +};
 +
  /*
   * Physical camera settings control
   */
-@@ -144,6 +167,7 @@ struct SensorSettings {
+@@ -144,6 +169,7 @@ struct SensorSettings {
    uint32_t test_pattern_data[4] = {0, 0, 0, 0};
    uint32_t screen_rotation = 0;
    uint32_t timestamp_source = ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN;

@@ -29,6 +29,15 @@ buffers back, so the rest of the request fails at once and a late frame cannot l
 framework has reused. The exposure's values (exposure, gain, white balance, focus, 3A states, the
 neutral color point and the noise profile of a RAW) come from the metadata node's record, matched by
 sequence.
+
+Each video output of a request has its own host stream, so that one exposure fills a preview and a
+recording of one size (on one stream they took an exposure each, which halved the frame rate), and
+the stream of an output that left the configuration closes after half a second, so that the
+platform's restart for the largest open size comes at the mode switch. With auto-exposure on, the
+camera runs at the top of the requested frame rate range, not at its midpoint. A JPEG made here from
+a frame that the device made black (blocked, interrupted, resuming) fails, as a native still does.
+The Exif exposure time and aperture are written only for a positive, finite value.
+
 Stills are encoded by the host with a gap for the Exif data: the HAL builds the Exif data and a
 thumbnail from the result and writes them into the gap in place, then the blob header at the end of
 the buffer. RAW16 is copied from the still node. Discovery opens only /dev/video10 and above, where
@@ -44,8 +53,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/JpegCompressor.h   |  30 +-
  .../hwl/V4l2Characteristics.cpp               | 403 ++++++++
  .../EmulatedCamera/hwl/V4l2Characteristics.h  |  37 +
- .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 922 ++++++++++++++++++
- devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 158 +++
+ .../EmulatedCamera/hwl/V4l2FrameSource.cpp    | 959 ++++++++++++++++++
+ devices/EmulatedCamera/hwl/V4l2FrameSource.h  | 167 +++
  devices/EmulatedCamera/hwl/V4l2Stream.cpp     | 468 +++++++++
  devices/EmulatedCamera/hwl/V4l2Stream.h       | 179 ++++
  devices/EmulatedCamera/hwl/V4l2Thumbnail.cpp  | 180 ++++
@@ -54,7 +63,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>
  devices/EmulatedCamera/hwl/V4l2Utils.h        | 154 +++
  devices/EmulatedCamera/hwl/configs/Android.bp |   6 +
  .../hwl/configs/emu_camera_v4l2.json          | 592 +++++++++++
- 18 files changed, 3682 insertions(+), 13 deletions(-)
+ .../EmulatedCamera/hwl/utils/ExifUtils.cpp    |   6 +-
+ 19 files changed, 3732 insertions(+), 15 deletions(-)
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
  create mode 100644 devices/EmulatedCamera/hwl/V4l2Characteristics.h
  create mode 100644 devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
@@ -141,7 +151,7 @@ index 751b8494c9212015282e821993dbd9a33ecd9e52..a0e21aa0a0c44de02230c3365c4b5a15
  
  #endif  // EMULATOR_CAMERA_HAL_HWL_CONFIG_UTILS_H
 diff --git a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
-index 33053fcb587022d25e66a692c4cd888c16cac43b..daacc97cad7e5f71e3f3e4688b8e4fdef2a8f60f 100644
+index 2e4b787abd8180e8db0772dcb2811cd40055a16f..4672ae56bf78e3884ffc92a3101e268cc3cb7a42 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedSensor.cpp
 @@ -39,6 +39,7 @@
@@ -732,10 +742,10 @@ index 0000000000000000000000000000000000000000..413d37e1691516ce3b8346be27a98014
 +#endif  // HW_EMULATOR_CAMERA_V4L2_CHARACTERISTICS_H
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3bea615df41
+index 0000000000000000000000000000000000000000..6c1f70410a8596cec4d3373c3648d039ae6df0ae
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.cpp
-@@ -0,0 +1,922 @@
+@@ -0,0 +1,959 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -830,6 +840,11 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +constexpr nsecs_t kStillTimeout = 15000000000LL;
 +constexpr nsecs_t kMetaTimeout = 200000000LL;
 +constexpr nsecs_t kIdleStreamLimit = 5000000000LL;
++// The platform runs at the largest size of the streams that are open, and a
++// change restarts it with black frames. The stream of a video output that left
++// the configuration is closed soon, so that the restart comes at the mode
++// switch and not in the recording started a few seconds later.
++constexpr nsecs_t kIdleOutputStreamLimit = 500000000LL;
 +// Frames and stills are queued two at a time at most: one in flight and one
 +// spare, since a request waits for its own buffers.
 +constexpr uint32_t kStreamSlots = 2;
@@ -983,6 +998,7 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +    if (const auto* entry = made_here(camera.sizes.yuv)) {
 +      derive(*entry);
 +    }
++    route.key.output = static_cast<uint32_t>(buffer.stream_buffer.stream_id) + 1;
 +  } else {
 +    return route;
 +  }
@@ -1027,7 +1043,8 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +        in_flight = true;
 +      }
 +    }
-+    if (!in_flight && now - it->second->last_used() > kIdleStreamLimit) {
++    const nsecs_t limit = it->first.output != 0 ? kIdleOutputStreamLimit : kIdleStreamLimit;
++    if (!in_flight && now - it->second->last_used() > limit) {
 +      it = camera->streams.erase(it);
 +    } else {
 +      ++it;
@@ -1121,14 +1138,26 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +  if (buffers == nullptr) {
 +    return BAD_VALUE;
 +  }
-+  interrupted_ = false;
++  // Every request collects the buffers it queued, so a buffer still pending
++  // here was never collected: a request that stopped on its way. Take it back
++  // now, or its slot stays with the device for good and every later request
++  // finds the stream full.
++  if (!pending_.empty()) {
++    ALOGW("%s: %zu buffers of earlier requests were never collected", __FUNCTION__,
++          pending_.size());
++    for (const auto& entry : pending_) {
++      V4l2Stream::Completion unused;
++      entry.second.stream->Wait(entry.second.slot, 0, nullptr, &unused);
++    }
++    pending_.clear();
++  }
 +  // The stills the device takes in this request are one capture. A JPEG made
 +  // here from a video frame is not one of them. The whole request has one
 +  // deadline.
 +  std::map<uint32_t, int> still_count;
 +  bool any_still = false;
 +  for (const auto& buffer : *buffers) {
-+    if (buffer->is_input) {
++    if (buffer->is_input || buffer->stream_buffer.status == google_camera_hal::BufferStatus::kError) {
 +      continue;
 +    }
 +    if (buffer->format == PixelFormat::BLOB || buffer->format == PixelFormat::RAW16) {
@@ -1149,7 +1178,7 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +  std::map<uint32_t, int> stills_queued;
 +  status_t result = OK;
 +  for (auto& buffer : *buffers) {
-+    if (buffer->is_input) {
++    if (buffer->is_input || buffer->stream_buffer.status == google_camera_hal::BufferStatus::kError) {
 +      continue;
 +    }
 +    auto camera_entry = cameras_.find(buffer->camera_id);
@@ -1173,9 +1202,18 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +                               planner->commit(write);
 +                             });
 +      camera.request_timestamp = 0;
-+      if (sensor_settings.frame_duration > 0) {
-+        const uint32_t fps = static_cast<uint32_t>(std::clamp<int64_t>(
-+            std::llround(1e9 / static_cast<double>(sensor_settings.frame_duration)), 1, 240));
++      // The camera cannot vary its rate: with AE on it runs at the top of the
++      // requested range (frame_duration holds the middle of it).
++      double wanted = 0;
++      if (sensor_settings.host.ae_mode != ANDROID_CONTROL_AE_MODE_OFF &&
++          sensor_settings.host.ae_max_fps > 0) {
++        wanted = sensor_settings.host.ae_max_fps;
++      } else if (sensor_settings.frame_duration > 0) {
++        wanted = 1e9 / static_cast<double>(sensor_settings.frame_duration);
++      }
++      if (wanted > 0) {
++        const uint32_t fps =
++            static_cast<uint32_t>(std::clamp<int64_t>(std::llround(wanted), 1, 240));
 +        if (fps != camera.fps) {
 +          camera.fps = fps;
 +          for (auto& stream : camera.streams) {
@@ -1369,6 +1407,15 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +  camera->last_meta = meta;
 +  camera->have_meta = true;
 +  if (pending.derived) {
++    // The device completes a frame it made black (blocked, interrupted, or
++    // starting after a restart) as a good frame; a picture of it is no picture,
++    // and a still of the device's own kind fails then too.
++    if ((meta.flags & (abi::frame_flag::interrupted | abi::frame_flag::blocked |
++                       abi::frame_flag::resuming)) != 0) {
++      ALOGW("%s: the frame for a %ux%u picture was black (flags %x)", __FUNCTION__, buffer->width,
++            buffer->height, meta.flags);
++      return UNKNOWN_ERROR;
++    }
 +    // A picture made here from a video frame: the results first, as the Exif
 +    // data says what the exposure did.
 +    nsecs_t unused = 0;
@@ -1660,10 +1707,10 @@ index 0000000000000000000000000000000000000000..6099f31f3d090bd05e7144ffa2b6c3be
 +}  // namespace android
 diff --git a/devices/EmulatedCamera/hwl/V4l2FrameSource.h b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..95c54d3d5140a5aa56ea707adebd4a420e8461fb
+index 0000000000000000000000000000000000000000..69d9a28818bbaa9c9913d3845140be0a0eb24cc9
 --- /dev/null
 +++ b/devices/EmulatedCamera/hwl/V4l2FrameSource.h
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,167 @@
 +/*
 + * Copyright (C) 2026 The Android Open Source Project
 + *
@@ -1736,6 +1783,9 @@ index 0000000000000000000000000000000000000000..95c54d3d5140a5aa56ea707adebd4a42
 +  void Interrupt() override {
 +    interrupted_ = true;
 +  }
++  void ClearInterrupt() override {
++    interrupted_ = false;
++  }
 +
 + private:
 +  struct StreamKey {
@@ -1746,9 +1796,15 @@ index 0000000000000000000000000000000000000000..95c54d3d5140a5aa56ea707adebd4a42
 +    // The stream serves a size made here: its frames are mapped and copied,
 +    // never imported.
 +    bool derived = false;
++    // The framework stream of a video output, plus one; 0 for a still or a JPEG
++    // made here. Two outputs of one request that need the same frame size have
++    // a host stream each, so that one exposure fills both: on one stream they
++    // would take an exposure each, and halve the frame rate.
++    uint32_t output = 0;
 +    bool operator<(const StreamKey& other) const {
-+      return std::tie(kind, pixel_format, width, height, derived) <
-+             std::tie(other.kind, other.pixel_format, other.width, other.height, other.derived);
++      return std::tie(kind, pixel_format, width, height, derived, output) <
++             std::tie(other.kind, other.pixel_format, other.width, other.height, other.derived,
++                      other.output);
 +    }
 +  };
 +
@@ -1811,7 +1867,7 @@ index 0000000000000000000000000000000000000000..95c54d3d5140a5aa56ea707adebd4a42
 +
 +  std::map<uint32_t, Camera> cameras_;
 +  std::map<const SensorBuffer*, Pending> pending_;
-+  // A flush or a close is under way (Interrupt); the next BeginRequest clears it.
++  // A flush or a close is under way (Interrupt); the sensor clears it as it takes the next request.
 +  std::atomic<bool> interrupted_{false};
 +  // When the request being collected has to be complete, whatever its buffers
 +  // wait for: one deadline for the whole request.
@@ -3970,3 +4026,28 @@ index 0000000000000000000000000000000000000000..6d356b8cc74536c97cfa1b4a2a7d4d5b
 + ]
 +}
 \ No newline at end of file
+diff --git a/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp b/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp
+index 2f3ca4c85933547400d0963174cebf69ded3da70..a113d94a7224bc68f606c446f19967f6a72251ee 100644
+--- a/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp
++++ b/devices/EmulatedCamera/hwl/utils/ExifUtils.cpp
+@@ -1006,8 +1006,10 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
+     }
+   }
+ 
++  // An absent, zero or negative exposure is no measurement: the tags are left out
++  // (the logarithm of zero is infinite, and an infinite float does not convert).
+   ret = metadata.Get(ANDROID_SENSOR_EXPOSURE_TIME, &entry);
+-  if (ret == OK) {
++  if (ret == OK && entry.count == 1 && entry.data.i64[0] > 0) {
+     float exposure_time = 1.0f * entry.data.i64[0] / 1e9;
+     if (!SetExposureTime(exposure_time)) {
+       ALOGE("%s: setting exposure time failed.", __FUNCTION__);
+@@ -1045,7 +1047,7 @@ bool ExifUtilsImpl::SetFromMetadata(const HalCameraMetadata& metadata,
+   }
+ 
+   ret = metadata.Get(ANDROID_LENS_APERTURE, &entry);
+-  if (ret == OK) {
++  if (ret == OK && entry.count == 1 && std::isfinite(entry.data.f[0]) && entry.data.f[0] > 0.f) {
+     if (!SetFNumber(entry.data.f[0])) {
+       ALOGE("%s: setting F number failed.", __FUNCTION__);
+       return false;
