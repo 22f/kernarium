@@ -791,11 +791,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         camera_library_path = "VENDOR/lib64/libgooglecamerahwl_impl.so"
         camera_template_path = "VENDOR/etc/config/emu_camera_v4l2.json"
         camera_init_path = f"VENDOR/etc/init/{camera_layouts.INIT_FILE}"
-        camera_init = camera_layouts.installed()[camera_init_path].decode()
+        camera_provider_init_path = f"SYSTEM_EXT/etc/init/{camera_layouts.PROVIDER_INIT_FILE}"
+        camera_init = camera_layouts.installed()[camera_provider_init_path].decode()
         camera_service = camera_layouts.PROVIDER_SERVICE
         camera_with_cameras = [layout.name for layout in camera_layouts.all_layouts() if layout.has_front]
         camera_start_action = (f"\non {camera_layouts.provider_trigger(camera_with_cameras[0])}\n"
-                               f"    start {camera_service}\n")
+                               f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n")
         camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
         camera_overlay_path = tool.CAMERA_APP_OVERLAY
         camera_app_package = tool.CAMERA_APP_PACKAGE
@@ -1819,7 +1820,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     "ro.boot.              u:object_r:bootloader_prop:s0\n"
                     "persist.sys.usb.config  u:object_r:system_prop:s0 exact string\n"
                     "persist.adb.tls_server.enable  u:object_r:system_adbd_prop:s0 exact bool\n"
-                    "init.svc.  u:object_r:init_service_status_prop:s0\n"
+                    # As the platform types them: every status is private (coredomain reads it) but a few.
+                    "init.svc.  u:object_r:init_service_status_private_prop:s0\n"
+                    "init.svc.adbd  u:object_r:init_service_status_prop:s0 exact string\n"
+                    "init.svc.zygote  u:object_r:init_service_status_prop:s0 exact string\n"
                     "debug.  u:object_r:debug_prop:s0\n"
                     "ro.hardware.  u:object_r:vendor_default_prop:s0\n"
                     "ro.hardware.audio.primary  u:object_r:exported_default_prop:s0 exact string\n"
@@ -5288,35 +5292,51 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             # boot, a start only in the profile action, a layout with cameras that lacks its action, an action on another
             # property than cameraserver's state, and a start anywhere else.
             ("camera-provider-started-at-boot-only", {"entries": {
-                camera_init_path: camera_init.replace("on property:init.svc.cameraserver=running && ", "on ").encode()}},
-             "must start the camera provider in one action for each layout"),
+                camera_provider_init_path: camera_init.replace("on property:init.svc.cameraserver=running && ", "on ").encode()}},
+             "must restart the camera provider in one action for each layout"),
             ("camera-provider-started-in-the-profile-action", {"entries": {
-                camera_init_path: (camera_init.replace(camera_start_action, "").replace(
-                    f"on property:{camera_layouts.SKU_PROPERTY}={camera_with_cameras[0]}\n",
-                    f"on property:{camera_layouts.SKU_PROPERTY}={camera_with_cameras[0]}\n    start {camera_service}\n", 1)).encode()}},
-             "must start the camera provider in one action for each layout"),
+                camera_init_path: camera_layout_files[camera_init_path].decode().replace(
+                    f"on property:{camera_layouts.SKU_PROPERTY}=front\n",
+                    f"on property:{camera_layouts.SKU_PROPERTY}=front\n    start {camera_service}\n", 1).encode()}},
+             "init reads a vendor script in the vendor_init context"),
             ("camera-layout-without-its-provider-action", {"entries": {
-                camera_init_path: camera_init.replace(camera_start_action, "").encode()}},
-             "must start the camera provider in one action for each layout"),
+                camera_provider_init_path: camera_init.replace(camera_start_action, "").encode()}},
+             "must restart the camera provider in one action for each layout"),
             ("camera-provider-action-on-another-property", {"entries": {
-                camera_init_path: camera_init.replace(f"property:{camera_layouts.SERVER_PROPERTY}=running",
+                camera_provider_init_path: camera_init.replace(f"property:{camera_layouts.SERVER_PROPERTY}=running",
                                                       "property:sys.boot_completed=1").encode()}},
-             "must start the camera provider in one action for each layout"),
+             "must restart the camera provider in one action for each layout"),
             ("camera-provider-action-without-the-sku", {"entries": {
-                camera_init_path: camera_init.replace(
+                camera_provider_init_path: camera_init.replace(
                     f"on {camera_layouts.provider_trigger(camera_with_cameras[0])}\n",
                     f"on property:{camera_layouts.SERVER_PROPERTY}=running\n").encode()}},
-             "must start the camera provider in one action for each layout"),
+             "must restart the camera provider in one action for each layout"),
             ("camera-provider-started-for-a-layout-without-cameras", {"entries": {
-                camera_init_path: (camera_init + f"\non {camera_layouts.provider_trigger('none')}\n"
-                                   f"    start {camera_service}\n").encode()}},
-             "must start the camera provider in one action for each layout"),
+                camera_provider_init_path: (camera_init + f"\non {camera_layouts.provider_trigger('none')}\n"
+                                   f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n").encode()}},
+             "must restart the camera provider in one action for each layout"),
             ("camera-provider-started-twice", {"entries": {
-                camera_init_path: camera_init.replace(
-                    camera_start_action, camera_start_action + f"    start {camera_service}\n", 1).encode()}},
-             "must start the camera provider in one action for each layout"),
-            ("camera-provider-init-file-missing", {"entries": {camera_init_path: None}},
-             "nothing starts the camera provider"),
+                camera_provider_init_path: camera_init.replace(
+                    camera_start_action, camera_start_action + f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n", 1).encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-started-not-restarted", {"entries": {
+                camera_provider_init_path: camera_init.replace(
+                    f"    {camera_layouts.PROVIDER_COMMAND} {camera_service}\n", f"    start {camera_service}\n").encode()}},
+             "must restart the camera provider in one action for each layout"),
+            ("camera-provider-init-file-missing", {"entries": {camera_provider_init_path: None}},
+             "kernarium_camera_provider.rc is missing"),
+            ("camera-provider-started-in-the-vendor-file", {"entries": {
+                camera_init_path: (camera_layout_files[camera_init_path].decode() + camera_start_action).encode()}},
+             "init reads a vendor script in the vendor_init context"),
+            ("camera-provider-trigger-in-another-vendor-file", {"entries": {
+                "VENDOR/etc/init/other.rc": camera_start_action.encode()}},
+             "other.rc: the trigger 'on property:init.svc.cameraserver=running"),
+            ("camera-provider-trigger-in-an-odm-file", {"entries": {
+                "ODM/etc/init/other.rc": camera_start_action.encode()}},
+             "other.rc: the trigger 'on property:init.svc.cameraserver=running"),
+            ("vendor-trigger-on-a-private-service-status", {"entries": {
+                "VENDOR/etc/init/other.rc": b"on property:init.svc.cameraserver=running\n    setprop a b\n"}},
+             "labelled init_service_status_private_prop, which vendor_init may not read"),
             ("camera-provider-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                 good_video_contexts.replace("hal_camera_default_exec", "vendor_file").encode()}},
              "hal_camera_default_exec label"),
