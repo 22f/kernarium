@@ -1031,6 +1031,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The tags of the camera path and of the buffers it allocates; the application's own noise (the surface
+# composer's per-frame lines, adb's own polling of the camera folder) is left out.
+FAILURE_LOG_PATTERN = ("V4l2Stream|V4l2FrameSource|EmulatedSensor|EmulatedRequest|CameraService|Camera2Client|Camera3|"
+                       "cameraserver|camera.provider|CameraProvider|CameraX|Aperture|vrend|gralloc|minigbm|virtio|BufferQueue")
+FAILURE_LOG_NOISE = "SurfaceFlinger|adbd|out of bounds transparent region"
+FAILURE_LOG_LINES = 120
+
+
+def print_camera_log(guest: Guest) -> None:
+    """At a failure, the guest's own log lines about the camera path and its buffers (nothing is asserted on them):
+    they tell a failure of the image from one of the runner."""
+    try:
+        text = guest.shell(f"logcat -d -b all | grep -a -E '{FAILURE_LOG_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
+                           f"| tail -n {FAILURE_LOG_LINES}", timeout=120)
+    except Exception as problem:  # the guest may be gone; the failure being reported is the one that matters
+        print(f"(no camera log lines: {problem})", file=sys.stderr)
+        return
+    print("camera log lines of the guest:\n" + text.rstrip(), file=sys.stderr)
+
+
 def main() -> int:
     options = build_parser().parse_args()
     if options.cpus <= 0 or options.boot_timeout <= 0:
@@ -1053,6 +1073,8 @@ def main() -> int:
         return 0
     except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
         print(f"FAIL: {problem}", file=sys.stderr)
+        if guest is not None and not isinstance(problem, boot_android.LauncherError):
+            print_camera_log(guest)
         log = private / "emulator.log"
         if log.is_file():
             print("launcher log tail:\n" + "\n".join(log.read_text(errors="replace").splitlines()[-30:]),

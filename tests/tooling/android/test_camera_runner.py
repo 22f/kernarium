@@ -627,6 +627,34 @@ class FakeGuest:
         return jpeg(4000, 3000) if remote.endswith(".jpg") else self.movie
 
 
+class FailureLogTests(unittest.TestCase):
+    def test_the_camera_log_lines_are_printed_at_a_failure(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        commands: list[str] = []
+        guest.shell = lambda command, timeout=0: (commands.append(command), "E V4l2FrameSource: a line\n")[1]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        self.assertIn("camera log lines of the guest:\nE V4l2FrameSource: a line", err.getvalue())
+        self.assertIn("logcat -d -b all | grep -a -E", commands[0])
+        self.assertIn("vrend", commands[0])
+        self.assertIn("grep -a -v -E 'SurfaceFlinger|adbd", commands[0])
+
+    def test_a_guest_that_is_gone_does_not_hide_the_failure(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+
+        def gone(command: str, timeout: float = 0) -> str:
+            raise OSError("adb: device offline")
+
+        guest.shell = gone
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            runner.print_camera_log(guest)
+        self.assertIn("no camera log lines: adb: device offline", err.getvalue())
+
+
 class VideoAndFrontFlowTests(unittest.TestCase):
     def run_step(self, step, plan, guest) -> None:
         with mock.patch.object(runner.time, "sleep", lambda seconds: None):
