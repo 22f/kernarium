@@ -671,7 +671,13 @@ public:
         if (!prepareStill(camera, entry, running)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
-        NSDictionary* jpeg = @{AVVideoCodecKey: AVVideoCodecTypeJPEG, AVVideoQualityKey: @(request.jpegQuality / 100.0)};
+        // The quality belongs inside the compression properties: iOS raises
+        // (NSInvalidArgumentException) for it at the top level, which refused
+        // every still there.
+        NSDictionary* jpeg = @{
+            AVVideoCodecKey: AVVideoCodecTypeJPEG,
+            AVVideoCompressionPropertiesKey: @{AVVideoQualityKey: @(request.jpegQuality / 100.0)},
+        };
         if (request.raw) {
 #if TARGET_OS_IOS
             OSType rawFormat = 0;
