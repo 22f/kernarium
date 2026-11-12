@@ -63,10 +63,10 @@ index 972791a2f2dcf0e411cb1789c9cd5de0a4093634..9335e0ce538787484b4fc3257d6f0030
  
  /* reset the rendererer - destroy all contexts and resource */
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index c5a35c0def8b1de9801e031a8b5d0f579379492e..ed194126f32678ad6b2da8256e2e8842ec0c1c28 100644
+index 83c185bc243df4afad18a7e6b1caeb3c26833632..771e76ad8c7e04c8cbaa4811fcc1c45cc64ecbe3 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -15174,6 +15174,37 @@ void vrend_renderer_resource_get_info(struct pipe_resource *pres,
+@@ -15183,6 +15183,37 @@ void vrend_renderer_resource_get_info(struct pipe_resource *pres,
     info->stride = util_format_get_nblocksx(res->base.format, u_minify(res->base.width0, 0)) * elsize;
  }
  

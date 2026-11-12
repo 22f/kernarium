@@ -73,8 +73,15 @@ Guest-visible guarantees:
   upload, which is then dropped without an error, so a texture can keep its
   older pixels until it is written again.
 - A texture exported to another context through shared memory is written into
-  its segment at the next fence after it is drawn. A read-back the host driver
-  refuses leaves the texture the newer copy, and the next fence tries again.
+  its segment at the next fence after it is drawn. A read-back into client
+  memory that the host driver refuses at a fence leaves the texture the newer
+  copy, and the next fence tries again; a read-back into a pinned segment is
+  not checked. The read-back of the first export leaves the texture clean when
+  it is refused, because the importer may write the segment before any fence:
+  an importer that reads the segment first sees zeros, and its own frame is
+  never replaced by an older texture. The retry cannot see an importer write,
+  so a buffer with a GL writer and an importer writer can lose the importer's
+  frame to the retry.
 - Images shared through native Metal heaps keep tiled storage but disable
   lossless compression, so a compositor can sample a render target. A Virgl
   import of such a blob is bounded by what backs it; an import that does not

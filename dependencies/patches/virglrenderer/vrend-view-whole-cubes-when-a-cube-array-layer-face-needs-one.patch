@@ -40,7 +40,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
  1 file changed, 9 insertions(+)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index ca0f4c9d085c4b35bb75422317e2a3c69d4847ac..d90a2deb51e34dd6e8fc449f97c0458e0e8889e2 100644
+index f85832777c31831bc98ee61721e4a96a7988de1f..7c5b2d44237f262772c10d87d7d6ce7e12184642 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -2413,6 +2413,15 @@ int vrend_create_surface(struct vrend_context *ctx,

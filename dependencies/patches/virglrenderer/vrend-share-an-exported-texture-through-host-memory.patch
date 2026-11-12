@@ -59,10 +59,23 @@ Either side may hold the newer pixels, and the resource records which:
 The write-back reads the texture with glGetTexImage, which a host whose
 memory budget is full refuses for want of a staging buffer. The renderer
 asks the driver for the outcome of a read-back into client memory, the
-kind that stages, and leaves a texture whose read-back was refused
-marked dirty, so the next fence writes it: clearing the mark would leave
-the importer the older picture for good. A read-back into a pinned
-segment stages nothing and runs as before, with no added call.
+kind that stages, and leaves a texture whose read-back a fence found
+refused marked dirty, so the next fence writes it: clearing the mark
+would leave the importer the older picture for good. The read-back of a
+first export is the exception and leaves the texture clean: the importer
+may write the segment before any fence, as a Venus producer does, and
+the retry would replace that frame with GL's older pixels. What remains
+is what the renderer did before: a texture GL drew before its first
+export, whose first read-back was refused, shows the importer zeros
+until GL draws it again. A read-back into a pinned segment is not
+checked and adds no call.
+
+The retry cannot see the importer write the segment. An importer that
+rewrites it whole after a refused fence and before a retry that
+succeeds has its pixels replaced by GL's older ones. That needs a
+buffer with a GL writer and an importer writer between two read-backs
+that succeed; a swapchain image has one, the importer, and GL only
+samples it.
 
 Neither direction adds a host-side fence: ordering comes from the
 guest, exactly as it does for an imported blob. A buffer that is never
@@ -71,9 +84,9 @@ and the whole export conversion is Metal-host only, so a host with
 dma-buf keeps its GBM export untouched.
 ---
  src/proxy/proxy_context.c  |  23 ++-
- src/vrend/vrend_renderer.c | 332 +++++++++++++++++++++++++++++++++----
+ src/vrend/vrend_renderer.c | 341 ++++++++++++++++++++++++++++++++++---
  src/vrend/vrend_renderer.h |   8 +
- 3 files changed, 331 insertions(+), 32 deletions(-)
+ 3 files changed, 340 insertions(+), 32 deletions(-)
 
 diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
 index 4f87d5accabf1929a5b174d4a5f95419aa699e61..64f318d741670840cddc388cb88d257723323687 100644
@@ -121,7 +134,7 @@ index 4f87d5accabf1929a5b174d4a5f95419aa699e61..64f318d741670840cddc388cb88d2577
        close_res_fd = true;
     }
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a20502360f 100644
+index d37273d63b85e55c0615f1ea787faee596053fa6..a2ea2d4a84a9ec5990c44b1564e37a61e427dbea 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -3120,6 +3120,18 @@ static void vrend_hw_set_zsurf_texture(struct vrend_context *ctx)
@@ -209,7 +222,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     // enable primitive-mode-dependent shader variants
     if (sub_ctx->prim_mode != (int)info->mode) {
        // Only refresh shader program when switching in/out of GL_POINTS primitive mode
-@@ -7606,12 +7649,230 @@ static void vrend_pipe_resource_detach_iov(struct pipe_resource *pres,
+@@ -7606,12 +7649,239 @@ static void vrend_pipe_resource_detach_iov(struct pipe_resource *pres,
     res->num_iovs = 0;
  }
  
@@ -252,8 +265,10 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
 + * segment is written by the GPU, queued behind the drawing, and the fence the
 + * renderer creates next covers the copy. `now` has the pixels in the segment
 + * on return instead, for a reader that waits on no later fence. Returns false
-+ * when the host driver had no room for the read-back: the segment still holds
-+ * the older pixels, and the caller keeps the texture marked as the newer. */
++ * when the host driver had no room for a read-back into client memory: the
++ * segment still holds the older pixels, and the caller may keep the texture
++ * marked as the newer. A read-back into a pinned segment is not checked, so it
++ * always returns true. */
 +static bool vrend_resource_write_shm_export(struct vrend_resource *res, bool now)
 +{
 +   if (!res->shm_import_borrowed || !res->shm_import_map)
@@ -276,9 +291,11 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
 +      return true;
 +   }
 +
-+   /* A read-back into a pinned segment is a GPU copy that stages nothing, and
-+    * the renderer does not wait for it. One into client memory stages the
-+    * texture in a buffer the host driver may refuse, and waits anyway. */
++   /* A read-back into a pinned segment is a GPU copy the renderer does not
++    * wait for, and it asks the driver for no answer: both queries would
++    * synchronize with the driver's worker thread at every fence. One into
++    * client memory stages the texture in a buffer the host driver may refuse,
++    * and waits anyway, so the answer costs nothing more. */
 +   const bool staged = !res->shm_import_pbo || now;
 +   if (staged)
 +      vrend_drain_gl_errors();
@@ -321,7 +338,11 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
 +
 +/* A texture whose read-back the host driver refused stays on the list: the
 + * next fence tries again, and until one succeeds the importer reads older
-+ * pixels than GL holds, which is the lesser harm than dropping the frame. */
++ * pixels than GL holds, which is the lesser harm than dropping the frame.
++ * The renderer cannot see an importer write the segment, so an importer that
++ * rewrites the whole segment before a retry succeeds has its pixels replaced
++ * by the older ones: a buffer needs a GL writer and an importer writer
++ * between two read-backs that succeed for that to happen. */
 +static void vrend_resource_flush_shm_export(struct vrend_resource *res, bool now)
 +{
 +   if (!vrend_resource_write_shm_export(res, now))
@@ -413,9 +434,10 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
 +
 +   /* The importer's first read must see what this texture already holds,
 +    * and it may read before any later fence. A refused read-back leaves the
-+    * texture dirty, so a later fence writes it. */
-+   if (!vrend_resource_write_shm_export(gr, true))
-+      vrend_resource_gl_write(gr, true);
++    * texture clean, not dirty: the importer may write the segment before the
++    * next fence, as a Venus producer does, and GL's older pixels must not
++    * then replace that frame. */
++   (void)vrend_resource_write_shm_export(gr, true);
 +
 +   virgl_info("%s: sharing a %ux%u texture through a %" PRIu64
 +              " byte segment, stride %u%s\n", __func__, gr->base.width0,
@@ -442,7 +464,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
        *fd = os_dupfd_cloexec(shm_res->host_shm->fd);
        return *fd >= 0 ? VIRGL_RESOURCE_FD_SHM : VIRGL_RESOURCE_FD_INVALID;
     }
-@@ -9309,28 +9570,10 @@ static int vrend_resource_import_shm(struct vrend_resource *gr,
+@@ -9309,28 +9579,10 @@ static int vrend_resource_import_shm(struct vrend_resource *gr,
                   offset);
     }
  
@@ -475,7 +497,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
  
     gr->shm_import_map = map;
     gr->shm_import_size = res->map_size;
-@@ -9347,6 +9590,10 @@ void vrend_resource_sync_shm_import(struct vrend_resource *res)
+@@ -9347,6 +9599,10 @@ void vrend_resource_sync_shm_import(struct vrend_resource *res)
     if (likely(!res || !res->shm_import_map || res->shm_import_image))
        return;
  
@@ -486,7 +508,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     const struct vrend_format_table *entry = &tex_conv_table[res->shm_import_format];
     const uint32_t blocksize = util_format_get_blocksize(res->shm_import_format);
     const uint32_t width = res->base.width0;
-@@ -9383,7 +9630,11 @@ void vrend_renderer_resource_destroy(struct vrend_resource *res)
+@@ -9383,7 +9639,11 @@ void vrend_renderer_resource_destroy(struct vrend_resource *res)
     if (res->shm_import_image)
        virgl_egl_host_pointer_image_destroy(egl, res->shm_import_image);
  #endif
@@ -499,7 +521,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
        munmap(res->shm_import_map, res->shm_import_size);
  
     if (has_bit(res->storage_bits, VREND_STORAGE_GL_TEXTURE)) {
-@@ -9784,6 +10035,11 @@ static int vrend_renderer_transfer_write_iov(struct vrend_context *ctx,
+@@ -9784,6 +10044,11 @@ static int vrend_renderer_transfer_write_iov(struct vrend_context *ctx,
  {
     void *data;
  
@@ -511,7 +533,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     if ((is_only_bit(res->storage_bits, VREND_STORAGE_GUEST_MEMORY) ||
         has_bit(res->storage_bits, VREND_STORAGE_HOST_SYSTEM_MEMORY)) && res->iov) {
        return virgl_copy_iovec(iov, num_iovs, info->offset,
-@@ -10453,6 +10709,9 @@ static int vrend_renderer_transfer_send_iov(struct vrend_context *ctx,
+@@ -10453,6 +10718,9 @@ static int vrend_renderer_transfer_send_iov(struct vrend_context *ctx,
                                              const struct iovec *iov, int num_iovs,
                                              const struct vrend_transfer_info *info)
  {
@@ -521,7 +543,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     if ((is_only_bit(res->storage_bits, VREND_STORAGE_GUEST_MEMORY) ||
         has_bit(res->storage_bits, VREND_STORAGE_HOST_SYSTEM_MEMORY)) && res->iov) {
        return virgl_copy_iovec(res->iov, res->num_iovs, info->box->x,
-@@ -11212,6 +11471,12 @@ void vrend_renderer_resource_copy_region(struct vrend_context *ctx,
+@@ -11212,6 +11480,12 @@ void vrend_renderer_resource_copy_region(struct vrend_context *ctx,
        return;
     }
  
@@ -534,7 +556,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     VREND_DEBUG(dbg_copy_resource, ctx, "COPY_REGION: From %s ms:%d [%d, %d, %d]+[%d, %d, %d] lvl:%d "
                                     "To %s ms:%d [%d, %d, %d]\n",
                                     util_format_name(src_res->base.format), src_res->base.nr_samples,
-@@ -11683,9 +11948,6 @@ static void vrend_renderer_blit_int(struct vrend_context *ctx,
+@@ -11683,9 +11957,6 @@ static void vrend_renderer_blit_int(struct vrend_context *ctx,
        .swizzle =  {0, 1, 2, 3}
     };
  
@@ -544,7 +566,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     /* We create the texture views in this function instead of doing it in
      * vrend_renderer_prepare_blit_extra_info because we also delete them here */
     if ((src_res->base.format != info->src.format) && has_feature(feat_texture_view) &&
-@@ -11773,6 +12035,18 @@ void vrend_renderer_blit(struct vrend_context *ctx,
+@@ -11773,6 +12044,18 @@ void vrend_renderer_blit(struct vrend_context *ctx,
        return;
     }
  
@@ -563,7 +585,7 @@ index d37273d63b85e55c0615f1ea787faee596053fa6..fc0d7f8cb7e9c5171abddd1d1db972a2
     if (info->render_condition_enable == false)
        vrend_pause_render_condition(ctx, true);
  
-@@ -11872,6 +12146,8 @@ int vrend_renderer_create_fence(struct vrend_context *ctx,
+@@ -11872,6 +12155,8 @@ int vrend_renderer_create_fence(struct vrend_context *ctx,
     fence->flags = flags;
     fence->fence_id = fence_id;
  
