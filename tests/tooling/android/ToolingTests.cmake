@@ -141,6 +141,16 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 30)
 
+# The orientation runner without a guest: the wire against the golden frames,
+# the parsers of the dumps it reads, the rotation each request earns, its host
+# against a fake guest on loopback, and the probe application's manifest.
+uml_add_tooling_test(
+    NAME android17-orientation-runner
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_orientation_runner.py
+    LABELS android
+    TIMEOUT 60)
+
 # The Wi-Fi network runner's reading of the guest's status, listing, dumps and
 # overlay list, and of the boot script's settle time; its upgrade checks against
 # scripted answers.
