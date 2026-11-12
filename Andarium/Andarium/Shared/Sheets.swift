@@ -25,8 +25,8 @@ struct NewGuestSheet: View {
                     if !model.canCreate {
                         NoticeCard(
                             symbol: "externaldrive.badge.exclamationmark", color: .orange,
-                            title: "Not enough free space",
-                            text: "Setting up needs \(Formats.size(bytes: model.createRequirementBytes)) free for the guest's setup. This \(model.host.name) has \(Formats.size(bytes: model.host.freeStorageBytes)). Free up space in Settings › General › \(model.host.name) Storage."
+                            title: StartSpaceWords.title,
+                            text: String(localized: "Setting up the virtual machine needs \(Formats.size(bytes: model.createRequirementBytes)) of free space. This \(model.host.name) has \(Formats.size(bytes: model.host.freeStorageBytes)). Free up space in Settings › General › \(model.host.name) Storage.")
                         )
                     }
                     StoragePanel(guest: draftBinding, host: model.host, stops: model.capacityStopsGiB)
@@ -44,7 +44,7 @@ struct NewGuestSheet: View {
                 .padding(.bottom, 24)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("New guest")
+            .navigationTitle("New virtual machine")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -164,7 +164,7 @@ struct InfoSheet: View {
                     LabeledContent("Kernel", value: model.system.kernel)
                     LabeledContent("Architecture", value: model.system.architecture)
                     if !model.system.abis.isEmpty {
-                        LabeledContent("Supported architectures", value: model.system.abis.joined(separator: ", "))
+                        LabeledContent("Supported architectures", value: ListWords.join(model.system.abis))
                     }
                 }
                 Section {
@@ -204,5 +204,8 @@ struct InfoSheet: View {
                 }
             }
         }
+        // Tall enough for every row, in any language, without scrolling to
+        // the last one; the system keeps it inside a smaller window.
+        .presentationSizing(FixedSheetSizing(width: 540, height: 900))
     }
 }

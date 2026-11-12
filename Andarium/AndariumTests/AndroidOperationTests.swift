@@ -209,7 +209,7 @@ struct AndroidOperationTests {
         model.createBugReport()
         #expect(await eventually { model.alert != nil })
         #expect(model.alert?.title == "Bug report not created")
-        #expect(model.alert?.message == "The guest is already making a bug report.")
+        #expect(model.alert?.message == "The virtual machine is already making a bug report.")
         #expect(model.busy == nil)
     }
 
@@ -263,19 +263,19 @@ struct AndroidOperationTests {
 
     @Test func theFailuresHaveTheirWords() {
         #expect(AdbFailure(.refused, activity: .bugReport).message
-            == "The guest isn\u{2019}t ready to make a bug report. Try again in a moment.")
+            == "The virtual machine isn\u{2019}t ready to make a bug report. Try again in a moment.")
         #expect(AdbFailure(.notAnswering, activity: .installApp).message
-            == "The guest isn\u{2019}t answering yet. Try again once it has started.")
+            == "The virtual machine isn\u{2019}t answering yet. Try again once it has started.")
         #expect(AdbFailure(.keyRejected, activity: .bugReport).message
-            == "The guest didn\u{2019}t accept Andarium\u{2019}s key. Restart the guest and try again.")
+            == "The virtual machine didn\u{2019}t accept Andarium\u{2019}s key. Restart the virtual machine and try again.")
         #expect(AdbFailure(.guestGone, activity: .installApp).message
-            == "The guest\u{2019}s debugging service restarted before the app was installed. Try again.")
+            == "The virtual machine\u{2019}s debugging service restarted before the app was installed. Try again.")
         #expect(AdbFailure(.streamClosed, activity: .bugReport).message
-            == "The guest\u{2019}s debugging service restarted before the bug report was finished. Try again.")
+            == "The virtual machine\u{2019}s debugging service restarted before the bug report was finished. Try again.")
         // Turning USB debugging off restarts adbd under a transfer; the browser
         // works either way, so it is not told to check the setting.
         #expect(AdbFailure(.guestGone, activity: .files).message
-            == "The guest\u{2019}s debugging service restarted before the transfer finished. Try again.")
+            == "The virtual machine\u{2019}s debugging service restarted before the transfer finished. Try again.")
         #expect(BugReportStaging.NoRoom(bytes: 300 << 20, device: "iPad").errorDescription
             == "There isn\u{2019}t enough free space on this iPad for the report (300 MiB).")
     }
@@ -311,7 +311,7 @@ struct AndroidOperationTests {
         let (model, driver) = running()
         driver.install = { update in
             update(BusyUpdate(progress: 0.4))
-            update(BusyUpdate(progress: 0.8, detail: "The guest is installing the app\u{2026}", cancellable: false))
+            update(BusyUpdate(progress: 0.8, detail: "The virtual machine is installing the app\u{2026}", cancellable: false))
         }
         let url = try apk(named: "Signal-7.21.4.apk")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -322,7 +322,7 @@ struct AndroidOperationTests {
         // The overlay is still up, and says how it went.
         let busy = try #require(model.busy)
         #expect(busy.title == "App installed")
-        #expect(busy.detail.hasSuffix("Signal-7.21.4.apk is installed in the guest."))
+        #expect(busy.detail.hasSuffix("Signal-7.21.4.apk is installed in the virtual machine."))
         #expect(busy.result?.failed == false)
         #expect(busy.progress == nil && busy.cancel == nil)
         #expect(model.alert == nil)
@@ -337,7 +337,7 @@ struct AndroidOperationTests {
         let (model, driver) = running()
         let gate = Gate()
         driver.install = { update in
-            update(BusyUpdate(progress: 0.8, detail: "The guest is installing the app\u{2026}", cancellable: false))
+            update(BusyUpdate(progress: 0.8, detail: "The virtual machine is installing the app\u{2026}", cancellable: false))
             while !gate.isOpen { try await Task.sleep(for: .milliseconds(5)) }
         }
         let url = try apk(named: "a.apk")
@@ -345,7 +345,7 @@ struct AndroidOperationTests {
         model.installPicked(url)
         #expect(model.busy?.cancel != nil)
         #expect(await eventually { model.busy?.cancel == nil })
-        #expect(model.busy?.detail == "The guest is installing the app\u{2026}")
+        #expect(model.busy?.detail == "The virtual machine is installing the app\u{2026}")
         gate.release()
         #expect(await eventually { model.busy?.result != nil })
     }
@@ -582,21 +582,21 @@ struct PackageInstallMessagesTests {
             "PARSE_FAILED_NO_CERTIFICATES": "The app isn\u{2019}t signed correctly.",
             "PARSE_FAILED_INCONSISTENT_CERTIFICATES": "The app isn\u{2019}t signed correctly.",
             "PARSE_FAILED_CERTIFICATE_ENCODING": "The app isn\u{2019}t signed correctly.",
-            "FAILED_UPDATE_INCOMPATIBLE": "A version of this app signed by someone else is installed. Uninstall it in the guest first.",
-            "FAILED_SHARED_USER_INCOMPATIBLE": "A version of this app signed by someone else is installed. Uninstall it in the guest first.",
+            "FAILED_UPDATE_INCOMPATIBLE": "A version of this app signed by someone else is installed. Uninstall it in the virtual machine first.",
+            "FAILED_SHARED_USER_INCOMPATIBLE": "A version of this app signed by someone else is installed. Uninstall it in the virtual machine first.",
             "FAILED_VERSION_DOWNGRADE": "A newer version of this app is already installed.",
-            "FAILED_OLDER_SDK": "This app needs a newer system than this guest runs.",
-            "FAILED_DEPRECATED_SDK_VERSION": "This app was made for a system version that this guest no longer installs.",
+            "FAILED_OLDER_SDK": "This app needs a newer system than this virtual machine runs.",
+            "FAILED_DEPRECATED_SDK_VERSION": "This app was made for a system version that this virtual machine no longer installs.",
             "FAILED_NO_MATCHING_ABIS": "This app has no code for this device\u{2019}s processor.",
-            "FAILED_INSUFFICIENT_STORAGE": "The guest doesn\u{2019}t have enough free space. Free some up in the guest, or give it more storage with Resize.",
+            "FAILED_INSUFFICIENT_STORAGE": "The virtual machine doesn\u{2019}t have enough free space. Free some up in the virtual machine, or give it more storage with Resize.",
             "FAILED_MISSING_SPLIT": "This app comes in several parts, which Andarium can\u{2019}t install yet.",
-            "FAILED_MISSING_SHARED_LIBRARY": "The app needs a system library this guest doesn\u{2019}t have.",
+            "FAILED_MISSING_SHARED_LIBRARY": "The app needs a system library this virtual machine doesn\u{2019}t have.",
             "FAILED_DUPLICATE_PERMISSION": "The app conflicts with an app that\u{2019}s already installed.",
             "FAILED_CONFLICTING_PROVIDER": "The app conflicts with an app that\u{2019}s already installed.",
             "FAILED_DUPLICATE_PACKAGE": "The app conflicts with an app that\u{2019}s already installed.",
-            "FAILED_USER_RESTRICTED": "The guest refused to install the app.",
-            "FAILED_VERIFICATION_FAILURE": "The guest refused to install the app.",
-            "FAILED_ABORTED": "The guest refused to install the app.",
+            "FAILED_USER_RESTRICTED": "The virtual machine refused to install the app.",
+            "FAILED_VERIFICATION_FAILURE": "The virtual machine refused to install the app.",
+            "FAILED_ABORTED": "The virtual machine refused to install the app.",
         ]
         #expect(Set(PackageInstallMessages.mappedCodes) == Set(expected.keys))
         for (code, message) in expected {
@@ -608,7 +608,7 @@ struct PackageInstallMessagesTests {
 
     @Test func anUnknownCodeIsNamed() {
         #expect(PackageInstallMessages.failure(inOutput: "Failure [INSTALL_FAILED_TEST_ONLY: x]\n")
-            == "The guest couldn\u{2019}t install the app (FAILED_TEST_ONLY).")
+            == "The virtual machine couldn\u{2019}t install the app (FAILED_TEST_ONLY).")
     }
 
     @Test func successIsNil() {
@@ -617,8 +617,8 @@ struct PackageInstallMessagesTests {
     }
 
     @Test func outputWithoutAVerdictIsAFailure() {
-        #expect(PackageInstallMessages.failure(inOutput: "") == "The guest couldn\u{2019}t install the app.")
-        #expect(PackageInstallMessages.failure(inOutput: "Failure\n") == "The guest couldn\u{2019}t install the app.")
+        #expect(PackageInstallMessages.failure(inOutput: "") == "The virtual machine couldn\u{2019}t install the app.")
+        #expect(PackageInstallMessages.failure(inOutput: "Failure\n") == "The virtual machine couldn\u{2019}t install the app.")
     }
 
     @Test func theCodeIsReadWhateverFollowsIt() {

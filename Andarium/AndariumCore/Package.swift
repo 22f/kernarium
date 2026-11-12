@@ -9,6 +9,7 @@ import PackageDescription
 // applications decide the same way.
 let package = Package(
     name: "AndariumCore",
+    defaultLocalization: "en",
     platforms: [.macOS("27.0"), .iOS("27.0")],
     products: [
         .library(name: "AndariumCore", targets: ["AndariumCore"]),
@@ -24,7 +25,8 @@ let package = Package(
     targets: [
         .target(
             name: "AndariumCore",
-            dependencies: [.product(name: "GuestHostCore", package: "Core")]
+            dependencies: [.product(name: "GuestHostCore", package: "Core")],
+            resources: [.process("Resources/Localizable.xcstrings")]
         ),
         // Simulated controllers and the guest end of the gamepad wire, for tests
         // and the probe tool. The application never links it (the App Store

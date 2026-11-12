@@ -179,9 +179,9 @@ struct SendFeedbackSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Mail can\u{2019}t send from this \(model.app.host.name)", tableName: "Feedback")
                     .font(.subheadline.weight(.semibold))
-                Text(
-                    "Feedback is sent with the Mail app. Add a mail account in Settings \u{203A} Apps \u{203A} Mail \u{203A} Mail Accounts, then come back.",
-                    tableName: "Feedback")
+                Text(String(
+                    localized: "Feedback is sent with the Mail app. Add a mail account in Settings \u{203A} Apps \u{203A} Mail \u{203A} Mail Accounts, then come back.",
+                    table: "Feedback").keepingTogether)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -242,7 +242,9 @@ struct SendFeedbackSheet: View {
                 if state.attachments.exceedsWarningSize {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .accessibilityHidden(true)
-                    Text("\(count) \u{00B7} \(total). Some mail services refuse mail over 20 MiB.", tableName: "Feedback")
+                    Text(String(
+                        localized: "\(count) \u{00B7} \(total). Some mail services refuse mail over 20 MiB.",
+                        table: "Feedback").keepingTogether)
                 } else {
                     Text("\(count) \u{00B7} \(total)", tableName: "Feedback")
                 }
@@ -365,7 +367,7 @@ struct SendFeedbackSheet: View {
     private var information: some View {
         @Bindable var model = model
         return VStack(alignment: .leading, spacing: 4) {
-            Text("\u{2014}")
+            Text(verbatim: "\u{2014}")
                 .foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
             Text(model.information.text)
@@ -577,7 +579,7 @@ struct SendFeedbackSteps: View {
                 .foregroundStyle(.white)
                 .frame(width: badge, height: badge)
                 .background(Color.accentColor, in: .circle)
-            Text(words)
+            Text(String(localized: words).keepingTogether)
                 .font(font)
                 .fixedSize(horizontal: false, vertical: true)
         }

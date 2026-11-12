@@ -75,4 +75,9 @@ TIP_JAR_PLIST_DEFINITION = $(TIP_JAR_PLIST_$(TIP_JAR_NAMED):default=TIP_JAR=1)
 // names as above, an empty set excluding the catalog and any other excluding
 // nothing.
 TIP_JAR_CATALOG_ = TipJar.xcstrings
-EXCLUDED_SOURCE_FILE_NAMES = $(TIP_JAR_CATALOG_$(TIP_JAR_NAMED):default=)
+// The Feedback string table is compiled only where Send feedback is. An empty
+// address names the setting FEEDBACK_CATALOG_ and excludes the catalog; any
+// other lands on an undefined name and excludes nothing. The project's
+// AppStore setting of this name lists the JIT catalog and inherits this one.
+FEEDBACK_CATALOG_ = Feedback.xcstrings
+EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=) $(TIP_JAR_CATALOG_$(TIP_JAR_NAMED):default=)

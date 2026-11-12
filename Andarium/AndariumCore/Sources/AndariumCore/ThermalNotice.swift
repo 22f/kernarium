@@ -13,8 +13,8 @@ public struct ThermalNotice: Equatable, Sendable {
     public static let visibleFor = Duration.seconds(30)
 
     /// The words of the notice.
-    public static let text = "Frame rate lowered while this device is hot"
-    public static let dismissLabel = "Dismiss"
+    public static let text = String(localized: "Frame rate lowered while this device is hot", bundle: .module)
+    public static let dismissLabel = String(localized: "Dismiss", bundle: .module)
 
     /// A notice is up.
     public private(set) var isShowing = false
