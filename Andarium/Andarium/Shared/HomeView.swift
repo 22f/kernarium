@@ -76,17 +76,17 @@ struct HomeView: View {
         }
         .microphoneAccessAlert()
         .locationAccessAlert()
-        .alert("Erase guest?", isPresented: $model.confirmingErase) {
-            Button("Erase guest", role: .destructive) { model.erase() }
+        .alert("Erase virtual machine?", isPresented: $model.confirmingErase) {
+            Button("Erase virtual machine", role: .destructive) { model.erase() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count))
+            Text(SnapshotWords.eraseMessage(snapshots: model.snapshots.count).keepingTogether)
         }
-        .alert(StartSpace.title, isPresented: $model.startBlocked) {
+        .alert(StartSpaceWords.title, isPresented: $model.startBlocked) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(StartSpace(neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes)
-                .message(device: model.host.name))
+            Text(StartSpaceWords.message(
+                neededBytes: Limits.startReserveBytes, freeBytes: model.host.freeStorageBytes, device: model.host.name).keepingTogether)
         }
     }
 
@@ -145,7 +145,7 @@ struct HomeView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// JIT, right below Guest system, in the builds that have it. An App Store
+    /// JIT, right below Virtual machine, in the builds that have it. An App Store
     /// build has none and nothing takes its place.
     @ViewBuilder
     private var developmentSections: some View {
@@ -187,7 +187,7 @@ struct HomeView: View {
         if model.lowSpace {
             NoticeCard(
                 symbol: "externaldrive.badge.exclamationmark", color: .orange,
-                title: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)",
+                title: String(localized: "\(Formats.size(bytes: model.host.freeStorageBytes)) free on this \(model.host.name)"),
                 text: SnapshotWords.lowSpaceText(
                     hasSnapshots: model.snapshots.count > 0, startReserve: Formats.size(bytes: Limits.startReserveBytes),
                     device: model.host.name)
@@ -222,8 +222,8 @@ struct HomeView: View {
             // A restored older snapshot says itself that the next start updates it.
             NoticeCard(
                 symbol: "arrow.down.circle.fill", color: .accentColor,
-                title: "System image updated",
-                text: "Andarium system image is updated to \(ReleaseLabel.revision(of: release)). The next start finishes the update and takes a little longer."
+                title: String(localized: "System image updated"),
+                text: String(localized: "Andarium system image is updated to \(ReleaseLabel.revision(of: release)). The next start finishes the update and takes a little longer.")
             )
         case .unfinishedUpdate(let release, let canRetry, let canRestore):
             UnfinishedUpdateCard(release: release, canRetry: canRetry, canRestore: canRestore)
@@ -241,8 +241,8 @@ struct HomeView: View {
             case .closedInBackground:
                 NoticeCard(
                     symbol: "moon.zzz.fill", color: .secondary,
-                    title: "iOS closed Andarium",
-                    text: "The guest was shut down in the background.",
+                    title: String(localized: "iOS closed Andarium"),
+                    text: String(localized: "The virtual machine was shut down in the background."),
                     onClose: { withAnimation { model.notice = nil } }
                 )
             case .sessionEnded(let ended):
@@ -327,11 +327,11 @@ struct StartButton: View {
     private var blocked: Bool { !model.plan.allowsStart || !model.host.runsGuestGraphics }
 
     private var title: String {
-        guard model.guest != nil, model.plan.allowsStart else { return "Start" }
+        guard model.guest != nil, model.plan.allowsStart else { return String(localized: "Start") }
         switch model.bootKind(.normal) {
-        case .firstStart: return "Start and set up"
-        case .upgrade: return "Update and start"
-        default: return "Start"
+        case .firstStart: return String(localized: "Start and set up")
+        case .upgrade: return String(localized: "Update and start")
+        default: return String(localized: "Start")
         }
     }
 }
@@ -388,7 +388,7 @@ struct WelcomeView: View {
             Spacer(minLength: 20)
             StackMark(lit: false, width: 150)
                 .padding(.bottom, 34)
-            Text("No guest yet")
+            Text("No virtual machine yet")
                 .font(.title2.weight(.bold))
             if !model.host.runsGuestGraphics {
                 NoticeCard(
@@ -402,7 +402,7 @@ struct WelcomeView: View {
             Button {
                 model.sheet = .create
             } label: {
-                Text("Set up guest")
+                Text("Set up virtual machine")
                     .font(.body.weight(.semibold))
                     .frame(width: 220, height: 50)
             }
@@ -436,7 +436,7 @@ struct NoticeCard: View {
     let text: String
     var action: NoticeAction?
     /// What VoiceOver says for the close button.
-    var closeLabel = "Dismiss"
+    var closeLabel = String(localized: "Dismiss")
     var onClose: (() -> Void)?
 
     var body: some View {
@@ -446,8 +446,8 @@ struct NoticeCard: View {
                 .foregroundStyle(color)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(text)
+                Text(title.keepingTogether).font(.subheadline.weight(.semibold))
+                Text(text.keepingTogether)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -516,13 +516,13 @@ struct UnfinishedUpdateCard: View {
         let revision = ReleaseLabel.revision(of: release)
         return switch (canRetry, canRestore) {
         case (true, true):
-            "The start that updates to \(revision) did not reach its end. Start tries it again, or Restore puts back your data from before the update."
+            String(localized: "The update to \(revision) did not finish. Update and start tries it again, or Restore puts back your data from before the update.")
         case (true, false):
-            "The start that updates to \(revision) did not reach its end. Start tries it again, or erase the guest to start over."
+            String(localized: "The update to \(revision) did not finish. Update and start tries it again, or erase the virtual machine to start over.")
         case (false, true):
-            "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the guest to start over."
+            String(localized: "This app version carries a different release than the update that did not finish. Restore puts back your data from before it, or erase the virtual machine to start over.")
         case (false, false):
-            "The start that updates to \(revision) did not reach its end, and nothing from before it is left to put back. Erase the guest to start over."
+            String(localized: "The update to \(revision) did not finish, and nothing from before it is left to put back. Erase the virtual machine to start over.")
         }
     }
 }
@@ -562,7 +562,7 @@ struct RecoveryErasePanel: View {
                 } label: {
                     HStack(spacing: 12) {
                         IconTile(symbol: "trash.fill", color: .red)
-                        Text("Erase guest…")
+                        Text("Erase virtual machine…")
                             .foregroundStyle(.red)
                         Spacer()
                         if let guest = model.guest {

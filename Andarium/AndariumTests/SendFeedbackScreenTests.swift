@@ -189,7 +189,7 @@ struct SendFeedbackScreenTests {
         sheet.createBugReport()
         #expect(await eventually { sheet.failure != nil })
         #expect(sheet.failure?.title == "Bug report not created")
-        #expect(sheet.failure?.message == "The guest isn\u{2019}t ready to make a bug report. Try again in a moment.")
+        #expect(sheet.failure?.message == "The virtual machine isn\u{2019}t ready to make a bug report. Try again in a moment.")
         #expect(fixture.app.alert == nil && fixture.app.busy == nil && !fixture.app.busyOverSheet)
         #expect(sheet.form.attachments.isEmpty)
         sheet.close()

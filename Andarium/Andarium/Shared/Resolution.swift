@@ -8,25 +8,26 @@ import UIKit
 /// no-break spaces and is the same in every language; VoiceOver reads "×" as
 /// "multiplied by", so its words are "by".
 enum ResolutionWords {
-    static let title = "Resolution"
-    static let change = "Change"
-    static let changeAccessibility = "Change resolution"
-    static let native = "Native"
-    static let fastest = "Fastest"
+    static let title = String(localized: "Resolution")
+    static let change = String(localized: "Change")
+    static let changeAccessibility = String(localized: "Change resolution")
+    static let native = String(localized: "Native")
+    static let fastest = String(localized: "Fastest")
 
     /// "1206 × 2334", never broken across lines.
     static func pixels(_ layout: GuestDisplayLayout) -> String {
         "\(layout.width)\u{00A0}\u{00D7}\u{00A0}\(layout.height)"
     }
 
-    /// "1206 by 2334".
+    /// "1206 by 2334". The numbers go in as text, so the language's digit
+    /// grouping does not turn 1206 into 1,206.
     static func spokenPixels(_ layout: GuestDisplayLayout) -> String {
-        "\(layout.width) by \(layout.height)"
+        String(localized: "\(String(layout.width)) by \(String(layout.height))")
     }
 
     /// "480 dpi".
     static func dpi(_ layout: GuestDisplayLayout) -> String { dpi(layout.dotsPerInch) }
-    static func dpi(_ dotsPerInch: Int) -> String { "\(dotsPerInch) dpi" }
+    static func dpi(_ dotsPerInch: Int) -> String { String(localized: "\(dotsPerInch) dpi") }
 
     /// The name of an end of the list: "Native" or "Fastest".
     static func name(of end: ResolutionChoices.End) -> String {

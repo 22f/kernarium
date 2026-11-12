@@ -25,8 +25,8 @@ public enum InstallRefusal: Equatable, Sendable {
 
     public var message: String {
         switch self {
-        case .notApk: "This isn\u{2019}t an app. Choose a file that ends in .apk."
-        case .bundle: "Apps that come in several files can\u{2019}t be installed yet. Choose a single .apk file."
+        case .notApk: String(localized: "This isn\u{2019}t an app. Choose a file that ends in .apk.", bundle: .module)
+        case .bundle: String(localized: "Apps that come in several files can\u{2019}t be installed yet. Choose a single .apk file.", bundle: .module)
         }
     }
 }

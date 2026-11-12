@@ -116,7 +116,7 @@ struct SnapshotFaultTests {
             try InstanceFiles.clone(missing, to: destination)
         } catch let error as InstanceError {
             #expect(
-                error.errorDescription == "The guest's data cannot be snapshotted (it needs an APFS volume): \(reason)")
+                error.errorDescription == "The virtual machine's data cannot be snapshotted (it needs an APFS volume): \(reason)")
         }
         #expect(!FileManager.default.fileExists(atPath: destination.path))
         #expect(!FileManager.default.fileExists(atPath: destination.appendingPathExtension("tmp").path))

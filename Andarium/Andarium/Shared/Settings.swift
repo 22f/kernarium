@@ -168,12 +168,18 @@ struct SessionSettingsSheet: View {
             } label: {
                 HStack(spacing: 12) {
                     IconTile(symbol: "square.and.arrow.down.fill")
+                    // The name gets its width first: it wraps only when the
+                    // line is too narrow for it alone, and the hint beside
+                    // it gives way.
                     Text("Install APK\u{2026}")
                         .foregroundStyle(Color.accentColor)
-                    Spacer()
+                        .layoutPriority(1)
+                    Spacer(minLength: 0)
                     Text("From Files")
                         .font(.subheadline)
                         .foregroundStyle(Color(.secondaryLabel))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
             }
             .disabled(model.fileBrowser?.busy == true)
@@ -207,11 +213,11 @@ struct SessionSettingsSheet: View {
             if let problem = session.adbProblem {
                 Text(problem).foregroundStyle(.red)
             } else if session.adb {
-                Text("The guest asks to allow the computer the first time it connects. ADB turns off when the guest stops or USB debugging is turned off.")
+                Text("The virtual machine asks to allow the computer the first time it connects. ADB turns off when the virtual machine stops or USB debugging is turned off.")
             } else if !model.adbOverNetworkAvailable {
-                Text("Turn on USB debugging in the guest\u{2019}s Developer options to use ADB over network.")
+                Text("Turn on USB debugging in the virtual machine\u{2019}s Developer options to use ADB over network.")
             } else {
-                Text("Lets a computer on the same network connect to the guest with adb.")
+                Text("Lets a computer on the same network connect to the virtual machine with adb.")
             }
         }
     }
@@ -271,7 +277,7 @@ struct SessionSettingsSheet: View {
     private func inputProbe(_ probe: InputProbe) -> some View {
         @Bindable var probe = probe
         return Section {
-            TextField("Input probe", text: $probe.fieldText)
+            TextField(text: $probe.fieldText) { Text(verbatim: "Input probe") }
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .accessibilityIdentifier("inputProbeField")
@@ -332,12 +338,11 @@ struct SessionSettingsSheet: View {
         }
     }
 
-    private func rowLabel(_ title: String, symbol: String) -> some View {
+    private func rowLabel(_ title: LocalizedStringKey, symbol: String) -> some View {
         HStack(spacing: 12) {
             IconTile(symbol: symbol)
             Text(title)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

@@ -8,16 +8,27 @@ import SwiftUI
 /// the logic. Android shows having no network at all by itself; this is only
 /// for a network that iOS holds back from Andarium.
 enum NetworkWords {
-    static let settingsLabel = "Open Settings"
-    static let settingsHint = "Opens Andarium\u{2019}s page in Settings."
-    static let dismissLabel = "Dismiss"
+    static let settingsLabel = String(
+        localized: "Open Settings",
+        comment: "A button that opens Andarium's page in the iOS Settings app.")
+    static let settingsHint = String(
+        localized: "Opens Andarium\u{2019}s page in Settings.",
+        comment: "VoiceOver hint of the network notice's Open Settings button.")
+    static let dismissLabel = String(
+        localized: "Dismiss", comment: "A button that closes a notice; VoiceOver reads it too.")
     /// The name with a non-breaking hyphen, so a line never ends in "Wi-".
     static let wifiName = "Wi\u{2011}Fi"
 
     static func title(for denial: NetworkDenial) -> String {
         switch denial {
-        case .cellular: "Cellular data is off for Andarium"
-        case .wifi: "\(wifiName) is off for Andarium"
+        case .cellular:
+            String(
+                localized: "Cellular data is off for Andarium",
+                comment: "Title of the notice shown when iOS blocks Andarium's cellular data. Cellular Data is iOS's own name of the setting.")
+        case .wifi:
+            String(
+                localized: "\(wifiName) is off for Andarium",
+                comment: "Title of the notice shown when iOS blocks Andarium's Wi-Fi. The argument is the name Wi-Fi, written with a non-breaking hyphen.")
         }
     }
 
@@ -25,9 +36,13 @@ enum NetworkWords {
     static func text(for denial: NetworkDenial) -> String {
         switch denial {
         case .cellular:
-            "Android can\u{2019}t reach the internet over cellular data. Turn on Cellular Data for Andarium in Settings."
+            String(
+                localized: "Android can\u{2019}t reach the internet over cellular data. Turn on Cellular Data for Andarium in Settings.",
+                comment: "Text of the notice shown when iOS blocks Andarium's cellular data. Cellular Data is the name of the switch under Andarium in the iOS Settings app.")
         case .wifi:
-            "Android can\u{2019}t reach the internet over \(wifiName). Allow wireless data for Andarium in Settings."
+            String(
+                localized: "Android can\u{2019}t reach the internet over \(wifiName). Allow wireless data for Andarium in Settings.",
+                comment: "Text of the notice shown when iOS blocks Andarium's Wi-Fi. The argument is the name Wi-Fi. Wireless Data is the name of the setting under Andarium in the iOS Settings app.")
         }
     }
 
@@ -58,7 +73,7 @@ struct NetworkNoticeBanner: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(NetworkWords.title(for: denial))
                         .font(.subheadline.weight(.semibold))
-                    Text(NetworkWords.text(for: denial))
+                    Text(NetworkWords.text(for: denial).keepingTogether)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
