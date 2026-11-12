@@ -226,7 +226,7 @@ index 92ae55f0bf63d4bedddc67b24a96dd389d46c762..3f05efbb0b72b5b5ca7564475f4eac17
  
  void kk_cmd_release_dynamic_ds_state(struct kk_cmd_buffer *cmd);
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-index edfe479688cb68a0b456c1536e8b24c933dd1650..c569cb1cadd8076562a186e55b3915b6018f171b 100644
+index 8eba16b8772510bcec2321437d1c06871d8089e3..6f549b0299febe743e8624bf1a22ba7910d01d84 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 @@ -17,6 +17,7 @@
@@ -683,7 +683,7 @@ index edfe479688cb68a0b456c1536e8b24c933dd1650..c569cb1cadd8076562a186e55b3915b6
     draw.index.el_size_B = sizeof(uint32_t);
     draw.vertex_offset = 0;
     draw.line_raster_run_starts_addr =
-@@ -2778,7 +3086,6 @@ kk_dispatch_compute(mtl_compute_encoder *enc, struct kk_grid grid,
+@@ -2782,7 +3090,6 @@ kk_dispatch_compute(mtl_compute_encoder *enc, struct kk_grid grid,
  static struct kk_draw_data
  kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
  {
@@ -691,7 +691,7 @@ index edfe479688cb68a0b456c1536e8b24c933dd1650..c569cb1cadd8076562a186e55b3915b6
     struct kk_graphics_state *gfx = &cmd->state.gfx;
     struct kk_grid grid_vs, grid_tcs, grid_tess;
  
-@@ -2880,8 +3187,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
+@@ -2884,8 +3191,7 @@ kk_launch_tess(struct kk_cmd_buffer *cmd, struct kk_draw_data draw)
  
     draw.grid = kk_grid_indirect(gfx->tess.out_draws_addr);
  
@@ -701,7 +701,7 @@ index edfe479688cb68a0b456c1536e8b24c933dd1650..c569cb1cadd8076562a186e55b3915b6
     draw.index.el_size_B = 4u;
     draw.primitive_type = mesa_prim_to_mtl_primitive_type(gfx->tess.prim);
     return draw;
-@@ -3452,6 +3758,78 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
+@@ -3456,6 +3762,78 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
     return draw;
  }
  
@@ -780,7 +780,7 @@ index edfe479688cb68a0b456c1536e8b24c933dd1650..c569cb1cadd8076562a186e55b3915b6
  static void
  kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
  {
-@@ -3526,15 +3904,41 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -3530,15 +3908,41 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
        fprintf(stderr,
                "KK_UNROLL unrolled=%u provoking_rewrite=%u provoking_last=%u\n",
                requires_unroll, rewrite_direct_provoking, provoking_last);
@@ -825,7 +825,7 @@ index edfe479688cb68a0b456c1536e8b24c933dd1650..c569cb1cadd8076562a186e55b3915b6
     }
  
     for (uint32_t i = 0; i < data->draw_count; i++) {
-@@ -3546,6 +3950,11 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -3550,6 +3954,11 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
  
        struct kk_draw_data draw_data = build_draw_data(cmd, data, i);
  

@@ -263,8 +263,20 @@ class TipJarShotTests(unittest.TestCase):
                 mock.patch.object(self.script, "app_state", return_value=state):
             self.assertIsNone(self.script.not_in_front("UDID", 7, shot))
 
+
+class FeedbackMenuShotTests(unittest.TestCase):
+    """Send feedback is reached from Home's toolbar menu, not from Info."""
+
+    def setUp(self):
+        self.script = load_script()
+
     def test_no_shot_opens_feedback_over_info(self):
         self.assertFalse([shot.id for shot in self.script.SHOTS if "info" in shot.screen and shot.feedback])
+
+    def test_the_menu_is_captured_open_on_home_and_on_welcome(self):
+        menus = {shot.id: shot.screen for shot in self.script.SHOTS if shot.id.startswith("feedback-menu")}
+        self.assertEqual(menus, {"feedback-menu-home": "home-menu", "feedback-menu-welcome": "welcome-menu"})
+        self.assertTrue(all(shot.feedback for shot in self.script.SHOTS if shot.id.startswith("feedback-menu")))
 
 
 if __name__ == "__main__":

@@ -421,7 +421,7 @@ struct SendFeedbackSheet: View {
     private func barContent(send style: SendStyle) -> some View {
         HStack(spacing: 2) {
             if !state.running {
-                // From Info neither can be made: dimmed, they bring the card
+                // From Home neither can be made: dimmed, they bring the card
                 // with the way to them back.
                 let showWay = { withAnimation(.snappy) { model.hintDismissed = false } }
                 source(symbol: "ladybug.fill", title: Words.bugReport, enabled: false, id: "feedback-bug-report",
@@ -506,7 +506,7 @@ struct SendFeedbackSheet: View {
         .fixedSize()
     }
 
-    /// The request for a bug report, over the bar; from Info, where no virtual
+    /// The request for a bug report, over the bar; from Home, where no virtual
     /// machine runs, the way to one.
     private var card: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -555,7 +555,7 @@ struct SendFeedbackSheet: View {
     }
 }
 
-/// The way to a bug report from where no virtual machine runs (Info): start it,
+/// The way to a bug report from where no virtual machine runs (Home): start it,
 /// make the problem happen again, and open Send feedback from the session's
 /// Settings. VoiceOver reads them as one, numbers included.
 struct SendFeedbackSteps: View {

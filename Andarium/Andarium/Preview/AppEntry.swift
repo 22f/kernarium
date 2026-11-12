@@ -129,7 +129,7 @@ struct AppEntry {
             ?? PreviewData.host(lowSpace: lowSpace, device: device)
         var guest: Guest? = PreviewData.sampleGuest(on: host)
         if let memoryMiB { guest?.memoryMiB = memoryMiB }
-        if ["welcome", "create", "create-low-space"].contains(screen) { guest = nil }
+        if ["welcome", "welcome-menu", "create", "create-low-space"].contains(screen) { guest = nil }
         let model = AppModel(
             guest: guest, host: host, system: PreviewData.system, capabilities: .preview,
             createRequirementBytes: PreviewData.createRequirementBytes
@@ -492,6 +492,12 @@ struct AppEntry {
             model.sheet = .info
             try? await Task.sleep(for: .milliseconds(1200))
             await PreviewScroll.toBottomOfFrontSheet()
+        #if FEEDBACK_MAIL
+        case "home-menu", "welcome-menu":
+            // Home's toolbar menu open, as a tap leaves it.
+            try? await Task.sleep(for: .milliseconds(600))
+            PreviewMenu.openToolbarMenu()
+        #endif
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew
         case "start-low-space":

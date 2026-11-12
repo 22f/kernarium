@@ -22,7 +22,8 @@ enum FeedbackPreview {
     /// Readies the model for `screen`: its phase, the sheet that stays beneath,
     /// and the services the sheet asks.
     static func configure(screen: String, model: AppModel) {
-        guard opensSheet(screen) || screen == "settings-feedback" || screen == "home" else { return }
+        guard opensSheet(screen) || screen == "settings-feedback"
+            || ["home", "home-menu", "welcome", "welcome-menu", "info"].contains(screen) else { return }
         var services = SendFeedbackServices()
         services.address = { "feedback@example.com" }
         services.canSendMail = { screen != "feedback-nomail" }
