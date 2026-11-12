@@ -72,14 +72,16 @@ App Store offer the application to Macs, and every configuration sets
 destination and adds nothing to the built application.
 `ITSAppUsesNonExemptEncryption` is NO in `Config/Info.plist`.
 
-The iPhone interface is portrait-only. On iPad, a guest session whose scene
-fills its screen locks the interface orientation, so Android alone rotates its
-display and the sensor axes stay fixed. A window, or a full-screen scene whose
-lock iPadOS releases, uses host-driven rotation: the guest is held at display
-rotation zero and its display follows the window, and the sensor axes follow
-the window's interface orientation (`MotionMount`). Returning to a locked
-scene restores the guest's previous rotation preferences
-(`SessionOrientationPolicy`).
+The iPhone interface is portrait-only and the guest owns its rotation:
+Android turns its own display and the sensor axes stay fixed. On iPad the
+interface turns with the device in a session as it does at Home, full screen
+or in a window, and the host drives the guest: it is held at display rotation
+zero, its display follows the scene, and the sensor axes follow the scene's
+interface orientation (`MotionMount`, `SessionOrientationPolicy`). An
+application that asks for one fixed orientation is letterboxed in the other
+one, as in a window. The guest's own rotation preferences are restored when
+the host stops driving it. The display keeps the last frame's proportions
+while it turns, until Android draws the new layout.
 
 While the guest's display is shown (the boot and the run) everything behind it
 is black, in the light appearance too: the scene's root view and its window
