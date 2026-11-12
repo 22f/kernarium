@@ -93,15 +93,21 @@ struct Entry {
     }
 }
 
-// The photo sizes a device format lists (supportedMaxPhotoDimensions).
+// The photo sizes a device format lists (supportedMaxPhotoDimensions) that a
+// synchronous capture makes. AVFoundation services the 24 MP setting
+// (5712x4284), where a format lists it, only as a deferred photo proxy, which
+// this backend neither opts into nor receives (AVCapturePhotoOutput.h), so the
+// size is not listed and no tier can offer it.
 std::vector<CameraStillSize> listedPhotoSizes(AVCaptureDeviceFormat* format)
 {
+    constexpr CameraStillSize deferredOnly {5712, 4284};
     std::vector<CameraStillSize> listed;
     for (NSValue* value in format.supportedMaxPhotoDimensions) {
         CMVideoDimensions candidate;
         [value getValue:&candidate];
-        if (candidate.width > 0 && candidate.height > 0)
-            listed.push_back({std::uint32_t(candidate.width), std::uint32_t(candidate.height)});
+        if (candidate.width <= 0 || candidate.height <= 0) continue;
+        const CameraStillSize size {std::uint32_t(candidate.width), std::uint32_t(candidate.height)};
+        if (!(size == deferredOnly)) listed.push_back(size);
     }
     return listed;
 }

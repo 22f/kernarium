@@ -141,7 +141,9 @@ interface to the wire.
   session, as AVFoundation requires: the largest size the anchor lists within
   the guest's still cap, so no larger pipeline is prepared. The guest is offered
   the sizes the anchor makes (`stillsOf`), and a camera that only takes stills
-  runs in the same anchor. A
+  runs in the same anchor. The 24 MP size (5712x4284) that AVFoundation services
+  only as a deferred photo proxy is not listed, as the backend captures
+  synchronously. A
   still's `exposure` is the photo's own where the photo states it: the exposure
   time, ISO, f-number, focal length and flash come from the photo's Exif
   (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's
