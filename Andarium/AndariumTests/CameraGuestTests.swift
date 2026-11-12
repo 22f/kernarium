@@ -73,7 +73,9 @@ struct CameraGuestTests {
         try await withAndroidGuest(
             prepare: { model in
                 // The runtime put the system's own source on the model; the
-                // test plays the permission iOS would give.
+                // test plays the permission iOS would give. The microphone
+                // is off, so the boot asks iOS for no second permission.
+                model.setMicrophone(false)
                 model.camera = CameraController(model: model, source: access)
                 model.setCamera(mode == .live)
                 try #require(model.cameraMode == mode, "the session is \(mode)")
