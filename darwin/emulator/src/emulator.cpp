@@ -2,6 +2,7 @@
 #include "uml/emulator.h"
 #include "device.hpp"
 #include "options.hpp"
+#include "carrier_activity.hpp"
 #include "context.hpp"
 #include "guest_sync.hpp"
 #include "guest_console.hpp"
@@ -628,6 +629,7 @@ public:
 			return;
 		const auto suspension = std::exchange(guest_suspension_,
 			::uml::device::GuestSuspension::none);
+		::uml::runtime::note_host_wake();
 		::uml::device::resume_guest(suspension);
 		if (const auto enabled = std::exchange(pending_page_cache_trim_,
 			    std::nullopt))
@@ -721,8 +723,13 @@ public:
 	{
 		std::lock_guard lock{guest_lifecycle_mutex_};
 		/* A quiesced guest stays put until the host resumes it. */
-		if (guest_suspension_ == ::uml::device::GuestSuspension::none)
+		if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
+			/* The stall watch sleeps while every carrier is idle: it is
+			 * told first that one is about to be woken, so that a carrier
+			 * the system then does not schedule is seen. */
+			::uml::runtime::note_host_wake();
 			(void)::uml::device::wake_guest();
+		}
 	}
 
 	[[nodiscard]] ::uml::runtime::ExecutionEngine

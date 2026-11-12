@@ -272,9 +272,21 @@ uml_add_unit_test(
         ${PROJECT_SOURCE_DIR}/tests/unit/andarium/fixtures/stall-slot-golden.txt
     LABELS tsan)
 
+# The activity record the stall watch sleeps by: carriers that name themselves
+# and enter idle waits, and the queue timer they arm.
+add_executable(uml_runtime_carrier_activity_tests carrier_activity_tests.cpp)
+target_link_libraries(uml_runtime_carrier_activity_tests PRIVATE
+    UML::RuntimeCarrierActivity)
+uml_add_unit_test(
+    NAME runtime-carrier-activity
+    COMMAND uml_runtime_carrier_activity_tests
+    TIMEOUT 120)
+set_tests_properties(runtime-carrier-activity PROPERTIES RUN_SERIAL TRUE)
+
 # The kernel's blocking imports, marked while they block.
 add_executable(uml_runtime_kernel_waits_tests kernel_waits_tests.cpp)
 target_link_libraries(uml_runtime_kernel_waits_tests PRIVATE
+    UML::RuntimeCarrierActivity
     UML::RuntimeKernelWaits
     UML::RuntimeThreadFence)
 uml_add_unit_test(
@@ -286,6 +298,7 @@ uml_add_unit_test(
 # runs alone.
 add_executable(uml_runtime_stall_watch_tests stall_watch_tests.cpp)
 target_link_libraries(uml_runtime_stall_watch_tests PRIVATE
+    UML::RuntimeCarrierActivity
     UML::RuntimeKernelWaits
     UML::RuntimeSessionRecord
     UML::RuntimeStallRecord
