@@ -81,6 +81,10 @@ struct SideKeysTouchTests {
             model.driver = StubDriver(plan: nil)
             let lease = try await HostWindow.take()
             let controller = AndariumHostingController(rootView: RootView(entry: entry).environment(model), model: model)
+            // These are the phone's edge keys. A display that folds lays the
+            // session out by its pose instead (`FoldSessionHostingTests`), so
+            // here the scene reads as one that does not fold.
+            controller.foldReader.stub = { nil }
             lease.window.rootViewController = controller
             model.phase = .running(.normal)
             let root = controller.view!

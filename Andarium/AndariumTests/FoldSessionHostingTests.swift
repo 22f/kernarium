@@ -92,6 +92,15 @@ struct FoldSessionHostingTests {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
 
+    /// Ends the session and lets the root lay out once, so that it hands the
+    /// window back as the application left it (a running session paints the
+    /// window black) before the next test takes it.
+    private func endSession(of model: AppModel, _ controller: UIViewController) {
+        model.phase = .home
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+    }
+
     /// The scene root with a run on screen, in a view the size of the pose that
     /// sits in the application's window. A window cannot take another size, so
     /// the root is a child of the window's controller in a view of its own,
@@ -100,6 +109,9 @@ struct FoldSessionHostingTests {
     private final class Rig {
         let model: AppModel
         let lease: HostWindow.Lease
+        /// The window as the application left it: a running session paints it
+        /// black, and the root puts it back when its phase ends.
+        private let windowBacking: UIColor?
         let container = UIViewController()
         let holder: UIView
         let controller: AndariumHostingController<AnyView>
@@ -114,6 +126,7 @@ struct FoldSessionHostingTests {
             model.launchApplied = true
             self.model = model
             lease = try await HostWindow.take()
+            windowBacking = lease.window.backgroundColor
             holder = UIView(frame: pose.reading.window)
             controller = AndariumHostingController(rootView: AnyView(RootView(entry: entry).environment(model)), model: model)
             model.driver = driver
@@ -134,7 +147,7 @@ struct FoldSessionHostingTests {
                 return display != nil && display!.bounds.width > 0
             }
             guard found, let display else {
-                lease.give()
+                end()
                 throw Failure.noDisplay
             }
             guest = display
@@ -143,6 +156,11 @@ struct FoldSessionHostingTests {
         enum Failure: Error { case noDisplay }
 
         func end() {
+            // The session ends first, so that the root hands the window back.
+            model.phase = .home
+            controller.view.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            lease.window.backgroundColor = windowBacking
             controller.willMove(toParent: nil)
             controller.view.removeFromSuperview()
             controller.removeFromParent()
@@ -385,6 +403,7 @@ struct FoldSessionHostingTests {
         defer { lease.give() }
         let controller = AndariumHostingController(rootView: Color.black, model: model)
         lease.window.rootViewController = controller
+        defer { endSession(of: model, controller) }
         model.phase = .running(.normal)
         try await Task.sleep(for: .milliseconds(500))
         controller.view.layoutIfNeeded()
@@ -420,6 +439,15 @@ struct TheRealDisplay {
         view.subviews + view.subviews.flatMap { descendants(of: $0) }
     }
 
+    /// Ends the session and lets the root lay out once, so that it hands the
+    /// window back as the application left it (a running session paints the
+    /// window black) before the next test takes it.
+    private func endSession(of model: AppModel, _ controller: UIViewController) {
+        model.phase = .home
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+    }
+
     @Test func theSceneReadsAsTheExpectedPoseAndTheGuestFollowsThePlan() async throws {
         guard let pose = expected else { return }
         let entry = AppEntry.fromArguments()
@@ -430,6 +458,7 @@ struct TheRealDisplay {
         defer { lease.give() }
         let controller = AndariumHostingController(rootView: RootView(entry: entry).environment(model), model: model)
         lease.window.rootViewController = controller
+        defer { endSession(of: model, controller) }
         model.phase = .running(.normal)
         let deadline = ContinuousClock.now + .seconds(20)
         while model.sessionPlan == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
@@ -458,6 +487,5 @@ struct TheRealDisplay {
         let rotates = !phone || pose.inner
         #expect(model.hostDrivesGuestRotation == rotates)
         #expect(controller.supportedInterfaceOrientations == (rotates ? .all : .portrait))
-        model.phase = .home
     }
 }
