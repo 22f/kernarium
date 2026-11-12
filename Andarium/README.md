@@ -267,120 +267,101 @@ the address's builder and nothing else of the row.
 ### ICP filing number
 
 For users whose App Store storefront is mainland China's, the last line of
-Info is the developer's ICP filing number, as the law asks: one centred
-footnote in the secondary colour, no icon or words around it, shown exactly as
-stored (it is not translated), as a link to MIIT's filing site through
-`openURL` (`Shared/ICP/`; VoiceOver reads the number with the link trait). It
-shows only when StoreKit 2's `Storefront.current` is `CHN`, kept current through
-`Storefront.updates` while Info is open; an unknown storefront (not loaded,
-offline, no account) hides it, and nothing else decides: no request of its own,
-no locale, region setting, time zone or address. The number is the developer's
-own and is tracked nowhere: the line is compiled in, under the `ICP_FILING`
-condition, only in an AppStore build whose ignored
+Info is the developer's ICP filing number, as the law asks: a centred
+footnote, shown as stored (not translated), linking to MIIT's filing site
+(`Shared/ICP/`). It shows only when StoreKit 2's `Storefront.current` is
+`CHN`, kept current through `Storefront.updates` while Info is open; an
+unknown storefront hides it, and nothing else decides (no locale, region,
+time zone or address).
+
+The number is the developer's and is tracked nowhere: the line is compiled in,
+under the `ICP_FILING` condition, only in an AppStore build whose ignored
 `Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`)
-names it (`DEVELOPER_ICP_NUMBER`), with a switch of its own that needs no tip,
-review or X value. A fork, a sideload or a Debug or Release build holds none of
-it, and the bundle check asserts both directions as it does for Follow
-developer on X: the number and its Info.plist key (`AndariumICPNumber`) are in no
-other product, the number is in no other file of one that names it, the local
-number is in no file of one that does not (as UTF-8 or as a property list's
-UTF-16), and the arranged placeholder is in no product but Debug's; it never
-prints the number. Tests and captures turn it on in a Debug build with
-`ICP_NUMBER=示例ICP备00000000号-0A` on the `xcodebuild` line; the hosted tests
-inject the storefront. `AndariumPreview` takes the arrangement only, and its
-`-icpStorefront CHN|USA|none|later` states the storefront.
+names `DEVELOPER_ICP_NUMBER`; it needs no tip, review or X value. The bundle
+check asserts both directions as for Follow developer on X: the number and its
+Info.plist key (`AndariumICPNumber`) are in no other product, the number is in
+no other file of one that names it, the local number is in no file of one that
+does not (as UTF-8 or UTF-16, never printed), and the
+arranged placeholder is in no product but Debug's. Tests and captures turn it
+on in a Debug build with `ICP_NUMBER=示例ICP备00000000号-0A`; the hosted tests
+inject the storefront. Whether `Storefront.updates` fires when the storefront
+first becomes known while Info is open only a device shows; otherwise the line
+appears at the next opening.
 
 ### Buy me tokens
 
 A sheet in the shape of a chat offers four one-time tips, Lite, Pro, Max and
 Ultra (`Shared/TipJar/`), as consumable In-App Purchases through StoreKit 2.
 A tip is voluntary and unlocks nothing: every feature is free either way, and
-nothing about a tip is remembered, counted or shown outside the sheet, which
-says only thanks and then only Done. There is no prompt, badge or banner; the
+nothing about a tip is remembered, counted or shown outside the sheet. Its
 one entrance is the item in [Home's toolbar menu](#home-toolbar-menu), offered
-once a virtual machine is set up, and its icon is the system symbol
-`cup.and.heat.waves`, which also sits beside the sheet's title. The words never
-use "donate", "plan" or "subscribe" and name no amount of tokens, and
-`scripts/check-tip-words.py` (`andarium-tip-words`) rejects those words in
-every language of the `TipJar` string table; each tier's price is the store's
-own.
+once a virtual machine is set up. The words never use "donate", "plan" or
+"subscribe" and name no token amount: `scripts/check-tip-words.py`
+(`andarium-tip-words`) checks every language of the `TipJar` string table, and
+each price is the store's own. The tier names are the products' own in App
+Store Connect; no tracked text assumes they appear on the system's purchase
+sheet.
 
 The feature is compiled in, under the `TIP_JAR` condition, only in an AppStore
 build whose ignored `Config/TipJar.local.xcconfig` (from
 `TipJar.local.xcconfig.example`) names all four products, so a fork, a
-sideload or a Debug or Release build holds none of it: no entrance, no
-StoreKit use, no `TipJar` string table, no identifier. The bundle check says
-for every configuration whether it does, fails on a build that has the
-identifiers without the code or the code without the identifiers, and fails on
-the local identifiers' bytes in any file of a bundle that does not name them
-(never printing them). Tests and captures turn it on in a Debug build with
+sideload or a Debug or Release build holds none of it: no entrance, StoreKit
+use, string table or identifier. The bundle check says for every configuration
+whether it does, fails on identifiers without the code or the code without
+identifiers, and fails on the local identifiers in any file of a bundle that
+does not name them (as UTF-8 or UTF-16, never printed).
+Tests and captures turn it on in a Debug build with
 `TIP_LITE=com.example.andarium.tip.lite` and the same for `TIP_PRO`,
-`TIP_MAX` and `TIP_ULTRA` on the `xcodebuild` line, which the bundle check
-accepts in Debug alone; `AndariumPreview` takes that arrangement only, and its
-hooks into the sheet are not in the AppStore product.
+`TIP_MAX` and `TIP_ULTRA`, which the check accepts in Debug alone.
 
-The sheet's states (loading, the tiers the store answered, none answered with
-Try again, purchases not allowed on the device, purchasing, thanks, waiting for
-approval, the store's own failure message; a cancel shows nothing) live in
-`Shared/TipJar/Logic`, behind a store seam the tests drive without the App
-Store, and AndariumCore's tests build and run them through a symlinked target
-no product links. A listener from launch finishes every transaction the store
-holds unfinished (an approved Ask to Buy, an interrupted purchase), verified
-or not, because nothing is unlocked and an unfinished consumable blocks buying
-it again. `AndariumTests/TipJar.storekit` is the StoreKit test configuration
-of the hosted tests, with the example identifiers only. Purchase history is
-not collected, and no account, receipt or analytics leaves the device, so the
-privacy manifest declares nothing for it.
+The sheet's states live in `Shared/TipJar/Logic` behind a store seam, which
+AndariumCore's tests build through a symlinked target no product links; the
+hosted StoreKit tests play purchases, Ask to Buy and unfinished transactions
+against `AndariumTests/TipJar.storekit` (example identifiers only), never the
+App Store. A listener from launch finishes every transaction the store holds
+unfinished, verified or not, because nothing is unlocked and an unfinished
+consumable blocks buying it again; a purchase that comes back unverified is
+thanked like any other. Nothing is collected, so the privacy manifest
+declares nothing for it.
 
-The sheet opens on its sender line: the developer's circular avatar (a hairline
-border from the separator colour, hidden from accessibility), the name as a
-person wrote it and the role "Andarium's developer", then one logo button each
-for the developer's GitHub and X profiles, drawn in the label colour as
-template images and opened through `openURL` (no web view; a touch target of at
-least 44 pt; at larger text sizes they move under the text). VoiceOver reads
-the sender once, as "name, role", before the messages. Every piece follows what
-the build holds: no avatar keeps the application's mark, no name reads the role
-alone, and a logo button exists only where its handle does. The name, the two
-handles and the three files are the maker's own, in the ignored
-`Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`) and
-`Config/Local/` (`developer-avatar.jpeg`, `github-logo.svg`, `x-logo.svg`; the
-logos are single-path SVGs), the same file and directory that
-[Follow developer on X](#follow-developer-on-x) reads. They reach the product
-only in an AppStore build that has Buy me tokens: Info.plist keys for the
-values the build names (`AndariumDeveloperName`, `AndariumDeveloperGitHub`,
-`AndariumDeveloperX`) and asset catalogs the avatar, the GitHub mark and the X
-logo are linked into (`Shared/TipJar/DeveloperAvatarLocal.xcassets` and its
-neighbours, each a symlink to the file in `Config/Local/`); a build that names
-a value and lacks its file fails its first build phase. The addresses are built
-in code from the handles, the X one by `FollowXProfile`, the row's. The
-bundle check compares keys and the asset names in `Assets.car`, fails on an
-artwork file lying in any bundle and on a local profile address in any file of
-a bundle that does not name it. The tests' arrangement states
+The sheet opens on a sender line (`Shared/TipJar/TipJarHeader.swift`): the
+developer's name, role and avatar, with a GitHub and an X button that open the
+profiles through `openURL`. Each piece follows what the build holds: no avatar
+keeps the application's mark, no name reads the role alone, and a button
+exists only where its handle does. The name, handles and artwork are the
+maker's own, in the ignored `Config/Developer.local.xcconfig` and
+`Config/Local/` (`developer-avatar.jpeg`, `github-logo.svg`, `x-logo.svg`),
+the same file and directory as [Follow developer on X](#follow-developer-on-x);
+they reach only an AppStore build that has Buy me tokens, as Info.plist keys
+and linked asset catalogs. A value without its artwork file fails the first
+build phase, so a name needs the avatar file and a handle its logo; nothing
+falls back. The avatar is compiled as it is, so its metadata goes into the
+product: strip it (an EXIF location, for one) before an archive. The bundle
+check compares keys and asset names, refuses the placeholders of every value
+in an AppStore build, and fails on an artwork file or a profile address in any
+bundle that does not name it. The tests' arrangement states
 `SHEET_DEVELOPER_NAME` and `SHEET_DEVELOPER_GITHUB` as `example` and
-`SHEET_DEVELOPER_X` as `example_handle`, with a plain glyph in place of each
-artwork (the `...Glyph.xcassets` catalogs); adding `SHEET_ARTWORK_SOURCE=local`
-and `FOLLOW_X_LOGO_SOURCE=local` takes the artwork from `Config/Local/`, for a
-capture. `AndariumPreview` takes the same arrangement, and its
-`-tipDeveloperParts` keeps the pieces a screen shows.
+`SHEET_DEVELOPER_X` as `example_handle`, with plain glyph catalogs in place of
+artwork; `SHEET_ARTWORK_SOURCE=local` and `FOLLOW_X_LOGO_SOURCE=local` take it
+from `Config/Local/`, for a capture.
 
 ### Review on the App Store
 
 An item of [Home's toolbar menu](#home-toolbar-menu), offered once a virtual
 machine is set up, opens this application's App Store page at its write-review
-address through the system (`Shared/Review/`); the item itself shows no prompt
-and no web view, and the one thing it remembers is that the person went to
-write a review ([Rating prompt](#rating-prompt)). It is compiled in, under
-the `APP_REVIEW` condition, only in an AppStore build whose ignored
-`Config/Review.local.xcconfig` (from `Review.local.xcconfig.example`) names the
-application's App Store identifier (`id` and its digits), so a fork, a sideload
-or a Debug or Release build holds no item, address or text; the page is built
-in code from the identifier, without a storefront. The bundle check says for
-every configuration whether it is compiled in, fails on the code without the
-identifier or the identifier without the code, refuses the all-zero
-placeholder in an App Store build, and fails on the identifier's digits in any
-file of a bundle that does not name it (never printing them). Tests turn it on
-in a Debug build with `REVIEW_ID=id0000000000`, which the check accepts in
-Debug alone. Its word is the `Review` string table.
+address through the system (`Shared/Review/`); it shows no prompt and no web
+view. It is compiled in, under the `APP_REVIEW` condition, only in an AppStore
+build whose ignored `Config/Review.local.xcconfig` (from
+`Review.local.xcconfig.example`) names the application's App Store identifier
+(`id` and its digits), so a fork, a sideload or a Debug or Release build holds
+no item, address or text. The bundle check says for every configuration
+whether it is compiled in, fails on the code without the identifier or the
+identifier without the code, refuses the all-zero placeholder in an App Store
+build, and fails on the identifier's digits in any file of a bundle that does
+not name it (as UTF-8 or UTF-16, never printed). Tests turn it on in a Debug
+build with `REVIEW_ID=id0000000000`, which the check accepts in Debug alone.
+Its word is the `Review` string table. Opening it answers the
+[Rating prompt](#rating-prompt).
 
 ### Rating prompt
 

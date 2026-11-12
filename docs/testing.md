@@ -363,31 +363,25 @@ map, backup attribute) on a small sparse file and prints their answers on a
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
 exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
-a run without it does not build them. `FollowXRowTests` need
-`FOLLOW_X_HANDLE=example_handle`
-([Follow developer on X](../Andarium/README.md#follow-developer-on-x)), and
-`ICPFootnoteTests` need `ICP_NUMBER=示例ICP备00000000号-0A`
-([ICP filing number](../Andarium/README.md#icp-filing-number)).
-`TipJarScreenTests` and
-`TipJarStoreKitTests` ([Buy me tokens](../Andarium/README.md#buy-me-tokens)) need
-the four `TIP_` settings the same way; the second plays purchases, Ask to Buy
-and unfinished transactions against `AndariumTests/TipJar.storekit` (example
-identifiers only) in StoreKit's test session, never the App Store.
-`TipJarHeaderTests` checks the sheet's sender line (VoiceOver's reading, the
-two links and what a tap hands to `openURL`) with the `SHEET_DEVELOPER_*`
-placeholders and the tracked glyph catalogs the tests draw in place of the
-developer's artwork, and
-`ReviewScreenTests` ([Review on the App Store](../Andarium/README.md#review-on-the-app-store))
-needs `REVIEW_ID`, as do `ReviewAskFlowTests` and `ReviewAskStoreTests`
-([Rating prompt](../Andarium/README.md#rating-prompt)):
-they drive the coordinator through Home, a running session, a normal stop, an
-abnormal end, a stop in the background and a pending sheet with an injected
-request and clocks (the system's prompt is never asked for), and
-read the Keychain item under a service of their own. `AndariumCoreTests` holds the
-rule, the counter and the record of asking as pure logic. `HomeMenuTests` checks the content of Home's toolbar menu in
-every combination of the features the build holds, and `HomePlainInfoTests`
-that a build with none keeps the plain Info button ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+command line, as the command above has it
+([Send feedback](../Andarium/README.md#send-feedback)); a run without it does
+not build them. Each other feature's tests need the example
+values of its own: `FollowXRowTests` `FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)),
+`ICPFootnoteTests` `ICP_NUMBER=示例ICP备00000000号-0A`
+([ICP filing number](../Andarium/README.md#icp-filing-number)),
+`TipJarScreenTests`, `TipJarHeaderTests` and `TipJarStoreKitTests` the four
+`TIP_` settings and the `SHEET_DEVELOPER_*` placeholders
+([Buy me tokens](../Andarium/README.md#buy-me-tokens); the last plays
+StoreKit's test session over `AndariumTests/TipJar.storekit`, example
+identifiers only, never the App Store), and `ReviewScreenTests`,
+`ReviewAskFlowTests` and `ReviewAskStoreTests` `REVIEW_ID`
+([Review on the App Store](../Andarium/README.md#review-on-the-app-store); the
+system's rating prompt is never asked for). `HomeMenuTests` exist with any of
+Send feedback, Review and Buy me tokens, and `HomePlainInfoTests` only with
+none ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+`AndariumCoreTests` holds the tip sheet's states and the rating rule, counter
+and record as pure logic.
 The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
