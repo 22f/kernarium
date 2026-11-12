@@ -132,18 +132,74 @@ struct MotionDemandTests {
     // MARK: A session over a fake guest
 
     /// A device with sensors that records what the session does with them.
-    private final class FakeDevice: MotionDevice, @unchecked Sendable {
+    /// (Shared with `MotionCompassTests`.)
+    final class FakeDevice: MotionDevice, @unchecked Sendable {
         let hasAccelerometer: Bool
         let hasGyroscope: Bool
+        private let magnetometer: Bool
         private let lock = NSLock()
+        private var reads = 0
+        var hasMagnetometer: Bool { lock.withLock { reads += 1 }; return magnetometer }
+        /// How often the session asked whether the device has a magnetometer.
+        var magnetometerReads: Int { lock.withLock { reads } }
         private var running: [MotionSample.Sensor: TimeInterval] = [:]
         private var handlers: [MotionSample.Sensor: @Sendable (Double, Double, Double) -> Void] = [:]
         private var failures: [@Sendable () -> Void] = []
+        private var fieldInterval: TimeInterval?
+        private var fieldHandler: (@Sendable (Double, Double, Double, UInt8) -> Void)?
+        private var fieldFailures: [@Sendable () -> Void] = []
+        /// Every handler a start gave, kept after a stop: a reading that Core
+        /// Motion had already taken can still be delivered to it.
+        private var fieldHandlersGiven: [@Sendable (Double, Double, Double, UInt8) -> Void] = []
         private(set) var starts = 0
+        private(set) var magnetometerStarts = 0
 
-        init(accelerometer: Bool = true, gyroscope: Bool = true) {
+        init(accelerometer: Bool = true, gyroscope: Bool = true, magnetometer: Bool = false) {
             hasAccelerometer = accelerometer
             hasGyroscope = gyroscope
+            self.magnetometer = magnetometer
+        }
+
+        func startMagnetometer(
+            interval: TimeInterval,
+            handler: @escaping @Sendable (Double, Double, Double, UInt8) -> Void,
+            failure: @escaping @Sendable () -> Void
+        ) {
+            lock.withLock {
+                fieldInterval = interval
+                fieldHandler = handler
+                fieldHandlersGiven.append(handler)
+                fieldFailures.append(failure)
+                magnetometerStarts += 1
+            }
+        }
+
+        func stopMagnetometer() {
+            lock.withLock {
+                fieldInterval = nil
+                fieldHandler = nil
+            }
+        }
+
+        /// How often the magnetometer is read, nil while it is off.
+        var magnetometerInterval: TimeInterval? { lock.withLock { fieldInterval } }
+        func emitField(_ x: Double, _ y: Double, _ z: Double, status: UInt8) {
+            let handler = lock.withLock { fieldHandler }
+            handler?(x, y, z, status)
+        }
+        func failMagnetometer() {
+            let failure = lock.withLock { fieldFailures.last }
+            failure?()
+        }
+        /// A reading, or a failure, that the start number `start` (from 0) was
+        /// given to deliver, whatever has happened since.
+        func emitField(fromStart start: Int, _ x: Double, _ y: Double, _ z: Double, status: UInt8) {
+            let handler = lock.withLock { fieldHandlersGiven[start] }
+            handler(x, y, z, status)
+        }
+        func failMagnetometer(fromStart start: Int) {
+            let failure = lock.withLock { fieldFailures[start] }
+            failure()
         }
 
         func start(
@@ -179,7 +235,7 @@ struct MotionDemandTests {
 
     /// Hands out one end of a socket pair per connection; the other end is the
     /// guest's.
-    private final class FakeGuest: GuestStreamOpener, @unchecked Sendable {
+    final class FakeGuest: GuestStreamOpener, @unchecked Sendable {
         private let lock = NSLock()
         private var ends: [Int32] = []
         /// Nothing listens: the guest is down, or its image has no service.
@@ -211,6 +267,30 @@ struct MotionDemandTests {
                 bytes += (0..<4).map { UInt8((period >> UInt32(8 * $0)) & 0xff) }
             }
             if let end = current { _ = write(end, bytes, bytes.count) }
+        }
+
+        /// A service that lists a magnetometer says what it needs: "ANC3".
+        func sayCompass(_ demand: MotionDemand) {
+            var mask: UInt8 = 0
+            if demand.accelerometer != nil { mask |= 1 }
+            if demand.gyroscope != nil { mask |= 2 }
+            if demand.orientationSensor == .active { mask |= 4 }
+            if demand.magnetometer != nil { mask |= 8 }
+            if demand.orientationSensor != .absent { mask |= 16 }
+            send(Self.compassFrame(mask: mask, periods: [
+                demand.accelerometer ?? 10_000, demand.gyroscope ?? 10_000, demand.magnetometer ?? 20_000,
+            ]))
+        }
+
+        static func compassFrame(mask: UInt8, periods: [UInt32]) -> [UInt8] {
+            var bytes: [UInt8] = [0x41, 0x4e, 0x43, 0x33, mask, 0, 0, 0]
+            for period in periods { bytes += (0..<4).map { UInt8((period >> UInt32(8 * $0)) & 0xff) } }
+            return bytes
+        }
+
+        /// Bytes the guest's service sends, as they are.
+        func send(_ bytes: [UInt8]) {
+            if let end = current { _ = Darwin.write(end, bytes, bytes.count) }
         }
 
         /// What the guest has received, up to `count` bytes within `timeout`.
