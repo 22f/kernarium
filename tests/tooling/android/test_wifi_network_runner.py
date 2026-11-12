@@ -875,6 +875,39 @@ class ContinuityReadingTests(unittest.TestCase):
         self.assertFalse(runner.status_bar_present(elsewhere))
 
 
+class CrashReadingTests(unittest.TestCase):
+    CRASH = ("11-13 03:10:01.000  1000  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
+             "11-13 03:10:01.000  1000  1234  1234 E AndroidRuntime: Process: com.android.systemui, PID: 1234\n"
+             "11-13 03:10:01.000  1000  1234  1234 E AndroidRuntime: java.lang.NullPointerException\n")
+
+    def test_a_quiet_log_has_no_problem(self) -> None:
+        self.assertEqual(runner.crash_problems("11-13 03:10:01.000  1000  1  1 I x: nothing\n"), [])
+
+    def test_a_crash_of_an_application_of_the_warning_is_a_problem(self) -> None:
+        problems = runner.crash_problems(self.CRASH)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("com.android.systemui crashed", problems[0])
+
+    def test_a_crash_of_another_application_is_not(self) -> None:
+        self.assertEqual(runner.crash_problems(self.CRASH.replace("com.android.systemui", "com.example.game")), [])
+
+    def test_an_application_that_does_not_respond_is_a_problem(self) -> None:
+        anr = "11-13 03:10:01.000  1000  500  500 E ActivityManager: ANR in com.android.settings (com.android.settings/.Settings)\n"
+        self.assertIn("com.android.settings did not respond", runner.crash_problems(anr)[0])
+
+    def test_an_illegal_instruction_in_any_process_is_a_problem(self) -> None:
+        log = "11-13 03:10:01.000  0  7  7 F libc: Fatal signal 4 (SIGILL), code 1 (ILL_ILLOPC) in tid 7 (game)\n"
+        self.assertIn("an illegal instruction", runner.crash_problems(log)[0])
+
+    def test_the_section_fails_on_a_crash(self) -> None:
+        class Logged(ScriptedGuest):
+            def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+                return CrashReadingTests.CRASH
+
+        with self.assertRaisesRegex(runner.Failure, "com.android.systemui crashed"):
+            runner.check_no_crashes(Logged())
+
+
 class SimulatedGuest(StubbedGuest):
     """A guest whose network follows the server that its probes ask, on the fake clock: a check at the time the
     platform would make it, a log line for each, and a screen that shows what the platform last reported. A

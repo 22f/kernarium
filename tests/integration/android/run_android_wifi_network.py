@@ -32,7 +32,9 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   has just joined, by the host's server and by the stock servers, leaves no
   warning; with a strict private DNS name the platform can use, a check that
   fails again and again leaves the network validated with its private DNS not
-  broken, and the private DNS probe is not repeated for each check; with the
+  broken, and the private DNS probe is not repeated for each check; across all
+  of it NetworkStack, SystemUI and Settings neither crash nor stop answering and
+  nothing hits an illegal instruction; with the
   probes at a black hole and a strict private DNS name that does not resolve,
   and VirtWifi forgotten and saved again, the network stays enabled and joined for
   a minute and a half, and is joined again after a guest suspend and wake (the
@@ -1127,6 +1129,36 @@ def check_no_denials(guest: Guest) -> str | None:
     return f"{logged} denials logged in all, none for {SCRIPT_DOMAIN} in {guest.denial_reads} reads of the log"
 
 
+# The applications of the warning: the platform's network stack, the status bar and Settings.
+CRASH_PACKAGES = ("com.android.networkstack", "com.android.systemui", "com.android.settings")
+
+
+def crash_problems(log: str) -> list[str]:
+    """What the log says of the applications of the warning crashing or not answering, and of any illegal
+    instruction (an instruction the guest's CPU lacks is a defect of the host, in whatever process)."""
+    lines = log.splitlines()
+    problems = []
+    for index, line in enumerate(lines):
+        if "FATAL EXCEPTION" in line:
+            window = "\n".join(lines[index:index + 4])
+            problems += [f"{package} crashed: {line.strip()[:160]}"
+                         for package in CRASH_PACKAGES if f"Process: {package}" in window]
+        problems += [f"{package} did not respond: {line.strip()[:160]}"
+                     for package in CRASH_PACKAGES if re.search(rf"\bANR in {re.escape(package)}\b", line)]
+        if re.search(r"signal 4 \(SIGILL\)", line):
+            problems.append(f"an illegal instruction: {line.strip()[:160]}")
+    return problems
+
+
+def check_no_crashes(guest: Guest) -> str | None:
+    """Across the warning sections, NetworkStack, SystemUI and Settings neither crashed nor stopped answering,
+    and nothing hit an illegal instruction."""
+    problems = crash_problems(guest.shell("logcat -d -b all", timeout=180))
+    if problems:
+        raise Failure("; ".join(problems[:5]))
+    return None
+
+
 @dataclass
 class Pin:
     """The network a section judges, and when the platform last gave it the validated capability: the same
@@ -1527,6 +1559,8 @@ def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: 
         report.section("VirtWifi is saved and joined at the first boot", guest, lambda: check_saved_and_joined(guest))
         report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
         warning_sections(guest, server, report)
+        report.section("NetworkStack, SystemUI and Settings neither crash nor stop answering", guest,
+                       lambda: check_no_crashes(guest))
         report.section("a failed internet check does not disable the network", guest,
                        lambda: check_not_disabled(guest))
         report.section("the station joins again after a suspend and wake", guest, lambda: check_suspend(guest))
