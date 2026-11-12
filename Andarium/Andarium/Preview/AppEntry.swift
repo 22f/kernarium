@@ -324,6 +324,9 @@ struct AppEntry {
         #if FEEDBACK_MAIL
         FeedbackPreview.configure(screen: screen, model: model)
         #endif
+        #if TIP_JAR
+        TipJarPreview.configure(screen: screen, model: model)
+        #endif
         if let statsReadings {
             model.session.readout = Readout(
                 previewReadings: statsReadings, memoryMiB: model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
@@ -470,7 +473,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history", "feedback-info", "feedback-info-filled":
+             "whatsnew-history":
             model.sheet = .info
         case "whatsnew-open", "whatsnew-skipped-open":
             model.sheet = .whatsNew

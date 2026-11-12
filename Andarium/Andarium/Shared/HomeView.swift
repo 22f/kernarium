@@ -47,11 +47,11 @@ struct HomeView: View {
             .navigationTitle("Andarium")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        model.sheet = .info
-                    } label: {
-                        Label("Info", systemImage: "info")
-                    }
+                    #if FEEDBACK_MAIL || TIP_JAR
+                    HomeToolbarMenu()
+                    #else
+                    HomeInfoButton()
+                    #endif
                 }
             }
         }
@@ -74,6 +74,12 @@ struct HomeView: View {
             }
             .environment(model)
         }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model)
+        #endif
+        #if TIP_JAR
+        .tipJarSheet(model)
+        #endif
         .microphoneAccessAlert()
         .locationAccessAlert()
         .alert("Erase guest?", isPresented: $model.confirmingErase) {
@@ -332,6 +338,19 @@ struct StartButton: View {
         case .firstStart: return "Start and set up"
         case .upgrade: return "Update and start"
         default: return "Start"
+        }
+    }
+}
+
+/// Home's Info button, the toolbar's trailing item.
+struct HomeInfoButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button {
+            model.sheet = .info
+        } label: {
+            Label("Info", systemImage: "info")
         }
     }
 }

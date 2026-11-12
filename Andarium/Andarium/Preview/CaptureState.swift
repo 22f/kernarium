@@ -39,6 +39,10 @@ enum CaptureState {
         // The screens of Send feedback exist only in a build that has it.
         record["feedback"] = true
         #endif
+        #if TIP_JAR
+        // And those of Buy me tokens.
+        record["tipjar"] = true
+        #endif
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
               let data = try? JSONSerialization.data(withJSONObject: record) else { return }
         try? data.write(to: caches.appendingPathComponent("capture-state.json"), options: .atomic)
