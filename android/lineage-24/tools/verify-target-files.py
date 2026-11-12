@@ -3086,10 +3086,12 @@ def check_thermal_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo
 
 # The host's cameras (overlay/camera; routes p0030 and p0031). The camera device gives the guest V4L2
 # nodes, and the emulated camera HAL of hardware/google/camera takes the cameras from them: the lazy
-# provider runs only while an application holds a camera or the torch, and its HWL library holds the
-# V4L2 source of route p0030. The host composes one camera layout from its cameras and passes it as
-# the vendor SKU: the permission directory of that name declares the camera features and an init
-# trigger selects the media profiles that match its size caps, all of them generated (camera_layouts.py).
+# provider is started at boot by the init file of a layout that has cameras, runs while cameraserver
+# lists the cameras and while an application holds a camera or the torch, and exits otherwise (init
+# starts it again through its interface); its HWL library holds the V4L2 source of route p0030. The
+# host composes one camera layout from its cameras and passes it as the vendor SKU: the permission
+# directory of that name declares the camera features and an init trigger selects the media profiles
+# that match its size caps and starts the provider, all of them generated (camera_layouts.py).
 # Nothing here fails loudly when it is missing: a stock library lists no camera, a missing declaration
 # lists no feature, and a missing file leaves the default profiles.
 CAMERA_HAL_NAME = "android.hardware.camera.provider"
@@ -3180,8 +3182,25 @@ def check_camera_layout_files(archive: zipfile.ZipFile, infos: dict[str, zipfile
             fail(f"{entry} is a VINTF manifest of a camera layout: the layouts differ in features, not in HALs")
 
 
+def camera_provider_starts(script: str, service: str) -> set[str]:
+    """The camera layouts whose action in the init file starts the service."""
+    starting: set[str] = set()
+    layout = None
+    prefix = f"on property:{camera_layouts.SKU_PROPERTY}="
+    for raw in script.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("on "):
+            layout = line[len(prefix):] if line.startswith(prefix) else None
+        elif line == f"start {service}" and layout is not None:
+            starting.add(layout)
+    return starting
+
+
 def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
-    """The lazy provider is installed alone, declared once, started on demand, and loads the V4L2 HWL."""
+    """The lazy provider is installed alone, declared once, started at boot by the layouts that have
+    cameras and by its interface afterwards, and loads the V4L2 HWL."""
     binary = f"VENDOR/bin/hw/{CAMERA_PROVIDER}"
     for entry in (binary, CAMERA_HWL):
         info = infos.get(entry)
@@ -3209,7 +3228,22 @@ def check_camera_provider(archive: zipfile.ZipFile, infos: dict[str, zipfile.Zip
         if required not in lines:
             fail(f"the camera provider service must carry '{required}'")
     if any(line.startswith("on ") for line in lines):
-        fail("the camera provider init script may have no trigger: init starts the service when a client asks")
+        fail("the camera provider init script may have no trigger: the layouts' init file starts the service "
+             "and its interface line restarts it")
+    # cameraserver lists a lazy AIDL provider only if it registered, and nothing but an init action starts
+    # it the first time, so the service the layouts start must be this one, in the layouts that have cameras.
+    service_name = service[0].split()[1]
+    if service_name != camera_layouts.PROVIDER_SERVICE:
+        fail(f"the camera provider service is {service_name}, not {camera_layouts.PROVIDER_SERVICE}, "
+             "which the init file of the camera layouts starts")
+    init_info = infos.get(f"VENDOR/etc/init/{camera_layouts.INIT_FILE}")
+    if init_info is None or init_info.is_dir():
+        fail(f"VENDOR/etc/init/{camera_layouts.INIT_FILE} is missing: nothing starts the camera provider")
+    starting = camera_provider_starts(read_small(archive, init_info).decode("utf-8", errors="strict"), service_name)
+    with_cameras = {layout.name for layout in camera_layouts.all_layouts() if layout.has_front}
+    if starting != with_cameras:
+        fail("the camera layouts that start the camera provider are not the layouts that have cameras: "
+             f"missing {sorted(with_cameras - starting)}, extra {sorted(starting - with_cameras)}")
     declarations = []
     for entry, info in sorted(infos.items()):
         path = PurePosixPath(entry)

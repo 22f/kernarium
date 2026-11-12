@@ -592,7 +592,7 @@ done
 [[ "$PRODUCT_PRODUCT_PROPERTIES" == *" ro.lmk.gpu_reclaim=true "* ]] ||
 	fail "required lmkd property is absent: ro.lmk.gpu_reclaim=true"
 [[ "$PRODUCT_PRODUCT_PROPERTIES" == *" ro.camera.enableLazyHal=true "* ]] ||
-	fail "cameraserver is not told to wait for the lazy camera provider: ro.camera.enableLazyHal=true"
+	fail "cameraserver is not told that the camera provider is lazy: ro.camera.enableLazyHal=true"
 [[ "$(get_build_var LOCAL_USE_VENDOR_AUDIO_CONFIGURATION)" == true ]] ||
 	fail "the UML product must own its minimal primary audio policy"
 for package in \

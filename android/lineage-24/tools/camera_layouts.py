@@ -6,7 +6,8 @@ One image serves every host. The host discovers its cameras and passes the layou
 that describes them on the vendor SKU axis (androidboot.product.vendor.sku=<name>).
 A layout is a closed name: the permission directory sku_<name>/ of the vendor
 partition declares the camera features it earns, and an init trigger on the name
-selects the media profiles file that matches its size caps. This module is the
+selects the media profiles file that matches its size caps and starts the camera
+provider (a layout without cameras starts none). This module is the
 only source of the set, its names, its fallback order and the files:
 
     camera_layouts.py            rewrite overlay/camera/generated
@@ -51,6 +52,9 @@ SKU_PROPERTY = "ro.boot.product.vendor.sku"
 # The kernel argument that Android init imports as that property.
 SKU_BOOT_ARGUMENT = "androidboot.product.vendor.sku="
 MEDIA_PROPERTY = "ro.media.xml_variant.profiles"
+# The service of the lazy camera provider (the stock rc of hardware/google/camera, which the verifier
+# reads): a layout with cameras starts it at boot.
+PROVIDER_SERVICE = "vendor.camera-provider-2-7-google"
 INIT_FILE = "init.kernarium_camera.rc"
 MAKEFILE = "camera_layouts.mk"
 TABLE = "layouts.tsv"
@@ -399,12 +403,19 @@ def init_file() -> bytes:
              "# The camera layout the host composed selects the media profiles that match its size\n",
              "# caps. The property is read when a process first reads the media profiles, so it is\n",
              "# set while the property triggers run, before the zygote starts. A layout with no\n",
-             "# variant (none) keeps the product's default profiles.\n"]
+             "# variant (none) keeps the product's default profiles.\n",
+             "#\n",
+             "# A layout with cameras also starts the camera provider. The provider is lazy: it\n",
+             "# exits when cameraserver holds no camera and init starts it again through its\n",
+             "# interface when an application opens one. cameraserver lists only the providers\n",
+             "# that have registered, at its first lookup or later, and nothing else starts a\n",
+             "# lazy AIDL provider the first time. A layout without cameras starts none.\n"]
     for layout in all_layouts():
-        if not layout.media_variant:
+        if not layout.has_front:
             continue
         lines.append(f"\non property:{SKU_PROPERTY}={layout.name}\n"
-                     f"    setprop {MEDIA_PROPERTY} {layout.media_variant}\n")
+                     f"    setprop {MEDIA_PROPERTY} {layout.media_variant}\n"
+                     f"    start {PROVIDER_SERVICE}\n")
     return "".join(lines).encode()
 
 
