@@ -383,8 +383,10 @@ void anUnknownSourceNeverFallsBackToTheHostsCamera()
         ++hostSources;
         return uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::laptop);
     };
+    // A typo of the back-only name is not the host's cameras either.
     for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:", "SYNTHETIC:PHONE", " host",
-                            "host ", "synthetic:phone:2", "0", ""}) {
+                            "host ", "synthetic:phone:2", "0", "", "host:bak", "host:backs", "host:back:", "host:front", "Host:back",
+                            "host:Back", "host:", "host:back "}) {
         require(parseSource(bad).invalid, bad);
         require(chooseSource(parseSource(bad), host) == nullptr, bad);
     }

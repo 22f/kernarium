@@ -281,6 +281,9 @@ public:
     {
         for (const auto& info : host_->cameras())
             openable_.push_back(info.position == uml::platform::CameraPosition::back);
+        /* A test that must never open the front camera requires this line in
+         * the log before it lets any camera open. */
+        std::fprintf(stderr, "Kernarium: cameras from the host, back cameras alone openable\n");
     }
 
     [[nodiscard]] std::vector<uml::platform::CameraInfo> cameras() const override

@@ -236,12 +236,13 @@ Kernarium attaches:
   difference ([orientation](../darwin/device/camera/README.md#orientation)). A
   runtime that is not an App Store build serves the synthetic camera when
   `KERNARIUM_CAMERA_SOURCE` names it, serves the host's cameras with only the
-  back ones openable for `host:back` (the front camera is listed, so the layout
-  is an image's, and every request to open it is refused before the host), gives
-  the guest no cameras for any other value (never the host's), and prints the ROTATE_AND_CROP settings that reach
-  the cameras and the process's footprint when a capture session opens, closes
-  and after each still. The Linux runtime keeps both entries and never calls
-  back;
+  back ones openable for `host:back` (the front camera is listed, so the
+  layout is an image's, every request to open it is refused before the host,
+  and the runtime says at start that the filter is installed), gives the guest
+  no cameras for any other value, a typo of that name included (never the
+  host's), and prints the ROTATE_AND_CROP settings that reach the cameras and
+  the process's footprint when a capture session opens, closes and after each
+  still. The Linux runtime keeps both entries and never calls back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then
