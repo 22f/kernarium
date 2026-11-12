@@ -147,6 +147,21 @@ FormatSet formatSetOf(AVCaptureDevice* device)
     return set;
 }
 
+// What a video output delivers: NV12, at the size the stream needs (see
+// deliveredFrameSize). Without a scaling the format's own size arrives.
+NSDictionary* videoSettingsOf(AVCaptureDeviceFormat* format, std::uint32_t width, std::uint32_t height)
+{
+    NSMutableDictionary* settings = [NSMutableDictionary dictionaryWithObject:@(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+                                                                      forKey:(__bridge NSString*)kCVPixelBufferPixelFormatTypeKey];
+    const CMVideoDimensions native = CMVideoFormatDescriptionGetDimensions(format.formatDescription);
+    const FrameSize delivered = deliveredFrameSize(std::uint32_t(native.width), std::uint32_t(native.height), width, height);
+    if (delivered.width != std::uint32_t(native.width) || delivered.height != std::uint32_t(native.height)) {
+        settings[(__bridge NSString*)kCVPixelBufferWidthKey] = @(delivered.width);
+        settings[(__bridge NSString*)kCVPixelBufferHeightKey] = @(delivered.height);
+    }
+    return settings;
+}
+
 std::vector<Entry> discover()
 {
     NSMutableArray<AVCaptureDeviceType>* types =
@@ -1207,6 +1222,10 @@ private:
                 }
                 newDelegate = delegate;
             }
+            // The stream's size, scaled by the platform from the format's: a
+            // format chosen for the photos it lists is larger than the preview.
+            AVCaptureVideoDataOutput* const delivering = running.videoOutput != nil ? running.videoOutput : newOutput;
+            if (ok && delivering != nil) delivering.videoSettings = videoSettingsOf(format, width, height);
         } @catch (NSException*) {
             ok = false;
         }

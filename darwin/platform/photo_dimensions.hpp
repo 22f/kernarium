@@ -95,6 +95,20 @@ struct VideoRequest {
                                                                 std::span<const VideoRequest> requests,
                                                                 CameraStillSize preferredStill);
 
+// The size a video output delivers frames at, for a stream of `width` by
+// `height` running in a format of `formatWidth` by `formatHeight`: the
+// format's aspect ratio scaled down to just cover the stream, in even
+// dimensions, and never above the format's own size. The platform scales the
+// frames itself, so a format larger than the stream (one chosen for the photos
+// it lists) costs the host no more than the smaller format would.
+struct FrameSize {
+    std::uint32_t width {};
+    std::uint32_t height {};
+    friend bool operator==(const FrameSize&, const FrameSize&) = default;
+};
+[[nodiscard]] FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
+                                           std::uint32_t height) noexcept;
+
 // Whether the size the platform resolved for a photo is the size asked for. A
 // resolved size of zero by zero is the platform stating none (a Bayer still
 // alone has no processed photo), which is not a different size.

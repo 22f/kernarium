@@ -2,6 +2,7 @@
 #include "photo_dimensions.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace uml::platform {
 namespace {
@@ -108,6 +109,18 @@ std::vector<CameraStillSize> photoSizesOfEveryRun(std::span<const VideoFormatFac
     });
     common.erase(std::unique(common.begin(), common.end()), common.end());
     return common;
+}
+
+FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
+                            std::uint32_t height) noexcept
+{
+    if (formatWidth == 0 || formatHeight == 0 || width == 0 || height == 0) return {formatWidth, formatHeight};
+    const double scale = std::min(1.0, std::max(double(width) / formatWidth, double(height) / formatHeight));
+    const auto even = [](double value, std::uint32_t limit) {
+        const auto rounded = (std::uint32_t(std::ceil(value - 1e-9)) + 1u) & ~1u;
+        return std::min(rounded, limit);
+    };
+    return {even(formatWidth * scale, formatWidth), even(formatHeight * scale, formatHeight)};
 }
 
 bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept

@@ -269,6 +269,22 @@ void aCameraWithoutRequestsOffersNothing()
     require(photoSizesOfEveryRun(tabletFormats, {}, twelveMegapixels).empty(), "no stream, no run");
 }
 
+void aStreamSmallerThanItsFormatIsDeliveredScaled()
+{
+    require(deliveredFrameSize(1920, 1440, 1440, 1080) == FrameSize({1440, 1080}), "the preview of a 12 MP format is 1440x1080");
+    require(deliveredFrameSize(1920, 1440, 1280, 720) == FrameSize({1280, 960}), "a wider stream keeps the format's aspect ratio");
+    require(deliveredFrameSize(4032, 3024, 1920, 1080) == FrameSize({1920, 1440}), "and covers the stream's longer side");
+    require(deliveredFrameSize(1920, 1440, 1000, 1000) == FrameSize({1334, 1000}), "an odd size rounds up to even");
+}
+
+void aStreamTheFormatJustCoversIsDeliveredAsItIs()
+{
+    require(deliveredFrameSize(1440, 1080, 1440, 1080) == FrameSize({1440, 1080}), "the same size");
+    require(deliveredFrameSize(1440, 1080, 1920, 1440) == FrameSize({1440, 1080}), "never above the format's own size");
+    require(deliveredFrameSize(1440, 1080, 0, 0) == FrameSize({1440, 1080}), "a stream of no size leaves the format's");
+    require(deliveredFrameSize(0, 0, 640, 480) == FrameSize({0, 0}), "a format of no size has none");
+}
+
 } // namespace
 
 int main()
@@ -293,5 +309,7 @@ int main()
     aSizeOnlyAnotherFormatListsIsNotOffered();
     aCameraWithoutTheLargestStillOffersWhatItsFormatMakes();
     aCameraWithoutRequestsOffersNothing();
+    aStreamSmallerThanItsFormatIsDeliveredScaled();
+    aStreamTheFormatJustCoversIsDeliveredAsItIs();
     return 0;
 }
