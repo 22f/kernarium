@@ -2,6 +2,7 @@
 #pragma once
 
 #include "camera_description.hpp"
+#include "camera_device.hpp"
 #include "camera_tiers.hpp"
 
 #include <cstdint>
@@ -77,6 +78,26 @@ struct LayoutDimensions {
 /* The kernel argument the layout travels in; Android's init imports it as
  * ro.boot.product.vendor.sku. */
 inline constexpr std::string_view layoutArgumentPrefix = "androidboot.product.vendor.sku=";
+
+/* The layout of a host with no cameras the image can describe. */
+inline constexpr std::string_view noCameraLayout = "none";
+
+/* Whether a guest with this layout gets a camera device at all. A layout that
+ * is not stated counts as having cameras. */
+[[nodiscard]] constexpr bool layoutHasCameras(std::string_view layout) noexcept
+{
+    return layout != noCameraLayout;
+}
+
+/* Whether the side keys advertise Android's camera lens cover
+ * (SW_CAMERA_LENS_COVER) and report it set: a blocked session whose guest has
+ * cameras. A live session leaves the switch out, and a host with no cameras
+ * reports no cover, so the guest shows no blocked camera it does not have. The
+ * launcher and the application's runtime both decide it here. */
+[[nodiscard]] constexpr bool lensCoverAdvertised(CameraMode mode, std::string_view layout) noexcept
+{
+    return mode == CameraMode::blocked && layoutHasCameras(layout);
+}
 
 /* The dimensions a host's cameras (in wire order, `arrangeCameras`) earn at a
  * tier. A host with a back camera and no front one, or with no camera that is

@@ -120,7 +120,9 @@ guest's cameras are live or blocked. The macOS launcher composes it with
 `--camera-layout=auto`, as the iOS runtime does; a launch otherwise passes the
 layout itself. A release's own command line may not carry the argument. A
 blocked guest also reports Android's camera lens cover on the side-key input
-device (`SW_CAMERA_LENS_COVER`) when its layout has cameras.
+device (`SW_CAMERA_LENS_COVER`) when its layout has cameras, and a live guest
+does not advertise the switch (`lensCoverAdvertised()`, which the launcher and
+the iOS runtime both ask). A guest whose layout is `none` gets no device.
 
 ## Orientation
 

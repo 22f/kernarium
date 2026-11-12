@@ -87,10 +87,10 @@ struct Presentation {
     uml::camera::CameraTier tier {uml::camera::CameraTier::small};
     /* The vendor SKU's value: one of the image's layouts, "none" when the host
      * has no cameras the image can describe. */
-    std::string layout {"none"};
+    std::string layout {uml::camera::noCameraLayout};
 
     /* Whether the guest gets a camera device at all. */
-    [[nodiscard]] bool hasCameras() const noexcept { return layout != "none"; }
+    [[nodiscard]] bool hasCameras() const noexcept { return uml::camera::layoutHasCameras(layout); }
 };
 
 /* Discovers `source`'s cameras at `tier` and composes the layout. A null
@@ -112,15 +112,6 @@ struct Presentation {
         uml::camera::composeLayout(*source, *presentation.calibration, arrangement);
     presentation.source = std::move(source);
     return presentation;
-}
-
-/* Whether the side keys report Android's camera lens cover for a session: a
- * blocked session that has cameras. A host with none reports no cover, so a
- * guest does not show a blocked camera it does not have. */
-[[nodiscard]] constexpr bool lensCovered(
-    uml::camera::CameraMode mode, bool hasCameras) noexcept
-{
-    return mode == uml::camera::CameraMode::blocked && hasCameras;
 }
 
 /* The runtime's state value of the device's. */

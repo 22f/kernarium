@@ -132,10 +132,16 @@ void theLayoutFollowsTheCamerasAndTheTier()
 
 void theLensCoverFollowsTheSession()
 {
-    require(lensCovered(CameraMode::blocked, true), "a blocked session with cameras");
-    require(!lensCovered(CameraMode::live, true), "a live one");
-    require(!lensCovered(CameraMode::blocked, false), "a host without cameras shows no blocked camera");
-    require(!lensCovered(CameraMode::live, false));
+    using uml::camera::lensCoverAdvertised;
+    const auto cameras = "bf-small-flash-manual";
+    require(lensCoverAdvertised(CameraMode::blocked, cameras), "a blocked session with cameras");
+    require(!lensCoverAdvertised(CameraMode::live, cameras), "a live one");
+    require(!lensCoverAdvertised(CameraMode::blocked, "none"),
+        "a host without cameras shows no blocked camera");
+    require(!lensCoverAdvertised(CameraMode::live, "none"));
+    require(lensCoverAdvertised(CameraMode::blocked, ""), "an unstated layout counts as having cameras");
+    require(uml::camera::layoutHasCameras("front") && uml::camera::layoutHasCameras(""));
+    require(!uml::camera::layoutHasCameras("none"));
 }
 
 struct Reports {

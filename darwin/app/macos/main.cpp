@@ -1709,9 +1709,11 @@ private:
 				error.what());
 			return false;
 		}
+		/* The layout the guest is told: composed here as the iOS runtime
+		 * composes it, or stated by the kernel arguments, or not stated. */
+		std::string layout;
 		if (prepared_.camera_layout_auto) {
-			/* The layout the iOS runtime composes for these cameras: the
-			 * same function, the same tier and calibration. */
+			/* The same function, the same tier and calibration. */
 			for (const auto &argument : kernel) {
 				if (argument.starts_with(uml::camera::layoutArgumentPrefix)) {
 					std::fputs("--camera-layout=auto cannot be combined "
@@ -1722,7 +1724,7 @@ private:
 			try {
 				uml::camera::ArrangementOptions arrangement;
 				arrangement.tier = options.tier;
-				const auto layout = uml::camera::composeLayout(
+				layout = uml::camera::composeLayout(
 					*source, *camera_calibration_, arrangement);
 				kernel.emplace_back(
 					std::string{uml::camera::layoutArgumentPrefix} + layout);
@@ -1732,13 +1734,25 @@ private:
 					error.what());
 				return false;
 			}
+		} else {
+			for (const auto &argument : kernel) {
+				if (argument.starts_with(uml::camera::layoutArgumentPrefix))
+					layout = argument.substr(
+						uml::camera::layoutArgumentPrefix.size());
+			}
+		}
+		/* A host with no camera the image can describe gets no camera device,
+		 * as the iOS runtime gives it none. */
+		if (!uml::camera::layoutHasCameras(layout)) {
+			std::fputs("Camera layout: none; no camera device\n", stderr);
+			return true;
 		}
 		/* The side keys report whether the cameras are blocked, as the iOS
 		 * runtime's do (only a guest with hardware input has them). */
 		if (services_.side_keys) {
 			services_.side_keys->setSwitch(
 				{uml::input::virtio::protocol::switchCameraLensCover,
-				 options.mode == uml::camera::CameraMode::blocked});
+				 uml::camera::lensCoverAdvertised(options.mode, layout)});
 		}
 		return start_virtio_device(
 			kernel, services_.camera, uml::camera::cameraDeviceId,

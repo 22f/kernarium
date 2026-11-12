@@ -1820,8 +1820,8 @@ private:
                 boot->camera->takeConnectionName(),
                 uml::camera::cameraDeviceId));
         }
-        if (kernarium::camera::lensCovered(
-                request_.camera.mode, cameras_->hasCameras()))
+        if (uml::camera::lensCoverAdvertised(
+                request_.camera.mode, cameras_->layout))
             boot->keyboard->setSwitch(
                 {uml::input::virtio::protocol::switchCameraLensCover, true});
         /* The hardware keyboard, mouse and pointer come last and stay
