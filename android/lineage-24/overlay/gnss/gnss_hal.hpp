@@ -31,7 +31,7 @@ namespace andarium::gnss {
 //    moves, copies and atomic stores. It is never held across a call that takes
 //    `ops_` or an engine's control lock.
 // The order is `ops_`, then `mutex_`. The settings entry points take only
-// `mutex_`.
+// `mutex_`, and the engine functions they call under it are atomic stores.
 class Hal {
 public:
     enum class StartResult { started, no_callback, no_receiver };
@@ -83,34 +83,22 @@ public:
     // False when the interval is not positive.
     bool set_position_mode(int interval_ms) {
         if (interval_ms <= 0) return false;
-        std::shared_ptr<Engine> engine;
-        {
-            std::lock_guard lock(mutex_);
-            interval_ms_ = interval_ms;
-            engine = engine_;
-        }
-        if (engine) engine->set_min_interval_ms(interval_ms);
+        std::lock_guard lock(mutex_);
+        interval_ms_ = interval_ms;
+        if (engine_) engine_->set_min_interval_ms(interval_ms);
         return true;
     }
 
     void set_sv_status(bool on) {
-        std::shared_ptr<Engine> engine;
-        {
-            std::lock_guard lock(mutex_);
-            sv_status_ = on;
-            engine = engine_;
-        }
-        if (engine) engine->set_sv_status(on);
+        std::lock_guard lock(mutex_);
+        sv_status_ = on;
+        if (engine_) engine_->set_sv_status(on);
     }
 
     void set_nmea(bool on) {
-        std::shared_ptr<Engine> engine;
-        {
-            std::lock_guard lock(mutex_);
-            nmea_ = on;
-            engine = engine_;
-        }
-        if (engine) engine->set_nmea(on);
+        std::lock_guard lock(mutex_);
+        nmea_ = on;
+        if (engine_) engine_->set_nmea(on);
     }
 
     std::optional<DebugFix> last_fix() {

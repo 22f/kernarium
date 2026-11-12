@@ -842,6 +842,84 @@ void aRefusedStartLeavesTheRunningSessionAlone()
     heldWakelocks(world, 0);
 }
 
+/* What an entry point saves is what the engine runs, whichever way concurrent
+ * calls interleave: after concurrent setters, the settings the engine has are
+ * the settings a replacement engine is given. They are seen by what a session
+ * reports (sentences, satellites, and how often a location). */
+struct Observed {
+    bool sentences = false;
+    bool satellites = false;
+    bool everyEpoch = false;
+
+    bool operator==(const Observed&) const = default;
+};
+
+Observed observe(World& world, Hal& hal)
+{
+    const auto before = logOf(world);
+    const std::size_t from = before.size();
+    const auto offs = std::count(before.begin(), before.end(), "off");
+    require(hal.start() == Hal::StartResult::started);
+    // Two epochs, which the engine handles half a second apart whenever it
+    // gets to them: the second is a location only when the interval is short.
+    world.write(epoch(preciseFix(baseNs, sessionLatitude(1))));
+    world.write(epoch(preciseFix(baseNs + second, sessionLatitude(1))));
+    require(world.drained());
+    hal.stop();
+    // The end is the barrier: everything posted before it is heard.
+    require(eventually([&] {
+        const auto now = logOf(world);
+        return std::count(now.begin(), now.end(), "off") == offs + 1;
+    }));
+    Observed result;
+    const auto log = logOf(world);
+    int locations = 0;
+    for (std::size_t index = from; index < log.size(); ++index) {
+        result.sentences |= log[index] == "nmea";
+        result.satellites |= log[index] == "sv";
+        locations += log[index] == "location" ? 1 : 0;
+    }
+    result.everyEpoch = locations == 2;
+    return result;
+}
+
+void concurrentSettersLeaveTheEngineWithTheSavedSettings()
+{
+    for (int trial = 0; trial < 120; ++trial) {
+        World world;
+        world.boottimeStep = second / 2;
+        Hal hal(world.env());
+        hal.set_callback(world.sink());
+        {
+            Callers setters;
+            for (int thread = 0; thread < 4; ++thread) {
+                setters.call([&, thread] {
+                    std::minstd_rand random(static_cast<unsigned>(trial * 8 + thread + 1));
+                    for (int round = 0; round < 60; ++round) {
+                        switch (random() % 3) {
+                        case 0:
+                            hal.set_nmea(random() % 2 == 0);
+                            break;
+                        case 1:
+                            hal.set_sv_status(random() % 2 == 0);
+                            break;
+                        default:
+                            hal.set_position_mode(random() % 2 == 0 ? 1 : 4000);
+                            break;
+                        }
+                    }
+                });
+            }
+            require(setters.allReturned(30s));
+        }
+        const Observed before = observe(world, hal);
+        // A replacement engine runs the saved settings.
+        hal.set_callback(world.sink());
+        const Observed after = observe(world, hal);
+        require(before == after, "the engine's settings are not the saved ones");
+    }
+}
+
 /* One thread starts, stops, restarts and replaces at random while a writer
  * feeds the receiver: the framework hears exactly the sequence the entry
  * points ran, with no end or off lost to a restart, and every location is of
@@ -1198,6 +1276,8 @@ int main()
         {"a-replacement-stops-an-epoch-between-its-sentences", aReplacementStopsAnEpochBetweenItsSentences},
         {"a-stalled-framework-bounds-the-statuses-by-refusing-starts", aStalledFrameworkBoundsTheStatusesByRefusingStarts},
         {"a-refused-start-leaves-the-running-session-alone", aRefusedStartLeavesTheRunningSessionAlone},
+        {"concurrent-setters-leave-the-engine-with-the-saved-settings",
+         concurrentSettersLeaveTheEngineWithTheSavedSettings},
         {"a-driver-hears-exactly-the-sessions-it-ran", aDriverHearsExactlyTheSessionsItRan},
         {"random-starts-and-stops-keep-the-calls-in-order", randomStartsAndStopsKeepTheCallsInOrder},
         {"a-callback-may-call-back-into-the-hal", aCallbackMayCallBackIntoTheHal},
