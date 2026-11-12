@@ -727,6 +727,8 @@ struct LegacyApkInstallAlertTests {
         model.alert = nil
         try #require(await eventually { alert(over: controller)?.title == LegacyInstallWords.title }, "the question never presented")
         let shown = try #require(alert(over: controller))
+        // The alert is on screen before its buttons are built.
+        try #require(await eventually { control(labelled: "Cancel", in: shown.view) != nil }, "no Cancel on the alert")
         let cancel = try #require(control(labelled: "Cancel", in: shown.view))
         if !cancel.accessibilityActivate(), let control = cancel as? UIControl { control.sendActions(for: .touchUpInside) }
         try #require(await eventually { alert(over: controller) == nil && model.busy == nil })
