@@ -358,9 +358,11 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
-exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback)),
-and `FollowXRowTests` only with `FOLLOW_X_HANDLE=example_handle`
+and `HomeMenuTests` (Home's toolbar menu) exist only in a build with
+`FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
+above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
+`HomePlainInfoTests` (the plain Info button) only in a build without it;
+`FollowXRowTests` exist only with `FOLLOW_X_HANDLE=example_handle`
 ([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
 without them does not build them. The Mail composer, the picker and the
 guest's display are stand-ins. The hosted tests
@@ -398,6 +400,16 @@ a session: an iPad's interface follows, an iPhone's stays portrait. The
 results carry how many attempts each repeated step took. The Simulator produces
 no Escape, Delete, Caps Lock, F13, lone Shift or Globe key, and no raw mouse
 motion under the pointer lock.
+
+The folding iPhone's layout ([devices](../Andarium/README.md#devices)) is
+`andarium-core`'s `FoldLayoutTests`, one test per pose of the iPhone Duo.
+`FoldSessionHostingTests` puts the real scene root in a window of each pose's
+size through the reader's stub, so it runs on every Simulator: the guest's
+frame, nothing of Andarium's on the fold, the guest kept and resized once where
+its shape changes, and the rotation rule. `TheRealDisplay` reads the iPhone Duo
+Simulator's own display in the pose a harness put it in
+(`TEST_RUNNER_ANDARIUM_FOLD_POSE`; a harness outside the repository poses the
+Simulator, which no Xcode control does) and checks nothing without it.
 
 The opt-in suites each need a `TEST_RUNNER_ANDARIUM_*` switch that the suite's
 header names: rotation, motion compatibility, power-off and over-vsock,

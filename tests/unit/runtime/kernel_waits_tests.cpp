@@ -5,6 +5,7 @@
  * length of the call, makes the system's call and leaves the slot as it was
  * but for the count of marks. A call that cannot block is not marked.
  */
+#include "carrier_activity.hpp"
 #include "kernel_threads.hpp"
 #include "kernel_waits.hpp"
 #include "platform/host_wait.hpp"
@@ -271,6 +272,100 @@ void a_thread_without_a_cell_marks_nothing()
 	close(fds[1]);
 }
 
+/* The call that names a thread tells the activity record the stall watch
+ * sleeps by (runtime/carrier_activity) that a vCPU's carrier exists, and its
+ * idle waits are then reported there; the kernel's other threads are not. */
+void a_carrier_is_reported_by_its_name_and_its_idle_waits()
+{
+	using SetName = int (*)(const char *);
+	using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
+		const sigset_t *);
+	require(kernel_wait_import("pthread_setname_np") != nullptr);
+	require(kernel_wait_import("_pthread_setname_np") ==
+		kernel_wait_import("pthread_setname_np"));
+	require(uml::runtime::carriers_outside_idle() == 0 &&
+		uml::runtime::carriers_reporting() == 0);
+
+	int pipe_fds[2];
+	require(pipe(pipe_fds) == 0);
+	std::atomic<bool> named{false};
+	std::atomic<std::uint32_t> after_naming{0};
+	std::atomic<std::uint32_t> after_waking{0};
+	Running carrier{[&] {
+		const auto set_name = import_of<SetName>("pthread_setname_np");
+		require(set_name("uml-vcpu-5-carrier") == 0);
+		char name[64]{};
+		require(pthread_getname_np(pthread_self(), name, sizeof(name)) == 0 &&
+			std::strcmp(name, "uml-vcpu-5-carrier") == 0, "the name is not set");
+		after_naming = uml::runtime::carriers_outside_idle();
+		named = true;
+		fd_set readable;
+		FD_ZERO(&readable);
+		FD_SET(pipe_fds[0], &readable);
+		(void)import_of<Pselect>("pselect")(pipe_fds[0] + 1, &readable, nullptr,
+			nullptr, nullptr, nullptr);
+		after_waking = uml::runtime::carriers_outside_idle();
+	}};
+	require(within(std::chrono::seconds{3}, [&] { return named.load(); }));
+	/* It starts outside an idle wait, enters one, and is outside again after. */
+	require(after_naming == 1U << 5);
+	require(uml::runtime::carriers_reporting() == 1U << 5);
+	require(within(std::chrono::seconds{3}, [&] {
+		return uml::platform::wait_kind(word_of(carrier.port())) == HostWait::idle;
+	}));
+	require(within(std::chrono::seconds{3}, [&] {
+		return uml::runtime::carriers_outside_idle() == 0;
+	}), "a carrier in its idle wait is counted outside it");
+	(void)!write(pipe_fds[1], "x", 1);
+	require(within(std::chrono::seconds{3}, [&] {
+		return carrier.job.finished.load(std::memory_order_acquire);
+	}));
+	carrier.join();
+	require(after_waking == 1U << 5);
+	/* A thread that ends reports no more. */
+	require(uml::runtime::carriers_outside_idle() == 0 &&
+		uml::runtime::carriers_reporting() == 0);
+	close(pipe_fds[0]);
+	close(pipe_fds[1]);
+}
+
+/* The kernel starts a notification thread and an alarm helper beside its
+ * carriers; they wait in calls of their own, and the idle waits among them
+ * must not count, whatever the thread is named. */
+void other_threads_of_the_kernel_are_not_carriers()
+{
+	using SetName = int (*)(const char *);
+	using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
+		const sigset_t *);
+	for (const char *name : {"uml-irq-notify", "uml-rtc-alarm",
+		     "uml-vcpu-16-carrier", "uml-vcpu-x-carrier", "uml-vcpu--carrier"}) {
+		int pipe_fds[2];
+		require(pipe(pipe_fds) == 0);
+		std::atomic<bool> waiting{false};
+		Running thread{[&] {
+			require(import_of<SetName>("pthread_setname_np")(name) == 0);
+			fd_set readable;
+			FD_ZERO(&readable);
+			FD_SET(pipe_fds[0], &readable);
+			waiting = true;
+			(void)import_of<Pselect>("pselect")(pipe_fds[0] + 1, &readable,
+				nullptr, nullptr, nullptr, nullptr);
+		}};
+		require(within(std::chrono::seconds{3}, [&] {
+			return waiting.load() && uml::platform::wait_kind(
+				word_of(thread.port())) == HostWait::idle;
+		}));
+		require(uml::runtime::carriers_outside_idle() == 0 &&
+			uml::runtime::carriers_reporting() == 0, name);
+		(void)!write(pipe_fds[1], "x", 1);
+		thread.join();
+		require(uml::runtime::carriers_outside_idle() == 0 &&
+			uml::runtime::carriers_reporting() == 0, name);
+		close(pipe_fds[0]);
+		close(pipe_fds[1]);
+	}
+}
+
 } // namespace
 
 /* A signal handler's marked write inside a wait it interrupted gives the
@@ -311,6 +406,8 @@ int main()
 	a_thread_without_a_cell_marks_nothing();
 	calls_the_loader_does_not_hand_over_are_not_wrapped();
 	blocking_calls_are_marked_for_as_long_as_they_block();
+	a_carrier_is_reported_by_its_name_and_its_idle_waits();
+	other_threads_of_the_kernel_are_not_carriers();
 	other_calls_are_marked_and_immediate_ones_are_not();
 	std::puts("kernel waits tests passed");
 	return 0;

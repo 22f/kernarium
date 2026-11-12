@@ -285,7 +285,7 @@ index a83e9a6d575aa57da52255b11d0307dc1bfd04d2..25d7aecc45c04ad280e222555cd1271b
  void cs_end(struct kk_cmd_buffer *cmd);
  void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_draw.c b/src/kosmickrisp/vulkan/kk_cmd_draw.c
-index 0e0a6da3bf103a844c54a130279e5014a564dc2c..05651ddbf68437be772a4d954b230ca5fd7ba69f 100644
+index 6f61cd6e72688228ac0a9062e576dba0b798c2a0..a1457b264e611f9f164c7781f920b54d6e1d05b6 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_draw.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_draw.c
 @@ -355,6 +355,7 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
@@ -357,7 +357,7 @@ index 0e0a6da3bf103a844c54a130279e5014a564dc2c..05651ddbf68437be772a4d954b230ca5
     if (kk_grid_is_indirect(data.grid)) {
        if (data.index.el_size_B) {
           struct kk_addr_range index_range =
-@@ -3455,6 +3489,12 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+@@ -3459,6 +3493,12 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
     }
  
     for (uint32_t i = 0; i < data->draw_count; i++) {
