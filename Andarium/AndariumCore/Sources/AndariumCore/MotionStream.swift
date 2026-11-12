@@ -4,13 +4,17 @@ import Darwin
 import Foundation
 
 /// Private host-to-guest motion protocol on vsock 5556. Each 20-byte record is
-/// little endian: "ANS1", Android sensor type (1 or 4), three IEEE float32 SI
-/// values. The guest timestamps receipt in its own CLOCK_BOOTTIME domain. The
-/// guest answers on the same connection with `MotionDemand` frames, which say
-/// which sensors an application uses. A guest that has the device-orientation
-/// sensor also takes records of type 27 (`OrientationRecord`).
+/// little endian: "ANS1", Android sensor type (1, 2 or 4) as a uint16, a status
+/// byte (0 for every type but 2, which carries 0 to 3), a zero byte, and three
+/// IEEE float32 values in SI units (microtesla for type 2). The guest
+/// timestamps receipt in its own CLOCK_BOOTTIME domain. The guest answers on
+/// the same connection with `MotionDemand` frames, which say which sensors an
+/// application uses. A guest that has the device-orientation sensor also takes
+/// records of type 27 (`OrientationRecord`), and one that lists a magnetometer
+/// (it sends "ANC3") takes records of type 2.
 public struct MotionSample: Sendable {
-    public enum Sensor: UInt32, Sendable { case accelerometer = 1, gyroscope = 4 }
+    /// The raw value is Android's sensor type.
+    public enum Sensor: UInt32, Sendable { case accelerometer = 1, magnetometer = 2, gyroscope = 4 }
     /// The host interface orientation the virtual device is mounted to
     /// (`MotionMount` decides when it changes).
     public enum Axes: Equatable, Sendable { case portrait, portraitUpsideDown, landscapeLeft, landscapeRight }
@@ -18,8 +22,16 @@ public struct MotionSample: Sendable {
     public let x: Float
     public let y: Float
     public let z: Float
+    /// How far the magnetic field can be trusted, as Android's SensorStatus: 0
+    /// unreliable, 1 low, 2 medium, 3 high. Zero for every other sensor.
+    public let status: UInt8
 
-    public init(sensor: Sensor, x: Double, y: Double, z: Double, axes: Axes = .portrait) {
+    /// `x`, `y` and `z` are in the device's frame and the sensor's unit (g,
+    /// rad/s, microtesla), and are given the axes of the mount. The magnetic
+    /// field has no sign convention of its own, so it keeps its sign like the
+    /// rotation rate, and the same rotation about z the accelerometer takes
+    /// turns it, so the guest's gravity and field stay in one frame.
+    public init(sensor: Sensor, x: Double, y: Double, z: Double, axes: Axes = .portrait, status: UInt8 = 0) {
         self.sensor = sensor
         // Core Motion reports gravity in g with the opposite acceleration
         // sign to Android. Both use right-handed, fixed device axes.
@@ -33,12 +45,26 @@ public struct MotionSample: Sendable {
         self.x = Float(horizontal * scale)
         self.y = Float(vertical * scale)
         self.z = Float(z * scale)
+        self.status = sensor == .magnetometer ? min(status, 3) : 0
+    }
+
+    private init(sensor: Sensor, x: Float, y: Float, z: Float, status: UInt8) {
+        self.sensor = sensor
+        self.x = x
+        self.y = y
+        self.z = z
+        self.status = status
+    }
+
+    /// The same reading, with another status.
+    public func withStatus(_ status: UInt8) -> MotionSample {
+        MotionSample(sensor: sensor, x: x, y: y, z: z, status: sensor == .magnetometer ? min(status, 3) : 0)
     }
 
     public var encoded: Data? {
         guard x.isFinite, y.isFinite, z.isFinite else { return nil }
         var data = Data([0x41, 0x4e, 0x53, 0x31])
-        for word in [sensor.rawValue, x.bitPattern, y.bitPattern, z.bitPattern] {
+        for word in [sensor.rawValue | UInt32(status) << 16, x.bitPattern, y.bitPattern, z.bitPattern] {
             var little = word.littleEndian
             withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
         }
@@ -201,13 +227,23 @@ public final class MotionStream: @unchecked Sendable {
             guard running, generation == epoch, self.descriptor == descriptor else { return false }
             guard count > 0 else { return closeStream() }
             partial.append(contentsOf: buffer.prefix(count))
-            while partial.count >= MotionDemand.frameSize {
-                let frame = partial.prefix(MotionDemand.frameSize)
-                partial.removeFirst(MotionDemand.frameSize)
-                guard let demand = MotionDemand(frame: Data(frame)) else { return closeStream() }
-                frames.append(demand)
+            // The magic says how long the frame is ("ANC1" and "ANC2" 16 bytes,
+            // "ANC3" 20), so a frame that has not all arrived is waited for and
+            // a magic no frame has ends the connection at once.
+            while true {
+                switch MotionDemand.framing(of: partial) {
+                case .incomplete:
+                    return false
+                case .invalid:
+                    return closeStream()
+                case .frame(let length):
+                    guard partial.count >= length else { return false }
+                    let frame = Data(partial.prefix(length))
+                    partial.removeFirst(length)
+                    guard let demand = MotionDemand(frame: frame) else { return closeStream() }
+                    frames.append(demand)
+                }
             }
-            return false
         }
         // Frames that arrived before a bad one still count.
         for frame in frames { demandChanged(frame) }
