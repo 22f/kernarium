@@ -20,13 +20,20 @@ The report comes from the stock callback WifiTrackerLib already
 registers, so nothing else is read. A network that is not validated, a
 partial one, and one behind a sign-in page keep the stock rules.
 
+A report alone changes the mark of a network that stays validated, and
+it reaches only the listener of the entry, which the status bar's
+repository does not set. WifiPickerTracker now notifies its own
+listeners when a report changes whether an entry shows the mark, as the
+capabilities and the lost handlers do for their changes.
+
 The library's unit tests do not cover this change.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../src/com/android/wifitrackerlib/Utils.java | 40 ++++++++++++++++++-
  .../com/android/wifitrackerlib/WifiEntry.java | 13 +++++-
- 2 files changed, 50 insertions(+), 3 deletions(-)
+ .../wifitrackerlib/WifiPickerTracker.java     |  8 ++++
+ 3 files changed, 58 insertions(+), 3 deletions(-)
 
 diff --git a/libs/WifiTrackerLib/src/com/android/wifitrackerlib/Utils.java b/libs/WifiTrackerLib/src/com/android/wifitrackerlib/Utils.java
 index 0035030b0ef6255a755a28d63af17bfe28aa1069..7864d0352e30b69c9b9ebbffc9f14dba9d59e7f5 100644
@@ -132,3 +139,24 @@ index 0035119e4b5e77f7dc7752b7c6dd8b9dc4f46a42..778dcf3192ec1e5eeb6d0f1577a62117
      /**
       * Returns whether this network has validated internet access or not.
       * Note: This does not necessarily mean the network is the default route.
+diff --git a/libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java b/libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java
+index fc4d8ab1866b5bd776f6ea340b6e3657cf7b5a67..b0e03097db06a38d9d184a2389b3113c7f7247cd 100644
+--- a/libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java
++++ b/libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java
+@@ -437,8 +437,16 @@ public class WifiPickerTracker extends BaseWifiTracker {
+     @Override
+     protected void handleConnectivityReportAvailable(
+             @NonNull ConnectivityDiagnosticsManager.ConnectivityReport connectivityReport) {
++        boolean markChanged = false;
+         for (WifiEntry entry : getAllWifiEntries()) {
++            final boolean markShown = entry.shouldShowXLevelIcon();
+             entry.updateConnectivityReport(connectivityReport);
++            markChanged |= markShown != entry.shouldShowXLevelIcon();
++        }
++        // A report alone can change the mark of a network that stays validated, and nothing else
++        // reaches the listeners of the tracker (the status bar's among them) then.
++        if (markChanged) {
++            notifyOnWifiEntriesChanged(WIFI_ENTRIES_CHANGED_REASON_GENERAL);
+         }
+     }
+ 
