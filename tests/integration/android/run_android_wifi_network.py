@@ -33,8 +33,11 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   warning; with a strict private DNS name the platform can use, a check that
   fails again and again leaves the network validated with its private DNS not
   broken, and the private DNS probe is not repeated for each check; across all
-  of it NetworkStack, SystemUI and Settings neither crash nor stop answering and
-  nothing hits an illegal instruction; with the
+  of it NetworkStack, SystemUI and Settings (each by the exact name it runs
+  under) neither crash nor stop answering and nothing hits an illegal
+  instruction, which every section of a guest of the release under test reads
+  from the marker it wrote at its start (a section whose marker the log has
+  dropped fails); with the
   probes at a black hole and a strict private DNS name that does not resolve,
   and VirtWifi forgotten and saved again, the network stays enabled and joined for
   a minute and a half, and is joined again after a guest suspend and wake (the
@@ -688,6 +691,8 @@ class Console:
 
 
 class Guest:
+    crash_log: "CrashLog | None" = None
+
     def __init__(self, adb: str, serial: str, process: subprocess.Popen, log: pathlib.Path,
                  console: Console, private: pathlib.Path) -> None:
         self.adb = adb
@@ -699,6 +704,8 @@ class Guest:
         # The boot script's denials found by every read of the log so far.
         self.denials: list[str] = []
         self.denial_reads = 0
+        # Set for a guest of the release under test: its sections read their crash evidence.
+        self.crash_log: CrashLog | None = None
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -889,8 +896,13 @@ class Guest:
         """A guest restart, shown by the uptime going back, then boot_completed again.
 
         The Wi-Fi service writes a change to its configuration store a little later, and a restart
-        that follows at once loses it (a forgotten network comes back), so the restart waits."""
+        that follows at once loses it (a forgotten network comes back), so the restart waits. A restart
+        clears the log, so the crash evidence of the section is read before it and a new marker follows it."""
         time.sleep(STORE_SECONDS)
+        watch = self.crash_log
+        watching = watch is not None and watch.active
+        if watching:
+            watch.collect(self)
         before = self.uptime()
         self.adb_run("reboot", timeout=60)
 
@@ -905,12 +917,15 @@ class Guest:
             return None
 
         wait_for("the guest restarts", BOOT_SECONDS, rebooted, self, interval=3.0)
+        # The restart cleared the log: the rest of the section is read from a new marker.
+        if watching:
+            watch.mark(self)
 
 
 # ---- Starting and stopping a guest.
 
 def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, release: pathlib.Path | None,
-                instance: pathlib.Path, provision: bool) -> Guest:
+                instance: pathlib.Path, provision: bool, watched: bool = False) -> Guest:
     boot_options = boot_android.parse_arguments([
         *(["--release", str(release)] if release else []),
         *(["--emulator", str(options.emulator)] if options.emulator else []),
@@ -938,6 +953,8 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, re
     stream.close()
     serial = f"127.0.0.1:{options.adb_port}"
     guest = Guest(adb, serial, process, log, Console(private / f"uml-kern{process.pid}", private), private)
+    if watched:
+        guest.crash_log = CrashLog()
     try:
         boot_android.wait_for_adb(adb, serial, process, options.boot_timeout)
         if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
@@ -964,17 +981,35 @@ class Report:
         self.failures: list[str] = []
 
     def section(self, name: str, guest: Guest | None, body: Callable[[], str | None]) -> None:
+        """Runs one section. On a guest of the release under test the section's crash evidence is read at its
+        end (also when it failed, for a crash may be why) and a crash, an ANR or a lost marker fails it."""
+        watch = guest.crash_log if guest is not None else None
+        problem: Exception | None = None
+        note = None
         try:
+            if watch is not None:
+                watch.begin(guest, name)
             note = body()
+        except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as failed:
+            problem = failed
+        if watch is not None:
+            try:
+                crashed = watch.end(guest)
+            except (Failure, subprocess.TimeoutExpired, OSError) as unread:
+                crashed = [f"the crash evidence could not be read: {unread}"]
+            if crashed:
+                text = "; ".join(crashed[:5])
+                problem = Failure(f"{problem}; and {text}" if problem is not None else text)
+        if problem is None:
             print(f"ok   {name}" + (f" ({note})" if note else ""))
-        except (Failure, boot_android.LauncherError, subprocess.TimeoutExpired, OSError) as problem:
-            print(f"FAIL {name}: {problem}", file=sys.stderr)
-            if guest is not None:
-                try:
-                    print(guest.diagnose(), file=sys.stderr)
-                except (Failure, subprocess.TimeoutExpired, OSError):
-                    pass
-            self.failures.append(f"{name}: {problem}")
+            return
+        print(f"FAIL {name}: {problem}", file=sys.stderr)
+        if guest is not None:
+            try:
+                print(guest.diagnose(), file=sys.stderr)
+            except (Failure, subprocess.TimeoutExpired, OSError):
+                pass
+        self.failures.append(f"{name}: {problem}")
 
 
 def check_overlay(guest: Guest) -> str | None:
@@ -1129,34 +1164,152 @@ def check_no_denials(guest: Guest) -> str | None:
     return f"{logged} denials logged in all, none for {SCRIPT_DOMAIN} in {guest.denial_reads} reads of the log"
 
 
-# The applications of the warning: the platform's network stack, the status bar and Settings.
-CRASH_PACKAGES = ("com.android.networkstack", "com.android.systemui", "com.android.settings")
+CRASH_SECTION = "NetworkStack, SystemUI and Settings neither crash nor stop answering"
+# The processes of the warning, each by the exact name it runs under: the platform's network stack (the
+# manifest's own process name, not its package), the status bar and Settings. A name that only starts with one
+# of these, another package or a private subprocess such as com.android.systemui:screenshot, is another
+# process, and none of those subprocesses is read as one of these three.
+WARNING_PROCESSES = ("com.android.networkstack.process", "com.android.systemui", "com.android.settings")
+# `logcat -v threadtime`: date, time, pid, tid, priority, tag, message. The log's own columns bind the lines of
+# one record, which other processes' lines may interleave.
+LOG_LINE = re.compile(r"^(\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEFS])\s+(\S+)\s*:\s?(.*)$")
+JAVA_PROCESS_LINE = re.compile(r"Process: (\S+), PID: (\d+)")
+ANR_LINE = re.compile(r"ANR in (\S+)(?: \(\S*\))?")
+NATIVE_PROCESS_LINE = re.compile(r"pid: \d+, (?:ppid: \d+, )?tid: \d+, name: .*  >>> (\S+) <<<")
+NATIVE_SIGNAL_LINE = re.compile(r"signal (\d+) \((\S+)\)")
+SIGILL_LINE = re.compile(r"signal 4 \(SIGILL\)")
+SECTION_MARKER_TAG = "wifi-runner"
+
+
+@dataclass(frozen=True)
+class LogLine:
+    when: str
+    pid: int
+    tid: int
+    tag: str
+    message: str
+    text: str
+
+    @property
+    def stream(self) -> tuple[int, int, str]:
+        """What binds the lines of one record: the process and thread that logged them, under one tag."""
+        return self.pid, self.tid, self.tag
+
+
+def log_lines(log: str) -> list[LogLine]:
+    lines = []
+    for text in log.splitlines():
+        match = LOG_LINE.match(text)
+        if match:
+            lines.append(LogLine(match[1], int(match[2]), int(match[3]), match[5], match[6], text.strip()))
+    return lines
+
+
+def next_of_record(lines: list[LogLine], index: int, same_time: bool) -> LogLine | None:
+    """The next line of the record that starts at `lines[index]`: the next one of the same process, thread and
+    tag, however many lines of other processes come between. One logged message that has several lines (a
+    crash's header and its process line) carries one time stamp."""
+    first = lines[index]
+    for line in lines[index + 1:]:
+        if line.stream == first.stream and (line.when == first.when or not same_time):
+            return line
+    return None
 
 
 def crash_problems(log: str) -> list[str]:
-    """What the log says of the applications of the warning crashing or not answering, and of any illegal
-    instruction (an instruction the guest's CPU lacks is a defect of the host, in whatever process)."""
-    lines = log.splitlines()
+    """What the log says of the processes of the warning crashing or not answering, and of any illegal
+    instruction (an instruction the guest's CPU lacks is a defect of the host, in whatever process). A Java
+    crash, a native crash (any fatal signal) and an ANR are each read as the one process they name, by its
+    exact name; a crash that names no process is a problem too, since it may be any of them."""
+    lines = log_lines(log)
     problems = []
     for index, line in enumerate(lines):
-        if "FATAL EXCEPTION" in line:
-            window = "\n".join(lines[index:index + 4])
-            problems += [f"{package} crashed: {line.strip()[:160]}"
-                         for package in CRASH_PACKAGES if f"Process: {package}" in window]
-        problems += [f"{package} did not respond: {line.strip()[:160]}"
-                     for package in CRASH_PACKAGES if re.search(rf"\bANR in {re.escape(package)}\b", line)]
-        if re.search(r"signal 4 \(SIGILL\)", line):
-            problems.append(f"an illegal instruction: {line.strip()[:160]}")
+        if SIGILL_LINE.search(line.message):
+            problems.append(f"an illegal instruction: {line.text[:160]}")
+        if line.message.startswith(("FATAL EXCEPTION", "*** FATAL EXCEPTION")):
+            follow = next_of_record(lines, index, same_time=True)
+            named = JAVA_PROCESS_LINE.fullmatch(follow.message.strip()) if follow else None
+            if named is None:
+                problems.append(f"a process crashed without naming itself: {line.text[:160]}")
+            elif named[1] in WARNING_PROCESSES:
+                problems.append(f"{named[1]} crashed: {line.text[:160]}")
+        anr = ANR_LINE.fullmatch(line.message.strip())
+        if anr and anr[1] in WARNING_PROCESSES:
+            problems.append(f"{anr[1]} did not respond: {line.text[:160]}")
+        named = NATIVE_PROCESS_LINE.fullmatch(line.message.strip())
+        if named and named[1] in WARNING_PROCESSES:
+            for after in lines[index + 1:]:
+                if after.stream != line.stream:
+                    continue
+                signal = NATIVE_SIGNAL_LINE.match(after.message.strip())
+                if signal:
+                    # Signal 4 is reported above in any process.
+                    if signal[1] != "4":
+                        problems.append(f"{named[1]} died of signal {signal[1]} ({signal[2]}): {line.text[:160]}")
+                    break
+                if NATIVE_PROCESS_LINE.fullmatch(after.message.strip()):
+                    break
     return problems
 
 
+class CrashLog:
+    """The crash and ANR evidence of one guest, read at the end of every section from a marker that the section
+    wrote at its start: the log is small and rotates, so one read at the end of a run cannot rule out what
+    the log has dropped. A section whose marker is gone fails, for the evidence it would show is gone. A guest
+    restart clears the log, so it reads what the section has logged so far first and writes a new marker."""
+
+    def __init__(self) -> None:
+        self.token: str | None = None
+        self.name = ""
+        # What every section found, kept for the summary at the end; and what this section has found.
+        self.problems: list[str] = []
+        self.section_problems: list[str] = []
+        self.sections = 0
+
+    def begin(self, guest: "Guest", name: str) -> None:
+        self.name = name
+        self.section_problems = []
+        self.mark(guest)
+
+    def mark(self, guest: "Guest") -> None:
+        token = uuid.uuid4().hex
+        guest.shell(f"log -t {SECTION_MARKER_TAG} section-start-{token}")
+        self.token = token
+
+    def collect(self, guest: "Guest") -> None:
+        """Reads the log from the marker on: what it holds of the section so far."""
+        if self.token is None:
+            return
+        token, self.token = self.token, None
+        lines = guest.shell("logcat -d -b all -v threadtime", timeout=180).splitlines()
+        start = next((index for index, line in enumerate(lines) if token in line), None)
+        if start is None:
+            found = ["the log no longer holds the start of the section (it rotated): a crash or an ANR in it "
+                     "cannot be ruled out"]
+        else:
+            found = crash_problems("\n".join(lines[start + 1:]))
+        self.sections += 1
+        self.section_problems += found
+        self.problems += [f"{self.name}: {problem}" for problem in found]
+
+    def end(self, guest: "Guest") -> list[str]:
+        self.collect(guest)
+        return self.section_problems
+
+    @property
+    def active(self) -> bool:
+        return self.token is not None
+
+
 def check_no_crashes(guest: Guest) -> str | None:
-    """Across the warning sections, NetworkStack, SystemUI and Settings neither crashed nor stopped answering,
-    and nothing hit an illegal instruction."""
-    problems = crash_problems(guest.shell("logcat -d -b all", timeout=180))
-    if problems:
-        raise Failure("; ".join(problems[:5]))
-    return None
+    """Across the sections of this guest, NetworkStack, SystemUI and Settings neither crashed nor stopped
+    answering, and nothing hit an illegal instruction: what every section read of the log from its own marker."""
+    watch = guest.crash_log
+    if watch is None or watch.sections == 0:
+        raise Failure("no section of this guest read its crash evidence")
+    if watch.problems:
+        raise Failure("; ".join(watch.problems[:5]))
+    return f"{watch.sections} reads of the log from a section's own marker, no crash, ANR or illegal instruction"
 
 
 @dataclass
@@ -1551,7 +1704,7 @@ def warning_sections(guest: Guest, server: "ProbeServer", report: "Report") -> N
 
 def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
     print("fresh data disk")
-    guest = start_guest(options, adb, private, options.release, private / "fresh", provision=True)
+    guest = start_guest(options, adb, private, options.release, private / "fresh", provision=True, watched=True)
     server: ProbeServer | None = None
     try:
         server = ProbeServer()
@@ -1559,8 +1712,6 @@ def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: 
         report.section("VirtWifi is saved and joined at the first boot", guest, lambda: check_saved_and_joined(guest))
         report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
         warning_sections(guest, server, report)
-        report.section("NetworkStack, SystemUI and Settings neither crash nor stop answering", guest,
-                       lambda: check_no_crashes(guest))
         report.section("a failed internet check does not disable the network", guest,
                        lambda: check_not_disabled(guest))
         report.section("the station joins again after a suspend and wake", guest, lambda: check_suspend(guest))
@@ -1572,6 +1723,7 @@ def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: 
         report.section("a forgotten network stays forgotten", guest,
                        lambda: check_forgotten_stays_forgotten(guest, waits))
         report.section("Wi-Fi that is off stays off", guest, lambda: check_wifi_off_stays_off(guest, waits))
+        report.section(CRASH_SECTION, guest, lambda: check_no_crashes(guest))
     finally:
         if server is not None:
             server.close()
@@ -1742,7 +1894,7 @@ def upgrade_from(options: argparse.Namespace, adb: str, private: pathlib.Path, r
         stop(guest)
     if not prepared:
         return
-    guest = start_guest(options, adb, private, options.release, instance, provision=False)
+    guest = start_guest(options, adb, private, options.release, instance, provision=False, watched=True)
     try:
         if kept:
             report.section("the first boot of the release leaves the joined network alone", guest,
@@ -1760,6 +1912,7 @@ def upgrade_from(options: argparse.Namespace, adb: str, private: pathlib.Path, r
                            lambda: check_failed_check_warns(guest))
             report.section("the next boot leaves the repaired network alone", guest,
                            lambda: check_autojoin_kept(guest, waits))
+        report.section(CRASH_SECTION, guest, lambda: check_no_crashes(guest))
     finally:
         stop(guest)
 

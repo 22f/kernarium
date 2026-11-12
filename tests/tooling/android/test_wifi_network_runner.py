@@ -22,6 +22,7 @@ __import__("sys").dont_write_bytecode = True
 import contextlib
 import http.client
 import importlib.util
+import inspect
 import io
 from pathlib import Path
 import re
@@ -875,37 +876,326 @@ class ContinuityReadingTests(unittest.TestCase):
         self.assertFalse(runner.status_bar_present(elsewhere))
 
 
+def log_line(pid: int, tid: int, priority: str, tag: str, message: str, when: str = "03:10:01.000") -> str:
+    """One line of `logcat -v threadtime`."""
+    return f"11-13 {when} {pid:5d} {tid:5d} {priority} {tag:<8s}: {message}\n"
+
+
+def java_crash(process: str, pid: int = 1234, tid: int = 1234, when: str = "03:10:01.000") -> str:
+    """A Java crash: one logged message of several lines, which carry one time stamp."""
+    return "".join(log_line(pid, tid, "E", "AndroidRuntime", message, when) for message in (
+        "FATAL EXCEPTION: main", f"Process: {process}, PID: {pid}", "java.lang.NullPointerException",
+        "\tat com.example.Foo.bar(Foo.java:12)"))
+
+
+def anr(process: str, component: str | None = None) -> str:
+    component = component or f"{process}/.Main"
+    return "".join(log_line(500, 520, "E", "ActivityManager", message) for message in (
+        f"ANR in {process} ({component})", "PID: 1234", "Reason: Input dispatching timed out"))
+
+
+def native_crash(process: str, signal: str = "signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0",
+                 dump_pid: int = 900) -> str:
+    """The tombstone that crash_dump logs under the tag DEBUG, from its own process and thread."""
+    return "".join(log_line(dump_pid, dump_pid, "F", "DEBUG", message) for message in (
+        "*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***",
+        f"Cmdline: {process}",
+        f"pid: 1234, tid: 1250, name: RenderThread  >>> {process} <<<",
+        "uid: 10001", signal))
+
+
+FORMS = {"a Java crash": java_crash, "an ANR": anr, "a native crash": native_crash}
+
+
 class CrashReadingTests(unittest.TestCase):
-    CRASH = ("11-13 03:10:01.000  1000  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main\n"
-             "11-13 03:10:01.000  1000  1234  1234 E AndroidRuntime: Process: com.android.systemui, PID: 1234\n"
-             "11-13 03:10:01.000  1000  1234  1234 E AndroidRuntime: java.lang.NullPointerException\n")
-
     def test_a_quiet_log_has_no_problem(self) -> None:
-        self.assertEqual(runner.crash_problems("11-13 03:10:01.000  1000  1  1 I x: nothing\n"), [])
+        self.assertEqual(runner.crash_problems(log_line(1000, 1, "I", "x", "nothing")), [])
 
-    def test_a_crash_of_an_application_of_the_warning_is_a_problem(self) -> None:
-        problems = runner.crash_problems(self.CRASH)
-        self.assertEqual(len(problems), 1)
-        self.assertIn("com.android.systemui crashed", problems[0])
+    def test_the_three_processes_are_named_exactly(self) -> None:
+        self.assertEqual(runner.WARNING_PROCESSES,
+                         ("com.android.networkstack.process", "com.android.systemui", "com.android.settings"))
 
-    def test_a_crash_of_another_application_is_not(self) -> None:
-        self.assertEqual(runner.crash_problems(self.CRASH.replace("com.android.systemui", "com.example.game")), [])
+    def test_each_form_of_crash_of_each_process_is_a_problem(self) -> None:
+        for process in runner.WARNING_PROCESSES:
+            for form, make in FORMS.items():
+                with self.subTest(process=process, form=form):
+                    problems = runner.crash_problems(make(process))
+                    self.assertEqual(len(problems), 1, problems)
+                    self.assertIn(process, problems[0])
 
-    def test_an_application_that_does_not_respond_is_a_problem(self) -> None:
-        anr = "11-13 03:10:01.000  1000  500  500 E ActivityManager: ANR in com.android.settings (com.android.settings/.Settings)\n"
-        self.assertIn("com.android.settings did not respond", runner.crash_problems(anr)[0])
+    def test_another_process_whose_name_extends_one_of_them_is_not(self) -> None:
+        for process in runner.WARNING_PROCESSES:
+            for other in (f"{process}.other", f"{process}:screenshot", f"x.{process}", f"{process}2"):
+                for form, make in FORMS.items():
+                    with self.subTest(process=other, form=form):
+                        self.assertEqual(runner.crash_problems(make(other)), [])
 
-    def test_an_illegal_instruction_in_any_process_is_a_problem(self) -> None:
-        log = "11-13 03:10:01.000  0  7  7 F libc: Fatal signal 4 (SIGILL), code 1 (ILL_ILLOPC) in tid 7 (game)\n"
+    def test_the_package_of_the_network_stack_is_not_its_process(self) -> None:
+        for form, make in FORMS.items():
+            with self.subTest(form=form):
+                self.assertEqual(runner.crash_problems(make("com.android.networkstack")), [])
+
+    def test_a_process_that_does_not_belong_to_the_warning_is_not_a_problem(self) -> None:
+        for form, make in FORMS.items():
+            with self.subTest(form=form):
+                self.assertEqual(runner.crash_problems(make("com.example.game")), [])
+
+    def test_a_native_crash_of_any_fatal_signal_is_a_problem(self) -> None:
+        for number, name in ((11, "SIGSEGV"), (6, "SIGABRT"), (7, "SIGBUS"), (8, "SIGFPE")):
+            with self.subTest(signal=name):
+                problems = runner.crash_problems(native_crash(
+                    "com.android.settings", f"signal {number} ({name}), code 1 (X), fault addr 0x0"))
+                self.assertEqual(len(problems), 1)
+                self.assertIn(f"signal {number} ({name})", problems[0])
+
+    def test_a_tombstone_header_without_a_signal_is_not_a_crash(self) -> None:
+        self.assertEqual(runner.crash_problems(native_crash("com.android.settings", "uid: 10001")), [])
+
+    def test_the_signal_of_another_crash_does_not_belong_to_the_header(self) -> None:
+        log = (native_crash("com.android.settings", "uid: 10001", dump_pid=900)
+               + native_crash("com.example.game", dump_pid=901))
+        self.assertEqual(runner.crash_problems(log), [])
+
+    def test_an_illegal_instruction_in_any_process_is_a_problem_once(self) -> None:
+        log = log_line(7, 7, "F", "libc", "Fatal signal 4 (SIGILL), code 1 (ILL_ILLOPC) in tid 7 (game)")
         self.assertIn("an illegal instruction", runner.crash_problems(log)[0])
+        named = native_crash("com.android.settings", "signal 4 (SIGILL), code 1 (ILL_ILLOPC), fault addr 0x1")
+        problems = runner.crash_problems(named)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("an illegal instruction", problems[0])
 
-    def test_the_section_fails_on_a_crash(self) -> None:
-        class Logged(ScriptedGuest):
+    def test_the_process_line_of_a_crash_may_come_after_any_number_of_other_lines(self) -> None:
+        crash = java_crash("com.android.settings", pid=1234).splitlines(keepends=True)
+        noise = [log_line(2000 + n, 2000 + n, "I", "other", f"line {n}") for n in range(40)]
+        log = crash[0] + "".join(noise) + "".join(crash[1:])
+        problems = runner.crash_problems(log)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("com.android.settings crashed", problems[0])
+
+    def test_two_crashes_that_interleave_are_read_by_their_process_and_thread(self) -> None:
+        settings = java_crash("com.android.settings", pid=1234, tid=1234).splitlines(keepends=True)
+        game = java_crash("com.example.game", pid=777, tid=780).splitlines(keepends=True)
+        log = settings[0] + game[0] + game[1] + settings[1] + game[2] + settings[2:] [0]
+        problems = runner.crash_problems(log)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("com.android.settings crashed", problems[0])
+        swapped = game[0] + settings[0] + settings[1] + game[1]
+        self.assertEqual(len(runner.crash_problems(swapped)), 1)
+
+    def test_a_crash_that_names_no_process_is_a_problem(self) -> None:
+        log = log_line(900, 900, "E", "AndroidRuntime", "*** FATAL EXCEPTION IN SYSTEM PROCESS: android.fg")
+        self.assertIn("without naming itself", runner.crash_problems(log)[0])
+
+    def test_a_process_line_of_another_message_is_not_the_crashs_own(self) -> None:
+        log = (log_line(1234, 1234, "E", "AndroidRuntime", "FATAL EXCEPTION: main", "03:10:01.000")
+               + log_line(1234, 1234, "E", "AndroidRuntime", "Process: com.android.settings, PID: 1234",
+                          "03:10:09.000"))
+        self.assertIn("without naming itself", runner.crash_problems(log)[0])
+
+    def test_an_anr_is_read_with_and_without_its_component(self) -> None:
+        for line in ("ANR in com.android.settings (com.android.settings/.Settings)", "ANR in com.android.settings"):
+            with self.subTest(line=line):
+                self.assertEqual(len(runner.crash_problems(log_line(500, 500, "E", "ActivityManager", line))), 1)
+
+    def test_a_message_that_only_mentions_an_anr_is_not_one(self) -> None:
+        line = "Skipping ANR in com.android.settings for ProcessRecord{1 1234:com.android.settings/u0a1}"
+        self.assertEqual(runner.crash_problems(log_line(500, 500, "I", "ActivityManager", line)), [])
+
+
+class LoggingGuest(ScriptedGuest):
+    """A guest whose log is a list of lines: the marker a section writes joins it, and a fault of the guest
+    (a crash, a rotation) is made by the section's own body."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+        self.crash_log = runner.CrashLog()
+        self.tick = 0
+
+    def stamp(self) -> str:
+        self.tick += 1
+        return f"03:{self.tick // 60:02d}:{self.tick % 60:02d}.000"
+
+    def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+        if command.startswith("log -t "):
+            tag, message = command[len("log -t "):].split(" ", 1)
+            self.lines.append(log_line(4000, 4000, "I", tag, message, self.stamp()))
+            return ""
+        if command == "logcat -d -b all -v threadtime":
+            return "".join(self.lines)
+        raise AssertionError(command)
+
+    def diagnose(self) -> str:
+        return ""
+
+    def crash(self, process: str, form: str = "a Java crash") -> None:
+        self.lines.append(FORMS[form](process))
+
+    def rotate(self) -> None:
+        del self.lines[:]
+
+
+class CrashEvidenceTests(unittest.TestCase):
+    """What every section reads of the log, from the marker it wrote at its start."""
+
+    def setUp(self) -> None:
+        output = contextlib.redirect_stdout(io.StringIO())
+        errors = contextlib.redirect_stderr(io.StringIO())
+        output.__enter__()
+        errors.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+        self.addCleanup(errors.__exit__, None, None, None)
+        self.report = runner.Report()
+        self.guest = LoggingGuest()
+
+    def run_section(self, name: str, body) -> None:
+        self.report.section(name, self.guest, body)
+
+    def test_a_crash_during_a_section_fails_that_section_alone(self) -> None:
+        for process in runner.WARNING_PROCESSES:
+            for form in FORMS:
+                with self.subTest(process=process, form=form):
+                    report, guest = runner.Report(), LoggingGuest()
+                    report.section("first", guest, lambda: guest.crash(process, form))
+                    report.section("second", guest, lambda: None)
+                    self.assertEqual(len(report.failures), 1, report.failures)
+                    self.assertTrue(report.failures[0].startswith("first: "), report.failures)
+                    self.assertIn(process, report.failures[0])
+
+    def test_a_crash_that_a_section_fails_on_is_named_with_its_own_failure(self) -> None:
+        def body() -> None:
+            self.guest.crash("com.android.systemui")
+            raise runner.Failure("the mark never showed")
+
+        self.run_section("a", body)
+        self.assertIn("the mark never showed", self.report.failures[0])
+        self.assertIn("com.android.systemui crashed", self.report.failures[0])
+
+    def test_a_crash_before_a_section_is_not_the_sections(self) -> None:
+        self.guest.crash("com.android.settings")
+        self.run_section("a", lambda: None)
+        self.assertEqual(self.report.failures, [])
+
+    def test_a_crash_of_an_unrelated_process_passes_the_section(self) -> None:
+        self.run_section("a", lambda: self.guest.crash("com.android.settings.other"))
+        self.assertEqual(self.report.failures, [])
+
+    def test_a_section_whose_marker_rotated_out_fails(self) -> None:
+        self.run_section("a", self.guest.rotate)
+        self.assertEqual(len(self.report.failures), 1)
+        self.assertIn("no longer holds the start of the section", self.report.failures[0])
+
+    def test_an_unreadable_log_fails_the_section(self) -> None:
+        class Mute(LoggingGuest):
             def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
-                return CrashReadingTests.CRASH
+                if command.startswith("logcat"):
+                    raise runner.Failure("adb: closed")
+                return super().shell(command, timeout)
 
-        with self.assertRaisesRegex(runner.Failure, "com.android.systemui crashed"):
-            runner.check_no_crashes(Logged())
+        guest = Mute()
+        self.report.section("a", guest, lambda: None)
+        self.assertIn("could not be read", self.report.failures[0])
+
+    def test_the_summary_passes_after_quiet_sections_and_fails_after_a_crash(self) -> None:
+        self.run_section("a", lambda: None)
+        self.run_section("b", lambda: None)
+        self.assertIn("2 reads", runner.check_no_crashes(self.guest))
+        self.run_section("c", lambda: self.guest.crash("com.android.settings", "an ANR"))
+        with self.assertRaisesRegex(runner.Failure, "c: com.android.settings did not respond"):
+            runner.check_no_crashes(self.guest)
+
+    def test_the_summary_fails_when_no_section_read_the_log(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "no section"):
+            runner.check_no_crashes(self.guest)
+        with self.assertRaisesRegex(runner.Failure, "no section"):
+            runner.check_no_crashes(ScriptedGuest())
+
+    def test_a_guest_that_is_not_watched_reads_nothing(self) -> None:
+        guest = ScriptedGuest()
+        report = runner.Report()
+        report.section("a", guest, lambda: None)
+        self.assertEqual(report.failures, [])
+
+    def test_the_last_section_of_each_guest_of_the_release_under_test_is_the_summary(self) -> None:
+        for function in (runner.fresh, runner.upgrade_from):
+            source = inspect.getsource(function)
+            last = source[source.rindex("report.section("):]
+            self.assertTrue(last.startswith("report.section(CRASH_SECTION, guest, "), function.__name__)
+
+    def test_a_guest_of_the_release_under_test_is_watched_and_the_previous_release_is_not(self) -> None:
+        source = inspect.getsource(runner.upgrade_from)
+        self.assertEqual(source.count("watched=True"), 1)
+        self.assertIn("options.release, instance, provision=False, watched=True", source)
+        self.assertIn("watched=True", inspect.getsource(runner.fresh))
+
+
+class RebootingGuest(LoggingGuest):
+    """A guest whose restart is the real one, and whose reboot clears its log."""
+
+    restart = runner.Guest.restart
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rebooted = False
+
+    def uptime(self) -> float:
+        return 5.0 if self.rebooted else 900.0
+
+    def adb_run(self, *arguments: str, timeout: float = 0) -> object:
+        if arguments[0] == "reboot":
+            self.rebooted = True
+            self.lines = []
+        return mock.Mock(returncode=0, stdout=b"")
+
+    def adb_answers(self) -> str | None:
+        return None
+
+    def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+        if command == "getprop sys.boot_completed":
+            return "1\n"
+        return super().shell(command, timeout)
+
+
+class CrashEvidenceAcrossARestartTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patch = mock.patch.object(runner, "time", FakeClock())
+        patch.start()
+        self.addCleanup(patch.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        errors = contextlib.redirect_stderr(io.StringIO())
+        output.__enter__()
+        errors.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+        self.addCleanup(errors.__exit__, None, None, None)
+        self.report = runner.Report()
+        self.guest = RebootingGuest()
+
+    def test_a_crash_before_the_restart_is_read_although_the_restart_clears_the_log(self) -> None:
+        def body() -> None:
+            self.guest.crash("com.android.networkstack.process")
+            self.guest.restart()
+
+        self.report.section("restarts", self.guest, body)
+        self.assertEqual(len(self.report.failures), 1, self.report.failures)
+        self.assertIn("com.android.networkstack.process crashed", self.report.failures[0])
+
+    def test_a_crash_after_the_restart_is_read_from_the_new_marker(self) -> None:
+        def body() -> None:
+            self.guest.restart()
+            self.guest.crash("com.android.settings", "a native crash")
+
+        self.report.section("restarts", self.guest, body)
+        self.assertIn("com.android.settings died of signal 11", self.report.failures[0])
+
+    def test_a_restart_in_a_quiet_section_passes_and_both_reads_count(self) -> None:
+        self.report.section("restarts", self.guest, self.guest.restart)
+        self.assertEqual(self.report.failures, [])
+        self.assertEqual(self.guest.crash_log.sections, 2)
+
+    def test_a_restart_outside_a_section_reads_nothing(self) -> None:
+        self.guest.restart()
+        self.assertEqual(self.guest.crash_log.sections, 0)
+        self.assertFalse(self.guest.crash_log.active)
 
 
 class SimulatedGuest(StubbedGuest):
