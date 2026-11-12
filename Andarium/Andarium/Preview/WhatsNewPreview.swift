@@ -81,7 +81,7 @@ enum WhatsNewPreview {
                 defaultsMiB: Array(repeating: pad ? 4_096 : 3_072, count: count),
                 graphicsMiB: { memory, _ in max(limitMiB - 900 - memory, 384) }
             ),
-            freeStorageBytes: UInt64((pad ? 118.3 : 41.6) * Double(Limits.bytesPerGiB))
+            freeStorageBytes: UInt64((pad ? 118.3 : 41.6) * Double(Limits.bytesPerGiB)), hasCompass: true
         )
     }
 

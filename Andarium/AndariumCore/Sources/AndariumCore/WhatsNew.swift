@@ -178,9 +178,9 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     /// The device offers a guest more RAM than this, in MiB, at its vCPU
     /// count.
     public var memoryAboveMiB: Int?
-    /// Whether the device can give the guest a compass: `true` is an entry for
-    /// a device that has a magnetometer (an iPhone, an iPad), which a Mac and
-    /// the Simulator do not.
+    /// `true` is an entry for a device that can give the guest a compass (an
+    /// iPhone, an iPad), which a Mac and the Simulator cannot. `false` is no
+    /// requirement and is refused.
     public var compass: Bool?
 
     public init(memoryAboveMiB: Int? = nil, compass: Bool? = nil) {
@@ -195,6 +195,10 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         memoryAboveMiB = try values.decodeIfPresent(Int.self, forKey: .memoryAboveMiB)
         compass = try values.decodeIfPresent(Bool.self, forKey: .compass)
+        guard compass != false else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "\"compass\" is true or absent"))
+        }
         guard memoryAboveMiB != nil || compass != nil else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "a requirement states nothing"))
@@ -203,7 +207,7 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
 
     public func isMet(by host: HostDevice, vCPUs: Int) -> Bool {
         if let memoryAboveMiB, host.memory.maximumMiB(vCPUs: vCPUs) <= memoryAboveMiB { return false }
-        if let compass, compass != host.hasCompass { return false }
+        if compass == true, !host.hasCompass { return false }
         return true
     }
 }

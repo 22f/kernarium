@@ -277,6 +277,17 @@ struct WhatsNewCatalogTests {
         }
     }
 
+    @Test func aCompassRequirementOfFalseIsRefusedLikeAnyOtherInvalidOne() {
+        // `false` would read as "only on a device without a compass": no entry says that.
+        let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"compass": false}"#))
+        }
+        #expect(throws: (any Error).self) {
+            try decode(notes(entry: entry + #", "requirement": {"memoryAboveMiB": 4096, "compass": false}"#))
+        }
+    }
+
     @Test func aRequirementThatStatesNothingIsRefused() {
         let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
         #expect(throws: (any Error).self) { try decode(notes(entry: entry + #", "requirement": {}"#)) }
