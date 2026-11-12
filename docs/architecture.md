@@ -678,13 +678,35 @@ that carry the host's thermal, power, memory and main-queue state
 4 KiB, at most 32, the last 8 changes of each host state, and counts of the idle
 and unmarked waits the watch saw, which show whether the markers reach the
 wrappers. Times are milliseconds after a base wall time on the system's
-continuous clock, which runs through a sleep. The watch reads no guest memory,
-takes no lock a carrier takes, suspends nothing and calls no framework from its
-own thread, which the kernel-thread fence can hold: the host's state is read on
-a serial queue of system threads, and the main queue is asked only while a stall
-is open or being confirmed. A hold of the kernel's threads is not recorded as a
-stall. Andarium adds the previous and current records, the stalls in words and
-the guest's `/proc` counters to its bug report.
+continuous clock, which runs through a sleep.
+
+The watch looks only while a carrier is outside its idle wait, and sleeps with
+no wake-up of its own while all are inside one: a guest at rest, with the screen
+on or off, suspended or quiesced, costs it none. Each carrier reports its idle
+waits (`runtime/carrier_activity`, through the loader's wrappers; the kernel's
+other threads report nothing). A carrier that stays outside its wait for 50 ms,
+or is due to wake from a timed wait and has not 50 ms after its deadline, or
+that the host wakes (`uml_emulator_wake`, resume), wakes the watch by a timer of
+its kqueue; one that returns within 50 ms never does. The watch sleeps again
+after two looks with every carrier idle and nothing suspected, and its first
+look after a sleep starts the measurement over, so the sleep is nobody's
+starvation. A stall that starts as a carrier leaves its idle wait is recorded
+about 150 ms later. A carrier woken by the guest's own wake source (another
+vCPU, the kernel's notification thread) from a wait with no limit, while every
+other carrier is idle, is seen from its first instruction on. A carrier that
+does not report keeps the watch looking every 50 ms.
+
+The watch reads no guest memory, takes no lock a carrier takes, suspends
+nothing and calls no framework from its own thread, which the kernel-thread
+fence can hold; it waits in a system call of `libsystem_kernel` alone. The
+host's state is observed on a serial queue of system threads: the system's
+notices of a change of the thermal state or Low Power Mode and the
+memory-pressure source publish it and wake the watch to record the change, and
+the main queue is asked, and the thermal source read for the core count, every
+250 ms only while a stall is open or being confirmed. A hold of the kernel's
+threads is not recorded as a stall. Andarium adds the previous and current
+records, the stalls in words and the guest's `/proc` counters to its bug
+report.
 
 The network slot holds the guest's user network in numbers: DNS queries
 answered, refused by the system (policy denied), timed out or failed; DHCP

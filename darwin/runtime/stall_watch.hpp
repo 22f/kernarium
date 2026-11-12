@@ -18,7 +18,18 @@ namespace uml::runtime {
  * host_wait.hpp). A carrier that is runnable and gets little of the time, or
  * sits in an uninterruptible wait or one host wait and used little of the
  * time, for 100 ms or more is stalled, and the stalls form events (runtime/
- * stall_record.hpp). Each event carries what the host looked like around it:
+ * stall_record.hpp).
+ *
+ * The thread sleeps, with no wake-up of its own, while every carrier is in its
+ * idle wait and nothing is suspected: the carriers report their idle waits
+ * (runtime/carrier_activity.hpp), and one that stays outside its wait for
+ * 50 ms, or is due to wake from a timed wait and has not, or that the host
+ * wakes, wakes the watch. It sleeps after two looks in a row with every
+ * carrier idle and nothing suspected, and its first look after a sleep starts
+ * the measurement over, so the sleep is nobody's starvation. A carrier that
+ * does not report its idle waits keeps the watch looking every 50 ms.
+ *
+ * Each event carries what the host looked like around it:
  * the thermal state, Low Power Mode and the active core count; the process's
  * cores, performance cores and power in the 5 s before and during it; its
  * memory, paging and involuntary context switches; the lateness of the
@@ -37,7 +48,8 @@ namespace uml::runtime {
  * lock a carrier takes and reads no guest memory; it uses only public system
  * interfaces, in every build.
  *
- * The watch thread calls no framework. A fence that holds the kernel's threads
+ * The watch thread calls no framework, and waits in a kevent, a system call of
+ * libsystem_kernel alone. A fence that holds the kernel's threads
  * (thread_fence.hpp) holds this thread too, and a hold inside a system
  * library's lock would last until the release. What needs Foundation or
  * libdispatch (the thermal state, Low Power Mode and the core count, the
@@ -45,9 +57,13 @@ namespace uml::runtime {
  * queue that the system's worker threads run and the fence never holds, and
  * the watch reads it from atomics, which are published process-wide
  * (platform/host_state_figures.hpp) for the session record's checkpoint to read
- * too. The main queue is asked only while an event is open or a stall is being
- * confirmed. The first tick after a hold starts the measurement over.
-  */
+ * too. The system's notices of a change of the thermal state or Low Power Mode
+ * and the memory pressure source publish a change and wake the watch to record
+ * it; nothing polls them. While an event is open or a stall is being confirmed
+ * the watch has the observer read the host's state, the core count included,
+ * every 250 ms and ask the main queue; it asks by a byte in a pipe. The first
+ * tick after a hold starts the measurement over.
+ */
 class StallWatch final {
 public:
 	/* Starts the thread. `thermal` is the host's thermal source, the

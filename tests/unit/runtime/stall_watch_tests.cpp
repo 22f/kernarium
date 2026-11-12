@@ -6,6 +6,7 @@
  * a session record file. A stall here is a carrier that stays in one marked
  * wait, which needs no load on the host.
  */
+#include "carrier_activity.hpp"
 #include "kernel_threads.hpp"
 #include "kernel_waits.hpp"
 #include "platform/host_state_figures.hpp"
@@ -29,6 +30,8 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <random>
+#include <mach/mach_time.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -41,20 +44,22 @@
  * the function, so the watch's call binds here and not to libdispatch: it
  * counts the callers by thread, answers the ping at once, and the test
  * requires that no thread of the process's own (uml-*), which the thread fence
- * can hold, ever sends one. */
+ * can hold, ever sends one. The watch's notices to its observer queue (a
+ * change of the thermal state) bind here too, run at once on the caller's
+ * thread, and are not counted as pings. */
 namespace {
 std::atomic<int> pings_from_held_threads{0};
 std::atomic<int> pings_from_other_threads{0};
 } // namespace
 
-extern "C" void dispatch_async_f(dispatch_queue_t, void *context,
+extern "C" void dispatch_async_f(dispatch_queue_t queue, void *context,
 	dispatch_function_t work)
 {
 	char name[64]{};
 	(void)pthread_getname_np(pthread_self(), name, sizeof(name));
 	if (std::strncmp(name, "uml-", 4) == 0)
 		++pings_from_held_threads;
-	else
+	else if (queue == dispatch_get_main_queue())
 		++pings_from_other_threads;
 	work(context);
 }
@@ -76,6 +81,23 @@ struct Thermal final : uml::platform::HostThermalProvider {
 	static inline std::atomic<int> processors{6};
 	static inline std::atomic<int> from_held_threads{0};
 	static inline std::atomic<int> readings{0};
+	/* The watch's notice of a change, as the system would call it. */
+	static inline std::atomic<void (*)(void *)> notice{nullptr};
+	static inline std::atomic<void *> notice_context{nullptr};
+
+	void observe(void (*changed)(void *), void *context) noexcept override
+	{
+		notice_context = context;
+		notice = changed;
+	}
+
+	/* Moves the thermal state and says so, from the calling thread. */
+	static void change_to(int new_level)
+	{
+		level = new_level;
+		if (void (*const changed)(void *) = notice.load())
+			changed(notice_context.load());
+	}
 
 	HostThermalState state() noexcept override
 	{
@@ -97,6 +119,12 @@ struct Carrier final {
 	unsigned cpu{};
 	std::function<void()> body;
 	std::atomic<bool> stop{false};
+	/* Named through the loader's wrapper, as the kernel's carriers are, so
+	 * that the activity record knows it; a carrier named directly reports
+	 * nothing there and keeps the watch awake. */
+	bool reports{};
+	/* Not a carrier at all: this name. */
+	const char *other_name{};
 };
 
 void *carrier_main(void *argument)
@@ -104,17 +132,35 @@ void *carrier_main(void *argument)
 	auto *carrier = static_cast<Carrier *>(argument);
 	char name[32];
 	std::snprintf(name, sizeof(name), "uml-vcpu-%u-carrier", carrier->cpu);
-	(void)pthread_setname_np(name);
+	using SetName = int (*)(const char *);
+	if (carrier->reports) {
+		const auto set_name = reinterpret_cast<SetName>(
+			uml::runtime::kernel_wait_import("pthread_setname_np"));
+		require(set_name != nullptr);
+		(void)set_name(carrier->other_name != nullptr ? carrier->other_name : name);
+	} else {
+		(void)pthread_setname_np(carrier->other_name != nullptr ?
+			carrier->other_name : name);
+	}
 	carrier->body();
 	return nullptr;
 }
 
-void start(Carrier &carrier, unsigned cpu, std::function<void()> body)
+void start(Carrier &carrier, unsigned cpu, std::function<void()> body,
+	bool reports = false)
 {
 	carrier.cpu = cpu;
 	carrier.body = std::move(body);
+	carrier.reports = reports;
 	require(uml::runtime::kernel_pthread_create(&carrier.thread, nullptr,
 		carrier_main, &carrier) == 0);
+}
+
+/* A thread of the kernel's that is no carrier. */
+void start_other(Carrier &thread, const char *name, std::function<void()> body)
+{
+	thread.other_name = name;
+	start(thread, 0, std::move(body), true);
 }
 
 /* The idle wait of a vCPU, through the loader's wrapper: 20 ms at a time. */
@@ -129,6 +175,34 @@ void idle_until_stopped(const Carrier &carrier)
 		const timespec period{0, 20L * 1000L * 1000L};
 		(void)wait(0, nullptr, nullptr, nullptr, &period, nullptr);
 	}
+}
+
+/* The idle wait of a vCPU that wakes now and then: `period_ms` at a time. */
+void blink_until_stopped(const Carrier &carrier, long period_ms)
+{
+	using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
+		const sigset_t *);
+	const auto wait = reinterpret_cast<Pselect>(
+		uml::runtime::kernel_wait_import("_pselect$DARWIN_EXTSN"));
+	require(wait != nullptr);
+	while (!carrier.stop.load(std::memory_order_acquire)) {
+		const timespec period{period_ms / 1000, (period_ms % 1000) * 1000L * 1000L};
+		(void)wait(0, nullptr, nullptr, nullptr, &period, nullptr);
+	}
+}
+
+/* An idle wait that ends when the descriptor is readable. */
+void idle_until_readable(int descriptor)
+{
+	using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
+		const sigset_t *);
+	const auto wait = reinterpret_cast<Pselect>(
+		uml::runtime::kernel_wait_import("_pselect$DARWIN_EXTSN"));
+	require(wait != nullptr);
+	fd_set readable;
+	FD_ZERO(&readable);
+	FD_SET(descriptor, &readable);
+	(void)wait(descriptor + 1, &readable, nullptr, nullptr, nullptr, nullptr);
 }
 
 /* One wait for a device service's answer, as long as the test says. */
@@ -291,7 +365,9 @@ void a_stalled_carrier_is_recorded_and_idle_ones_are_not()
 	uml::runtime::reset_session_record();
 }
 
-void a_hold_of_the_threads_is_no_stall()
+/* `reports`: the carrier reports its idle waits, so the watch sleeps while the
+ * fence holds it. */
+void a_hold_of_the_threads_is_no_stall(bool reports)
 {
 	const uml::testing::ScratchSubdirectory directory{"uml-stall-fence.XXXXXX"};
 	const std::string path = (directory.path() / "session").string();
@@ -299,7 +375,7 @@ void a_hold_of_the_threads_is_no_stall()
 	require(uml::runtime::begin_session_record(path, {}), "begin the record");
 
 	Carrier idle0;
-	start(idle0, 0, [&] { idle_until_stopped(idle0); });
+	start(idle0, 0, [&] { idle_until_stopped(idle0); }, reports);
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr);
 	sleep_ms(300);
@@ -322,6 +398,324 @@ void a_hold_of_the_threads_is_no_stall()
 	idle0.stop.store(true, std::memory_order_release);
 	require(pthread_join(idle0.thread, nullptr) == 0);
 	uml::runtime::reset_session_record();
+}
+
+/* ---- A watch that sleeps while every carrier is idle. ---- */
+
+/* A session record in a scratch directory, and a thermal source at rest. */
+struct Session final {
+	explicit Session(const char *pattern)
+		: directory{pattern}, path{(directory.path() / "session").string()}
+	{
+		uml::runtime::reset_session_record();
+		require(uml::runtime::begin_session_record(path, {}), "begin the record");
+		Thermal::level = 0;
+		Thermal::processors = 6;
+		Thermal::notice = nullptr;
+	}
+
+	~Session()
+	{
+		uml::runtime::reset_session_record();
+	}
+
+	uml::testing::ScratchSubdirectory directory;
+	std::string path;
+};
+
+/* The level the newest thermal transition of the slot went to, -1 for none. */
+int newest_thermal_level(const std::string &slot)
+{
+	const std::size_t at = slot.rfind("\nthermal ");
+	if (at == std::string::npos)
+		return -1;
+	const std::size_t end = slot.find('\n', at + 1);
+	const std::string line = slot.substr(at + 1, end - at - 1);
+	return std::atoi(line.c_str() + line.rfind(' ') + 1);
+}
+
+double milliseconds_since(std::chrono::steady_clock::time_point start)
+{
+	return std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now() - start).count();
+}
+
+/* Moves the thermal state, as the system's notice does, which wakes a watch
+ * that sleeps to record it, and returns how many looks at the carriers the
+ * slot says the watch has made: the carriers' idle and unmarked waits it has
+ * counted, one for each carrier at each look. The watch makes none while it
+ * sleeps, so the count does not move between two calls then. */
+unsigned long looks_after(const std::string &path, int thermal_level)
+{
+	Thermal::change_to(thermal_level);
+	const auto began = std::chrono::steady_clock::now();
+	for (;;) {
+		const std::string slot = stall_slot(path);
+		if (newest_thermal_level(slot) == thermal_level)
+			return header_count(slot, "idle") + header_count(slot, "unmarked");
+		require(milliseconds_since(began) < 5000,
+			"a change of the thermal state was not recorded:\n" + slot);
+		sleep_ms(5);
+	}
+}
+
+void the_watch_sleeps_while_every_carrier_is_idle()
+{
+	Session session{"uml-stall-sleep.XXXXXX"};
+	int quiet[2];
+	require(pipe(quiet) == 0);
+	Carrier idle0;
+	Carrier idle1;
+	Carrier notifier;
+	/* Two carriers that wake now and then, as a guest's timers wake them for
+	 * a moment, and the kernel's notification thread: it has a wait cell
+	 * like every thread the kernel starts, waits in a call that is not marked,
+	 * and is no carrier. */
+	start(idle0, 0, [&] { blink_until_stopped(idle0, 30); }, true);
+	start(idle1, 1, [&] { blink_until_stopped(idle1, 45); }, true);
+	start_other(notifier, "uml-irq-notify", [&] {
+		char byte;
+		(void)!read(quiet[0], &byte, 1);
+	});
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr, "a watch without a record");
+	/* Two quiet looks, and it sleeps. */
+	sleep_ms(800);
+	const unsigned long first = looks_after(session.path, 1);
+	require(first >= 2, "the watch made no look at the idle carriers");
+	/* A second of carriers waking every 30 and 45 ms: no look at all. */
+	sleep_ms(1000);
+	Thermal::processors = 4;
+	const unsigned long second = looks_after(session.path, 2);
+	require(second == first, "the watch looked at carriers that were idle: " +
+		std::to_string(first) + " then " + std::to_string(second));
+	const std::string slot = stall_slot(session.path);
+	require(slot.find("\npower ") != std::string::npos,
+		"a change that woke the watch was not recorded:\n" + slot);
+	require(vcpu_events(slot) == 0, "idle carriers stalled:\n" + slot);
+
+	const auto stopping = std::chrono::steady_clock::now();
+	watch.reset();
+	require(milliseconds_since(stopping) < 2000, "a sleeping watch did not stop");
+	require(Thermal::from_held_threads.load() == 0,
+		"the thermal source was read from a thread of the process's own");
+	require(pings_from_held_threads.load() == 0);
+
+	for (Carrier *carrier : {&idle0, &idle1})
+		carrier->stop.store(true, std::memory_order_release);
+	(void)!write(quiet[1], "x", 1);
+	for (Carrier *carrier : {&idle0, &idle1, &notifier})
+		require(pthread_join(carrier->thread, nullptr) == 0);
+	close(quiet[0]);
+	close(quiet[1]);
+}
+
+void a_carrier_that_reports_nothing_keeps_the_watch_looking()
+{
+	Session session{"uml-stall-awake.XXXXXX"};
+	Carrier idle0;
+	start(idle0, 0, [&] { blink_until_stopped(idle0, 30); }, false);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	sleep_ms(500);
+	const unsigned long first = looks_after(session.path, 1);
+	sleep_ms(1000);
+	const unsigned long second = looks_after(session.path, 2);
+	/* 20 looks a second, as before the watch learned to sleep. */
+	require(second >= first + 12, "the watch slept for a carrier it cannot hear: " +
+		std::to_string(first) + " then " + std::to_string(second));
+	watch.reset();
+	idle0.stop.store(true, std::memory_order_release);
+	require(pthread_join(idle0.thread, nullptr) == 0);
+}
+
+void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
+{
+	Session session{"uml-stall-wedge.XXXXXX"};
+	int wake[2];
+	int answer[2];
+	require(pipe(wake) == 0 && pipe(answer) == 0);
+	Carrier idle0;
+	Carrier wedger;
+	start(idle0, 0, [&] { blink_until_stopped(idle0, 40); }, true);
+	/* Idle until the host wakes it, then waits on a device service that does not
+	 * answer. */
+	start(wedger, 2, [&] {
+		while (!wedger.stop.load(std::memory_order_acquire)) {
+			idle_until_readable(wake[0]);
+			char byte;
+			(void)!read(wake[0], &byte, 1);
+			if (wedger.stop.load(std::memory_order_acquire))
+				break;
+			wait_for_a_device_service(answer[0]);
+			(void)!read(answer[0], &byte, 1);
+		}
+	}, true);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	sleep_ms(800);
+	require(vcpu_events(stall_slot(session.path)) == 0);
+
+	const auto woken = std::chrono::steady_clock::now();
+	require(write(wake[1], "w", 1) == 1);
+	double found = -1;
+	std::string slot;
+	while (milliseconds_since(woken) < 5000) {
+		slot = stall_slot(session.path);
+		if (vcpu_events(slot) >= 1) {
+			found = milliseconds_since(woken);
+			break;
+		}
+		sleep_ms(5);
+	}
+	require(found >= 0, "a wedge after a wake was never found");
+	std::printf("a wedge after a wake was recorded %.0f ms after the wake\n", found);
+	/* The timer 50 ms after the wake, then the 100 ms a stall must last. */
+	require(found >= 100, "a wedge was recorded before it had lasted 100 ms");
+	require(found < 1000, "a wedge after a wake was found late: " +
+		std::to_string(found));
+	require(slot.find("+ ..a ") != std::string::npos,
+		"the third carrier is stalled on a device service's answer:\n" + slot);
+
+	wedger.stop.store(true, std::memory_order_release);
+	idle0.stop.store(true, std::memory_order_release);
+	require(write(answer[1], "a", 1) == 1);
+	require(write(wake[1], "w", 1) == 1);
+	watch.reset();
+	for (Carrier *carrier : {&idle0, &wedger})
+		require(pthread_join(carrier->thread, nullptr) == 0);
+	for (const int descriptor : {wake[0], wake[1], answer[0], answer[1]})
+		close(descriptor);
+}
+
+/* A carrier that wakes after a sleep of seconds has used a sliver of them,
+ * and the watch must not take that for starvation. */
+void a_two_second_idle_is_no_starvation()
+{
+	Session session{"uml-stall-nap.XXXXXX"};
+	Carrier sleeper;
+	Carrier other;
+	start(other, 1, [&] { blink_until_stopped(other, 40); }, true);
+	start(sleeper, 0, [&] {
+		using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
+			const sigset_t *);
+		const auto wait = reinterpret_cast<Pselect>(
+			uml::runtime::kernel_wait_import("_pselect$DARWIN_EXTSN"));
+		const timespec long_idle{2, 200L * 1000L * 1000L};
+		(void)wait(0, nullptr, nullptr, nullptr, &long_idle, nullptr);
+		/* Awake and busy for a moment, as the guest is when it wakes. */
+		const auto busy_until = std::chrono::steady_clock::now() +
+			std::chrono::milliseconds{120};
+		while (std::chrono::steady_clock::now() < busy_until) {
+		}
+		blink_until_stopped(sleeper, 40);
+	}, true);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	sleep_ms(3500);
+	watch.reset();
+	const std::string slot = stall_slot(session.path);
+	require(vcpu_events(slot) == 0, "a sleep was counted as starvation:\n" + slot);
+	for (Carrier *carrier : {&sleeper, &other})
+		carrier->stop.store(true, std::memory_order_release);
+	for (Carrier *carrier : {&sleeper, &other})
+		require(pthread_join(carrier->thread, nullptr) == 0);
+}
+
+/* A carrier is due to wake, and the system does not run it: it never clears
+ * its idle mark, and the watch hears of it 50 ms after its deadline. */
+void a_carrier_that_is_due_and_does_not_run_wakes_the_watch()
+{
+	Session session{"uml-stall-due.XXXXXX"};
+	Carrier due;
+	std::atomic<bool> waiting{false};
+	start(due, 0, [&] {
+		const uml::platform::ScopedHostWait mark{uml::platform::HostWait::idle};
+		const timespec limit{0, 700L * 1000L * 1000L};
+		const uml::runtime::CarrierIdle idle{&limit,
+			uml::runtime::CarrierIdle::Limit::relative};
+		waiting = true;
+		sleep_ms(1800);
+	}, true);
+	/* The carrier is in its wait before the watch exists: the watch sets the
+	 * timer for it as it goes to sleep. */
+	while (!waiting.load())
+		sleep_ms(1);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	sleep_ms(300);
+	const unsigned long before = looks_after(session.path, 1);
+	sleep_ms(250);
+	const unsigned long still = looks_after(session.path, 2);
+	require(still == before, "the watch looked before the carrier was due");
+	sleep_ms(700);
+	const unsigned long after = looks_after(session.path, 1);
+	require(after > still, "the watch did not look for a carrier past its deadline");
+	watch.reset();
+	require(pthread_join(due.thread, nullptr) == 0);
+}
+
+/* Wedges found among carriers that come and go. */
+void every_wedge_among_waking_carriers_is_found()
+{
+	Session session{"uml-stall-race.XXXXXX"};
+	int wake[2];
+	int answer[2];
+	require(pipe(wake) == 0 && pipe(answer) == 0);
+	Carrier churn1;
+	Carrier churn2;
+	Carrier wedger;
+	const auto churn = [](Carrier &carrier, unsigned seed) {
+		using Pselect = int (*)(int, fd_set *, fd_set *, fd_set *, const timespec *,
+			const sigset_t *);
+		const auto wait = reinterpret_cast<Pselect>(
+			uml::runtime::kernel_wait_import("_pselect$DARWIN_EXTSN"));
+		std::mt19937 random{seed};
+		while (!carrier.stop.load(std::memory_order_acquire)) {
+			const timespec period{0, (1L + random() % 30) * 1000L * 1000L};
+			(void)wait(0, nullptr, nullptr, nullptr, &period, nullptr);
+			nap(random() % 200);
+		}
+	};
+	start(churn1, 0, [&] { churn(churn1, 1); }, true);
+	start(churn2, 1, [&] { churn(churn2, 2); }, true);
+	start(wedger, 2, [&] {
+		while (!wedger.stop.load(std::memory_order_acquire)) {
+			idle_until_readable(wake[0]);
+			char byte;
+			(void)!read(wake[0], &byte, 1);
+			if (wedger.stop.load(std::memory_order_acquire))
+				break;
+			wait_for_a_device_service(answer[0]);
+			(void)!read(answer[0], &byte, 1);
+		}
+	}, true);
+	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
+	require(watch != nullptr);
+	std::mt19937 random{0xd0ce};
+	for (std::size_t wedge = 1; wedge <= 8; ++wedge) {
+		sleep_ms(400 + random() % 500);
+		const auto woken = std::chrono::steady_clock::now();
+		require(write(wake[1], "w", 1) == 1);
+		while (vcpu_events(stall_slot(session.path)) < wedge) {
+			require(milliseconds_since(woken) < 3000,
+				"wedge " + std::to_string(wedge) + " was not found:\n" +
+				stall_slot(session.path));
+			sleep_ms(5);
+		}
+		/* Past the 100 ms a wedge must last, then let it go. */
+		sleep_ms(50);
+		require(write(answer[1], "a", 1) == 1);
+	}
+	for (Carrier *carrier : {&churn1, &churn2, &wedger})
+		carrier->stop.store(true, std::memory_order_release);
+	require(write(answer[1], "a", 1) == 1);
+	require(write(wake[1], "w", 1) == 1);
+	watch.reset();
+	for (Carrier *carrier : {&churn1, &churn2, &wedger})
+		require(pthread_join(carrier->thread, nullptr) == 0);
+	for (const int descriptor : {wake[0], wake[1], answer[0], answer[1]})
+		close(descriptor);
 }
 
 /* The record's times are on the clock that counts the system's sleep. */
@@ -351,7 +745,14 @@ int main()
 	no_session_means_no_watch();
 	the_record_is_on_the_continuous_clock();
 	a_stalled_carrier_is_recorded_and_idle_ones_are_not();
-	a_hold_of_the_threads_is_no_stall();
+	a_hold_of_the_threads_is_no_stall(false);
+	a_hold_of_the_threads_is_no_stall(true);
+	the_watch_sleeps_while_every_carrier_is_idle();
+	a_carrier_that_reports_nothing_keeps_the_watch_looking();
+	a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds();
+	a_two_second_idle_is_no_starvation();
+	a_carrier_that_is_due_and_does_not_run_wakes_the_watch();
+	every_wedge_among_waking_carriers_is_found();
 	std::puts("stall watch tests passed");
 	return 0;
 }
