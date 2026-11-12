@@ -70,8 +70,9 @@ public final class MotionSession: @unchecked Sendable {
 
     deinit { stream?.stop() }
 
-    /// What is wanted now. A run begins when the switch is on and the guest
-    /// is in front, and ends when either stops being true or the axes change.
+    /// What is wanted now. A run begins when the switch is on, or the guest
+    /// follows the device's orientation, and the guest is in front. It ends
+    /// when either stops being true or the axes change.
     public func update(
         enabled: Bool, foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false
     ) {

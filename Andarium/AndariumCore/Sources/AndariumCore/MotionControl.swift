@@ -108,7 +108,8 @@ public struct MotionPlan: Equatable, Sendable {
 /// The host reads a sensor only while the person's switch is on, the guest is
 /// in the foreground, the guest's sensor service is connected and an
 /// application in the guest has the sensor active. The connection itself is
-/// held while the first two are true, even when nothing is active, because
+/// held while the first two are true, or while the guest follows the device's
+/// orientation and is in the foreground, even when nothing is active, because
 /// the guest says what it needs over it.
 ///
 /// A guest image whose service never sends a frame (the one before the
