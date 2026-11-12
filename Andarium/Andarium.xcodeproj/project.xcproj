@@ -103,6 +103,10 @@
         }, {
           "kind": "script",
           "name": "Check App Store bundle",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
@@ -113,6 +117,10 @@
         }, {
           "kind": "script",
           "name": "Check Send feedback",
+          "input-paths": [
+            "$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
+            "$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+          ],
           "run-on-every-build": true,
           "shell": "/bin/sh",
           "script": [
