@@ -400,6 +400,10 @@ DEBUG_SYMBOLS = (
     # The Simulator preview's denied-network notice (Model.previewNetworkNotice):
     # the Simulator cannot be denied the network, so the preview plays it.
     ("network notice preview", (b"20previewNetworkNotice",)),
+    # The Simulator preview's play of the legacy install
+    # (AppModel.previewInstallAttempt): the preview refuses the first attempt
+    # for its version, which the application's install never does by itself.
+    ("legacy install preview", (b"21previewInstallAttempt",)),
     # The Simulator preview's hooks into the Send feedback sheet
     # (SendFeedbackServices.previewOpensAtLaunch, previewPrepare and
     # previewKeepsConfirmation): the preview opens the sheet, fills a draft and
