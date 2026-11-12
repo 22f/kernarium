@@ -1003,6 +1003,161 @@ void applySetting(Hal& hal, Setting setting, bool first)
     }
 }
 
+/* The sessions a HAL admits, start and stop each, while the framework does not
+ * answer. The first status is held, so the room is what the HAL's accounting
+ * leaves: a HAL that was given room back wrongly admits another number. The
+ * callback's announcement is heard before the count, so that it is not in it. */
+int sessionsAdmittedUnderAStall(Scene& scene, Hal& hal)
+{
+    // Everything posted before the new callback's announcement is heard when
+    // it is, and the announcement itself has left the queue.
+    Sink stalled = scene.sink({.statuses = 1});
+    const auto announced = std::make_shared<std::atomic<bool>>(false);
+    stalled.ready = [recorded = stalled.ready, announced] {
+        recorded();
+        announced->store(true);
+    };
+    hal.set_callback(std::move(stalled));
+    require(eventually([&] { return announced->load(); }), "the announcement was not heard");
+    int admitted = 0;
+    for (int round = 0; round < 200; ++round) {
+        if (hal.start() != Hal::StartResult::started)
+            break;
+        ++admitted;
+        hal.stop();
+        // The held status has left the queue, so it is not counted twice.
+        if (round == 0)
+            require(scene.gate.waitEntered());
+    }
+    scene.gate.release();
+    return admitted;
+}
+
+/* The room a start reserves for its statuses is given back by whatever way its
+ * session ends, however many times: a session that ends silently (a restart, a
+ * close, a replacement) never posts its end and off, a start that fails to open
+ * the receiver posts nothing, and a receiver that dies ends its own session. A
+ * HAL that keeps room it has no statuses for would refuse every start after a
+ * few score of them. After each of them has been repeated more times than the
+ * bound allows, with the framework answering, the HAL admits as many sessions
+ * under a stall as a HAL that has never been used. (Room given back that is
+ * still needed is the other way round: the queue is no longer bounded, which
+ * a-refused-start-leaves-the-running-session-alone sees.) */
+void theRoomForStatusesIsGivenBackWhicheverWayASessionEnds()
+{
+    int fresh;
+    {
+        Scene scene;
+        Hal hal(scene.world.env());
+        fresh = sessionsAdmittedUnderAStall(scene, hal);
+    }
+    require(fresh >= 60 && fresh <= 65, "the number of sessions admitted is the bound's");
+
+    constexpr const char* refused = "a start was refused while the framework answers: room was not given back";
+    const auto setMissing = [](Scene& scene, bool missing) {
+        std::lock_guard lock(scene.world.mutex);
+        scene.world.deviceMissing = missing;
+    };
+    // `once` makes one round of a way and says how many calls the framework is
+    // to hear for it, so that the rounds keep pace with the framework and a
+    // start is refused only for room that was not given back; zero for a way
+    // that is not kept to that.
+    struct Way {
+        const char* name;
+        int rounds;
+        std::function<int(Scene&, Hal&)> once;
+    };
+    const Way ways[] = {
+        {"a restart", 140,
+         [](Scene&, Hal& hal) {
+             require(hal.start() == Hal::StartResult::started, refused);
+             require(hal.start() == Hal::StartResult::started, refused);
+             hal.stop();
+             return 6;  // on begin, on begin, end off
+         }},
+        {"a close", 140,
+         [](Scene& scene, Hal& hal) {
+             require(hal.start() == Hal::StartResult::started, refused);
+             hal.close();
+             hal.set_callback(scene.sink());
+             return 3;  // on begin, then the new announcement
+         }},
+        {"a replacement", 140,
+         [](Scene& scene, Hal& hal) {
+             require(hal.start() == Hal::StartResult::started, refused);
+             hal.set_callback(scene.sink());
+             return 3;
+         }},
+        {"a receiver that is missing", 140,
+         [&](Scene& scene, Hal& hal) {
+             setMissing(scene, true);
+             require(hal.start() == Hal::StartResult::no_receiver, refused);
+             setMissing(scene, false);
+             return 0;
+         }},
+        {"a receiver that dies", 70,
+         [](Scene& scene, Hal& hal) {
+             World& world = scene.world;
+             require(hal.start() == Hal::StartResult::started, refused);
+             world.hangUp();
+             require(world.wait([&] { return world.wakelocksHeld == 0; }),
+                     "the session of a receiver that died did not end");
+             hal.stop();
+             return 4;  // on begin end off
+         }},
+        {"all of them, mixed", 600,
+         [&, random = std::make_shared<std::minstd_rand>(97531)](Scene& scene, Hal& hal) {
+             switch ((*random)() % 8) {
+             case 0:
+             case 1:
+                 (void)hal.start();
+                 break;
+             case 2:
+                 hal.stop();
+                 break;
+             case 3:
+                 hal.close();
+                 break;
+             case 4:
+                 hal.set_callback(scene.sink());
+                 break;
+             case 5:
+             case 6:
+                 setMissing(scene, true);
+                 (void)hal.start();
+                 setMissing(scene, false);
+                 break;
+             default:
+                 hal.set_nmea((*random)() % 2 == 0);
+                 break;
+             }
+             return -1;  // not kept to the framework's pace
+         }},
+    };
+    for (const auto& way : ways) {
+        Scene scene;
+        Hal hal(scene.world.env());
+        hal.set_callback(scene.sink());
+        std::size_t heard = 1;  // the first announcement
+        for (int round = 0; round < way.rounds; ++round) {
+            const int calls = way.once(scene, hal);
+            if (calls < 0)
+                continue;
+            heard += static_cast<std::size_t>(calls);
+            require(scene.world.wait([&] { return scene.world.log.size() == heard; }),
+                    "the framework did not hear the round");
+        }
+        hal.stop();
+        const int admitted = sessionsAdmittedUnderAStall(scene, hal);
+        if (admitted != fresh) {
+            const std::string message = std::string("after ") + way.name + " the HAL admits " +
+                                        std::to_string(admitted) + " sessions under a stall, a new one " +
+                                        std::to_string(fresh);
+            require(false, message);
+        }
+    }
+}
+
 /* What an entry point saves is what the engine runs, even when two calls of the
  * same setter meet at the worst point. A setter that saved its value under the
  * lock and told the engine after releasing it leaves a window of a few
@@ -1455,6 +1610,8 @@ int main()
         {"a-replacement-stops-an-epoch-between-its-sentences", aReplacementStopsAnEpochBetweenItsSentences},
         {"a-stalled-framework-bounds-the-statuses-by-refusing-starts", aStalledFrameworkBoundsTheStatusesByRefusingStarts},
         {"a-refused-start-leaves-the-running-session-alone", aRefusedStartLeavesTheRunningSessionAlone},
+        {"the-room-for-statuses-is-given-back-whichever-way-a-session-ends",
+         theRoomForStatusesIsGivenBackWhicheverWayASessionEnds},
         {"concurrent-setters-leave-the-engine-with-the-saved-settings",
          concurrentSettersLeaveTheEngineWithTheSavedSettings},
         {"a-setter-stopped-anywhere-leaves-the-engine-with-the-saved-settings",
