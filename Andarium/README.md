@@ -444,7 +444,10 @@ requires reopening Andarium.
   capture session and reports Android's camera lens cover. The row is off with
   its reason when iOS refuses or the device restricts the camera, and turning
   it on then explains why and, for a refusal, offers Settings. A device with no
-  camera shows the row off with a note. On an iPad, a session that other apps
+  camera shows the row off and disabled with a note and keeps the person's
+  choice; a device has one when it has a built-in front camera, the rule the
+  guest's layout follows, and the iPad app running on a Mac has none
+  (`CameraAvailability`). On an iPad, a session that other apps
   share the screen with pauses the camera (black frames) and shows a notice
   that goes with the interruption. With Camera on and Gyroscope off a note under
   Capabilities says photos taken sideways are saved the wrong way up. Where the

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import AndariumCore
+import AVFoundation
 import Foundation
 import Testing
 @testable import Andarium
@@ -163,14 +164,30 @@ struct CameraFlowTests {
         #expect(CameraWords.detail(for: .authorized) == nil && CameraWords.detail(for: .unavailable) == nil)
     }
 
-    @Test func aDeviceWithoutACameraCannotTurnItOn() {
+    @Test func aDeviceWithoutACameraCannotTurnItOnAndKeepsAChoiceMadeBefore() {
         let s = setup(.unavailable, chosen: true)
-        // A choice stored before is dropped once the device says it has none.
+        // The device says it has none: the row shows the switch off and
+        // disabled and the session is blocked, but the choice is not taken back.
         s.model.camera?.refresh()
-        #expect(s.model.guest?.camera == false)
+        #expect(s.model.guest?.camera == true)
+        #expect(!s.model.cameraShownOn && !s.model.cameraAccess.offered)
+        #expect(s.model.cameraMode == .blocked)
+        #expect(s.driver.savedGuest == nil, "nothing was written for it")
         s.model.setCamera(true)
-        #expect(s.model.guest?.camera == false && !s.model.cameraShownOn)
+        #expect(!s.model.cameraShownOn)
         #expect(s.model.permissionPrompt == nil && s.system.asked == 0)
+        #expect(s.model.cameraMode == .blocked)
+        // The camera comes back (a Continuity camera in reach, the guest moved
+        // to another device): the switch is on again as the person left it.
+        s.system.access = .authorized
+        s.model.camera?.refresh()
+        #expect(s.model.cameraShownOn && s.model.cameraMode == .live)
+    }
+
+    @Test func aDeviceWithoutACameraTurnedOffStaysOff() {
+        let s = setup(.unavailable, chosen: false)
+        s.model.camera?.refresh()
+        #expect(s.model.guest?.camera == false && !s.model.cameraShownOn)
         #expect(s.model.cameraMode == .blocked)
     }
 
@@ -280,6 +297,17 @@ struct CameraFlowTests {
         #expect(notes(access: .unavailable, camera: false, gyroscope: true) == [CameraWords.noCamera])
         #expect(notes(reason: "No sensors.", access: .unavailable, camera: false, gyroscope: false, sensors: false)
             == ["No sensors.", CameraWords.noCamera])
+    }
+
+    @Test func theDeviceOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {
+        // The system's own answer for this process is a front camera and a Mac.
+        let device = SystemCameraSource.hasCamera
+        let mac = ProcessInfo.processInfo.isiOSAppOnMac
+        #expect(device == CameraAvailability.isAvailable(hasFrontCamera: SystemCameraSource.hasFrontCamera, isiOSAppOnMac: mac))
+        if mac { #expect(!device) }
+        #expect(SystemCameraSource().access == (device ? SystemCameraSource.access(of: AVCaptureDevice.authorizationStatus(for: .video)) : .unavailable))
+        // The preview's system mode asks the Simulator's own permission whatever it has.
+        #expect(SystemCameraSource(requiresCamera: false).access != .unavailable)
     }
 
     @Test func theWordsAreThoseOfTheDesign() {

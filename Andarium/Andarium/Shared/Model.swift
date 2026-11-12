@@ -1608,12 +1608,19 @@ final class AppModel {
     }
 
     /// iOS answered the camera question, or the person changed Andarium's
-    /// access in Settings. A refusal takes the choice back with it; access the
-    /// person went to Settings to give turns the switch they tapped on.
+    /// access in Settings. A refusal takes the choice back with it, and a
+    /// device without a camera keeps it; access the person went to Settings to
+    /// give turns the switch they tapped on.
     func cameraAccessChanged(_ access: CameraAccess) {
         cameraAccess = access
         switch access {
-        case .unavailable, .restricted, .denied:
+        case .unavailable:
+            // No camera to share is not a choice taken back: a Continuity
+            // camera that is away, or a device the guest moves to, leaves the
+            // person's switch as it was. The row shows it off and disabled,
+            // and the session is blocked (`cameraShownOn`, `cameraMode`).
+            break
+        case .restricted, .denied:
             if guest?.camera == true {
                 guest?.camera = false
                 persistNow()

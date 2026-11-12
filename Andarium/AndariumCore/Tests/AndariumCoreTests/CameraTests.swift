@@ -70,6 +70,19 @@ struct CameraTests {
         }
     }
 
+    @Test func theRowOffersACameraByTheLayoutsRuleAndTheIPadAppOnAMacNone() {
+        // Elsewhere: a built-in front camera, the rule the guest's layout follows.
+        #expect(CameraAvailability.isAvailable(hasFrontCamera: true, isiOSAppOnMac: false))
+        #expect(!CameraAvailability.isAvailable(hasFrontCamera: false, isiOSAppOnMac: false))
+        // The iPad app on a Mac is offered none, whatever the Mac reports. The
+        // decision is one constant.
+        #expect(!CameraAvailability.offeredToIOSAppOnMac)
+        #expect(!CameraAvailability.isAvailable(hasFrontCamera: true, isiOSAppOnMac: true))
+        #expect(!CameraAvailability.isAvailable(hasFrontCamera: false, isiOSAppOnMac: true))
+        // An unavailable camera is not offered, and the person has no question to answer.
+        #expect(!CameraAccess.unavailable.offered && !CameraAccess.unavailable.refuses)
+    }
+
     @Test func theGuestIsToldTheDeviceBodysTurnOnlyWhereTheHostOwnsTheRotation() {
         let axes: [MotionSample.Axes] = [.portrait, .landscapeLeft, .portraitUpsideDown, .landscapeRight]
         for interface in axes {
