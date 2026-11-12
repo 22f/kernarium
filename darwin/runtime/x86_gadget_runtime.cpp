@@ -330,21 +330,6 @@ X86RunResult run_x86_gadgets(x86_64::CpuState &cpu,
 		}
 	return false;
 	};
-	/* Whether to end the run, as a spent budget does, at this block, so that
-	 * an address space the budget shed or another executor closed is let
-	 * go of by the next run (leave_gone_generations()) and not held, and
-	 * grown, until this one is over. A run that must retire an exact count,
-	 * or ends after the next instruction, is not cut short. */
-	const auto renewal_ends_run = [&]() noexcept {
-		if (exact_budget || trap_armed)
-			return false;
-		if (executor.renewal_pending())
-			return true;
-		for (const auto &checked_executor : checked_executors)
-			if (checked_executor && checked_executor->renewal_pending())
-				return true;
-		return false;
-	};
 	while (result.retired_instructions < instruction_budget) {
 		const auto sequences = execution.sequences();
 		if (sequences.execution_interrupt != 0) {
@@ -402,10 +387,6 @@ X86RunResult run_x86_gadgets(x86_64::CpuState &cpu,
 			state->code_changes = active->prepared_code_changes();
 			if (!handle(stepped, stepping))
 				return run;
-			if (renewal_ends_run()) {
-				result.reason = ::uml::cpu::ExitReason::instruction_budget;
-				return run;
-			}
 			continue;
 		}
 		/* Only a step has to stop inside a block. Cutting the block that
@@ -453,10 +434,6 @@ X86RunResult run_x86_gadgets(x86_64::CpuState &cpu,
 		state->code_changes = active->prepared_code_changes();
 		if (!handle(executed, stepping))
 			return run;
-		if (renewal_ends_run()) {
-			result.reason = ::uml::cpu::ExitReason::instruction_budget;
-			return run;
-		}
 	}
 	result.reason = budget_reason();
 	return run;

@@ -148,14 +148,6 @@ public:
 	 * translated code of this executor until after its next prepare(). */
 	void leave_gone_generations(unsigned long long retirements,
 		GenerationLiveness live) noexcept;
-	/* Whether the gadget-cache budget or another executor asked this one
-	 * to let go of an address space it holds since it last did, which it
-	 * does in leave_gone_generations() before its next run. The run in
-	 * progress ends at its next block so that the next starts now, and the
-	 * space is not held, or grown, for the rest of the dispatch. False
-	 * while a let-go ran out of memory: the ask stands, and runs go on as
-	 * they did, so that none ends after every block. */
-	[[nodiscard]] bool renewal_pending() const noexcept;
 
 private:
 	struct Storage;

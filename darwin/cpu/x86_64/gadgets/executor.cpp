@@ -742,7 +742,6 @@ public:
 			announcement_->renew.load(std::memory_order_relaxed);
 		if (!closed && !shed_requested_.load(std::memory_order_relaxed))
 			return false;
-		renewal_stuck_ = false;
 		shed_requested_.store(false, std::memory_order_relaxed);
 		if (closed)
 			announcement_->renew.store(false, std::memory_order_relaxed);
@@ -779,46 +778,9 @@ public:
 			}
 		} catch (...) {
 			shed_requested_.store(true, std::memory_order_relaxed);
-			renewal_stuck_ = true;
 			throw;
 		}
-		/* The closes above asked every executor attached to a space, this
-		 * one among them, to let go of it, though it has. The ask is cleared
-		 * and made again only if a space held here is still closed or being
-		 * shed, as another executor's close may have made it since: it
-		 * closes the space before it asks, so the check after the clear
-		 * finds it. Otherwise the next run would end at its first block for
-		 * an ask this run answered (renewal_pending()). */
-		if (announcement_ != nullptr) {
-			(void)announcement_->renew.exchange(false,
-				std::memory_order_acq_rel);
-			if (holds_gone())
-				announcement_->renew.store(true,
-					std::memory_order_relaxed);
-		}
 		return left_current;
-	}
-
-	/* Whether an address space held here is closed or being shed, which
-	 * leave_shedding() would let go of. */
-	[[nodiscard]] bool holds_gone() const noexcept
-	{
-		for (const auto &[generation, state] : window_.generations)
-			if (state.space->closed() || state.space->shedding())
-				return true;
-		return false;
-	}
-
-	/* Whether leave_shedding() has something to let go of: the budget asked
-	 * an address space held here to shed, or another executor closed one.
-	 * Not while a let-go ran out of memory, which stands until one
-	 * succeeds. */
-	[[nodiscard]] bool renewal_pending() const noexcept
-	{
-		return !renewal_stuck_ &&
-			((announcement_ != nullptr &&
-			  announcement_->renew.load(std::memory_order_relaxed)) ||
-			 shed_requested_.load(std::memory_order_relaxed));
 	}
 
 	void set_code_change_reader(
@@ -2136,9 +2098,6 @@ private:
 	 * run (leave_shedding()); before the window's address spaces, whose
 	 * accounts may set it until they are destroyed. */
 	std::atomic<bool> shed_requested_{};
-	/* Whether the last attempt to let go of what shed_requested_ or the
-	 * announcement asked ran out of memory (renewal_pending()). */
-	bool renewal_stuck_{};
 	/* What this cache's executor says about itself for the bodies other
 	 * executors free, null when it shares nothing; whether the cache shares
 	 * its address spaces; and the exceptions its blocks are built for. */
@@ -2445,11 +2404,6 @@ void Executor::end_run() noexcept
 unsigned Executor::checked_exceptions() const noexcept
 {
 	return storage_->checked;
-}
-
-bool Executor::renewal_pending() const noexcept
-{
-	return storage_->programs.renewal_pending();
 }
 
 void *Executor::execution_context() const noexcept
