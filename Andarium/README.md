@@ -503,7 +503,7 @@ requires reopening Andarium.
   application reads it (`RunSpace.nextCheck`: every 2 s near the limit, every
   30 s on a roomy device) and pauses the guest below 1 GiB
   (`RunSpace.pauseBelowBytes`), before the data disk can fail to grow. A full
-  volume holds the virtual machine's disk I/O until it has room instead of
+  volume holds the guest's disk I/O until it has room instead of
   failing it ([kernel contract](../kernel/common/README.md#block-devices-and-filesystems)),
   and the pause stays the guard. The pause is the runtime's
   suspension with the storage written back first and the RAM kept in the
