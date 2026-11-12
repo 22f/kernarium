@@ -973,24 +973,57 @@ class ForcedEvaluationReadingTests(unittest.TestCase):
         self.assertIn("lists no Wi-Fi network", runner.private_dns_failed_problems(None)[0])
 
     def test_no_check_after_the_forced_re_evaluation_is_the_proof(self) -> None:
-        self.assertEqual(runner.forced_check_problems(self.ENTRIES), [])
+        self.assertEqual(runner.forced_request_problems(self.ENTRIES[:1], self.ENTRIES, checked=False), [])
 
     def test_a_check_after_the_forced_re_evaluation_is_a_problem(self) -> None:
         for line in ("Wi-Fi internet check passed", "Wi-Fi internet check failed, the network stays validated"):
             with self.subTest(line=line):
-                problems = runner.forced_check_problems([*self.ENTRIES, ("2026-11-13T03:00:14.000000", line)])
-                self.assertIn("an internet check ran after the forced re-evaluation", problems[0])
+                problems = runner.forced_request_problems(
+                    self.ENTRIES[:1], [*self.ENTRIES, ("2026-11-13T03:00:14.000000", line)], checked=False)
+                self.assertIn("an internet check ran after the forced re-evaluation request", problems[0])
 
-    def test_a_check_before_the_forced_re_evaluation_is_not(self) -> None:
-        self.assertEqual(runner.forced_check_problems(self.ENTRIES[:2]), [])
+    def test_a_check_that_the_log_held_before_the_request_is_not_the_requests(self) -> None:
+        self.assertEqual(runner.forced_request_problems(self.ENTRIES[:1], self.ENTRIES, checked=False), [])
 
-    def test_a_log_without_the_forced_line_proves_nothing(self) -> None:
-        self.assertIn("did not take the forced re-evaluation",
-                      runner.forced_check_problems([self.ENTRIES[0], self.ENTRIES[2]])[0])
+    def test_a_check_between_two_force_lines_is_a_problem(self) -> None:
+        between = [self.ENTRIES[0], self.ENTRIES[1], ("2026-11-13T03:00:10.000000", "Wi-Fi internet check failed, x"),
+                   ("2026-11-13T03:00:11.000000", "Forcing reevaluation for UID 0")]
+        self.assertIn("an internet check ran",
+                      runner.forced_request_problems(self.ENTRIES[:1], between, checked=False)[0])
+
+    def test_a_check_before_the_first_force_line_of_the_request_is_a_problem(self) -> None:
+        early = [self.ENTRIES[0], ("2026-11-13T03:00:08.000000", "Wi-Fi internet check passed"), self.ENTRIES[1]]
+        self.assertIn("an internet check ran", runner.forced_request_problems(self.ENTRIES[:1], early, False)[0])
+
+    def test_a_log_without_a_new_forced_line_proves_nothing(self) -> None:
+        for entries in ([self.ENTRIES[0], self.ENTRIES[2]], self.ENTRIES[:1]):
+            with self.subTest(entries=len(entries)):
+                self.assertIn("no new 'Forcing reevaluation' line",
+                              runner.forced_request_problems(self.ENTRIES[:1], entries, checked=False)[0])
+
+    def test_an_older_forced_line_does_not_satisfy_a_later_request(self) -> None:
+        # The log held the line before the request was made: only a line gained after it counts, however alike.
+        self.assertIn("no new 'Forcing reevaluation' line",
+                      runner.forced_request_problems(self.ENTRIES[:2], self.ENTRIES, checked=False)[0])
+        self.assertIn("no new 'Forcing reevaluation' line",
+                      runner.forced_request_problems(self.ENTRIES[:2], self.ENTRIES, checked=True)[0])
+        again = [*self.ENTRIES, ("2026-11-13T03:00:30.000000", "Forcing reevaluation for UID 0")]
+        self.assertEqual(runner.forced_request_problems(self.ENTRIES[:2], again, checked=False), [])
+
+    def test_a_request_that_is_to_be_checked_needs_a_check_after_its_forced_line(self) -> None:
+        before = self.ENTRIES[:2]
+        forced = ("2026-11-13T03:01:00.000000", "Forcing reevaluation for UID 0")
+        checked = ("2026-11-13T03:01:02.000000", "Wi-Fi internet check passed")
+        autonomous = ("2026-11-13T03:00:59.000000", "Wi-Fi internet check passed")
+        self.assertEqual(runner.forced_request_problems(before, [*before, forced, checked], checked=True), [])
+        self.assertIn("no internet check after the forced re-evaluation",
+                      runner.forced_request_problems(before, [*before, forced], checked=True)[0])
+        self.assertIn("no internet check after the forced re-evaluation",
+                      runner.forced_request_problems(before, [*before, autonomous, forced], checked=True)[0])
 
     def test_the_entries_are_read_in_time_order(self) -> None:
         late = [self.ENTRIES[2], ("2026-11-13T03:00:14.000000", "Wi-Fi internet check passed"), self.ENTRIES[1]]
-        self.assertEqual(len(runner.forced_check_problems(late)), 1)
+        self.assertEqual(len(runner.forced_request_problems([], late, checked=False)), 1)
 
     def test_the_time_from_the_join_to_the_validated_line_is_read_from_the_dump_and_the_log(self) -> None:
         dump = CONNECTIVITY
@@ -1583,7 +1616,9 @@ class SimulatedGuest(StubbedGuest):
         self.settings: dict[str, str] = {}
         self.net_id = 100
         self.log: list[tuple[str, str]] = []
+        self.other_log: list[tuple[str, str]] = []
         self.counter = 0
+        self.forces = 0
         self.join()
 
     # What the platform does.
@@ -1681,9 +1716,16 @@ class SimulatedGuest(StubbedGuest):
                   and self.settings.get("private_dns_specifier") == runner.UNRESOLVED_NAME)
         if broken and not self.broken:
             self.broken, self.validated, self.next_check = True, False, None
+            if self.faults.get("stale_force_line"):
+                self.add(f"{runner.FORCED_LINE} for UID 0")
         elif not broken and self.broken and not self.faults.get("stays_broken"):
+            if self.faults.get("reconnect_on_recovery"):
+                self.join()
+                return
             self.broken, self.validated = False, True
             self.validated_at += 1000
+            if self.faults.get("autonomous_check_on_recovery"):
+                self.next_check = self.clock.now + 2
 
     def capabilities(self) -> str:
         return VALIDATED if self.validated else STOCK
@@ -1701,9 +1743,19 @@ class SimulatedGuest(StubbedGuest):
         super().reevaluate(net_id)
         if self.faults.get("reevaluate_fails"):
             raise runner.Failure(f"cmd connectivity reevaluate {net_id} (rc 255): Permission denied")
-        if self.faults.get("reevaluate_ignored"):
+        self.forces += 1
+        if self.faults.get("reevaluate_ignored") or self.forces in self.faults.get("ignore_forces", ()):
             return
-        self.add(f"{runner.FORCED_LINE} for UID 0")
+        line = f"{runner.FORCED_LINE} for UID 0"
+        if self.faults.get("force_for_another_network"):
+            self.other_log.append((self.stamp(), line))
+        else:
+            self.add(line)
+        if self.faults.get("check_between_forces") and self.broken:
+            self.add(runner.CHECK_FAILED_LINE)
+            self.add(line)
+        if self.faults.get("revalidate_on_force") and not self.broken:
+            self.validated_at += 1000
         if self.broken:
             # The stock platform evaluates private DNS again, and it fails again. A check that completes
             # (the platform before the fix) reports the network validated, with its private DNS still broken.
@@ -1731,7 +1783,10 @@ class SimulatedGuest(StubbedGuest):
                                                      private_dns_broken=self.broken)),
             "dumpsys network_stack": lambda: ("Validation logs (most recent first):\n"
                                               + f'{self.net_id} - "VirtWifi"\n'
-                                              + "".join(f"  {stamp} - {message}\n" for stamp, message in self.log)),
+                                              + "".join(f"  {stamp} - {message}\n" for stamp, message in self.log)
+                                              + (f'{self.net_id - 1} - "VirtWifi"\n' if self.other_log else "")
+                                              + "".join(f"  {stamp} - {message}\n"
+                                                        for stamp, message in self.other_log)),
             "dumpsys notification --noredact": lambda: (SIGN_IN_NOTIFICATIONS if self.faults.get("notification")
                                                         else QUIET_NOTIFICATIONS),
             "dumpsys activity activities": lambda: QUIET_ACTIVITIES,
@@ -1903,8 +1958,45 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
         self.assertEqual(guest.checks_done, 2, text)
 
     def test_a_platform_that_does_not_take_the_forced_re_evaluation_proves_nothing(self) -> None:
-        with self.assertRaisesRegex(runner.Failure, "no 'Forcing reevaluation' line|cmd connectivity"):
+        with self.assertRaisesRegex(runner.Failure, "no new 'Forcing reevaluation' line after the request"):
             self.forced(self.guest(reevaluate_ignored=True))
+
+    def test_an_older_forced_line_does_not_satisfy_the_request(self) -> None:
+        # The log holds a line from before the request; the request is ignored. The line is not the request's.
+        with self.assertRaisesRegex(runner.Failure, "no new 'Forcing reevaluation' line after the request"):
+            self.forced(self.guest(stale_force_line=True, ignore_forces=(1,)))
+
+    def test_a_check_logged_between_two_force_lines_fails_the_request(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "an internet check ran after the forced re-evaluation request"):
+            self.forced(self.guest(check_between_forces=True))
+
+    def test_a_force_line_in_the_log_of_another_network_is_not_this_networks(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "no new 'Forcing reevaluation' line after the request"):
+            self.forced(self.guest(force_for_another_network=True))
+
+    def test_a_recovery_request_the_platform_ignores_is_not_satisfied_by_an_autonomous_check(self) -> None:
+        # The first request is taken; the second is ignored, and the platform checks the network by itself.
+        guest = self.guest(ignore_forces=(2,), autonomous_check_on_recovery=True)
+        with self.assertRaisesRegex(runner.Failure, "no new 'Forcing reevaluation' line after the request"):
+            self.forced(guest)
+        self.assertEqual(guest.checks_done, 2)
+
+    def test_a_recovery_request_that_is_taken_is_judged_by_its_own_line_and_check(self) -> None:
+        guest = self.guest(autonomous_check_on_recovery=True)
+        self.forced(guest)
+        lines = [message for _, message in guest.log]
+        self.assertEqual(sum(line.startswith(runner.FORCED_LINE) for line in lines), 2, lines)
+
+    def test_a_network_replaced_while_it_recovers_fails_the_section_at_once(self) -> None:
+        guest = self.guest(reconnect_on_recovery=True)
+        with self.assertRaisesRegex(runner.Failure, "network 102 was replaced by network 103"):
+            self.forced(guest)
+        self.assertEqual(guest.calls.count("reevaluate 102"), 1)
+        self.assertLess(self.clock.now, 200)
+
+    def test_a_network_validated_again_by_the_recovery_request_fails_the_section(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"network 102 was validated again \(lastValidated"):
+            self.forced(self.guest(revalidate_on_force=True))
 
     def test_a_request_at_the_server_after_the_forced_re_evaluation_fails_even_when_nothing_is_logged(self) -> None:
         with self.assertRaisesRegex(runner.Failure, "a check reached the host's server"):
