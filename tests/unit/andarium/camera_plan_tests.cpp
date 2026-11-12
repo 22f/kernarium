@@ -4,7 +4,9 @@
 // the IDs Android sees for the host's cameras, the capabilities and the stream
 // tables its description and formats earn.
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <set>
 #include <vector>
 
 #include "camera_concurrent_vectors.hpp"
@@ -461,6 +463,110 @@ void check_concurrency()
     require(conflicting_ids(conflicts, 9).empty(), "an unknown camera has no conflicts");
 }
 
+// What StaticMetadataTest.validateCapability reads of the key lists: a camera that does not list a capability must lack at
+// least one key the capability requires (else "meets all requirements" is a failure), and a region key is there only for a
+// kind of region the camera takes.
+struct KeyLists {
+    std::set<std::int32_t> request;
+    std::set<std::int32_t> result;
+};
+
+constexpr std::int32_t ae_lock = 0x10002;
+constexpr std::int32_t lens_aperture = 0x80000;
+constexpr std::int32_t lens_filter_density = 0x80001;
+constexpr std::int32_t lens_focus_distance = 0x80003;
+constexpr std::int32_t lens_ois_mode = 0x80004;
+constexpr std::int32_t sensor_exposure_time = 0xe0000;
+constexpr std::int32_t sensor_sensitivity = 0xe0002;
+
+// The keys of the template that a capability reads, as the template (emu_camera_v4l2.json) lists them for every camera.
+KeyLists template_lists()
+{
+    const std::set<std::int32_t> keys = {tag::control_ae_regions, tag::control_af_regions, tag::sensor_frame_duration,
+                                         tag::black_level_lock,   ae_lock,                 sensor_exposure_time,
+                                         sensor_sensitivity,      lens_aperture,           lens_filter_density,
+                                         lens_focus_distance,     lens_ois_mode};
+    return {keys, keys};
+}
+
+KeyLists listed_keys(const abi::Desc& desc, const Capabilities& caps)
+{
+    auto lists = template_lists();
+    for (const auto key : unlisted_keys(desc, caps)) {
+        lists.request.erase(key);
+        lists.result.erase(key);
+    }
+    return lists;
+}
+
+bool has_all(const std::set<std::int32_t>& keys, const std::vector<std::int32_t>& wanted)
+{
+    return std::all_of(wanted.begin(), wanted.end(), [&](std::int32_t key) { return keys.count(key) != 0; });
+}
+
+// The request keys of MANUAL_SENSOR and the result keys of READ_SENSOR_SETTINGS, with the lens keys of a camera that can focus.
+bool meets_manual_sensor(const KeyLists& lists, bool focuser)
+{
+    std::vector<std::int32_t> keys = {ae_lock, tag::sensor_frame_duration, sensor_exposure_time, sensor_sensitivity,
+                                      tag::black_level_lock};
+    if (focuser) keys.insert(keys.end(), {lens_aperture, lens_focus_distance, lens_filter_density, lens_ois_mode});
+    return has_all(lists.request, keys);
+}
+
+bool meets_read_sensor_settings(const KeyLists& lists, bool focuser)
+{
+    std::vector<std::int32_t> keys = {tag::sensor_frame_duration, sensor_exposure_time, sensor_sensitivity};
+    if (focuser) keys.insert(keys.end(), {lens_aperture, lens_focus_distance, lens_filter_density});
+    return has_all(lists.result, keys);
+}
+
+// The CTS first pass on a phone: the zoom camera is automatic, the front camera has manual exposure and no autofocus, the
+// back lenses have both. Each of them lists what it declares, and none lists what it does not.
+void check_key_lists()
+{
+    auto lens = lens_desc();
+    auto zoom = lens;
+    zoom.lens = abi::lens::zoom;
+    auto front = lens;
+    front.facing = abi::facing::front;
+    front.lens = abi::lens::wide;
+    front.flags &= ~abi::feature::autofocus;
+    front.min_focus_distance_mm = 0;
+    const auto formats = phone_formats();
+
+    require(max_regions_of(lens) == std::array<std::int32_t, 3>({1, 0, 1}), "a camera with autofocus has one AF region");
+    require(max_regions_of(front) == std::array<std::int32_t, 3>({1, 0, 0}), "a camera without autofocus has none");
+
+    for (const auto& desc : {lens, zoom, front}) {
+        const auto caps = capabilities_of(desc, formats);
+        const auto lists = listed_keys(desc, caps);
+        for (const bool focuser : {false, true}) {
+            require(meets_manual_sensor(lists, focuser) == caps.manual_sensor,
+                    "a camera has the keys of MANUAL_SENSOR when it lists it, and only then");
+            require(meets_read_sensor_settings(lists, focuser) == caps.read_sensor_settings,
+                    "a camera has the keys of READ_SENSOR_SETTINGS when it lists it, and only then");
+        }
+        const auto regions = max_regions_of(desc);
+        require((lists.request.count(tag::control_af_regions) != 0) == (regions[2] > 0), "AF regions are requestable with one");
+        require((lists.result.count(tag::control_af_regions) != 0) == (regions[2] > 0), "and reported with one");
+        require(lists.request.count(tag::control_ae_regions) != 0 && lists.result.count(tag::control_ae_regions) != 0,
+                "AE regions stay");
+        if (caps.manual_sensor)
+            require(lists.request.count(tag::black_level_lock) != 0 && lists.result.count(tag::black_level_lock) != 0 &&
+                        lists.result.count(tag::sensor_frame_duration) != 0,
+                    "a manual camera lists the black level lock and the frame duration both ways");
+        else
+            require(lists.request.count(tag::black_level_lock) == 0 && lists.result.count(tag::black_level_lock) == 0 &&
+                        lists.request.count(tag::sensor_frame_duration) == 0 && lists.result.count(tag::sensor_frame_duration) == 0,
+                    "an automatic camera lists neither");
+        // The exposure keys are not taken out: an automatic camera reports what it ran (CTS waives them).
+        require(lists.result.count(sensor_exposure_time) != 0 && lists.result.count(sensor_sensitivity) != 0,
+                "the exposure time and sensitivity stay");
+    }
+    require(!capabilities_of(zoom, formats).manual_sensor && capabilities_of(front, formats).manual_sensor,
+            "the zoom camera is the automatic one, the front camera is manual");
+}
+
 } // namespace
 
 int main()
@@ -475,5 +581,6 @@ int main()
     check_centred_window();
     check_cts_subsets();
     check_concurrent_feature();
+    check_key_lists();
     return 0;
 }

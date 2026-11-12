@@ -356,8 +356,11 @@ JPEG, encoded there. A request whose outputs the host refuses or does not
 deliver within the HAL's deadline (3 s, 15 s for a request with a still) is a
 failed request (`ERROR_REQUEST`, which Camera2 and CameraX report as a failed
 capture); a request that loses only some of its outputs reports
-`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's
-smoke test is `tests/integration/android/run_android_camera.py`
+`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. A camera lists
+the keys it honours: the frame duration and the black level lock only with
+`MANUAL_SENSOR`, the AF regions only with autofocus. Every result carries the
+scene mode (`DISABLED`) and, with `MANUAL_SENSOR`, the black level lock. The
+candidate's smoke test is `tests/integration/android/run_android_camera.py`
 (`android-camera`).
 
 ### Networking

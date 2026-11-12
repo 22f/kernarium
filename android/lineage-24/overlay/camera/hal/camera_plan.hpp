@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -84,6 +85,42 @@ inline Capabilities capabilities_of(const abi::Desc& desc, const Formats& format
     caps.raw = caps.manual_sensor && (desc.flags & abi::feature::raw) != 0 && formats.raw.pixels() != 0 &&
         desc.bayer_order != abi::bayer::none;
     return caps;
+}
+
+// android.control.maxRegions: the AE, AWB and AF regions the camera takes. The
+// host meters and focuses on one point, and a camera without autofocus has none
+// to move.
+inline std::array<std::int32_t, 3> max_regions_of(const abi::Desc& desc) noexcept
+{
+    return {1, 0, (desc.flags & abi::feature::autofocus) != 0 ? 1 : 0};
+}
+
+// Tags of camera_metadata_tags.h that unlisted_keys names; the HAL asserts them.
+namespace tag {
+constexpr std::int32_t control_ae_regions = 0x10004;
+constexpr std::int32_t control_af_regions = 0x10008;
+constexpr std::int32_t control_awb_regions = 0x1000c;
+constexpr std::int32_t sensor_frame_duration = 0xe0001;
+constexpr std::int32_t black_level_lock = 0x160000;
+} // namespace tag
+
+// The keys of the template's request and result key lists that this camera does
+// not honour; it lists them in neither. The frame duration and the black level
+// lock are the sensor keys of MANUAL_SENSOR, so a camera without the capability
+// has neither: CTS fails a camera that has every key of a capability it does
+// not list. A region key is listed only for a kind of region the camera takes.
+inline std::vector<std::int32_t> unlisted_keys(const abi::Desc& desc, const Capabilities& caps)
+{
+    std::vector<std::int32_t> keys;
+    if (!caps.manual_sensor) {
+        keys.push_back(tag::sensor_frame_duration);
+        keys.push_back(tag::black_level_lock);
+    }
+    const auto regions = max_regions_of(desc);
+    if (regions[0] == 0) keys.push_back(tag::control_ae_regions);
+    if (regions[1] == 0) keys.push_back(tag::control_awb_regions);
+    if (regions[2] == 0) keys.push_back(tag::control_af_regions);
+    return keys;
 }
 
 // The size of the array that RAW and the field of view are stated in: the Bayer
