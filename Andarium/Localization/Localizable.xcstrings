@@ -2176,7 +2176,7 @@
       }
     },
     "Capabilities" : {
-      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, gyroscope).",
+      "comment" : "Home section: what the virtual machine may use of this device (location, microphone, haptics).",
       "localizations" : {
         "ja" : {
           "stringUnit" : {

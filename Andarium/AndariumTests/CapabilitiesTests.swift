@@ -36,8 +36,7 @@ final class GuestMicrophone {
 
 /// Microphone asks iOS when it is turned on, shows itself off and unusable
 /// when iOS refuses or the person takes the access away, and gives the guest
-/// no input then. Gyroscope asks for nothing: raw accelerometer and gyroscope
-/// updates need no permission on iOS.
+/// no input then.
 @MainActor
 struct CapabilitiesFlowTests {
     private let host = HostDevice(
@@ -226,9 +225,8 @@ struct CapabilitiesFlowTests {
 
     // MARK: The order of the rows
 
-    /// Location sits above Microphone and Gyroscope, as the person asked, and
-    /// Haptics comes last; the section draws its rows in this order, which
-    /// VoiceOver reads.
+    /// Location sits above Microphone, as the person asked, and Haptics comes
+    /// last; the section draws its rows in this order, which VoiceOver reads.
     @Test func capabilitiesAreListedLocationMicrophoneHaptics() {
         #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .haptics])
         #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .haptics])
