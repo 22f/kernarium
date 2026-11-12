@@ -271,14 +271,17 @@ struct SourceChoice {
     bool invalid {};
 };
 
-/* "host" or nothing, "synthetic" (the phone) or "synthetic:" with phone,
- * tablet or laptop. */
+/* "host" or nothing (the variable is not set), "synthetic" (the phone) or
+ * "synthetic:" with phone, tablet or laptop. A variable that is set but empty
+ * is not a name: a harness writes one when its own variable is unset. */
 [[nodiscard]] inline SourceChoice parseSource(const char* value)
 {
     SourceChoice choice;
-    if (value == nullptr || *value == '\0' || std::string_view {value} == "host")
+    if (value == nullptr)
         return choice;
     const std::string_view text {value};
+    if (text == "host")
+        return choice;
     if (text == "synthetic" || text == "synthetic:phone") {
         choice.synthetic = true;
     } else if (text == "synthetic:tablet") {

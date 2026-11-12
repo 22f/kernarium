@@ -327,7 +327,7 @@ void aBootStatesTheOrientationAndALaterTurnIsADelta()
 void theEnvironmentNamesTheSyntheticCamera()
 {
     require(std::string {sourceVariable} == "KERNARIUM_CAMERA_SOURCE");
-    for (const char* host : {static_cast<const char*>(nullptr), "", "host"}) {
+    for (const char* host : {static_cast<const char*>(nullptr), "host"}) {
         const auto choice = parseSource(host);
         require(!choice.synthetic && !choice.invalid);
     }
@@ -342,7 +342,7 @@ void theEnvironmentNamesTheSyntheticCamera()
         const auto choice = parseSource(named.value);
         require(choice.synthetic && !choice.invalid && choice.profile == named.profile, named.value);
     }
-    for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:"}) {
+    for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:", ""}) {
         const auto choice = parseSource(bad);
         require(!choice.synthetic && choice.invalid, bad);
     }
@@ -358,7 +358,7 @@ void anUnknownSourceNeverFallsBackToTheHostsCamera()
         return uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::laptop);
     };
     for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:", "SYNTHETIC:PHONE", " host",
-                            "host ", "synthetic:phone:2", "0"}) {
+                            "host ", "synthetic:phone:2", "0", ""}) {
         require(parseSource(bad).invalid, bad);
         require(chooseSource(parseSource(bad), host) == nullptr, bad);
     }
@@ -370,11 +370,11 @@ void anUnknownSourceNeverFallsBackToTheHostsCamera()
     require(none.layout == "none" && !none.hasCameras() && none.source == nullptr);
     require(!uml::camera::lensCoverAdvertised(CameraMode::blocked, none.layout));
 
-    for (const char* named : {static_cast<const char*>(nullptr), "", "host"}) {
+    for (const char* named : {static_cast<const char*>(nullptr), "host"}) {
         require(chooseSource(parseSource(named), host) != nullptr);
     }
-    require(hostSources == 3, "the host's own value asks for the host's camera");
-    require(chooseSource(parseSource("synthetic:tablet"), host) != nullptr && hostSources == 3,
+    require(hostSources == 2, "the host's own value asks for the host's camera");
+    require(chooseSource(parseSource("synthetic:tablet"), host) != nullptr && hostSources == 2,
         "the synthetic camera is not the host's");
 }
 #endif
