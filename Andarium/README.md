@@ -451,14 +451,21 @@ requires reopening Andarium.
   share the screen with pauses the camera (black frames) and shows a notice
   that goes with the interruption. With Camera on and Gyroscope off a note under
   Capabilities says photos taken sideways are saved the wrong way up. Where the
-  host owns the rotation (an iPad window) it tells the runtime how far to turn
-  the picture for Android's automatic ROTATE_AND_CROP. The memory a session's
-  cameras hold is the [camera device's tier](../darwin/device/camera/README.md),
-  taken from the launch's graphics budget. The Simulator has no camera: the
+  host owns the rotation (an iPad window) it tells the runtime how the device
+  body is turned from portrait (`CameraRotation`): each start derives every
+  camera's sensor orientation from it, and a later turn turns the picture
+  ([orientation](../darwin/device/camera/README.md#orientation)). The colour
+  data a Bayer still teaches is kept in a folder of Application Support that
+  backups leave out. The memory a live
+  session's cameras hold comes out of the graphics budget
+  ([camera device](../darwin/device/camera/README.md)): with Camera on, the
+  VRAM the System sheet and the statistics show is the pool, the budget less
+  that reserve, and the memory offered and the default are unchanged. The Simulator has no camera: the
   preview states the access (`-systemCamera` reads the Simulator's own
   permission) and the non-App Store runtime serves a synthetic camera
-  (`KERNARIUM_CAMERA_SOURCE`) that tests use; an App Store build has neither.
-  No test captures a real camera.
+  (`KERNARIUM_CAMERA_SOURCE`) that tests use, and no camera at all for a value
+  it does not know; an App Store build has neither. No test captures a real
+  camera.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches
