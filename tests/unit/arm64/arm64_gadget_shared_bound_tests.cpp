@@ -14,6 +14,7 @@
 #include "runtime_test_route.hpp"
 
 #include "cpu/arm64/gadgets/executor.hpp"
+#include "cpu/gadget_cache_budget.hpp"
 #include "static_mmu_test_support.hpp"
 
 #include <cstddef>
@@ -21,10 +22,12 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <vector>
 
 namespace arm64 = uml::cpu::arm64;
 namespace gadgets = arm64::gadgets;
 namespace stress = gadgets::stress;
+namespace cache = uml::cpu::gadget_cache;
 using uml::emulator::tests::JitBacking;
 using uml::emulator::tests::JitMapping;
 using uml::emulator::tests::require;
@@ -310,6 +313,95 @@ void a_window_leaves_a_space_another_executor_is_running(
 		stress::closes() == closes + 1);
 }
 
+/* A window that leaves a running space alone does not keep it from the
+ * budget: relief asks any open account to shed, the running ones last, and
+ * every executor holding a shedding account lets go of it at its next entry
+ * whatever its window would do. The state is that of the test above, B having
+ * entered the space on every turn of A's through the window. The budget then
+ * falls under what the caches hold and a store of A's passes it: the space is
+ * asked to shed though it is running. A lets go of it at its next entry, B,
+ * which has not entered since, at its own, and the last of them frees it; B
+ * then translates its block afresh in a new space. */
+void relief_sheds_a_space_the_window_leaves(unsigned long generation)
+{
+	/* The space is much larger than the little ones of the window's turn, so
+	 * that a budget under it is not under what the rest hold. */
+	constexpr std::size_t blocks = 2800;
+	constexpr std::size_t width = 31;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{pages_for((blocks * width + 1) * 4)};
+	put_chain(backing, blocks, width);
+	JitMapping mapping{generation, code_base, backing,
+		pages_for((blocks * width + 1) * 4)};
+	/* The generations of the window's turn, and one more for the store. */
+	std::vector<std::unique_ptr<JitBacking>> others;
+	std::vector<std::unique_ptr<JitMapping>> mappings;
+	for (unsigned long other = 0;
+	     other <= UML_GADGET_RESIDENT_GENERATIONS + 1; ++other) {
+		others.push_back(std::make_unique<JitBacking>(1));
+		put_program(*others.back(), 1, 2);
+		mappings.push_back(std::make_unique<JitMapping>(
+			generation + 1 + other, code_base, *others.back(), 1));
+	}
+	const auto store_generation =
+		generation + 1 + UML_GADGET_RESIDENT_GENERATIONS + 1;
+	const auto a_vcpu = std::make_unique<Vcpu>();
+	const auto b_vcpu = std::make_unique<Vcpu>();
+	auto &a = a_vcpu->executor;
+	auto &b = b_vcpu->executor;
+	auto &a_memory = a_vcpu->memory;
+	auto &b_memory = b_vcpu->memory;
+	auto &cpu = a_vcpu->cpu;
+
+	require(run_to_system_call(a, a_memory, generation, cpu, code_base,
+		blocks + 4) != 0);
+	require(run_to_system_call(b, b_memory, generation, cpu, code_base,
+		blocks) != 0);
+	for (const auto at : {blocks / 4, blocks / 2, blocks * 3 / 4}) {
+		cpu = {};
+		cpu.pc = code_base + at * width * 4;
+		(void)run_once(b, b_memory, generation, cpu);
+	}
+	const auto full = stress::open_space_bytes(generation);
+	require(full.spaces == 1);
+	const auto closes = stress::closes();
+	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
+	     ++other) {
+		require(run_to_system_call(a, a_memory, generation + 1 + other,
+			cpu, code_base) == 4);
+		cpu = {};
+		cpu.pc = code_base;
+		(void)run_once(b, b_memory, generation, cpu);
+	}
+	/* The window went past the running space: the blocks of the others
+	 * took a few of its slots, not the space. */
+	const auto kept = stress::open_space_bytes(generation);
+	require(kept.spaces == 1 && kept.held >= full.held * 9 / 10 &&
+		stress::closes() == closes);
+
+	/* The budget falls under the space, and A stores past it. */
+	const auto charged = cache::ledger_state();
+	require(charged.shedding == 0 && charged.total > kept.arena);
+	cache::set_budget(kept.arena * 3 / 4);
+	require(run_to_system_call(a, a_memory, store_generation, cpu,
+		code_base) == 4);
+	const auto asked = cache::ledger_state();
+	require(asked.reliefs > charged.reliefs);
+	/* The space, not the little ones, was asked, and B still holds it. */
+	require(asked.shed_accounts == charged.shed_accounts + 1 &&
+		asked.shedding >= kept.held);
+	/* B's next entry lets go of it as the last holder, and the space it then
+	 * runs is a new one holding the block B translated in it. */
+	cpu = {};
+	cpu.pc = code_base;
+	(void)run_once(b, b_memory, generation, cpu);
+	require(cache::ledger_state().shedding == 0);
+	const auto fresh = stress::open_space_bytes(generation);
+	require(fresh.spaces == 1 && fresh.held < kept.held / 8);
+	cache::set_budget(cache::fallback_budget);
+}
+
 /* An address space only one executor holds is retired in its turn, however
  * lately that executor ran it: nobody else could be in the code it frees. */
 void a_window_retires_a_space_no_other_executor_holds()
@@ -509,6 +601,7 @@ int main()
 	held_bytes_follow_the_slots();
 	a_mostly_free_space_is_renewed_and_a_busy_one_is_not();
 	a_window_leaves_a_space_another_executor_is_running(1120);
+	relief_sheds_a_space_the_window_leaves(1200);
 	a_window_retires_a_space_no_other_executor_holds();
 	a_private_cache_is_never_renewed();
 	renewal_reaches_every_executor();
