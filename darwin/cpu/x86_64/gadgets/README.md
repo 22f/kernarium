@@ -237,7 +237,8 @@ sequence or a raised execution interrupt abandons a validation.
   byte budget (`cpu/gadget_cache_budget.hpp`,
   [`darwin/README.md`](../../../README.md)); a run's first block tells the
   account the address space was entered, and an account asked to shed is let go
-  of at the executor's next run.
+  of at the executor's next run; a running executor ends its run at its next
+  return from translated code to start that run.
 
 `UML_GADGET_CACHE_CENSUS=ON` builds record what each cache holds in the arm64
 engine's format

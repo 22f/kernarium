@@ -46,14 +46,23 @@ namespace uml::cpu::gadget_cache {
  * holding that address space lets go of it at its next entry into translated
  * code, as it lets go of a renewed space; the storage goes with the last of
  * them, and the address space starts afresh in a new account when it runs
- * again. Until then a shedding account's bytes, whatever it charges or refunds
- * after it was asked, are counted apart from the open ones: every charge is
- * attributed to one figure or the other exactly once. Every store past the
- * budget relieves it in turn, counting the open accounts again under the
- * ledger's lock, so the open accounts stay within the budget but for the stores
- * in flight, one per storing vCPU, and a closed space that an idle vCPU still
- * holds -- part of what was open when that vCPU went idle -- leaves the whole
- * at most twice the budget.
+ * again. A running holder comes back to that entry within a block: the engine
+ * ends its run through the fairness exit when its executor's renew flag is set.
+ * Until the storage goes, a shedding account's bytes, whatever it charges or
+ * refunds after it was asked, are counted apart from the open ones: every
+ * charge is attributed to one figure or the other exactly once. Every store
+ * past the budget relieves it in turn, counting the open accounts again under
+ * the ledger's lock, so the open accounts stay within the budget but for the
+ * stores in flight, one per storing vCPU.
+ *
+ * The budget does not bound the shed bytes: they wait for the holders, which
+ * the ledger cannot hurry. A running holder lets go within a block of the ask,
+ * but its let-go retires its slots in the space, which takes milliseconds for
+ * a space of tens of MiB, and the storage goes when the last holder has let go.
+ * While every vCPU translates, each relief leaves such a space behind, so the
+ * whole is above the budget by the spaces in flight. An idle vCPU lets go when
+ * it next runs, and holds meanwhile what its window held when it went idle,
+ * which was part of what was open then.
  *
  * Telling the account costs an entry a read of the host's counter and a load,
  * and a store only when the epoch has moved on, once per epoch however many
