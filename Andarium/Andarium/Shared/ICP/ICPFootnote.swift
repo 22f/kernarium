@@ -56,9 +56,12 @@ struct ICPFootnote: View {
 
     var body: some View {
         Link(destination: ICPFiling.siteURL) {
+            // The secondary label colour itself: a hierarchical `.secondary` inside a Link fades the
+            // tint instead, which is too faint on either background. The underline says it is a link.
             Text(verbatim: number)
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .underline()
+                .foregroundStyle(Color.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity)
