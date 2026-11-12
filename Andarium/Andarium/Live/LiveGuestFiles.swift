@@ -17,14 +17,14 @@ nonisolated enum GuestFilesFailure {
 
     static func message(_ error: GuestFilesError, device: String) -> String {
         switch error {
-        case .refused: "Android doesn\u{2019}t allow this folder to be opened."
-        case .missing: "It is no longer in the guest."
-        case .exists: "A file with that name is already there."
-        case .folderInTheWay: "A folder with that name is already there."
-        case .changed: "The file changed while it was being copied."
-        case .guestFull: "Not enough space in the guest."
-        case .deviceFull: "Not enough space on this \(device)."
-        case .badPath: "The guest can\u{2019}t take a file with this name."
+        case .refused: String(localized: "Android doesn\u{2019}t allow this folder to be opened.")
+        case .missing: String(localized: "It is no longer in the virtual machine.")
+        case .exists: String(localized: "A file with that name is already there.")
+        case .folderInTheWay: String(localized: "A folder with that name is already there.")
+        case .changed: String(localized: "The file changed while it was being copied.")
+        case .guestFull: String(localized: "Not enough space in the virtual machine.")
+        case .deviceFull: String(localized: "Not enough space on this \(device).")
+        case .badPath: String(localized: "The virtual machine can\u{2019}t take a file with this name.")
         }
     }
 }
@@ -102,7 +102,7 @@ nonisolated enum FileUploadOperation {
     ) throws {
         let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
         if values.isDirectory == true {
-            throw AdbFailure(message: "Folders and packages can\u{2019}t be imported.")
+            throw AdbFailure(message: String(localized: "Folders and packages can\u{2019}t be imported."))
         }
         let size = UInt64(max(values.fileSize ?? 0, 0))
         let source = try LocalFileSource(file)
@@ -387,7 +387,7 @@ final class LiveGuestFiles: GuestFilesBackend {
         } catch GuestFilesError.refused {
             throw GuestFolderProblem.refused
         } catch GuestFilesError.missing {
-            throw GuestFolderProblem.unavailable("The folder is no longer in the guest.")
+            throw GuestFolderProblem.unavailable(String(localized: "The folder is no longer in the virtual machine."))
         }
     }
 

@@ -332,7 +332,7 @@ struct TransferCapsule: View {
         .contentShape(.rect)
         .onTapGesture { if transfer.items.count > 1 { transfer.expanded.toggle() } }
         .accessibilityAddTraits(transfer.items.count > 1 ? .isButton : [])
-        .accessibilityHint(transfer.items.count > 1 ? (transfer.expanded ? "Hides the files" : "Shows the files") : "")
+        .accessibilityHint(transfer.items.count > 1 ? (transfer.expanded ? String(localized: "Hides the files") : String(localized: "Shows the files")) : "")
     }
 
     @ViewBuilder private var progressFill: some View {
@@ -430,7 +430,7 @@ struct TransferCapsule: View {
                     Text(reason)
                         .font(.caption)
                         .foregroundStyle(.red)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
             }
             Spacer(minLength: 8)
@@ -448,7 +448,7 @@ struct TransferCapsule: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
         case .moving:
-            Text("\(Formats.size(bytes: item.moved)) of \(Formats.size(bytes: item.size))")
+            Text(MeterWords.of(Formats.size(bytes: item.moved), Formats.size(bytes: item.size)))
                 .font(.caption.weight(.medium))
                 .foregroundStyle(Color.accentColor)
                 .monospacedDigit()
@@ -498,10 +498,10 @@ struct ConflictCard: View {
                 .accessibilityLabel("Cancel import")
             }
             HStack(spacing: 8) {
-                Button { browser.resolveConflict(.skip) } label: { choice("Skip") }
+                Button { browser.resolveConflict(.skip) } label: { choice(String(localized: "Skip")) }
                     .buttonStyle(.bordered)
                     .tint(Color(.label))
-                Button(role: .destructive) { browser.resolveConflict(.replace) } label: { choice("Replace") }
+                Button(role: .destructive) { browser.resolveConflict(.replace) } label: { choice(String(localized: "Replace")) }
                     .buttonStyle(.bordered)
                     .tint(.red)
                 Button { browser.resolveConflict(.keepBoth) } label: { choice("Keep Both") }
@@ -525,9 +525,9 @@ struct ConflictCard: View {
 
     private var title: String {
         if conflict.clashing.count == 1, let only = conflict.clashing.first {
-            return "\u{201C}\(only.name)\u{201D} is already in \(folderName)"
+            return String(localized: "\u{201C}\(only.name)\u{201D} is already in \(folderName)")
         }
-        return "\(conflict.clashing.count) names are already in \(folderName)"
+        return String(localized: "\(conflict.clashing.count) names are already in \(folderName)")
     }
 
     /// The names a count stands for.
@@ -535,6 +535,6 @@ struct ConflictCard: View {
         guard conflict.clashing.count > 1 else { return nil }
         let shown = conflict.clashing.prefix(2).map(\.name)
         let more = conflict.clashing.count - shown.count
-        return ListFormatter.localizedString(byJoining: shown + (more > 0 ? ["\(more) more"] : []))
+        return ListFormatter.localizedString(byJoining: shown + (more > 0 ? [String(localized: "\(more) more")] : []))
     }
 }

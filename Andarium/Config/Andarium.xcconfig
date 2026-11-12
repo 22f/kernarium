@@ -33,3 +33,10 @@ SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(FEEDBACK_CONDITION)
 // Info.plist is preprocessed, and holds the address only where FEEDBACK_MAIL is defined.
 FEEDBACK_PLIST_ = FEEDBACK_NO_MAIL=1
 FEEDBACK_PLIST_DEFINITION = $(FEEDBACK_PLIST_$(FEEDBACK_ADDRESS:identifier):default=FEEDBACK_MAIL=1)
+
+// The Feedback string table is compiled only where Send feedback is. An empty
+// address names the setting FEEDBACK_CATALOG_ and excludes the catalog; any
+// other lands on an undefined name and excludes nothing. The project's
+// AppStore setting of this name lists the JIT catalog and inherits this one.
+FEEDBACK_CATALOG_ = Feedback.xcstrings
+EXCLUDED_SOURCE_FILE_NAMES = $(FEEDBACK_CATALOG_$(FEEDBACK_ADDRESS:identifier):default=)

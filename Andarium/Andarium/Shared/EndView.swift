@@ -13,7 +13,7 @@ struct EndView: View {
             Spacer(minLength: 24)
             StackMark(lit: false, width: 140, fault: true)
                 .padding(.bottom, 36)
-            Text("The guest stopped unexpectedly")
+            Text("The virtual machine stopped unexpectedly")
                 .font(.title2.weight(.bold))
                 .multilineTextAlignment(.center)
             Text("To start it again, close Andarium and open it again.")
