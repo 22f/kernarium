@@ -14,6 +14,7 @@
 #include "thread_nap.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -338,6 +339,65 @@ void the_last_carrier_in_pushes_the_timer_past_the_earliest_deadline()
 	});
 	second.run([&] { second.idle.emplace(); });
 	require(wait_for(200).bits == 0, "a wait of years armed the watch");
+}
+
+/* A carrier that is still blocked after its deadline and the 50 ms: the push
+ * fires, the watch looks, finds it in its wait, and settles to sleep. The
+ * deadline it has looked past is spent, or the settle would put the timer in
+ * the past and the watch would wake and look again at once, for as long as
+ * the wait lasts. */
+void the_watch_spends_a_deadline_it_has_looked_past()
+{
+	const Case scope{"overdue"};
+	Actor actor;
+	actor.run([&] { carrier_named(0); });
+	drain();
+	const timespec hundred = relative_ms(100);
+	Clock::time_point began = Clock::now();
+	actor.run([&] { actor.idle.emplace(&hundred, CarrierIdle::Limit::relative); });
+
+	/* A settle before the deadline and the slack leaves the push alone. */
+	watch_settle();
+	Waited waited = wait_for(3000, began);
+	require(waited.bits == timer, "the push of a timed wait was lost");
+	require(waited.ms >= 140, "the push went off before the deadline and 50 ms: " +
+		std::to_string(waited.ms) + " ms");
+
+	/* The carrier is still blocked; the watch looks and settles. */
+	watch_settle();
+	require(carriers_outside_idle() == 0);
+	waited = wait_for(600);
+	require(waited.bits == 0,
+		"a deadline the watch had looked past woke it again after " +
+		std::to_string(waited.ms) + " ms");
+
+	/* A wait the carrier enters afterwards has a deadline of its own. */
+	actor.run([&] { actor.idle.reset(); });
+	drain();
+	const timespec two_hundred = relative_ms(200);
+	began = Clock::now();
+	actor.run([&] { actor.idle.emplace(&two_hundred, CarrierIdle::Limit::relative); });
+	waited = wait_for(3000, began);
+	require(waited.bits == timer && waited.ms >= 240,
+		"the deadline of a later wait was lost: " + std::to_string(waited.bits) +
+		" after " + std::to_string(waited.ms) + " ms");
+}
+
+/* The wait that the scope wraps reports its failure in errno. */
+void leaving_an_idle_wait_keeps_errno()
+{
+	const Case scope{"errno"};
+	Actor actor;
+	actor.run([&] { carrier_named(2); });
+	const timespec limit = relative_ms(5000);
+	int kept = 0;
+	actor.run([&] {
+		actor.idle.emplace(&limit, CarrierIdle::Limit::relative);
+		errno = EINTR;
+		actor.idle.reset();
+		kept = errno;
+	});
+	require(kept == EINTR, "leaving an idle wait changed errno");
 }
 
 void a_host_wake_arms_the_watch_and_no_carrier_takes_it_back()
@@ -674,6 +734,8 @@ int main()
 	a_carrier_that_blinks_never_wakes_the_watch();
 	the_first_carrier_out_arms_and_the_last_one_in_removes();
 	the_last_carrier_in_pushes_the_timer_past_the_earliest_deadline();
+	the_watch_spends_a_deadline_it_has_looked_past();
+	leaving_an_idle_wait_keeps_errno();
 	a_host_wake_arms_the_watch_and_no_carrier_takes_it_back();
 	a_carrier_that_ends_reports_no_more();
 	idle_scopes_inside_each_other_count_once();

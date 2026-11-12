@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cerrno>
 #include <fcntl.h>
+#include <mach/mach_time.h>
 #include <sys/event.h>
 #include <unistd.h>
 
@@ -25,11 +26,31 @@ constexpr std::uintptr_t host_wake_ident = 2;
 constexpr std::uintptr_t poke_ident = 3;
 constexpr std::uintptr_t stop_ident = 4;
 
-/* The continuous clock, which counts the time the system sleeps, in
- * nanoseconds: the clock of the stall watch's times. */
-std::uint64_t continuous_ns() noexcept
+/* The clock of the deadlines and of the timers: the absolute clock, which
+ * stops while the host sleeps, in nanoseconds. It is the clock the carriers'
+ * waits (the select and condition waits, the kernel's timers) run on, so a
+ * deadline and the wait it guards move together across a host sleep; the
+ * continuous clock would put every deadline in the past on waking. The stall
+ * record's own times stay on the continuous clock. mach_absolute_time and
+ * mach_timebase_info are in libsystem_kernel, which the thread fence does not
+ * hold the watch's thread in. */
+std::atomic<std::uint32_t> timebase_numerator{0};
+std::atomic<std::uint32_t> timebase_denominator{1};
+
+std::uint64_t absolute_ns() noexcept
 {
-	return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+	std::uint32_t numerator = timebase_numerator.load(std::memory_order_acquire);
+	if (numerator == 0) {
+		mach_timebase_info_data_t timebase{};
+		(void)mach_timebase_info(&timebase);
+		timebase_denominator.store(timebase.denom != 0 ? timebase.denom : 1,
+			std::memory_order_relaxed);
+		numerator = timebase.numer != 0 ? timebase.numer : 1;
+		timebase_numerator.store(numerator, std::memory_order_release);
+	}
+	return static_cast<std::uint64_t>(
+		static_cast<unsigned __int128>(mach_absolute_time()) * numerator /
+		timebase_denominator.load(std::memory_order_relaxed));
 }
 
 /* Per-process state, constant-initialized and never destroyed: carriers use it
@@ -75,7 +96,7 @@ void set_timer(std::uintptr_t ident, std::uint64_t delay_ns) noexcept
 	struct kevent change;
 	EV_SET(&change, ident, EVFILT_TIMER,
 		EV_ADD | EV_ENABLE | EV_ONESHOT,
-		NOTE_NSECONDS | NOTE_MACH_CONTINUOUS_TIME,
+		NOTE_NSECONDS,
 		static_cast<std::intptr_t>(std::clamp<std::uint64_t>(delay_ns, 1,
 			longest_wait_ns + arm_ns)),
 		nullptr);
@@ -93,42 +114,64 @@ void remove_timer(std::uintptr_t ident) noexcept
 	(void)kevent(fd, &change, 1, nullptr, 0, nullptr);
 }
 
-/* All the carriers are in an idle wait. The timer goes off 50 ms after the
- * earliest deadline of a timed wait, or is removed when none has one, so that
- * the watch wakes for a carrier that is due and does not run, and for nothing
- * else.
- *
- * The ordering argument. A carrier clears its bit in `outside_idle` before it
- * calls this (and the watch calls it only to sleep), and a carrier that
- * leaves its idle wait sets its bit before it arms the timer. The call above
- * can remove or move the timer after such a carrier has armed it, since the
- * two system calls are not ordered. The last step settles it: it reads the
- * mask once the timer has been changed, and a carrier outside its wait then
- * arms the timer again. Of the carrier's set and this read, one comes first
- * in the order of the atomics. If the set came first, the read sees the bit
- * and arms. If the read came first, the change of the timer came before it,
- * hence before the set and before the carrier's arm, which then stands. Either
- * way the timer is armed for a carrier outside its wait. A call that arms for
- * nothing costs the watch one wake. */
-void settle_timer() noexcept
+/* The earliest deadline of a timed wait among the carriers that report, or
+ * `never`. */
+std::uint64_t earliest_deadline() noexcept
 {
-	if (!listening.load(std::memory_order_acquire))
-		return;
 	const std::uint32_t known = reporting.load(std::memory_order_acquire);
 	std::uint64_t earliest = never;
 	for (unsigned vcpu = 0; vcpu < carrier_capacity; ++vcpu)
 		if ((known & bit_of(vcpu)) != 0)
 			earliest = std::min(earliest,
 				limits[vcpu].deadline_ns.load(std::memory_order_relaxed));
+	return earliest;
+}
+
+/* All the carriers are in an idle wait. The timer goes off 50 ms after the
+ * earliest deadline of a timed wait, or is removed when none has one, so that
+ * the watch wakes for a carrier that is due and does not run, and for nothing
+ * else.
+ *
+ * The ordering argument, in two halves; each is a recheck after the timer was
+ * changed, and each can only cost the watch one wake.
+ *
+ * The mask. A carrier clears its bit in `outside_idle` before it calls this
+ * (and the watch calls it only to sleep), and a carrier that leaves its idle
+ * wait sets its bit before it arms the timer. The call above can remove or
+ * move the timer after such a carrier has armed it, since the two system calls
+ * are not ordered. The last step settles it: it reads the mask once the timer
+ * has been changed, and a carrier outside its wait then arms the timer again.
+ * Of the carrier's set and this read, one comes first in the order of the
+ * atomics. If the set came first, the read sees the bit and arms. If the read
+ * came first, the change of the timer came before it, hence before the set and
+ * before the carrier's arm, which then stands.
+ *
+ * The deadlines. A carrier stores its deadline before it clears its bit, and
+ * its own settle (if it is the last one in) moves the timer after that. Two
+ * settles can run at once, and the one that read an older set of deadlines
+ * can change the timer after the other, undoing its push. The recheck reads
+ * the deadlines again once the timer has been changed: a deadline stored
+ * since the first reading was stored before its carrier's own change of the
+ * timer, which came before ours through the queue, which came before this
+ * read, so the read sees it and the timer is armed for the watch, which
+ * settles again.
+ *
+ * Either way the timer is armed for a carrier that needs it. */
+void settle_timer() noexcept
+{
+	if (!listening.load(std::memory_order_acquire))
+		return;
+	const std::uint64_t earliest = earliest_deadline();
 	if (earliest == never) {
 		remove_timer(timer_ident);
 	} else {
-		const std::uint64_t now = continuous_ns();
+		const std::uint64_t now = absolute_ns();
 		const std::uint64_t at = earliest > never - arm_ns ? never :
 			earliest + arm_ns;
 		set_timer(timer_ident, at > now ? at - now : 1);
 	}
-	if (outside_idle.load(std::memory_order_seq_cst) != 0)
+	if (outside_idle.load(std::memory_order_seq_cst) != 0 ||
+	    earliest_deadline() != earliest)
 		set_timer(timer_ident, arm_ns);
 }
 
@@ -186,8 +229,8 @@ thread_local EndOfCarrier end_of_carrier;
 	const std::int64_t remaining_ns =
 		static_cast<std::int64_t>(remaining.tv_sec) * per_second + remaining.tv_nsec;
 	if (remaining_ns <= 0)
-		return continuous_ns();
-	return continuous_ns() + static_cast<std::uint64_t>(remaining_ns);
+		return absolute_ns();
+	return absolute_ns() + static_cast<std::uint64_t>(remaining_ns);
 }
 
 } // namespace
@@ -220,8 +263,13 @@ CarrierIdle::CarrierIdle(const timespec *limit, Limit clock) noexcept
 
 CarrierIdle::~CarrierIdle()
 {
-	if (counted_ && --this_thread.depth == 0)
+	if (counted_ && --this_thread.depth == 0) {
+		/* The wait this scope wrapped (pselect, pause) reports its failure
+		 * in errno, which the system call below must not touch. */
+		const int saved = errno;
 		leave_idle(static_cast<unsigned>(this_thread.vcpu));
+		errno = saved;
+	}
 }
 
 void note_host_wake() noexcept
@@ -331,6 +379,21 @@ std::uint32_t carriers_reporting() noexcept
 
 void watch_settle() noexcept
 {
+	/* The watch has just seen every carrier in its idle wait, so a deadline
+	 * that is past by the slack was looked at: it is spent, unless the carrier
+	 * has moved to another wait since (the exchange fails then). Left alone
+	 * it would put the timer in the past, and the watch would wake and look
+	 * again, and again, until the wait ended. */
+	const std::uint64_t now = absolute_ns();
+	if (now >= arm_ns) {
+		for (Limit &limit : limits) {
+			std::uint64_t deadline =
+				limit.deadline_ns.load(std::memory_order_relaxed);
+			if (deadline != never && deadline <= now - arm_ns)
+				(void)limit.deadline_ns.compare_exchange_strong(deadline,
+					never, std::memory_order_relaxed);
+		}
+	}
 	settle_timer();
 }
 

@@ -35,10 +35,27 @@ namespace uml::runtime {
  * is a kevent, a system call of libsystem_kernel alone, which the thread
  * fence can hold.
  *
- * What is not covered: a carrier woken from an untimed idle wait by a guest
- * wake source (another carrier's IPI, the kernel's descriptor-notification
- * thread) is seen from its first instruction on, not while the system keeps
- * it from running, when every other carrier is idle.
+ * What is not covered. A carrier woken before the limit of its idle wait (a
+ * timed one included) by a guest wake source (another carrier's IPI, or the
+ * kernel's notification thread, which alone wakes CPU0 for a host descriptor)
+ * is seen from its first instruction on, not while the system keeps it from
+ * running, when every other carrier is idle. The kernel's fallback, which
+ * wakes an idle secondary when CPU0 is late for a device, arms the watch and
+ * so records such a stall, later and shorter than before. The case stays open
+ * for a guest of one vCPU, a guest whose secondaries are offline (a suspended
+ * one), a carrier woken by an IPI from one that goes idle again within the
+ * bound, and a stall shorter than the fallback needs.
+ *
+ * Two more cases follow from the bound itself. A carrier that stays blocked
+ * past its limit and the bound is looked at once and then left alone, so one
+ * that wakes after that and is then starved is seen from its first
+ * instruction too. A carrier that is due, is starved, and runs before the
+ * watch has collected the timer's firing takes the firing back when it arms or
+ * removes the timer, and the watch does not look.
+ *
+ * The deadlines and the timers run on the absolute clock, which the carriers'
+ * waits run on, and stops while the host sleeps; the stall record's times are
+ * on the continuous clock.
  */
 
 /* How many vCPU carriers are tracked; a higher vCPU number is ignored here
@@ -82,8 +99,9 @@ private:
 	bool counted_;
 };
 
-/* The host wakes a guest that may be asleep: the watch is armed, so a wake
- * that the system does not schedule is seen. Any thread. */
+/* The host wakes a guest that may be asleep (a wake, a resume, a console
+ * request, which ends a suspend the guest took by itself): the watch is armed,
+ * so a wake that the system does not schedule is seen. Any thread. */
 void note_host_wake() noexcept;
 
 /* ---- The watch's side. ---- */
@@ -116,7 +134,10 @@ void watch_stop() noexcept;
 [[nodiscard]] std::uint32_t carriers_reporting() noexcept;
 /* Sets the timer for the carriers that are all idle now: removed, or pushed
  * past the earliest deadline of a timed wait. The watch calls it before it
- * sleeps; a carrier that enters its idle wait last does the same. */
+ * sleeps, having just seen every carrier in its idle wait, and so spends the
+ * deadlines it has looked past: a carrier still blocked after its deadline and
+ * the bound does not wake the watch again. A carrier that enters its idle wait
+ * last does the same without spending. */
 void watch_settle() noexcept;
 
 } // namespace uml::runtime
