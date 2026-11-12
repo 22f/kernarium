@@ -1204,6 +1204,14 @@ final class AppModel {
         return file
     }
 
+    /// Starts the access that a picked file's URL carries and returns what
+    /// ends it. The hosted tests give their own, to see when it is held.
+    @ObservationIgnored
+    var accessPickedFile: @MainActor (URL) -> (@MainActor () -> Void) = { url in
+        guard url.startAccessingSecurityScopedResource() else { return {} }
+        return { url.stopAccessingSecurityScopedResource() }
+    }
+
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
     /// end with how it went until the person closes it. A file that is not a
@@ -1222,13 +1230,13 @@ final class AppModel {
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
-        let scoped = url.startAccessingSecurityScopedResource()
+        let endAccess = accessPickedFile(url)
         // The size here is what the picker can say: an iCloud file that is not
         // down has none yet, and the install reads the real one when it has
         // the file.
         let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
         if let refusal = InstallRefusal(sizeBytes: size) {
-            if scoped { url.stopAccessingSecurityScopedResource() }
+            endAccess()
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
@@ -1238,7 +1246,7 @@ final class AppModel {
             failure: Self.installFailure,
             ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                defer { endAccess() }
                 try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
                         try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
