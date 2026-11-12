@@ -433,7 +433,8 @@ DEBUG_SYMBOLS = (
                           b"17decodeChartMarker",
                           # The runtime's choice of it from the environment
                           # (Kernarium/Runtime/KernariumCamera.hpp).
-                          b"6camera11parseSource", b"6camera12chooseSource")),
+                          b"6camera11parseSource", b"6camera12chooseSource",
+                          b"15BackCamerasOnly")),
     # The camera's development lines (darwin/device/camera/camera_diagnostics.hpp):
     # what ROTATE_AND_CROP asks of the host and the footprint at each capture
     # checkpoint, printed by a launcher or a runtime that is not an App Store
@@ -471,7 +472,7 @@ DEBUG_STRINGS = (
     ("camera diagnostics", (b"ROTATE_AND_CROP", b"Camera: memory: ")),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
                           b"SyntheticLaptop1,1", b"synthetic-back-wide",
-                          b"KERNARIUM_CAMERA_SOURCE")),
+                          b"KERNARIUM_CAMERA_SOURCE", b"is not a back camera")),
     ("JIT", (b"--jit-cache-budget=", b"--execution-engine=jit",
              b"running on gadgets, not the JIT", b"open Andarium from StikDebug",
              b"Started without JIT")),

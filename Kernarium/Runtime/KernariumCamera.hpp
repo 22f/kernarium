@@ -13,12 +13,16 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits.h>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace kernarium::camera {
 
@@ -257,13 +261,112 @@ private:
 
 #ifndef UML_APP_STORE_RUNTIME
 /* Which camera a runtime that is not an App Store build serves, from the
- * environment: the host's (the default), or the synthetic one that tests and
- * the Simulator use, which is no camera of the machine's and never captures
- * one. An App Store runtime reads no such knob and has no synthetic camera. */
+ * environment: the host's (the default), the host's back cameras alone, or
+ * the synthetic one that tests and the Simulator use, which is no camera of
+ * the machine's and never captures one. An App Store runtime reads no such
+ * knob and has no synthetic camera. */
 inline constexpr const char* sourceVariable = "KERNARIUM_CAMERA_SOURCE";
+
+/* The host's cameras with only the back-facing ones openable, for a test on a
+ * device whose front camera must never be opened. The host's cameras are
+ * listed as they are, so the layout the guest is given is the one an image
+ * carries (a layout needs the front camera), but a session call for any
+ * camera that is not a back camera is refused here and never reaches the
+ * host: no capture device of the front camera is started, however the guest
+ * asks. The guest sees a front camera that fails to open. */
+class BackCamerasOnly final : public uml::platform::Camera {
+public:
+    explicit BackCamerasOnly(uml::camera::CameraSourceHandle host)
+        : host_(std::move(host))
+    {
+        for (const auto& info : host_->cameras())
+            openable_.push_back(info.position == uml::platform::CameraPosition::back);
+    }
+
+    [[nodiscard]] std::vector<uml::platform::CameraInfo> cameras() const override
+    {
+        return host_->cameras();
+    }
+    [[nodiscard]] std::vector<std::vector<std::size_t>> concurrentSets() const override
+    {
+        return host_->concurrentSets();
+    }
+    [[nodiscard]] std::string hostModel() const override { return host_->hostModel(); }
+    [[nodiscard]] std::uint64_t now() const noexcept override { return host_->now(); }
+    [[nodiscard]] std::unique_ptr<uml::platform::Nv12Transformer> makeFrameTransformer() const override
+    {
+        return host_->makeFrameTransformer();
+    }
+    [[nodiscard]] std::unique_ptr<uml::platform::CameraSession> openSession(
+        uml::platform::CameraSessionDelegate& delegate) override
+    {
+        auto session = host_->openSession(delegate);
+        if (session == nullptr)
+            return nullptr;
+        return std::make_unique<Session>(std::move(session), openable_);
+    }
+
+private:
+    class Session final : public uml::platform::CameraSession {
+    public:
+        Session(std::unique_ptr<uml::platform::CameraSession> host, std::vector<bool> openable)
+            : host_(std::move(host)), openable_(std::move(openable))
+        {
+        }
+
+        [[nodiscard]] bool startVideo(
+            std::size_t camera, std::uint32_t width, std::uint32_t height,
+            std::uint32_t frameRate) override
+        {
+            return openable(camera, true) && host_->startVideo(camera, width, height, frameRate);
+        }
+        void stopVideo(std::size_t camera) override
+        {
+            if (openable(camera, false))
+                host_->stopVideo(camera);
+        }
+        void apply(std::size_t camera, const uml::platform::CameraSettings& settings) override
+        {
+            if (openable(camera, false))
+                host_->apply(camera, settings);
+        }
+        [[nodiscard]] bool takeStill(
+            std::size_t camera, const uml::platform::CameraStillRequest& request) override
+        {
+            return openable(camera, true) && host_->takeStill(camera, request);
+        }
+        void stop() override { host_->stop(); }
+
+    private:
+        /* Whether the host may be asked for `camera`; a refused request to
+         * open one says so, once for each camera. */
+        [[nodiscard]] bool openable(std::size_t camera, bool opens)
+        {
+            if (camera < openable_.size() && openable_[camera])
+                return true;
+            if (opens && !reported_.contains(camera)) {
+                reported_.insert(camera);
+                std::fprintf(
+                    stderr,
+                    "Kernarium: camera %zu is not a back camera: refused (%s=host:back)\n",
+                    camera, sourceVariable);
+            }
+            return false;
+        }
+
+        std::unique_ptr<uml::platform::CameraSession> host_;
+        std::vector<bool> openable_;
+        std::set<std::size_t> reported_;
+    };
+
+    uml::camera::CameraSourceHandle host_;
+    std::vector<bool> openable_;
+};
 
 struct SourceChoice {
     bool synthetic {};
+    /* The host's cameras, the back ones alone openable (`BackCamerasOnly`). */
+    bool backOnly {};
     uml::camera::SyntheticProfile profile {uml::camera::SyntheticProfile::phone};
     /* The value was not one of the names. A test knob that cannot be read must
      * never fall back to a real camera, so the guest gets no cameras
@@ -271,9 +374,10 @@ struct SourceChoice {
     bool invalid {};
 };
 
-/* "host" or nothing (the variable is not set), "synthetic" (the phone) or
- * "synthetic:" with phone, tablet or laptop. A variable that is set but empty
- * is not a name: a harness writes one when its own variable is unset. */
+/* "host" or nothing (the variable is not set), "host:back" (the host's, back
+ * cameras alone openable), "synthetic" (the phone) or "synthetic:" with phone,
+ * tablet or laptop. A variable that is set but empty is not a name: a harness
+ * writes one when its own variable is unset. */
 [[nodiscard]] inline SourceChoice parseSource(const char* value)
 {
     SourceChoice choice;
@@ -282,6 +386,10 @@ struct SourceChoice {
     const std::string_view text {value};
     if (text == "host")
         return choice;
+    if (text == "host:back") {
+        choice.backOnly = true;
+        return choice;
+    }
     if (text == "synthetic" || text == "synthetic:phone") {
         choice.synthetic = true;
     } else if (text == "synthetic:tablet") {
@@ -307,7 +415,10 @@ template <class HostSource>
         return nullptr;
     if (choice.synthetic)
         return uml::camera::makeSyntheticCameraSource(choice.profile);
-    return host();
+    auto source = host();
+    if (choice.backOnly && source != nullptr)
+        return std::make_shared<BackCamerasOnly>(std::move(source));
+    return source;
 }
 #endif
 

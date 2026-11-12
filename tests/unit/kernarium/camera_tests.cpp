@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -350,8 +351,12 @@ void theEnvironmentNamesTheSyntheticCamera()
     require(std::string {sourceVariable} == "KERNARIUM_CAMERA_SOURCE");
     for (const char* host : {static_cast<const char*>(nullptr), "host"}) {
         const auto choice = parseSource(host);
-        require(!choice.synthetic && !choice.invalid);
+        require(!choice.synthetic && !choice.invalid && !choice.backOnly);
     }
+    const auto back = parseSource("host:back");
+    require(back.backOnly && !back.synthetic && !back.invalid, "the host's back cameras alone");
+    for (const char* bad : {"host:front", "host:Back", "host:back ", "host:", "back"})
+        require(parseSource(bad).invalid && !parseSource(bad).backOnly, bad);
     using uml::camera::SyntheticProfile;
     struct Case {
         const char* value;
@@ -398,6 +403,105 @@ void anUnknownSourceNeverFallsBackToTheHostsCamera()
     require(chooseSource(parseSource("synthetic:tablet"), host) != nullptr && hostSources == 2,
         "the synthetic camera is not the host's");
 }
+
+// A host with a back camera, a front camera and a second back lens. It records
+// what its sessions are asked, by camera.
+class RecordingHost final : public uml::platform::Camera {
+public:
+    std::vector<std::string> calls;
+    uml::platform::CameraSessionDelegate* delegate {};
+
+    [[nodiscard]] std::vector<uml::platform::CameraInfo> cameras() const override
+    {
+        using uml::platform::CameraPosition;
+        std::vector<uml::platform::CameraInfo> infos(3);
+        infos[0].identifier = "back";
+        infos[1].identifier = "front";
+        infos[1].position = CameraPosition::front;
+        infos[2].identifier = "back-tele";
+        return infos;
+    }
+    [[nodiscard]] std::vector<std::vector<std::size_t>> concurrentSets() const override { return {{0, 1}}; }
+    [[nodiscard]] std::string hostModel() const override { return "RecordingHost"; }
+    [[nodiscard]] std::uint64_t now() const noexcept override { return 7; }
+    [[nodiscard]] std::unique_ptr<uml::platform::Nv12Transformer> makeFrameTransformer() const override { return nullptr; }
+    [[nodiscard]] std::unique_ptr<uml::platform::CameraSession> openSession(
+        uml::platform::CameraSessionDelegate& to) override
+    {
+        delegate = &to;
+        return std::make_unique<Session>(calls);
+    }
+
+private:
+    class Session final : public uml::platform::CameraSession {
+    public:
+        explicit Session(std::vector<std::string>& calls) : calls_(calls) {}
+        [[nodiscard]] bool startVideo(std::size_t camera, std::uint32_t, std::uint32_t, std::uint32_t) override
+        {
+            calls_.push_back("start " + std::to_string(camera));
+            return true;
+        }
+        void stopVideo(std::size_t camera) override { calls_.push_back("stop " + std::to_string(camera)); }
+        void apply(std::size_t camera, const uml::platform::CameraSettings&) override
+        {
+            calls_.push_back("apply " + std::to_string(camera));
+        }
+        [[nodiscard]] bool takeStill(std::size_t camera, const uml::platform::CameraStillRequest&) override
+        {
+            calls_.push_back("still " + std::to_string(camera));
+            return true;
+        }
+        void stop() override { calls_.push_back("stop all"); }
+
+    private:
+        std::vector<std::string>& calls_;
+    };
+};
+
+class NullDelegate final : public uml::platform::CameraSessionDelegate {
+public:
+    void cameraFrame(std::size_t, uml::platform::CameraFrame) override {}
+    void cameraStill(std::size_t, uml::platform::CameraStillResult) override {}
+    void cameraEvent(uml::platform::CameraEvent) override {}
+};
+
+void theBackKnobNeverReachesTheFrontCamera()
+{
+    auto recording = std::make_shared<RecordingHost>();
+    const auto source = chooseSource(parseSource("host:back"), [&]() -> uml::camera::CameraSourceHandle { return recording; });
+    require(source != nullptr && source != recording, "the host's cameras behind the filter");
+    // The cameras are listed as the host has them, so the guest's layout is an image's.
+    require(source->cameras().size() == 3 && source->cameras()[1].position == uml::platform::CameraPosition::front);
+    require(source->concurrentSets() == recording->concurrentSets() && source->hostModel() == "RecordingHost" && source->now() == 7);
+
+    NullDelegate delegate;
+    auto session = source->openSession(delegate);
+    require(session != nullptr && recording->delegate == &delegate, "the host's session reports to the caller's delegate");
+    require(session->startVideo(0, 1280, 720, 30) && session->startVideo(2, 640, 480, 30), "the back lenses start");
+    session->apply(0, {});
+    require(session->takeStill(2, {}));
+    session->stopVideo(2);
+    // Anything that is not a back camera, or no camera, is refused and never asked of the host.
+    require(!session->startVideo(1, 1280, 720, 30), "the front camera does not start");
+    require(!session->takeStill(1, {}), "nor does it take a still");
+    session->apply(1, {});
+    session->stopVideo(1);
+    require(!session->startVideo(3, 1280, 720, 30) && !session->takeStill(99, {}), "an index past the cameras");
+    session->stop();
+    const std::vector<std::string> expected {"start 0", "start 2", "apply 0", "still 2", "stop 2", "stop all"};
+    require(recording->calls == expected, "the host saw the back cameras' calls and no other");
+
+    // The same cameras give the same layout with or without the filter.
+    int hosts = 0;
+    const auto plain = present(
+        chooseSource(parseSource("host"), [&]() -> uml::camera::CameraSourceHandle { ++hosts; return recording; }),
+        CameraTier::small, "");
+    const auto filtered = present(source, CameraTier::small, "");
+    require(hosts == 1 && plain.layout == filtered.layout, "the layout is the host's");
+
+    // A host that is not there stays none.
+    require(chooseSource(parseSource("host:back"), []() -> uml::camera::CameraSourceHandle { return nullptr; }) == nullptr);
+}
 #endif
 
 } // namespace
@@ -422,6 +526,7 @@ int main()
 #ifndef UML_APP_STORE_RUNTIME
         {"the-environment-names-the-synthetic-camera", theEnvironmentNamesTheSyntheticCamera},
         {"an-unknown-source-never-falls-back-to-the-hosts-camera", anUnknownSourceNeverFallsBackToTheHostsCamera},
+        {"the-back-knob-never-reaches-the-front-camera", theBackKnobNeverReachesTheFrontCamera},
 #endif
     };
     return uml::testing::runNamedTests(tests);
