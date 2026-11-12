@@ -646,12 +646,24 @@ struct FoldSessionHostingTests {
         let (shown, _) = try await frame(of: popup, on: pose)
         if pose == .uprightFlat || pose == .turnedFlat {
             let (plain, space) = try await frame(of: popup, on: pose, plain: true)
-            // The popup moves from the middle of its space to the middle of
-            // what the display's centred area shares with it.
-            let target = halves.area(for: .card).intersection(space)
-            let expected = CGPoint(x: plain.midX + target.midX - space.midX, y: plain.midY + target.midY - space.midY)
-            #expect(abs(shown.midX - expected.x) < 1 && abs(shown.midY - expected.y) < 1,
-                    "\(pose): the \(popup) is at \(shown), not centred as without a fold, \(plain), moved to \(expected)")
+            let safe = pose.reading.safeArea
+            let given = abs(space.minX - safe.minX) < 1 && abs(space.minY - safe.minY) < 1
+                && abs(space.maxX - safe.maxX) < 1 && abs(space.maxY - safe.maxY) < 1
+            if given {
+                // The popup moves from the middle of its space to the middle of
+                // what the display's centred area shares with it.
+                let target = halves.area(for: .card).intersection(space)
+                let expected = CGPoint(x: plain.midX + target.midX - space.midX, y: plain.midY + target.midY - space.midY)
+                #expect(abs(shown.midX - expected.x) < 1 && abs(shown.midY - expected.y) < 1,
+                        "\(pose): the \(popup) is at \(shown), not centred as without a fold, \(plain), moved to \(expected)")
+            } else {
+                // A window with safe-area insets of its own, an iPhone's or an
+                // iPad's, cannot be given the pose's: the popup is where it is
+                // without a fold, moved at most by half of what the fold's
+                // centring cuts off (a status strip, an inset).
+                #expect(abs(shown.midX - plain.midX) <= 60 && abs(shown.midY - plain.midY) <= 60,
+                        "\(pose): the \(popup) is at \(shown), far from where it is without a fold, \(plain)")
+            }
         } else {
             let place = popup == .boot && pose == .turnedBook ? halves.first : halves.card
             #expect(!shown.intersects(band), "\(pose): the \(popup) is on the fold at \(shown)")
