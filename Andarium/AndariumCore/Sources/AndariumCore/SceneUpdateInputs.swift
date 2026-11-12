@@ -18,10 +18,14 @@ public struct SceneUpdateInputs: Equatable, Sendable {
     /// `UIInterfaceOrientation`'s raw value.
     public var interfaceOrientation: Int
     public var phase: Phase
+    /// Whether the interface of the display the scene is on turns with the
+    /// device. It changes on a folding iPhone when the scene moves between the
+    /// cover and the inner display.
+    public var interfaceRotates: Bool
 
     public init(
         scene: ObjectIdentifier, driver: ObjectIdentifier?, sceneSize: CGSize, screenSize: CGSize,
-        interfaceOrientation: Int, phase: Phase
+        interfaceOrientation: Int, phase: Phase, interfaceRotates: Bool = false
     ) {
         self.scene = scene
         self.driver = driver
@@ -29,5 +33,6 @@ public struct SceneUpdateInputs: Equatable, Sendable {
         self.screenSize = screenSize
         self.interfaceOrientation = interfaceOrientation
         self.phase = phase
+        self.interfaceRotates = interfaceRotates
     }
 }
