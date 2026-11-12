@@ -3742,13 +3742,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "图形内存%@"
+            "value" : "显存%@"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "圖形記憶體%@"
+            "value" : "繪圖記憶體%@"
           }
         }
       }

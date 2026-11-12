@@ -70,13 +70,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "超过%@时，游戏可能会耗尽图形内存。"
+            "value" : "超过%@时，游戏可能会耗尽显存。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "超過%@時，遊戲可能會耗盡圖形記憶體。"
+            "value" : "超過%@時，遊戲可能會耗盡繪圖記憶體。"
           }
         }
       }
@@ -230,13 +230,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android图形内存不足"
+            "value" : "Android显存不足"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Android圖形記憶體不足"
+            "value" : "Android繪圖記憶體不足"
           }
         }
       }
@@ -986,13 +986,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAM是图形内存，与虚拟机的RAM相互独立。"
+            "value" : "VRAM是显存，与虚拟机的RAM相互独立。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VRAM是圖形記憶體，與虛擬機器的RAM各自獨立。"
+            "value" : "VRAM是繪圖記憶體，與虛擬機器的RAM各自獨立。"
           }
         }
       }
