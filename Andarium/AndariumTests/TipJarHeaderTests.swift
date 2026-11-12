@@ -321,30 +321,42 @@ struct TipJarHeaderTests {
         return found
     }
 
-    /// The sheet closes with the close symbol, an icon-only toolbar button (which the folding iPhone's
-    /// cover moves into the column beside its camera, as it does Settings' Done), that VoiceOver reads
-    /// as "Done", and no text button of that name is left in the bar.
-    @Test func theSheetClosesWithTheCloseSymbolAndVoiceOverSaysDone() async throws {
+    /// The sheet closes with the system's close button: one control in the bar, a symbol and no text, that
+    /// VoiceOver names with the system's word (not ours: the sheet's catalog has no word for it), and no
+    /// "Done" in the bar. It closes the sheet.
+    @Test func theSheetClosesWithTheSystemCloseButtonThatNamesItself() async throws {
         let model = app()
         model.tipJarServices.sender = { Self.content() }
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let (controller, elements) = try await openSheet(model, lease: lease)
+        let sheet = try #require(controller.presentedViewController?.view, "the sheet")
+        let bars = Self.views(of: UINavigationBar.self, under: sheet)
+        try #require(bars.count == 1, "one bar in the sheet: \(bars)")
+        // A bar button is two nested views: the outermost ones are the bar's buttons (the title, which
+        // the sheet draws in the middle, is a control of the bar too, and no button).
+        let controls = bars.flatMap { Self.views(of: UIControl.self, under: $0) }
+            .filter { String(describing: type(of: $0)).contains("BarButton") }
+        let outer = controls.filter { control in !controls.contains { $0 !== control && control.isDescendant(of: $0) } }
+        try #require(outer.count == 1, "one button in the bar: \(controls)")
+        let button = outer[0]
+        let symbols = Self.views(of: UIImageView.self, under: button).compactMap(\.image).filter(\.isSymbolImage)
+        #expect(!symbols.isEmpty, "the button draws a symbol: \(button.subviews)")
+        let texts = Self.views(of: UILabel.self, under: button).compactMap(\.text).filter { !$0.isEmpty }
+        #expect(texts.isEmpty, "the button draws no word: \(texts)")
+        // The system names it: a word, and not the sheet's own Done.
         let done = String(localized: TipJarWords.done)
-        // A bar button is two nested views, each an element: one control.
-        let buttons = elements.filter { $0.label == done && $0.traits.contains(.button) }
-        let views = buttons.compactMap { $0.object as? UIView }
-        let outer = views.first { outer in views.allSatisfy { $0 === outer || $0.isDescendant(of: outer) } }
-        try #require(!buttons.isEmpty && views.count == buttons.count && outer != nil,
-                     "one Done in the sheet: \(buttons.map(\.description))")
-        let symbols = Self.views(of: UIImageView.self, under: outer!).compactMap(\.image).filter(\.isSymbolImage)
-        #expect(!symbols.isEmpty, "the bar's button draws a symbol: \(buttons.map(\.description))")
-        let texts = Self.views(of: UILabel.self, under: outer!).compactMap(\.text)
-        #expect(!texts.contains(done), "the word is not drawn in the bar: \(texts)")
-        _ = controller
+        let named = elements.filter { element in
+            guard let view = element.object as? UIView else { return false }
+            return element.traits.contains(.button) && (view === button || view.isDescendant(of: button))
+        }
+        try #require(!named.isEmpty, "VoiceOver finds the button: \(elements.map(\.description))")
+        for element in named {
+            #expect(!element.label.isEmpty && element.label != done, "VoiceOver says \(element.description)")
+        }
+        #expect(!elements.contains { $0.label == done }, "no Done in the sheet before a tip: \(elements.map(\.description))")
         // It closes the sheet.
-        let control = try #require(views.compactMap { $0 as? UIControl }.first, "a control: \(views)")
-        control.performPrimaryAction()
+        button.performPrimaryAction()
         #expect(await eventually { !model.tipJarSheetOpen })
     }
 
