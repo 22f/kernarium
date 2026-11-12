@@ -61,10 +61,11 @@ final class AndariumHostingController<Content: View>: UIHostingController<Conten
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Whether the interface turns with the device: an iPad's does, an
-    /// iPhone's is portrait-only. The one place that decides it for this
-    /// scene's display, for the supported orientations and the guest's policy.
+    /// iPhone's is portrait-only (its guest follows the device's orientation
+    /// instead). The one place that decides it for this scene's display, for
+    /// the supported orientations and the guest's policy.
     private var interfaceRotates: Bool {
-        UIDevice.current.userInterfaceIdiom != .phone
+        UIDevice.current.userInterfaceIdiom != .phone && !model.followsDeviceOrientation
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {

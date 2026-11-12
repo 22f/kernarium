@@ -194,6 +194,11 @@ final class AppModel {
     /// is held at rotation zero and its display follows the scene. The scene's
     /// root sets it (`SessionOrientationPolicy`). Never a saved guest setting.
     var hostDrivesGuestRotation = false
+    /// The guest follows the device's orientation, as iOS reports it: the device
+    /// is an iPhone, whose interface stays portrait while the guest turns with
+    /// the device, or the launch states it (a Mac test). Set once, when the
+    /// model is made (`AppEntry`).
+    var followsDeviceOrientation = false
 
     var sessionPreset = SessionPreset()
     var session = SessionState() {
