@@ -75,6 +75,7 @@ class Tree:
                 "Retina": {"shouldTranslate": False},
             }),
             "JIT": catalog({"Preparing JIT": entry(ja="JITを準備中", zh_Hans="正在准备JIT", zh_Hant="正在準備JIT")}),
+            "Feedback": catalog({"Send feedback": entry(ja="フィードバックを送信", zh_Hans="发送反馈", zh_Hant="傳送使用者意見")}),
             "AndariumCore": catalog({"Paused": entry(ja="一時停止", zh_Hans="已暂停", zh_Hant="已暫停")}),
             "InfoPlist": catalog({"NSMicrophoneUsageDescription": {"localizations": {
                 "en": unit(PERMISSION), **{lang: unit(f"{lang}: 麦克风") for lang in LANGS}}}}),
@@ -338,13 +339,14 @@ class SyncTests(unittest.TestCase):
         self.root = self.tree.write()
         self.data = self.scratch / "build" / "Home.stringsdata"
 
-    def extract(self, *keys: str, jit: tuple[str, ...] = ("Preparing JIT",)) -> None:
+    def extract(self, *keys: str, jit: tuple[str, ...] = ("Preparing JIT",),
+                feedback: tuple[str, ...] = ("Send feedback",)) -> None:
         self.data.parent.mkdir(parents=True, exist_ok=True)
 
         def table(texts: tuple[str, ...]) -> list[dict]:
             return [{"comment": "", "key": key, "location": {"startingColumn": 1, "startingLine": 1}} for key in texts]
 
-        body = {"source": str(self.root / self.source), "tables": {"Localizable": table(keys), "JIT": table(jit)}, "version": 1}
+        body = {"source": str(self.root / self.source), "tables": {"Localizable": table(keys), "JIT": table(jit), "Feedback": table(feedback)}, "version": 1}
         self.data.write_text(json.dumps(body), encoding="utf-8")
 
     def sync(self, *extra: str) -> list[str]:
@@ -383,6 +385,33 @@ class SyncTests(unittest.TestCase):
         problems = self.sync("--check")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("JIT: is out of step with the code: 1 to add ['A new JIT text']", problems[0])
+
+    def test_a_feedback_string_of_the_arranged_build_is_in_step(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")
+        self.assertEqual(self.sync("--check"), [])
+
+    def test_a_missing_feedback_string_is_found(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of",
+                     feedback=("Send feedback", "A new feedback text"))
+        problems = self.sync("--check")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("Feedback: is out of step with the code: 1 to add ['A new feedback text']", problems[0])
+
+    def test_a_development_build_without_send_feedback_is_refused_not_read_as_stale(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of", feedback=())
+        problems = self.sync("--check")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("Feedback: has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com", problems[0])
+
+    def test_an_app_store_build_without_a_receiver_has_no_feedback_table_to_compare(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=())
+        self.assertEqual(self.sync("--check", "--app-store"), [])
+
+    def test_an_app_store_build_with_a_receiver_is_held_to_the_feedback_keys_it_lacks(self) -> None:
+        self.extract("Virtual machine", "%@ of %@", "Retina", jit=(), feedback=("Send feedback", "A new feedback text"))
+        problems = self.sync("--check", "--app-store")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("Feedback: is out of step with the code: 1 to add ['A new feedback text']", problems[0])
 
     def test_an_app_store_build_that_compiled_a_jit_string_is_refused(self) -> None:
         self.extract("Virtual machine", "%@ of %@", "%lld snapshots", "Retina", "storage.of")

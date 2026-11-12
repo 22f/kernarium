@@ -365,7 +365,7 @@ struct SendFeedbackSheet: View {
     private var information: some View {
         @Bindable var model = model
         return VStack(alignment: .leading, spacing: 4) {
-            Text("\u{2014}")
+            Text(verbatim: "\u{2014}")
                 .foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
             Text(model.information.text)

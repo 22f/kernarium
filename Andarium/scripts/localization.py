@@ -10,6 +10,7 @@ text is the key. The strings live in:
   Andarium/Localization/InfoPlist.xcstrings     the permission explanations
   Andarium/Localization/WhatsNew.xcstrings      the notes of Shared/WhatsNew.json
   Andarium/Localization/JIT.xcstrings           the JIT texts (table "JIT"), carried by the builds that have JIT only
+  Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
@@ -46,6 +47,14 @@ of an App Store build is checked with `--app-store --check`: that build has no
 JIT, so it must have extracted no string of the JIT table and no catalog of it
 is compared, and only a string the catalogs lack is a problem (a key of
 `#if !APP_STORE` code is not in its output).
+
+Send feedback is compiled in only where the build names a receiver
+(Andarium/README.md#send-feedback), and then its strings are extracted. A
+development check needs that build (`FEEDBACK_ADDRESS=feedback@example.com` on
+the `xcodebuild` line) and fails on one that extracted no string of the
+Feedback table, as the keys of code compiled out would read as stale. An App
+Store build with no receiver has none, and its Feedback catalog is not
+compared; one with a receiver is checked like the rest.
 """
 
 from __future__ import annotations
@@ -78,6 +87,7 @@ CATALOGS = {
     "InfoPlist": "Andarium/Localization/InfoPlist.xcstrings",
     "WhatsNew": "Andarium/Localization/WhatsNew.xcstrings",
     "JIT": "Andarium/Localization/JIT.xcstrings",
+    "Feedback": "Andarium/Localization/Feedback.xcstrings",
     "AndariumCore": CORE_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
@@ -90,6 +100,7 @@ APPLICATION_TARGET = "Andarium"
 SYNC_SOURCES = {
     "Localizable": ("Andarium/Andarium/", "GuestHost/Sources/"),
     "JIT": ("Andarium/Andarium/",),
+    "Feedback": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
 }
 
@@ -464,6 +475,13 @@ def sync(root: pathlib.Path, directories: list[pathlib.Path], check_only: bool, 
     if not any(parts.values()):
         problems.add("sync", "no .stringsdata of the application or the package found: build with SWIFT_EMIT_LOC_STRINGS=YES first")
         return problems.items
+    # Send feedback is compiled in where the build names a receiver: without its strings the catalog cannot be compared.
+    if "Feedback" not in extracted_tables(files):
+        parts["Feedback"] = []
+        if not app_store:
+            problems.add(
+                "Feedback",
+                "has no extracted strings: build with FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in")
     with tempfile.TemporaryDirectory() as scratch:
         for name, data in parts.items():
             if not data:
