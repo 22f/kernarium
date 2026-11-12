@@ -10,8 +10,8 @@ import UIKit
 @testable import Andarium
 
 /// The rating prompt in the application: the model's states, the scene's edges and the clocks are
-/// driven by the test, the request and the system's reaction are doubles. The rule and the
-/// attempts are the package's tests (`ReviewAskTests`); this is the coordinator that feeds them.
+/// driven by the test, the request is a double. The rule and the record of asking are the
+/// package's tests (`ReviewAskTests`); this is the coordinator that feeds them.
 private final class MemoryReviewStore: ReviewAskPersistence, @unchecked Sendable {
     var snapshot = ReviewAskSnapshot()
     var history: ReviewAskHistory? = ReviewAskHistory()
@@ -22,36 +22,17 @@ private final class MemoryReviewStore: ReviewAskPersistence, @unchecked Sendable
 }
 
 @MainActor
-private final class FakeDetector: ReviewPromptDetecting {
-    var observation = ReviewPromptObservation()
-    /// Runs while the watch is open: the application doing something of its own.
-    var during: (@MainActor () -> Void)?
-    var watches = 0
-    var open = false
-
-    func observe(afterRequesting request: @MainActor () -> Void) async -> ReviewPromptObservation {
-        watches += 1
-        open = true
-        defer { open = false }
-        request()
-        during?()
-        try? await Task.sleep(for: .milliseconds(40))
-        return observation
-    }
-}
-
-@MainActor
 private final class Harness {
     static let hour: TimeInterval = 3600
     static let day: TimeInterval = 86400
 
     let model: AppModel
     let store: MemoryReviewStore
-    let detector = FakeDetector()
     let center = NotificationCenter()
     var uptime: TimeInterval = 100
-    var now = Date(timeIntervalSince1970: 1_800_000_000)
     var requests: [Date] = []
+    /// Runs inside the request, as the system's own side of it would.
+    var atRequest: (@MainActor () -> Void)?
     var sceneActive = true
     var presenting = false
     private(set) var ask: ReviewAsk!
@@ -73,14 +54,15 @@ private final class Harness {
         if let lastRunNormal { store.snapshot.lastRunEndedNormally = lastRunNormal }
         var services = ReviewAskServices()
         services.persistence = store
-        services.detector = detector
         services.center = center
         services.settle = .milliseconds(30)
         services.checkpoint = .milliseconds(20)
         services.sceneActive = { true }
         services.uptime = { [unowned self] in uptime }
-        services.date = { [unowned self] in now }
-        services.request = { [unowned self] in requests.append(now) }
+        services.request = { [unowned self] in
+            atRequest?()
+            requests.append(Date())
+        }
         services.presenting = { [unowned self] in presenting }
         ask = ReviewAsk(model: model, services: services)
         model.reviewAsk = ask
@@ -136,7 +118,7 @@ struct ReviewAskFlowTests {
         #expect(await h.wait { h.requests.count == 1 })
         await h.rest()
         #expect(h.requests.count == 1, "one request, however long Home stays")
-        #expect(h.history.attempts == 1 && h.detector.watches == 1)
+        #expect(h.history.asked)
     }
 
     @Test func belowTheThresholdItNeverAsks() async {
@@ -360,99 +342,43 @@ struct ReviewAskFlowTests {
         #expect(h.requests.isEmpty)
     }
 
-    // MARK: Once, and three at most
+    // MARK: Once
 
-    @Test func aSeenPromptEndsItForGood() async {
-        let h = Harness(seconds: 6 * hour)
-        h.detector.observation = ReviewPromptObservation(sceneLeftForeground: true)
+    @Test func onceAskedItNeverAsksAgain() async {
+        let store = MemoryReviewStore()
+        let h = Harness(store: store, seconds: 6 * hour)
         #expect(await h.wait { h.requests.count == 1 })
         await h.rest(.milliseconds(100))
-        #expect(h.history.finished)
-        h.now.addTimeInterval(400 * day)
-        h.model.sheet = .info
-        h.model.sheet = nil
-        await h.rest()
+        #expect(h.history.asked && store.history?.asked == true)
+        // Whatever Home does afterwards, and however long it waits, nothing asks again.
+        for _ in 0..<3 {
+            h.model.sheet = .info
+            h.model.sheet = nil
+            await h.rest(.milliseconds(80))
+        }
         #expect(h.requests.count == 1)
+        // A launch after that reads the record: the next process does not ask either.
+        let next = Harness(store: store, seconds: 6 * hour)
+        await next.rest()
+        #expect(next.requests.isEmpty)
     }
 
-    @Test func anUnseenPromptIsTriedAgainAfterAWeekAndThreeTimesAtMost() async {
-        let h = Harness(seconds: 6 * hour)
-        for attempt in 1...3 {
-            #expect(await h.wait { h.requests.count == attempt }, "attempt \(attempt)")
-            await h.rest(.milliseconds(100))
-            #expect(h.history.attempts == attempt)
-            // Two days on: too soon, whatever happens on Home.
-            h.now.addTimeInterval(2 * day)
-            h.model.sheet = .info
-            h.model.sheet = nil
-            await h.rest(.milliseconds(120))
-            #expect(h.requests.count == attempt)
-            h.now.addTimeInterval(5 * day)
-            h.model.sheet = .info
-            h.model.sheet = nil
-        }
-        await h.rest()
-        h.now.addTimeInterval(60 * day)
-        h.model.sheet = .info
-        h.model.sheet = nil
-        await h.rest()
-        #expect(h.requests.count == 3 && h.history.done && !h.history.finished)
-    }
-
-    @Test func theSceneLeavingInTheSecondAfterIsSeenEvenWhenThePersonLeft() async {
-        // The person leaving the application in that second looks the same: accepted.
-        let h = Harness(seconds: 6 * hour)
-        h.detector.during = { [center = h.center] in
-            center.post(name: UIApplication.willResignActiveNotification, object: nil)
-        }
-        h.detector.observation = ReviewPromptObservation(sceneLeftForeground: true)
-        #expect(await h.wait { h.requests.count == 1 })
-        await h.rest(.milliseconds(120))
-        #expect(h.history.finished)
-    }
-
-    @Test func aPresentationOfTheApplicationsOwnInTheSecondIsNotJudgedAndRetried() async {
-        let h = Harness(seconds: 6 * hour)
-        h.detector.observation = ReviewPromptObservation(sceneLeftForeground: true)
-        let model = h.model
-        h.detector.during = { model.sheet = .info }
-        #expect(await h.wait { h.requests.count == 1 })
-        await h.rest(.milliseconds(120))
-        #expect(h.history.attempts == 0 && !h.history.finished, "the attempt was given back")
-        #expect(h.history.lastAttempt == h.now, "and dated: the retry waits the same week")
-        h.detector.during = nil
-        model.sheet = nil
-        await h.rest(.milliseconds(120))
-        #expect(h.requests.count == 1, "too soon")
-        h.now.addTimeInterval(7 * day)
-        model.sheet = .info
-        model.sheet = nil
-        #expect(await h.wait { h.requests.count == 2 })
-        await h.rest(.milliseconds(120))
-        #expect(h.history.finished, "judged this time: seen")
-    }
-
-    @Test func anAttemptIsRecordedBeforeTheSystemCanShowAnything() async {
-        let h = Harness(seconds: 6 * hour)
-        var recordedAtRequest: Int?
+    @Test func theRequestIsRecordedBeforeItIsMade() async {
+        let h = Harness(seconds: 6 * hour, start: false)
+        var recordedAtRequest: Bool?
         let store = h.store
-        h.detector.during = { recordedAtRequest = store.history?.attempts }
+        h.atRequest = { recordedAtRequest = store.history?.asked }
+        h.ask.start()
         #expect(await h.wait { h.requests.count == 1 })
-        await h.rest(.milliseconds(120))
-        #expect(recordedAtRequest == 1)
+        #expect(recordedAtRequest == true, "the record is written before anything can be shown")
     }
 
-    @Test func noSecondRequestWhileTheWatchIsOpen() async {
-        let h = Harness(seconds: 6 * hour)
-        let model = h.model
-        h.detector.during = {
-            // Anything the application does during the watch evaluates the decision again.
-            model.sheet = nil
-            model.startBlocked = false
-        }
-        #expect(await h.wait { h.requests.count == 1 })
+    @Test func aRecordThatCannotBeReadAsksNothing() async {
+        let store = MemoryReviewStore()
+        store.history = nil
+        let h = Harness(store: store, seconds: 6 * hour)
         await h.rest()
-        #expect(h.requests.count == 1 && h.detector.watches == 1)
+        #expect(h.requests.isEmpty)
     }
 
     @Test func openingReviewOnTheAppStoreEndsItForGood() async {
@@ -463,10 +389,10 @@ struct ReviewAskFlowTests {
         // Before the wait is over, the person goes to the menu.
         h.model.choose(.reviewOnAppStore)
         #expect(opened.count == 1)
-        #expect(h.history.finished)
+        #expect(h.history.asked)
         await h.rest()
         #expect(h.requests.isEmpty, "someone who went to write a review is not asked")
-        #expect(h.store.history?.finished == true)
+        #expect(h.store.history?.asked == true)
     }
 
     @Test func openingReviewBeforeTheThresholdAlsoEndsIt() async {
@@ -485,7 +411,7 @@ struct ReviewAskFlowTests {
         h.model.tipJarSheetOpen = true
         h.model.tipJarSheetOpen = false
         await h.rest()
-        #expect(h.requests.isEmpty && h.history.attempts == 0)
+        #expect(h.requests.isEmpty && !h.history.asked)
         #endif
         // And a tip sheet that is open holds a due request back, as any sheet does.
         #if TIP_JAR
@@ -500,14 +426,14 @@ struct ReviewAskFlowTests {
 
     // MARK: The build
 
-    @Test func theDebugKnobSetsTheCounterAndClearsTheAttempts() async {
+    @Test func theDebugKnobSetsTheCounterAndClearsTheRecord() async {
         #if !APP_STORE
         let store = MemoryReviewStore()
-        store.history = ReviewAskHistory(attempts: 3, lastAttempt: Date(), finished: true)
+        store.history = ReviewAskHistory(asked: true)
         let h = Harness(store: store, start: false)
-        #expect(h.history.done)
+        #expect(h.history.asked)
         h.ask.applyDebugLaunch(environment: ["ANDARIUM_REVIEW_ASK_SECONDS": "18000", "ANDARIUM_REVIEW_ASK_RESET": "1"])
-        #expect(h.ask.tracker.activeSeconds == 18000 && !h.history.done)
+        #expect(h.ask.tracker.activeSeconds == 18000 && !h.history.asked)
         h.ask.start()
         #expect(await h.wait { h.requests.count == 1 })
         // A launch that states neither changes nothing.
@@ -535,7 +461,7 @@ struct ReviewAskFlowTests {
     }
 }
 
-// MARK: The stores and the watcher
+// MARK: The stores
 
 private extension ReviewAskKeychain {
     /// The test's own item, removed at the end of the test.
@@ -568,7 +494,7 @@ struct ReviewAskStoreTests {
         let (store, defaults, keychain, name) = store()
         defer { defaults.removePersistentDomain(forName: name); keychain.remove() }
         #expect(store.loadHistory() == ReviewAskHistory())
-        let history = ReviewAskHistory(attempts: 2, lastAttempt: Date(timeIntervalSince1970: 1_800_000_000), finished: false)
+        let history = ReviewAskHistory(asked: true)
         store.save(history)
         #expect(store.loadHistory() == history)
         #expect(defaults.data(forKey: ReviewAskStore.historyKey) != nil)
@@ -582,18 +508,17 @@ struct ReviewAskStoreTests {
     @Test func aReinstallKeepsWhatTheKeychainHolds() {
         let (store, defaults, keychain, name) = store()
         defer { defaults.removePersistentDomain(forName: name); keychain.remove() }
-        store.save(ReviewAskHistory(attempts: 3, lastAttempt: Date(), finished: true))
+        store.save(ReviewAskHistory(asked: true))
         // Deleting the application takes its defaults and leaves the Keychain.
         defaults.removePersistentDomain(forName: name)
-        let after = store.loadHistory()
-        #expect(after?.done == true && after?.finished == true && after?.attempts == 3)
+        #expect(store.loadHistory()?.asked == true)
     }
 
     @Test func theFurtherOfTwoReadingsWins() {
         let (store, defaults, keychain, name) = store()
         defer { defaults.removePersistentDomain(forName: name); keychain.remove() }
-        let early = ReviewAskHistory(attempts: 1, lastAttempt: Date(timeIntervalSince1970: 1000))
-        let late = ReviewAskHistory(attempts: 2, lastAttempt: Date(timeIntervalSince1970: 2000))
+        let early = ReviewAskHistory(asked: false)
+        let late = ReviewAskHistory(asked: true)
         defaults.set(try? JSONEncoder().encode(early), forKey: ReviewAskStore.historyKey)
         keychain.write((try? JSONEncoder().encode(late)) ?? Data())
         #expect(store.loadHistory() == late)
@@ -602,9 +527,9 @@ struct ReviewAskStoreTests {
     @Test func aWriteReplacesTheItemInPlace() {
         let (store, defaults, keychain, name) = store()
         defer { defaults.removePersistentDomain(forName: name); keychain.remove() }
-        store.save(ReviewAskHistory(attempts: 1))
-        store.save(ReviewAskHistory(attempts: 2))
-        #expect(store.loadHistory()?.attempts == 2)
+        store.save(ReviewAskHistory(asked: false))
+        store.save(ReviewAskHistory(asked: true))
+        #expect(store.loadHistory()?.asked == true)
     }
 
     @Test func aDamagedHistoryIsNotGuessedAt() {
@@ -620,7 +545,7 @@ struct ReviewAskStoreTests {
     @Test func eraseGuestLeavesTheItemAlone() {
         let (store, defaults, keychain, name) = store()
         defer { defaults.removePersistentDomain(forName: name); keychain.remove() }
-        store.save(ReviewAskHistory(finished: true))
+        store.save(ReviewAskHistory(asked: true))
         // Erase guest deletes the adb key by its tag, a key and not a password item.
         AdbKeyStore(tag: "com.example.\(name)").delete()
         #expect(keychain.read() != .absent)
@@ -630,7 +555,7 @@ struct ReviewAskStoreTests {
     @Test func theKeychainItemIsLocalToTheDevice() throws {
         let (store, defaults, keychain, name) = store()
         defer { defaults.removePersistentDomain(forName: name); keychain.remove() }
-        store.save(ReviewAskHistory(finished: true))
+        store.save(ReviewAskHistory(asked: true))
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: name,
             kSecAttrAccount as String: ReviewAskKeychain.account, kSecUseDataProtectionKeychain as String: true,
@@ -641,53 +566,6 @@ struct ReviewAskStoreTests {
         let attributes = try #require(item as? [String: Any])
         #expect(attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
         #expect((attributes[kSecAttrSynchronizable as String] as? Int ?? 0) == 0)
-    }
-}
-
-@MainActor
-@Suite(.serialized)
-struct ReviewPromptWatcherTests {
-    private func observe(
-        _ send: @escaping @MainActor (NotificationCenter) -> Void
-    ) async -> ReviewPromptObservation {
-        let center = NotificationCenter()
-        let watcher = ReviewPromptWatcher(center: center, window: .milliseconds(60))
-        return await watcher.observe { send(center) }
-    }
-
-    @Test func theSceneLeavingTheForegroundIsHeard() async {
-        let heard = await observe { $0.post(name: UIScene.willDeactivateNotification, object: nil) }
-        #expect(heard == ReviewPromptObservation(sceneLeftForeground: true, keyWindowResigned: false))
-    }
-
-    @Test func aWindowResigningKeyIsHeard() async {
-        let heard = await observe { $0.post(name: UIWindow.didResignKeyNotification, object: nil) }
-        #expect(heard == ReviewPromptObservation(sceneLeftForeground: false, keyWindowResigned: true))
-    }
-
-    @Test func nothingHappeningIsHeardAsNothing() async {
-        let heard = await observe { _ in }
-        #expect(heard == ReviewPromptObservation())
-    }
-
-    @Test func onlyTheWatchedSecondCounts() async {
-        let center = NotificationCenter()
-        let watcher = ReviewPromptWatcher(center: center, window: .milliseconds(40))
-        center.post(name: UIScene.willDeactivateNotification, object: nil)
-        let heard = await watcher.observe {}
-        center.post(name: UIWindow.didResignKeyNotification, object: nil)
-        try? await Task.sleep(for: .milliseconds(20))
-        #expect(heard == ReviewPromptObservation())
-    }
-
-    @Test func theWatchRemovesItsObservers() async {
-        let center = NotificationCenter()
-        let watcher = ReviewPromptWatcher(center: center, window: .milliseconds(10))
-        _ = await watcher.observe {}
-        // A later notification reaches nobody: a second watch starts clean.
-        center.post(name: UIScene.willDeactivateNotification, object: nil)
-        let second = await watcher.observe {}
-        #expect(second == ReviewPromptObservation())
     }
 }
 

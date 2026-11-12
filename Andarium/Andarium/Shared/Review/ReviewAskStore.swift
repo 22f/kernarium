@@ -8,9 +8,8 @@ import Security
 /// Where the rating prompt keeps what it knows, on this device only.
 ///
 /// The counter and the previous run's end are in the application's defaults. The
-/// history of the attempts (how many, when, whether the prompt was seen or the
-/// review page opened) is in the defaults and in a Keychain item, and is read
-/// back as the furthest of the two. The defaults go with the application when
+/// record that the prompt was asked for, or the review page opened, is in the
+/// defaults and in a Keychain item, and is read back as the furthest of the two. The defaults go with the application when
 /// it is deleted; the Keychain item stays, as every Keychain item of the
 /// application does, so a person who reinstalls is not asked again. The item
 /// is the application's own default access group, local to the device and
@@ -113,7 +112,7 @@ nonisolated struct ReviewAskKeychain: Sendable {
     }
 
     /// Writes the item, replacing what is there. A write that fails leaves the
-    /// defaults' copy, which is all the rating prompt needs to stay once.
+    /// defaults' copy, which is all the rating prompt needs to ask once.
     @discardableResult
     func write(_ data: Data) -> Bool {
         let update = SecItemUpdate(identity as CFDictionary, [kSecValueData as String: data] as CFDictionary)

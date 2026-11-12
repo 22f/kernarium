@@ -72,11 +72,9 @@ nonisolated enum ReviewAskRule {
     /// Everything the decision reads, gathered by the caller.
     struct Situation: Equatable, Sendable {
         var activeSeconds: TimeInterval = 0
-        /// The attempts allowed are used up, or the person has been asked or
-        /// has gone to write a review (`ReviewAskHistory.done`).
-        var done = false
-        /// The last attempt was less than the spacing ago.
-        var tooSoon = false
+        /// The prompt was already requested, or the person has gone to write a
+        /// review (`ReviewAskHistory.asked`).
+        var asked = false
         /// Home is the screen, and no virtual machine runs or starts.
         var onHome = false
         /// A virtual machine is set up: without one Home shows its welcome.
@@ -93,15 +91,14 @@ nonisolated enum ReviewAskRule {
     }
 
     enum Blocker: Equatable, Sendable, CaseIterable {
-        case belowThreshold, done, tooSoon, notOnHome, noGuest, lastRunNotNormal
+        case belowThreshold, asked, notOnHome, noGuest, lastRunNotNormal
         case noticeShown, somethingPresented, sceneInactive, notSettled
     }
 
     static func blockers(_ situation: Situation) -> [Blocker] {
         var found: [Blocker] = []
         if situation.activeSeconds < threshold { found.append(.belowThreshold) }
-        if situation.done { found.append(.done) }
-        if situation.tooSoon { found.append(.tooSoon) }
+        if situation.asked { found.append(.asked) }
         if !situation.onHome { found.append(.notOnHome) }
         if !situation.hasGuest { found.append(.noGuest) }
         if !situation.lastRunEndedNormally { found.append(.lastRunNotNormal) }

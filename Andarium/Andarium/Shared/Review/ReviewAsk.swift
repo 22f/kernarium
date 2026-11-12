@@ -9,10 +9,11 @@ import UIKit
 
 /// Asks for a rating with the system's own prompt: once the virtual machine has
 /// run five hours in the foreground, at a settled Home, after a run that ended
-/// normally. The rule, the counter and the attempts are `ReviewAskRule` and
-/// `ReviewAskTracker`; this class feeds them the model's state, waits for Home
-/// to settle and makes the request. It has no screen of its own, shows nothing
-/// before or after the prompt, and is never tied to the tip sheet.
+/// normally, and only once per device. The rule, the counter and the record of
+/// asking are `ReviewAskRule` and `ReviewAskTracker`; this class feeds them the
+/// model's state, waits for Home to settle, records the request and makes it.
+/// It has no screen of its own, shows nothing before or after the prompt, does
+/// not look at what the system did, and is never tied to the tip sheet.
 ///
 /// It is driven by the model's own changes (Observation) and by the scene's
 /// edges, never by a timer except one write a minute while the counter runs.
@@ -27,20 +28,8 @@ final class ReviewAsk {
     private var sceneActive: Bool
     private var settleTask: Task<Void, Never>?
     private var checkpointTask: Task<Void, Never>?
-    private var attemptTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
     private var started = false
-    /// What the application showed when the request went, and whether it
-    /// changed since: the application's own presentations explain what the
-    /// system side saw as well as a prompt does.
-    private var watchedPresentation: Presentation?
-    private var appChangedDuringWatch = false
-
-    /// What the application presents or dismisses itself; nothing of the scene.
-    private struct Presentation: Equatable {
-        var onHome: Bool
-        var presented: Bool
-    }
 
     init(model: AppModel, services: ReviewAskServices) {
         self.model = model
@@ -80,8 +69,6 @@ final class ReviewAsk {
         settleTask = nil
         checkpointTask?.cancel()
         checkpointTask = nil
-        attemptTask?.cancel()
-        attemptTask = nil
     }
 
     // MARK: What the model tells it
@@ -105,15 +92,15 @@ final class ReviewAsk {
         tracker.runEnded(normally: normally)
     }
 
-    /// The person opened Review on the App Store from the menu.
+    /// The person opened Review on the App Store from the menu: the question is answered.
     func openedReview() {
-        tracker.openedReview()
+        tracker.markAsked()
         evaluate()
     }
 
     #if !APP_STORE
-    /// A Debug build's own check: sets the counter and clears the attempts
-    /// (`ANDARIUM_REVIEW_ASK_SECONDS`, `ANDARIUM_REVIEW_ASK_RESET`).
+    /// A Debug build's own check: sets the counter and clears the record of
+    /// asking (`ANDARIUM_REVIEW_ASK_SECONDS`, `ANDARIUM_REVIEW_ASK_RESET`).
     func applyDebugLaunch(environment: [String: String]) {
         let seconds = environment["ANDARIUM_REVIEW_ASK_SECONDS"].flatMap { TimeInterval($0) }
         let reset = environment["ANDARIUM_REVIEW_ASK_RESET"] == "1"
@@ -162,17 +149,10 @@ final class ReviewAsk {
         presented = presented || model.tipJarSheetOpen
         #endif
         return ReviewAskRule.Situation(
-            activeSeconds: tracker.activeSeconds, done: tracker.history.done,
-            tooSoon: tracker.isTooSoon(at: services.date()),
+            activeSeconds: tracker.activeSeconds, asked: tracker.history.asked,
             onHome: model.phase == .home, hasGuest: model.guest != nil,
             lastRunEndedNormally: tracker.lastRunEndedNormally, noticeShown: model.notice != nil,
             somethingPresented: presented || uikitPresenting, sceneActive: sceneActive, settled: settled)
-    }
-
-    private func presentation() -> Presentation {
-        guard let model else { return Presentation(onHome: false, presented: false) }
-        let situation = readSituation(settled: true, uikitPresenting: services.presenting())
-        return Presentation(onHome: model.phase == .home, presented: situation.somethingPresented)
     }
 
     /// The decision, again: counts, writes at the edges, and starts or cancels
@@ -181,10 +161,6 @@ final class ReviewAsk {
         guard started, model != nil else { return }
         tracker.count(countingNow)
         updateCheckpoint()
-        if attemptTask != nil {
-            if let watched = watchedPresentation, presentation() != watched { appChangedDuringWatch = true }
-            return
-        }
         if ReviewAskRule.isEligibleOnceSettled(readSituation(settled: false, uikitPresenting: false)) {
             if settleTask == nil { startSettling() }
         } else {
@@ -223,31 +199,17 @@ final class ReviewAsk {
                 #endif
                 return
             }
-            attempt()
+            ask()
         }
     }
 
-    /// Records the attempt first, so that nothing the request or the end of
-    /// the application does can lose it, then asks, then judges what the
-    /// system did in the second after.
-    private func attempt() {
-        guard attemptTask == nil else { return }
-        tracker.beginAttempt(at: services.date())
-        watchedPresentation = presentation()
-        appChangedDuringWatch = false
-        attemptTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            let observation = await services.detector.observe { self.services.request() }
-            let appPresented = appChangedDuringWatch || presentation() != watchedPresentation
-            let evidence = ReviewPromptJudgement.evidence(observation, appPresented: appPresented)
-            tracker.conclude(evidence)
-            attemptTask = nil
-            watchedPresentation = nil
-            #if !APP_STORE
-            print("Andarium: rating prompt attempt \(tracker.history.attempts): \(evidence)")
-            #endif
-            evaluate()
-        }
+    /// Records the request first, so that nothing the request or the end of
+    /// the application does can lose it, then asks. The system decides whether
+    /// anything shows; the application does not look, and does not ask again.
+    private func ask() {
+        tracker.markAsked()
+        services.request()
+        evaluate()
     }
 }
 

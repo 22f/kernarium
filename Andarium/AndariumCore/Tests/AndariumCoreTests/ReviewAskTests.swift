@@ -108,8 +108,7 @@ private func due() -> ReviewAskRule.Situation {
     @Test func eachConditionAloneHoldsItBack() {
         let cases: [(ReviewAskRule.Blocker, (inout ReviewAskRule.Situation) -> Void)] = [
             (.belowThreshold, { $0.activeSeconds = 4 * hour }),
-            (.done, { $0.done = true }),
-            (.tooSoon, { $0.tooSoon = true }),
+            (.asked, { $0.asked = true }),
             (.notOnHome, { $0.onHome = false }),
             (.noGuest, { $0.hasGuest = false }),
             (.lastRunNotNormal, { $0.lastRunEndedNormally = false }),
@@ -129,7 +128,7 @@ private func due() -> ReviewAskRule.Situation {
 
     @Test func theConditionsTogetherNeedAllOfThem() {
         var situation = ReviewAskRule.Situation(
-            activeSeconds: 0, done: true, tooSoon: true, onHome: false, hasGuest: false, lastRunEndedNormally: false,
+            activeSeconds: 0, asked: true, onHome: false, hasGuest: false, lastRunEndedNormally: false,
             noticeShown: true, somethingPresented: true, sceneActive: false, settled: false)
         #expect(Set(ReviewAskRule.blockers(situation)) == Set(ReviewAskRule.Blocker.allCases))
         situation = due()
@@ -271,12 +270,12 @@ private func due() -> ReviewAskRule.Situation {
         let store = MemoryStore()
         store.history = nil
         let tracker = ReviewAskTracker(persistence: store, uptime: { 0 })
-        #expect(tracker.history.done)
+        #expect(tracker.history.asked)
     }
 
     @Test func theDebugSetterIsInDebugBuildsOnly() {
         var (tracker, store, _) = make()
-        tracker.beginAttempt(at: Date(timeIntervalSince1970: 0))
+        tracker.markAsked()
         tracker.debugSet(activeSeconds: 6 * hour, clearHistory: true)
         #expect(tracker.activeSeconds == 6 * hour && store.snapshot.activeSeconds == 6 * hour)
         #expect(tracker.history == ReviewAskHistory() && store.history == ReviewAskHistory())
@@ -286,179 +285,96 @@ private func due() -> ReviewAskRule.Situation {
 }
 
 @Suite struct ReviewAskHistoryTests {
-    private let start = Date(timeIntervalSince1970: 1_800_000_000)
-
-    @Test func threeAttemptsAreTheMostWhateverTheyShowed() {
-        var history = ReviewAskHistory()
-        for attempt in 1...3 {
-            #expect(!history.done)
-            history.beginAttempt(at: start.addingTimeInterval(Double(attempt) * 8 * day))
-            history.conclude(.notSeen)
-            #expect(history.attempts == attempt)
-        }
-        #expect(history.done && !history.finished)
+    private func make(_ store: MemoryStore = MemoryStore()) -> (ReviewAskTracker, MemoryStore) {
+        (ReviewAskTracker(persistence: store, uptime: { 0 }), store)
     }
 
-    @Test func theThirdAttemptEndsItEvenWhenItIsNotJudgedOrSeenLater() {
-        var history = ReviewAskHistory(attempts: 2, lastAttempt: start)
-        history.beginAttempt(at: start.addingTimeInterval(8 * day))
-        // Recorded before the request: the end of the application loses nothing.
-        #expect(history.done)
-    }
-
-    @Test func aSeenAttemptEndsItForGood() {
-        var history = ReviewAskHistory()
-        history.beginAttempt(at: start)
-        history.conclude(.seen)
-        #expect(history.finished && history.done && history.attempts == 1)
-    }
-
-    @Test func anotherAttemptWaitsSevenDays() {
-        var history = ReviewAskHistory()
-        #expect(!history.isTooSoon(at: start))
-        history.beginAttempt(at: start)
-        history.conclude(.notSeen)
-        #expect(history.isTooSoon(at: start))
-        #expect(history.isTooSoon(at: start.addingTimeInterval(7 * day - 1)))
-        #expect(!history.isTooSoon(at: start.addingTimeInterval(7 * day)))
-        #expect(!history.isTooSoon(at: start.addingTimeInterval(30 * day)))
-    }
-
-    @Test func aClockSetBackDoesNotHoldItForever() {
-        let history = ReviewAskHistory(attempts: 1, lastAttempt: start.addingTimeInterval(400 * day))
-        #expect(!history.isTooSoon(at: start))
-    }
-
-    @Test func anAttemptTheApplicationOverlappedIsGivenBackAndRetriedUnderTheSameSpacing() {
-        var history = ReviewAskHistory()
-        history.beginAttempt(at: start)
-        history.conclude(.notJudged)
-        #expect(history.attempts == 0 && !history.done)
-        #expect(history.isTooSoon(at: start.addingTimeInterval(day)))
-        #expect(!history.isTooSoon(at: start.addingTimeInterval(7 * day)))
-        history.conclude(.notJudged)
-        #expect(history.attempts == 0)
-    }
-
-    @Test func openingReviewOnTheAppStoreEndsIt() {
-        var (tracker, store) = (ReviewAskTracker(persistence: MemoryStore(), uptime: { 0 }), MemoryStore())
-        tracker = ReviewAskTracker(persistence: store, uptime: { 0 })
-        #expect(!tracker.history.done)
-        tracker.openedReview()
-        #expect(tracker.history.done && store.history?.finished == true)
-        // Once: the second time writes nothing.
+    @Test func askingIsRecordedOnceAndWritesOnce() {
+        var (tracker, store) = make()
+        #expect(!tracker.history.asked)
+        tracker.markAsked()
+        #expect(tracker.history.asked && store.history?.asked == true)
+        // The second time changes nothing and writes nothing.
         let writes = store.historyWrites
-        tracker.openedReview()
+        tracker.markAsked()
         #expect(store.historyWrites == writes)
-        #expect(ReviewAskTracker(persistence: store, uptime: { 0 }).history.done)
     }
 
-    @Test func theAttemptsSurviveARelaunch() {
-        let store = MemoryStore()
-        var tracker = ReviewAskTracker(persistence: store, uptime: { 0 })
-        tracker.beginAttempt(at: start)
-        tracker.conclude(.notSeen)
+    @Test func openingReviewOnTheAppStoreIsTheSameRecord() {
+        // The person who went to write a review is not asked: the one record serves both.
+        var (tracker, store) = make()
+        tracker.markAsked()
+        #expect(ReviewAskTracker(persistence: store, uptime: { 0 }).history.asked)
+    }
+
+    @Test func theRecordSurvivesARelaunch() {
+        var (tracker, store) = make()
+        tracker.markAsked()
         let relaunched = ReviewAskTracker(persistence: store, uptime: { 0 })
-        #expect(relaunched.history == tracker.history)
-        #expect(relaunched.isTooSoon(at: start.addingTimeInterval(day)))
+        #expect(relaunched.history == tracker.history && relaunched.history.asked)
     }
 
-    @Test func twoReadingsOfTheHistoryMergeToTheFurthest() {
-        let early = ReviewAskHistory(attempts: 1, lastAttempt: start)
-        let late = ReviewAskHistory(attempts: 2, lastAttempt: start.addingTimeInterval(day), finished: false)
-        let merged = early.merged(with: late)
-        #expect(merged.attempts == 2 && merged.lastAttempt == late.lastAttempt && !merged.finished)
-        #expect(early.merged(with: ReviewAskHistory(finished: true)).finished)
+    @Test func twoReadingsOfTheRecordMergeToTheFurthest() {
+        #expect(ReviewAskHistory().merged(with: ReviewAskHistory(asked: true)).asked)
+        #expect(ReviewAskHistory(asked: true).merged(with: ReviewAskHistory()).asked)
         #expect(ReviewAskHistory().merged(with: ReviewAskHistory()) == ReviewAskHistory())
     }
 
-    @Test func aDamagedHistoryIsHeldToWhatAHistoryCanBe() {
-        #expect(ReviewAskHistory(attempts: -4).sanitized().attempts == 0)
-        #expect(ReviewAskHistory(attempts: 4000).sanitized().attempts == 99)
-        #expect(ReviewAskHistory(attempts: 1, lastAttempt: Date(timeIntervalSinceReferenceDate: .nan)).sanitized().lastAttempt == nil)
-    }
-
-    @Test func theHistoryRoundTripsThroughJSON() throws {
-        let history = ReviewAskHistory(attempts: 2, lastAttempt: start, finished: true)
+    @Test func theRecordRoundTripsThroughJSON() throws {
+        let history = ReviewAskHistory(asked: true)
         let data = try JSONEncoder().encode(history)
         #expect(try JSONDecoder().decode(ReviewAskHistory.self, from: data) == history)
     }
 }
 
-@Suite struct ReviewPromptJudgementTests {
-    private typealias Observation = ReviewPromptObservation
-
-    @Test func theSceneLeavingOrTheKeyWindowResigningIsEvidence() {
-        #expect(ReviewPromptJudgement.evidence(Observation(sceneLeftForeground: true), appPresented: false) == .seen)
-        #expect(ReviewPromptJudgement.evidence(Observation(keyWindowResigned: true), appPresented: false) == .seen)
-        #expect(ReviewPromptJudgement.evidence(Observation(sceneLeftForeground: true, keyWindowResigned: true), appPresented: false) == .seen)
-    }
-
-    @Test func nothingHappeningIsNotEvidence() {
-        #expect(ReviewPromptJudgement.evidence(Observation(), appPresented: false) == .notSeen)
-    }
-
-    @Test func aPresentationOfTheApplicationsOwnIsNoVerdictEitherWay() {
-        #expect(ReviewPromptJudgement.evidence(Observation(sceneLeftForeground: true), appPresented: true) == .notJudged)
-        #expect(ReviewPromptJudgement.evidence(Observation(), appPresented: true) == .notJudged)
-    }
-}
-
 @Suite struct ReviewAskSequenceTests {
-    /// The decision as the application makes it, from a tracker and a date.
-    private func situation(_ tracker: ReviewAskTracker, at date: Date, onHome: Bool = true) -> ReviewAskRule.Situation {
+    /// The decision as the application makes it, from a tracker.
+    private func situation(_ tracker: ReviewAskTracker, onHome: Bool = true) -> ReviewAskRule.Situation {
         ReviewAskRule.Situation(
-            activeSeconds: tracker.activeSeconds, done: tracker.history.done, tooSoon: tracker.isTooSoon(at: date),
+            activeSeconds: tracker.activeSeconds, asked: tracker.history.asked,
             onHome: onHome, lastRunEndedNormally: tracker.lastRunEndedNormally)
     }
 
-    @Test func fiveHoursThenOneNormalStopAsksOnceAndASeenPromptIsTheEnd() {
+    @Test func fiveHoursThenOneNormalStopAsksOnceAndThatIsTheEnd() {
         let store = MemoryStore()
         let clock = Clock()
         var tracker = ReviewAskTracker(persistence: store, uptime: { clock.now })
-        var date = Date(timeIntervalSince1970: 1_800_000_000)
         tracker.runBegan()
         tracker.count(true)
         clock.advance(4.9 * hour)
-        #expect(!ReviewAskRule.isEligible(situation(tracker, at: date, onHome: false)))
+        #expect(!ReviewAskRule.isEligible(situation(tracker, onHome: false)))
         clock.advance(0.1 * hour + 1)
         tracker.count(false)
         // Still running: not on Home.
-        #expect(ReviewAskRule.blockers(situation(tracker, at: date, onHome: false)).contains(.lastRunNotNormal))
+        #expect(ReviewAskRule.blockers(situation(tracker, onHome: false)).contains(.lastRunNotNormal))
         tracker.runEnded(normally: true)
-        #expect(ReviewAskRule.isEligible(situation(tracker, at: date)))
-        tracker.beginAttempt(at: date)
-        tracker.conclude(.seen)
-        date.addTimeInterval(365 * day)
-        #expect(ReviewAskRule.blockers(situation(tracker, at: date)) == [.done])
+        #expect(ReviewAskRule.isEligible(situation(tracker)))
+        tracker.markAsked()
+        clock.advance(365 * day)
+        #expect(ReviewAskRule.blockers(situation(tracker)) == [.asked])
     }
 
-    @Test func anUnseenPromptIsRetriedAfterAWeekThreeTimesAtMost() {
+    @Test func onceAskedItIsNeverAskedAgainHoweverLongItWaits() {
         var tracker = ReviewAskTracker(persistence: MemoryStore(), uptime: { 0 })
         tracker.debugSet(activeSeconds: 6 * hour, clearHistory: false)
-        var date = Date(timeIntervalSince1970: 1_800_000_000)
-        var attempts = 0
-        for _ in 0..<40 {
-            if ReviewAskRule.isEligible(situation(tracker, at: date)) {
-                tracker.beginAttempt(at: date)
-                tracker.conclude(.notSeen)
-                attempts += 1
+        var asks = 0
+        for _ in 0..<400 {
+            if ReviewAskRule.isEligible(situation(tracker)) {
+                tracker.markAsked()
+                asks += 1
             }
-            date.addTimeInterval(day)
         }
-        #expect(attempts == 3)
-        #expect(tracker.history.done)
+        #expect(asks == 1)
     }
 
     @Test func anAbnormalEndHoldsItBackUntilTheNextNormalOne() {
         var tracker = ReviewAskTracker(persistence: MemoryStore(), uptime: { 0 })
         tracker.debugSet(activeSeconds: 6 * hour, clearHistory: false)
-        let date = Date(timeIntervalSince1970: 1_800_000_000)
         tracker.runBegan()
         tracker.runEnded(normally: false)
-        #expect(ReviewAskRule.blockers(situation(tracker, at: date)) == [.lastRunNotNormal])
+        #expect(ReviewAskRule.blockers(situation(tracker)) == [.lastRunNotNormal])
         tracker.runBegan()
         tracker.runEnded(normally: true)
-        #expect(ReviewAskRule.isEligible(situation(tracker, at: date)))
+        #expect(ReviewAskRule.isEligible(situation(tracker)))
     }
 }

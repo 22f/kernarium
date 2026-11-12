@@ -85,7 +85,7 @@ application that must:
     Chinese, and the identifier the build named (well formed, no placeholder).
     The local configuration's identifier is in no file of a bundle whose build
     does not name it, which the check finds by its digits and never prints.
-    The rating prompt is part of the same feature: its counter, its attempts
+    The rating prompt is part of the same feature: its counter, its record
     and the StoreKit request are in the product exactly where the item is, and
     its Debug knobs (a launch's way to set the counter) are in no AppStore
     product; and
@@ -528,7 +528,7 @@ DEBUG_SYMBOLS = (
     ("tip jar preview", (b"16previewOpensSheet", b"12previewPlays", b"19previewScrollsToTop",
                          b"14TipJarServicesV8openLink", b"21TipJarScrollsToTopKey")),
     # A Debug build's own check of the rating prompt (ReviewAskTracker.debugSet,
-    # ReviewAsk.applyDebugLaunch): it sets the counter and clears the attempts.
+    # ReviewAsk.applyDebugLaunch): it sets the counter and clears the record.
     ("rating prompt debug", (b"8debugSet", b"16applyDebugLaunch")),
     # The UI tests' probe of the guest's keyboard and mouse
     # (Andarium/Shared/InputProbe.swift): its log, its launch, the recording

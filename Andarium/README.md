@@ -379,54 +379,36 @@ Debug alone. Its word is the `Review` string table.
 
 ### Rating prompt
 
-The system's own rating prompt (`AppStore.requestReview(in:)`), asked for at
-most three times and never after a prompt was seen or the review page was
-opened. It shows nothing of the application's own, is never tied to Buy me
+The system's own rating prompt (`AppStore.requestReview(in:)`), requested once
+per device. It shows nothing of the application's own, is never tied to Buy me
 tokens, and shares the build switch of Review on the App Store: a product
-without that feature holds no request, counter or stored flag.
+without that feature holds no request, counter or stored record.
 
-- **Counter.** The seconds during which a virtual machine runs past boot with
-  the scene active in the foreground; Home, boot, the background and a guest
-  paused for space add nothing. It is written at each state change and once a
-  minute while it runs, so a crash loses under a minute, and it never
-  decreases. The threshold is five hours.
-- **When.** The threshold is reached; no attempt is pending or too recent;
-  Home shows with no virtual machine running or starting and one set up; the
-  most recent run ended normally; no notice about the previous run shows; no
-  sheet, alert, dialog or release-notes ribbon is up; the scene is active; and
-  Home has stayed so for a second. Otherwise nothing happens and the next
-  arrival at Home tries again.
-- **A run's end** is read from what the application already records: the
-  run's end when it saw it, and at launch the previous session record
-  (`SessionRecord.orderly`), which also knows a stop that completed in the
-  background. A run in progress counts as not normal, so an application that
-  ends in the middle of one leaves it so.
-- **Attempts.** iOS reports nothing about the request, so the second after it
-  is watched for the scene leaving the foreground-active state or a window
-  resigning key (public notifications only), with nothing presented by the
-  application itself in that second. Seen ends the asking. Not seen counts
-  the attempt and allows another at a later eligible moment at least seven
-  days on, three at most ever; the third ends it whatever was seen. An
-  attempt the application's own presentation overlapped is not judged: it is
-  given back, keeps its date and is retried under the same spacing. The
-  person leaving the application in that second counts as seen. Opening
-  Review on the App Store ends the asking too. A Debug build always shows the
-  system dialog and a TestFlight build never does, so the detection can only
-  be confirmed on a production build.
-- **Storage.** The counter and the run's end are in `UserDefaults`; the
-  attempts (count, date, whether it ended) are in `UserDefaults` and in a
-  Keychain generic-password item of the application's default access group,
-  device-only and not synchronized, and are read back as the furthest of the
-  two. The Keychain item survives deleting the application, so a reinstall is
-  not asked again, needs no entitlement, and is not touched by Erase guest,
-  which deletes the adb key only. Nothing about them leaves the device or
-  enters a bug report, and no privacy manifest or App Store metadata entry
-  changes.
+- **When.** The virtual machine has run five hours in the foreground (past
+  boot, scene active, not paused for space; the counter is written at each
+  state change and once a minute and never decreases); Home shows with a
+  virtual machine set up and none running or starting; the most recent run
+  ended normally (the run's end when the application saw it, else the previous
+  session record's `orderly`); no notice, sheet, alert, dialog or release-notes
+  ribbon is up; the scene is active; and Home has stayed so for a second.
+  Otherwise the next arrival at Home tries again.
+- **Once.** The request is recorded before it is made, and the application
+  does not look at what the system did: iOS decides whether anything shows, so
+  the person is asked once whether or not it did. Opening Review on the App
+  Store sets the same record. A record that cannot be read asks nothing.
+- **Storage.** The counter and the run's end are in `UserDefaults`; the record
+  is in `UserDefaults` and in a Keychain generic-password item of the
+  application's default access group (named after the bundle identifier),
+  device-only and not synchronized, read back as the furthest of the two. The
+  item survives deleting the application, so a reinstall is not asked again,
+  needs no entitlement, and is not touched by Erase guest, which deletes the
+  adb key only. Nothing about it leaves the device or enters a bug report, and
+  no privacy manifest or App Store metadata entry changes.
 - **Debug.** A Debug build sets the counter from `ANDARIUM_REVIEW_ASK_SECONDS`
-  and clears the attempts with `ANDARIUM_REVIEW_ASK_RESET=1` (`Live/`), for
-  the maker's own check; an App Store build compiles both out, which the
-  bundle check's knob scan covers. The application's own launch is the only
-  one that asks: the Simulator preview and a hosted test build their own.
+  and clears the record with `ANDARIUM_REVIEW_ASK_RESET=1` (`Live/`), for the
+  maker's own check; an App Store build compiles both out, which the bundle
+  check's knob scan covers. The application's own launch is the only one that
+  asks: the Simulator preview and a hosted test build their own.
 
 ### Home toolbar menu
 
@@ -945,7 +927,7 @@ one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
 `ANDARIUM_REVIEW_ASK_SECONDS` and `ANDARIUM_REVIEW_ASK_RESET=1` set the rating
-prompt's counter and clear its attempts, in a build that has the prompt
+prompt's counter and clear its record, in a build that has the prompt
 ([Rating prompt](#rating-prompt)).
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
