@@ -39,6 +39,17 @@ check above refuses, so the shots that raise the alert run last, and
 SpringBoard is restarted after each: rotate the iPad again before the next
 run.
 
+The shots of Send feedback exist only in a Preview built with the arrangement
+that turns the feature on, which gives it the example receiver and never reads
+the local file:
+
+    xcodebuild -project Andarium/Andarium.xcodeproj -scheme AndariumPreview \\
+        -destination 'generic/platform=iOS Simulator' \\
+        FEEDBACK_ADDRESS=feedback@example.com build
+
+Without it the Preview has no Send feedback, its shots are skipped and said
+so, and the rest is unaffected.
+
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard
 time bound. A rerun replaces the files and manifest entries it captures and
@@ -91,6 +102,8 @@ class Shot:
     # The shot raises the system's own alert, which stays up over whatever launches next: it runs last, and
     # SpringBoard is restarted after it.
     alert: bool = False
+    # The screen is Send feedback's, which only a Preview built with FEEDBACK_ADDRESS has.
+    feedback: bool = False
 
     def launch_arguments(self) -> list[str]:
         return ["-screen", self.screen, *self.args]
@@ -98,6 +111,11 @@ class Shot:
 
 def s(id: str, group: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 3.0) -> Shot:
     return Shot(id, group, screen, description, tuple(args), dark, wait)
+
+
+def feedback(id: str, screen: str, description: str, *args: str, dark: bool = False, wait: float = 14.0) -> Shot:
+    """A shot of Send feedback, which exists only in a Preview built with `FEEDBACK_ADDRESS=feedback@example.com`."""
+    return Shot(id, "Feedback", screen, description, tuple(args), dark, wait, feedback=True)
 
 
 SYSTEM = ("-systemMicrophone", "YES")
@@ -255,6 +273,18 @@ SHOTS: list[Shot] = [
     s("overlay-install-failed", "Operations", "install-failed", "The install overlay at its end: App not installed, the guest's reason and OK."),
     s("overlay-install-not-apk", "Operations", "install-not-apk", "A file that is not an app, refused at once on the overlay."),
     s("overlay-install-bundle", "Operations", "install-bundle", "An app in several files, refused at once on the overlay."),
+    # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
+    feedback("feedback-entrance-info", "info", "Info with Send feedback in a section of its own under the header, apart from the version.", dark=True, wait=3.0),
+    feedback("feedback-entrance-settings", "settings-feedback", "Settings scrolled to Diagnostics: Send feedback is the first row, above Create bug report.", dark=True, wait=3.0),
+    feedback("feedback-empty", "feedback", "Send feedback opened from a running session's Settings, empty: the subject and body lines, the information block folded, the card that asks for a bug report and the bar (Bug report, Screenshot, Photos, Send feedback). Send is dimmed until there is a problem."),
+    feedback("feedback-filled", "feedback-filled", "Send feedback from a session with a problem and details, and three attachments (bug report, screenshot, photo) with their sizes and remove buttons and the total under them; the bar shows the bug report as attached.", dark=True),
+    feedback("feedback-details", "feedback-details", "Send feedback filled, with the app and device details opened in full at the end of the mail."),
+    feedback("feedback-large", "feedback-large", "Send feedback with attachments over 20 MiB: the total turns orange and says some mail services refuse mail over 20 MiB; Send still works."),
+    feedback("feedback-generating", "feedback-generating", "Send feedback while the bug report is made: the app's progress overlay with Cancel over the whole sheet, Settings still open beneath."),
+    feedback("feedback-discard", "feedback-discard", "Cancel after something is typed or attached: Discard or Keep editing."),
+    feedback("feedback-nomail", "feedback-nomail", "Send feedback where Mail cannot send (no account): the error and the way to fix it, and every control disabled."),
+    feedback("feedback-info", "feedback-info", "Send feedback opened from Info, where no virtual machine runs: the card says a bug report and a screenshot need the virtual machine running and gives three steps; the rest of the form works.", dark=True),
+    feedback("feedback-info-filled", "feedback-info-filled", "Feedback that is not a bug, from Info: a suggestion with a photo; Send is ready."),
     # End: a clean power-off returns to Home; only a failed run keeps an end screen
     s("end-failed", "End", "failed", "The screen after the guest stopped unexpectedly."),
 ]
@@ -354,6 +384,8 @@ def not_in_front(udid: str, pid: int, shot: Shot, *, after: bool = False) -> str
         return f"the app that reported is process {state.get('pid')}, not the launched {pid}"
     if state.get("screen") != shot.screen:
         return f"the app reported screen {state.get('screen')!r}, not {shot.screen!r}"
+    if shot.feedback and state.get("feedback") is not True:
+        return "this Preview has no Send feedback: build it with FEEDBACK_ADDRESS=feedback@example.com on the command line"
     if state.get("state") != "active" and not (after and shot.alert):
         return f"the app is {state.get('state')}, not active: a system alert, another app or the Home screen is in front"
     return None
@@ -594,10 +626,18 @@ def capture_all(args: argparse.Namespace) -> int:
             print(f"capture-screens.py: {name} ({udid}): the Preview does not come to the front; nothing captured", file=sys.stderr)
             status = 1
             continue
+        # The Preview reports (from the launch that preflight made) whether it was built with Send feedback.
+        has_feedback = (app_state(udid) or {}).get("feedback") is True
+        wanted = [shot for shot in selected if has_feedback or not shot.feedback]
+        if len(wanted) < len(selected):
+            print(
+                f"{name}: skipping {len(selected) - len(wanted)} shots of Send feedback: this Preview was built "
+                "without it (see --help)", file=sys.stderr,
+            )
         # The shot of the system's own alert runs last: the alert outlives its shot and covers whatever launches next.
-        plain = [shot for shot in selected if not shot.alert]
+        plain = [shot for shot in wanted if not shot.alert]
         passes = [("light", plain), ("dark", [shot for shot in plain if shot.dark]),
-                  ("light", [shot for shot in selected if shot.alert])]
+                  ("light", [shot for shot in wanted if shot.alert])]
         passes = [(appearance, shots) for appearance, shots in passes if args.appearance in (None, appearance)]
         asked = False
         for appearance, shots in passes:

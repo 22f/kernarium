@@ -33,6 +33,16 @@ let package = Package(
             name: "AndariumCoreTestSupport",
             dependencies: ["AndariumCore"]
         ),
+        // Send feedback's logic, for the package's tests only. Its sources are the
+        // application's own, which the application compiles only where Send
+        // feedback is compiled in (a symlink to Andarium/Shared/Feedback/Logic),
+        // so no product of the package carries any of it; here the condition is
+        // always set. Neither application links it.
+        .target(
+            name: "AndariumFeedbackLogic",
+            dependencies: ["AndariumCore"],
+            swiftSettings: [.define("FEEDBACK_MAIL")]
+        ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
@@ -40,7 +50,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic"]
         ),
     ]
 )
