@@ -6,9 +6,10 @@ import UIKit
 /// Reads what the system says of the folding display a scene is on, for the
 /// layout decisions of `AndariumCore` (`FoldReading`): the hinge, through a
 /// `UIHingeInteraction`, and the fold's band and the regions the system keeps
-/// for the camera, as the view's reserved regions. A device that does not fold
-/// delivers no hinge, so the reader never produces a reading there and nothing
-/// that follows from one ever runs.
+/// for the camera, as the view's reserved regions. Only an iPhone folds, so
+/// the interaction is attached on the phone idiom alone; a device that does not
+/// fold delivers no hinge, so the reader never produces a reading there and
+/// nothing that follows from one ever runs.
 ///
 /// The system gives no notification for a reserved region. The root reads
 /// again at every layout and every geometry change, and the hinge's own
@@ -32,21 +33,28 @@ final class FoldSceneReader {
     var reportsHinge: Bool { hinge != nil }
 
     func attach(to view: UIView) {
-        guard #available(iOS 27.1, *), interaction == nil else { return }
+        guard #available(iOS 27.1, *), interaction == nil, UIDevice.current.userInterfaceIdiom == .phone else {
+            return
+        }
         let interaction = UIHingeInteraction { [weak self] _, update in
-            MainActor.assumeIsolated { self?.hingeReported(update.hinge?.status) }
+            MainActor.assumeIsolated { self?.hingeReported(update.hinge) }
         }
         view.addInteraction(interaction)
         self.interaction = interaction
     }
 
+    /// Only an update without a hinge (the interaction left the view
+    /// hierarchy's display) clears the reading. A status the system adds or
+    /// cannot tell (`.unknown`) leaves the last one in place, so that a blip in
+    /// the sensor does not swap the session's layout for the phone's and back.
     @available(iOS 27.1, *)
-    private func hingeReported(_ status: UIHinge.Status?) {
-        let next: FoldReading.Hinge? = switch status {
-        case .closed: .closed
-        case .partiallyOpen: .partiallyOpen
-        case .fullyOpen: .fullyOpen
-        default: nil
+    private func hingeReported(_ reported: UIHinge?) {
+        let next: FoldReading.Hinge? = switch reported?.status {
+        case nil: nil
+        case .closed?: .closed
+        case .partiallyOpen?: .partiallyOpen
+        case .fullyOpen?: .fullyOpen
+        default: hinge
         }
         guard next != hinge else { return }
         hinge = next

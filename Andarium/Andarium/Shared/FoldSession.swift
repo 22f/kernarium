@@ -39,6 +39,10 @@ struct FoldSessionOverlay: View {
                     hud
                         .frame(width: plan.hud.width, height: plan.hud.height, alignment: .top)
                         .offset(x: plan.hud.minX - origin.x, y: plan.hud.minY - origin.y)
+                        // VoiceOver reads the statistics and the notices before
+                        // the keys, as it does on the phone, though the keys
+                        // are declared first (the HUD stays above them).
+                        .accessibilitySortPriority(1)
                 case .rail(let rail):
                     // The statistics are in the strip; the notices hang from
                     // the guest's top.

@@ -43,7 +43,7 @@ struct BootView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .onCardHalf()
+        .onCardHalf(.boot)
         .background { backdrop }
         .environment(\.colorScheme, dimmed ? .dark : colorScheme)
         .statusBarHidden(true)

@@ -8,13 +8,15 @@ import SwiftUI
 // does nothing where the display has no fold band.
 
 extension View {
-    /// Keeps the view to the half of the inner display where the system puts
-    /// its own alerts (the leading one upright, the lower one turned, bent or
-    /// flat alike), so a card or a boot step never straddles the fold. The
-    /// view is padded away from the other half; elsewhere there is no padding,
-    /// so it lays out as it always did. Apply it to a view that fills the safe
-    /// area.
-    func onCardHalf() -> some View { modifier(OnCardHalf()) }
+    /// Keeps the view to the place of `screen` on the inner display (see
+    /// `FoldHalves.area(for:)`): by default the half where the system puts its
+    /// own alerts, the leading one upright and the lower one turned, so a card
+    /// or a boot step never straddles the fold. The view is padded away from
+    /// the rest of the space it has; elsewhere there is no padding, so it
+    /// lays out as it always did. It measures the space it is given and not
+    /// the window's safe area, so it holds in a sheet and under a navigation
+    /// bar. Apply it to a view that fills the space it is shown in.
+    func onCardHalf(_ screen: FoldScreen = .card) -> some View { modifier(OnCardHalf(screen: screen)) }
 
     /// A sheet's presentation on the turned inner display. Upright the system
     /// keeps a sheet to the leading half while the device is bent. Turned,
@@ -26,47 +28,73 @@ extension View {
     /// modifiers. It is handed the model and does not read the environment:
     /// a sheet's presentation preferences are read before the sheet inherits
     /// its presenter's environment, on a Mac and in a harness that gives the
-    /// presenter no model.
+    /// presenter no model. A sheet decides once, when it is presented, whether
+    /// it takes the turned presentation; turning the display with it open
+    /// leaves its content, and what the person has typed in it, in place.
     func foldSheet(_ model: AppModel, reachesBehind: Bool = false) -> some View {
         modifier(FoldSheetPresentation(model: model, reachesBehind: reachesBehind))
     }
 }
 
 private struct OnCardHalf: ViewModifier {
+    let screen: FoldScreen
     /// Optional: a card shown without a model, as a harness does, is laid out
     /// as it always was.
     @Environment(AppModel.self) private var model: AppModel?
+    /// The space the view is given, in window coordinates, once measured.
+    @State private var measured: CGRect?
 
     func body(content: Content) -> some View {
-        let safe = model?.fold?.safeArea
-        let half = model?.fold.flatMap(FoldHalves.init)?.card
+        let fold = model?.fold
+        let half = fold.flatMap(FoldHalves.init)?.area(for: screen)
         // The view fills the space it is given, then keeps to the half: a
-        // card in a stack centres on the half and not on the safe area. With
-        // no fold band the frame proposes nothing and the padding is zero.
+        // card in a stack centres on the half and not on that space. With no
+        // fold band the frame proposes nothing and the padding is zero. Until
+        // the space is measured the window's safe area stands for it.
         let folds = half != nil
         content
             .frame(maxWidth: folds ? .infinity : nil, maxHeight: folds ? .infinity : nil)
-            .padding(Self.insets(of: half, in: safe))
+            .padding(Self.insets(of: half, in: folds ? (measured ?? fold?.safeArea) : nil))
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                if folds, measured != frame { measured = frame }
+            }
     }
 
-    static func insets(of half: CGRect?, in safe: CGRect?) -> EdgeInsets {
-        guard let half, let safe else { return EdgeInsets() }
+    static func insets(of half: CGRect?, in space: CGRect?) -> EdgeInsets {
+        guard let half, let space else { return EdgeInsets() }
         return EdgeInsets(
-            top: max(0, half.minY - safe.minY), leading: max(0, half.minX - safe.minX),
-            bottom: max(0, safe.maxY - half.maxY), trailing: max(0, safe.maxX - half.maxX))
+            top: max(0, half.minY - space.minY), leading: max(0, half.minX - space.minX),
+            bottom: max(0, space.maxY - half.maxY), trailing: max(0, space.maxX - half.maxX))
     }
 }
 
 private struct FoldSheetPresentation: ViewModifier {
     let model: AppModel
     let reachesBehind: Bool
+    /// Decided when the sheet is presented and never again: a branch on the
+    /// live reading would move the content to another place in the view tree
+    /// when the display turns, and SwiftUI would build it anew.
+    @State private var turned: Bool
+    /// The detent's height, kept up to date while the display is turned.
+    @State private var height: CGFloat
+
+    init(model: AppModel, reachesBehind: Bool) {
+        self.model = model
+        self.reachesBehind = reachesBehind
+        let height = model.fold.flatMap(FoldSheet.detentHeight)
+        _turned = State(initialValue: height != nil)
+        _height = State(initialValue: height ?? 0)
+    }
 
     func body(content: Content) -> some View {
-        if let height = model.fold.flatMap(FoldSheet.detentHeight) {
+        if turned {
             content
                 .presentationSizing(.page)
                 .presentationDetents([.height(height)])
                 .presentationBackgroundInteraction(reachesBehind ? .enabled : .disabled)
+                .onChange(of: model.fold.flatMap(FoldSheet.detentHeight)) { _, next in
+                    if let next, next != height { height = next }
+                }
         } else {
             content
         }
