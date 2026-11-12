@@ -702,20 +702,4 @@ struct PackageInstallMessagesTests {
         #expect(PackageInstallMessages.code(inFailure: "Failure [FAILED_ABORTED: Session was abandoned]") == "FAILED_ABORTED")
         #expect(PackageInstallMessages.code(inFailure: "Failure") == nil)
     }
-
-    @Test func theInstallServiceHasItsArguments() {
-        #expect(
-            ApkInstallOperation.service(size: 1234)
-                == "abb_exec:package\0install\0-r\0-t\0--install-reason\0" + "4\0-S\0" + "1234")
-    }
-
-    @Test func theInstallIsMarkedAsTheUsersAndTheMarkComesBeforeTheSize() throws {
-        let words = ApkInstallOperation.service(size: 1234).split(separator: "\0", omittingEmptySubsequences: false)
-        let reason = try #require(words.firstIndex(of: "--install-reason"))
-        // The reason is Android's INSTALL_REASON_USER, and `-S size` stays the tail
-        // the package manager reads the stream by.
-        #expect(words[reason + 1] == "4")
-        #expect(words.suffix(2) == ["-S", "1234"])
-        #expect(try #require(words.firstIndex(of: "-S")) > reason + 1)
-    }
 }

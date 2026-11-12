@@ -423,6 +423,15 @@ final class AppModel {
     /// screen over the session asks what to do.
     var spacePause: SpacePause?
     var alert: AppAlert?
+    /// Settings' Install APK asks whether to install an app Android refused for
+    /// the version it was built for; the screens' alert shows it while the
+    /// install waits behind the overlay (`LegacyInstallFlow`).
+    var legacyInstallQuestion: LegacyInstallQuestion?
+    @ObservationIgnored private var legacyInstallAnswer: CheckedContinuation<Bool?, Never>?
+    /// Which attempt of an install the overlay listens to: what an attempt that is over reports
+    /// late (the guest's last words arrive on the main actor after the attempt has thrown) is
+    /// dropped, so it cannot write over the question's or the retry's overlay.
+    @ObservationIgnored private var installAttemptTag = 0
     /// How far the current boot has got, from the guest's console.
     var bootTracker = BootTracker()
     /// The guest's disk is being written before the run can begin.
@@ -454,7 +463,7 @@ final class AppModel {
     /// the keys, and the guest takes them back when it goes. The pointer lock
     /// goes with them.
     var guestHasKeys: Bool {
-        !sessionSettingsOpen && sheet == nil && alert == nil && !shareSheetUp
+        !sessionSettingsOpen && sheet == nil && alert == nil && legacyInstallQuestion == nil && !shareSheetUp
     }
     /// An Android application captured the pointer and the guest should have
     /// the pointer lock; the scene's root asks iOS for it.
@@ -1099,6 +1108,7 @@ final class AppModel {
         operationEpoch += 1
         operation?.cancel()
         operation = nil
+        finishLegacyInstallQuestion(nil)
         busy = nil
     }
 
@@ -1194,6 +1204,23 @@ final class AppModel {
         return file
     }
 
+    #if !APP_STORE
+    /// What the hosted tests put in place of the picked file's access, to see
+    /// when it is held. The App Store configuration leaves this out.
+    @ObservationIgnored
+    var accessPickedFileStub: (@MainActor (URL) -> (@MainActor () -> Void))?
+    #endif
+
+    /// Starts the access that a picked file's URL carries and returns what
+    /// ends it.
+    private func accessPickedFile(_ url: URL) -> @MainActor () -> Void {
+        #if !APP_STORE
+        if let accessPickedFileStub { return accessPickedFileStub(url) }
+        #endif
+        guard url.startAccessingSecurityScopedResource() else { return {} }
+        return { url.stopAccessingSecurityScopedResource() }
+    }
+
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
     /// end with how it went until the person closes it. A file that is not a
@@ -1212,29 +1239,29 @@ final class AppModel {
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
-        let scoped = url.startAccessingSecurityScopedResource()
+        let endAccess = accessPickedFile(url)
         // The size here is what the picker can say: an iCloud file that is not
         // down has none yet, and the install reads the real one when it has
         // the file.
         let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
         if let refusal = InstallRefusal(sizeBytes: size) {
-            if scoped { url.stopAccessingSecurityScopedResource() }
+            endAccess()
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
         }
+        let detail = size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name
         runOperation(
-            BusyState(
-                title: String(localized: "Installing app"),
-                detail: size > 0 ? "\(name) \u{00B7} \(Formats.size(bytes: size))" : name, progress: 0
-            ),
+            BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
             ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
             { [driver] update in
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                if let driver {
-                    try await driver.installApk(at: url, update: update)
-                } else {
-                    try await Self.playInstall(update)
+                defer { endAccess() }
+                try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                    if let driver {
+                        try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                    } else {
+                        try await self.playInstall(bypassLowTargetSdkBlock: bypass, update)
+                    }
                 }
                 // 100% for a moment, then the result.
                 update(BusyUpdate(progress: 1))
@@ -1243,8 +1270,119 @@ final class AppModel {
         )
     }
 
+    /// The install, as `LegacyInstallFlow` has it: the ordinary attempt first,
+    /// which is exactly what Install APK always did. When Android refuses the
+    /// app for the version it was built for, and only then, the person is
+    /// asked; "Install anyway" sends the same file again with the package
+    /// manager's flag, once, and Cancel ends the install as a cancelled one.
+    /// The file's security scope is the caller's and spans the question; each
+    /// attempt reads the file and checks the room afresh.
+    private func installAskingAboutLegacyApps(
+        detail: String,
+        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> Void
+    ) async throws {
+        let epoch = operationEpoch
+        var flow = LegacyInstallFlow()
+        while true {
+            switch flow.step {
+            case let .attempt(bypass):
+                installAttemptTag += 1
+                let tag = installAttemptTag
+                let update: @Sendable (BusyUpdate) -> Void = { update in
+                    Task { @MainActor in
+                        guard self.installAttemptTag == tag else { return }
+                        self.apply(update, epoch: epoch)
+                    }
+                }
+                do {
+                    try await attempt(bypass, update)
+                    flow.attemptEnded(.installed)
+                } catch let refused as LegacyApkRefused {
+                    flow.attemptEnded(.tooOldTarget(refused.target))
+                }
+            case let .ask(target):
+                // The file is not being sent while the person thinks: the
+                // overlay says which file. Its Cancel stays, though the alert
+                // covers it: an alert that cannot present (another one, or
+                // a popover, is in its way) must not leave the install with
+                // no way out. That Cancel closes the question too.
+                installAttemptTag += 1
+                busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
+                busy?.detail = detail
+                guard let installAnyway = await askAboutLegacyInstall(target) else {
+                    flow.stopped()
+                    continue
+                }
+                flow.answered(installAnyway: installAnyway)
+                // The bar starts over for the second attempt.
+                if installAnyway { busy?.progress = 0 }
+            case let .finished(ending):
+                switch ending {
+                case .installed: return
+                case .cancelled: throw CancellationError()
+                // Today only a second too-old refusal ends this way, and
+                // `ApkInstall` words one of those as an ordinary failure
+                // itself, so these are the same words. A later route to
+                // `.failed` for another cause needs words of its own: these
+                // would name the wrong one.
+                case .failed: throw AdbFailure(message: PackageInstallMessages.message(forCode: PackageInstallAnswer.tooOldCode))
+                }
+            }
+        }
+    }
+
+    /// Opens the question and waits for the answer: true for Install anyway,
+    /// false for Cancel, nil when the install was stopped meanwhile (the guest
+    /// ended, or the task was cancelled), which takes the question away.
+    private func askAboutLegacyInstall(_ target: LegacyTarget) async -> Bool? {
+        guard !Task.isCancelled else { return nil }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+                finishLegacyInstallQuestion(nil)
+                if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                legacyInstallAnswer = continuation
+                legacyInstallQuestion = LegacyInstallQuestion(target: target)
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.finishLegacyInstallQuestion(nil) }
+        }
+    }
+
+    /// The alert's buttons.
+    func answerLegacyInstall(installAnyway: Bool) {
+        finishLegacyInstallQuestion(installAnyway)
+    }
+
+    private func finishLegacyInstallQuestion(_ answer: Bool?) {
+        legacyInstallQuestion = nil
+        let continuation = legacyInstallAnswer
+        legacyInstallAnswer = nil
+        continuation?.resume(returning: answer)
+    }
+
     /// The title of an install that did not happen.
     static let installFailure = String(localized: "App not installed")
+
+    #if !APP_STORE
+    /// What one attempt of the preview's install does instead of
+    /// `playInstall`, for a preview that plays how the install can end.
+    /// The App Store configuration leaves this out.
+    @ObservationIgnored
+    var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    #endif
+
+    private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {
+        #if !APP_STORE
+        if let previewInstallAttempt {
+            try await previewInstallAttempt(bypassLowTargetSdkBlock, update)
+            return
+        }
+        #endif
+        try await Self.playInstall(update)
+    }
 
     /// The preview's install: the file goes over, the guest takes its time.
     private static func playInstall(_ update: @Sendable (BusyUpdate) -> Void) async throws {
