@@ -632,7 +632,7 @@ class ProbeServerTests(unittest.TestCase):
         self.assertTrue(self.server.is_open("/s1"))
 
     def test_the_handler_shows_no_request_that_is_recorded_and_not_yet_open(self) -> None:
-        # The reviewer's loopback interleaving: the handler is paused at the moment the request arrives. Nothing
+        # The loopback interleaving: the handler is paused at the moment the request arrives. Nothing
         # is recorded and nothing is open then; once it goes on, the request is recorded and open together.
         arriving, go = threading.Event(), threading.Event()
         original = self.server.arrive
@@ -2356,7 +2356,7 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
             self.recovery(guest)
 
     def test_a_request_that_arrives_between_two_looks_at_the_hold_is_not_an_answer_that_is_out(self) -> None:
-        # The reviewer's interleaving: the hold is read as not arrived, and the request arrives right after. Read
+        # The interleaving: the hold is read as not arrived, and the request arrives right after. Read
         # as one state, that is "no check yet" and the next look finds it open, so the section goes on.
         guest = self.guest(no_checks=True)
         scenario = "/race"
