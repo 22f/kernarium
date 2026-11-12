@@ -35,11 +35,14 @@ struct SendFeedbackServices {
     #if !APP_STORE
     // The Simulator preview's hooks. The App Store product has neither the
     // properties nor the code that reads them.
-    /// Opens the sheet once Info or Settings has settled, as a launch of the
+    /// Opens the sheet once Home or Settings has settled, as a launch of the
     /// Simulator preview asks; never in the application.
     var previewOpensAtLaunch = false
     /// Runs when the sheet appears: the Simulator preview fills a draft with it.
     var previewPrepare: @MainActor (SendFeedbackModel) async -> Void = { _ in }
+    /// Keeps the confirmation of a sent mail on screen, which closes the sheet
+    /// within seconds, so a capture of it can be taken.
+    var previewKeepsConfirmation = false
     #endif
 }
 

@@ -105,6 +105,9 @@ struct PartialFileSweepTests {
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<8 { group.addTask { sweep.guestBooted() } }
         }
+        // The sweep settles under its lock and reports after it: wait for the
+        // line, then look at the phase.
+        try await eventually("the line is printed") { guest.printed.count == 1 }
         try await eventually("the sweep settles") { sweep.currentPhase == .settled }
         #expect(guest.sweepCount == 1 && sweep.attempts == 1)
         #expect(guest.printed == ["Andarium: removed 3 partial files that earlier imports left"])
@@ -144,6 +147,7 @@ struct PartialFileSweepTests {
         sweep.guestRestarting()
         #expect(sweep.currentPhase == .waiting)
         sweep.guestBooted()
+        try await eventually("the line is printed") { guest.printed.count == 1 }
         try await eventually("the sweep settles") { sweep.currentPhase == .settled && guest.sweepCount == 1 }
         #expect(guest.printed == ["Andarium: removed 2 partial files that earlier imports left"])
         #expect(!guest.stillOwed && sweep.attempts == 1 && guest.lookCount == 2)
@@ -158,6 +162,7 @@ struct PartialFileSweepTests {
         let one = Guest(sweep: { 1 })
         let single = one.sweeper()
         single.guestBooted()
+        try await eventually("the line is printed") { one.printed.count == 1 }
         try await eventually("the sweep settles") { single.currentPhase == .settled }
         #expect(one.printed == ["Andarium: removed 1 partial file that earlier imports left"])
     }
@@ -168,6 +173,7 @@ struct PartialFileSweepTests {
         let guest = Guest(readings: [nil, false, false, nil, true], sweep: { 2 })
         let sweep = guest.sweeper()
         sweep.guestBooted()
+        try await eventually("the line is printed") { guest.printed.count == 1 }
         try await eventually("the sweep settles") { sweep.currentPhase == .settled }
         #expect(guest.readCount == 5 && guest.sweepCount == 1)
         #expect(guest.pauses == Array(repeating: PartialFileSweep.storageInterval, count: 4))
@@ -178,6 +184,7 @@ struct PartialFileSweepTests {
         let guest = Guest(readings: [false])
         let sweep = guest.sweeper()
         sweep.guestBooted()
+        try await eventually("the line is printed") { guest.printed.count == 1 }
         try await eventually("the attempt ends") { sweep.currentPhase == .stopped }
         #expect(guest.sweepCount == 0)
         #expect(guest.readCount == PartialFileSweep.storagePolls)
@@ -197,6 +204,7 @@ struct PartialFileSweepTests {
         let guest = Guest(sweep: { throw Refused() })
         let sweep = guest.sweeper()
         sweep.guestBooted()
+        try await eventually("the line is printed") { guest.printed.count == 1 }
         try await eventually("the sweep ends") { sweep.currentPhase == .stopped }
         #expect(guest.printed == ["Andarium: could not remove the partial files that earlier imports left: the guest said no"])
         sweep.guestBooted()
@@ -209,6 +217,7 @@ struct PartialFileSweepTests {
         guest.setSweep { 5 }
         let next = guest.sweeper()
         next.guestBooted()
+        try await eventually("the line is printed") { guest.printed.count == 2 }
         try await eventually("the next run's sweep settles") { next.currentPhase == .settled }
         #expect(guest.sweepCount == 2 && !guest.stillOwed)
         #expect(guest.printed.last == "Andarium: removed 5 partial files that earlier imports left")
@@ -231,6 +240,7 @@ struct PartialFileSweepTests {
         #expect(sweep.currentPhase == .waiting && guest.printed.isEmpty)
         guest.setSweep { 4 }
         sweep.guestBooted()
+        try await eventually("the line is printed") { guest.printed.count == 1 }
         try await eventually("the second attempt settles") { sweep.currentPhase == .settled }
         #expect(guest.sweepCount == 2 && sweep.attempts == 2)
         #expect(guest.printed == ["Andarium: removed 4 partial files that earlier imports left"])

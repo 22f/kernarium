@@ -18,9 +18,9 @@ namespace uml::runtime::stall {
  * a device service's answer, a disk, guest RAM, or in no wait the loader
  * marks) and used less than starved_below_percent of the time: a carrier that
  * ran between two samples was not held in the wait both found it in. A carrier
- * in its idle wait is not stalled. The watch
- * (stall_watch.hpp) feeds this file one Tick every tick_ms; what comes out is
- * a StallRecord, a ring of events and three rings of transitions, which
+ * in its idle wait is not stalled. The watch (stall_watch.hpp) feeds this
+ * file one Tick every tick_ms while it looks; what comes out is a
+ * StallRecord, a ring of events and three rings of transitions, which
  * format_stall_slot writes as text into the session record's fixed slot. The
  * rings and the slot never grow: a ring that is full forgets its oldest entry
  * and the slot is cut to its size by dropping whole old events.
@@ -75,6 +75,12 @@ struct Tick final {
 	/* The threads were held, or the process was, since the last tick, and
 	 * what they show says nothing of the host. */
 	bool disturbed{};
+	/* The watch slept since the last tick, with every carrier in its idle
+	 * wait (stall_watch.hpp). A carrier that has run since used a sliver of
+	 * the sleep, which says nothing of whether it was starved, so the
+	 * interval is not measured: every carrier is seen as for the first time,
+	 * and the next tick is the first to measure. */
+	bool rebaseline{};
 	/* How late the watch woke against its own deadline, which leaves out the
 	 * watch's work between two waits: a slow write of the slot is not the
 	 * process being stopped. */

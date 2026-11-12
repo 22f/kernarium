@@ -2,12 +2,15 @@
 //
 // The motion wire (vsock 5556) from the guest's side: the sensor records the
 // host sends, the control frames the sub-HAL sends, and the orientation part of
-// both against the golden frames. argv[1] is the fixture,
+// both against the golden frames that AndariumCore checks too
+// (MotionOrientationFixture.swift). argv[1] is the fixture,
 // tests/unit/andarium/fixtures/motion-orientation-golden-frames.txt.
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -197,6 +200,12 @@ int main(int argc, char** argv)
     require(refuse(8, 4.0f) && refuse(8, -1.0f) && refuse(8, 0.5f) && refuse(8, 1e9f));
     require(refuse(8, std::nanf("")) && refuse(8, INFINITY));
     require(refuse(12, 1.0f) && refuse(16, 1.0f));
+    // A record is exactly 20 bytes: a valid one with a byte more, or with a byte
+    // less, is not a record.
+    std::array<uint8_t, 21> overlong{};
+    std::copy(turned.begin(), turned.end(), overlong.begin());
+    require(!andarium::motion::decode(overlong));
+    require(!andarium::motion::decode(std::span(turned).first(19)));
     require(andarium::motion::orientation_count == 4);
     require(std::string(andarium::motion::orientation_property) == "ro.boot.kernarium.orientation");
 }

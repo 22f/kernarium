@@ -189,7 +189,8 @@ struct ResolutionSheet: View {
 /// window's safe area
 /// gives the part the status bar takes, which the session hides
 /// (`SessionDisplayArea`). The screen's native scale is read from the window's
-/// screen. It follows the window's size as it changes.
+/// screen. It follows the window's size as it changes. On a display that folds
+/// the size is the session plan's guest (`SessionPlan`).
 struct DisplayAreaProbe: View {
     @Environment(AppModel.self) private var model
     let cornerEdges: Edge.Set
@@ -210,6 +211,7 @@ struct DisplayAreaProbe: View {
                     publish()
                 }
             }
+            .onChange(of: model.sessionPlan?.guest.size) { publish() }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
@@ -218,6 +220,13 @@ struct DisplayAreaProbe: View {
         // Until the window has said what its safe area is, the size is not the
         // session's.
         guard size.width > 0, size.height > 0, let window else { return }
+        // A folding display has a layout of its own (`SessionPlan`), which
+        // knows the session's safe area whichever screen this is, and where
+        // the device stands the upper half.
+        if let plan = model.sessionPlan {
+            model.displayPointsDidChange(plan.guest.size)
+            return
+        }
         model.displayPointsDidChange(
             SessionDisplayArea.size(
                 home: size, topInset: window.topInset, bottomInset: window.bottomInset, isPhone: window.isPhone))

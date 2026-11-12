@@ -297,8 +297,10 @@ StallDetector::Change StallDetector::observe(const Tick &tick) noexcept
 
 	/* Threads that were held, or a process that was not running for
 	 * seconds, say nothing about the host: the counters start again and an
-	 * event in progress ends where it was last seen. */
-	if (tick.disturbed || wall_ms >= suspension_gap_ms) {
+	 * event in progress ends where it was last seen. A watch that slept
+	 * starts again the same way, and goes on to read the carriers at once, as
+	 * it does at its start: none of them has an interval to judge. */
+	if (tick.disturbed || tick.rebaseline || wall_ms >= suspension_gap_ms) {
 		Change change = Change::none;
 		if (open_) {
 			StallEvent &event = record_.events.back();
@@ -311,7 +313,8 @@ StallDetector::Change StallDetector::observe(const Tick &tick) noexcept
 		for (Track &track : tracks_)
 			track = {};
 		continued_ = false;
-		return change;
+		if (!tick.rebaseline || tick.disturbed || change != Change::none)
+			return change;
 	}
 
 	const std::uint32_t late_ms = tick.late_ms;

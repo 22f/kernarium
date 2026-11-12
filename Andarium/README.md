@@ -76,8 +76,17 @@ destination and adds nothing to the built application.
 `ITSAppUsesNonExemptEncryption` is NO in `Config/Info.plist`.
 
 The iPhone interface is portrait-only and the guest owns its rotation:
-Android turns its own display and the sensor axes stay fixed. On iPad the
-interface turns with the device in a session as it does at Home, full screen
+Android turns its own display and the sensor axes stay fixed. A guest whose
+image has a device-orientation sensor (the boot request's `orientation` host
+feature, [Kernarium](../Kernarium/README.md#automation-runs)) follows the
+device's orientation as iOS reports it, which already includes the person's
+Portrait Orientation Lock: while a session is in front the application
+observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
+over the motion connection (`MotionOrientation.swift`), which Android treats as
+a rotation proposal that its own policy still decides on. The Gyroscope switch
+governs only the accelerometer and gyroscope data apps may read, not this. A
+guest whose image has no such sensor judges the accelerometer as before. On iPad
+the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
 interface orientation (`MotionMount`, `SessionOrientationPolicy`). An
@@ -85,6 +94,44 @@ application that asks for one fixed orientation is letterboxed in the other
 one, as in a window. The guest's own rotation preferences are restored when
 the host stops driving it. The display keeps the last frame's proportions
 while it turns, until Android draws the new layout.
+
+A folding iPhone (iPhone Duo) has two displays. Its cover is an iPhone's, and
+its inner display turns with the device as an iPad's does, the host driving the
+guest. The layout follows the display the system lights, which the scene's root
+reads from the hinge and the view's reserved regions (`FoldSceneReader`) and
+`AndariumCore/FoldLayout.swift` decides as pure functions; a device that
+reports no hinge keeps every layout it has. Only the inner display bent at the
+fold is placed around the hinge (`FoldPose.spreads`): flat, upright or turned,
+every screen is laid out as on an iPad of the same size and shape.
+
+- **Cover.** The guest keeps an iPhone's shape beside the strip the camera
+  keeps, which holds the side keys as an always-open column and the statistics.
+- **Inner display, upright.** The guest is one display across both halves, so
+  moving the hinge never resizes Android, and the side keys stay on its edge.
+  Bent, the statistics and notices hang from the trailing half and Andarium's
+  own pieces never sit on the fold; flat, they hang from the top of the display.
+- **Inner display, turned.** Flat, the guest fills the display, with the keys
+  on its edge and the statistics and notices at its top. Bent, the device
+  stands like a laptop: the guest is the upper half and the lower half is a
+  deck with the keys in one row and the statistics and notices above them.
+- **Other screens.** Bent, Home is one page each side of the fold; flat it is
+  Home as on an iPad, one scrolling list with Start at the foot of the screen.
+  Flat, Welcome, the boot, the busy, low-space and end cards, and the cards
+  inside a sheet (the system's) are laid out as on a display with no hinge,
+  centred in the safe area as the Start bar and the system's alerts are. While
+  the device is bent they keep to the half where the system puts its alerts,
+  and the boot of a standing device to the upper half. While bent, Welcome
+  and the end screen scroll when taller than their half. System alerts stay
+  where iOS puts them, inside the device's own safe area. A sheet turned and
+  bent rises to a little below the fold; a sheet keeps the placement it opened
+  with, and what has been typed in it, until it closes, whatever the hinge or
+  the turn does meanwhile.
+  On the cover the file browser's Import is a round button in the toolbar's
+  column beside the camera, between More and Done, and the bar keeps Export.
+
+The guest is resized only where its shape changes (the cover and the inner
+display, standing and the other turned poses), through the display's ordinary
+resize. Telling Android where the crease is is not done.
 
 While the guest's display is shown (the boot and the run) everything behind it
 is black, in the light appearance too: the scene's root view and its window
@@ -198,25 +245,30 @@ not declare because only an App Store build is uploaded.
 
 ### Send feedback
 
-Info and a running session's Settings open a sheet that writes an email to the
-developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
-compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
-ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
-names the receiver, so a fork, a sideload or a Debug or Release build holds none
-of it, and every configuration's bundle check says whether it does: it also
-fails on the local receiver's bytes in any file of a bundle that does not name
-it (never printing it), and on an `Info.plist` whose values differ from
-`Config/Info.plist` (the preprocessing changes the feedback key alone).
-Tests and captures turn it on in a Debug build with
-`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
-bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
-only, never the local receiver, and its hooks into the sheet are not in the
-AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
-tested, by AndariumCore's tests through a symlinked target no product links.
-The feature's words are looked up in the `Feedback` string table (zh-Hans,
-zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
-its information block are English whatever the interface language, and the bug
-report's overlay text is the app's own.
+Home's toolbar menu and a running session's Settings open a sheet that writes
+an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
+it). Home's toolbar holds one menu in place of the Info button, with Info and
+Send feedback; it keeps Info's glyph and accessibility label and is on Welcome
+too, where Send feedback is reachable before a virtual machine is set up. A
+build without Send feedback keeps the plain Info button and holds no menu code
+(`Shared/HomeMenu.swift`). Info itself has no Send feedback section. The
+feature is compiled in, under the `FEEDBACK_MAIL` condition, only in an
+AppStore build whose ignored `Config/Feedback.local.xcconfig` (from
+`Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
+a Debug or Release build holds none of it, and every configuration's bundle
+check says whether it does: it also fails on the local receiver's bytes in any
+file of a bundle that does not name it (never printing it), and on an
+`Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
+changes the feedback key alone). Tests and captures turn it on in a Debug build
+with `FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which
+the bundle check accepts in Debug alone; `AndariumPreview` takes that
+arrangement only, never the local receiver, and its hooks into the sheet are
+not in the AppStore product. Its logic (`Shared/Feedback/Logic`) is also built,
+and tested, by AndariumCore's tests through a symlinked target no product
+links. The feature's words are looked up in the `Feedback` string table
+(zh-Hans, zh-Hant and ja are in [Languages](#languages)); the mail's subject
+prefix and its information block are English whatever the interface language,
+and the bug report's overlay text is the app's own.
 
 ### Follow developer on X
 
@@ -747,6 +799,9 @@ states the resolution; the earlier `KERNARIUM_RETINA_MODE` (`1` native, `0`
 one pixel to a point) is read where it is not stated.
 `ANDARIUM_THERMAL_STATE` (`nominal`, `fair`, `serious` or `critical`) stands
 for iOS's thermal state in the Simulator and in automation.
+`ANDARIUM_FOLLOW_ORIENTATION` (`1` or `0`) states whether the guest follows the
+device's orientation, where the device's idiom (an iPhone follows) would
+otherwise decide.
 `ANDARIUM_INPUT_PROBE=1` is the UI tests' launch: the session opens at once
 with no guest behind it, and what the guest's keyboard and mouse would receive,
 and the touches that reach its touchscreen, go to one accessibility element
