@@ -32,6 +32,17 @@ public:
 	virtual ~HostThermalProvider() = default;
 
 	[[nodiscard]] virtual HostThermalState state() noexcept = 0;
+
+	/* Calls `changed(context)` whenever the system says the thermal state or
+	 * Low Power Mode changed, from a thread of the system's, never the
+	 * caller's; the active core count has no such notice. A null `changed`
+	 * ends it, and once the call returns no call is running or will start.
+	 * A source with no notice never calls. */
+	virtual void observe(void (*changed)(void *), void *context) noexcept
+	{
+		(void)changed;
+		(void)context;
+	}
 };
 
 [[nodiscard]] std::unique_ptr<HostThermalProvider>

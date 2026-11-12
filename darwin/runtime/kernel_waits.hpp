@@ -23,6 +23,10 @@ namespace uml::runtime {
  *   pread, pwrite                                               disk read, write
  *   fsync                                                       flush
  *
+ * An idle wait of a vCPU carrier is also reported to the activity record the
+ * watch sleeps by (runtime/carrier_activity.hpp), and so is the call that names
+ * a carrier, pthread_setname_np.
+ *
  * recvmsg is marked by the resource ledger (kernel_resources.hpp), write
  * (send) by the session record (session_record.hpp) and the commit of guest
  * RAM by the memory layer.
