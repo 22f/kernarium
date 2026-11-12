@@ -459,8 +459,9 @@ requires reopening Andarium.
   backups leave out. The memory a live session's cameras hold comes out of the
   graphics budget ([camera device](../darwin/device/camera/README.md)): with
   Camera on, the VRAM the System sheet and the statistics show is the pool,
-  the budget less that reserve, and the memory offered and the default are
-  unchanged. The Simulator has no camera: the preview states the access
+  the budget less that reserve, and the ruler's graphics warning follows the
+  pool too; the memory offered and the default are unchanged. The Simulator has
+  no camera: the preview states the access
   (`-systemCamera` reads the Simulator's own permission) and the non-App Store
   runtime serves a synthetic camera (`KERNARIUM_CAMERA_SOURCE`) to a run that
   has none, and no camera at all for a value it does not know; an App Store

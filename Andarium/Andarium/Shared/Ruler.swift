@@ -234,7 +234,8 @@ struct SystemControls: View {
             {
                 Divider().padding(.leading, 58)
                 GraphicsMemoryRow(
-                    estimateMiB: vram, warns: host.memory.risk(guest.memoryMiB, vCPUs: guest.cores) != .none
+                    estimateMiB: vram,
+                    warns: host.memory.risk(guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraLive) != .none
                 )
             }
         }
@@ -271,10 +272,12 @@ struct SystemControls: View {
         // where that is a higher one; the line beneath says why while the
         // chosen size is one of them, the worse risk alone. Both sizes follow
         // the vCPU count as the top does.
-        let graphicsLineMiB = host.memory.graphicsLineMiB(vCPUs: guest.cores)
+        // While Camera is on (`cameraLive`) the line follows the pool the
+        // VRAM row shows, not the budget.
+        let graphicsLineMiB = host.memory.graphicsLineMiB(vCPUs: guest.cores, cameraLive: cameraLive)
         let safeMiB = host.memory.safeMemoryMiB(vCPUs: guest.cores)
         let distinct = safeMiB > graphicsLineMiB
-        let risk = host.memory.risk(guest.memoryMiB, vCPUs: guest.cores)
+        let risk = host.memory.risk(guest.memoryMiB, vCPUs: guest.cores, cameraLive: cameraLive)
         return ControlRow(title: String(localized: "Memory"), symbol: "memorychip", value: Formats.size(mib: guest.memoryMiB)) {
             Ruler(
                 index: Binding(

@@ -51,8 +51,10 @@ public struct MemoryPolicy: Equatable, Sendable {
     /// empty, or zeros, where the host states none.
     private let cameraReserves: [[Int]]
     /// The size above which games may run out of graphics memory, at the same
-    /// counts.
+    /// counts, and the same while a live camera session holds its reserve out
+    /// of the budget.
     private let graphicsLines: [Int]
+    private let graphicsLinesWithCamera: [Int]
 
     /// The bounds, the defaults and the safe sizes as they are: each is taken
     /// down to the runtime's steps and into its range. A count without a
@@ -90,7 +92,8 @@ public struct MemoryPolicy: Equatable, Sendable {
             }
         }
         graphics = table
-        cameraReserves = table.map { row in row.map { cameraReserveMiB?($0) ?? 0 } }
+        let reserves = table.map { row in row.map { cameraReserveMiB?($0) ?? 0 } }
+        cameraReserves = reserves
         // Where the runtime lowered the default to keep B at a gibibyte, the
         // default itself is the line, as it was before the range passed
         // 4 GiB. Elsewhere the largest size a person may choose that still
@@ -98,7 +101,9 @@ public struct MemoryPolicy: Equatable, Sendable {
         // warned about) and no higher than the safe size (above it the
         // warning is the worse one). The default itself where B falls below
         // that figure just above it, and where the host gives no estimate.
-        graphicsLines = bounds.indices.map { index in
+        // While Camera is on the figure the sheet shows is the pool, the
+        // budget less the camera's reserve, so the line follows it too.
+        let line = { (index: Int, reserves: [[Int]]?) -> Int in
             let atLeast = steppedDefaults[index]
             guard !table.isEmpty, !(index < defaultHoldsGraphics.count && defaultHoldsGraphics[index]) else {
                 return atLeast
@@ -106,11 +111,15 @@ public struct MemoryPolicy: Equatable, Sendable {
             let row = table[index]
             let first = Limits.runtimeMemoryRangeMiB.lowerBound
             let top = (bounds[index] - first) / Limits.runtimeMemoryStepMiB
-            guard let kept = (0...top).last(where: { row[$0] >= Limits.minimumDefaultGraphicsMemoryMiB }) else {
-                return atLeast
+            let kept = (0...top).last { column in
+                let reserve = reserves.map { $0[index][column] } ?? 0
+                return max(row[column] - reserve, 0) >= Limits.minimumDefaultGraphicsMemoryMiB
             }
+            guard let kept else { return atLeast }
             return min(max(atLeast, first + kept * Limits.runtimeMemoryStepMiB), steppedSafes[index])
         }
+        graphicsLines = bounds.indices.map { line($0, nil) }
+        graphicsLinesWithCamera = bounds.indices.map { line($0, reserves) }
     }
 
     /// The bounds alone: every default and safe size is its bound, so nothing
@@ -204,9 +213,11 @@ public struct MemoryPolicy: Equatable, Sendable {
     /// size, above which the closing warning is the one shown: the default
     /// itself where B is already under it above the default, as on a device
     /// with little room, and where the host gives no estimate. A count above
-    /// the host's takes the last one.
-    public func graphicsLineMiB(vCPUs: Int) -> Int {
-        graphicsLines[min(max(vCPUs, 1), graphicsLines.count) - 1]
+    /// the host's takes the last one. With `cameraLive` the line follows the
+    /// pool the GPU is given (`graphicsMemoryMiB`), not the budget.
+    public func graphicsLineMiB(vCPUs: Int, cameraLive: Bool = false) -> Int {
+        let lines = cameraLive ? graphicsLinesWithCamera : graphicsLines
+        return lines[min(max(vCPUs, 1), lines.count) - 1]
     }
 
     /// Whether a guest with `mib` of memory and `vCPUs` vCPUs has more than
@@ -214,16 +225,16 @@ public struct MemoryPolicy: Equatable, Sendable {
     /// graphics memory, though iOS need not end the application. Where the
     /// default was not lowered for the GPU and more memory leaves B at a
     /// gibibyte or more, the sheet does not warn.
-    public func isShortOfGraphicsMemory(_ mib: Int, vCPUs: Int) -> Bool {
-        mib > graphicsLineMiB(vCPUs: vCPUs)
+    public func isShortOfGraphicsMemory(_ mib: Int, vCPUs: Int, cameraLive: Bool = false) -> Bool {
+        mib > graphicsLineMiB(vCPUs: vCPUs, cameraLive: cameraLive)
     }
 
     /// What a guest of `mib` of memory and `vCPUs` vCPUs risks, the worse of
     /// the two when it risks both: iOS ending the application, then the guest
     /// running out of graphics memory.
-    public func risk(_ mib: Int, vCPUs: Int) -> MemoryRisk {
+    public func risk(_ mib: Int, vCPUs: Int, cameraLive: Bool = false) -> MemoryRisk {
         if isAboveSafe(mib, vCPUs: vCPUs) { return .closing }
-        return isShortOfGraphicsMemory(mib, vCPUs: vCPUs) ? .graphics : .none
+        return isShortOfGraphicsMemory(mib, vCPUs: vCPUs, cameraLive: cameraLive) ? .graphics : .none
     }
 
     /// The graphics memory, in MiB, a guest of `mib` of memory and `vCPUs`
