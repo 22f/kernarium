@@ -209,6 +209,20 @@ class VerdictTests(unittest.TestCase):
         none = runner.parse_input_dump(plugged_keyboard("<none>"))
         self.assertIn("not 'true'", runner.capture_led_problem(none, "true"))
 
+    def test_relative_motion_needs_a_writable_event_node(self) -> None:
+        class Shell:
+            def __init__(self, answer: str) -> None:
+                self.answer, self.commands = answer, []
+
+            def shell(self, command: str) -> str:
+                self.commands.append(command)
+                return self.answer + "\n"
+
+        writable, denied = Shell("writable"), Shell("denied")
+        self.assertTrue(runner.can_inject_relative(writable, "/dev/input/event3"))
+        self.assertFalse(runner.can_inject_relative(denied, "/dev/input/event3"))
+        self.assertIn("test -w /dev/input/event3", writable.commands[0])
+
 
 PROBE_LOG = """\
 1 begin run_id="keymouse"
