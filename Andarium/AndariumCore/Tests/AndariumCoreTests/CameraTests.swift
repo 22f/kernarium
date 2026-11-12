@@ -4,9 +4,8 @@ import Foundation
 import Testing
 @testable import AndariumCore
 
-// The Camera setting's saved choice, the session's mode, and the three
-// statements the screens make about it (the notice, the footnote and the
-// rotation).
+// The Camera setting's saved choice, the session's mode, and the two
+// statements the screens make about it (the notice and the rotation).
 struct CameraTests {
     private let host = HostDevice(
         name: "iPad", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000

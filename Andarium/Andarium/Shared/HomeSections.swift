@@ -325,9 +325,9 @@ struct SnapshotsRow: View {
 
 // MARK: Capabilities
 
-/// What the guest may use of this device: the location and the microphone,
-/// which iOS asks about when they are turned on, and the haptics on a device
-/// that has them. The motion sensors are always the guest's where the device
+/// What the guest may use of this device: the location, the microphone and the
+/// camera, which iOS asks about when they are turned on, and the haptics on a
+/// device that has them. The motion sensors are always the guest's where the device
 /// has them, so there is no row for them.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model

@@ -24,6 +24,15 @@ func withAndroidGuest(
         model.create(entry.overrides.applied(to: Guest.fresh(on: model.host), on: model.host))
         try await waitForAndroidGuest(until: { model.busy == nil }, seconds: 30)
     }
+    // The callers set what a run needs (the camera's source, a switch) in
+    // `prepare`; a start that skipped it would run every test on the defaults.
+    var prepareRuns = 0
+    func runPrepare() throws {
+        prepareRuns += 1
+        try prepare(model)
+    }
+    try runPrepare()
+    try #require(prepareRuns == 1, "prepare must run once, before the guest starts")
     model.start(.normal)
     try #require(model.alert == nil, "\(String(describing: model.alert))")
 

@@ -502,9 +502,10 @@ requires reopening Andarium.
   guest's layout follows, and the iPad app running on a Mac has none
   (`CameraAvailability`). On an iPad, a session that other apps
   share the screen with pauses the camera (black frames) and shows a notice
-  that goes with the interruption. A photo taken sideways is turned upright by
-  the guest's own accelerometer, which the guest has wherever the device has
-  sensors (see Motion below); a Mac and the Simulator have none. Where the
+  that goes with the interruption. Camera apps in the guest save a photo taken
+  sideways the right way up from the guest's accelerometer, which the guest has
+  wherever the device has sensors (see Motion below); an iPad app on a Mac and
+  the Simulator have none. Where the
   host owns the rotation (an iPad window) it tells the runtime how the device
   body is turned from portrait (`CameraRotation`): each start derives every
   camera's sensor orientation from it, and a later turn turns the picture
