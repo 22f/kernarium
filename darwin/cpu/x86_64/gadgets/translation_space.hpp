@@ -275,13 +275,12 @@ public:
 		return account_;
 	}
 
-	/* Whether an executor besides the one asking is probably running this
-	 * address space at epoch `now`: another holds it, and some executor
-	 * entered it within the account's window of activity. The asking
-	 * executor holds the space, so a space it alone holds never is. */
-	[[nodiscard]] bool in_use_elsewhere(std::uint64_t now) const
+	/* How the asking executor's window sees this address space at epoch
+	 * `now` (gadget_cache::place_use()). */
+	[[nodiscard]] gadget_cache::PlaceUse use(std::uint64_t now) const
 	{
-		return attached_.size() > 1 && account_.activity(now) != 0;
+		return gadget_cache::place_use(attached_, account_, closed(),
+			now);
 	}
 
 	/* ---- Bodies ---- */

@@ -21,6 +21,19 @@ inline constexpr std::uint64_t no_owner = std::uint64_t{0xffffU}
 /* The most code changes a slot's epoch can count. */
 inline constexpr std::uint16_t max_epoch = 0xffffU;
 
+/* How an address space looks to the cache that holds it, when its window
+ * chooses what to retire:
+ *
+ *   idle        no executor entered it within the account's window of
+ *               activity (cpu/gadget_cache_budget.hpp), or it is closed or
+ *               being shed, which an executor lets go of at its next entry
+ *               anyway;
+ *   here        an executor entered it lately and only this cache holds it;
+ *   elsewhere   an executor entered it lately and another cache holds it
+ *               too: that executor may be in code this cache's links armed,
+ *               which it reaches without holding it. */
+enum class PlaceUse : std::uint8_t { idle, here, elsewhere };
+
 /* What a cache keeps about one address space it holds: its translation
  * `Space`, which the cache shares with the other executors running the
  * address space or keeps to itself, and the rest of what the window and
@@ -75,8 +88,9 @@ struct GenerationState {
  * `order` lists the address spaces least recently current first. Only
  * `Limit` of them stay resident: a switch to a new one retires one beyond
  * that (trim()), the least recently current unless another executor is
- * running it. An address space the MMU destroyed may keep its place in the
- * order without being held, a tombstone that retiring only drops.
+ * running it (victim()). An address space the MMU destroyed may keep its
+ * place in the order without being held, a tombstone that retiring only
+ * drops.
  *
  * `State` is the engine's record of one address space, a GenerationState or
  * a type derived from it, kept in `generations` and so at a stable address.
@@ -167,26 +181,28 @@ struct GenerationWindow final {
 	}
 
 	/* Retire, with `retire(generation)`, places until only the limit
-	 * remain, each the victim() that `running` names. `retire` takes the
+	 * remain, each the victim() that `use` names. `retire` takes the
 	 * number by value, and drops its place in the order. */
-	template <typename Retire, typename Running>
-	void trim(Retire &&retire, Running &&running)
+	template <typename Retire, typename Use>
+	void trim(Retire &&retire, Use &&use)
 	{
 		while (order.size() > Limit)
-			retire(victim(running));
+			retire(victim(use));
 	}
 
 	/* The place a trim retires: the least recently current, unless it holds
-	 * an address space that `running(state)` says another executor is
-	 * running. That executor reaches the bodies through links this cache
-	 * armed, which hold nothing, so retiring the address space here would
-	 * free, as the last holder, the code it is in. The oldest place that is
-	 * a tombstone or an address space not running goes instead, and when
-	 * every place is running, the one whose state names the fewest slots,
-	 * the oldest of equals. The most recently current place, the one just
-	 * made current, is never chosen. Needs more than one place. */
-	template <typename Running>
-	[[nodiscard]] Number victim(Running &&running) const
+	 * an address space that `use(state)` says is PlaceUse::elsewhere. The
+	 * other executor reaches its bodies through links this cache armed,
+	 * which hold nothing, so retiring the address space here would free, as
+	 * the last holder, the code it is in. The oldest place that is a
+	 * tombstone or PlaceUse::idle goes instead; one that is PlaceUse::here
+	 * is as likely to be wanted again as the front was, with nobody else to
+	 * keep its bodies, and is not taken for it. When no place is idle, the
+	 * one whose state names the fewest slots goes, of every place but the
+	 * newest, the oldest of equals. The most recently current place, the one
+	 * just made current, is never chosen. Needs more than one place. */
+	template <typename Use>
+	[[nodiscard]] Number victim(Use &&use) const
 	{
 		assert(order.size() > 1);
 		const auto state_of = [this](Number place) -> const State * {
@@ -194,16 +210,19 @@ struct GenerationWindow final {
 			return found != generations.end() ? &found->second :
 							    nullptr;
 		};
-		const auto *first = state_of(order.front());
-		if (first == nullptr || !running(*first))
+		const auto use_of = [&](Number place) {
+			const auto *state = state_of(place);
+			return state != nullptr ? use(*state) : PlaceUse::idle;
+		};
+		if (use_of(order.front()) != PlaceUse::elsewhere)
 			return order.front();
-		auto fewest = order.front();
-		auto fewest_slots = slots_named(*first);
-		for (std::size_t place = 1; place + 1 < order.size(); ++place) {
-			const auto *state = state_of(order[place]);
-			if (state == nullptr || !running(*state))
+		for (std::size_t place = 1; place + 1 < order.size(); ++place)
+			if (use_of(order[place]) == PlaceUse::idle)
 				return order[place];
-			const auto slots = slots_named(*state);
+		auto fewest = order.front();
+		auto fewest_slots = slots_named(*state_of(fewest));
+		for (std::size_t place = 1; place + 1 < order.size(); ++place) {
+			const auto slots = slots_named(*state_of(order[place]));
 			if (slots < fewest_slots) {
 				fewest = order[place];
 				fewest_slots = slots;

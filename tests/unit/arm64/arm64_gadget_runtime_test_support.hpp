@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <source_location>
 #include <thread>
 #include <vector>
 
@@ -91,6 +92,25 @@ inline void let_activity_lapse()
 		std::chrono::seconds{10}, std::chrono::milliseconds{5}));
 }
 
+/* For a test that keeps an address space active from one executor while the
+ * window of another is trimmed: the epoch to read before each entry of the
+ * first, and the check after the other's next run that no whole activity
+ * window has passed since, as a host that held the test would let happen. The
+ * test says so rather than failing for a reason it does not show. */
+[[nodiscard]] inline std::uint64_t activity_stamp() noexcept
+{
+	return ::uml::cpu::gadget_cache::epoch();
+}
+
+inline void require_activity_held(std::uint64_t stamp,
+	std::source_location location = std::source_location::current())
+{
+	namespace budget = ::uml::cpu::gadget_cache;
+	::uml::testing::require(budget::epoch() - stamp < budget::window_epochs,
+		"the host held the test past the activity window; rerun it alone",
+		location);
+}
+
 /* `movz xreg, #value`. */
 [[nodiscard]] constexpr std::uint32_t move_immediate(
 	unsigned reg, unsigned value) noexcept
@@ -117,6 +137,23 @@ inline void put_program(JitBacking &backing, unsigned first, unsigned second)
 	backing.put32(target - code_base, move_immediate(1, second));
 	backing.put32(target - code_base + 4, system_call);
 }
+
+/* The one-page programs of the address spaces a test runs besides its own,
+ * kept mapped for as long as it holds them. */
+class OtherSpaces final {
+public:
+	void add(unsigned long generation)
+	{
+		backings_.push_back(std::make_unique<JitBacking>(1));
+		put_program(*backings_.back(), 1, 2);
+		mappings_.push_back(std::make_unique<JitMapping>(
+			generation, code_base, *backings_.back(), 1));
+	}
+
+private:
+	std::vector<std::unique_ptr<JitBacking>> backings_;
+	std::vector<std::unique_ptr<JitMapping>> mappings_;
+};
 
 [[nodiscard]] constexpr std::size_t pages_for(std::size_t bytes) noexcept
 {
@@ -164,8 +201,10 @@ inline void code_change_storm(unsigned long first_generation,
 		auto &cpu = owned->cpu;
 		std::size_t round = 0;
 		while (!stop.load(std::memory_order_relaxed)) {
-			/* Each vCPU walks the address spaces in its own order, so
-			 * the eight-space window retires different ones in each. */
+			/* Each vCPU walks the address spaces in its own order.
+			 * Every space is being run, so every trim takes the
+			 * window's fallback: the place it names the fewest slots
+			 * of. */
 			const auto space = (round * (index + 1) + index) % spaces;
 			++round;
 			(void)run_to_system_call(executor, memory,

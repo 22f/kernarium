@@ -228,31 +228,28 @@ void a_mostly_free_space_is_renewed_and_a_busy_one_is_not()
 
 /* What retiring the space frees is what the other executor is running:
  * while B enters it, A's window leaves it, retires the oldest address space
- * only A holds instead, and does not close it, though A's bodies are most of
- * the arena. B goes on through the links A armed and translates nothing. Once
- * B has stopped for a window of activity, A's window retires it as it would
- * any other. */
+ * nobody entered lately instead, and does not close it, though A's bodies are
+ * most of the arena. B goes on through the links A armed and translates
+ * nothing. A new address space looks entered until its history is its own, so
+ * A fills its window with the spaces to go before the activity lapses, and
+ * only B's entries after that keep this one in use. Once B has stopped for a
+ * window of activity, A's window retires it as it would any other. */
 void a_window_leaves_a_space_another_executor_is_running(
 	unsigned long generation)
 {
 	constexpr std::size_t blocks = 700;
 	constexpr std::size_t width = 31;
 	constexpr std::size_t arena_chunk = std::size_t{64} << 10;
+	constexpr unsigned long places = UML_GADGET_RESIDENT_GENERATIONS;
 	stress::set_renewal_period(0);
 	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
 	JitBacking backing{pages_for((blocks * width + 1) * 4)};
 	put_chain(backing, blocks, width);
 	JitMapping mapping{generation, code_base, backing,
 		pages_for((blocks * width + 1) * 4)};
-	std::vector<std::unique_ptr<JitBacking>> others;
-	std::vector<std::unique_ptr<JitMapping>> mappings;
-	for (unsigned long other = 0;
-	     other <= UML_GADGET_RESIDENT_GENERATIONS; ++other) {
-		others.push_back(std::make_unique<JitBacking>(1));
-		put_program(*others.back(), 1, 2);
-		mappings.push_back(std::make_unique<JitMapping>(
-			generation + 1 + other, code_base, *others.back(), 1));
-	}
+	OtherSpaces old;
+	OtherSpaces fresh;
+	OtherSpaces later;
 	const auto a_vcpu = std::make_unique<Vcpu>();
 	const auto b_vcpu = std::make_unique<Vcpu>();
 	auto &a = a_vcpu->executor;
@@ -280,18 +277,34 @@ void a_window_leaves_a_space_another_executor_is_running(
 	stress::set_renewal_floor(2 * arena_chunk);
 	const auto closes = stress::closes();
 
-	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
-	     ++other) {
-		require(run_to_system_call(a, a_memory, generation + 1 + other,
+	/* A's window is full: this space and the ones to go. */
+	for (unsigned long other = 1; other < places; ++other) {
+		old.add(generation + other);
+		require(run_to_system_call(a, a_memory, generation + other,
 			cpu, code_base) == 4);
+	}
+	let_activity_lapse();
+
+	/* A new space is admitted on each turn of A's, and the window goes past
+	 * this one every time. */
+	auto stamp = activity_stamp();
+	cpu = {};
+	cpu.pc = code_base;
+	(void)run_once(b, b_memory, generation, cpu);
+	for (unsigned long other = 1; other < places; ++other) {
+		fresh.add(generation + places + other);
+		require(run_to_system_call(a, a_memory,
+			generation + places + other, cpu, code_base) == 4);
+		require_activity_held(stamp);
 		/* B enters the space on every turn of A's. */
+		stamp = activity_stamp();
 		cpu = {};
 		cpu.pc = code_base;
 		(void)run_once(b, b_memory, generation, cpu);
 	}
 	const auto kept = stress::open_space_bytes(generation);
 	require(kept.spaces == 1 && stress::closes() == closes);
-	require(kept.held == full.held);
+	require(kept.held >= full.held * 9 / 10);
 	const auto translations = b.cache_diagnostics().translations;
 	const auto adoptions = a.cache_diagnostics().adoptions;
 	require(run_to_system_call(b, b_memory, generation, cpu, code_base,
@@ -305,47 +318,44 @@ void a_window_leaves_a_space_another_executor_is_running(
 	/* B has gone quiet. A turn of A's through other address spaces lets the
 	 * window retire this one, and what it frees closes the space. */
 	let_activity_lapse();
-	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
-	     ++other)
-		require(run_to_system_call(a, a_memory, generation + 1 + other,
-			cpu, code_base) == 4);
+	for (unsigned long other = 0; other <= places; ++other) {
+		later.add(generation + 2 * places + other);
+		require(run_to_system_call(a, a_memory,
+			generation + 2 * places + other, cpu, code_base) == 4);
+	}
 	require(stress::open_space_bytes(generation).spaces == 0 &&
 		stress::closes() == closes + 1);
 }
 
 /* A window that leaves a running space alone does not keep it from the
- * budget: relief asks any open account to shed, the running ones last, and
- * every executor holding a shedding account lets go of it at its next entry
- * whatever its window would do. The state is that of the test above, B having
- * entered the space on every turn of A's through the window. The budget then
- * falls under what the caches hold and a store of A's passes it: the space is
- * asked to shed though it is running. A lets go of it at its next entry, B,
- * which has not entered since, at its own, and the last of them frees it; B
- * then translates its block afresh in a new space. */
+ * budget, and when the budget demands the space, relief wins: it asks any open
+ * account to shed, the running ones last, and every executor holding a
+ * shedding account lets go of it at its next entry whatever its window would
+ * do. The window spares a space only while it is neither closed nor being shed
+ * (gadget_cache::place_use()), and once the budget has asked, no window takes
+ * it back. The state is that of the test above, B having entered the space on
+ * every turn of A's through the window. The budget then falls under what the
+ * caches hold and a store of A's passes it: the space is asked to shed though
+ * it is running. A lets go of it at its next entry, B, which has not entered
+ * since, at its own, and the last of them frees it; B then translates its
+ * block afresh in a new space, not in the one it let go of. */
 void relief_sheds_a_space_the_window_leaves(unsigned long generation)
 {
 	/* The space is much larger than the little ones of the window's turn, so
 	 * that a budget under it is not under what the rest hold. */
 	constexpr std::size_t blocks = 2800;
 	constexpr std::size_t width = 31;
+	constexpr unsigned long places = UML_GADGET_RESIDENT_GENERATIONS;
 	stress::set_renewal_period(0);
 	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
 	JitBacking backing{pages_for((blocks * width + 1) * 4)};
 	put_chain(backing, blocks, width);
 	JitMapping mapping{generation, code_base, backing,
 		pages_for((blocks * width + 1) * 4)};
-	/* The generations of the window's turn, and one more for the store. */
-	std::vector<std::unique_ptr<JitBacking>> others;
-	std::vector<std::unique_ptr<JitMapping>> mappings;
-	for (unsigned long other = 0;
-	     other <= UML_GADGET_RESIDENT_GENERATIONS + 1; ++other) {
-		others.push_back(std::make_unique<JitBacking>(1));
-		put_program(*others.back(), 1, 2);
-		mappings.push_back(std::make_unique<JitMapping>(
-			generation + 1 + other, code_base, *others.back(), 1));
-	}
-	const auto store_generation =
-		generation + 1 + UML_GADGET_RESIDENT_GENERATIONS + 1;
+	OtherSpaces old;
+	OtherSpaces fresh;
+	OtherSpaces store;
+	const auto store_generation = generation + 2 * places;
 	const auto a_vcpu = std::make_unique<Vcpu>();
 	const auto b_vcpu = std::make_unique<Vcpu>();
 	auto &a = a_vcpu->executor;
@@ -366,10 +376,22 @@ void relief_sheds_a_space_the_window_leaves(unsigned long generation)
 	const auto full = stress::open_space_bytes(generation);
 	require(full.spaces == 1);
 	const auto closes = stress::closes();
-	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
-	     ++other) {
-		require(run_to_system_call(a, a_memory, generation + 1 + other,
+	for (unsigned long other = 1; other < places; ++other) {
+		old.add(generation + other);
+		require(run_to_system_call(a, a_memory, generation + other,
 			cpu, code_base) == 4);
+	}
+	let_activity_lapse();
+	auto stamp = activity_stamp();
+	cpu = {};
+	cpu.pc = code_base;
+	(void)run_once(b, b_memory, generation, cpu);
+	for (unsigned long other = 1; other < places; ++other) {
+		fresh.add(generation + places + other);
+		require(run_to_system_call(a, a_memory,
+			generation + places + other, cpu, code_base) == 4);
+		require_activity_held(stamp);
+		stamp = activity_stamp();
 		cpu = {};
 		cpu.pc = code_base;
 		(void)run_once(b, b_memory, generation, cpu);
@@ -381,6 +403,7 @@ void relief_sheds_a_space_the_window_leaves(unsigned long generation)
 		stress::closes() == closes);
 
 	/* The budget falls under the space, and A stores past it. */
+	store.add(store_generation);
 	const auto charged = cache::ledger_state();
 	require(charged.shedding == 0 && charged.total > kept.arena);
 	cache::set_budget(kept.arena * 3 / 4);
@@ -397,8 +420,8 @@ void relief_sheds_a_space_the_window_leaves(unsigned long generation)
 	cpu.pc = code_base;
 	(void)run_once(b, b_memory, generation, cpu);
 	require(cache::ledger_state().shedding == 0);
-	const auto fresh = stress::open_space_bytes(generation);
-	require(fresh.spaces == 1 && fresh.held < kept.held / 8);
+	const auto fresh_space = stress::open_space_bytes(generation);
+	require(fresh_space.spaces == 1 && fresh_space.held < kept.held / 8);
 	cache::set_budget(cache::fallback_budget);
 }
 

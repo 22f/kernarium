@@ -215,6 +215,53 @@ void a_renewal_is_counted_when_the_space_is_closed_for_it()
 	registry.detach(shed, &executor);
 }
 
+/* The three ways a window sees an address space it holds. */
+void a_window_tells_idle_from_held_here_from_running_elsewhere()
+{
+	using cache::PlaceUse;
+	cache::ExecutorAnnouncement asking;
+	cache::ExecutorAnnouncement other;
+	cache::AttachedExecutors attached;
+	attached.attach(&asking);
+	cache::Account account{[](void *) noexcept {}, nullptr};
+	const auto now = cache::epoch();
+
+	/* A new account counts as entered, so with only this cache holding it
+	 * the space is held here, and with another it is running elsewhere. */
+	require(cache::place_use(attached, account, false, now) ==
+		PlaceUse::here, "a space held by one cache was not held here");
+	attached.attach(&other);
+	require(cache::place_use(attached, account, false, now) ==
+		PlaceUse::elsewhere, "a space two caches hold was not shared");
+
+	/* A closed space is let go of at the next entry whoever runs it. */
+	require(cache::place_use(attached, account, true, now) ==
+		PlaceUse::idle, "a closed space was kept by its use");
+
+	/* Nobody entered it for a whole window: idle however many hold it,
+	 * until some executor enters it. */
+	const auto later = now + cache::window_epochs;
+	require(cache::place_use(attached, account, false, later) ==
+		PlaceUse::idle, "a space nobody entered was not idle");
+	account.ran(later);
+	require(cache::place_use(attached, account, false, later) ==
+		PlaceUse::elsewhere, "a space entered again was not running");
+	require(attached.detach(&other) == false);
+	require(cache::place_use(attached, account, false, later) ==
+		PlaceUse::here, "a space left to one cache was not held here");
+	attached.attach(&other);
+
+	/* The budget asks it to shed: its holders let go of it at their next
+	 * entry, so no window keeps it, though it is entered all the time. */
+	cache::set_budget(1024);
+	account.charge(4096);
+	cache::relieve_at(later);
+	cache::set_budget(cache::fallback_budget);
+	require(account.shedding(), "the budget did not ask the space to shed");
+	require(cache::place_use(attached, account, false, later) ==
+		PlaceUse::idle, "a space asked to shed was kept by its use");
+}
+
 } // namespace
 
 int main()
@@ -223,5 +270,6 @@ int main()
 	a_failed_snapshot_keeps_the_next_bodies_waiting();
 	a_body_that_cannot_be_queued_is_never_freed();
 	a_renewal_is_counted_when_the_space_is_closed_for_it();
+	a_window_tells_idle_from_held_here_from_running_elsewhere();
 	return 0;
 }

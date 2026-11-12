@@ -99,19 +99,20 @@ share:
 - **Bounded growth.** A shared space is renewed once its arena is mostly freed,
   a private cache sweeps link state nothing names, an address space the kernel
   destroyed is let go of at the executor's next entry, and a process-wide byte
-  budget (`cpu/gadget_cache_budget.hpp`) caps the whole. An executor keeps
-  eight address spaces and admits a ninth by retiring the least recently
-  current one, unless another executor holds it and an executor entered it in
-  the last 175 ms: retiring it would free the bodies the other is running. The
-  oldest destroyed or idle one goes instead, and when every one is running,
-  the one the executor holds the fewest slots of. Past the budget, an address
-  space that alone holds more than seven eighths of the budget is asked to
-  shed, and then, only while the cache is above that, the others: those no
-  executor entered for the last 175 ms first, then the less active by band and
-  the smaller first, so the address space the guest runs most goes last. The
+  budget (`cpu/gadget_cache_budget.hpp`) caps the whole. An executor keeps eight
+  address spaces and admits a ninth by retiring the least recently current one,
+  unless another executor holds it and some executor entered it in the last 175
+  ms: retiring it would free the bodies the other is running. The oldest
+  destroyed or idle one (nobody entered it in those 175 ms) goes instead, and
+  when none is, the one the executor names the fewest slots of. An address space
+  only this executor holds is never spared. Past the budget, an address space
+  that alone holds more than seven eighths of the budget is asked to shed, and
+  then, only while the cache is above that, the others: those no executor
+  entered for the last 175 ms first, then the less active by band and the
+  smaller first, so the address space the guest runs most goes last. The
   emulator sets the budget before the first executor, from guest memory and the
-  process memory limit or `--gadget-cache-budget=`; it is also the
-  gadget-cache term of the host GPU's budget
+  process memory limit or `--gadget-cache-budget=`; it is also the gadget-cache
+  term of the host GPU's budget
   ([architecture](../docs/architecture.md#memory-and-executable-code)).
 - **Code writes.** In both arm64 engines, code another vCPU changed and
   synchronized takes effect at this vCPU's next context synchronization point.

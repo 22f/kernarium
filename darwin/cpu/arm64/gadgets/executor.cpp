@@ -735,13 +735,12 @@ public:
 		account_.ran(epoch);
 	}
 
-	/* Whether an executor besides the one asking is probably running this
-	 * address space at epoch `now`: another holds it, and some executor
-	 * entered it within the account's window of activity. The asking
-	 * executor holds the space, so a space it alone holds never is. */
-	[[nodiscard]] bool in_use_elsewhere(std::uint64_t now) const
+	/* How the asking executor's window sees this address space at epoch
+	 * `now` (gadget_cache::place_use()). */
+	[[nodiscard]] gadget_cache::PlaceUse use(std::uint64_t now) const
 	{
-		return attached_.size() > 1 && account_.activity(now) != 0;
+		return gadget_cache::place_use(attached_, account_, closed(),
+			now);
 	}
 
 #if UML_GADGET_SWEEP_STRESS
@@ -2068,14 +2067,15 @@ public:
 	}
 
 	/* Let go of every address space held here that has been closed, as the
-	 * window lets go of the least recently used one, and, with `dead`, of
-	 * every one whose generation the MMU has destroyed since the caller last
-	 * looked. A destroyed generation never runs again, so nothing it holds
-	 * can be looked up again. A closed space's generation leaves the window's
+	 * window lets go of the one it retires, and, with `dead`, of every one
+	 * whose generation the MMU has destroyed since the caller last looked.
+	 * A destroyed generation never runs again, so nothing it holds can be
+	 * looked up again. A closed space's generation leaves the window's
 	 * order; a destroyed one's number keeps its place in it as a tombstone,
-	 * which holds nothing and which the least-recently-used rule retires when
-	 * it reaches it, so the window keeps the live address spaces it would
-	 * have kept. Say whether the one last prepared was among those let go of.
+	 * which holds nothing and which the window retires before any address
+	 * space it has a reason to keep (GenerationWindow::victim()), so the
+	 * window keeps the live address spaces it would have kept. Say whether
+	 * the one last prepared was among those let go of.
 	 * The caller runs no translated code of this cache from before this call
 	 * until after the next prepare(), which it must therefore make: a retired
 	 * space's successor is attached there, at the address space's current
@@ -2464,9 +2464,10 @@ private:
 				},
 				state.changes, announcement_);
 			touch(window_.current_generation);
-			/* A place goes to make room, but not an address space
-			 * another executor is running: retiring it here would
-			 * free the code that executor is in. */
+			/* A place goes to make room: the least recently
+			 * current, unless another executor is running it,
+			 * which retiring here would free the code of
+			 * (GenerationWindow::victim()). */
 			window_.trim([this](unsigned long generation) {
 #if UML_GADGET_CACHE_CENSUS
 				if (!window_.generations.contains(generation))
@@ -2475,7 +2476,7 @@ private:
 				retire(generation);
 			},
 			[now = gadget_cache::epoch()](const Generation &held) {
-				return held.space->in_use_elsewhere(now);
+				return held.space->use(now);
 			});
 		}
 		window_.bind(*window_.current);

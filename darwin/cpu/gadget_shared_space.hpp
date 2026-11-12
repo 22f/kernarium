@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cpu/gadget_cache_budget.hpp"
+#include "cpu/gadget_generation_window.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -225,6 +226,23 @@ private:
 	mutable std::mutex mutex_;
 	std::vector<const ExecutorAnnouncement *> attached_;
 };
+
+/* How a cache's window sees an address space it holds at epoch `now`, the
+ * `attached` executors being the ones that hold it (the asking cache among
+ * them) and `account` its charge to the budget: PlaceUse::elsewhere when
+ * another executor holds it and some executor entered it within the account's
+ * window of activity, PlaceUse::here when only the asking cache holds it and
+ * it was entered lately, PlaceUse::idle when nobody entered it in that window.
+ * A closed or shedding space is idle: its holders let go of it at their next
+ * entry, so no window keeps it. A new account counts as entered until its
+ * history is its own. */
+[[nodiscard]] inline PlaceUse place_use(const AttachedExecutors &attached,
+	const Account &account, bool closed, std::uint64_t now)
+{
+	if (closed || account.shedding() || account.activity(now) == 0)
+		return PlaceUse::idle;
+	return attached.size() > 1 ? PlaceUse::elsewhere : PlaceUse::here;
+}
 
 /* Where bodies wait after they are unpublished, until no executor can still be
  * running them.
