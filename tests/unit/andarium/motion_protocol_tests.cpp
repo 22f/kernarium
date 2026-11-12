@@ -2,8 +2,8 @@
 //
 // The motion wire (vsock 5556) from the guest's side: the sensor records the
 // host sends, the control frames the sub-HAL sends, and the orientation part of
-// both against the golden frames that AndariumCore checks too. argv[1] is the
-// fixture, tests/unit/andarium/fixtures/motion-orientation-golden-frames.txt.
+// both against the golden frames. argv[1] is the fixture,
+// tests/unit/andarium/fixtures/motion-orientation-golden-frames.txt.
 #include <cmath>
 #include <cstdint>
 #include <fstream>

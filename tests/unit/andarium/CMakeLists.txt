@@ -11,9 +11,9 @@ uml_add_unit_test(NAME andarium-core
     TIMEOUT 1200)
 
 # The guest's motion sub-HAL (android/lineage-24/overlay/sensors): the wire
-# format, its device-orientation part against the golden frames that
-# AndariumCore checks too (the fixture's path is the test's argument, so the
-# file has one copy), and what the orientation sensor reports and when.
+# format, its device-orientation part against the golden frames (the fixture's
+# path is the test's argument, so the file has one copy), and what the
+# orientation sensor reports and when.
 add_executable(uml_andarium_motion_protocol_tests motion_protocol_tests.cpp)
 target_include_directories(uml_andarium_motion_protocol_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/sensors)
