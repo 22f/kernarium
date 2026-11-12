@@ -18,7 +18,11 @@ struct HomeView: View {
             GeometryReader { geo in
                 let wide = geo.size.width >= 700
                 Group {
-                    if model.guest != nil {
+                    if model.guest != nil, let fold = model.fold,
+                        let pages = HomePages(fold, frame: geo.frame(in: .global))
+                    {
+                        pagesLayout(pages)
+                    } else if model.guest != nil {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 if wide && geo.size.width > geo.size.height {
@@ -73,6 +77,7 @@ struct HomeView: View {
                 }
             }
             .environment(model)
+            .foldSheet()
         }
         .microphoneAccessAlert()
         .locationAccessAlert()
@@ -91,6 +96,63 @@ struct HomeView: View {
     }
 
     // MARK: Layouts
+
+    /// The inner display of a folding iPhone, bent or flat alike: one page of
+    /// Home on each side of the fold, each scrolling on its own, and Start at
+    /// the foot of the first. Upright, the virtual machine and Start on the
+    /// leading page and what it may use on the trailing one; turned, the
+    /// virtual machine and Start above the fold and the rest below it.
+    @ViewBuilder
+    private func pagesLayout(_ pages: HomePages) -> some View {
+        let first = ScrollView {
+            VStack(spacing: 22) {
+                notices
+                SystemSection()
+                if pages.upright { developmentSections }
+            }
+            .padding(.horizontal, pages.upright ? 20 : 28)
+            .padding(.top, 8)
+            .padding(.bottom, 20)
+        }
+        .safeAreaBar(edge: .bottom) { startBar(wide: false) }
+        let second = ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 22) {
+                    if pages.upright {
+                        guestSections
+                    } else {
+                        developmentSections
+                        guestSections
+                    }
+                    RecoveryErasePanel()
+                        .id("erase")
+                }
+                .padding(.horizontal, pages.upright ? 20 : 28)
+                .padding(.top, pages.upright ? 8 : 20)
+                .padding(.bottom, 20)
+            }
+            .onAppear {
+                if let target = hints.scrollTarget {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        proxy.scrollTo(target, anchor: .bottom)
+                    }
+                }
+            }
+        }
+        if pages.upright {
+            HStack(spacing: 0) {
+                first.frame(width: pages.first)
+                Color.clear.frame(width: pages.gap)
+                second.frame(width: pages.second)
+            }
+        } else {
+            VStack(spacing: 0) {
+                first.frame(height: pages.first)
+                Color.clear.frame(height: pages.gap)
+                second.frame(height: pages.second)
+            }
+        }
+    }
 
     private var narrowLayout: some View {
         VStack(spacing: 22) {
@@ -417,6 +479,7 @@ struct WelcomeView: View {
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onCardHalf()
     }
 }
 

@@ -367,6 +367,9 @@ extension View {
             SessionSettingsSheet(large: large)
                 .environment(model)
                 .statusBarHidden(true)
+                // On a turned inner display the sheet rises to the fold and
+                // lets touches through to the guest above it.
+                .foldSheet(reachesBehind: true)
         }
     }
 }

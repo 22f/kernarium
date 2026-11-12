@@ -27,6 +27,7 @@ struct BusyOverlay: View {
             .frame(maxWidth: sizeClass == .regular ? 520 : 360)
             .glassEffect(.regular, in: .rect(cornerRadius: 26))
             .padding(24)
+            .onCardHalf()
         }
         .transition(.opacity)
         .animation(.easeInOut(duration: 0.2), value: state.cancel != nil)

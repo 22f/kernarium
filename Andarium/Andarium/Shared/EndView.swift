@@ -49,6 +49,7 @@ struct EndView: View {
         }
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onCardHalf()
         .background(Color(.systemGroupedBackground))
     }
 
