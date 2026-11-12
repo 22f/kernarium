@@ -199,7 +199,9 @@ struct AppEntry {
             #endif
             let runtime = LiveRuntime(
                 model: model, storage: storage, marker: marker, keyStore: adbKeyStore,
-                sessionRecord: sessionRecord, freeSpace: watched)
+                sessionRecord: sessionRecord,
+                cameraDirectory: markerDirectory.appendingPathComponent("Camera", isDirectory: true),
+                freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
             // The listing says why a restore that began last time is still not finished.
@@ -210,6 +212,7 @@ struct AppEntry {
             // Microphone choice with it.
             model.microphone?.refresh()
             model.location?.refresh()
+            model.camera?.refresh()
             #if !APP_STORE
             // A debugger attached at launch (StikDebug) is asked for what the
             // JIT row says at once: it spins until it is served, and the

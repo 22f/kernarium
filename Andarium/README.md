@@ -433,6 +433,29 @@ requires reopening Andarium.
   location or Location Services are off, and says Approximate location, with an
   explanation and Settings, when Precise Location is off. No test reads a real
   location.
+- **Camera.** Camera is a per-guest switch under Capabilities on Home, after
+  Microphone; it is off for a new guest and for one stored before. iOS is asked
+  for camera access only when the person turns it on. The guest always lists
+  the host's cameras (the layout is composed from them, with no permission
+  asked), and the switch decides one thing: whether the host captures. It is
+  read once, when the guest starts, as the boot request's
+  `android_camera_mode` (runtime API 37): live only while it is on and iOS
+  allows it, otherwise blocked, which gives the guest black frames, opens no
+  capture session and reports Android's camera lens cover. The row is off with
+  its reason when iOS refuses or the device restricts the camera, and turning
+  it on then explains why and, for a refusal, offers Settings. A device with no
+  camera shows the row off with a note. On an iPad, a session that other apps
+  share the screen with pauses the camera (black frames) and shows a notice
+  that goes with the interruption. With Camera on and Gyroscope off a note under
+  Capabilities says photos taken sideways are saved the wrong way up. Where the
+  host owns the rotation (an iPad window) it tells the runtime how far to turn
+  the picture for Android's automatic ROTATE_AND_CROP. The memory a session's
+  cameras hold is the [camera device's tier](../darwin/device/camera/README.md),
+  taken from the launch's graphics budget. The Simulator has no camera: the
+  preview states the access (`-systemCamera` reads the Simulator's own
+  permission) and the non-App Store runtime serves a synthetic camera
+  (`KERNARIUM_CAMERA_SOURCE`) that tests use; an App Store build has neither.
+  No test captures a real camera.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches

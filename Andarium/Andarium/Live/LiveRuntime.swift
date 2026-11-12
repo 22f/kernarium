@@ -56,6 +56,9 @@ final class LiveRuntime: RuntimeDriver {
     private let keyStore: AdbKeyStore
     /// Where the runtime records how each session ends, for the next launch.
     private let sessionRecord: URL?
+    /// Where the colour data a Bayer still teaches the camera is kept: beside
+    /// the session records, outside the guest's disks, so an erase leaves it.
+    private let cameraDirectory: URL?
     /// The guest's adb key, made before the start that boots with it.
     private var adbIdentity: AdbKeyStore.Identity?
     /// What this run puts in the names of its imports' partial files, new at
@@ -121,6 +124,9 @@ final class LiveRuntime: RuntimeDriver {
                 message: String(localized: "The virtual machine’s screen could not follow this window. Close and reopen Andarium to try again."))
         })
     private var normalRun = false
+    /// The rotation last given to the camera in this run
+    /// (`updateCameraRotation`).
+    private var cameraRotationSent: UInt32?
     /// The runtime runs a guest, from its start until its run returns.
     private var runActive = false { didSet { publishSnapshotActivity() } }
     private var active = UIApplication.shared.applicationState == .active
@@ -169,7 +175,7 @@ final class LiveRuntime: RuntimeDriver {
 
     init(
         model: AppModel, storage: TwoDiskStorage, marker: PauseMarker, keyStore: AdbKeyStore = AdbKeyStore(),
-        sessionRecord: URL? = nil,
+        sessionRecord: URL? = nil, cameraDirectory: URL? = nil,
         freeSpace: @escaping @Sendable () -> UInt64 = { AppEntry.freeStorageBytes() },
         keyboardMouse: KeyboardMouse? = nil
     ) {
@@ -182,6 +188,7 @@ final class LiveRuntime: RuntimeDriver {
         partials = PartialSweepLedger(directory: storage.locations.directory)
         self.keyStore = keyStore
         self.sessionRecord = sessionRecord
+        self.cameraDirectory = cameraDirectory
         self.freeSpace = freeSpace
         let effects = LivePauseEffects()
         pause = PauseController(effects: effects, marker: marker, runClock: clock)
@@ -204,6 +211,13 @@ final class LiveRuntime: RuntimeDriver {
         // queue.
         kernarium_runtime_loader_set_location_receiver_handler { @Sendable [weak self] powered in
             MainActor.assumeIsolated { self?.location.receiverPower(powered) }
+        }
+        // The camera is read once, when the guest starts; the runtime says
+        // what the host is doing for it (the notice for other apps sharing the
+        // screen), delivered on the main queue.
+        model.camera = CameraController(model: model, source: SystemCameraSource())
+        kernarium_runtime_loader_set_camera_state_handler { @Sendable [weak model] state in
+            MainActor.assumeIsolated { model?.cameraCaptureChanged(Self.cameraCapture(runtimeState: state)) }
         }
         model.motionSensorsAvailable = motion.available
         model.hapticsAvailable = hapticsAvailable
@@ -455,12 +469,20 @@ final class LiveRuntime: RuntimeDriver {
         updateThermal()
         if normalRun { thermalMonitor.start() }
         motionMount.begin(interface: interfaceMotionAxes)
+        cameraRotationSent = nil
+        updateCameraRotation(policy: rotationPolicy)
         updateHaptics()
         updateGameControllers()
         updateLocation()
         inputRunReady = false
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(hapticsAvailable: hapticsAvailable)
+        // iOS may have changed the camera's access since Home read it: the
+        // mode is what it allows at this moment, and it holds until the guest
+        // powers off.
+        model?.camera?.refresh()
+        let cameraMode = Self.cameraRuntimeMode(model?.cameraMode ?? .blocked)
+        let cameraPath = cameraDirectory?.path
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -479,7 +501,8 @@ final class LiveRuntime: RuntimeDriver {
                 view: view, dataDiskPath: dataDiskPath, releasePath: releasePath, dataGiB: dataGiB, bootMode: bootMode,
                 width: width, height: height, dotsPerInch: dotsPerInch, memoryMiB: memoryMiB,
                 processorCount: processorCount, adbKeyLine: adbKeyLine, timeZone: timeZone,
-                sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, extras: extras
+                sessionRecordPath: sessionRecordPath, hostFeatures: hostFeatures, cameraMode: cameraMode,
+                cameraPath: cameraPath, extras: extras
             )
             Task { @MainActor in self.finished(result: result) }
         }
@@ -491,45 +514,51 @@ final class LiveRuntime: RuntimeDriver {
         view: GuestMetalView, dataDiskPath: String, releasePath: String, dataGiB: UInt32, bootMode: UInt32,
         width: UInt32, height: UInt32, dotsPerInch: UInt32, memoryMiB: UInt32,
         processorCount: UInt32, adbKeyLine: String?, timeZone: String?, sessionRecordPath: String?,
-        hostFeatures: UInt32, extras: StartExtras
+        hostFeatures: UInt32, cameraMode: UInt32, cameraPath: String?, extras: StartExtras
     ) -> Int32 {
         dataDiskPath.withCString { dataDisk in
             releasePath.withCString { release in
                 withOptionalCString(adbKeyLine) { adbKey in
                     withOptionalCString(timeZone) { zone in
                         withOptionalCString(sessionRecordPath) { record in
-                            var request = kernarium_runtime_boot()
-                            request.struct_size = UInt32(MemoryLayout<kernarium_runtime_boot>.size)
-                            request.width = width
-                            request.height = height
-                            request.dots_per_inch = dotsPerInch
-                            request.guest_memory_mib = memoryMiB
-                            request.guest_processor_count = processorCount
-                            request.android_boot_mode = bootMode
-                            // The guest's display always follows the window.
-                            request.auto_resize_guest = 1
-                            request.android_data_disk_path = dataDisk
-                            request.android_release_path = release
-                            request.android_data_gib = dataGiB
-                            // The conservative launch parameters the default memory was computed with.
-                            let parameters = kernarium_runtime_loader_launch_memory_set()
-                            request.gpu_budget_application_mib = parameters.application_mib
-                            request.gpu_budget_engine_mib = parameters.engine_mib
-                            request.gpu_budget_headroom_mib = parameters.headroom_mib
-                            // The key adbd authorizes for this boot, or none.
-                            request.android_adb_public_key = adbKey
-                            // The host's time zone, which the guest applies while its
-                            // own automatic time zone is on, or none.
-                            request.android_time_zone = zone
-                            // Where the runtime records how the session ends.
-                            request.session_record_path = record
-                            // What the host has that the guest is to find.
-                            request.android_host_features = hostFeatures
-                            #if !APP_STORE
-                            // The JIT engine, once its memory is prepared; gadgets otherwise.
-                            request.use_jit = extras.jit ? 1 : 0
-                            #endif
-                            return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }
+                            withOptionalCString(cameraPath) { calibration in
+                                var request = kernarium_runtime_boot()
+                                request.struct_size = UInt32(MemoryLayout<kernarium_runtime_boot>.size)
+                                request.width = width
+                                request.height = height
+                                request.dots_per_inch = dotsPerInch
+                                request.guest_memory_mib = memoryMiB
+                                request.guest_processor_count = processorCount
+                                request.android_boot_mode = bootMode
+                                // The guest's display always follows the window.
+                                request.auto_resize_guest = 1
+                                request.android_data_disk_path = dataDisk
+                                request.android_release_path = release
+                                request.android_data_gib = dataGiB
+                                // The conservative launch parameters the default memory was computed with.
+                                let parameters = kernarium_runtime_loader_launch_memory_set()
+                                request.gpu_budget_application_mib = parameters.application_mib
+                                request.gpu_budget_engine_mib = parameters.engine_mib
+                                request.gpu_budget_headroom_mib = parameters.headroom_mib
+                                // The key adbd authorizes for this boot, or none.
+                                request.android_adb_public_key = adbKey
+                                // The host's time zone, which the guest applies while its
+                                // own automatic time zone is on, or none.
+                                request.android_time_zone = zone
+                                // Where the runtime records how the session ends.
+                                request.session_record_path = record
+                                // What the host has that the guest is to find.
+                                request.android_host_features = hostFeatures
+                                // What the cameras do for the whole run, and where the
+                                // colour data a Bayer still teaches is kept.
+                                request.android_camera_mode = cameraMode
+                                request.android_camera_calibration_path = calibration
+                                #if !APP_STORE
+                                // The JIT engine, once its memory is prepared; gadgets otherwise.
+                                request.use_jit = extras.jit ? 1 : 0
+                                #endif
+                                return withUnsafePointer(to: &request) { kernarium_runtime_loader_run(view, $0) }
+                            }
                         }
                     }
                 }
@@ -548,6 +577,27 @@ final class LiveRuntime: RuntimeDriver {
     /// (`android_host_features`): a vibrator, on a device with haptics.
     nonisolated static func hostFeatures(hapticsAvailable: Bool) -> UInt32 {
         hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0
+    }
+
+    /// The runtime's word for the session's camera mode (KernariumRuntime.h).
+    nonisolated static func cameraRuntimeMode(_ mode: CameraMode) -> UInt32 {
+        switch mode {
+        case .blocked: UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED)
+        case .live: UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_LIVE)
+        }
+    }
+
+    /// What the runtime's camera state (KernariumRuntime.h) says the host is
+    /// doing. A state this application does not know counts as an interruption,
+    /// the safe reading: the notice follows only the multitasking one.
+    nonisolated static func cameraCapture(runtimeState state: Int32) -> CameraCapture {
+        switch state {
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_IDLE): .idle
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_STREAMING): .streaming
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING): .interruptedByMultitasking
+        case Int32(KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE): .interruptedBySystemPressure
+        default: .interrupted
+        }
     }
 
     // MARK: Android operations
@@ -783,12 +833,23 @@ final class LiveRuntime: RuntimeDriver {
         // the mount follows the scene's orientation. Never remap per sensor
         // sample.
         if motionMount.update(policy: policy, interface: interfaceMotionAxes) { motion.restart() }
+        updateCameraRotation(policy: policy)
         rotation.update(policy: policy, ready: normalRun && reachedBootCompleted && active && !holdsGuestStill)
         updateMotionSensors()
         updateHaptics()
         updateGameControllers()
         updateLocation()
         updateKeyboardMouse()
+    }
+
+    /// Tells the camera how far the host turns the guest's picture: where the
+    /// host owns the rotation (an iPad window) the window's orientation, else
+    /// none. The runtime keeps the figure, so only a change is sent.
+    private func updateCameraRotation(policy: GuestRotationPolicy) {
+        guard runActive, let axes = interfaceMotionAxes else { return }
+        let degrees = CameraRotation.degrees(policy: policy, interface: axes)
+        guard degrees != cameraRotationSent else { return }
+        if kernarium_runtime_loader_set_camera_rotation(degrees) == 0 { cameraRotationSent = degrees }
     }
 
     func setNetworkNotice(_ denial: NetworkDenial?) {
@@ -1255,6 +1316,7 @@ final class LiveRuntime: RuntimeDriver {
         if model.spacePause != nil { model.spacePause?.freeBytes = free }
         model.microphone?.refresh()
         model.location?.refresh()
+        model.camera?.refresh()
     }
 
     private func observeRotationPolicy() {

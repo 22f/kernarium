@@ -26,6 +26,11 @@ struct AppEntry {
     /// `systemMicrophone` does for the microphone: `simctl privacy` sets it
     /// and the system's alert asks.
     var systemLocation: Bool
+    /// The Camera switch asks the Simulator's own permission, as
+    /// `systemMicrophone` does for the microphone. The Simulator has no camera,
+    /// so the preview takes it that the device has one: `simctl privacy` sets
+    /// the access and the system's alert asks.
+    var systemCamera: Bool
     /// How many CPU readings the stats overlay and Settings' Stats rows
     /// start with, and hold: 0 is a session before its first reading. Absent,
     /// the mock readings run on.
@@ -58,6 +63,7 @@ struct AppEntry {
             bootStage: defaults.string(forKey: "bootStage").flatMap { Int($0) },
             systemMicrophone: defaults.bool(forKey: "systemMicrophone"),
             systemLocation: defaults.bool(forKey: "systemLocation"),
+            systemCamera: defaults.bool(forKey: "systemCamera"),
             statsReadings: defaults.string(forKey: "statsReadings").flatMap { Int($0) },
             statsVramMiB: defaults.string(forKey: "statsVramMiB").flatMap { Int($0) },
             device: defaults.string(forKey: "device"),
@@ -82,6 +88,10 @@ struct AppEntry {
         "home-location-services-off": "capabilities", "home-location-alert": "capabilities",
         "home-location-approximate-alert": "capabilities", "home-location-restricted-alert": "capabilities",
         "home-location-services-off-alert": "capabilities", "home-location-ask": "capabilities",
+        "home-camera-on": "capabilities", "home-camera-denied": "capabilities",
+        "home-camera-restricted": "capabilities", "home-camera-unavailable": "capabilities",
+        "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
+        "home-camera-footnote": "capabilities", "home-camera-ask": "capabilities",
         "home-backup": "backup",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
@@ -144,6 +154,10 @@ struct AppEntry {
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
         model.hapticsAvailable = host.name == "iPhone"
+        // The mock device has a camera that iOS has not been asked about; a
+        // screen states another access (and `-systemCamera` reads the
+        // Simulator's own).
+        model.cameraAccess = .notDetermined
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil
@@ -192,7 +206,8 @@ struct AppEntry {
             }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask":
+        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit", "home-location-ask",
+             "home-camera-ask":
             break
         case "home-jit":
             model.jitOn = true
@@ -224,6 +239,19 @@ struct AppEntry {
             model.locationAuthorization = .restricted
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
+        case "home-camera-on":
+            model.guest?.camera = true
+            model.cameraAccess = .authorized
+        case "home-camera-footnote":
+            model.guest?.camera = true
+            model.guest?.motionChoice = false
+            model.cameraAccess = .authorized
+        case "home-camera-denied", "home-camera-alert":
+            model.cameraAccess = .denied
+        case "home-camera-restricted", "home-camera-restricted-alert":
+            model.cameraAccess = .restricted
+        case "home-camera-unavailable":
+            model.cameraAccess = .unavailable
         case "busy-create":
             model.busy = BusyState(title: String(localized: "Creating virtual machine"), detail: String(localized: "Setting up Andarium with \(Formats.size(gib: 16))."), progress: 0.42)
         case "busy-erase":
@@ -257,7 +285,8 @@ struct AppEntry {
             boot(.normal, stage: 1, seconds: 4)
         case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
-             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi":
+             "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
+             "session-camera-notice":
             model.session.showStats = screen == "session-stats"
             model.session.sideKeysOpen = ["session-open", "session-off", "session-left", "session-volume"].contains(screen)
             model.sessionPreset = SessionPreset(
@@ -278,6 +307,7 @@ struct AppEntry {
             if screen == "session-thermal-notice" { model.previewThermalNotice() }
             if screen == "session-network-cellular" { model.previewNetworkNotice(.cellular) }
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
+            if screen == "session-camera-notice" { model.previewCameraNotice() }
         case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-done", "install-failed", "install-not-apk", "install-bundle", "bug-report":
             let session = model.session
@@ -341,6 +371,7 @@ struct AppEntry {
         }
         if systemMicrophone { useSystemMicrophone(in: model) }
         if systemLocation { useSystemLocation(in: model) }
+        if systemCamera { useSystemCamera(in: model) }
         SnapshotPreview.apply(screen: screen, to: model)
         return model
     }
@@ -440,6 +471,18 @@ struct AppEntry {
         }
     }
 
+    /// The device's camera conversation against the Simulator's permission,
+    /// which is read again whenever the app becomes active. The Simulator has
+    /// no camera and the conversation does not need one.
+    private func useSystemCamera(in model: AppModel) {
+        model.camera = CameraController(model: model, source: SystemCameraSource(requiresCamera: false))
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in model.camera?.refresh() }
+        }
+    }
+
     /// The resolution the launch chooses and the screen it states: the preview
     /// shows a 2.3 screen on any Simulator.
     @MainActor
@@ -476,6 +519,8 @@ struct AppEntry {
             model.setLocation(true)
         case "home-location-approximate-alert":
             model.permissionPrompt = .location
+        case "home-camera-alert", "home-camera-restricted-alert", "home-camera-ask":
+            model.setCamera(true)
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",

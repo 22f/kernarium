@@ -69,6 +69,9 @@ enum MicrophoneState: Equatable {
 /// person can change in Settings.
 enum PermissionPrompt: Identifiable, Equatable {
     case microphone
+    /// The camera is refused or restricted; the words follow the access
+    /// (`CameraWords.alert`).
+    case camera
     /// The location is refused, restricted, off or approximate; the words
     /// follow the access (`LocationWords.alert`).
     case location

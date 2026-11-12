@@ -226,18 +226,18 @@ struct CapabilitiesFlowTests {
 
     // MARK: The order of the rows
 
-    /// Location sits above Microphone and Gyroscope, as the person asked, and
-    /// Haptics comes last; the section draws its rows in this order, which
-    /// VoiceOver reads.
-    @Test func capabilitiesAreListedLocationMicrophoneGyroscopeHaptics() {
-        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .gyroscope, .haptics])
-        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .gyroscope, .haptics])
+    /// Location sits above Microphone, Camera follows Microphone, Gyroscope
+    /// comes next and Haptics comes last; the section draws its rows in this
+    /// order, which VoiceOver reads.
+    @Test func capabilitiesAreListedLocationMicrophoneCameraGyroscopeHaptics() {
+        #expect(CapabilitiesSection.Row.allCases == [.location, .microphone, .camera, .gyroscope, .haptics])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: true) == [.location, .microphone, .camera, .gyroscope, .haptics])
     }
 
     /// An iPad, a Mac and the Simulator have no Taptic Engine: nothing to
     /// switch, so no row (and no disabled one).
     @Test func hapticsHasNoRowWithoutADeviceThatHasThem() {
-        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .gyroscope])
+        #expect(CapabilitiesSection.rows(hapticsAvailable: false) == [.location, .microphone, .camera, .gyroscope])
         #expect(!setup().model.hapticsAvailable)
     }
 

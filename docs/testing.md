@@ -341,7 +341,16 @@ ranges of every field and the frame reader), system image staging, the
 screenshot script, the String Catalogs' check and their sync with the
 compiler's extraction ([the gate after a build](../Andarium/README.md#languages)),
 and `kernarium-host-features` (unit) the table of host features the boot
-request carries to an Android guest. The application builds with Xcode
+request carries to an Android guest. `kernarium-camera` (unit) checks
+what the runtime tells an Android guest about the host's cameras (the camera
+fields of the boot request, the composed layout, the lens cover and the
+camera state and rotation), and `camera-layout` (unit) that the layout name
+composed from a host's cameras is one of the image's
+([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted tests
+(`CameraFlowTests`) play iOS's permission with a fake and open
+no camera; the Simulator has no camera and `simctl privacy` cannot grant or
+revoke one, so the denied, restricted and absent states are shown by the
+preview (`-systemCamera` asks the Simulator's own permission). The application builds with Xcode
 (`AndariumPreview` is the Simulator build with mock data, `Andarium` the
 device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
