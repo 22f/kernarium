@@ -315,7 +315,10 @@ it. The bridge fields used below are defined by the comments in
 - The virtio-uml exit call stops every command-line device's connection-broken
   work before it removes a device, and a device being removed queues none, so a
   backend lost during the removal at power off does not have it unregistered a
-  second time (`guest-vhost-user-power-off`).
+  second time (`guest-vhost-user-power-off`). One loss report per device queues
+  the work (an atomic bit), and the work holds the platform device's lock
+  around its lookup of the virtio device, so an unbind cannot free what it
+  breaks.
 
 ## Devices
 

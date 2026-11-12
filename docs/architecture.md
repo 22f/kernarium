@@ -539,7 +539,10 @@ virtqueues and unregisters it so that pending and later requests fail instead of
 waiting (`guest-vhost-user-backend-gone`). A backend lost while the device is
 being removed, as at power off, leaves the removal to the path that began it:
 the exit call stops the connection-broken work before it removes a device, so
-that a device is unregistered once (`guest-vhost-user-power-off`). Recovery
+that a device is unregistered once (`guest-vhost-user-power-off`). The work is
+queued by one loss report per device and holds the platform device's lock
+around its lookup of the virtio device, so an unbind cannot free what it
+breaks. Recovery
 ends there: a lost GPU backend kills the guest's Vulkan client within seconds,
 but a client waiting on a full control queue stays blocked until Mesa's own
 ring timeout.
