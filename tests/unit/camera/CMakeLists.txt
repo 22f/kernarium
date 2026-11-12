@@ -43,6 +43,14 @@ target_link_libraries(uml_camera_photo_dimensions_tests PRIVATE UML::PhotoDimens
 uml_add_unit_test(NAME camera-photo-dimensions COMMAND uml_camera_photo_dimensions_tests
     LABELS "device;camera")
 
+# The anchor model: the one format a camera runs in, what it offers from it, the
+# session's admit and resize transactions on a fake session, and the invariants
+# over seeded generated format tables.
+add_executable(uml_camera_capture_model_tests camera_capture_model_tests.cpp)
+target_link_libraries(uml_camera_capture_model_tests PRIVATE UML::PhotoDimensions)
+uml_add_unit_test(NAME camera-capture-model COMMAND uml_camera_capture_model_tests
+    LABELS "device;camera")
+
 # The Apple host's accelerated transform against the portable one.
 add_executable(uml_camera_apple_transform_tests camera_apple_transform_tests.cpp)
 target_link_libraries(uml_camera_apple_transform_tests PRIVATE UML::AppleCamera)

@@ -338,7 +338,11 @@ private:
         {
             return openable(camera, true) && host_->takeStill(camera, request);
         }
-        void setLimits(const uml::platform::CameraLimits& limits) override { host_->setLimits(limits); }
+        void setAnchors(std::span<const std::optional<std::size_t>> formatOfCamera,
+                        const uml::platform::CameraLimits& limits) override
+        {
+            host_->setAnchors(formatOfCamera, limits);
+        }
         void stop() override { host_->stop(); }
 
     private:

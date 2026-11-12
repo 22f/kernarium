@@ -27,7 +27,10 @@ enum class SyntheticCameraProfile : std::uint8_t {
     // A phone: a back zoom camera over wide, ultra wide and telephoto lenses,
     // and a front camera. The wide lens has 48 MP stills and Bayer stills.
     phone,
-    // A tablet: a back wide camera and a front camera.
+    // A tablet: a back wide camera and a front camera. The back camera lists the
+    // capture formats an iPad mini's does (CameraInfo::captureFormats), so the
+    // device gives it an anchor and it runs only in it; the front camera lists
+    // none.
     tablet,
     // An iPad's: a back wide camera and two front cameras (wide and ultra wide,
     // one sensor behind both), each of which can run with the back camera. The
@@ -50,18 +53,26 @@ struct SyntheticCameraOptions {
 
 // The multi-camera rule it models, as an AVCaptureMultiCamSession asks it:
 // every camera with an input (one that streams, or has a still on its way)
-// lies in one concurrent set and runs a format a multi-camera session takes,
-// the cameras that stream moving to such a format when another joins; a join
-// that cannot is refused with nothing changed, and so is one whose cameras ask
-// for more than 200 million pixels a second together (the hardware budget).
+// lies in one concurrent set and runs a format a multi-camera session takes; a
+// join that cannot is refused with nothing changed, and so is one whose cameras
+// ask for more than 200 million pixels a second together (the hardware
+// budget). A camera that has an anchor (CameraSession::setAnchors) runs in it
+// and nowhere else: a stream outside it, a still it does not make, or an anchor
+// a multi-camera session does not take is refused. A camera with none picks the
+// smallest of its video formats that covers the stream, moving between them as
+// others join and leave.
 class SyntheticCamera : public Camera {
 public:
     // Sessions opened since the object was made, and sessions open now. A
     // blocked guest never opens one.
     [[nodiscard]] virtual unsigned sessionsOpened() const noexcept = 0;
     [[nodiscard]] virtual unsigned sessionsOpen() const noexcept = 0;
-    // The limits the device last gave a session (zero before any was given).
+    // What the device last told a session (CameraSession::setAnchors): the
+    // format each camera runs in and the limits, and how many times it was
+    // told. Empty, zero limits and zero before any session was told.
+    [[nodiscard]] virtual std::vector<std::optional<std::size_t>> sessionAnchors() const = 0;
     [[nodiscard]] virtual CameraLimits sessionLimits() const noexcept = 0;
+    [[nodiscard]] virtual unsigned sessionAnchorCalls() const noexcept = 0;
     // The settings last applied to a camera, and the cameras running video.
     [[nodiscard]] virtual CameraSettings appliedSettings(std::size_t camera) const = 0;
     [[nodiscard]] virtual bool videoRunning(std::size_t camera) const = 0;

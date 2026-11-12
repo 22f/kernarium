@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "synthetic_camera.hpp"
 
+#include "photo_dimensions.hpp"
+
 #include <time.h>
 
 #include <algorithm>
@@ -41,6 +43,22 @@ std::uint64_t realNow() noexcept
 CameraVideoFormat format(std::uint32_t width, std::uint32_t height, std::uint32_t maximumRate, bool multi = true)
 {
     return {width, height, 1, maximumRate, multi};
+}
+
+// A camera that lists the capture formats of a platform: the format list, the
+// video formats the session's own rule uses (in the same order, so a format's
+// index is the same in both) and every JPEG size some format makes.
+void listFormats(CameraInfo& info, std::vector<CameraCaptureFormat> formats)
+{
+    info.captureFormats = std::move(formats);
+    info.videoFormats.clear();
+    info.stillSizes.clear();
+    for (const auto& format : info.captureFormats) {
+        info.videoFormats.push_back(
+            {format.width, format.height, 1, std::uint32_t(format.frameRates.front().maximum), format.multiCamera});
+        for (const auto& size : format.photoSizes)
+            if (std::find(info.stillSizes.begin(), info.stillSizes.end(), size) == info.stillSizes.end()) info.stillSizes.push_back(size);
+    }
 }
 
 struct Profile {
@@ -119,6 +137,17 @@ Profile profileOf(SyntheticCameraProfile which)
         back.flash = back.torch = true;
         back.rawStills = true;
         back.rawStillSize = {1008, 756};
+        // The formats an iPad mini's back camera lists, so the device anchors it: the 12 MP photos belong to the 4:3
+        // formats, and the 1080p format makes none. The front camera lists none (it has one set of facts).
+        listFormats(back, {
+            {640, 480, {{1, 60}}, {{640, 480}}, true, true},
+            {1280, 720, {{1, 120}}, {{1280, 720}}, true, true},
+            {1440, 1080, {{1, 30}}, {{1440, 1080}, {2016, 1512}, {1008, 756}}, true, true},
+            {1920, 1440, {{1, 30}}, {{1920, 1440}, {4032, 3024}, {2016, 1512}, {1008, 756}}, true, true},
+            {4032, 3024, {{1, 30}}, {{4032, 3024}, {4224, 2376}}, true, false},
+            {1920, 1080, {{1, 60}}, {{1920, 1080}, {2016, 1134}}, true, true},
+            {3840, 2160, {{1, 60}}, {{3840, 2160}}, true, false},
+        });
         CameraInfo front = lens("synthetic-front", CameraPosition::front, CameraLensKind::wide);
         front.videoFormats = {format(640, 480, 60), format(1280, 720, 60), format(1920, 1080, 60)};
         front.stillSizes = {{2016, 1512}, {1008, 756}};
@@ -424,7 +453,10 @@ public:
     const SyntheticCameraOptions options_;
     const Profile profile_;
     std::atomic<unsigned> opened {0};
-    std::atomic<std::uint64_t> stillPixelLimit {0};
+    std::mutex anchorMutex;
+    std::vector<std::optional<std::size_t>> anchors;  // guarded by anchorMutex
+    CameraLimits anchorLimits;                        // guarded by anchorMutex
+    std::atomic<unsigned> anchorCalls {0};
     std::atomic<unsigned> open {0};
     std::atomic<std::uint64_t> clock {1'000'000'000};
     std::atomic<bool> rawRefused {false};
@@ -451,7 +483,15 @@ public:
 
     ~Session() override { stop(); }
 
-    void setLimits(const CameraLimits& limits) override { core_.stillPixelLimit = limits.maximumStillPixels; }
+    void setAnchors(std::span<const std::optional<std::size_t>> formatOfCamera, const CameraLimits& limits) override
+    {
+        {
+            std::lock_guard lock(core_.anchorMutex);
+            core_.anchors.assign(formatOfCamera.begin(), formatOfCamera.end());
+            core_.anchorLimits = limits;
+        }
+        ++core_.anchorCalls;
+    }
 
     bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate) override
     {
@@ -485,6 +525,11 @@ public:
         const auto& info = core_.profile_.cameras[camera];
         if (request.raw && (!info.rawStills || info.rawStillSize.width == 0 || core_.rawRefused)) return false;
         if (request.jpegWidth != 0 && !stillSize(info, request.jpegWidth, request.jpegHeight)) return false;
+        // An anchored camera makes the sizes its anchor makes, as the platform's output does.
+        if (const auto anchor = anchorOf(camera); anchor && request.jpegWidth != 0) {
+            const auto made = anchoredStills(camera, *anchor);
+            if (std::find(made.begin(), made.end(), CameraStillSize {request.jpegWidth, request.jpegHeight}) == made.end()) return false;
+        }
         if (request.jpegWidth == 0 && !request.raw) return false;
         // A camera that only takes stills is an input of the session too: it
         // joins as a streaming camera does, or the still is refused.
@@ -563,6 +608,22 @@ public:
     void deliver(CameraEvent event) { delegate_.cameraEvent(event); }
 
 private:
+    // The format a camera was told to run in, when it was told one.
+    std::optional<std::size_t> anchorOf(std::size_t camera) const
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        const auto& info = core_.profile_.cameras[camera];
+        if (camera >= core_.anchors.size() || !core_.anchors[camera] || *core_.anchors[camera] >= info.captureFormats.size()) return std::nullopt;
+        return core_.anchors[camera];
+    }
+
+    // The sizes the anchor's format makes within the cap the device named.
+    std::vector<CameraStillSize> anchoredStills(std::size_t camera, std::size_t anchor) const
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        return stillsOf(core_.profile_.cameras[camera].captureFormats[anchor], core_.anchorLimits.maximumStillPixels);
+    }
+
     // A camera has an input in the session while it streams and while a still
     // it took is on its way.
     static bool hasInput(const CameraState& state) { return state.video.has_value() || state.stillsOut > 0; }
@@ -592,16 +653,20 @@ private:
             const bool self = index == camera;
             const auto& state = cameras_[index];
             const auto& info = core_.profile_.cameras[index];
+            const auto anchor = anchorOf(index);
             if (!(self && streams) && !state.video) {
-                const bool takesMulti = std::any_of(info.videoFormats.begin(), info.videoFormats.end(),
-                                                    [](const auto& candidate) { return candidate.multiCamera; });
+                const bool takesMulti = anchor ? info.captureFormats[*anchor].multiCamera
+                                               : std::any_of(info.videoFormats.begin(), info.videoFormats.end(),
+                                                             [](const auto& candidate) { return candidate.multiCamera; });
                 if (several && !takesMulti) return false;
                 continue;
             }
             const auto askedWidth = self && streams ? width : state.video->requestedWidth;
             const auto askedHeight = self && streams ? height : state.video->requestedHeight;
             const auto askedRate = self && streams ? frameRate : state.video->frameRate;
-            const auto* pick = chooseFormat(info, askedWidth, askedHeight, askedRate, several);
+            // An anchored camera runs in its anchor, or the stream is refused.
+            const auto* pick = anchor ? anchoredFormat(info, *anchor, askedWidth, askedHeight, askedRate, several)
+                                      : chooseFormat(info, askedWidth, askedHeight, askedRate, several);
             if (pick == nullptr) return false;
             picks[index] = pick;
             cost += double(pick->width) * pick->height * askedRate;
@@ -616,10 +681,18 @@ private:
         for (const auto& [index, pick] : picks) {
             auto& state = cameras_[index];
             const bool self = index == camera && streams;
-            if (!self && state.video->width == pick->width && state.video->height == pick->height) continue;
+            const bool anchored = anchorOf(index).has_value();
+            // An anchored camera never leaves its format.
+            if (!self && (anchored || (state.video->width == pick->width && state.video->height == pick->height))) continue;
             RunningVideo video;
             video.width = pick->width;
             video.height = pick->height;
+            // The platform delivers an anchored camera's frames at the stream's size in the format's own aspect ratio.
+            if (anchored) {
+                const auto delivered = deliveredFrameSize(pick->width, pick->height, width, height);
+                video.width = delivered.width;
+                video.height = delivered.height;
+            }
             video.requestedWidth = self ? width : state.video->requestedWidth;
             video.requestedHeight = self ? height : state.video->requestedHeight;
             video.frameRate = self ? frameRate : state.video->frameRate;
@@ -637,6 +710,7 @@ private:
             if (hasInput(cameras_[index])) inputs.push_back(index);
         if (inputs.size() != 1 || !cameras_[inputs.front()].video) return;
         auto& state = cameras_[inputs.front()];
+        if (anchorOf(inputs.front())) return;  // an anchored camera never leaves its format
         const auto* pick = chooseFormat(core_.profile_.cameras[inputs.front()], state.video->requestedWidth,
                                         state.video->requestedHeight, state.video->frameRate, false);
         if (pick == nullptr || (pick->width == state.video->width && pick->height == state.video->height)) return;
@@ -651,6 +725,18 @@ private:
             return std::all_of(running.begin(), running.end(),
                                [&](auto member) { return std::find(set.begin(), set.end(), member) != set.end(); });
         });
+    }
+
+    // The anchor's video format when it covers the size at the rate (and a
+    // multi-camera session takes it when several cameras run).
+    static const CameraVideoFormat* anchoredFormat(const CameraInfo& info, std::size_t anchor, std::uint32_t width,
+                                                   std::uint32_t height, std::uint32_t frameRate, bool multiCameraOnly)
+    {
+        const auto& candidate = info.videoFormats[anchor];
+        if (candidate.width < width || candidate.height < height) return nullptr;
+        if (frameRate < candidate.minimumFrameRate || frameRate > candidate.maximumFrameRate) return nullptr;
+        if (multiCameraOnly && !candidate.multiCamera) return nullptr;
+        return &candidate;
     }
 
     // The smallest format that covers the size at the rate.
@@ -917,7 +1003,17 @@ public:
         return session;
     }
 
-    CameraLimits sessionLimits() const noexcept override { return {core_.stillPixelLimit}; }
+    std::vector<std::optional<std::size_t>> sessionAnchors() const override
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        return core_.anchors;
+    }
+    CameraLimits sessionLimits() const noexcept override
+    {
+        std::lock_guard lock(core_.anchorMutex);
+        return core_.anchorLimits;
+    }
+    unsigned sessionAnchorCalls() const noexcept override { return core_.anchorCalls; }
     unsigned sessionsOpened() const noexcept override { return core_.opened; }
     unsigned sessionsOpen() const noexcept override { return core_.open; }
 

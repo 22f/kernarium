@@ -37,13 +37,17 @@ application's statements (the sensor orientation, the rotation that
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
   exercises them.
 - **Memory.** A live session holds host memory outside the guest's RAM: the
-  capture pools (four frames of the 4:3 frame of the tier's width, which is the
-  largest the platform delivers: a format that would deliver more to a stream
-  is not run for it), the device's staging and the transients of a 12 MP RAW
-  still with its DNG and JPEG, 110 MiB at the small tier
-  (`cameraHostMemoryReserveMiB`). The GPU's pool is the budget B less that
-  while the cameras are live and B otherwise, in the runtime, the launcher and
-  the applications' figure alike.
+  capture pools (six frames a camera is holding, `heldFramesPerCamera`, of the
+  largest buffer the platform delivers, for two cameras: the 4:3 frame of the
+  tier's width at the capture buffer's 256-byte row alignment), the device's
+  staging and the transients of a 12 MP RAW still with its DNG and JPEG, 145
+  MiB at the small tier (`cameraHostMemoryReserveMiB`). The figure is one a
+  tier, for the layout with the most in it; the loader states it from the
+  budget alone. The device keeps only the newest frame of a camera and frees
+  each as soon as it is written, and checks the first buffer of each
+  configuration against the figure (a log line). The GPU's pool is the budget B
+  less the reserve while the cameras are live and B otherwise, in the runtime,
+  the launcher and the applications' figure alike.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer
@@ -65,13 +69,21 @@ application's statements (the sensor orientation, the rotation that
   the size of its stream or its buffer completes with the error flag: the frame
   header the device reads is compared with the configured size, and the
   platform is asked for exactly that size. A host whose photo sizes belong to
-  its formats (`CameraInfo::captureFormats`) offers the sizes that every
-  stream it permits can make in the format it runs in (every whole rate of
-  every video mode, the multi-camera formats too for a camera that may run with
-  others) and that a still taken alone can make, up to the tier's cap
-  (`offerStills`). Photos win over fast streams: a stream is permitted only up
-  to the rate at which the largest offered size is still made, and never below
-  30 frames a second.
+  its formats (`CameraInfo::captureFormats`) runs each camera in one of them,
+  its **anchor**, and offers only what the anchor makes: its stills up to the
+  tier's cap, the video sizes inside it whose frames fit the reserve, and its
+  whole frame rates up to 30 (`videoRateCap`: photos win over fast streams).
+  The anchor is chosen once when the cameras are arranged, by the key in
+  `photo_dimensions.hpp`: a whole rate within 30, then the largest still, then
+  the largest video box, then the smaller format, the lower minimum rate, a
+  full-range format, the lower index. Every offered still is made and every
+  offered stream starts, whatever else the camera is doing. A camera that could
+  run with others keeps that only when the formats a multi-camera session takes
+  offer as much as its best format on those first three; otherwise it keeps its
+  whole offer, is published as conflicting with the others, and the log says so
+  once. A host that lists no formats has no anchors and offers what it states.
+  A camera opened while another's still is in flight, which the two conflict
+  over, is refused until that still is delivered or has run out its ten seconds.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The exposure time, ISO, aperture, focal length, neutral point and
@@ -110,7 +122,8 @@ application's statements (the sensor orientation, the rotation that
 - **Calibration.** RAW is offered only for a lens whose colour data is known.
   The first still of an uncalibrated lens at unit zoom also takes a Bayer still
   and keeps what its DNG reveals in the `CalibrationStore` (per host model and
-  lens); the next guest sees RAW. A guest keeps seeing what it saw at start. The
+  lens), with the size of the anchor it was learned in; the next guest sees RAW,
+  and a lens learned in another format is learned again. A guest keeps seeing what it saw at start. The
   Bayer part is a courtesy: when the platform refuses it or it fails, the JPEG
   of the same capture is delivered.
 - **Controls** belong to the camera, whichever stream carries the command, and a

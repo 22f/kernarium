@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <numbers>
 #include <stdexcept>
+#include <string>
 
 namespace uml::camera {
 namespace {
@@ -22,11 +24,6 @@ using uml::virtio::toBytes;
  * until a Bayer still replaces them. */
 constexpr double nominalPitchMicrometres = 1.2;
 
-/* The frame rate up to which a camera's streams are always allowed the photos
- * it offers: a format that cannot make them at a higher rate does not
- * restrict the photos, and a host with such a format offers the rates the
- * photos hold up to (offerStills). */
-constexpr std::uint32_t stillsHoldUntilRate = 30;
 constexpr std::uint32_t maximumCameras = VIRTIO_VIDEO_CAMERA_MAX_CAMERAS;
 
 /* The sizes every camera offers beyond its native ones, so that a guest has
@@ -212,35 +209,31 @@ BayerOrder bayerOrderOf(std::uint32_t wireFormat) noexcept
 
 namespace {
 
-/* The photo sizes a camera whose still sizes depend on its format offers, and
- * the streams that go with them: a size is offered when the format of every
- * stream the camera permits makes it (uml::platform::offerStills), and a
- * stream faster than the photos hold for is not permitted. */
-void offerCameraStills(CameraDescription& camera, const CameraTierLimits& limits,
-                 std::span<const std::vector<std::size_t>> concurrentSets)
+std::vector<VideoMode> modesOf(const uml::platform::CaptureOffer& offer)
 {
-    std::vector<uml::platform::VideoRequest> requests;
-    std::uint32_t fastest = 0;
-    for (const auto& mode : camera.video) {
-        requests.push_back({mode.width, mode.height, mode.minimumFrameRate, mode.maximumFrameRate});
-        fastest = std::max(fastest, mode.maximumFrameRate);
-    }
-    const bool concurrent = std::any_of(concurrentSets.begin(), concurrentSets.end(), [&](const auto& set) {
-        return set.size() > 1 && std::find(set.begin(), set.end(), camera.platformIndex) != set.end();
-    });
-    const auto offer = uml::platform::offerStills(camera.info.captureFormats, requests, concurrent,
-                                                  cameraLimitsOf(limits), stillsHoldUntilRate);
-    camera.jpegSizes = offer.sizes;
-    camera.info.stillSizes = offer.sizes;
-    if (offer.maximumRate >= fastest) return;
-    // The streams that are faster are not permitted.
-    auto& formats = camera.info.videoFormats;
-    std::erase_if(formats, [&](const auto& format) { return format.minimumFrameRate > offer.maximumRate; });
-    for (auto& format : formats) format.maximumFrameRate = std::min(format.maximumFrameRate, offer.maximumRate);
-    camera.video = videoModes(camera.info, limits);
+    std::vector<VideoMode> modes;
+    for (const auto& size : offer.videoSizes)
+        for (const auto& range : offer.rates) modes.push_back({size.width, size.height, range.minimum, range.maximum});
+    return modes;
+}
+
+[[nodiscard]] bool listsIdentifier(const std::vector<std::string>& names, const std::string& identifier)
+{
+    return std::find(names.begin(), names.end(), identifier) != names.end();
 }
 
 } // namespace
+
+std::vector<uml::platform::FrameSize> candidateVideoSizes(std::span<const uml::platform::CameraCaptureFormat> formats)
+{
+    std::vector<uml::platform::FrameSize> sizes;
+    const auto add = [&](uml::platform::FrameSize size) {
+        if (std::find(sizes.begin(), sizes.end(), size) == sizes.end()) sizes.push_back(size);
+    };
+    for (const auto& [width, height] : standardSizes) add({width, height});
+    for (const auto& format : formats) add({format.width, format.height});
+    return sizes;
+}
 
 std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
                                               std::span<const std::vector<std::size_t>> concurrentSets,
@@ -276,26 +269,84 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     }
     order.resize(std::min<std::size_t>(order.size(), maximumCameras));
 
+    // Which cameras run together: those a platform set names, except a zoom
+    // camera and its lenses, which share the sensors.
+    const auto together = [&](std::size_t a, std::size_t b) {
+        return std::any_of(concurrentSets.begin(), concurrentSets.end(), [&](const auto& set) {
+            return std::find(set.begin(), set.end(), a) != set.end() && std::find(set.begin(), set.end(), b) != set.end();
+        });
+    };
+    const auto sharesSensors = [&](std::size_t a, std::size_t b) {
+        return listsIdentifier(infos[a].constituents, infos[b].identifier) || listsIdentifier(infos[b].constituents, infos[a].identifier);
+    };
+    const auto runsWith = [&](std::size_t a, std::size_t b) { return a != b && together(a, b) && !sharesSensors(a, b); };
+
+    // Each camera that lists its formats is arranged once, here: its anchor is
+    // the format it runs in whatever it is asked, and everything the guest is
+    // offered comes from it. A camera that could run with others keeps that only
+    // when the formats a multi-camera session takes offer as much as its best
+    // format; otherwise it keeps the whole offer and does not run with others.
     const auto limits = limitsOf(options.tier);
+    struct Arranged {
+        std::size_t platform {};
+        std::optional<std::size_t> anchor;
+        uml::platform::CaptureOffer offer;
+        bool concurrent {true};
+        bool concurrencyDropped {};
+    };
+    std::vector<Arranged> arranged;
+    for (const auto platform : order) {
+        Arranged entry;
+        entry.platform = platform;
+        const auto& formats = infos[platform].captureFormats;
+        if (!formats.empty()) {
+            auto rules = offerRulesOf(limits);
+            rules.candidateSizes = candidateVideoSizes(formats);
+            const bool couldRunWithOthers = std::any_of(order.begin(), order.end(), [&](std::size_t other) { return runsWith(platform, other); });
+            entry.concurrent = couldRunWithOthers && uml::platform::keepsConcurrency(formats, rules);
+            entry.concurrencyDropped = couldRunWithOthers && !entry.concurrent;
+            entry.anchor = uml::platform::chooseAnchor(formats, rules, entry.concurrent);
+            if (!entry.anchor) {
+                std::fprintf(stderr, "Camera: platform camera %zu is not offered: none of its %zu formats carries a stream\n", platform,
+                             formats.size());
+                continue;
+            }
+            entry.offer = uml::platform::offerOf(formats[*entry.anchor], rules);
+        }
+        arranged.push_back(std::move(entry));
+    }
+
     std::vector<CameraDescription> cameras;
-    for (std::size_t wire = 0; wire < order.size(); ++wire) {
+    for (std::size_t wire = 0; wire < arranged.size(); ++wire) {
+        const auto& entry = arranged[wire];
         CameraDescription camera;
         camera.index = std::uint32_t(wire);
-        camera.platformIndex = order[wire];
-        camera.info = infos[order[wire]];
+        camera.platformIndex = entry.platform;
+        camera.info = infos[entry.platform];
         const auto& info = camera.info;
         camera.sensorOrientation = options.sensorOrientation ? options.sensorOrientation(info) : info.sensorOrientation;
-        camera.video = videoModes(info, limits);
-        if (info.captureFormats.empty()) {
+        if (entry.anchor) {
+            camera.anchor = entry.anchor;
+            camera.concurrencyDropped = entry.concurrencyDropped;
+            camera.video = modesOf(entry.offer);
+            camera.jpegSizes = entry.offer.stills;
+            camera.info.stillSizes = entry.offer.stills;
+        } else {
+            camera.video = videoModes(info, limits);
             // Every size works with every format.
             for (const auto& size : info.stillSizes)
                 if (std::uint64_t(size.width) * size.height <= limits.maximumStillPixels) camera.jpegSizes.push_back(size);
-        } else {
-            offerCameraStills(camera, limits, concurrentSets);
         }
-        // RAW is advertised only for a lens whose colour data is known.
+        // RAW is advertised only for a lens whose colour data is known, and, for
+        // a camera that has an anchor, was learned in it: another format may
+        // make another Bayer size.
         if (info.rawStills) {
             camera.calibration = calibration.load(hostModel, CalibrationStore::lensKey(info));
+            if (camera.calibration && camera.anchor) {
+                const auto& format = info.captureFormats[*camera.anchor];
+                if (camera.calibration->anchorWidth != format.width || camera.calibration->anchorHeight != format.height)
+                    camera.calibration.reset();
+            }
             if (camera.calibration && camera.calibration->bayer != BayerOrder::none && camera.calibration->rawWidth != 0 &&
                 std::uint64_t(camera.calibration->rawWidth) * camera.calibration->rawHeight <= limits.maximumStillPixels &&
                 camera.calibration->whiteLevel > camera.calibration->blackLevel)
@@ -305,34 +356,20 @@ std::vector<CameraDescription> arrangeCameras(std::span<const CameraInfo> infos,
     }
 
     for (auto& camera : cameras) fillWire(camera);
-    // Which cameras run together: those a platform set names.
-    const auto together = [&](std::size_t a, std::size_t b) {
-        return std::any_of(concurrentSets.begin(), concurrentSets.end(), [&](const auto& set) {
-            return std::find(set.begin(), set.end(), a) != set.end() && std::find(set.begin(), set.end(), b) != set.end();
-        });
-    };
     for (auto& camera : cameras) {
         for (const auto& other : cameras) {
             if (other.index == camera.index) continue;
-            if (together(camera.platformIndex, other.platformIndex)) camera.wire.concurrent_mask |= 1u << other.index;
-            else camera.wire.conflict_mask |= 1u << other.index;
+            // A camera that dropped its concurrency runs with none.
+            if (runsWith(camera.platformIndex, other.platformIndex) && arranged[camera.index].concurrent &&
+                arranged[other.index].concurrent)
+                camera.wire.concurrent_mask |= 1u << other.index;
+            else
+                camera.wire.conflict_mask |= 1u << other.index;
         }
         for (const auto& name : camera.info.constituents)
             for (const auto& other : cameras)
-                if (other.info.identifier == name) {
-                    camera.wire.constituent_mask |= 1u << other.index;
-                    // A zoom camera and its lenses share the sensors.
-                    camera.wire.concurrent_mask &= ~(1u << other.index);
-                    camera.wire.conflict_mask |= 1u << other.index;
-                }
+                if (other.info.identifier == name) camera.wire.constituent_mask |= 1u << other.index;
     }
-    // A conflict is mutual.
-    for (auto& camera : cameras)
-        for (auto& other : cameras)
-            if (camera.wire.conflict_mask >> other.index & 1u) {
-                other.wire.conflict_mask |= 1u << camera.index;
-                other.wire.concurrent_mask &= ~(1u << camera.index);
-            }
     return cameras;
 }
 
@@ -417,13 +454,72 @@ std::vector<std::uint8_t> cameraFormatsResponse(const CameraDescription& camera,
     return bytes;
 }
 
+std::vector<std::optional<std::size_t>> anchorsByPlatformCamera(std::span<const CameraDescription> cameras,
+                                                                std::size_t platformCameraCount)
+{
+    std::vector<std::optional<std::size_t>> anchors(platformCameraCount);
+    for (const auto& camera : cameras)
+        if (camera.anchor && camera.platformIndex < anchors.size()) anchors[camera.platformIndex] = camera.anchor;
+    return anchors;
+}
+
+std::string anchorSummary(const CameraDescription& camera)
+{
+    if (!camera.anchor || camera.video.empty()) return {};
+    const auto& info = camera.info;
+    const auto& format = info.captureFormats[*camera.anchor];
+    const char* position = info.position == CameraPosition::back ? "back" : info.position == CameraPosition::front ? "front" : "external";
+    const char* lens = "external";
+    switch (info.lens) {
+    case CameraLensKind::zoom: lens = "zoom"; break;
+    case CameraLensKind::wide: lens = "wide"; break;
+    case CameraLensKind::ultraWide: lens = "ultra wide"; break;
+    case CameraLensKind::telephoto: lens = "telephoto"; break;
+    case CameraLensKind::external: break;
+    }
+    const auto size = [](std::uint32_t width, std::uint32_t height) { return std::to_string(width) + "x" + std::to_string(height); };
+    std::string rates;
+    for (const auto& mode : camera.video) {
+        if (mode.width != camera.video.front().width || mode.height != camera.video.front().height) break;
+        if (!rates.empty()) rates += ",";
+        rates += std::to_string(mode.minimumFrameRate) + "-" + std::to_string(mode.maximumFrameRate);
+    }
+    std::string stills;
+    for (const auto& still : camera.jpegSizes) stills += (stills.empty() ? "" : " ") + size(still.width, still.height);
+    std::string line = "Camera: camera " + std::to_string(camera.index) + " (" + position + " " + lens + ") runs in " +
+        size(format.width, format.height) + (format.multiCamera ? " (multi-camera)" : "") + " of " +
+        std::to_string(info.captureFormats.size()) + " formats; offers stills " + (stills.empty() ? "none" : stills) +
+        ", video up to " + size(camera.video.front().width, camera.video.front().height) + " at " + rates + " fps";
+    if (camera.concurrencyDropped) line += "; not concurrent: the formats a multi-camera session takes offer less";
+    return line;
+}
+
+std::string bufferCheckLine(std::uint32_t camera, std::uint32_t width, std::uint32_t height, std::uint64_t bufferBytes,
+                            std::size_t rowBytes)
+{
+    const std::uint64_t counted = alignedFrameBytes(width, height);
+    std::string line = "Camera: camera " + std::to_string(camera) + " delivers " + std::to_string(width) + "x" + std::to_string(height) +
+        " in buffers of " + std::to_string(bufferBytes) + " bytes (rows of " + std::to_string(rowBytes) + "); the reserve counts " +
+        std::to_string(counted);
+    if (bufferBytes > counted) line += ": the buffer is larger than the reserve counts";
+    return line;
+}
+
 std::uint32_t supportedFrameRate(const CameraDescription& camera, std::uint32_t width, std::uint32_t height,
                                  std::uint32_t rate) noexcept
 {
     if (!videoSizeAllowed(camera, width, height)) return 0;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ranges;
+    if (camera.anchor) {
+        // The offer's own ranges: the anchor's, which no clip has touched.
+        for (const auto& mode : camera.video)
+            if (mode.width >= width && mode.height >= height) ranges.emplace_back(mode.minimumFrameRate, mode.maximumFrameRate);
+    } else {
+        ranges = rangesOf(camera.info, width, height);
+    }
     std::uint32_t best = 0;
     std::uint32_t bestDistance = ~0u;
-    for (const auto& range : rangesOf(camera.info, width, height)) {
+    for (const auto& range : ranges) {
         const auto clamped = std::clamp(rate, range.first, range.second);
         const auto distance = clamped > rate ? clamped - rate : rate - clamped;
         if (distance < bestDistance) {

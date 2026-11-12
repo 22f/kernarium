@@ -297,6 +297,15 @@ struct Rig final {
         device->drainEventSource();
         collect();
     }
+    /* `frames` frames of a camera, one at a time: the device writes the newest
+     * frame of a camera each time it runs, so a burst of frames is one. */
+    void pumpSteps(std::size_t platformCamera, unsigned frames)
+    {
+        for (unsigned frame = 0; frame < frames; ++frame) {
+            camera->pump(platformCamera, 1);
+            step();
+        }
+    }
     bool done(std::uint64_t request) const { return completed.contains(request); }
     virtio_video_camera_queue_resp result(std::uint64_t request, std::source_location where = std::source_location::current()) const
     {
@@ -506,8 +515,8 @@ void testStreamsAndParameters()
                 stream.ycbcr_enc == 2 && stream.quantization == 1,
             "BT.709 full range at 30 frames a second");
     require(Rig::type(rig.setInterval(1, 1, 15)) == VIRTIO_VIDEO_RESP_OK_NODATA && rig.params(1).frame_rate == 15, "15 frames a second");
-    require(Rig::type(rig.setInterval(1, 1, 1000)) == VIRTIO_VIDEO_RESP_OK_NODATA && rig.params(1).frame_rate == 120,
-            "a rate above the camera's is the highest any format that covers 640 x 480 runs at");
+    require(Rig::type(rig.setInterval(1, 1, 1000)) == VIRTIO_VIDEO_RESP_OK_NODATA && rig.params(1).frame_rate == 30,
+            "a rate above the camera's is the highest it offers: the cap, 30");
     require(Rig::type(rig.setInterval(1, 0, 30)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a zero interval changes nothing");
 
     // A buffer smaller than the format is refused; one the size of it is taken.
@@ -560,18 +569,19 @@ void testVideoAndMetadata()
     for (std::uint32_t resource = 1; resource <= 3; ++resource) frames.push_back(rig.queue(1, resource));
     require(rig.camera->sessionsOpened() == 1 && rig.camera->videoRunning(0) && rig.camera->videoFrameRate(0) == 30,
             "the first video buffer starts the camera at the stream's rate");
-    require(rig.camera->sessionLimits().maximumStillPixels == limitsOf(CameraTier::small).maximumStillPixels,
-            "the session is told what the guest may ask, before it starts anything");
+    require(rig.camera->sessionAnchorCalls() == 1 && rig.camera->sessionAnchors() == std::vector<std::optional<std::size_t>> {3, std::nullopt} &&
+                rig.camera->sessionLimits().maximumStillPixels == limitsOf(CameraTier::small).maximumStillPixels &&
+                rig.camera->sessionLimits().maximumFrameBytes == maximumDeliveredFrameBytes(limitsOf(CameraTier::small)),
+            "the session is told each camera's anchor (the back camera's 1920x1440 format; the front camera lists none) and what the guest may ask, once, before it starts anything");
     require(rig.states == std::vector<CameraState> {CameraState::streaming}, "the host is streaming");
 
-    rig.camera->pump(0, 3);
-    rig.step();
+    rig.pumpSteps(0, 3);
     const std::uint64_t interval = 1'000'000'000ull / 30;
     for (std::size_t index = 0; index < 3; ++index) {
         const auto frame = rig.result(frames[index]);
         require(frame.base.flags == 0 && frame.base.data_sizes[0] == nv12Size(640, 480), "a frame fills its buffer");
         require(frame.sequence == index + 1, "frames are numbered from 1 in capture order");
-        require(frame.base.timestamp == (3 - index) * interval, "the timestamp is the frame's age");
+        require(frame.base.timestamp == interval, "the timestamp is the frame's age");
         const auto picture = rig.bytes(1, std::uint32_t(index + 1), nv12Size(640, 480));
         const auto marker = decodeChartMarker(picture.data(), 640, 640, 480);
         require(marker.valid && marker.tag == chartTag(0) && marker.counter == index + 1, "the buffer holds that frame's picture");
@@ -663,8 +673,7 @@ void testPipeline()
         const auto first = rig.queue(1, 1);
         const auto second = rig.queue(1, 2);
         require(reference->startVideo(0, test.width, test.height, 30), test.what);
-        rig.camera->pump(0, 2);
-        rig.step();
+        rig.pumpSteps(0, 2);
         require(recorder.frames.size() == 2, test.what);
         for (std::size_t index = 0; index < 2; ++index) {
             const auto answer = rig.result(index == 0 ? first : second);
@@ -784,8 +793,7 @@ void testInterruption()
         return load<virtio_video_event>(rig.completed.at(eventBuffers[index]));
     };
     const auto a = rig.queue(1, 1), b = rig.queue(1, 2);
-    rig.camera->pump(0, 2);
-    rig.step();
+    rig.pumpSteps(0, 2);
     require(rig.result(a).base.flags == 0 && rig.result(b).base.flags == 0, "frames flow");
 
     rig.camera->interrupt();
@@ -802,8 +810,7 @@ void testInterruption()
         const auto picture = rig.bytes(1, id == c ? 3u : 4u, 640 * 480);
         require(std::all_of(picture.begin(), picture.end(), [](auto byte) { return byte == 0; }), "black");
     }
-    rig.camera->pump(0, 2);
-    rig.step();
+    rig.pumpSteps(0, 2);
 
     rig.camera->resume();
     rig.step();
@@ -911,6 +918,7 @@ void testStillsAndCalibration()
         require(learned && learned->bayer == BayerOrder::rggb && learned->rawWidth == 1008 && learned->rawHeight == 756 &&
                     learned->whiteLevel > learned->blackLevel,
                 "the lens is calibrated");
+        require(learned->anchorWidth == 1920 && learned->anchorHeight == 1440, "in the format the camera runs in, which is stored with it");
         require(!rig.device->cameras()[0].raw(), "but this guest keeps seeing what it saw at the start");
     }
 
@@ -1890,6 +1898,85 @@ void testHostileGuest()
             "of the 20 records after the first, the last 16 are kept: the next one is the sixth");
 }
 
+/* The anchor model end to end, against a platform that runs an anchored camera in its anchor only and refuses
+ * anything outside it: every still and every stream the guest is offered works, alone and beside another camera. */
+void testEveryOfferedRunStartsInTheAnchor()
+{
+    Rig rig;
+    const auto camera = rig.device->cameras()[0];
+    require(camera.anchor == std::optional<std::size_t>(3), "the back camera is anchored in its 1920x1440 format");
+    require(camera.jpegSizes.front() == CameraStillSize({4032, 3024}) && !camera.video.empty(), "it offers 12 MP stills and video");
+    std::uint32_t stream = 10;
+    for (const auto& size : camera.jpegSizes) {
+        const auto id = stream++;
+        rig.create(id, 0, stillKind);
+        require(Rig::type(rig.setParams(id, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, size.width, size.height)) == VIRTIO_VIDEO_RESP_OK_NODATA,
+                "an offered size is accepted");
+        rig.attach(id, 1, rig.params(id).plane_formats[0].plane_size);
+        const auto buffer = rig.queue(id, 1);
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.done(buffer) && rig.result(buffer).base.flags == 0, "an offered still is made");
+        rig.destroy(id);
+        rig.bump = 16 * page;  // the guest's memory holds one 12 MP buffer
+    }
+    for (const auto& mode : camera.video)
+        for (const auto rate : {mode.minimumFrameRate, mode.maximumFrameRate}) {
+            const auto id = stream++;
+            videoStream(rig, id, 0, mode.width, mode.height, 1);
+            require(Rig::type(rig.setInterval(id, 1, rate)) == VIRTIO_VIDEO_RESP_OK_NODATA, "an offered rate is accepted");
+            const auto buffer = rig.queue(id, 1);
+            require(rig.camera->videoRunning(0) && rig.camera->videoFrameRate(0) == rate, "an offered size and rate start");
+            rig.camera->pump(0, 1);
+            rig.step();
+            require(rig.done(buffer) && rig.result(buffer).base.flags == 0, "and deliver");
+            rig.destroy(id);
+            rig.bump = 16 * page;
+        }
+
+    // Beside the front camera, with a 12 MP still in the middle of a stream.
+    videoStream(rig, 1, 0, 1280, 720, 2);
+    videoStream(rig, 2, 1, 640, 480, 1);
+    rig.create(3, 0, stillKind);
+    require(Rig::type(rig.setParams(3, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 4032, 3024)) == VIRTIO_VIDEO_RESP_OK_NODATA, "12 MP");
+    rig.attach(3, 1, rig.params(3).plane_formats[0].plane_size);
+    const auto back = rig.queue(1, 1);
+    const auto front = rig.queue(2, 1);
+    require(rig.camera->videoRunning(0) && rig.camera->videoRunning(1), "both cameras stream");
+    rig.camera->pump(0, 1);
+    rig.camera->pump(1, 1);
+    rig.step();
+    require(rig.done(back) && rig.done(front) && rig.result(back).base.flags == 0 && rig.result(front).base.flags == 0, "and deliver");
+    const auto still = rig.queue(3, 1, 4242);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(still) && rig.result(still).base.flags == 0 && rig.result(still).base.timestamp == 4242,
+            "the 12 MP still is made while both cameras stream");
+    const auto after = rig.queue(1, 2);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(after) && rig.result(after).base.flags == 0 && rig.camera->videoRunning(0), "and the stream goes on");
+}
+
+/* A burst of frames from one camera is one frame to the guest: the newest. The older ones are not held. */
+void testABurstOfFramesIsTheNewestFrame()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    const auto first = rig.queue(1, 1), second = rig.queue(1, 2), third = rig.queue(1, 3);
+    rig.camera->pump(0, 3);
+    rig.step();
+    require(rig.done(first) && !rig.done(second) && !rig.done(third), "three frames at once fill one buffer");
+    require(rig.result(first).sequence == 1, "numbered as one frame");
+    const auto marker = decodeChartMarker(rig.bytes(1, 1, nv12Size(640, 480)).data(), 640, 640, 480);
+    require(marker.valid && marker.counter == 3, "the picture is the newest of the three");
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(second) && rig.result(second).sequence == 2, "the next frame is the next");
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -1935,6 +2022,8 @@ int main()
     testStillDeadlines();
     testStillsInFlight();
     testHostileGuest();
+    testEveryOfferedRunStartsInTheAnchor();
+    testABurstOfFramesIsTheNewestFrame();
     testService();
     return 0;
 }

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -349,6 +350,71 @@ void multiCameraFormats()
     require(camera->videoSize(1) == Size(1920, 1080) && !camera->videoRunning(0));
 }
 
+// A camera that was given an anchor (its back camera lists capture formats) runs in it and nowhere else: a stream
+// outside the anchor, a still it does not make and an anchor a multi-camera session does not take are refused, and the
+// frames are the stream's size in the anchor's aspect ratio. A camera with none keeps the session's own rule.
+void anchoredCamera()
+{
+    using Size = std::pair<std::uint32_t, std::uint32_t>;
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    const auto info = camera->cameras();
+    require(info[0].captureFormats.size() == 7 && info[0].videoFormats.size() == 7 && info[1].captureFormats.empty());
+    CameraStillRequest still;
+    still.jpegWidth = 1440;
+    still.jpegHeight = 1080;
+    {
+        // Without an anchor the session picks a format for each request, as it always did.
+        Recorder recorder;
+        auto session = camera->openSession(recorder);
+        require(camera->sessionAnchorCalls() == 0 && camera->sessionAnchors().empty() && camera->sessionLimits().maximumStillPixels == 0);
+        require(session->startVideo(0, 1920, 1080, 60) && session->takeStill(0, still));
+        session->stop();
+    }
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    // The 1920x1440 format (1 to 30 fps) of the back camera, in a 12.7 MP cap.
+    const std::optional<std::size_t> anchors[] {3, std::nullopt};
+    session->setAnchors(anchors, {12'700'000, 6'220'800});
+    require(camera->sessionAnchorCalls() == 1 && camera->sessionAnchors() == std::vector<std::optional<std::size_t>>(anchors, anchors + 2) &&
+                camera->sessionLimits().maximumStillPixels == 12'700'000 && camera->sessionLimits().maximumFrameBytes == 6'220'800,
+            "the session records every field it was told");
+    require(!session->startVideo(0, 1920, 1080, 60), "a rate the anchor does not take");
+    require(!session->startVideo(0, 3840, 2160, 30), "a size larger than the anchor");
+    require(session->startVideo(0, 1920, 1080, 30) && camera->videoSize(0) == Size(1920, 1440),
+            "1080p is delivered in the anchor's 4:3 aspect ratio");
+    require(session->startVideo(0, 640, 480, 30) && camera->videoSize(0) == Size(640, 480), "a resize");
+    camera->pump(0, 1);
+    require(!recorder.frames.empty() && recorder.frames.back().second.width == 640 && recorder.frames.back().second.height == 480);
+    require(!session->takeStill(0, still), "a size another format makes (1440x1080) is not made by the anchor");
+    still.jpegWidth = 4224;
+    still.jpegHeight = 2376;
+    require(!session->takeStill(0, still), "nor the 16:9 size of the 12 MP video format");
+    still.jpegWidth = 4032;
+    still.jpegHeight = 3024;
+    require(session->takeStill(0, still), "a size the anchor makes");
+    camera->pump(0, 0);
+    require(recorder.stills.size() == 1);
+    // The front camera has none: it joins as the session's own rule has it, and the anchored camera stays where it is
+    // when it comes and goes.
+    require(session->startVideo(0, 1920, 1080, 30) && camera->videoSize(0) == Size(1920, 1440));
+    require(session->startVideo(1, 640, 480, 30), "a camera with no anchor beside an anchored one");
+    require(camera->videoSize(0) == Size(1920, 1440), "the anchored camera is not moved for a peer");
+    session->stopVideo(1);
+    require(camera->videoSize(0) == Size(1920, 1440), "nor back to a smaller format when the peer leaves");
+    session->stop();
+
+    // An anchor a multi-camera session does not take (the 4032x3024 format) cannot be joined.
+    Recorder second;
+    auto alone = camera->openSession(second);
+    const std::optional<std::size_t> large[] {4, std::nullopt};
+    alone->setAnchors(large, {12'700'000, 6'220'800});
+    require(alone->startVideo(0, 640, 480, 30), "alone, it runs");
+    require(!alone->startVideo(1, 640, 480, 30), "a second camera cannot join an anchor no multi-camera session takes");
+    require(camera->videoRunning(0) && !camera->videoRunning(1), "and the first runs on");
+    alone->stopVideo(0);
+    require(alone->startVideo(1, 640, 480, 30) && !alone->takeStill(0, still), "a still on it is refused too, beside a running camera");
+}
+
 // Every camera with an input counts in a multi-camera session, one that only
 // takes stills as well: it joins as a streaming camera does, the cameras that
 // stream move to formats the session takes (or the still is refused, nothing
@@ -613,6 +679,7 @@ int main()
     zoomCamera();
     multiCamera();
     multiCameraFormats();
+    anchoredCamera();
     stillOnlyCamerasCount();
     hardwareBudget();
     rawFailures();

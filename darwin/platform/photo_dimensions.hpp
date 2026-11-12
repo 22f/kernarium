@@ -1,22 +1,37 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-// Which photo size a camera is asked for, and whether the photo that came is
-// the one asked for. A guest configures a JPEG stream at one size and gets
-// that size or an error: a platform picture of another size is not passed on.
-// The platform lists its photo sizes per device format, and the format a
-// camera runs is not the one that was listed first, so a size another format
-// lists is not one the active format can make.
+// How a host's capture formats become what a guest is offered, and what a
+// camera session does with them. Every function here is pure: the Apple
+// backend (apple/camera_capture.mm) and the tests call the same code, and the
+// backend's glue only turns a decision into platform calls.
+//
+// One format per camera, chosen once. A camera runs in its anchor, the one
+// capture format that anchorKeyOf ranks best, whatever it is asked: a stream, a
+// still alone, a still while streaming, alone or with other cameras. Everything
+// the guest is offered (stills, video sizes, frame rates) is derived from the
+// anchor (offerOf), so every offered run starts and every offered still is made.
+// A session has no per-run choice and a camera's active format changes only when
+// its input joins the session.
 
 #include "camera.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace uml::platform {
+
+using VideoFormatFacts = CameraCaptureFormat;
+
+// ---------------------------------------------------------------------------
+// Photo sizes
+// ---------------------------------------------------------------------------
 
 // The size to ask the photo output for when a JPEG of `request` is wanted: the
 // request itself, when the active format lists it and the output's maximum
@@ -29,7 +44,8 @@ namespace uml::platform {
 [[nodiscard]] std::optional<CameraStillSize> coveringPhotoSize(std::span<const CameraStillSize> listed,
                                                                CameraStillSize minimum, CameraStillSize outputMaximum);
 
-// The largest of the listed sizes by area; nothing for a table with none.
+// The largest of the listed sizes by area, then by width; nothing for a table
+// with none.
 [[nodiscard]] std::optional<CameraStillSize> largestPhotoSize(std::span<const CameraStillSize> listed);
 
 // How a photo output is made ready, in the order the platform requires. The
@@ -52,83 +68,33 @@ enum class PhotoOutputPreparation : std::uint8_t {
 [[nodiscard]] PhotoOutputPreparation preparePhotoOutput(std::optional<CameraStillSize> largest,
                                                         const PhotoOutputSteps& steps);
 
-using FrameRateSpan = CameraRateSpan;
-using VideoFormatFacts = CameraCaptureFormat;
+// The largest photo a format's output is set to make: the largest size the
+// format lists that is within the still cap (`maximumStillPixels`, zero for
+// none). A format that lists a 48 MP size under a 12 MP cap is set to its 12 MP
+// one, so no larger pipeline is prepared.
+[[nodiscard]] std::optional<CameraStillSize> photoMaximum(const VideoFormatFacts& format, std::uint64_t maximumStillPixels);
 
-// Whether a format's photo output makes `size`: the format lists it and the
-// output's maximum, which is set to the largest size the format lists, covers
-// it. This is the test a capture applies (exactPhotoSize).
-[[nodiscard]] bool formatMakesPhoto(const VideoFormatFacts& format, CameraStillSize size);
+// The sizes a format makes within the cap, largest first: those it lists that
+// are within the cap and no larger than photoMaximum in either dimension, the
+// test a capture applies (exactPhotoSize against the output's maximum).
+[[nodiscard]] std::vector<CameraStillSize> stillsOf(const VideoFormatFacts& format, std::uint64_t maximumStillPixels);
 
-// Every photo size within the guest's cap that some format makes, largest
-// first.
-[[nodiscard]] std::vector<CameraStillSize> photoSizesMade(std::span<const VideoFormatFacts> formats, const CameraLimits& limits);
+// Whether a format's photo output makes `size`: one of stillsOf.
+[[nodiscard]] bool formatMakesPhoto(const VideoFormatFacts& format, CameraStillSize size, std::uint64_t maximumStillPixels);
 
-// The largest photo within the guest's cap that some format makes: the size a
-// stream's format is chosen to make. Nothing when no format makes one.
-[[nodiscard]] std::optional<CameraStillSize> preferredPhotoSize(std::span<const VideoFormatFacts> formats,
-                                                                const CameraLimits& limits);
+// Every size some format makes (stillsOf), largest first: what a host can do at
+// all, before a camera's anchor decides what it offers.
+[[nodiscard]] std::vector<CameraStillSize> stillsMadeByAnyFormat(std::span<const VideoFormatFacts> formats,
+                                                                 std::uint64_t maximumStillPixels);
 
-// The NV12 bytes of a frame a format delivers for a stream of `width` by
-// `height` (deliveredFrameSize), tightly packed.
-[[nodiscard]] std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height) noexcept;
+// Whether the size the platform resolved for a photo is the size asked for. A
+// resolved size of zero by zero is the platform stating none (a Bayer still
+// alone has no processed photo), which is not a different size.
+[[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
 
-// The format a stream of `width` by `height` at `frameRate` runs in: one that
-// covers the stream, takes its rate and delivers a frame within the limits'
-// maximumFrameBytes. Of those, the ones that make the
-// preferred photo come first, so that the photos the guest is offered can be
-// made while it streams; among equals the smallest, and the full-range one
-// among those of one size. Nothing when no format takes the stream. A camera
-// in a multi-camera session takes only the formats such a session takes.
-[[nodiscard]] std::optional<std::size_t> chooseVideoFormat(std::span<const VideoFormatFacts> formats, std::uint32_t width,
-                                                           std::uint32_t height, std::uint32_t frameRate, bool multiCameraOnly,
-                                                           const CameraLimits& limits);
-
-// The format a camera that only takes stills runs in: the smallest that makes
-// `wanted`, which is the size the guest asked for. With none wanted (a Bayer
-// still alone), the one that makes the largest photo within the guest's cap.
-// The size selects the format, so a size another format makes is not refused.
-[[nodiscard]] std::optional<std::size_t> chooseStillFormat(std::span<const VideoFormatFacts> formats,
-                                                           std::optional<CameraStillSize> wanted, bool multiCameraOnly,
-                                                           const CameraLimits& limits);
-
-// A stream a guest may configure: a size and the frame rates it takes.
-struct VideoRequest {
-    std::uint32_t width {};
-    std::uint32_t height {};
-    std::uint32_t minimumFrameRate {};
-    std::uint32_t maximumFrameRate {};
-};
-
-// The photo sizes a guest is offered, and the rate they hold up to.
-struct StillOffer {
-    // Largest first. Every size is made by the format every permitted run
-    // chooses, and by a still taken with no stream running.
-    std::vector<CameraStillSize> sizes;
-    // The fastest frame rate (a whole number) of the streams the offer holds
-    // for; a stream above it is not permitted. The highest rate of the
-    // requests when none is held back.
-    std::uint32_t maximumRate {};
-};
-
-// The photo sizes that are true for every run the guest can make. A run is a
-// stream of one of `requests` at any whole rate in its range, and also its
-// choice among the formats a multi-camera session takes when the camera may
-// run with others (`concurrent`). A size is offered only when the format of
-// every such run makes it, and when a still taken with no stream running can
-// make it too (a format of a multi-camera session, in a concurrent camera). A
-// size that only another format makes is therefore not offered: nothing is
-// refused that was offered.
-//
-// Photos win over fast streams: the offer is made over the runs up to
-// `holdsUntil` frames a second (or the fastest request, when that is less),
-// and the largest size it contains then sets how fast the streams may run: the
-// highest rate at which every run still makes it. The offer is then taken
-// over the runs up to that rate, and `maximumRate` is that rate. A camera
-// with no size that survives the runs up to `holdsUntil` offers none and
-// restricts nothing.
-[[nodiscard]] StillOffer offerStills(std::span<const VideoFormatFacts> formats, std::span<const VideoRequest> requests,
-                                     bool concurrent, const CameraLimits& limits, std::uint32_t holdsUntil);
+// ---------------------------------------------------------------------------
+// Video sizes
+// ---------------------------------------------------------------------------
 
 // The size a video output delivers frames at, for a stream of `width` by
 // `height` running in a format of `formatWidth` by `formatHeight`: the
@@ -136,6 +102,7 @@ struct StillOffer {
 // stream, or the format's own size when no smaller one does. The ratio is
 // kept exactly (the platform refuses a scaled size of another aspect), so a
 // stream of another aspect is delivered larger than it asks in one dimension.
+// The result grows with the stream in each dimension.
 struct FrameSize {
     std::uint32_t width {};
     std::uint32_t height {};
@@ -144,41 +111,228 @@ struct FrameSize {
 [[nodiscard]] FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
                                            std::uint32_t height) noexcept;
 
-// What a format decides about the outputs of the camera that runs in it: the
+// The NV12 bytes of the frame a format delivers for a stream of `width` by
+// `height` (deliveredFrameSize), tightly packed.
+[[nodiscard]] std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height) noexcept;
+
+// What the anchor decides about the outputs of the camera that runs in it: the
 // video output's explicit size, which AVFoundation requires to be the aspect
 // ratio of the device's active format (it raises otherwise), and the photo
-// output's maximum, which must be one of the active format's sizes. Both
-// change with every change of the active format, so a camera's outputs are
-// set again for each one.
+// output's maximum, which must be one of the active format's sizes.
 struct OutputSizes {
     // The size the video output is told to deliver; nothing when it delivers
     // the format's own size (or the camera has no stream, `width` of zero).
     std::optional<FrameSize> frame;
-    // The largest size the format lists; nothing when it lists none, which
+    // photoMaximum; nothing when the format lists none within the cap, which
     // leaves the output's own maximum.
     std::optional<CameraStillSize> photoMaximum;
 };
-[[nodiscard]] OutputSizes outputSizesFor(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height);
+[[nodiscard]] OutputSizes outputSizesFor(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height,
+                                         std::uint64_t maximumStillPixels);
 
-// How a camera changes format, in the order that keeps its outputs valid: the
-// device takes the format, then the outputs take the sizes the format decides
-// (outputSizesFor), and a change that fails undoes both, the format first (an
-// output's sizes are checked against the device's active format, so they are
-// restored once the format they belong to is back). `activate` and
-// `syncOutputs` report a refusal (an exception) as false; `restoreFormat` also
-// runs after a refused `activate`, which may have changed the device in part.
-struct FormatMoveSteps {
-    std::function<bool()> activate;
-    std::function<bool()> syncOutputs;
-    std::function<void()> restoreFormat;
-    std::function<void()> restoreOutputs;
+// ---------------------------------------------------------------------------
+// Frame rates
+// ---------------------------------------------------------------------------
+
+// The fastest frame rate a guest is offered: photos win over fast streams, so a
+// rate above it is neither offered nor asked of the device.
+inline constexpr std::uint32_t videoRateCap = 30;
+
+// The whole rates of a span. A span's end within 0.15 % of a whole number counts
+// as that number (29.97 is 30, 30.00003 is 30, 23.976 is 24); otherwise the
+// rates run from the ceiling of the minimum to the floor of the maximum. Nothing
+// when the span holds no whole rate.
+struct WholeRates {
+    std::uint32_t minimum {};
+    std::uint32_t maximum {};
+    friend bool operator==(const WholeRates&, const WholeRates&) = default;
 };
-enum class FormatMove : std::uint8_t { moved, formatRefused, outputsRefused };
-[[nodiscard]] FormatMove moveFormat(const FormatMoveSteps& steps);
+[[nodiscard]] std::optional<WholeRates> wholeRatesOf(const CameraRateSpan& span) noexcept;
 
-// Whether the size the platform resolved for a photo is the size asked for. A
-// resolved size of zero by zero is the platform stating none (a Bayer still
-// alone has no processed photo), which is not a different size.
-[[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
+// A format's rates as offered: its whole rates up to `rateCap`, ascending and
+// merged. A format with whole rates only above the cap offers its slowest alone;
+// a format with none offers nothing.
+[[nodiscard]] std::vector<WholeRates> offeredRatesOf(const VideoFormatFacts& format, std::uint32_t rateCap);
+
+// How a whole rate is programmed on a span of a format (the index is the span's
+// in `frameRates`, which is the platform's own order). A rate inside the span
+// sets the reciprocal duration. A rate a hair above the span's maximum (30
+// against 29.97) sets the span's own shortest duration, and a hair below its
+// minimum (30 against 30.00003) the span's own longest, which the platform
+// accepts where the nominal reciprocal may fall outside the span.
+enum class FrameDuration : std::uint8_t { reciprocal, spanShortest, spanLongest };
+struct RateSetting {
+    std::size_t span {};
+    FrameDuration duration {};
+    friend bool operator==(const RateSetting&, const RateSetting&) = default;
+};
+[[nodiscard]] std::optional<RateSetting> rateSettingFor(const VideoFormatFacts& format, std::uint32_t rate) noexcept;
+
+// The duration, in seconds, that `setting` programs for `rate` on its span.
+[[nodiscard]] double programmedFrameDuration(const CameraRateSpan& span, FrameDuration duration, std::uint32_t rate) noexcept;
+
+// The rate a camera runs at while the system's pressure caps it (`pressureCap`,
+// zero for none): the largest offered rate that is not above the lower of the
+// request and the cap, else the slowest offered. Zero when nothing is offered.
+[[nodiscard]] std::uint32_t throttledRate(std::span<const WholeRates> offered, std::uint32_t requested,
+                                          std::uint32_t pressureCap) noexcept;
+
+// ---------------------------------------------------------------------------
+// The anchor and the offer
+// ---------------------------------------------------------------------------
+
+// What a guest of a tier may ask, and the sizes video is cut from.
+struct OfferRules {
+    // The still cap and the largest frame the host may deliver for a stream.
+    CameraLimits limits;
+    // The tier's video size.
+    std::uint32_t maximumVideoWidth {};
+    std::uint32_t maximumVideoHeight {};
+    std::uint32_t rateCap {videoRateCap};
+    // The standard sizes and the native sizes of the camera's formats; sizes the
+    // offer cannot use (odd, below 16, above the tier) are dropped by offerOf.
+    std::vector<FrameSize> candidateSizes;
+};
+
+// What a format offers a guest.
+struct CaptureOffer {
+    std::vector<CameraStillSize> stills;  // largest first: stillsOf
+    std::vector<FrameSize> videoSizes;    // largest first; never empty for a candidate
+    std::vector<WholeRates> rates;        // ascending; never empty for a candidate
+    // The largest request a stream may make of the format: the width of the
+    // widest and the height of the tallest of videoSizes. The frame the format
+    // delivers for the box is within the limits' frame bound, and so is the frame
+    // for any request inside it (deliveredFrameSize grows with the request).
+    FrameSize box;
+};
+[[nodiscard]] CaptureOffer offerOf(const VideoFormatFacts& format, const OfferRules& rules);
+
+// How a format ranks as an anchor. The fields compare in this order, larger
+// first; each is true to its name:
+//  1. rate: the format has a whole rate within the cap, then the highest;
+//  2. still: the area of the largest still it makes, then its width;
+//  3. video: the area of the box of its video sizes;
+//  4. cost: the smaller frame (the format's own width by height);
+//  5. low rates: the lower minimum whole rate;
+//  6. a full-range format.
+struct AnchorKey {
+    bool hasCappedRate {};
+    std::uint32_t rate {};
+    std::uint64_t stillArea {};
+    std::uint32_t stillWidth {};
+    std::uint64_t boxArea {};
+    std::int64_t negativeCost {};
+    std::int64_t negativeMinimumRate {};
+    bool fullRange {};
+
+    friend bool operator==(const AnchorKey&, const AnchorKey&) = default;
+    friend auto operator<=>(const AnchorKey&, const AnchorKey&) = default;
+    // Whether two formats offer the guest as much: equal on the first three.
+    [[nodiscard]] bool offersAsMuchAs(const AnchorKey& other) const noexcept
+    {
+        return hasCappedRate == other.hasCappedRate && rate == other.rate && stillArea == other.stillArea &&
+            stillWidth == other.stillWidth && boxArea == other.boxArea;
+    }
+};
+
+// The key of a format; nothing for a format that cannot be an anchor: one with
+// no whole rate or no video size in its box.
+[[nodiscard]] std::optional<AnchorKey> anchorKeyOf(const VideoFormatFacts& format, const OfferRules& rules);
+
+// The anchor of a camera: the index of the best-ranked candidate (the lowest
+// index among equals); among the formats a multi-camera session takes when
+// `multiCameraOnly`. Nothing when there is no candidate.
+[[nodiscard]] std::optional<std::size_t> chooseAnchor(std::span<const VideoFormatFacts> formats, const OfferRules& rules,
+                                                      bool multiCameraOnly);
+
+// Whether a camera that could run with others keeps that: the best key among
+// its multi-camera formats offers as much as the best key among all its
+// formats. A camera with no multi-camera candidate does not.
+[[nodiscard]] bool keepsConcurrency(std::span<const VideoFormatFacts> formats, const OfferRules& rules);
+
+// ---------------------------------------------------------------------------
+// The session's transactions
+// ---------------------------------------------------------------------------
+
+// Whether a camera may join a session that holds other cameras' inputs: a
+// multi-camera session takes only the formats it lists, for every input, so
+// both this camera's anchor and every other input's must be one of them.
+[[nodiscard]] bool mayJoin(bool otherInputsInSession, bool ownAnchorMultiCamera,
+                           std::span<const bool> otherAnchorsMultiCamera) noexcept;
+
+// What an input, its outputs and its format need for a camera to run a stream,
+// a still or both, and the platform's calls that do it. The platform's calls
+// report a refusal (an exception included) as false. Anything a call added when
+// it refuses is removed by its `remove` step, which does nothing for what was
+// never added.
+struct AdmitPlan {
+    bool addInput {};  // the camera has no input in the session
+    bool activate {};  // the anchor and the rate are set on the device
+    bool addVideo {};
+    bool addPhoto {};
+};
+struct AdmitSteps {
+    std::function<void()> begin;   // beginConfiguration
+    std::function<void()> commit;  // commitConfiguration
+    std::function<bool()> addInput;
+    std::function<bool()> activate;
+    std::function<bool()> addVideo;
+    // Attaches the photo output and sets its maximum (preparePhotoOutput).
+    std::function<bool()> addPhoto;
+    // Whether the session is over its hardware budget with what was added.
+    std::function<bool()> overBudget;
+    std::function<void()> removeVideo;
+    std::function<void()> removePhoto;
+    std::function<void()> removeInput;
+};
+enum class Admission : std::uint8_t { admitted, inputRefused, formatRefused, videoRefused, photoRefused, overBudget };
+
+// Runs the plan inside one configuration. A refusal, or a session over budget
+// once the configuration is committed, removes exactly what this call added and
+// nothing else: the format and outputs of a camera that was already in the
+// session stay as they were.
+[[nodiscard]] Admission admit(const AdmitPlan& plan, const AdmitSteps& steps);
+
+// A running stream changes size or rate: the durations first, then the video
+// output's size; a refusal programs the old durations again.
+struct ResizeSteps {
+    std::function<void()> begin;
+    std::function<void()> commit;
+    std::function<bool()> setDurations;  // empty: the rate does not change
+    std::function<bool()> setVideoSize;  // empty: the size does not change
+    std::function<void()> restoreDurations;
+};
+enum class Resizing : std::uint8_t { resized, durationsRefused, sizeRefused };
+[[nodiscard]] Resizing resizeStream(const ResizeSteps& steps);
+
+// ---------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------
+
+enum class Refusal : std::uint8_t {
+    noAnchor,
+    formatChanged,
+    notJoinable,
+    inputRefused,
+    outputRefused,
+    overBudget,
+    stillNotMade,
+    rawUnavailable,
+    raised,
+};
+[[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
+
+// One line per camera and reason until the camera's configuration changes: a
+// guest that asks again and again must not fill the log.
+class RefusalLog {
+public:
+    // True the first time a camera is refused for a reason since the camera was
+    // last reset.
+    [[nodiscard]] bool first(std::size_t camera, Refusal reason);
+    void reset(std::size_t camera);
+
+private:
+    std::map<std::size_t, std::uint32_t> seen_;
+};
 
 } // namespace uml::platform

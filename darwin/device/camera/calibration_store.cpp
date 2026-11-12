@@ -14,7 +14,9 @@ namespace {
 using uml::platform::BayerOrder;
 using uml::platform::CameraColorData;
 
-constexpr char magic[8] = {'U', 'M', 'L', 'C', 'A', 'L', '0', '1'};
+// A file of another version fails the check and is ignored, so its lens is
+// learned again.
+constexpr char magic[8] = {'U', 'M', 'L', 'C', 'A', 'L', '0', '2'};
 
 std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept
 {
@@ -45,7 +47,7 @@ std::vector<std::uint8_t> encode(const CameraColorData& data)
     std::vector<std::uint8_t> out(magic, magic + sizeof(magic));
     put(out, std::uint32_t(data.bayer));
     for (const auto value : {data.blackLevel, data.whiteLevel, data.rawWidth, data.rawHeight, data.illuminant1,
-                             data.illuminant2})
+                             data.illuminant2, data.anchorWidth, data.anchorHeight})
         put(out, std::uint32_t(value));
     for (const auto* matrix : {&data.colorMatrix1, &data.colorMatrix2, &data.forwardMatrix1, &data.forwardMatrix2})
         for (const auto value : *matrix) put(out, double(value));
@@ -64,7 +66,7 @@ std::optional<CameraColorData> decode(const std::vector<std::uint8_t>& in)
     CameraColorData data;
     std::size_t at = sizeof(magic);
     std::uint32_t bayer = 0;
-    std::uint32_t fields[6];
+    std::uint32_t fields[8];
     bool ok = take(in, at, bayer);
     for (auto& field : fields) ok = ok && take(in, at, field);
     for (auto* matrix : {&data.colorMatrix1, &data.colorMatrix2, &data.forwardMatrix1, &data.forwardMatrix2})
@@ -79,6 +81,8 @@ std::optional<CameraColorData> decode(const std::vector<std::uint8_t>& in)
     data.rawHeight = fields[3];
     data.illuminant1 = fields[4];
     data.illuminant2 = fields[5];
+    data.anchorWidth = fields[6];
+    data.anchorHeight = fields[7];
     return data;
 }
 

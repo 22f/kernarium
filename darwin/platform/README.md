@@ -99,21 +99,32 @@ interface to the wire.
   aspect ratio (`deliveredFrameSize`), delivered through `CameraSessionDelegate`
   with the exposure that made them; holding a frame's `owner` holds the
   capture's buffer, and its `native` is the platform's own handle to the
-  picture. A camera alone may run any format; every camera with an input in the
-  session, one that only takes stills as well, runs a format a multi-camera
-  session takes (`multiCamera`) while another is in it: `startVideo()` and
-  `takeStill()` move the cameras already in the session to such a format, or
-  fail and change nothing, and fail and undo the join when the session's
-  hardware cost goes over its budget. A camera that only takes stills leaves the session, with its photo
-  output, when its last still is delivered, and a camera left alone goes back to
-  the smallest format of any kind (also after a join that was refused); a camera
-  whose format changed has its settings applied again. The format and the
-  explicit sizes of the camera's outputs change together, on every path (a
-  stream's first configuration, a camera moved for a peer, one returning alone):
-  the video output's delivered size at the new format's aspect ratio and the
-  photo output's maximum from the new format's sizes (`moveFormat`), both put
-  back when the change is refused. A photo output's delegate is held by the
-  session until its capture ends.
+  picture. A camera runs in one capture format, its **anchor**, whatever it
+  is asked: a stream, a still, a still beside a stream, alone or with other
+  cameras. Discovery lists the formats as data (`CameraInfo::captureFormats`);
+  `chooseAnchor` picks the anchor once from them by the key in
+  `photo_dimensions.hpp`, and the device gives it to the session with
+  `setAnchors()` together with what the guest may ask. The session has no
+  chooser and never moves a camera to another format: a camera's active format
+  changes only when its input joins the session. A camera joins through one
+  transaction (`admit`: the input, the anchor and its rate, the video output,
+  the photo output, inside one configuration), which, when a step is refused or
+  the session's hardware cost goes over its budget, removes exactly what that
+  call added. While another camera is in the session every anchor must be a
+  format a multi-camera session takes (`multiCamera`); a camera whose best
+  such format offers less than its best format does not run with others (the
+  device then publishes it as a conflict). A camera that only takes stills
+  leaves the session, with its photo output, when its last still is delivered.
+  A camera whose format changed has its settings applied again. The video
+  output's explicit size has the anchor's aspect ratio and the photo output's
+  maximum is a size the anchor lists (`outputSizesFor`), both set after the
+  output has its source. A photo output's delegate is held by the session until
+  its capture ends.
+- **Rates** are whole numbers of frames a second. A span's end within 0.15 % of
+  a whole number is that number (29.97 is 30), and the rate is programmed as the
+  span's own duration where the reciprocal would fall outside it
+  (`rateSettingFor`). The guest is offered the whole rates of the anchor up to
+  30 (`videoRateCap`); an anchor with none that low offers its slowest.
 - **Controls** arrive as one `CameraSettings` per camera, and the session
   applies what differs. A zoom camera (a virtual device) takes automatic
   exposure, focus and white balance only.
@@ -124,16 +135,10 @@ interface to the wire.
   (`photo_dimensions.hpp`): the capture is refused when the active format does
   not list that size, and the photo is dropped when the platform resolved
   another. A photo output gets its maximum size only after it is attached to the
-  session, as AVFoundation requires. A stream runs in the smallest format that
-  covers it and takes its rate, among those that make the largest photo the
-  guest may ask for (`chooseVideoFormat`; the device gives the session that
-  limit through `setLimits()`). Discovery reports the formats as data
-  (`CameraInfo::captureFormats`), and the device offers the photo sizes that
-  every stream it permits can make (`offerStills`, see
-  [`darwin/device/camera`](../device/camera/README.md)). A camera that only
-  takes stills runs in the format that makes the size asked for
-  (`chooseStillFormat`). A camera in a multi-camera session runs in a format
-  that session takes. A
+  session, as AVFoundation requires: the largest size the anchor lists within
+  the guest's still cap, so no larger pipeline is prepared. The guest is offered
+  the sizes the anchor makes (`stillsOf`), and a camera that only takes stills
+  runs in the same anchor. A
   still's `exposure` is the photo's own where the photo states it: the exposure
   time, ISO, f-number, focal length and flash come from the photo's Exif
   (`apple/photo_metadata.hpp`, `still_exposure.hpp`), and a Bayer still's
@@ -149,7 +154,8 @@ interface to the wire.
 - **Interruptions** (another application, a call, system pressure, iPad
   multitasking) arrive as events; the session does not stop itself. System
   pressure on a running camera also caps its frame rate (20 at serious, 15 at
-  critical), as Apple advises, before the session is interrupted. A runtime
+  critical), as Apple advises, to the largest rate the camera offers below the
+  cap (`throttledRate`), before the session is interrupted. A runtime
   error is restarted once: the restart ends with a `resumed` event, and an
   error before that ends the episode with `failed`, so that the client closes
   the session and tries again later.

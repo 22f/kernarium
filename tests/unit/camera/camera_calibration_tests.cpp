@@ -27,6 +27,9 @@ CameraColorData sample(double seed)
     data.rawHeight = 3024;
     data.illuminant1 = 17;
     data.illuminant2 = 21;
+    // The format the camera ran in when the data was learned.
+    data.anchorWidth = 1920 + std::uint32_t(seed);
+    data.anchorHeight = 1440;
     for (std::size_t index = 0; index < 9; ++index) {
         data.colorMatrix1[index] = seed + double(index) * 0.125;
         data.colorMatrix2[index] = seed - double(index) * 0.0625;
@@ -131,6 +134,32 @@ void testDamagedFile()
     require(after.load("M", "lens") == sample(6.0), "and it reads back");
 }
 
+// The anchor's size is stored with the data, and a file of the earlier version (which has none) is not read: the
+// lens is learned again in its anchor.
+void testTheAnchorIsStoredAndAnEarlierVersionIsIgnored()
+{
+    uml::testing::ScratchSubdirectory directory("camera-calibration-XXXXXX");
+    const auto root = directory.path();
+    {
+        CalibrationStore store(root);
+        require(store.save("M", "lens", sample(8.0)), "save");
+    }
+    {
+        CalibrationStore reopened(root);
+        const auto loaded = reopened.load("M", "lens");
+        require(loaded && loaded->anchorWidth == 1928 && loaded->anchorHeight == 1440, "the anchor's size comes back");
+    }
+    std::filesystem::path file;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) file = entry.path();
+    {
+        std::fstream stream(file, std::ios::in | std::ios::out | std::ios::binary);
+        stream.seekp(7);
+        stream.put('1');
+    }
+    CalibrationStore earlier(root);
+    require(!earlier.load("M", "lens"), "a file of the version that stored no anchor is ignored");
+}
+
 void testUnwritableDirectory()
 {
     uml::testing::ScratchSubdirectory directory("camera-calibration-XXXXXX");
@@ -150,6 +179,7 @@ int main()
     testMemoryOnly();
     testPersistence();
     testDamagedFile();
+    testTheAnchorIsStoredAndAnEarlierVersionIsIgnored();
     testUnwritableDirectory();
     return 0;
 }

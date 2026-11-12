@@ -44,7 +44,7 @@ constexpr std::size_t maximumStreams = 32;
 constexpr std::size_t maximumHeld = 128;
 constexpr std::size_t maximumControls = 256;
 constexpr std::size_t metaBacklogLimit = 16;
-constexpr std::size_t inboxFrameLimit = 3;
+constexpr std::size_t inboxFrameLimit = inboxFramesPerCamera;
 /* A group of still buffers whose last buffer has not arrived this long after
  * its first completes with an error. */
 constexpr std::uint64_t groupTimeoutNanoseconds = 2'000'000'000;
@@ -186,6 +186,9 @@ public:
         std::uint32_t runHeight {};
         std::uint32_t runRate {};
         std::uint32_t calibrationAttempts {};
+        /* The first buffer of this configuration's capture has been compared
+         * with what the reserve counts. */
+        bool bufferChecked {};
         /* The ROTATE_AND_CROP setting and the turn last reported to
          * `onRotateAndCrop`. */
         std::uint32_t reportedSetting {~0u};
@@ -220,6 +223,8 @@ public:
     CameraState reported {CameraState::idle};
     std::uint64_t lastRetry {};
     bool sessionFailed {};
+    /* The format each platform camera runs in, which a session is told when it opens. */
+    std::vector<std::optional<std::size_t>> anchors;
 
     // The platform's side: any thread, under the mutex.
     std::mutex inboxMutex;
@@ -244,9 +249,11 @@ public:
         const auto infos = host->cameras();
         const auto sets = host->concurrentSets();
         auto cameras = arrangeCameras(infos, sets, model, *calibration, arrangement);
+        anchors = anchorsByPlatformCamera(cameras, infos.size());
         const bool blocked = options.mode == CameraMode::blocked;
         runtimes.reserve(cameras.size());
         for (auto& camera : cameras) {
+            if (const auto line = anchorSummary(camera); !line.empty()) std::fprintf(stderr, "%s\n", line.c_str());
             wireOfPlatform[camera.platformIndex] = camera.index;
             const auto orientation = camera.sensorOrientation;
             runtimes.emplace_back(std::move(camera), blocked, orientation);
@@ -400,8 +407,8 @@ public:
         session = host->openSession(*this);
         sessionFailed = session == nullptr;
         if (session) {
-            // What the guest may ask, which the platform's formats serve.
-            session->setLimits(cameraLimitsOf(limits));
+            // The format each camera runs in, whatever the guest asks.
+            session->setAnchors(anchors, offerRulesOf(limits).limits);
             checkpoint(CameraCheckpoint::sessionOpened);
             // A session that opens runs; what interrupted the last one is over.
             // A camera with a stream waiting for frames starts its capture again
@@ -412,6 +419,7 @@ public:
                 runtime.appliedValid = false;
                 runtime.videoRunning = false;
                 runtime.videoRetry = 0;
+                runtime.bufferChecked = false;
                 settle(runtime);
                 updateBlackTimers(runtime);
             }
@@ -514,6 +522,7 @@ public:
         runtime.runHeight = height;
         runtime.runRate = rate;
         runtime.videoRetry = now();
+        if (ok) runtime.bufferChecked = false;
         if (ok) {
             // The capture has to deliver before the stream has a picture of its own.
             runtime.resuming = true;
@@ -740,6 +749,12 @@ public:
 
     void deliverFrame(Runtime& runtime, const CameraFrame& frame)
     {
+        if (!runtime.bufferChecked) {
+            runtime.bufferChecked = true;
+            std::fprintf(stderr, "%s\n",
+                         bufferCheckLine(runtime.description.index, frame.width, frame.height,
+                                         frame.luma.size() + frame.chroma.size(), frame.lumaStride).c_str());
+        }
         const auto sequence = ++runtime.sequence;
         runtime.latest = frame.exposure;
         const auto time = now();
@@ -990,8 +1005,15 @@ public:
         // A Bayer still teaches the lens's colour data, which reaches the guest
         // at its next start.
         if (result.color.bayer != uml::platform::BayerOrder::none && !runtime.description.calibration) {
-            runtime.description.calibration = result.color;
-            calibration->save(model, CalibrationStore::lensKey(runtime.description.info), result.color);
+            // Learned in the camera's anchor, which is the only format it runs in.
+            auto color = result.color;
+            if (runtime.description.anchor) {
+                const auto& anchor = runtime.description.info.captureFormats[*runtime.description.anchor];
+                color.anchorWidth = anchor.width;
+                color.anchorHeight = anchor.height;
+            }
+            runtime.description.calibration = color;
+            calibration->save(model, CalibrationStore::lensKey(runtime.description.info), color);
         }
         const auto sequence = ++runtime.sequence;
         auto meta = metaOf(runtime, sequence, result.exposure, VIRTIO_VIDEO_CAMERA_FRAME_F_STILL);
@@ -1147,7 +1169,17 @@ public:
         }
         for (const auto& platformEvent : platformEvents) handlePlatformEvent(platformEvent);
         for (auto& still : stills) deliverStill(still.camera, still.result);
+        // Only the newest frame of a camera is written: an older one is stale by
+        // the time the worker takes it, and holding it holds the capture's buffer
+        // (the reserve counts heldFramesPerCamera of them).
+        std::vector<InboxFrame> newest;
         for (auto& entry : frames) {
+            const auto same = std::find_if(newest.begin(), newest.end(), [&](const InboxFrame& kept) { return kept.camera == entry.camera; });
+            if (same != newest.end()) *same = std::move(entry);
+            else newest.push_back(std::move(entry));
+        }
+        frames.clear();
+        for (auto& entry : newest) {
             const auto wire = wireOfPlatform.find(entry.camera);
             if (wire == wireOfPlatform.end()) continue;
             auto& runtime = runtimes[wire->second];
@@ -1158,6 +1190,8 @@ public:
             }
             if (blackMode(runtime)) continue;
             deliverFrame(runtime, entry.frame);
+            // Its buffer goes back to the capture as soon as the guest has the frame.
+            entry.frame = CameraFrame {};
         }
     }
 

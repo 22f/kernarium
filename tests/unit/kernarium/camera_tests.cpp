@@ -154,7 +154,7 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
         uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone), tier, "");
     require(phone.hasCameras() && liveCameraReserveMiB(CameraMode::live, phone.layout, tier) == reserve,
         "a live session with cameras holds the tier's reserve");
-    require(reserve == 110, "the figure the budget gives up");
+    require(reserve == 145, "the figure the budget gives up");
     require(liveCameraReserveMiB(CameraMode::blocked, phone.layout, tier) == 0, "a blocked session opens none");
     // A live session that composes `none` (a host whose cameras the image cannot describe, or a source that is
     // not a name) has no device, so it holds nothing.
@@ -453,9 +453,13 @@ private:
             calls_.push_back("still " + std::to_string(camera));
             return true;
         }
-        void setLimits(const uml::platform::CameraLimits& limits) override
+        void setAnchors(std::span<const std::optional<std::size_t>> formatOfCamera,
+                        const uml::platform::CameraLimits& limits) override
         {
-            calls_.push_back("limits " + std::to_string(limits.maximumStillPixels));
+            std::string anchors;
+            for (const auto& anchor : formatOfCamera) anchors += (anchors.empty() ? "" : ",") + (anchor ? std::to_string(*anchor) : std::string("-"));
+            calls_.push_back("anchors " + anchors + " limits " + std::to_string(limits.maximumStillPixels) + " " +
+                             std::to_string(limits.maximumFrameBytes));
         }
         void stop() override { calls_.push_back("stop all"); }
 
@@ -483,7 +487,8 @@ void theBackKnobNeverReachesTheFrontCamera()
     NullDelegate delegate;
     auto session = source->openSession(delegate);
     require(session != nullptr && recording->delegate == &delegate, "the host's session reports to the caller's delegate");
-    session->setLimits({12'700'000});
+    const std::optional<std::size_t> anchors[] {2, std::nullopt, 0};
+    session->setAnchors(anchors, {12'700'000, 6'220'800});
     require(session->startVideo(0, 1280, 720, 30) && session->startVideo(2, 640, 480, 30), "the back lenses start");
     session->apply(0, {});
     require(session->takeStill(2, {}));
@@ -495,8 +500,8 @@ void theBackKnobNeverReachesTheFrontCamera()
     session->stopVideo(1);
     require(!session->startVideo(3, 1280, 720, 30) && !session->takeStill(99, {}), "an index past the cameras");
     session->stop();
-    const std::vector<std::string> expected {"limits 12700000", "start 0", "start 2", "apply 0", "still 2", "stop 2", "stop all"};
-    require(recording->calls == expected, "the host saw the guest's limits and the back cameras' calls and no other");
+    const std::vector<std::string> expected {"anchors 2,-,0 limits 12700000 6220800", "start 0", "start 2", "apply 0", "still 2", "stop 2", "stop all"};
+    require(recording->calls == expected, "the host saw the anchors and limits and the back cameras' calls and no other");
 
     // The same cameras give the same layout with or without the filter.
     int hosts = 0;

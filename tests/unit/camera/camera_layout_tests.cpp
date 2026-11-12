@@ -198,14 +198,22 @@ struct Host {
     [[nodiscard]] std::vector<CameraDescription> arrange(CameraTier tier, bool calibrated) const
     {
         CalibrationStore store;
-        if (calibrated)
-            for (const auto& info : infos)
-                if (info.rawStills) {
-                    const auto size = info.rawStillSize;
-                    store.save(camera->hostModel(), CalibrationStore::lensKey(info), colorOf(size.width, size.height));
-                }
         ArrangementOptions options;
         options.tier = tier;
+        if (calibrated) {
+            // The colour data was learned in the camera's anchor, which the arrangement names.
+            const auto bare = arrangeCameras(infos, camera->concurrentSets(), camera->hostModel(), store, options);
+            for (const auto& arranged : bare)
+                if (arranged.info.rawStills) {
+                    const auto size = arranged.info.rawStillSize;
+                    auto color = colorOf(size.width, size.height);
+                    if (arranged.anchor) {
+                        color.anchorWidth = arranged.info.captureFormats[*arranged.anchor].width;
+                        color.anchorHeight = arranged.info.captureFormats[*arranged.anchor].height;
+                    }
+                    store.save(camera->hostModel(), CalibrationStore::lensKey(arranged.info), color);
+                }
+        }
         return arrangeCameras(infos, camera->concurrentSets(), camera->hostModel(), store, options);
     }
 };

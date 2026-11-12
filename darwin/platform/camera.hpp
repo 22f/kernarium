@@ -53,11 +53,13 @@ struct CameraStillSize {
 };
 
 // A device format as data, for hosts whose photo sizes and frame rates belong
-// to the format a camera runs in: what the choice of that format needs to know
-// of it. `photoSizes` are the sizes its photo output can make.
+// to the format a camera runs in: what the choice of the camera's anchor (the
+// one format it runs in, photo_dimensions.hpp) needs to know of it.
+// `photoSizes` are the sizes its photo output lists.
 struct CameraRateSpan {
     double minimum {};
     double maximum {};
+    friend bool operator==(const CameraRateSpan&, const CameraRateSpan&) = default;
 };
 struct CameraCaptureFormat {
     std::uint32_t width {};
@@ -66,15 +68,16 @@ struct CameraCaptureFormat {
     std::vector<CameraStillSize> photoSizes;
     bool fullRange {};
     bool multiCamera {};  // a session that runs several cameras takes it
+    friend bool operator==(const CameraCaptureFormat&, const CameraCaptureFormat&) = default;
 };
 
-// What a guest may ask of a session's cameras, which the formats the host runs
-// them in must serve. Zero is no limit.
+// What a guest of a tier may ask of a camera, which its anchor must serve. Zero
+// is no limit.
 struct CameraLimits {
     // The largest JPEG the guest is offered, in pixels.
     std::uint64_t maximumStillPixels {};
     // The largest frame the host may deliver for a stream, in NV12 bytes: a
-    // format whose frame for the stream is larger is not run.
+    // video size whose frame from the anchor is larger is not offered.
     std::uint64_t maximumFrameBytes {};
 };
 
@@ -85,6 +88,11 @@ struct CameraColorData {
     std::uint32_t whiteLevel {};
     std::uint32_t rawWidth {};
     std::uint32_t rawHeight {};
+    // The size of the capture format the camera ran in when this was learned
+    // (its anchor), which the device fills in: another format may make another
+    // Bayer size. Zero for a host that lists no formats.
+    std::uint32_t anchorWidth {};
+    std::uint32_t anchorHeight {};
     // DNG LightSource codes of the two calibrations.
     std::uint32_t illuminant1 {};
     std::uint32_t illuminant2 {};
@@ -142,13 +150,15 @@ struct CameraInfo {
     std::uint32_t sensorOrientation {};
 
     std::vector<CameraVideoFormat> videoFormats;
-    // Every JPEG size some format of the camera makes. A host that fills
-    // captureFormats leaves the offer to the device, which makes it over the
-    // streams it permits; it is the sizes the host can make at all.
+    // The JPEG sizes the camera makes. A host that fills captureFormats lists
+    // every size some format makes, and the device replaces it with the anchor's
+    // stills when it arranges the camera; otherwise every size works with every
+    // video format.
     std::vector<CameraStillSize> stillSizes;  // JPEG
     // The formats behind videoFormats and stillSizes, when the sizes a still
-    // can have depend on the format the camera runs in. Empty: every size in
-    // stillSizes works with every video format.
+    // and the rates a stream can have depend on the format the camera runs in.
+    // The device picks one of them as the camera's anchor (setAnchors). Empty:
+    // the host has one format's worth of facts and no choice to make.
     std::vector<CameraCaptureFormat> captureFormats;
     CameraStillSize rawStillSize {};          // zero: no Bayer still
 };
@@ -315,14 +325,12 @@ class CameraSession {
 public:
     virtual ~CameraSession() = default;
 
-    // Starts a camera, or restarts it at another size or rate, with the
-    // smallest format of the camera that covers the size at the rate. Fails
-    // when the camera cannot join the cameras already running. Cameras that
-    // run together need formats a multi-camera session takes
-    // (CameraVideoFormat::multiCamera): the cameras already running move to
-    // the smallest such format that covers what they were asked for, and the
-    // call fails, changing nothing, when a camera has none. A camera that is
-    // alone again goes back to the smallest format of any kind.
+    // Starts a camera, or restarts it at another size or rate. A host with
+    // captureFormats runs the camera in its anchor, whatever the size and the
+    // rate (setAnchors), and the size and the rate are ones the offer holds.
+    // Fails when the camera cannot join the cameras already running (their
+    // anchors must all be formats a multi-camera session takes), changing
+    // nothing but the camera itself.
     [[nodiscard]] virtual bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height,
                                           std::uint32_t frameRate) = 0;
     virtual void stopVideo(std::size_t camera) = 0;
@@ -330,10 +338,17 @@ public:
     // Takes one still; the result arrives through the delegate. A still needs no
     // running video. Fails when the camera cannot take what the request asks.
     [[nodiscard]] virtual bool takeStill(std::size_t camera, const CameraStillRequest& request) = 0;
-    // Tells the session what its guest may ask: the host runs a camera in a
-    // format that serves it. Called once, right after the session opens; a host
-    // that has one format per camera has nothing to do with it.
-    virtual void setLimits(const CameraLimits& limits) { (void)limits; }
+    // Names the format each camera runs in: for each camera of cameras(), the
+    // index of one of its captureFormats, or nothing for a camera the device does
+    // not offer; and the limits the anchors were chosen for, whose still cap
+    // bounds the photo output of a camera (a format that lists a larger size is
+    // set to the largest within the cap). Called once, right after the session
+    // opens; a host with no captureFormats has nothing to do with it.
+    virtual void setAnchors(std::span<const std::optional<std::size_t>> formatOfCamera, const CameraLimits& limits)
+    {
+        (void)formatOfCamera;
+        (void)limits;
+    }
     // Stops every camera. The session cannot be used afterwards.
     virtual void stop() = 0;
 };

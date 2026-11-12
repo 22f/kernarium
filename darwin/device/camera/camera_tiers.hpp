@@ -23,6 +23,19 @@ struct CameraTierLimits {
     std::uint32_t buffers {};
 };
 
+/* How many frames of one camera the host holds at once: the device's inbox
+ * (`inboxFramesPerCamera`, the newest few of a camera), the frame the pump is
+ * writing to the guest, the frame the platform's callback is delivering and the
+ * one the capture is filling. */
+inline constexpr std::uint32_t inboxFramesPerCamera = 3;
+inline constexpr std::uint32_t heldFramesPerCamera = inboxFramesPerCamera + 3;
+/* The cameras that stream at once: the front and the back camera. */
+inline constexpr std::uint32_t concurrentCameras = 2;
+/* The row alignment the platform's capture buffers were measured at: a 1920x1440
+ * NV12 buffer takes 4,423,680 bytes where its pixels are 4,147,200. The device
+ * checks the first buffer of each configuration against it. */
+inline constexpr std::uint32_t captureRowAlignment = 256;
+
 inline constexpr std::uint64_t largeTierBudgetBytes = 1ull << 30;
 
 /* The largest tier any host is given for now: 1080p video and 12 MP stills,
@@ -53,13 +66,32 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
     return std::uint64_t {limits.maximumVideoWidth} * ((std::uint64_t {limits.maximumVideoWidth} * 3 + 3) / 4) * 3 / 2;
 }
 
+/* The bytes of an NV12 frame of `width` by `height` in a capture buffer whose
+ * rows are padded to captureRowAlignment. */
+[[nodiscard]] constexpr std::uint64_t alignedFrameBytes(std::uint32_t width, std::uint32_t height) noexcept
+{
+    const std::uint64_t pitch = (std::uint64_t {width} + captureRowAlignment - 1) / captureRowAlignment * captureRowAlignment;
+    return pitch * height * 3 / 2;
+}
+
+/* The largest capture buffer the host holds for a tier: the frame of the tier's
+ * width at 4:3 (the one maximumDeliveredFrameBytes counts) at the aligned row
+ * size. */
+[[nodiscard]] constexpr std::uint64_t alignedDeliveredFrameBytes(const CameraTierLimits& limits) noexcept
+{
+    return alignedFrameBytes(limits.maximumVideoWidth, (limits.maximumVideoWidth * 3 + 3) / 4);
+}
+
 /* The host-side memory a live session of a tier can hold at its worst, in
  * bytes, outside the guest's RAM. A live session takes it out of the GPU
  * budget B (gpu_pool_bytes in platform/gpu_budget.hpp), so the application's
- * memory limit holds it. Each part is derived from the tier's limits:
- *  - the capture pools: one NV12 frame of the largest size the platform
- *    delivers (maximumDeliveredFrameBytes) for each of the tier's buffers,
- *    which the platform's capture session holds;
+ * memory limit holds it. The figure is one per tier, for the layout with the
+ * most in it: two cameras and a Bayer still. Each part is derived from the
+ * tier's limits:
+ *  - the capture pools: the largest frame the platform delivers, at the
+ *    aligned row size (alignedDeliveredFrameBytes), for each frame the host
+ *    holds (heldFramesPerCamera) of each camera that streams at once
+ *    (concurrentCameras);
  *  - the device's staging: one NV12 frame of the largest video size, where a frame is
  *    cropped, rotated and scaled before it is copied to the guest;
  *  - the still's transients, for one 12 MP RAW still with its DNG: the RAW
@@ -84,7 +116,7 @@ struct CameraHostMemory {
     const CameraTierLimits limits = limitsOf(tier);
     const std::uint64_t frame = std::uint64_t {limits.maximumVideoWidth} * limits.maximumVideoHeight * 3 / 2;
     return {
-        .capturePools = maximumDeliveredFrameBytes(limits) * limits.buffers,
+        .capturePools = alignedDeliveredFrameBytes(limits) * heldFramesPerCamera * concurrentCameras,
         .staging = frame,
         .rawStill = limits.maximumStillPixels * 2 * 3,
         .jpegStill = limits.maximumStillPixels / 2 * 3,

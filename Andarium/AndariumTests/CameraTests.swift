@@ -292,16 +292,16 @@ struct CameraFlowTests {
     }
 
     @Test func theLoaderStatesTheCamerasReserveThatTheRuntimeTakesOutOfTheBudget() {
-        // Every host is given the small tier for now, so the reserve is the same at any budget: 109.6 MiB,
-        // the worst case of the capture pools (the 4:3 frame a 1080p stream is delivered), the staging and a 12 MP RAW
-        // still with its DNG and JPEG.
+        // Every host is given the small tier for now, so the reserve is the same at any budget: 144.4 MiB,
+        // the worst case of the capture pools (six held buffers of the aligned 4:3 frame a 1080p stream is
+        // delivered, for each of two cameras), the staging and a 12 MP RAW still with its DNG and JPEG.
         for budget: UInt32 in [384, 534, 1249, 2048, 4096, 9152] {
-            #expect(kernarium_runtime_loader_camera_reserve_mib(budget) == 110, "budget \(budget) MiB")
+            #expect(kernarium_runtime_loader_camera_reserve_mib(budget) == 145, "budget \(budget) MiB")
         }
         // The model's policy takes that reserve out of the budget the runtime
-        // computes: an iPad mini 6 (B 534) is left 424 MiB, a 4 GiB iPhone
-        // (B 1249) 1139 MiB, and the figure is the budget's while Camera is off.
-        for (budget, pool) in [(534, 424), (1249, 1139)] {
+        // computes: an iPad mini 6 (B 534) is left 389 MiB, a 4 GiB iPhone
+        // (B 1249) 1104 MiB, and the figure is the budget's while Camera is off.
+        for (budget, pool) in [(534, 389), (1249, 1104)] {
             let policy = MemoryPolicy(
                 processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
                 graphicsMemory: { _, _ in budget },
