@@ -671,8 +671,9 @@ footprint less the other terms. Andarium names the file in its boot request and
 reads it at launch.
 
 The stall slot records why the vCPUs stopped running. In every build a thread
-of the process, `uml-stall-watch`, looks every 50 ms (`runtime/stall_watch`) at
-each vCPU carrier's run state and CPU time, and the loader's wrappers mark the
+of the process, `uml-stall-watch`, looks every 50 ms while a carrier is outside
+its idle wait (`runtime/stall_watch`) at each vCPU carrier's run state and CPU
+time, and the loader's wrappers mark the
 host waits a carrier sits in (`platform/host_wait.hpp`). A carrier that for
 100 ms or more is runnable but gets under a fifth of the time, sits in an
 uninterruptible wait, or sits in one host wait while it is not using the CPU is
@@ -690,17 +691,30 @@ The watch looks only while a carrier is outside its idle wait, and sleeps with
 no wake-up of its own while all are inside one: a guest at rest, with the screen
 on or off, suspended or quiesced, costs it none. Each carrier reports its idle
 waits (`runtime/carrier_activity`, through the loader's wrappers; the kernel's
-other threads report nothing). A carrier that stays outside its wait for 50 ms,
-or is due to wake from a timed wait and has not 50 ms after its deadline, or
-that the host wakes (`uml_emulator_wake`, resume), wakes the watch by a timer of
-its kqueue; one that returns within 50 ms never does. The watch sleeps again
-after two looks with every carrier idle and nothing suspected, and its first
-look after a sleep starts the measurement over, so the sleep is nobody's
-starvation. A stall that starts as a carrier leaves its idle wait is recorded
-about 150 ms later. A carrier woken by the guest's own wake source (another
-vCPU, the kernel's notification thread) from a wait with no limit, while every
-other carrier is idle, is seen from its first instruction on. A carrier that
-does not report keeps the watch looking every 50 ms.
+other threads report nothing). The watch wakes when a carrier has stayed outside
+its wait for a short fixed time, when one that was due to wake from a timed wait
+has not run that long after its deadline, and when the host wakes the guest (a
+wake, a resume, or a console request that ends a suspend); a carrier that
+returns within that time never wakes it. The deadlines run on the absolute
+clock, which the carriers' waits run on, and the record's times on the
+continuous one. The watch sleeps again after two looks with every carrier idle
+and nothing suspected, counted afresh after each sleep; its first look after a
+sleep starts the measurement over, so the sleep is nobody's starvation. A stall
+that starts as a carrier leaves its idle wait is recorded about 150 ms later.
+While some carrier is outside its idle wait, or does not report, the watch looks
+every 50 ms.
+
+What the sleeping watch cannot see. A carrier woken before the limit of its
+wait by a guest wake source (another vCPU's IPI, or the kernel's notification
+thread, which alone wakes CPU0 for a host descriptor), while every other
+carrier is idle, is seen from its first instruction on, not while the system
+keeps it from running. The notification thread's fallback, which wakes an idle
+secondary when CPU0 is late for a device, arms the watch, so a device wake that
+stalls is still recorded, later and shorter; the case stays open for a guest of
+one vCPU, a suspended guest, a carrier woken by an IPI from one that goes idle
+again at once, and a stall shorter than the fallback needs. A carrier that stays
+blocked past its limit is looked at once and then left alone, and one that is
+due, starved, and runs before the watch has collected its wake-up is not seen.
 
 The watch reads no guest memory, takes no lock a carrier takes, suspends
 nothing and calls no framework from its own thread, which the kernel-thread
