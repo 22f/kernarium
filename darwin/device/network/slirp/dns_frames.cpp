@@ -18,8 +18,17 @@ constexpr std::uint8_t tcp_fin = 0x01;
 constexpr std::uint8_t tcp_syn = 0x02;
 constexpr std::uint8_t tcp_rst = 0x04;
 constexpr std::uint8_t tcp_ack = 0x10;
+constexpr std::uint8_t tcp_urg = 0x20;
 /* SLiRP sends every IPv4 frame from its gateway's MAC (if_encap4). */
 constexpr MacAddress slirp_mac{0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
+
+/* SLiRP opens a socket for a segment whose flags, masked so, are exactly SYN
+ * (tcp_input.c); a PSH, ECE or CWR beside the SYN does not change that. */
+constexpr bool is_connect_attempt(std::uint8_t flags)
+{
+	return (flags & (tcp_syn | tcp_fin | tcp_rst | tcp_urg | tcp_ack)) ==
+		tcp_syn;
+}
 
 std::uint16_t read16(std::span<const std::uint8_t> bytes, std::size_t offset)
 {
@@ -273,18 +282,37 @@ Classified classify_host_bound_frame(std::span<const std::uint8_t> frame,
 	const std::size_t offset = (transport[12] >> 4) * 4U;
 	if (offset < 20 || offset > transport.size())
 		return result;
+	/* A segment of a flow, which SLiRP serves or resets itself, is not
+	 * refused here. */
+	if (!is_connect_attempt(transport[13]))
+		return {};
 	endpoints.guest_port = read16(transport, 0);
 	endpoints.server_port = read16(transport, 2);
 	result.sequence = read32(transport, 4);
 	result.acknowledgement = read32(transport, 8);
 	result.tcp_flags = transport[13];
-	result.segment_length = transport.size() - offset;
-	if ((result.tcp_flags & tcp_syn) != 0)
-		++result.segment_length;
-	if ((result.tcp_flags & tcp_fin) != 0)
-		++result.segment_length;
+	result.segment_length = transport.size() - offset + 1;
 	result.action = FrameAction::reset;
 	return result;
+}
+
+bool needs_host_check(std::span<const std::uint8_t> frame,
+		      const Subnet &network)
+{
+	if (frame.size() < ethernet_header + 20 ||
+	    read16(frame, 12) != ethertype_ipv4)
+		return false;
+	const auto ip = frame.subspan(ethernet_header);
+	if ((ip[0] >> 4) != 4)
+		return false;
+	const std::size_t header = (ip[0] & 0x0f) * 4U;
+	if (header < 20 || header > ip.size() ||
+	    within(network, {ip[16], ip[17], ip[18], ip[19]}))
+		return false;
+	if (ip[9] == protocol_udp)
+		return true;
+	return ip[9] == protocol_tcp && ip.size() >= header + 14 &&
+		is_connect_attempt(ip[header + 13]);
 }
 
 std::vector<std::uint8_t> udp_reply_frame(const Endpoints &endpoints,

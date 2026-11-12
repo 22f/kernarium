@@ -137,20 +137,9 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 
 		/* The guest may not address the host itself (answer_locally), so
 		 * the network does not come up without the host's addresses to
-		 * refuse. The socket that reports a change opens first: an address
-		 * added after the read is reported. */
-		address_source_.close();
-		address_read_pending_ = false;
-#if UML_SLIRP_TESTING
-		if (address_timer_for_testing_.count() <= 0)
-			(void)address_source_.open();
-#else
-		(void)address_source_.open();
-#endif
-		if (!refresh_host_addresses()) {
-			address_source_.close();
+		 * refuse. */
+		if (!read_host_addresses_now())
 			return -EIO;
-		}
 
 		SlirpConfig config{};
 		config.version = 6;
@@ -180,7 +169,6 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		config.if_mru = 1500;
 		slirp_.reset(slirp_new(&config, &callbacks(), this));
 		if (!slirp_) {
-			address_source_.close();
 			return -EIO;
 		}
 		/* Replay the recorded forwards onto the SLiRP instance this open
@@ -227,7 +215,6 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 				    },
 				    stream_paths) != 0) {
 				slirp_.reset();
-				address_source_.close();
 				return -EIO;
 			}
 			/* DNS over TCP to the name server, and to the gateway as
@@ -269,7 +256,6 @@ int SlirpProvider::open(std::span<unsigned char, 6> mac,
 		} catch (const std::system_error &) {
 			resolver_.stop();
 			slirp_.reset();
-			address_source_.close();
 			return -EIO;
 		}
 		started_.store(true, std::memory_order_release);
@@ -368,7 +354,6 @@ void SlirpProvider::stop() noexcept
 	}
 	slirp_.reset();
 	timers_.clear();
-	address_source_.close();
 }
 
 #if UML_SLIRP_TESTING
@@ -523,12 +508,6 @@ void SlirpProvider::notify_receive_cleanup_for_testing() noexcept
 		receive_cleanup_reached_for_testing_ = true;
 	}
 	io_pause_condition_.notify_all();
-}
-
-void SlirpProvider::notify_host_addresses_changed_for_testing() noexcept
-{
-	address_change_for_testing_.store(true, std::memory_order_release);
-	wake();
 }
 
 /* "ADDRESS:PORT=PATH": the environment's form of a GuestForward. */

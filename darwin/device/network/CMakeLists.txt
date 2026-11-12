@@ -26,7 +26,6 @@ endif()
 # a test variant that publishes the hooks and the provider's own headers.
 function(_uml_add_network_provider TARGET TESTING)
     add_library(${TARGET} STATIC
-        slirp/address_source.cpp
         slirp/provider.cpp
         slirp/event_loop.cpp
         slirp/frame_queue.cpp
@@ -62,7 +61,7 @@ endfunction()
 if(UML_BUILD_NETWORK_PROVIDER)
     _uml_add_network_provider(uml_network_provider 0)
     add_library(UML::NetworkProvider ALIAS uml_network_provider)
-    if(UML_BUILD_TOOLING_TESTS)
+    if(UML_BUILD_TOOLING_TESTS OR UML_BUILD_INTEGRATION_TESTS)
         _uml_add_network_provider(uml_network_provider_test_variant 1)
     endif()
 endif()

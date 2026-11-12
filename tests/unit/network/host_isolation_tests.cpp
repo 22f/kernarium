@@ -2,10 +2,9 @@
 //
 // The rule that keeps the guest off the host itself: the table of the host's
 // addresses, which guest frames the provider refuses because they address one
-// of them and what the refusal looks like on the wire, and which routing
-// messages tell the provider to read the table again. Every rule is a pure
-// function of bytes and of the table, so these tests need no socket and no
-// guest.
+// of them, which frames make the provider look the table up again, and what a
+// refusal looks like on the wire. Every rule is a pure function of bytes and
+// of the table, so these tests need no socket and no guest.
 
 #include "dns_frames.hpp"
 #include "host_addresses.hpp"
@@ -29,10 +28,10 @@ using dns::Ipv4Address;
 using uml::network::HostAddresses;
 
 constexpr Ipv4Address guest{10, 0, 2, 15};
-constexpr Ipv4Address lan_host{192, 168, 1, 5};
-constexpr Ipv4Address lan_broadcast{192, 168, 1, 255};
+constexpr Ipv4Address lan_host{192, 0, 2, 5};
+constexpr Ipv4Address lan_broadcast{192, 0, 2, 255};
 constexpr Ipv4Address loopback{127, 0, 0, 1};
-constexpr Ipv4Address other_machine{192, 168, 1, 77};
+constexpr Ipv4Address other_machine{192, 0, 2, 77};
 constexpr Ipv4Address gateway{10, 0, 2, 2};
 constexpr dns::MacAddress guest_mac{0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 constexpr dns::MacAddress slirp_mac{0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
@@ -41,9 +40,14 @@ constexpr dns::Subnet virtual_network{{10, 0, 2, 0}, {255, 255, 255, 0}};
 constexpr std::uint8_t protocol_icmp = 1;
 constexpr std::uint8_t protocol_tcp = 6;
 constexpr std::uint8_t protocol_udp = 17;
+constexpr std::uint8_t tcp_fin = 0x01;
 constexpr std::uint8_t tcp_syn = 0x02;
 constexpr std::uint8_t tcp_rst = 0x04;
+constexpr std::uint8_t tcp_psh = 0x08;
 constexpr std::uint8_t tcp_ack = 0x10;
+constexpr std::uint8_t tcp_urg = 0x20;
+constexpr std::uint8_t tcp_ece = 0x40;
+constexpr std::uint8_t tcp_cwr = 0x80;
 
 std::uint16_t get16(const Bytes &bytes, std::size_t offset)
 {
@@ -216,23 +220,68 @@ void everyAddressTheHostHoldsIsRefused()
 				 host).action == FrameAction::reset);
 }
 
-void aSegmentOfAConnectionThatIsNotThereIsResetWithItsAcknowledgement()
+void onlyAConnectAttemptIsRefused()
 {
-	const auto frame = ip_frame(lan_host, protocol_tcp,
-		tcp_segment(40001, 80, 500, 9000, tcp_ack, 100));
-	const auto classified = classify(frame, the_host());
-	require(classified.action == FrameAction::reset);
-	const auto reset = dns::tcp_reset_frame(classified, 1);
-	require(reset[47] == tcp_rst && get32(reset, 38) == 9000);
+	const auto host = the_host();
+	/* SLiRP opens a socket for a segment whose SYN, FIN, RST, URG and ACK
+	 * flags are exactly SYN; a PSH, ECE or CWR beside it changes nothing. */
+	for (const std::uint8_t flags :
+	     {tcp_syn, static_cast<std::uint8_t>(tcp_syn | tcp_psh),
+	      static_cast<std::uint8_t>(tcp_syn | tcp_ece | tcp_cwr),
+	      static_cast<std::uint8_t>(tcp_syn | tcp_ece | tcp_cwr | tcp_psh)}) {
+		const auto frame = ip_frame(lan_host, protocol_tcp,
+			tcp_segment(40003, 80, 700, 0, flags, 4));
+		const auto classified = classify(frame, host);
+		require(classified.action == FrameAction::reset);
+		/* The reset acknowledges the SYN and the payload after it. */
+		const auto reset = dns::tcp_reset_frame(classified, 1);
+		require(reset[47] == (tcp_rst | tcp_ack) &&
+			get32(reset, 42) == 700 + 1 + 4);
+	}
+}
+
+void everyOtherSegmentGoesToSlirp()
+{
+	/* The guest's side of a flow the host opened, through an address of the
+	 * host's own, to a forward: SLiRP serves it. A flow it does not know is
+	 * reset by SLiRP itself. Nothing here connects to the host. */
+	const auto host = the_host();
+	for (const std::uint8_t flags :
+	     {static_cast<std::uint8_t>(tcp_syn | tcp_ack),
+	      static_cast<std::uint8_t>(tcp_syn | tcp_ack | tcp_ece),
+	      tcp_ack, static_cast<std::uint8_t>(tcp_ack | tcp_psh),
+	      static_cast<std::uint8_t>(tcp_fin | tcp_ack),
+	      static_cast<std::uint8_t>(tcp_syn | tcp_fin), tcp_fin, tcp_rst,
+	      static_cast<std::uint8_t>(tcp_rst | tcp_ack),
+	      static_cast<std::uint8_t>(tcp_syn | tcp_rst),
+	      static_cast<std::uint8_t>(tcp_syn | tcp_urg), tcp_urg, tcp_psh,
+	      std::uint8_t{0}}) {
+		const auto frame = ip_frame(lan_host, protocol_tcp,
+			tcp_segment(40001, 80, 500, 9000, flags, 100));
+		require(classify(frame, host).action == FrameAction::pass);
+		require(classify(ip_frame(loopback, protocol_tcp,
+					  tcp_segment(40001, 80, 500, 9000,
+						      flags, 100)),
+				 host).action == FrameAction::pass);
+	}
+	/* A segment that is cut short is still dropped, not passed. */
+	auto cut = ip_frame(lan_host, protocol_tcp,
+		tcp_segment(1, 2, 3, 4, tcp_ack));
+	cut.resize(cut.size() - 12);
+	put16(cut, 16, static_cast<std::uint16_t>(cut.size() - 14));
+	put16(cut, 24, 0);
+	put16(cut, 24, checksum(&cut[14], 20));
+	require(classify(cut, host).action == FrameAction::drop);
 }
 
 void aResetIsNeverAnswered()
 {
-	const auto frame = ip_frame(lan_host, protocol_tcp,
-		tcp_segment(40002, 80, 500, 0, tcp_rst));
-	const auto classified = classify(frame, the_host());
-	require(classified.action == FrameAction::reset);
-	require(dns::tcp_reset_frame(classified, 1).empty());
+	/* A connect attempt is the only segment the provider answers, and one
+	 * that carries RST is not that; a reset frame is still never built for
+	 * a segment that has the flag. */
+	dns::Classified segment;
+	segment.tcp_flags = tcp_rst;
+	require(dns::tcp_reset_frame(segment, 1).empty());
 }
 
 void aDatagramToAHostAddressGetsAPortUnreachable()
@@ -335,21 +384,53 @@ void framesThatAreNotIpv4AreLeftToSlirp()
 	require(classify(Bytes(10, 0), the_host()).action == FrameAction::pass);
 }
 
-void aRoutingMessageSaysWhenTheAddressesChange()
+bool needs_check(const Bytes &frame)
 {
-	/* rtm_msglen, rtm_version, rtm_type: RTM_NEWADDR, RTM_DELADDR,
-	 * RTM_IFINFO, RTM_IFANNOUNCE, RTM_IFINFO2. */
-	for (const std::uint8_t type : {0x0c, 0x0d, 0x0e, 0x11, 0x12}) {
-		const Bytes message{0x20, 0x00, 0x05, type, 0, 0, 0, 0};
-		require(uml::network::is_address_change(view(message)));
+	return dns::needs_host_check(view(frame), virtual_network);
+}
+
+void onlyAFrameJudgedByTheTableMakesTheProviderLookItUp()
+{
+	/* A connect attempt, and a datagram, to anything outside the virtual
+	 * network, whatever the destination is. */
+	for (const auto &destination : {lan_host, other_machine, loopback,
+					Ipv4Address{255, 255, 255, 255},
+					Ipv4Address{224, 0, 0, 251}}) {
+		require(needs_check(ip_frame(destination, protocol_tcp,
+					     tcp_segment(1, 2, 3, 0, tcp_syn))));
+		require(needs_check(ip_frame(destination, protocol_tcp,
+					     tcp_segment(1, 2, 3, 0,
+							 tcp_syn | tcp_psh))));
+		require(needs_check(ip_frame(destination, protocol_udp,
+					     udp_datagram(1, 2))));
 	}
-	/* RTM_ADD, RTM_DELETE, RTM_GET, RTM_MISS: routes, not addresses. */
-	for (const std::uint8_t type : {0x01, 0x02, 0x04, 0x05, 0x06, 0x0f}) {
-		const Bytes message{0x20, 0x00, 0x05, type, 0, 0, 0, 0};
-		require(!uml::network::is_address_change(view(message)));
+	/* The virtual network is never judged by the table. */
+	for (const auto &destination : {gateway, Ipv4Address{10, 0, 2, 3},
+					Ipv4Address{10, 0, 2, 255}}) {
+		require(!needs_check(ip_frame(destination, protocol_tcp,
+					      tcp_segment(1, 2, 3, 0, tcp_syn))));
+		require(!needs_check(ip_frame(destination, protocol_udp,
+					      udp_datagram(1, 2))));
 	}
-	require(!uml::network::is_address_change(view(Bytes{0x20, 0x00, 0x05})));
-	require(!uml::network::is_address_change({}));
+	/* A segment of a flow passes whatever the table holds. */
+	for (const std::uint8_t flags :
+	     {static_cast<std::uint8_t>(tcp_syn | tcp_ack), tcp_ack, tcp_rst,
+	      static_cast<std::uint8_t>(tcp_fin | tcp_ack)})
+		require(!needs_check(ip_frame(lan_host, protocol_tcp,
+					      tcp_segment(1, 2, 3, 4, flags))));
+	/* Neither does anything that is not TCP or UDP over IPv4. */
+	require(!needs_check(ip_frame(lan_host, protocol_icmp, Bytes(8, 0))));
+	require(!needs_check(ip_frame(lan_host, 47, Bytes(16, 0))));
+	Bytes arp(42, 0);
+	put16(arp, 12, 0x0806);
+	require(!needs_check(arp));
+	require(!needs_check(Bytes(10, 0)));
+	/* A header that is cut short has no destination to judge. */
+	auto cut = ip_frame(lan_host, protocol_udp, udp_datagram(1, 2));
+	cut.resize(14 + 12);
+	require(!needs_check(cut));
+	Bytes short_segment = ip_frame(lan_host, protocol_tcp, Bytes(10, 0));
+	require(!needs_check(short_segment));
 }
 
 } // namespace
@@ -360,13 +441,14 @@ int main()
 	theSystemListsTheLoopbackAddress();
 	aSynToAHostAddressIsReset();
 	everyAddressTheHostHoldsIsRefused();
-	aSegmentOfAConnectionThatIsNotThereIsResetWithItsAcknowledgement();
+	onlyAConnectAttemptIsRefused();
+	everyOtherSegmentGoesToSlirp();
 	aResetIsNeverAnswered();
 	aDatagramToAHostAddressGetsAPortUnreachable();
 	whateverElseIsAddressedToTheHostIsDropped();
 	everyOtherAddressGoesToSlirp();
 	theVirtualNetworkIsNeverTheHost();
 	framesThatAreNotIpv4AreLeftToSlirp();
-	aRoutingMessageSaysWhenTheAddressesChange();
+	onlyAFrameJudgedByTheTableMakesTheProviderLookItUp();
 	return EXIT_SUCCESS;
 }

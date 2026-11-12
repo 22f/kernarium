@@ -9,10 +9,12 @@
  *
  * What the guest is meant to reach keeps working in the same configuration:
  * DNS at the name server (over UDP and TCP), DHCP, an ICMP echo to the
- * gateway, an inbound host forward, and a destination that is neither the
- * host nor the virtual network, which goes to SLiRP. The provider reads the
- * host's addresses when a change is reported, never per frame; the hooks of
- * the test build report one, and take the place of the system's list.
+ * gateway, an inbound host forward (also when the host's own client comes
+ * through one of the host's addresses), and a destination that is neither
+ * the host nor the virtual network, which goes to SLiRP. The provider looks
+ * the host's addresses up when a frame that needs them finds the table older
+ * than a second, never otherwise; the hooks of the test build take the place
+ * of the system's list and of the clock.
  *
  * Every listener is the probe's own: on 127.0.0.1 and on the LAN address, at
  * a port the host picks, closed at the end.
@@ -666,135 +668,258 @@ void check_other_machines_are_reached()
 		fail("another machine", "SLiRP was not handed the SYN");
 }
 
-/* The provider refuses what the table names, and reads the table when it is
- * told it changed, not before. */
-void check_the_table_follows_the_host(bool timer)
+/* A host client that connects through one of the host's own addresses to a
+ * forward bound to every address is served: the guest's SYN-ACK and its data
+ * go to that address, and the provider passes them to SLiRP instead of
+ * resetting them as connect attempts to the host. */
+void check_a_forward_is_reached_through_the_hosts_own_address()
 {
-	const char *label = timer ? "the address timer" : "an address change";
-	/* The provider reads the table on its own thread. */
-	struct Table final {
-		std::mutex mutex;
-		std::vector<std::uint32_t> addresses{value(loopback)};
-	};
-	auto table = std::make_shared<Table>();
-	const auto change = [&](bool gained) {
-		std::lock_guard lock{table->mutex};
-		if (gained)
-			table->addresses.push_back(value(elsewhere));
-		else
-			table->addresses.pop_back();
-	};
+	const auto lan = find_lan();
+	if (!lan) {
+		std::puts("no LAN address on this host: a forward is not tried "
+			  "through its own address");
+		return;
+	}
+	std::uint16_t host_port = 0;
+	{
+		HostSockets reserve{lan->address};
+		host_port = reserve.tcp_port();
+	}
+	if (host_port == 0) {
+		fail("own-address forward", "no free port");
+		return;
+	}
+	constexpr std::uint16_t guest_port = 2223;
 	Rig rig{[&](uml::network::SlirpProvider &provider) {
-		provider.set_host_address_reader_for_testing([table] {
-			HostAddresses addresses;
-			{
-				std::lock_guard lock{table->mutex};
-				addresses.assign_ipv4(table->addresses);
-			}
-			return std::optional<HostAddresses>{addresses};
-		});
-		if (timer)
-			provider.use_address_timer_for_testing(
-				std::chrono::milliseconds{40});
+		uml::network::HostForward forward{};
+		forward.host_address = "0.0.0.0";
+		forward.host_port = host_port;
+		forward.guest_port = guest_port;
+		if (provider.add_forward(forward) != 0)
+			fail("own-address forward", "the forward was refused");
 	}};
 	if (!rig.opened)
 		return;
-	if (rig.provider.address_source_active_for_testing() == timer)
-		fail(label, timer ? "a routing socket was open" :
-				    "no routing socket reported changes");
-	const auto answered = [&](std::uint16_t port) {
-		return rig.guest.receive([&](const Bytes &frame) {
-			const auto segment = parse_tcp(frame);
-			return segment && segment->source_port == 0 &&
-				segment->destination_port == port &&
-				(segment->flags & tcp_rst) != 0;
-		}, 400).has_value();
-	};
-	const auto settle = [&](std::uint64_t reads) {
-		const auto deadline = Clock::now() + std::chrono::seconds{3};
-		while (rig.provider.host_address_reads_for_testing() < reads &&
-		       Clock::now() < deadline)
-			std::this_thread::sleep_for(std::chrono::milliseconds{5});
-		return rig.provider.host_address_reads_for_testing() >= reads;
+	const int client = ::socket(AF_INET, SOCK_STREAM, 0);
+	sockaddr_in where{};
+	where.sin_family = AF_INET;
+	where.sin_addr.s_addr = htonl(value(lan->address));
+	where.sin_port = htons(host_port);
+	(void)::fcntl(client, F_SETFL, ::fcntl(client, F_GETFL) | O_NONBLOCK);
+	(void)::connect(client, reinterpret_cast<sockaddr *>(&where),
+			sizeof(where));
+	const auto finish = [&](const char *message) {
+		fail("own-address forward", message);
+		::close(client);
 	};
 
-	/* The address is not the host's yet: the SYN goes to SLiRP. */
-	rig.syn(elsewhere, 0, 45000);
-	if (answered(45000))
-		fail(label, "an address that is not the host's was refused");
-
-	/* Traffic reads nothing; the timer is the only thing that does, and
-	 * only without a routing socket. */
-	const auto before = rig.provider.host_address_reads_for_testing();
-	for (std::uint16_t port = 45010; port < 45110; ++port)
-		rig.syn(elsewhere, 0, port);
-	(void)rig.guest.receive([](const Bytes &) { return false; }, 150);
-	if (!timer && rig.provider.host_address_reads_for_testing() != before)
-		fail(label, "the table was read for traffic");
-
-	/* The host gains the address. A timer's read in flight may have missed
-	 * it, so the second read after the change is the one that has it. */
-	const auto reads = rig.provider.host_address_reads_for_testing();
-	change(true);
-	if (!timer)
-		rig.provider.notify_host_addresses_changed_for_testing();
-	if (!settle(reads + (timer ? 2 : 1))) {
-		fail(label, "the table was not read again");
+	std::optional<Segment> syn;
+	if (!rig.guest.receive([&](const Bytes &frame) {
+		    const auto segment = parse_tcp(frame);
+		    if (!segment || segment->destination_port != guest_port ||
+			(segment->flags & tcp_syn) == 0)
+			    return false;
+		    syn = segment;
+		    return true;
+	    })) {
+		finish("the host's connection did not reach the guest");
 		return;
 	}
-	rig.syn(elsewhere, 0, 45001);
-	if (!answered(45001))
-		fail(label, "the host's new address was not refused");
-
-	/* The host loses it again. */
-	const auto gained = rig.provider.host_address_reads_for_testing();
-	change(false);
-	if (!timer)
-		rig.provider.notify_host_addresses_changed_for_testing();
-	if (!settle(gained + (timer ? 2 : 1))) {
-		fail(label, "the table was not read after the address went");
+	/* The guest answers the SYN-ACK to the address the SYN came from, which
+	 * is an address of the host. */
+	constexpr std::uint32_t guest_isn = 5000;
+	(void)rig.guest.send(tcp_frame(guest_ip, syn->source, guest_port,
+				       syn->source_port, guest_isn, syn->seq + 1,
+				       tcp_syn | tcp_ack, 65535));
+	pollfd connected{client, POLLOUT, 0};
+	int error = -1;
+	socklen_t length = sizeof(error);
+	if (::poll(&connected, 1, 3000) <= 0 ||
+	    ::getsockopt(client, SOL_SOCKET, SO_ERROR, &error, &length) != 0 ||
+	    error != 0) {
+		finish("the host's client could not connect");
 		return;
 	}
-	/* Frames the guest sent while the table was old were refused; let the
-	 * queue drain, then ask again. */
-	(void)rig.guest.receive([](const Bytes &) { return false; }, 100);
-	rig.syn(elsewhere, 0, 45002);
-	if (answered(45002))
-		fail(label, "an address the host gave up was still refused");
+
+	/* Bytes go both ways. */
+	constexpr std::size_t to_guest = 5;
+	constexpr std::size_t to_host = 7;
+	const char greeting[to_guest] = {'h', 'e', 'l', 'l', 'o'};
+	if (::send(client, greeting, sizeof(greeting), 0) !=
+	    static_cast<ssize_t>(to_guest)) {
+		finish("the host could not send");
+		return;
+	}
+	std::optional<Segment> data;
+	if (!rig.guest.receive([&](const Bytes &frame) {
+		    const auto segment = parse_tcp(frame);
+		    if (!segment || segment->destination_port != guest_port ||
+			segment->payload != to_guest)
+			    return false;
+		    data = segment;
+		    return true;
+	    })) {
+		finish("the host's bytes did not reach the guest");
+		return;
+	}
+	(void)rig.guest.send(tcp_frame(guest_ip, syn->source, guest_port,
+				       syn->source_port, guest_isn + 1,
+				       data->seq + to_guest, tcp_ack | tcp_psh,
+				       65535, to_host));
+	pollfd readable{client, POLLIN, 0};
+	char reply[16];
+	if (::poll(&readable, 1, 3000) <= 0 ||
+	    ::recv(client, reply, sizeof(reply), 0) !=
+		    static_cast<ssize_t>(to_host))
+		fail("own-address forward", "the guest's bytes did not reach the host");
+	::close(client);
 }
 
-/* A read that fails keeps the table and tries again. */
-void check_a_failed_read_is_retried()
+/* The provider refuses what the table names, looks the table up again for a
+ * frame that is judged by it once the table is a second old, and does not
+ * otherwise: not when the guest is quiet, not for the virtual network, not
+ * for a segment of a flow, not for a burst inside the second. */
+void check_the_table_is_read_for_the_frames_that_need_it()
 {
-	auto fails = std::make_shared<std::atomic_bool>(false);
+	using Nanoseconds = std::chrono::nanoseconds;
+	struct State final {
+		std::mutex mutex;
+		std::vector<std::uint32_t> addresses{value(loopback)};
+		bool fail{};
+		std::atomic<std::int64_t> now{1'000'000'000'000};
+	};
+	auto state = std::make_shared<State>();
+	const auto set_addresses = [&](std::vector<std::uint32_t> addresses) {
+		std::lock_guard lock{state->mutex};
+		state->addresses = std::move(addresses);
+	};
+	const auto set_failing = [&](bool failing) {
+		std::lock_guard lock{state->mutex};
+		state->fail = failing;
+	};
+	const auto advance = [&](std::chrono::milliseconds by) {
+		state->now.fetch_add(
+			std::chrono::duration_cast<Nanoseconds>(by).count());
+	};
 	Rig rig{[&](uml::network::SlirpProvider &provider) {
-		provider.set_host_address_reader_for_testing([fails] {
-			HostAddresses addresses;
-			if (fails->load())
+		provider.set_host_address_reader_for_testing([state] {
+			std::lock_guard lock{state->mutex};
+			if (state->fail)
 				return std::optional<HostAddresses>{};
-			addresses.assign_ipv4({value(loopback), value(elsewhere)});
+			HostAddresses addresses;
+			addresses.assign_ipv4(state->addresses);
 			return std::optional<HostAddresses>{addresses};
 		});
-		provider.use_address_timer_for_testing(
-			std::chrono::milliseconds{40});
+		provider.set_clock_for_testing([state] {
+			return Clock::time_point{Nanoseconds{state->now.load()}};
+		});
 	}};
 	if (!rig.opened)
 		return;
-	fails->store(true);
-	const auto reads = rig.provider.host_address_reads_for_testing();
-	const auto deadline = Clock::now() + std::chrono::seconds{3};
-	while (rig.provider.host_address_reads_for_testing() < reads + 3 &&
-	       Clock::now() < deadline)
-		std::this_thread::sleep_for(std::chrono::milliseconds{5});
-	if (rig.provider.host_address_reads_for_testing() < reads + 3)
-		fail("a failed read", "the provider did not try again");
-	rig.syn(elsewhere, 0, 46000);
-	if (!rig.guest.receive([](const Bytes &frame) {
-		    const auto segment = parse_tcp(frame);
-		    return segment && segment->destination_port == 46000 &&
-			    (segment->flags & tcp_rst) != 0;
-	    }, 400))
-		fail("a failed read", "the table was lost with the failed read");
+	const auto reads = [&] {
+		return rig.provider.host_address_reads_for_testing();
+	};
+	/* All the frames the guest sent so far have been looked at: a DNS query
+	 * is answered after them, in order. */
+	std::uint16_t marker = 47000;
+	const auto drained = [&] {
+		const std::uint16_t id = marker++;
+		(void)rig.guest.send(
+			udp_frame(guest_ip, name_server, id, 53, dns_query(id)));
+		return rig.guest
+			.receive([&](const Bytes &frame) {
+				return frame.size() > 46 && frame[23] == IPPROTO_UDP &&
+					get16(frame, 34) == 53 &&
+					get16(frame, 36) == id;
+			})
+			.has_value();
+	};
+	const auto refused = [&](std::uint16_t port) {
+		return rig.guest
+			.receive(
+				[&](const Bytes &frame) {
+					const auto segment = parse_tcp(frame);
+					return segment && segment->source_port == 0 &&
+						segment->destination_port == port &&
+						(segment->flags & tcp_rst) != 0;
+				},
+				400)
+			.has_value();
+	};
+	const auto expect_reads = [&](const char *what, std::uint64_t expected) {
+		if (!drained())
+			fail(what, "the marker query was not answered");
+		if (reads() != expected)
+			fail(what, "expected " + std::to_string(expected) +
+					   " reads of the host's addresses, found " +
+					   std::to_string(reads()));
+	};
+
+	/* open() reads once, because it cannot come up without the table. A
+	 * quiet guest causes no read, however long it is quiet. */
+	expect_reads("open", 1);
+	advance(std::chrono::seconds{30});
+	(void)rig.guest.receive([](const Bytes &) { return false; }, 300);
+	expect_reads("a quiet guest", 1);
+
+	/* Frames the table is not asked about cause none either, though the
+	 * table is old: the virtual network, a segment of a flow, an echo. */
+	rig.syn(gateway, 53, 47100);
+	(void)rig.guest.send(tcp_frame(guest_ip, elsewhere, 47101, 80, 7, 8,
+				       tcp_ack, 65535));
+	(void)rig.guest.send(icmp_echo_frame(gateway));
+	expect_reads("frames the table does not judge", 1);
+
+	/* The first frame that needs the table finds it old and reads it, and is
+	 * judged by what it read: another machine's address is not the host's. */
+	rig.syn(elsewhere, 0, 47200);
+	if (refused(47200))
+		fail("a connect attempt", "an address that is not the host's "
+					  "was refused");
+	expect_reads("a connect attempt after a quiet period", 2);
+
+	/* A burst inside the second reads nothing more. */
+	for (std::uint16_t port = 47210; port < 47310; ++port)
+		rig.syn(elsewhere, 0, port);
+	expect_reads("a burst", 2);
+
+	/* The host gains the address. Nothing has asked yet, and inside the
+	 * second the old table still stands. */
+	set_addresses({value(loopback), value(elsewhere)});
+	advance(std::chrono::milliseconds{400});
+	rig.syn(elsewhere, 0, 47400);
+	if (refused(47400))
+		fail("inside the second", "the table changed before it was "
+					  "read again");
+	expect_reads("inside the second", 2);
+	/* Past it, the next frame that needs the table reads the new one. */
+	advance(std::chrono::milliseconds{700});
+	rig.syn(elsewhere, 0, 47401);
+	if (!refused(47401))
+		fail("past the second", "the host's new address was not refused");
+	expect_reads("past the second", 3);
+
+	/* A read that fails keeps the table, and is not repeated for every
+	 * frame: the next try waits for the second as well. */
+	set_failing(true);
+	advance(std::chrono::milliseconds{1100});
+	rig.syn(elsewhere, 0, 47500);
+	if (!refused(47500))
+		fail("a failing read", "the table was lost with the failed read");
+	expect_reads("a failing read", 4);
+	for (std::uint16_t port = 47510; port < 47520; ++port)
+		rig.syn(elsewhere, 0, port);
+	expect_reads("a failing read, inside the second", 4);
+	/* It succeeds the next time it is tried, and the host has lost the
+	 * address meanwhile. */
+	set_failing(false);
+	set_addresses({value(loopback)});
+	advance(std::chrono::milliseconds{1100});
+	rig.syn(elsewhere, 0, 47600);
+	if (refused(47600))
+		fail("a retried read", "an address the host gave up was still "
+				       "refused");
+	expect_reads("a retried read", 5);
 }
 
 /* A network that cannot list the host's addresses does not come up: the
@@ -820,10 +945,9 @@ int main(void)
 	check_host_addresses_are_closed();
 	check_what_still_works();
 	check_inbound_forward();
+	check_a_forward_is_reached_through_the_hosts_own_address();
 	check_other_machines_are_reached();
-	check_the_table_follows_the_host(false);
-	check_the_table_follows_the_host(true);
-	check_a_failed_read_is_retried();
+	check_the_table_is_read_for_the_frames_that_need_it();
 	check_the_network_needs_the_table();
 	if (failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", failures);

@@ -6,9 +6,10 @@
  * the guest off the host itself. SLiRP connects a guest's flow with a socket
  * of the application, so a guest that addresses one of these addresses would
  * reach the application's own machine, services bound to every address
- * included. The provider refuses those flows (dns_frames.hpp) and reads this
- * table, not the system, for each frame: the table is read again when the
- * routing socket reports a change of an address or an interface.
+ * included. The provider refuses those flows (dns_frames.hpp) and judges
+ * them against this table, not the system, for each frame: the table is read
+ * again, on the provider's worker, when a frame that needs it finds it older
+ * than a second.
  *
  * A family is its own sorted table. IPv4 is the only one the guest has; an
  * IPv6 table with its `contains` and its case in `read_host_addresses` adds
@@ -19,7 +20,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <span>
 #include <vector>
 
 namespace uml::network {
@@ -50,11 +50,5 @@ private:
  * address is local whatever the state of its interface. Nothing when the
  * system cannot list them. */
 [[nodiscard]] std::optional<HostAddresses> read_host_addresses();
-
-/* Whether a message from the routing socket (a `struct rt_msghdr`, whose
- * fifth byte is the type) says that an interface address was added or
- * removed, or that an interface came, went, or changed state. */
-[[nodiscard]] bool is_address_change(
-	std::span<const std::uint8_t> message) noexcept;
 
 } // namespace uml::network

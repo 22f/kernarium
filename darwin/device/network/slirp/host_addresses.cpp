@@ -12,16 +12,6 @@
 namespace uml::network {
 namespace {
 
-/* The types of the routing socket's messages (<net/route.h>), written out
- * because the header is private on some Apple SDKs. */
-constexpr std::uint8_t rtm_newaddr = 0x0c;
-constexpr std::uint8_t rtm_deladdr = 0x0d;
-constexpr std::uint8_t rtm_ifinfo = 0x0e;
-constexpr std::uint8_t rtm_ifannounce = 0x11;
-constexpr std::uint8_t rtm_ifinfo2 = 0x12;
-/* rtm_msglen (2 bytes), rtm_version, rtm_type. */
-constexpr std::size_t rtm_type_offset = 3;
-
 constexpr std::uint32_t ipv4_value(const HostIpv4 &address) noexcept
 {
 	return (static_cast<std::uint32_t>(address[0]) << 24) |
@@ -76,22 +66,6 @@ std::optional<HostAddresses> read_host_addresses()
 	HostAddresses result;
 	result.assign_ipv4(std::move(ipv4));
 	return result;
-}
-
-bool is_address_change(std::span<const std::uint8_t> message) noexcept
-{
-	if (message.size() <= rtm_type_offset)
-		return false;
-	switch (message[rtm_type_offset]) {
-	case rtm_newaddr:
-	case rtm_deladdr:
-	case rtm_ifinfo:
-	case rtm_ifannounce:
-	case rtm_ifinfo2:
-		return true;
-	default:
-		return false;
-	}
 }
 
 } // namespace uml::network

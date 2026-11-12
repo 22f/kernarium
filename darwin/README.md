@@ -173,17 +173,23 @@ patches provide the behaviors the `slirp-network-*` tests check.
   permission is asked for only when the guest itself reaches the local network.
 - The guest cannot reach the machine the application runs on. SLiRP does not
   map the gateway or the broadcast address to the host's loopback
-  (`disable_host_loopback`), and the provider refuses a guest's TCP and UDP to
-  any address a host interface holds, its broadcast address and `127.0.0.1`
-  included: a TCP reset or an ICMP port unreachable at once, whether or not
-  anything listens, and silence for every other protocol. The addresses are
-  read when the routing socket reports a change of an address or an interface,
-  or every 2 s where the system refuses that socket, never per frame, and the
-  network does not open without them. Addresses of the virtual network are
-  never the host's. What the guest reaches through the gateway is SLiRP's own
-  (DHCP, ICMP echo, the name server's DNS); other machines on the local
-  network are reached as before. A host forward is the one listener the guest
-  shares with the host, and it leads into the guest. A test that needs a host
+  (`disable_host_loopback`), and the provider refuses a guest's TCP connect
+  attempts and UDP datagrams to any address a host interface holds, its
+  broadcast address and `127.0.0.1` included: a TCP reset or an ICMP port
+  unreachable at once, whether or not anything listens, and silence for the
+  other protocols. The provider checks the host's current addresses when the
+  guest starts a flow: it lists them when a connect attempt or a datagram to
+  an address outside the virtual network finds the last listing a second old,
+  never otherwise, so a quiet guest costs no wake-up and no system call, and
+  the network does not open without a first listing. Addresses of the virtual
+  network are never the host's. An address the host answers that no interface
+  holds, such as a service a VPN client runs inside its tunnel, is not
+  covered. What the guest reaches through the gateway is SLiRP's own (DHCP,
+  ICMP echo, the name server's DNS); other machines on the local network are
+  reached as before. A host forward is the one listener the guest shares with
+  the host, and it leads into the guest, also when the host's own client comes
+  through one of the host's addresses (TCP; a UDP forward used that way from a
+  non-loopback address of the host stays unreachable). A test that needs a host
   listener names a guest forward to a Unix socket, which only the provider's
   test build offers (`UML_TEST_SLIRP_GUEST_FORWARD`, read by
   `uml-darwin-network-test`, which no preset installs or packages); no product

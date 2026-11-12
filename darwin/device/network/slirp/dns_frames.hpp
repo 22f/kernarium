@@ -80,18 +80,32 @@ struct Subnet final {
 };
 
 /*
- * A guest frame addressed to one of the host's own addresses is refused, for
+ * A guest flow addressed to one of the host's own addresses is refused, for
  * SLiRP would connect it to a service of the machine the application runs
- * on: a TCP segment is answered with a reset and a UDP datagram with an ICMP
- * port unreachable, whether or not anything listens, so the guest learns
- * nothing about the host's services. Everything else addressed to the host
- * (ICMP, fragments, a malformed packet) is dropped. A frame for any other
- * address, the addresses of the virtual network `network` included, is
- * `pass`. Run it after classify_guest_frame has passed the frame on.
+ * on: a TCP connect attempt is answered with a reset and a UDP datagram with
+ * an ICMP port unreachable, whether or not anything listens, so the guest
+ * learns nothing about the host's services. A connect attempt is a segment
+ * whose SYN, FIN, RST, URG and ACK flags are exactly SYN, SLiRP's own test
+ * for opening a socket. Every other TCP segment is `pass`, for SLiRP serves
+ * the flow it belongs to or resets it itself, and the host's own client
+ * reaches a forward through one of the host's addresses by a flow the host
+ * opened. ICMP, fragments and a malformed packet addressed to the host are
+ * dropped. A frame for any other address, the addresses of the virtual
+ * network `network` included, is `pass`. Run it after classify_guest_frame
+ * has passed the frame on.
  */
 [[nodiscard]] Classified classify_host_bound_frame(
 	std::span<const std::uint8_t> frame, const HostAddresses &host,
 	const Subnet &network);
+
+/*
+ * Whether classify_host_bound_frame needs the host's current addresses for
+ * `frame`: an IPv4 TCP connect attempt or UDP datagram to an address outside
+ * the virtual network `network`. The provider reads the addresses again for
+ * such a frame only, so it asks the system nothing while the guest is quiet.
+ */
+[[nodiscard]] bool needs_host_check(std::span<const std::uint8_t> frame,
+				    const Subnet &network);
 
 /* One Ethernet frame carrying `payload` from the server back to the guest.
  * The payload must fit one 1500-byte IP packet. */
