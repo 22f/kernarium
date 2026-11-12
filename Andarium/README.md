@@ -585,12 +585,13 @@ requires reopening Andarium.
   App Store build carries none of this: its runtime has no JIT and the
   application has no row, preference, entries or sentences.
 - **Motion.** The guest has the device's accelerometer and gyroscope wherever
-  the device has them, with no setting and no permission; an iPad app on a Mac
-  and the Simulator have none and offer none. The host reads a sensor only
-  while the guest is in front and an application in it uses the sensor, and
-  sends samples over private vsock port 5556 from the process's one Core Motion
-  manager, which is never released (a released manager crashes inside Core
-  Motion); the system image must include the
+  the device has them, with no setting and no permission. An iPad app on a Mac
+  and the Simulator have none, so nothing is read there, and Android still
+  lists both sensors. The host reads a sensor only while the guest is in front
+  and an application in it uses the sensor, and sends samples over private
+  vsock port 5556 from the process's one Core Motion manager, which is never
+  released (a released manager crashes inside Core Motion); the system image
+  must include the
   [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
