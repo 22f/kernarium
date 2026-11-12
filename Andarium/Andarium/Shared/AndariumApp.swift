@@ -46,6 +46,12 @@ final class AndariumProcess {
         SendFeedbackStaging().sweep()
         #endif
         model = entry.makeModel()
+        #if TIP_JAR
+        // From launch: a purchase the store delivers outside the sheet (an
+        // approval, an interrupted purchase) is finished, whether or not the
+        // sheet is ever opened.
+        TipJarUpdates.listen(model.tipJarServices.store)
+        #endif
     }
 }
 

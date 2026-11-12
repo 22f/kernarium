@@ -393,8 +393,16 @@ final class AppModel {
     /// What Send feedback asks of the system (`SendFeedbackServices`); a test
     /// or the Simulator preview replaces it.
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
-    /// The Send feedback sheet is open, over Info or over the session's Settings.
+    /// The Send feedback sheet is open, over Home or over the session's Settings.
     var feedbackSheetOpen = false
+    #endif
+    #if TIP_JAR
+    /// What Buy me tokens asks of the App Store and of the build
+    /// (`TipJarServices`); a test or the Simulator preview replaces it.
+    @ObservationIgnored var tipJarServices = TipJarServices()
+    /// The Buy me tokens sheet is open, over Home. Nothing else about it is
+    /// kept: the sheet's state belongs to one opening.
+    var tipJarSheetOpen = false
     #endif
     /// The update's Restore is under way (waiting for a snapshot operation, or running).
     private var restoringUpdate = false
