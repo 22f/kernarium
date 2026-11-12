@@ -36,10 +36,6 @@ struct SideKeysOverlay: View {
     /// display can close them.
     @Binding var open: Bool
     let actions: SideKeyActions
-    /// A span of the edge the keys never rest on, in this view's
-    /// coordinates: the fold of a turned inner display
-    /// (`SessionPlan.keepOut`).
-    var keepOut: ClosedRange<CGFloat>?
 
     @State private var leading: Bool
     @State private var fraction: CGFloat = 0.32
@@ -52,15 +48,11 @@ struct SideKeysOverlay: View {
     /// tip wants to show.
     @State private var tipShown = false
 
-    init(
-        mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, actions: SideKeyActions,
-        keepOut: ClosedRange<CGFloat>? = nil
-    ) {
+    init(mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, actions: SideKeyActions) {
         self.mode = mode
         self.lit = lit
         _open = open
         self.actions = actions
-        self.keepOut = keepOut
         _leading = State(initialValue: leading)
     }
 
@@ -75,11 +67,8 @@ struct SideKeysOverlay: View {
     @ViewBuilder
     private func keys(in size: CGSize) -> some View {
         let edgeX: CGFloat = leading ? 0 : size.width
-        let closedY = KeyPlacement.clear(
-            min(max(70, size.height * fraction), size.height - 70), half: 66, keepOut: keepOut, length: size.height)
-        let openY = KeyPlacement.clear(
-            min(max(118, size.height * fraction), max(118, size.height - 118)), half: 122, keepOut: keepOut,
-            length: size.height)
+        let closedY = min(max(70, size.height * fraction), size.height - 70)
+        let openY = min(max(118, size.height * fraction), max(118, size.height - 118))
         let inward: CGFloat = leading ? 1 : -1
         let recoveryMode = mode == .recovery
         // The group's width: Power's column, and in Android the column beside it.

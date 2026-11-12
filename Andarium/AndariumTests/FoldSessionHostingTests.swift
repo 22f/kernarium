@@ -302,10 +302,10 @@ struct FoldSessionHostingTests {
         #expect(rig.lease.window.backgroundColor == .black, "\(pose)")
     }
 
-    // MARK: Nothing of Andarium's on the fold
+    // MARK: Nothing of Andarium's on the fold while bent
 
-    @Test(arguments: [Pose.uprightBook, .uprightFlat, .turnedFlat])
-    func nothingOfAndariumsIsOnTheFoldWhenTheGuestSpansIt(_ pose: Pose) async throws {
+    @Test(arguments: [Pose.uprightBook])
+    func nothingOfAndariumsIsOnTheFoldWhenTheGuestSpansItWhileBent(_ pose: Pose) async throws {
         let rig = try await Rig(pose, test: self)
         defer { rig.end() }
         // The pieces that can be on screen: the statistics and the keys.
@@ -349,6 +349,26 @@ struct FoldSessionHostingTests {
                     #expect(!rig.reachesGuest(centre), "\(pose): \(key.label) at \(centre) reached the guest")
                 }
             }
+        }
+    }
+
+    /// Flat, the session is the iPad's and nothing is placed by the fold: the
+    /// statistics hang centred from the top of the display, across the fold.
+    @Test(arguments: [Pose.uprightFlat, .turnedFlat])
+    func flatTheStatisticsHangCentredFromTheTopOfTheDisplayAsOnAnIPad(_ pose: Pose) async throws {
+        let rig = try await Rig(pose, test: self)
+        defer { rig.end() }
+        rig.model.session.showStats = true
+        rig.model.session.sideKeysOpen = false
+        try await Task.sleep(for: .milliseconds(700))
+        rig.controller.view.layoutIfNeeded()
+        let stats = try #require(rig.labelled().first { $0.label.hasPrefix("CPU") }, "no statistics in \(rig.labelled())").frame
+        #expect(abs(stats.midX - pose.guest.midX) < 1.5, "\(pose): the statistics \(stats) are not centred on \(pose.guest)")
+        #expect(stats.minY < pose.guest.minY + 80, "\(pose): the statistics \(stats) are not at the top")
+        if pose == .uprightFlat {
+            // Upright, the top centre is where the fold runs: nothing avoids it.
+            let band = try #require(pose.reading.division).frame
+            #expect(stats.intersects(band), "\(pose): the statistics \(stats) avoid the fold \(band)")
         }
     }
 
@@ -570,6 +590,38 @@ struct FoldSessionHostingTests {
         } else {
             #expect(!welcome.intersects(band), "\(pose): Welcome is on the fold at \(welcome)")
             #expect(halves.card.insetBy(dx: -1, dy: -1).contains(welcome), "\(pose): Welcome \(welcome) is not on \(halves.card)")
+        }
+    }
+
+    /// Home's Start, as a screen reads it: the bar's button (not Start in
+    /// recovery).
+    private func startButton(in rig: Rig) throws -> CGRect {
+        try #require(
+            rig.labelled().first { $0.label == "Start" || $0.label.hasPrefix("Start and") }, "no Start in \(rig.labelled())"
+        ).frame
+    }
+
+    /// Flat, Home is the iPad's: no pages, so Start is the same bar it is
+    /// with no hinge, at the foot of the display across the fold; bent, Start
+    /// is at the foot of the first page and clear of the fold.
+    @Test(arguments: Pose.allCases.filter(\.inner))
+    func homeIsTheIPadsListWhenFlatAndTwoPagesWhenBent(_ pose: Pose) async throws {
+        let shown = try await Rig(pose, phase: .home, test: self)
+        defer { shown.end() }
+        let start = try startButton(in: shown)
+        let band = try #require(pose.reading.division).frame
+        if pose == .uprightFlat || pose == .turnedFlat {
+            let plain = try await Rig(pose, phase: .home, plain: true, test: self)
+            defer { plain.end() }
+            let expected = try startButton(in: plain)
+            #expect(near(start, expected), "\(pose): Start is at \(start), not as with no hinge at \(expected)")
+        } else {
+            #expect(!start.intersects(band), "\(pose): Start is on the fold at \(start)")
+            if pose == .uprightBook {
+                #expect(start.maxX <= band.minX + 1, "\(pose): Start \(start) is not on the leading page")
+            } else {
+                #expect(start.maxY <= band.minY + 1, "\(pose): Start \(start) is not above the fold")
+            }
         }
     }
 

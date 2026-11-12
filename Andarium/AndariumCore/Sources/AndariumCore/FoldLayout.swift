@@ -98,6 +98,20 @@ public enum FoldPose: Equatable, Sendable {
 
     public var folds: Bool { self != .plain }
 
+    /// The one decision that places a screen around the hinge: the inner
+    /// display bent at it, a book upright or standing turned. Flat, upright or
+    /// turned, every screen outside the cover is laid out as on an iPad of the
+    /// same size and shape: nothing is placed relative to the hinge, nothing
+    /// avoids it, nothing is split around it. Home's pages, the session's
+    /// statistics and notices, the keys' keep-out and a sheet's detent all ask
+    /// it, and the popups' place follows it.
+    public var spreads: Bool {
+        switch self {
+        case .upright(let bent), .turned(let bent): bent
+        case .plain, .cover: false
+        }
+    }
+
     /// Whether the file browser's Import is a round button of its own in the
     /// toolbar, in the column the strip beside the cover's camera gives the
     /// toolbar's buttons, and not a labelled button in the bar at the foot.
@@ -127,10 +141,11 @@ public enum FoldPose: Equatable, Sendable {
 ///   statistics above them. Notices hang from the guest's top.
 /// - Inner, upright, bent or flat: the guest fills the safe area across both
 ///   halves, so the hinge never resizes Android. The keys stay on its edge,
-///   closed until tapped. The statistics and the notices hang from the top of
-///   the trailing half.
-/// - Inner, turned, flat: the guest fills the safe area; the keys stay on its
-///   edge and never rest on the fold.
+///   closed until tapped. Bent, the statistics and the notices hang from the
+///   top of the trailing half; flat, from the top of the display, as on an
+///   iPad.
+/// - Inner, turned, flat: the guest fills the safe area, with the keys on its
+///   edge and the statistics and notices at its top, as on an iPad.
 /// - Inner, turned, bent (standing like a laptop): the guest takes the upper
 ///   half; the lower half, on the table, is a deck with the keys in one row
 ///   and the statistics and notices above them.
@@ -149,10 +164,6 @@ public struct SessionPlan: Equatable, Sendable {
     public var keys: Keys
     /// What the statistics and the notices hang from the top of.
     public var hud: CGRect
-    /// The fold's span along the edge the keys sit on, in the guest's own
-    /// coordinates, where the keys never rest; nil where the fold does not
-    /// cross that edge.
-    public var keepOut: ClosedRange<CGFloat>?
 
     /// A strip narrower than this is the sensor housing's alone and holds
     /// nothing.
@@ -169,7 +180,6 @@ public struct SessionPlan: Equatable, Sendable {
         let pose = reading.pose
         guard pose.folds else { return nil }
         let safe = reading.sessionSafeArea
-        keepOut = nil
         switch pose {
         case .plain:
             return nil
@@ -181,9 +191,9 @@ public struct SessionPlan: Equatable, Sendable {
         case .upright:
             guest = safe
             keys = .edge
-            hud = Self.halves(of: safe, reading: reading)?.second ?? safe
-        case .turned(let bent):
-            if bent, let halves = Self.halves(of: safe, reading: reading) {
+            hud = pose.spreads ? Self.halves(of: safe, reading: reading)?.second ?? safe : safe
+        case .turned:
+            if pose.spreads, let halves = Self.halves(of: safe, reading: reading) {
                 guest = halves.first
                 keys = .deck(halves.second)
                 hud = halves.second
@@ -191,9 +201,6 @@ public struct SessionPlan: Equatable, Sendable {
                 guest = safe
                 keys = .edge
                 hud = safe
-                if let band = reading.division?.frame {
-                    keepOut = (band.minY - safe.minY)...(band.maxY - safe.minY)
-                }
             }
         }
     }
@@ -264,7 +271,7 @@ public struct FoldHalves: Equatable, Sendable {
     public var first: CGRect
     public var second: CGRect
     public var upright: Bool
-    /// The device is bent at the fold, not flat.
+    /// The device is bent at the fold, not flat (`FoldPose.spreads`).
     public var bent: Bool
     /// The safe area the halves divide.
     public var safe: CGRect
@@ -277,7 +284,7 @@ public struct FoldHalves: Equatable, Sendable {
         first = halves.first
         second = halves.second
         if case .upright = reading.pose { upright = true } else { upright = false }
-        bent = reading.division?.isActive ?? false
+        bent = reading.pose.spreads
         safe = reading.safeArea
         band = reading.division?.frame ?? .zero
     }
@@ -364,10 +371,11 @@ public struct HomePages: Equatable, Sendable {
     /// A page shorter or narrower than this is not worth a page of its own.
     public static let minimumPage: CGFloat = 120
 
-    /// `frame` is the space Home lays out in, in window coordinates. Nil on a
-    /// display with no fold band, and where a page would be too small.
+    /// `frame` is the space Home lays out in, in window coordinates. Nil while
+    /// the display is not bent at the fold (flat, Home is laid out as on an
+    /// iPad), and where a page would be too small.
     public init?(_ reading: FoldReading, frame: CGRect) {
-        guard let band = reading.division?.frame, reading.pose.isInner, frame.width > 0, frame.height > 0 else {
+        guard reading.pose.spreads, let band = reading.division?.frame, frame.width > 0, frame.height > 0 else {
             return nil
         }
         if case .upright = reading.pose {
@@ -393,30 +401,10 @@ public enum FoldSheet {
     /// cover, the upright inner display, the turned one while it is flat and
     /// every other screen).
     public static func detentHeight(_ reading: FoldReading) -> CGFloat? {
-        guard case .turned = reading.pose, let division = reading.division, division.isActive else { return nil }
-        let band = division.frame
+        guard case .turned = reading.pose, reading.pose.spreads, let band = reading.division?.frame else { return nil }
         // A detent leaves out the home indicator's inset and the sheet's own
         // top margin, so the height is measured from the bottom of the safe
         // area.
         return max(200, reading.safeArea.maxY - band.maxY - SessionPlan.sheetClearance)
-    }
-}
-
-/// Where the side keys rest along their edge.
-public enum KeyPlacement {
-    /// `centre` (a distance along the edge) moved to the nearer side of
-    /// `keepOut` when keys `half` long either side of it would reach into it;
-    /// `length` is the edge's length. A span the keys cannot clear on either
-    /// side leaves the centre where it was.
-    public static func clear(_ centre: CGFloat, half: CGFloat, keepOut: ClosedRange<CGFloat>?, length: CGFloat) -> CGFloat {
-        guard let keepOut, centre + half > keepOut.lowerBound, centre - half < keepOut.upperBound else {
-            return centre
-        }
-        let above = keepOut.lowerBound - half
-        let below = keepOut.upperBound + half
-        let fitsAbove = above >= half
-        let fitsBelow = below <= length - half
-        if fitsAbove && (!fitsBelow || centre - above <= below - centre) { return above }
-        return fitsBelow ? below : centre
     }
 }

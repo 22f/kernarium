@@ -97,11 +97,12 @@ struct HomeView: View {
 
     // MARK: Layouts
 
-    /// The inner display of a folding iPhone, bent or flat alike: one page of
-    /// Home on each side of the fold, each scrolling on its own, and Start at
+    /// The inner display of a folding iPhone while it is bent at the fold: one
+    /// page of Home on each side of it, each scrolling on its own, and Start at
     /// the foot of the first. Upright, the virtual machine and Start on the
     /// leading page and what it may use on the trailing one; turned, the
-    /// virtual machine and Start above the fold and the rest below it.
+    /// virtual machine and Start above the fold and the rest below it. Flat,
+    /// Home is laid out as on an iPad: `HomePages` is nil.
     @ViewBuilder
     private func pagesLayout(_ pages: HomePages) -> some View {
         let first = ScrollView {

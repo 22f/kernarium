@@ -69,6 +69,39 @@ struct FoldPoseTests {
         #expect(FoldSheet.detentHeight(plainPhone) == nil)
     }
 
+    @Test func onlyTheInnerDisplayBentAtTheFoldIsPlacedAroundTheHinge() {
+        // The one decision: flat, upright or turned, every screen is laid out
+        // as on an iPad; the cover and a display with no hinge have no spread.
+        #expect(reading(.upright(bent: true)).pose.spreads)
+        #expect(reading(.turned(bent: true)).pose.spreads)
+        #expect(!reading(.upright(bent: false)).pose.spreads)
+        #expect(!reading(.turned(bent: false)).pose.spreads)
+        #expect(!reading(.cover).pose.spreads)
+        #expect(!reading(.coverLeadingStrip).pose.spreads)
+        #expect(!plainPhone.pose.spreads)
+        #expect(!plainPad.pose.spreads)
+    }
+
+    @Test func flatTheInnerDisplayHasNoHingeAwareLayoutAtAllAsOnAnIPad() throws {
+        // Every layout that is decided from the hinge answers as it does on a
+        // display with no hinge, in both holding directions.
+        for pose in [Pose.upright(bent: false), .turned(bent: false)] {
+            let read = reading(pose, statusBarHidden: false)
+            #expect(HomePages(read, frame: read.safeArea) == nil, "\(pose)")
+            #expect(FoldSheet.detentHeight(read) == nil, "\(pose)")
+            let plan = try #require(SessionPlan(reading(pose)))
+            #expect(plan.keys == .edge && plan.hud == plan.guest, "\(pose)")
+            #expect(try #require(FoldHalves(read)).bent == false, "\(pose)")
+        }
+        // Bent, the same asks answer with the fold.
+        for pose in [Pose.upright(bent: true), .turned(bent: true)] {
+            let read = reading(pose, statusBarHidden: false)
+            #expect(HomePages(read, frame: read.safeArea) != nil, "\(pose)")
+            #expect(try #require(FoldHalves(read)).bent, "\(pose)")
+        }
+        #expect(FoldSheet.detentHeight(reading(.turned(bent: true))) != nil)
+    }
+
     @Test func theCoverIsAHingeWithNoFoldBand() {
         #expect(reading(.cover).pose == .cover)
         #expect(reading(.coverLeadingStrip).pose == .cover)
@@ -128,7 +161,6 @@ struct SessionPlanTests {
         #expect(plan.keys == .rail(rect(382, 86, 84, 558)))
         // Notices hang from the guest's top.
         #expect(plan.hud == plan.guest)
-        #expect(plan.keepOut == nil)
     }
 
     @Test func theRailStartsBelowWhateverTheSystemKeepsAtTheStripsTop() throws {
@@ -160,14 +192,17 @@ struct SessionPlanTests {
         let plan = try plan(.upright(bent: bent))
         #expect(plan.guest == rect(0, 0, 951, 635))
         #expect(plan.keys == .edge)
-        // The statistics and the notices hang from the trailing half, beside
-        // the keys and clear of the fold's band and its margins.
-        #expect(plan.hud == rect(495.5, 0, 455.5, 635))
-        #expect(plan.keepOut == nil)
     }
 
-    @Test func bendingTheHingeHeldUprightChangesNothing() throws {
-        #expect(try plan(.upright(bent: true)) == plan(.upright(bent: false)))
+    @Test func heldUprightTheStatisticsHangFromTheTrailingHalfWhileBentAndFromTheTopWhenFlat() throws {
+        // Bent, beside the keys and clear of the fold's band and its margins;
+        // flat, from the top of the display as on an iPad.
+        #expect(try plan(.upright(bent: true)).hud == rect(495.5, 0, 455.5, 635))
+        #expect(try plan(.upright(bent: false)).hud == rect(0, 0, 951, 635))
+    }
+
+    @Test func bendingTheHingeHeldUprightNeverResizesTheGuest() throws {
+        #expect(try plan(.upright(bent: true)).guest == plan(.upright(bent: false)).guest)
         #expect(!SessionPlan.resizesGuest(from: try plan(.upright(bent: true)), to: try plan(.upright(bent: false))))
     }
 
@@ -177,13 +212,11 @@ struct SessionPlanTests {
 
     // MARK: Inner, turned
 
-    @Test func turnedAndFlatTheGuestFillsTheSafeAreaAndTheKeysAvoidTheFold() throws {
+    @Test func turnedAndFlatTheSessionIsLaidOutAsOnAnIPad() throws {
         let plan = try plan(.turned(bent: false))
         #expect(plan.guest == rect(0, 0, 669, 917))
         #expect(plan.keys == .edge)
         #expect(plan.hud == plan.guest)
-        // The fold's band with its margins, from the guest's own top.
-        #expect(plan.keepOut == 455.5...495.5)
     }
 
     @Test func standingTheGuestIsTheUpperHalfAndTheLowerHalfIsTheDeck() throws {
@@ -191,55 +224,31 @@ struct SessionPlanTests {
         #expect(plan.guest == rect(0, 0, 669, 455.5))
         #expect(plan.keys == .deck(rect(0, 495.5, 669, 421.5)))
         #expect(plan.hud == rect(0, 495.5, 669, 421.5))
-        #expect(plan.keepOut == nil)
     }
 
     // MARK: What stays clear of the fold
 
-    @Test func nothingOfAndariumsOnTheInnerDisplayTouchesTheFoldBandInAnyPose() throws {
-        for pose in [Pose.upright(bent: true), .upright(bent: false), .turned(bent: true), .turned(bent: false)] {
+    @Test func whileBentNothingOfAndariumsOnTheInnerDisplayTouchesTheFoldBand() throws {
+        for pose in [Pose.upright(bent: true), .turned(bent: true)] {
             let reading = reading(pose)
             let band = try #require(reading.division).frame
             let plan = try #require(SessionPlan(reading))
             // The statistics and the notices.
-            if case .upright = reading.pose {
-                #expect(!plan.hud.intersects(band), "\(pose)")
-            } else if case .turned(true) = reading.pose {
-                #expect(!plan.hud.intersects(band), "\(pose)")
-            }
+            #expect(!plan.hud.intersects(band), "\(pose)")
             // The deck, and the guest above it when standing.
             if case .deck(let deck) = plan.keys {
                 #expect(!deck.intersects(band), "\(pose)")
                 #expect(!plan.guest.intersects(band), "\(pose)")
             }
-            // The keys: never over the band along their edge.
-            if let span = plan.keepOut {
-                #expect(span == (band.minY - plan.guest.minY)...(band.maxY - plan.guest.minY), "\(pose)")
-            }
         }
     }
 
-    @Test func theKeysSettleOnTheNearerSideOfTheBandNeverOnIt() {
-        let span: ClosedRange<CGFloat> = 455.5...495.5
-        // The closed keys are 124 tall, the open group 244 or so; the guest is
-        // 917 tall. Every centre the drag can reach (10% to 90%) ends clear.
-        for half: CGFloat in [62, 122] {
-            var y: CGFloat = 917 * 0.1
-            while y <= 917 * 0.9 {
-                let settled = KeyPlacement.clear(y, half: half, keepOut: span, length: 917)
-                #expect(settled + half <= span.lowerBound || settled - half >= span.upperBound,
-                        "centre \(y), half \(half) settled at \(settled)")
-                y += 7
-            }
+    @Test func flatNothingOfTheSessionIsPlacedByTheFoldAsOnAnIPad() throws {
+        for pose in [Pose.upright(bent: false), .turned(bent: false)] {
+            let plan = try #require(SessionPlan(reading(pose)))
+            #expect(plan.keys == .edge, "\(pose)")
+            #expect(plan.hud == plan.guest, "\(pose)")
         }
-        // Below the band when that is nearer, above it when that is.
-        #expect(KeyPlacement.clear(480, half: 62, keepOut: span, length: 917) == 557.5)
-        #expect(KeyPlacement.clear(470, half: 62, keepOut: span, length: 917) == 393.5)
-        // Clear already: left where it is.
-        #expect(KeyPlacement.clear(250, half: 62, keepOut: span, length: 917) == 250)
-        #expect(KeyPlacement.clear(480, half: 62, keepOut: nil, length: 917) == 480)
-        // A band the keys cannot clear on either side leaves them where they were.
-        #expect(KeyPlacement.clear(100, half: 62, keepOut: 0...200, length: 200) == 100)
     }
 
     // MARK: Which changes resize Android
@@ -282,7 +291,7 @@ struct SessionPlanTests {
 }
 
 struct FoldScreensTests {
-    @Test func homeHasOnePageEachSideOfTheFoldUpright() throws {
+    @Test func homeHasOnePageEachSideOfTheFoldUprightWhileBent() throws {
         // Home lays out in the window less the status bar's safe area.
         let reading = reading(.upright(bent: true), statusBarHidden: false)
         let pages = try #require(HomePages(reading, frame: reading.safeArea))
@@ -293,14 +302,19 @@ struct FoldScreensTests {
         #expect(pages == HomePages(reading, frame: reading.safeArea))
     }
 
-    @Test func homeHasAnUpperAndALowerPageTurned() throws {
-        for bent in [true, false] {
-            let reading = reading(.turned(bent: bent), statusBarHidden: false)
-            let pages = try #require(HomePages(reading, frame: reading.safeArea))
-            #expect(!pages.upright)
-            #expect(pages.first == 373.5)
-            #expect(pages.gap == 40)
-            #expect(pages.second == 421.5)
+    @Test func homeHasAnUpperAndALowerPageTurnedWhileBent() throws {
+        let reading = reading(.turned(bent: true), statusBarHidden: false)
+        let pages = try #require(HomePages(reading, frame: reading.safeArea))
+        #expect(!pages.upright)
+        #expect(pages.first == 373.5)
+        #expect(pages.gap == 40)
+        #expect(pages.second == 421.5)
+    }
+
+    @Test func flatHomeIsLaidOutAsOnAnIPadInBothDirections() {
+        for pose in [Pose.upright(bent: false), .turned(bent: false)] {
+            let reading = reading(pose, statusBarHidden: false)
+            #expect(HomePages(reading, frame: reading.safeArea) == nil, "\(pose)")
         }
     }
 
