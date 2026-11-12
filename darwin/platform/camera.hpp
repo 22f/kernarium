@@ -226,7 +226,9 @@ struct CameraSettings {
 
 struct CameraStillRequest {
     std::uint64_t token {};
-    // Zero: no JPEG. The host takes the closest size it lists.
+    // Zero: no JPEG. Otherwise exactly a size the camera lists in stillSizes,
+    // which the host makes at that size or refuses: a picture of another size
+    // is not a result.
     std::uint32_t jpegWidth {};
     std::uint32_t jpegHeight {};
     std::uint32_t jpegQuality {95};

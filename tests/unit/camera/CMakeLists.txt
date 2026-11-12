@@ -36,6 +36,13 @@ target_include_directories(uml_camera_still_exposure_tests PRIVATE
 uml_add_unit_test(NAME camera-still-exposure COMMAND uml_camera_still_exposure_tests
     LABELS "device;camera")
 
+# Which photo size a camera is asked for, on tables of the shape the platform
+# lists per format (no camera is opened).
+add_executable(uml_camera_photo_dimensions_tests camera_photo_dimensions_tests.cpp)
+target_link_libraries(uml_camera_photo_dimensions_tests PRIVATE UML::PhotoDimensions)
+uml_add_unit_test(NAME camera-photo-dimensions COMMAND uml_camera_photo_dimensions_tests
+    LABELS "device;camera")
+
 # The Apple host's accelerated transform against the portable one.
 add_executable(uml_camera_apple_transform_tests camera_apple_transform_tests.cpp)
 target_link_libraries(uml_camera_apple_transform_tests PRIVATE UML::AppleCamera)

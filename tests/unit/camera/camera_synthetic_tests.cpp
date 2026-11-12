@@ -360,8 +360,8 @@ void stillOnlyCamerasCount()
     auto session = camera->openSession(recorder);
     using Size = std::pair<std::uint32_t, std::uint32_t>;
     CameraStillRequest request;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     request.token = 7;
 
     // The back camera streams at a size of its own; a still on a front camera joins it.
@@ -421,8 +421,8 @@ void rawFailures()
     Recorder recorder;
     auto session = camera->openSession(recorder);
     CameraStillRequest request;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     request.raw = true;
     camera->refuseRaw(true);
     require(!session->takeStill(0, request));
@@ -483,8 +483,8 @@ void stills()
     auto session = camera->openSession(recorder);
     CameraStillRequest request;
     request.token = 7;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     require(session->takeStill(0, request));
     require(recorder.stills.empty());  // arrives on the camera's next tick
     camera->pump(0, 0);
@@ -497,6 +497,18 @@ void stills()
     for (std::size_t at = 2; at + 10 < jpeg.jpeg.size() && at < 200; ++at)
         exif |= jpeg.jpeg[at] == 0xff && jpeg.jpeg[at + 1] == 0xe1 && jpeg.jpeg[at + 4] == 'E' && jpeg.jpeg[at + 5] == 'x';
     require(exif);
+
+    // The JPEG is the size asked for, which is one the camera lists; a size it
+    // does not list is refused, even when a larger one covers it.
+    CameraStillRequest unlisted = request;
+    unlisted.token = 70;
+    unlisted.jpegWidth = 1000;
+    unlisted.jpegHeight = 700;
+    require(!session->takeStill(0, unlisted));
+    unlisted.jpegWidth = 1008;
+    unlisted.jpegHeight = 755;
+    require(!session->takeStill(0, unlisted));
+    require(recorder.stills.size() == 1);
 
     // The Bayer still, with the colour data of the sensor.
     request = {};
@@ -520,8 +532,8 @@ void stills()
         }
     require(red > blue);
     // JPEG and Bayer in one capture.
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     request.token = 9;
     require(session->takeStill(0, request));
     camera->pump(0, 0);
@@ -552,8 +564,8 @@ void interruptions()
     camera->pump(0, 3);
     require(recorder.frames.size() == 1);  // nothing flows while interrupted
     CameraStillRequest request;
-    request.jpegWidth = 1000;
-    request.jpegHeight = 700;
+    request.jpegWidth = 1008;
+    request.jpegHeight = 756;
     require(session->takeStill(0, request));
     camera->pump(0, 0);
     require(!recorder.stills.back().second.ok);
@@ -575,8 +587,8 @@ void threaded()
         require(session->startVideo(0, 640, 480, 60));
         require(recorder.waitFor(4));
         CameraStillRequest request;
-        request.jpegWidth = 1000;
-        request.jpegHeight = 700;
+        request.jpegWidth = 1008;
+        request.jpegHeight = 756;
         require(session->takeStill(0, request));
         require(recorder.waitFor(4, 1));
         std::lock_guard lock(recorder.mutex);

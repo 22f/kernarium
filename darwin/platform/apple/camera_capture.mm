@@ -10,6 +10,7 @@
 #include "camera.hpp"
 #include "dng_color.hpp"
 #include "photo_metadata.hpp"
+#include "photo_dimensions.hpp"
 #include "still_exposure.hpp"
 
 #import <AVFoundation/AVFoundation.h>
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -33,6 +35,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace uml::platform {
 namespace {
@@ -276,6 +279,7 @@ using uml::platform::SessionState;
 - (instancetype)initWithCamera:(size_t)camera
                          token:(uint64_t)token
                       wantJpeg:(BOOL)wantJpeg
+                      jpegSize:(uml::platform::CameraStillSize)jpegSize
                        wantRaw:(BOOL)wantRaw
                          state:(std::shared_ptr<SessionState>)state;
 @end
@@ -633,6 +637,8 @@ public:
             // output does not take; the camera then leaves with nothing in flight.
             @try {
                 started = startStill(camera, request);
+                // A capture that is refused leaves the camera as it found it.
+                if (!started) releaseStill(camera);
             } @catch (NSException*) {
                 started = false;
                 {
@@ -677,22 +683,29 @@ public:
 #if TARGET_OS_IOS
         if (request.speedPrioritized || request.raw)
             settings.photoQualityPrioritization = AVCapturePhotoQualityPrioritizationSpeed;
-        // The closest size the format lists that covers the request.
-        CMVideoDimensions chosen {0, 0};
+#endif
+        // The photo has the size the guest configured or the capture is refused:
+        // the output makes up to the size set here, and a format that does not
+        // list the request cannot make it, however large its other sizes are.
+        std::vector<uml::platform::CameraStillSize> listed;
         for (NSValue* value in entry.device.activeFormat.supportedMaxPhotoDimensions) {
             CMVideoDimensions candidate;
             [value getValue:&candidate];
-            const bool covers = std::uint32_t(candidate.width) >= request.jpegWidth &&
-                std::uint32_t(candidate.height) >= request.jpegHeight;
-            const bool closer = chosen.width == 0 ||
-                std::int64_t(candidate.width) * candidate.height < std::int64_t(chosen.width) * chosen.height;
-            if (covers && closer) chosen = candidate;
+            if (candidate.width > 0 && candidate.height > 0)
+                listed.push_back({std::uint32_t(candidate.width), std::uint32_t(candidate.height)});
         }
-        if (chosen.width != 0 && chosen.width <= output.maxPhotoDimensions.width) settings.maxPhotoDimensions = chosen;
-#endif
+        const CMVideoDimensions limit = output.maxPhotoDimensions;
+        const uml::platform::CameraStillSize outputMaximum {std::uint32_t(std::max(0, int(limit.width))),
+                                                            std::uint32_t(std::max(0, int(limit.height)))};
+        const uml::platform::CameraStillSize wanted {request.jpegWidth, request.jpegHeight};
+        const auto chosen = request.jpegWidth != 0 ? uml::platform::exactPhotoSize(listed, wanted, outputMaximum)
+                                                   : uml::platform::coveringPhotoSize(listed, {}, outputMaximum);
+        if (request.jpegWidth != 0 && !chosen) return false;
+        if (chosen) settings.maxPhotoDimensions = CMVideoDimensions {std::int32_t(chosen->width), std::int32_t(chosen->height)};
         UMLPhotoDelegate* delegate = [[UMLPhotoDelegate alloc] initWithCamera:camera
                                                                          token:request.token
                                                                       wantJpeg:request.jpegWidth != 0
+                                                                      jpegSize:wanted
                                                                        wantRaw:request.raw
                                                                          state:state_];
         // The photo output holds its delegate weakly, so the session keeps it
@@ -1253,7 +1266,8 @@ private:
                 if (running.input == nil) ok = addInput(entry, running);
                 if (ok) {
                     AVCapturePhotoOutput* output = [[AVCapturePhotoOutput alloc] init];
-#if TARGET_OS_IOS
+                    // The output makes photos up to the largest size the format
+                    // lists (the default is the smallest, which the Mac gets too).
                     CMVideoDimensions largest {0, 0};
                     for (NSValue* value in entry.device.activeFormat.supportedMaxPhotoDimensions) {
                         CMVideoDimensions candidate;
@@ -1262,6 +1276,7 @@ private:
                             largest = candidate;
                     }
                     if (largest.width != 0) output.maxPhotoDimensions = largest;
+#if TARGET_OS_IOS
                     output.maxPhotoQualityPrioritization = AVCapturePhotoQualityPrioritizationQuality;
 #endif
                     if (multiCamera_) {
@@ -1447,6 +1462,8 @@ std::unique_ptr<Camera> makeAppleCamera()
     size_t _camera;
     uint64_t _token;
     BOOL _wantJpeg;
+    // The size of the JPEG the guest configured.
+    uml::platform::CameraStillSize _jpegSize;
     BOOL _wantRaw;
     std::shared_ptr<SessionState> _state;
     uml::platform::CameraStillResult _result;
@@ -1461,6 +1478,7 @@ std::unique_ptr<Camera> makeAppleCamera()
 - (instancetype)initWithCamera:(size_t)camera
                          token:(uint64_t)token
                       wantJpeg:(BOOL)wantJpeg
+                      jpegSize:(uml::platform::CameraStillSize)jpegSize
                        wantRaw:(BOOL)wantRaw
                          state:(std::shared_ptr<SessionState>)state
 {
@@ -1468,6 +1486,7 @@ std::unique_ptr<Camera> makeAppleCamera()
         _camera = camera;
         _token = token;
         _wantJpeg = wantJpeg;
+        _jpegSize = jpegSize;
         _wantRaw = wantRaw;
         _state = std::move(state);
         _result.token = token;
@@ -1539,6 +1558,19 @@ std::unique_ptr<Camera> makeAppleCamera()
     // the last one.
     __strong UMLPhotoDelegate* keepAlive = self;
     (void)keepAlive;
+    // The photo is the size the guest configured or it is not passed on: the
+    // output makes at most the size it was asked for, and the platform says
+    // what it resolved. (The device compares the encoded picture as well.)
+    if (_wantJpeg && resolvedSettings != nil && !_result.jpeg.empty()) {
+        const CMVideoDimensions resolved = resolvedSettings.photoDimensions;
+        const uml::platform::CameraStillSize resolvedSize {std::uint32_t(std::max(0, int(resolved.width))),
+                                                           std::uint32_t(std::max(0, int(resolved.height)))};
+        if (!uml::platform::resolvedSizeIsRequested(resolvedSize, _jpegSize)) {
+            std::fprintf(stderr, "Camera: the photo resolved to %ux%u, not the %ux%u that was asked for\n", resolvedSize.width,
+                         resolvedSize.height, _jpegSize.width, _jpegSize.height);
+            _result.jpeg.clear();
+        }
+    }
     // Whatever arrived stands; the capture failed only when nothing asked for did.
     _result.ok = (_wantJpeg && !_result.jpeg.empty()) || (_wantRaw && !_result.raw.empty());
     // Whether the flash fired is the metadata's word, and the platform's decision

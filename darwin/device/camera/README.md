@@ -61,7 +61,8 @@ application's statements (the sensor orientation, the rotation that
   session failed or was interrupted). The JPEG ends at the first picture's end
   of image, without a multi-picture index or any picture behind it. A JPEG is
   the size of its stream or its buffer completes with the error flag: the frame
-  header the device reads is compared with the configured size.
+  header the device reads is compared with the configured size, and the
+  platform is asked for exactly that size.
 - **Metadata.** A meta stream completes one `virtio_video_camera_meta` per
   exposure, with the sequence the frames and stills carry; black frames get a
   record too. The record has no flag for an absent reading: zero is absent for

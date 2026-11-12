@@ -665,14 +665,12 @@ private:
         return best;
     }
 
+    // The JPEG size a request names: exactly one the camera lists, as the real
+    // camera takes it, or none.
     static const CameraStillSize* stillSize(const CameraInfo& info, std::uint32_t width, std::uint32_t height)
     {
-        const CameraStillSize* best = nullptr;
-        for (const auto& size : info.stillSizes) {
-            if (size.width < width || size.height < height) continue;
-            if (!best || std::uint64_t(size.width) * size.height < std::uint64_t(best->width) * best->height) best = &size;
-        }
-        return best;
+        const auto found = std::find(info.stillSizes.begin(), info.stillSizes.end(), CameraStillSize {width, height});
+        return found == info.stillSizes.end() ? nullptr : &*found;
     }
 
     // What the settings make of an exposure.

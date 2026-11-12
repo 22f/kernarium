@@ -137,6 +137,12 @@ target_include_directories(uml_still_exposure PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(uml_still_exposure PUBLIC UML::DngColor)
 
+# Which photo size a camera is asked for, and whether the photo is that size.
+add_library(uml_photo_dimensions STATIC photo_dimensions.cpp)
+add_library(UML::PhotoDimensions ALIAS uml_photo_dimensions)
+uml_declare_architecture_target(uml_photo_dimensions platform)
+target_include_directories(uml_photo_dimensions PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(uml_apple_camera STATIC
     apple/accelerated_nv12.cpp
     apple/camera_authorization.mm
@@ -146,7 +152,7 @@ add_library(UML::AppleCamera ALIAS uml_apple_camera)
 uml_declare_architecture_target(uml_apple_camera platform)
 target_include_directories(uml_apple_camera PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(uml_apple_camera PUBLIC UML::DngColor UML::Nv12Transform UML::StillExposure)
+target_link_libraries(uml_apple_camera PUBLIC UML::DngColor UML::Nv12Transform UML::PhotoDimensions UML::StillExposure)
 target_link_libraries(uml_apple_camera PRIVATE
     UML::PlatformContract
     "-framework Accelerate"
