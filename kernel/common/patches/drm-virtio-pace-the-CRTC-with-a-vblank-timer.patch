@@ -60,13 +60,13 @@ that a client queues next is refused with -EBUSY for up to a tick.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- drivers/gpu/drm/drm_vblank.c             | 58 +++++++++++++++++++++---
- drivers/gpu/drm/virtio/virtgpu_display.c | 54 ++++++++++++++++++++++
+ drivers/gpu/drm/drm_vblank.c             | 60 +++++++++++++++++++++---
+ drivers/gpu/drm/virtio/virtgpu_display.c | 54 +++++++++++++++++++++
  include/drm/drm_vblank.h                 |  7 +++
- 3 files changed, 112 insertions(+), 7 deletions(-)
+ 3 files changed, 114 insertions(+), 7 deletions(-)
 
 diff --git a/drivers/gpu/drm/drm_vblank.c b/drivers/gpu/drm/drm_vblank.c
-index 451ec96202266e7c345219d35b1c5983660f68aa..2aded53c69d40d41e1640f748e1c39fe97e46dc1 100644
+index 451ec96202266e7c345219d35b1c5983660f68aa..b4a172dee4431e1536f8fd07aaf0646dcc541489 100644
 --- a/drivers/gpu/drm/drm_vblank.c
 +++ b/drivers/gpu/drm/drm_vblank.c
 @@ -247,6 +247,7 @@ static u32 __get_vblank_counter(struct drm_device *dev, unsigned int pipe)
@@ -111,15 +111,17 @@ index 451ec96202266e7c345219d35b1c5983660f68aa..2aded53c69d40d41e1640f748e1c39fe
   *
   * Returns:
   * 0 on success, or a negative errno code otherwise.
-@@ -2227,6 +2244,7 @@ int drm_crtc_vblank_start_timer(struct drm_crtc *crtc)
+@@ -2227,6 +2244,9 @@ int drm_crtc_vblank_start_timer(struct drm_crtc *crtc)
  	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
  	struct drm_vblank_crtc_timer *vtimer = &vblank->vblank_timer;
  	unsigned long flags;
 +	ktime_t interval;
++
++	assert_spin_locked(&crtc->dev->vblank_time_lock);
  
  	if (!vtimer->crtc) {
  		/*
-@@ -2246,12 +2264,24 @@ int drm_crtc_vblank_start_timer(struct drm_crtc *crtc)
+@@ -2246,12 +2266,24 @@ int drm_crtc_vblank_start_timer(struct drm_crtc *crtc)
  	}
  
  	drm_calc_timestamping_constants(crtc, &crtc->mode);
@@ -146,7 +148,7 @@ index 451ec96202266e7c345219d35b1c5983660f68aa..2aded53c69d40d41e1640f748e1c39fe
  
  	return 0;
  }
-@@ -2292,7 +2322,8 @@ EXPORT_SYMBOL(drm_crtc_vblank_cancel_timer);
+@@ -2292,7 +2324,8 @@ EXPORT_SYMBOL(drm_crtc_vblank_cancel_timer);
   *
   * The helper drm_crtc_vblank_get_vblank_timeout() returns the next vblank
   * timestamp of the CRTC's vblank timer according to the timer's expiry
@@ -156,7 +158,7 @@ index 451ec96202266e7c345219d35b1c5983660f68aa..2aded53c69d40d41e1640f748e1c39fe
   */
  void drm_crtc_vblank_get_vblank_timeout(struct drm_crtc *crtc, ktime_t *vblank_time)
  {
-@@ -2300,8 +2331,21 @@ void drm_crtc_vblank_get_vblank_timeout(struct drm_crtc *crtc, ktime_t *vblank_t
+@@ -2300,8 +2333,21 @@ void drm_crtc_vblank_get_vblank_timeout(struct drm_crtc *crtc, ktime_t *vblank_t
  	struct drm_vblank_crtc_timer *vtimer = &vblank->vblank_timer;
  	u64 cur_count;
  	ktime_t cur_time;
@@ -179,7 +181,7 @@ index 451ec96202266e7c345219d35b1c5983660f68aa..2aded53c69d40d41e1640f748e1c39fe
  		*vblank_time = ktime_get();
  		return;
  	}
-@@ -2327,6 +2371,6 @@ void drm_crtc_vblank_get_vblank_timeout(struct drm_crtc *crtc, ktime_t *vblank_t
+@@ -2327,6 +2373,6 @@ void drm_crtc_vblank_get_vblank_timeout(struct drm_crtc *crtc, ktime_t *vblank_t
  	 * and what the vblank core expects. Therefore we need to always
  	 * correct the timestamp by one frame.
  	 */

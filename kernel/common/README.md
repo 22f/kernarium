@@ -312,6 +312,10 @@ it. The bridge fields used below are defined by the comments in
   (`guest-video-teardown`). A synchronous video command waits five seconds and
   owns its response memory, so a late answer or the removal frees it
   (`guest-video-late-answer`).
+- The virtio-uml exit call stops every command-line device's connection-broken
+  work before it removes a device, and a device being removed queues none, so a
+  backend lost during the removal at power off does not have it unregistered a
+  second time (`guest-vhost-user-power-off`).
 
 ## Devices
 
