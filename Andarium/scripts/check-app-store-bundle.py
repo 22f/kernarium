@@ -1277,6 +1277,11 @@ def developer_problems(
                             "only Debug takes the arrangement")
             usable = False
     if configuration == "AppStore":
+        # The example file's own values are placeholders for the name and the GitHub handle too.
+        for piece in ("name", "github"):
+            if named.get(piece, "").strip().lower() == DEVELOPER_ARRANGED[piece]:
+                problems.append(f"Buy me tokens: the developer {piece} in the local configuration "
+                                "is the placeholder")
         if named.get("github") and GITHUB_HANDLE_PATTERN.fullmatch(named["github"]) is None:
             problems.append("Buy me tokens: the GitHub handle in the local configuration is not a handle of GitHub")
         if named.get("x") and FOLLOW_X_HANDLE_PATTERN.fullmatch(named["x"]) is None:

@@ -1144,6 +1144,48 @@ def check_icp(root: Path, check, clean: Path) -> None:
           args=[*other, "Release", "--info-source", str(source)])
 
 
+def check_examples(root: Path, check, clean: Path, config: Path, failures: list[str]) -> None:
+    """The example files' own values are placeholders, and the App Store configuration refuses each
+    one of them in the mode that judges it, whatever the other values are. A value added to an
+    example file without its refusal here fails the check."""
+    ids = [f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")]
+    tip = ["--tip-jar", "--tip-products", ",".join(ids)]
+    # key -> (the mode's arguments for a value, what the refusal says)
+    judged = {
+        "DEVELOPER_NAME": (lambda v: [*tip, "--developer-name", v],
+                           "the developer name in the local configuration is the placeholder"),
+        "DEVELOPER_GITHUB_HANDLE": (lambda v: [*tip, "--developer-github", v],
+                                    "the developer github in the local configuration is the placeholder"),
+        "DEVELOPER_X_HANDLE": (lambda v: ["--follow-x", "--follow-x-handle", v],
+                               "the handle in the local configuration is the placeholder handle"),
+        "DEVELOPER_ICP_NUMBER": (lambda v: ["--icp", "--icp-number", v],
+                                 "the number in the local configuration is the placeholder"),
+        "FEEDBACK_RECEIVER": (lambda v: ["--feedback", "--feedback-address", v], "placeholder address"),
+        "REVIEW_APP_ID": (lambda v: ["--review", "--review-id", v], "is a placeholder"),
+    }
+    seen = set()
+    for example in sorted(config.glob("*.local.xcconfig.example")):
+        for line in example.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition(" = ")
+            if not separator or key.startswith("//"):
+                continue
+            seen.add(key)
+            value = value.strip()
+            if key.startswith("TIP_PRODUCT_"):
+                tier = key.rpartition("_")[2].lower()
+                named = [value if name.endswith("." + tier) else name for name in ids]
+                check(clean, passes=False, expect=f"the {tier} identifier in the local configuration is a placeholder",
+                      args=["--tip-jar", "--tip-products", ",".join(named)])
+            elif key in judged:
+                arguments, said = judged[key]
+                check(clean, passes=False, expect=said, args=arguments(value))
+            else:
+                failures.append(f"{example.name}: {key} has no refusal of its placeholder in this check")
+    named_keys = set(judged) | {f"TIP_PRODUCT_{tier}" for tier in ("LITE", "PRO", "MAX", "ULTRA")}
+    for key in sorted(named_keys - seen):
+        failures.append(f"no example file holds {key}, which this check judges")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checker", type=Path, required=True)
@@ -1571,6 +1613,7 @@ def main() -> int:
                      ["--tip-products", tip_list, "--tip-local-products", tip_list])
         check_developer(root, check, clean)
         check_icp(root, check, clean)
+        check_examples(root, check, clean, options.checker.parent.parent / "Config", failures)
         # Follow developer on X is compiled in only where the build names a handle,
         # by the same rule. The fixtures stand for the application with it (the
         # Info.plist key, a line of the row's text, a type, the FollowX table and the
