@@ -15,6 +15,7 @@ import stat
 import struct
 import sys
 import zipfile
+import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
@@ -1032,7 +1033,10 @@ def read_small(
 ) -> bytes:
     if info.is_dir() or info.file_size > limit:
         fail(f"policy file is missing or unexpectedly large: {info.filename}")
-    return archive.read(info)
+    try:
+        return archive.read(info)
+    except (zipfile.BadZipFile, zlib.error, OSError) as problem:
+        fail(f"cannot read {info.filename} from the archive: {problem}")
 
 
 def check_apex_payload_filesystem(
@@ -2742,6 +2746,10 @@ def check_cas_hal(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -
 MOTION_SUB_HAL = "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so"
 MOTION_SUB_HAL_MARKER = b"Andarium motion: ro.boot.kernarium.orientation="
 MOTION_SUB_HAL_LIMIT = 16 << 20
+# Only the launch states it (the host's "androidboot.kernarium.orientation=1" argument); a build.prop that
+# set it would list the sensor for a host that does not feed it, and the window manager would follow a
+# sensor that nothing drives.
+MOTION_ORIENTATION_PROPERTY = "ro.boot.kernarium.orientation"
 
 
 def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2760,7 +2768,17 @@ def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipI
     ]).decode()
     if not re.search(r"^service \S+ /vendor/bin/hw/android\.hardware\.sensors-service\.multihal$", script, re.M):
         fail("motion sensor HAL service does not start the multi-HAL binary")
-    if MOTION_SUB_HAL_MARKER not in read_small(archive, infos[MOTION_SUB_HAL], MOTION_SUB_HAL_LIMIT):
+    # The marker counts only in a shared library the image can load: bytes that merely contain the text
+    # would pass for a sub-HAL.
+    info = infos[MOTION_SUB_HAL]
+    prefix = read_elf_prefix(archive, info)
+    if prefix is None:
+        fail(f"{MOTION_SUB_HAL} is not an ELF file")
+    elf_type, machine = struct.unpack_from("<HH", prefix, 16)
+    if elf_type != ET_DYN or machine != android_image.EM_AARCH64:
+        fail(f"{MOTION_SUB_HAL} is not an AArch64 shared library")
+    check_target_elf(info, prefix)
+    if MOTION_SUB_HAL_MARKER not in read_small(archive, info, MOTION_SUB_HAL_LIMIT):
         fail(
             f"{MOTION_SUB_HAL} lacks the device-orientation sensor ({MOTION_SUB_HAL_MARKER.decode()!r} "
             "is not in it): a launch that asks for the sensor would find none"
@@ -4553,6 +4571,11 @@ def check_property_file(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> None
                 f"{info.filename} sets {key}={value}: a vendor overlay theme enables overlays at "
                 "boot, and the navigation mode overlays are the platform's to choose"
             )
+        if key == MOTION_ORIENTATION_PROPERTY:
+            fail(
+                f"{info.filename} sets {key}={value}: the launch alone states whether the host feeds the "
+                "device-orientation sensor"
+            )
         if key == "persist.sys.usb.config":
             fail(
                 f"{info.filename} sets {key}={value}: USB debugging is off on a fresh data "
@@ -5008,6 +5031,13 @@ def check_audio_policy(
 def read_elf_prefix(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | None:
     """Return an ELF file's header and program-header table, or None for any
     other file."""
+    try:
+        return read_elf_prefix_unchecked(archive, info)
+    except (zipfile.BadZipFile, zlib.error, OSError) as problem:
+        fail(f"cannot read {info.filename} from the archive: {problem}")
+
+
+def read_elf_prefix_unchecked(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes | None:
     if info.file_size < android_image.ELF32_HEADER_SIZE:
         return None
     with archive.open(info) as source:
