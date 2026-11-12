@@ -82,11 +82,12 @@ struct TipJarSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) { TipJarTitle() }
-                // The close symbol, as Settings and the file browser have their Done: an icon-only
-                // toolbar button, which the folding iPhone's cover moves into the column beside its
-                // camera, with the word for VoiceOver.
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(action: close) {
+                // The system's close symbol, an icon-only toolbar button like the other sheets' (the
+                // file browser's Import and More, the feedback sheet's cross): the folding iPhone's
+                // cover moves such buttons into the column beside its camera by itself. VoiceOver
+                // says Done, as it does for the other sheets' Done.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(role: .close, action: close) {
                         Label { Text(TipJarWords.done) } icon: { Image(systemName: "xmark") }
                     }
                     .accessibilityIdentifier("tipjar-done-bar")
