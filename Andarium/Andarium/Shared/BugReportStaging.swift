@@ -24,9 +24,9 @@ nonisolated enum BugReportStaging {
         Int64(clamping: HostStorage.freeBytes(on: FileManager.default.temporaryDirectory))
     }
 
-    /// Room kept beyond the report itself, for the system and the share
-    /// sheet's own copy.
-    static let reserveBytes: Int64 = 64 << 20
+    /// Room kept beyond the report itself: the reserve every transfer keeps
+    /// (`TransferRoom`), which is above where the run is paused for space.
+    static let reserveBytes = Int64(clamping: TransferRoom.deviceReserveBytes)
 
     nonisolated struct NoRoom: LocalizedError, Equatable {
         var bytes: UInt64

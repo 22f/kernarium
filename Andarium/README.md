@@ -268,7 +268,10 @@ control out.
   from 1.5 GiB, so a guest has at least that (`Limits.minimumMemoryMiB`,
   Andarium's own: the runtime still accepts less for Kernarium's guests); a
   stored smaller size is raised to it on load, and a device whose bound is
-  lower offers the bound alone. `MemoryPolicy` holds those bounds, defaults
+  lower offers the bound alone. The runtime starts every size the picker
+  offers: a start whose memory the loader refuses
+  (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
+  that reason. `MemoryPolicy` holds those bounds, defaults
   and the estimates and no formula of its own. A guest with more than the
   runtime's conservative size for its vCPU count (`safeMemoryMiB`) is likely
   to be closed by iOS: Home shows a notice and the memory ruler a line and red
@@ -634,7 +637,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   session. A bug report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
-  shared as Android made it.
+  shared as Android made it. An install streams the file to the package
+  manager in pieces that never outlive their read (`FileChunkReader`). It
+  reads the file's size once the coordinated read has the file, and refuses
+  before the first byte when the device (`TransferRoom`) or the virtual
+  machine's data partition lacks room for the app and its reserve
+  (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
+  Android cannot install (`InstallRefusal.tooLarge`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB

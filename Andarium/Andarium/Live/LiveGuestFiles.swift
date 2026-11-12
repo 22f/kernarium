@@ -29,19 +29,21 @@ nonisolated enum GuestFilesFailure {
     }
 }
 
-/// Reads a file the picker returned in pieces, never whole in memory.
+/// Reads a file the picker returned in pieces, never whole in memory, and
+/// with no piece outliving its read (`FileChunkReader`).
 nonisolated final class LocalFileSource: AdbSource, @unchecked Sendable {
-    private let handle: FileHandle
+    private let reader: FileChunkReader
 
     init(_ url: URL) throws {
-        handle = try FileHandle(forReadingFrom: url)
+        reader = try FileChunkReader(contentsOf: url, capacity: GuestFiles.uploadPiece)
     }
 
-    deinit { try? handle.close() }
+    /// The file's length as it is open, which for an iCloud file is the real
+    /// one once the coordinated read has brought it down.
+    var size: UInt64 { reader.size }
 
     func read(limit: Int) throws -> Data? {
-        guard let data = try handle.read(upToCount: limit), !data.isEmpty else { return nil }
-        return data
+        try reader.read(upTo: limit)
     }
 }
 
@@ -77,9 +79,12 @@ nonisolated final class ProgressThrottle: @unchecked Sendable {
 nonisolated enum FileUploadOperation {
     static let idleLimit = Duration.seconds(60)
 
+    /// `hostFree` is the device's free space now, read once the file is in
+    /// hand.
     static func run(
         session: AdbSession, coordinator: FileCoordinatorBox, pick: FilePick, path: String, temporary: String,
-        replacing: Bool, progress: @escaping @Sendable (UInt64, UInt64) -> Void
+        replacing: Bool, hostFree: @Sendable () -> UInt64,
+        progress: @escaping @Sendable (UInt64, UInt64) -> Void
     ) throws {
         guard let url = pick.url else { throw AdbError.io(ENOENT) }
         var result: Result<Void, Error> = .success(())
@@ -88,8 +93,8 @@ nonisolated enum FileUploadOperation {
         coordinator.current.coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
             result = Result {
                 try send(
-                    session: session, file: readable, modifiedFallback: pick.modified, path: path,
-                    temporary: temporary, replacing: replacing, progress: progress)
+                    session: session, file: readable, pick: pick, path: path, temporary: temporary,
+                    replacing: replacing, hostFree: hostFree, progress: progress)
             }
         }
         if let coordinationError { throw coordinationError }
@@ -97,26 +102,44 @@ nonisolated enum FileUploadOperation {
     }
 
     private static func send(
-        session: AdbSession, file: URL, modifiedFallback: Date, path: String, temporary: String, replacing: Bool,
-        progress: @escaping @Sendable (UInt64, UInt64) -> Void
+        session: AdbSession, file: URL, pick: FilePick, path: String, temporary: String, replacing: Bool,
+        hostFree: @Sendable () -> UInt64, progress: @escaping @Sendable (UInt64, UInt64) -> Void
     ) throws {
-        let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey])
+        let values = try file.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
         if values.isDirectory == true {
             throw AdbFailure(message: String(localized: "Folders and packages can\u{2019}t be imported."))
         }
-        let size = UInt64(max(values.fileSize ?? 0, 0))
         let source = try LocalFileSource(file)
+        // The size of the file as open, not the one the picker read: an iCloud
+        // file that was not down then had none.
+        let size = source.size
         let watchdog = session.watchdog
         progress(0, size)
         try session.run { connection in
             watchdog.arm(idle: idleLimit)
+            // The import's preparation checked the room for the size the pick
+            // had; a file that is larger is checked here with its real size.
+            if size > pick.size {
+                try checkRoom(for: size, in: GuestFilePath.parent(of: path), on: connection, hostFree: hostFree())
+            }
             try GuestFiles.upload(
-                source, modified: values.contentModificationDate ?? modifiedFallback, to: path,
+                source, modified: values.contentModificationDate ?? pick.modified, to: path,
                 temporary: temporary, replacing: replacing, on: connection,
                 progress: { sent in
                     watchdog.touch()
                     progress(sent, size)
                 })
+        }
+    }
+
+    private static func checkRoom(
+        for size: UInt64, in folder: String, on connection: AdbConnection, hostFree: UInt64
+    ) throws {
+        guard TransferRoom.deviceHasRoom(for: size, free: hostFree) else {
+            throw GuestFilesError.deviceFull(needed: size, free: hostFree)
+        }
+        if let free = try GuestFiles.freeSpace(of: folder, on: connection), !GuestFiles.guestHasRoom(for: size, free: free) {
+            throw GuestFilesError.guestFull(needed: size, free: free)
         }
     }
 }
@@ -319,12 +342,13 @@ extension AdbGuestOperations {
             in: GuestFilePath.parent(of: path), run: run, token: String(UUID().uuidString.prefix(8)).lowercased())
         let coordinator = FileCoordinatorBox()
         let throttle = ProgressThrottle(deliver: progress)
+        let hostFree = hostFree
         try partials.importBegan(mark: run)
         do {
             try await perform(onCancel: { coordinator.cancel() }) { session in
                 try FileUploadOperation.run(
                     session: session, coordinator: coordinator, pick: pick, path: path, temporary: temporary,
-                    replacing: replacing, progress: throttle.report)
+                    replacing: replacing, hostFree: hostFree, progress: throttle.report)
             }
         } catch {
             removeInBackground(temporary) { partials.importEnded(mark: run, clean: $0) }

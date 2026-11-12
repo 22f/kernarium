@@ -28,11 +28,15 @@
  * vCPUs, rounded up to 16 MiB. t is the slot tags each executor keeps outside
  * the cache's ledger. A, E_rest and S come from a LaunchMemorySet.
  *
- * C is the host's ceiling (guest_memory_ceiling_mib): the most RAM the host
- * admits whatever the budget says. Nothing else bounds G_max(v): the offered
- * maximum is what the budget gives the device at the vCPU count. The default
- * is held to 4096 MiB (default_guest_memory_maximum_mib) however much is
- * offered, and its rules are the ones that held for a range ending there.
+ * C is the host's ceiling (guest_memory_ceiling_mib, for a process
+ * process_guest_memory_ceiling_mib): the most RAM the host admits whatever the
+ * budget says. Nothing else bounds G_max(v): the offered maximum is what the
+ * budget gives the device at the vCPU count. The default is held to 4096 MiB
+ * (default_guest_memory_maximum_mib) however much is offered, and its rules
+ * are the ones that held for a range ending there. A run starts a guest of
+ * exactly the sizes from 512 through C in 64 MiB steps
+ * (guest_memory_admitted), so every size the settings offer is one the run
+ * starts: the runtime, the loader and the applications all ask this header.
  *
  * Header-only and standard library only, so the application's loader includes
  * it too and answers the settings without the runtime, which is loaded once
@@ -245,6 +249,30 @@ inline constexpr LaunchMemorySet maximum_memory_set =
 	return static_cast<std::uint32_t>(guest_memory_minimum_mib +
 		(top - guest_memory_minimum_mib) / guest_memory_step_mib *
 			guest_memory_step_mib);
+}
+
+/* C for a process: the ceiling of the window its runtime puts the kernel in
+ * (a macOS window in a macOS process and in an iOS application on a Mac, the
+ * signed iOS envelope on a device and in the Simulator, as
+ * native_kernel_placement chooses) and of the host's RAM. The loader answers
+ * the settings with it and the runtime admits no more. */
+[[nodiscard]] constexpr std::uint32_t process_guest_memory_ceiling_mib(
+	bool macos_window, std::uint64_t physical_memory) noexcept
+{
+	return guest_memory_ceiling_mib(macos_window ?
+			guest_memory_range_maximum_mib :
+			device_window_guest_memory_maximum_mib,
+		physical_memory);
+}
+
+/* Whether a run starts a guest of `mib` MiB under the ceiling `ceiling_mib`:
+ * the sizes from guest_memory_minimum_mib through the ceiling in
+ * guest_memory_step_mib steps, which are the sizes the settings offer. */
+[[nodiscard]] constexpr bool guest_memory_admitted(std::uint64_t mib,
+	std::uint32_t ceiling_mib) noexcept
+{
+	return mib >= guest_memory_minimum_mib && mib <= ceiling_mib &&
+		(mib - guest_memory_minimum_mib) % guest_memory_step_mib == 0;
 }
 
 namespace detail {

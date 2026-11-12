@@ -1164,6 +1164,82 @@ struct KernariumTests {
         #expect(configuration.maximumGuestMemoryMiB(vCPUCount: 4) == system)
     }
 
+    /// The runtime refuses a guest's memory by the rule the loader answers
+    /// (`guest_memory_admitted` of `runtime/guest_memory_budget.hpp`), so a size
+    /// the settings offer that the loader refuses would be a start that fails
+    /// at once: the maximum, the default and every position of the stepper,
+    /// at every vCPU count, and a stored size that is no longer one.
+    @Test
+    func theRuntimeStartsEverySizeTheSettingsOffer() {
+        func admitted(_ mib: Int) -> Bool {
+            kernarium_runtime_loader_guest_memory_admitted(
+                UInt32(clamping: mib)
+            ) != 0
+        }
+        let ceiling = EmulatorConfiguration.guestMemoryCeilingMiB
+        let configuration = EmulatorConfiguration(
+            vCPUCount: 1, guestMemoryMiB: 1024, overlaySizeGiB: 8,
+            androidDiskSizeGiB: 8, rootfsFilename: "x.erofs",
+            retinaMode: false, autoResizeGuest: true,
+            androidBootMode: .automatic
+        )
+        for vCPUs in 1...8 {
+            let maximum = configuration.maximumGuestMemoryMiB(vCPUCount: vCPUs)
+            #expect(admitted(maximum), "\(maximum) MiB at \(vCPUs) vCPUs")
+            #expect(
+                admitted(EmulatorConfiguration.systemDefaultGuestMemory(vCPUs))
+            )
+            #expect(
+                stride(
+                    from: EmulatorConfiguration.guestMemoryRangeMiB.lowerBound,
+                    through: maximum,
+                    by: EmulatorConfiguration.guestMemoryStepMiB
+                ).allSatisfy(admitted)
+            )
+        }
+        #expect(admitted(ceiling))
+        #expect(!admitted(ceiling + EmulatorConfiguration.guestMemoryStepMiB))
+
+        // A stored size above what this host admits, or off the steps, comes
+        // down to one it does.
+        let (defaults, suiteName) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        for stored in [ceiling + 64, ceiling + 4096, 1 << 20, 100, 1537] {
+            defaults.set(stored, forKey: "emulator.guestMemoryMiB")
+            let loaded = EmulatorConfiguration.load(
+                defaults: defaults, physicalProcessorCount: 8
+            )
+            #expect(admitted(loaded.guestMemoryMiB), "stored \(stored) MiB")
+        }
+    }
+
+    /// The settings' own figures restate the shape of the loader's rule; they
+    /// must be the loader's.
+    @Test
+    func theRestatedRangeIsTheLoadersRule() {
+        let range = kernarium_runtime_loader_guest_memory_range()
+        #expect(
+            EmulatorConfiguration.guestMemoryRangeMiB ==
+                Int(range.minimum_mib)...Int(range.largest_mib)
+        )
+        #expect(EmulatorConfiguration.guestMemoryStepMiB == Int(range.step_mib))
+        let ceiling = EmulatorConfiguration.guestMemoryCeilingMiB
+        let sizes = Array(0...20_000) +
+            Array(max(ceiling - 130, 0)...(ceiling + 130))
+        let differing = sizes.filter { mib in
+            let inShape = EmulatorConfiguration.guestMemoryRangeMiB.contains(mib)
+                && (mib - EmulatorConfiguration.guestMemoryRangeMiB.lowerBound)
+                    % EmulatorConfiguration.guestMemoryStepMiB == 0
+            return (kernarium_runtime_loader_guest_memory_admitted(
+                UInt32(clamping: mib)
+            ) != 0) != (inShape && mib <= ceiling)
+        }
+        #expect(
+            differing.isEmpty,
+            "differs at \(differing.prefix(5)) MiB, ceiling \(ceiling)"
+        )
+    }
+
     @Test
     func aStoredOrDefaultGuestMemoryAboveTheMaximumComesDownOnLoad() {
         let (defaults, suiteName) = isolatedDefaults()

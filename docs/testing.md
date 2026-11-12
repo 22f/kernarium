@@ -274,6 +274,10 @@ the run never starts, so the first build phase of each application's target
 one. The shared schemes gather no code coverage; a coverage run passes
 `-enableCodeCoverage YES`.
 
+A change to the guest memory the applications offer is proven by a start through
+the applications' runtime (`kernarium_runtime_loader_run`) at the largest offered
+size, in the Simulator or on a Mac, not by a command-line launcher.
+
 On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share

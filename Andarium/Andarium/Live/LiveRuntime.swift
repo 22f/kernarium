@@ -406,6 +406,15 @@ final class LiveRuntime: RuntimeDriver {
             end(startFailure: "the runtime could not be loaded")
             return
         }
+        // The runtime refuses a size this host does not admit, and the
+        // settings never offer one, so this is a safety net: say why rather
+        // than end on the runtime's bare result.
+        guard kernarium_runtime_loader_guest_memory_admitted(UInt32(clamping: run.guest.memoryMiB)) != 0 else {
+            end(startFailure: MemoryRefusal.reason(
+                memoryMiB: run.guest.memoryMiB,
+                ceilingMiB: Int(kernarium_runtime_loader_guest_memory_ceiling_mib())))
+            return
+        }
         // A denial of the network the notice is up for began before this run
         // loaded the runtime; its record notes it from the start.
         model?.reportNetworkDenial()
@@ -545,7 +554,9 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What adb does for the screens, with the key this boot carries.
     private var operations: AdbGuestOperations {
-        AdbGuestOperations(identity: adbIdentity, clock: clock, device: model?.host.name ?? "device", run: runMark)
+        AdbGuestOperations(
+            identity: adbIdentity, clock: clock, device: model?.host.name ?? "device", hostFree: freeSpace,
+            run: runMark)
     }
 
     /// A new run has its own mark, and a normal one sweeps the partial files
@@ -591,8 +602,8 @@ final class LiveRuntime: RuntimeDriver {
         await operations.guestProcFiles()
     }
 
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
-        try await operations.installApk(at: url, sizeBytes: sizeBytes, update: update)
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+        try await operations.installApk(at: url, update: update)
     }
 
     func usbDebugging() async -> Bool? {

@@ -282,6 +282,40 @@ struct AndroidOperationTests {
 
     // MARK: Staging
 
+    @Test func theStagedReportKeepsTheReserveOfEveryOtherTransfer() throws {
+        #expect(BugReportStaging.reserveBytes == Int64(TransferRoom.deviceReserveBytes))
+        // Staging may not take the device to where the run is paused for space.
+        #expect(BugReportStaging.reserveBytes > Int64(RunSpace.pauseBelowBytes))
+        let size: UInt64 = 1 << 30
+        let reserve = BugReportStaging.reserveBytes
+        #expect(throws: BugReportStaging.NoRoom(bytes: size, device: "iPad")) {
+            try BugReportStaging.makeSink(
+                remotePath: "/data/b/bugreport-x.zip", size: size, device: "iPad",
+                available: Int64(size) + reserve - 1)
+        }
+        let sink = try BugReportStaging.makeSink(
+            remotePath: "/data/b/bugreport-x.zip", size: size, device: "iPad", available: Int64(size) + reserve)
+        defer { BugReportStaging.sweep() }
+        sink.close()
+    }
+
+    @Test func thePullsProgressReachesTheOverlayNoMoreOftenThanItNeedsIt() {
+        let log = UpdateLog()
+        let progress = BugReportOperation.pullingProgress(update: log.add)
+        let total: UInt64 = 64 << 20
+        var received: UInt64 = 0
+        progress.report(0, total)
+        while received < total {
+            received += 64 << 10
+            progress.report(received, total)
+        }
+        // 1,025 reports of the pull: the first, the last and a few between.
+        #expect(log.progress.count < 40, "\(log.progress.count) updates")
+        #expect(log.progress.first == BugReportOperation.generatingShare)
+        #expect(abs((log.progress.last ?? 0) - 1) < 1e-9)
+        #expect(log.progress == log.progress.sorted())
+    }
+
     @Test func theStagedReportNeedsRoomBeyondItsOwnSize() throws {
         #expect(throws: BugReportStaging.NoRoom(bytes: 2_000_000_000, device: "iPad")) {
             try BugReportStaging.makeSink(
@@ -289,7 +323,7 @@ struct AndroidOperationTests {
                 available: 2_000_000_000 + BugReportStaging.reserveBytes - 1)
         }
         let sink = try BugReportStaging.makeSink(
-            remotePath: "/data/b/bugreport-x.zip", size: 10, device: "iPad", available: 1 << 30)
+            remotePath: "/data/b/bugreport-x.zip", size: 10, device: "iPad", available: 2 << 30)
         defer { BugReportStaging.sweep() }
         try sink.write(Data("PK".utf8))
         sink.close()
@@ -400,6 +434,30 @@ struct AndroidOperationTests {
         }
         // Nothing was sent to the guest.
         #expect(driver.installed == 0)
+    }
+
+    @Test func anApkTooLargeForAndroidIsRefusedAtOnceOnTheSameOverlayAndNothingIsSent() throws {
+        let (model, driver) = running()
+        let url = try makeSparseFile(bytes: Int(InstallRefusal.singleApkLimit), name: "Huge.apk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        let busy = try #require(model.busy)
+        #expect(busy.title == "App not installed")
+        #expect(busy.detail == InstallRefusal.tooLarge.message)
+        #expect(busy.result?.failed == true && busy.cancel == nil && busy.progress == nil)
+        #expect(model.alert == nil)
+        busy.result?.dismiss.action()
+        #expect(model.busy == nil)
+        #expect(driver.installed == 0)
+    }
+
+    @Test func aFileWithNoSizeYetShowsItsNameAloneUntilTheInstallHasIt() throws {
+        let (model, _) = running()
+        // What the picker reads of an iCloud file that is not down.
+        let url = try makeSparseFile(bytes: 0, name: "Cloud.apk")
+        defer { try? FileManager.default.removeItem(at: url) }
+        model.installPicked(url)
+        #expect(model.busy?.detail == url.lastPathComponent)
     }
 
     @Test func theEndOfTheRunTakesAFinishedResultAway() async throws {
@@ -614,6 +672,24 @@ struct PackageInstallMessagesTests {
     @Test func successIsNil() {
         #expect(PackageInstallMessages.failure(inOutput: "Success\n") == nil)
         #expect(PackageInstallMessages.failure(inOutput: "Performing Streamed Install\nSuccess\n") == nil)
+    }
+
+    @Test func theStorageExceptionOfCreateSessionIsTheStorageMessage() {
+        let storage = PackageInstallMessages.message(forCode: "FAILED_INSUFFICIENT_STORAGE")
+        let exception = """
+            Exception occurred while executing 'install':
+            android.os.ParcelableException: java.io.IOException: Requested internal only, but not enough space
+            \tat android.util.ExceptionUtils.wrap(ExceptionUtils.java:34)
+
+            """
+        #expect(PackageInstallMessages.failure(inOutput: exception) == storage)
+        #expect(PackageInstallMessages.failure(inOutput: "Error: java.io.IOException: No space left on device\n") == storage)
+        // A line that names a code decides, whatever else is printed.
+        #expect(PackageInstallMessages.failure(inOutput: "not enough space\nFailure [INSTALL_FAILED_OLDER_SDK]\n")
+            == PackageInstallMessages.message(forCode: "FAILED_OLDER_SDK"))
+        // Another exception names nothing.
+        #expect(PackageInstallMessages.failure(inOutput: "Exception occurred while executing 'install':\njava.lang.SecurityException: x\n")
+            == "The virtual machine couldn\u{2019}t install the app.")
     }
 
     @Test func outputWithoutAVerdictIsAFailure() {
