@@ -31,10 +31,10 @@ settings also carry the top of the request's AE target frame rate range (HostSet
 
 A request none of whose outputs was produced failed as a whole. The sensor asks the source
 (IFrameSource::FailsRequest) and, when the source says so, reports ERROR_REQUEST for the request,
-with no shutter message and no result metadata, and returns every buffer marked as failed, as it is
-done for a request that the stock request processor cannot take. Only that tells an application that
-its capture failed (onCaptureFailed); an ERROR_BUFFER alone does not, and a request that lost only
-some of its outputs still reports ERROR_BUFFER for those.
+with no shutter message and no result metadata, and returns every buffer marked as failed, as the
+stock request processor does for the pending requests that a flush drops. Only that tells an
+application that its capture failed (onCaptureFailed); an ERROR_BUFFER alone does not, and a request
+that lost only some of its outputs still reports ERROR_BUFFER for those.
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 ---
