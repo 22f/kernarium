@@ -707,7 +707,11 @@ bar, also when a sign-in or block page that the runner's server gives the probes
 answers them. On one network that is never replaced or validated again, the
 warning shows with no other action, follows the server from a failing check to
 a passing one and back, and returns when a forced re-evaluation checks the
-network; a strict private DNS name is not probed again for each failed check.
+network; a strict private DNS name is not probed again for each failed check,
+and a forced re-evaluation of a network whose strict name fails leaves it
+unvalidated with its private DNS broken and runs no check. Each section of a
+guest of the release under test reads the log from its own marker for crashes
+and ANRs of NetworkStack, SystemUI and Settings, and for illegal instructions.
 The network joins again after a suspend and after a restart, and the boot script
 runs without SELinux denials; a joined network keeps its metered and
 Auto-connect settings, a forgotten one stays forgotten and Wi-Fi that is off

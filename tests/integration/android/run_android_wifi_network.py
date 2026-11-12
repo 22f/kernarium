@@ -32,7 +32,12 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   has just joined, by the host's server and by the stock servers, leaves no
   warning; with a strict private DNS name the platform can use, a check that
   fails again and again leaves the network validated with its private DNS not
-  broken, and the private DNS probe is not repeated for each check; across all
+  broken, and the private DNS probe is not repeated for each check; a forced
+  re-evaluation of a network whose strict name does not resolve leaves it not
+  validated with its private DNS broken, without a check at the server or in the
+  log, and once the name is gone the network is validated and a forced
+  re-evaluation checks it; a network is reported validated within seconds of its
+  join, and no check follows a passing one until an evaluation is forced; across all
   of it NetworkStack, SystemUI and Settings (each by the exact name it runs
   under) neither crash nor stop answering and nothing hits an illegal
   instruction, which every section of a guest of the release under test reads
@@ -73,6 +78,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import datetime
 import http.server
 import importlib.util
 import io
@@ -160,6 +166,16 @@ INITIAL_BACKOFF_SECONDS = 1.0
 BACKOFF_FLOOR = 0.9
 # How long a forced re-evaluation has to show: a new check at the server.
 FORCE_SECONDS = 45
+# How long a forced re-evaluation of a network whose strict private DNS has failed is watched: longer than a
+# failing check takes (10 s to 25 s) and than the first retry of one.
+UNVALIDATED_SECONDS = 60
+# How long a network is left alone after a passing check before an evaluation is forced: no timer is left
+# after a pass, so no check reaches the server in it.
+QUIET_SECONDS = 20
+# From the join of the network to the line that reports it validated: the platform validates a Wi-Fi network
+# first and checks it after.
+VALIDATED_WITHIN_SECONDS = 5.0
+FORCED_LINE = "Forcing reevaluation"
 # Android's own words: the Wi-Fi list's summary and the status bar icon's spoken description.
 LIMITED_CONNECTION = "Limited connection"
 NO_INTERNET = "No internet"
@@ -450,6 +466,61 @@ def retry_problems(times: list[float]) -> list[str]:
             problems.append(f"check {index + 1} came {gap:.1f} s after the one before, under the back-off "
                             f"of {floor:.1f} s")
     return problems
+
+
+def created_times(dump: str) -> dict[int, datetime.datetime]:
+    """When each Wi-Fi network was created (`created=` of its NetworkAgentInfo), in UTC."""
+    found: dict[int, datetime.datetime] = {}
+    for line in dump.splitlines():
+        match = re.match(r"\s*NetworkAgentInfo\{network\{(\d+)\}.*?\bni\{WIFI\b.*? created=(\S+?)Z\s", line)
+        if match:
+            found[int(match[1])] = datetime.datetime.fromisoformat(match[2]).replace(tzinfo=datetime.timezone.utc)
+    return found
+
+
+def validated_after_join(dump: str, entries: list[tuple[str, str]], net_id: int) -> float | None:
+    """Seconds from the creation of the network to the validation log's line that reports it validated before
+    its check (the log's time stamps and the creation time are on one clock, which the dump's own numbers
+    show), or None when either is missing."""
+    created = created_times(dump).get(net_id)
+    stamp = next((when for when, message in entries if VALIDATED_FIRST_LINE in message), None)
+    if created is None or stamp is None:
+        return None
+    return (datetime.datetime.fromisoformat(stamp).replace(tzinfo=datetime.timezone.utc) - created).total_seconds()
+
+
+def join_to_validated_problems(delay: float | None) -> list[str]:
+    if delay is None:
+        return ["the time from the join to the validated line cannot be read (no creation time or no such line)"]
+    if not 0 <= delay <= VALIDATED_WITHIN_SECONDS:
+        return [f"the network was reported validated {delay:.1f} s after its join, not within "
+                f"{VALIDATED_WITHIN_SECONDS:.0f} s"]
+    return []
+
+
+def private_dns_failed_problems(capabilities: frozenset[str] | None) -> list[str]:
+    """What differs from the network the platform leaves when its strict private DNS name fails: not validated,
+    with its private DNS reported broken."""
+    if capabilities is None:
+        return ["dumpsys connectivity lists no Wi-Fi network"]
+    problems = []
+    if "VALIDATED" in capabilities:
+        problems.append("the network is validated")
+    if "PRIVATE_DNS_BROKEN" not in capabilities:
+        problems.append("the network does not have PRIVATE_DNS_BROKEN")
+    return problems
+
+
+def forced_check_problems(entries: list[tuple[str, str]]) -> list[str]:
+    """What a validation log shows of a forced re-evaluation of a network whose private DNS failed: the line
+    that says it was forced (or the section proves nothing), and no internet check after that line."""
+    entries = sorted(entries)
+    forced = [index for index, (_, message) in enumerate(entries) if message.startswith(FORCED_LINE)]
+    if not forced:
+        return [f"the validation log has no {FORCED_LINE!r} line: the platform did not take the forced "
+                "re-evaluation"]
+    later = [message for _, message in entries[forced[-1] + 1:] if "Wi-Fi internet check" in message]
+    return [f"an internet check ran after the forced re-evaluation: {later[0]!r}"] if later else []
 
 
 def connectivity_notifications(dump: str) -> list[str]:
@@ -1443,6 +1514,21 @@ def hold_validated(guest: Guest, seconds: float, pin: Pin | None = None) -> None
         time.sleep(POLL_SECONDS)
 
 
+def hold_quiet(guest: Guest, server: "ProbeServer", scenario: str, seconds: float, pin: Pin) -> None:
+    """For `seconds` the network stays as `stays_validated` says and no check reaches the server: a check that
+    comes after a pass is a timer that the pass left, and it would pass for the forced check that follows."""
+    seen = len(server.checks(scenario))
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        guest.alive()
+        stays_validated(guest, pin)
+        extra = len(server.checks(scenario)) - seen
+        if extra:
+            raise Failure(f"{extra} check(s) reached the server in the {seconds:.0f} s after a check passed: "
+                          "a timer was left, and the forced check would not be told from it")
+        time.sleep(POLL_SECONDS)
+
+
 def wait_watching(description: str, seconds: float, guest: Guest, pin: Pin, check: Callable[[], str | None],
                   interval: float = 3.0) -> None:
     """Waits for `check` while the network stays the one validated network: a change of it fails at once."""
@@ -1547,7 +1633,10 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         pin = pin_network(guest)
         wait_for("the first check reaches the host's server", WARNING_SECONDS,
                  lambda: None if server.checks(scenario) else "the server has seen no check", guest, interval=1.0)
-        first = first_validation_problems(guest.validation_log(pin.net_id))
+        entries = guest.validation_entries(pin.net_id)
+        first = first_validation_problems([message for _, message in entries])
+        delay = validated_after_join(guest.connectivity(), entries, pin.net_id)
+        first += join_to_validated_problems(delay)
         if first:
             raise Failure("; ".join(first))
         wait_watching("the failed check shows in Settings and in the status bar, with no other action",
@@ -1572,8 +1661,9 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         server.mode = "expected"
         wait_watching("the warning goes from Settings and the status bar when a check passes", WARNING_SECONDS,
                       guest, pin, lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)) or None)
-        # A forced re-evaluation checks the network again; no timer is left after a pass, so a new check at the
-        # server is the forced one.
+        # A forced re-evaluation checks the network again. No timer is left after a pass, which the quiet hold
+        # shows, so a new check at the server is the forced one.
+        hold_quiet(guest, server, scenario, QUIET_SECONDS, pin)
         server.mode = "page"
         seen = len(server.checks(scenario))
         guest.reevaluate(pin.net_id)
@@ -1587,7 +1677,78 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         hold_validated(guest, SHORT_HOLD_SECONDS, pin)
     finally:
         guest.leave_internet_page()
-    return f"network {pin.net_id} validated at {pin.validated_at} throughout, {len(server.checks(scenario))} checks"
+    return (f"network {pin.net_id} validated {delay:.1f} s after its join and at {pin.validated_at} throughout, "
+            f"{len(server.checks(scenario))} checks")
+
+
+def unresolved_problems(guest: Guest, net_id: int) -> list[str]:
+    """The pinned network is still the newest one and is as the platform leaves a network whose strict private
+    DNS name fails: not validated, its private DNS reported broken."""
+    networks = wifi_networks(guest.connectivity())
+    if net_id not in networks:
+        return [f"network {net_id} is gone"]
+    problems = [f"network {net_id} was replaced by network {max(networks)}"] if max(networks) != net_id else []
+    return problems + private_dns_failed_problems(networks[net_id])
+
+
+def check_forced_evaluation_after_private_dns_failed(guest: Guest, server: "ProbeServer") -> str | None:
+    """A forced re-evaluation of a network whose strict private DNS name fails is evaluated as the stock
+    platform does: the network stays not validated, with its private DNS broken, and no check runs (a check
+    would report it validated while its private DNS is broken). The log shows the forced re-evaluation and no
+    internet check after it, and the server sees no check. When the setting is deleted the network is
+    validated again with its private DNS no longer broken, and a forced re-evaluation checks it."""
+    scenario = server.scenario()
+    server.mode = "expected"
+    server.clear()
+    guest.reverse(server.port)
+    guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
+                               clear=PRIVATE_DNS_SETTINGS)
+    pin = pin_network(guest)
+    net_id = pin.net_id
+    wait_watching("the first check passes", WARNING_SECONDS, guest, pin,
+                  lambda: None if any(CHECK_PASSED_LINE in message for message in guest.validation_log(net_id))
+                  else "no passing check yet")
+    union = LogUnion()
+    # The setting changes with no rejoin: the platform evaluates the name for the network it has.
+    guest.put_settings({"private_dns_mode": "hostname", "private_dns_specifier": UNRESOLVED_NAME})
+    wait_problems("the platform reports the name that does not resolve: not validated, private DNS broken",
+                  WARNING_SECONDS, guest, lambda: unresolved_problems(guest, net_id), interval=2.0)
+    checks = len(server.checks(scenario))
+    union.add(guest.validation_entries(net_id))
+    guest.reevaluate(net_id)
+    deadline = time.monotonic() + UNVALIDATED_SECONDS
+    while time.monotonic() < deadline:
+        guest.alive()
+        problems = unresolved_problems(guest, net_id)
+        if len(server.checks(scenario)) > checks:
+            problems.append("a check reached the host's server after the forced re-evaluation")
+        union.add(guest.validation_entries(net_id))
+        if problems:
+            raise Failure("after the forced re-evaluation: " + "; ".join(problems))
+        time.sleep(POLL_SECONDS)
+    problems = forced_check_problems(list(union.entries))
+    if problems:
+        raise Failure("; ".join(problems))
+    passed = union.count(CHECK_PASSED_LINE)
+    # The name is not set any more: the network is validated again, and a forced re-evaluation checks it.
+    guest.delete_settings(PRIVATE_DNS_SETTINGS)
+    wait_problems("the network is validated again and its private DNS is not broken", WARNING_SECONDS, guest,
+                  lambda: validation_problems(wifi_networks(guest.connectivity()).get(net_id)), interval=2.0)
+    checks = len(server.checks(scenario))
+    guest.reevaluate(net_id)
+
+    def checked() -> str | None:
+        union.add(guest.validation_entries(net_id))
+        if len(server.checks(scenario)) <= checks:
+            return "the server saw no new check"
+        return None if union.count(CHECK_PASSED_LINE) > passed else "no new passing check in the log"
+
+    wait_for("a forced re-evaluation checks the network that is validated again", FORCE_SECONDS, checked, guest)
+    problems = validation_problems(wifi_networks(guest.connectivity()).get(net_id))
+    if problems:
+        raise Failure("after the check: " + "; ".join(problems))
+    return (f"network {net_id}: not validated and no check for {UNVALIDATED_SECONDS} s after the forced "
+            "re-evaluation, validated and checked again once the name was gone")
 
 
 def private_dns_probe_problems(first: int, last: int) -> list[str]:
@@ -1688,6 +1849,8 @@ def warning_sections(guest: Guest, server: "ProbeServer", report: "Report") -> N
                        lambda: check_page_answer_warns(guest, server, "page"))
         report.section("the warning follows one network from a failing check to a passing one and back", guest,
                        lambda: check_recovery_on_one_network(guest, server))
+        report.section("a forced re-evaluation does not validate a network whose strict private DNS failed", guest,
+                       lambda: check_forced_evaluation_after_private_dns_failed(guest, server))
         report.section("a passing check leaves no warning", guest,
                        lambda: check_passing_check_clears(guest, server))
         report.section("the stock servers leave no warning", guest,

@@ -85,10 +85,11 @@ DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): av
           "tcontext=u:object_r:system_file:s0 tclass=file permissive=0\n")
 REPAIR_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"
 
-def agent(net_id: int, capabilities: str, transport: str = "WIFI", validated_at: int | None = None) -> str:
+def agent(net_id: int, capabilities: str, transport: str = "WIFI", validated_at: int | None = None,
+          created: str = "2026-11-10T13:30:32.485Z") -> str:
     """The line `dumpsys connectivity` prints for a network (NetworkAgentInfo), trimmed to what the runner reads."""
     return (f"  NetworkAgentInfo{{network{{{net_id}}}  handle{{441492361229}}  ni{{{transport} CONNECTED extra: }} "
-            "created=2026-11-10T13:30:32.485Z Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED ; KeepConnected : 0) "
+            f"created={created} Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED ; KeepConnected : 0) "
             "created 149238 lp{{InterfaceName: wlan0 LinkAddresses: [ 10.0.2.16/24 ] DnsAddresses: [ /10.0.2.3 ]}} "
             f"nc{{[ Transports: {transport} Capabilities: {capabilities} LinkUpBandwidth>=12000Kbps "
             'Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="VirtWifi"]>]}  everValidated{true}'
@@ -686,7 +687,7 @@ class WarningSectionTests(unittest.TestCase):
         report = runner.Report()
         with contextlib.redirect_stderr(io.StringIO()):
             runner.warning_sections(guest, server, report)
-        self.assertEqual(len(report.failures), 8)
+        self.assertEqual(len(report.failures), 9)
         self.assertEqual(guest.calls[-2:], [f"delete {sorted(runner.ALL_CHECK_SETTINGS)}", f"unreverse {server.port}"])
 
     def test_the_page_settings_point_the_probes_at_the_server_and_the_black_hole(self) -> None:
@@ -874,6 +875,63 @@ class ContinuityReadingTests(unittest.TestCase):
         elsewhere = runner.ui_nodes(CLEAR_SCREEN.replace('package="com.android.systemui"',
                                                          'package="com.android.settings"'))
         self.assertFalse(runner.status_bar_present(elsewhere))
+
+
+class ForcedEvaluationReadingTests(unittest.TestCase):
+    ENTRIES = [("2026-11-13T03:00:01.000000", "Wi-Fi internet check passed"),
+               ("2026-11-13T03:00:09.000000", "Forcing reevaluation for UID 0"),
+               ("2026-11-13T03:00:12.000000", "PROBE_PRIVDNS 1a2b3c4d-dnsotls-ds.metric.gstatic.com 12ms: []")]
+
+    def test_a_network_whose_strict_private_dns_failed_is_not_validated_and_has_it_broken(self) -> None:
+        self.assertEqual(runner.private_dns_failed_problems(frozenset({"INTERNET", "PRIVATE_DNS_BROKEN"})), [])
+        self.assertIn("the network is validated",
+                      runner.private_dns_failed_problems(frozenset({"VALIDATED", "PRIVATE_DNS_BROKEN"}))[0])
+        self.assertIn("does not have PRIVATE_DNS_BROKEN",
+                      runner.private_dns_failed_problems(frozenset({"INTERNET"}))[0])
+        self.assertIn("lists no Wi-Fi network", runner.private_dns_failed_problems(None)[0])
+
+    def test_no_check_after_the_forced_re_evaluation_is_the_proof(self) -> None:
+        self.assertEqual(runner.forced_check_problems(self.ENTRIES), [])
+
+    def test_a_check_after_the_forced_re_evaluation_is_a_problem(self) -> None:
+        for line in ("Wi-Fi internet check passed", "Wi-Fi internet check failed, the network stays validated"):
+            with self.subTest(line=line):
+                problems = runner.forced_check_problems([*self.ENTRIES, ("2026-11-13T03:00:14.000000", line)])
+                self.assertIn("an internet check ran after the forced re-evaluation", problems[0])
+
+    def test_a_check_before_the_forced_re_evaluation_is_not(self) -> None:
+        self.assertEqual(runner.forced_check_problems(self.ENTRIES[:2]), [])
+
+    def test_a_log_without_the_forced_line_proves_nothing(self) -> None:
+        self.assertIn("did not take the forced re-evaluation",
+                      runner.forced_check_problems([self.ENTRIES[0], self.ENTRIES[2]])[0])
+
+    def test_the_entries_are_read_in_time_order(self) -> None:
+        late = [self.ENTRIES[2], ("2026-11-13T03:00:14.000000", "Wi-Fi internet check passed"), self.ENTRIES[1]]
+        self.assertEqual(len(runner.forced_check_problems(late)), 1)
+
+    def test_the_time_from_the_join_to_the_validated_line_is_read_from_the_dump_and_the_log(self) -> None:
+        dump = CONNECTIVITY
+        entries = [("2026-11-10T13:30:32.803492", runner.VALIDATED_FIRST_LINE)]
+        delay = runner.validated_after_join(dump, entries, 102)
+        self.assertAlmostEqual(delay, 0.318, places=3)
+        self.assertEqual(runner.join_to_validated_problems(delay), [])
+
+    def test_a_late_validation_is_a_problem(self) -> None:
+        entries = [("2026-11-10T13:30:46.000000", runner.VALIDATED_FIRST_LINE)]
+        delay = runner.validated_after_join(CONNECTIVITY, entries, 102)
+        self.assertIn("13.5 s after its join", runner.join_to_validated_problems(delay)[0])
+
+    def test_a_validation_before_the_join_is_a_problem(self) -> None:
+        entries = [("2026-11-10T13:30:30.000000", runner.VALIDATED_FIRST_LINE)]
+        self.assertTrue(runner.join_to_validated_problems(runner.validated_after_join(CONNECTIVITY, entries, 102)))
+
+    def test_a_time_that_cannot_be_read_is_a_problem(self) -> None:
+        self.assertIsNone(runner.validated_after_join(CONNECTIVITY, [], 102))
+        self.assertIsNone(runner.validated_after_join(CONNECTIVITY, [("2026-11-10T13:30:32.8", "x")], 102))
+        self.assertIsNone(runner.validated_after_join(
+            CONNECTIVITY, [("2026-11-10T13:30:32.8", runner.VALIDATED_FIRST_LINE)], 999))
+        self.assertIn("cannot be read", runner.join_to_validated_problems(None)[0])
 
 
 def log_line(pid: int, tid: int, priority: str, tag: str, message: str, when: str = "03:10:01.000") -> str:
@@ -1231,6 +1289,11 @@ class SimulatedGuest(StubbedGuest):
         self.failures = self.checks_done = 0
         self.settings_mark = self.bar_mark = bool(self.faults.get("mark_from_start"))
         self.log = []
+        self.created = self.stamp() + "Z"
+        self.broken = False
+        self.validated = True
+        if self.faults.get("validated_late"):
+            self.counter += 12
         probe = "PROBE_HTTP http://127.0.0.1:1/x/generate_204 time=3ms ret=200 request={} headers={}"
         if self.faults.get("probe_first"):
             self.add(probe)
@@ -1265,6 +1328,8 @@ class SimulatedGuest(StubbedGuest):
         if passed:
             self.add(runner.CHECK_PASSED_LINE)
             self.failures = 0
+            if self.faults.get("timer_after_pass"):
+                self.next_check = when + 5
             if not self.faults.get("clear_only_on_rejoin"):
                 self.settings_mark = self.bar_mark = False
         else:
@@ -1285,11 +1350,28 @@ class SimulatedGuest(StubbedGuest):
     def put_settings(self, settings: dict[str, str]) -> None:
         super().put_settings(settings)
         self.settings.update(settings)
+        self.private_dns_changed()
 
     def delete_settings(self, keys: tuple[str, ...] | list[str]) -> None:
         super().delete_settings(keys)
         for key in keys:
             self.settings.pop(key, None)
+        self.private_dns_changed()
+
+    def private_dns_changed(self) -> None:
+        """A strict name that does not resolve fails the network the platform has, as the stock platform does:
+        not validated, private DNS broken, nothing to check; the name gone, it is validated again."""
+        broken = (self.settings.get("private_dns_mode") == "hostname"
+                  and self.settings.get("private_dns_specifier") == runner.UNRESOLVED_NAME)
+        if broken and not self.broken:
+            self.broken, self.validated, self.next_check = True, False, None
+        elif not broken and self.broken and not self.faults.get("stays_broken"):
+            self.broken, self.validated = False, True
+            self.validated_at += 1000
+
+    def capabilities(self) -> str:
+        names = VALIDATED if self.validated else STOCK
+        return names + "&PRIVATE_DNS_BROKEN" if self.broken else names
 
     def forget_and_save(self) -> None:
         super().forget_and_save()
@@ -1304,8 +1386,21 @@ class SimulatedGuest(StubbedGuest):
         super().reevaluate(net_id)
         if self.faults.get("reevaluate_fails"):
             raise runner.Failure(f"cmd connectivity reevaluate {net_id} (rc 255): Permission denied")
-        if not self.faults.get("reevaluate_ignored"):
-            self.next_check = self.clock.now
+        if self.faults.get("reevaluate_ignored"):
+            return
+        self.add(f"{runner.FORCED_LINE} for UID 0")
+        if self.broken:
+            # The stock platform evaluates private DNS again, and it fails again. A check that completes
+            # (the platform before the fix) reports the network validated, with its private DNS still broken.
+            if self.faults.get("forced_check_validates_broken"):
+                self.validated = True
+                self.check(self.clock.now)
+            if self.faults.get("forced_request_unlogged") and self.scenario:
+                self.server.record(f"{self.scenario}/generate_204", 204, when=self.clock.now)
+            return
+        if self.faults.get("validated_force_checks_nothing"):
+            return
+        self.next_check = self.clock.now
 
     # What it answers: the platform acts by itself, so every look at the guest lets the clock's checks happen.
     def alive(self) -> None:
@@ -1315,7 +1410,8 @@ class SimulatedGuest(StubbedGuest):
         self.advance()
         answers = {
             "dumpsys connectivity": lambda: ("Current networks:\n" + agent(self.net_id - 1, STOCK)
-                                             + agent(self.net_id, VALIDATED, validated_at=self.validated_at)),
+                                             + agent(self.net_id, self.capabilities(),
+                                                     validated_at=self.validated_at, created=self.created)),
             "dumpsys network_stack": lambda: ("Validation logs (most recent first):\n"
                                               + f'{self.net_id} - "VirtWifi"\n'
                                               + "".join(f"  {stamp} - {message}\n" for stamp, message in self.log)),
@@ -1360,7 +1456,7 @@ class SimulatedSectionTests(unittest.TestCase):
     def test_the_warning_follows_one_network_from_a_failing_check_to_a_passing_one_and_back(self) -> None:
         guest = self.guest()
         note = self.recovery(guest)
-        self.assertRegex(note, r"^network 102 validated at \d+ throughout, \d+ checks$")
+        self.assertRegex(note, r"^network 102 validated 1\.0 s after its join and at \d+ throughout, \d+ checks$")
         # No rejoin or other action: the network joined once, and the forced check was asked for by its ID.
         self.assertEqual(guest.net_id, 102)
         self.assertEqual(guest.calls.count("forget and save"), 1)
@@ -1447,6 +1543,101 @@ class SimulatedSectionTests(unittest.TestCase):
         guest = self.guest(no_private_dns_probe=True)
         with self.assertRaisesRegex(runner.Failure, "the strict name was never evaluated"):
             runner.check_strict_private_dns_holds(guest, self.server)
+
+
+class SimulatedForcedEvaluationTests(unittest.TestCase):
+    """The sections of the forced re-evaluation of a network whose strict private DNS failed, of the quiet hold
+    after a pass and of the time from the join to the validated line, against a platform that behaves as it
+    should and against one that is wrong in the way each section is there to catch."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        patch = mock.patch.object(runner, "time", self.clock)
+        patch.start()
+        self.addCleanup(patch.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+        self.server = runner.ProbeServer()
+        self.addCleanup(self.server.close)
+
+    def guest(self, **faults: object) -> SimulatedGuest:
+        return SimulatedGuest(self.server, self.clock, **faults)
+
+    def forced(self, guest: SimulatedGuest) -> str | None:
+        return runner.check_forced_evaluation_after_private_dns_failed(guest, self.server)
+
+    def recovery(self, guest: SimulatedGuest) -> str | None:
+        return runner.check_recovery_on_one_network(guest, self.server)
+
+    def test_a_forced_re_evaluation_leaves_a_network_with_failed_private_dns_unvalidated_and_unchecked(self) -> None:
+        note = self.forced(self.guest())
+        self.assertIn("not validated and no check for 60 s", note)
+
+    def test_the_platform_before_the_fix_reports_such_a_network_validated_and_the_section_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "after the forced re-evaluation: .*(the network is validated|"
+                                                   "a check reached the host's server)"):
+            self.forced(self.guest(forced_check_validates_broken=True))
+
+    def test_the_server_sees_no_check_and_the_log_no_check_line_in_the_hold(self) -> None:
+        guest = self.guest()
+        self.forced(guest)
+        text = " ".join(message for _, message in guest.log)
+        self.assertEqual(guest.checks_done, 2, text)
+
+    def test_a_platform_that_does_not_take_the_forced_re_evaluation_proves_nothing(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "no 'Forcing reevaluation' line|cmd connectivity"):
+            self.forced(self.guest(reevaluate_ignored=True))
+
+    def test_a_request_at_the_server_after_the_forced_re_evaluation_fails_even_when_nothing_is_logged(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "a check reached the host's server"):
+            self.forced(self.guest(forced_request_unlogged=True))
+
+    def test_a_forced_re_evaluation_that_checks_nothing_once_validated_again_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "the server saw no new check"):
+            self.forced(self.guest(validated_force_checks_nothing=True))
+
+    def test_a_network_that_stays_unvalidated_after_the_name_is_gone_fails(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "the network is validated again|the network is not validated"):
+            self.forced(self.guest(stays_broken=True))
+
+    def test_a_network_that_is_never_reported_broken_fails(self) -> None:
+        guest = self.guest()
+        guest.private_dns_changed = lambda: None
+        with self.assertRaisesRegex(runner.Failure, "the network does not have PRIVATE_DNS_BROKEN"):
+            self.forced(guest)
+
+    def test_the_section_does_not_return_until_the_network_is_validated_and_checked_again(self) -> None:
+        guest = self.guest()
+        self.forced(guest)
+        self.assertTrue(guest.validated)
+        self.assertFalse(guest.broken)
+        self.assertEqual(guest.calls.count(f"reevaluate {guest.net_id}"), 2)
+
+    # The quiet hold after a pass.
+    def test_a_pass_that_leaves_no_timer_lets_the_forced_check_be_told_apart(self) -> None:
+        self.assertIn("checks", self.recovery(self.guest()))
+
+    def test_a_timer_that_a_pass_leaves_fails_the_recovery_section(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"check\(s\) reached the server in the 20 s after a check passed"):
+            self.recovery(self.guest(timer_after_pass=True))
+
+    def test_the_hold_is_the_quiet_seconds_long_and_ends_at_once_on_a_check(self) -> None:
+        guest = self.guest()
+        scenario = self.server.scenario()
+        self.server.record(f"{scenario}/generate_204", 204, when=0)
+        pin = runner.pin_network(guest)
+        started = self.clock.now
+        runner.hold_quiet(guest, self.server, scenario, runner.QUIET_SECONDS, pin)
+        self.assertGreaterEqual(self.clock.now - started, runner.QUIET_SECONDS)
+
+    # The time from the join to the validated line.
+    def test_a_network_that_is_validated_within_a_second_of_its_join_passes(self) -> None:
+        self.assertIn("validated 1.0 s after its join", self.recovery(self.guest()))
+
+    def test_a_network_that_is_validated_late_fails_the_recovery_section(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, r"reported validated 13\.0 s after its join"):
+            self.recovery(self.guest(validated_late=True))
 
 
 class RunnerNamesTests(unittest.TestCase):
