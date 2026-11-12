@@ -83,8 +83,10 @@ enum class WriteTarget : bool {
 }
 
 /* A front-end request whose reply the front-end reads from the main socket
- * without draining the backend channel, and whose handling only reads state,
- * so it can be answered while a backend request is outstanding. */
+ * without draining the backend channel, so it can be answered while a backend
+ * request is outstanding. Most only read state. GET_FEATURES, which ends a
+ * driver, also resets what a device holds and retires the disabled rings, and
+ * retiring is a flag flip with no I/O, so it is safe inside the wait. */
 [[nodiscard]] bool answeredDuringBackendWait(std::uint32_t request) noexcept
 {
     switch (static_cast<protocol::VhostRequest>(request)) {

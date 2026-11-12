@@ -484,11 +484,13 @@ finished it. A message that changes the memory, the
 features, a ring's layout or base, or ends the driver (the `GET_FEATURES` that
 follows a teardown's disables included) resets such a device first. That
 `GET_FEATURES` also retires every ring still disabled, which the guest then
-frees: the transport reads it no more until a kick starts it again, whereas an
-enabled ring, and a disabled one no teardown followed, stay read and are
-refused when their available flags are reserved. A write that fails because
-the front-end closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the
-connection without a failure report. A
+frees: the transport reads it no more until its next `SET_VRING_KICK` or
+in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
+followed, stay read and are refused when their available flags are reserved. A
+write to the control or backend-request socket that fails because the
+front-end closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the
+connection without a failure report; a write to a queue's call descriptor that
+fails still reports. A
 `VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
 ring is handled as that ring's buffers are, and a kick that asks for no
 acknowledgement gets none.

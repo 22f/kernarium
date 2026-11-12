@@ -113,7 +113,8 @@ private:
      * change what the held requests refer to, or the guest is tearing down. */
     void retireHeldRequests() noexcept;
     /* Stops reading every ring that is disabled: the driver that disabled it
-     * has ended and frees its memory. The kick of a new driver starts it. */
+     * has ended and frees its memory. Only a SET_VRING_KICK or an in-band
+     * VRING_KICK starts it again. */
     void retireDisabledRings() noexcept;
     [[nodiscard]] bool everyConfiguredRingIsEnabled() const noexcept;
     /* Writes the held completions of queue `index` to its used ring, in the

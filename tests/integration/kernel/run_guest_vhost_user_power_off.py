@@ -8,9 +8,10 @@ virtqueues (the rings are disabled and a GET_FEATURES round trip follows),
 and then unregisters the devices. A backend that goes while that is on the
 wire is a lost connection, which queues the work that breaks the device and
 unregisters it. The exit call has the device in hand, so the device must be
-unregistered by one of the two and not by both: unregistered twice, its
-sysfs entries are gone for the second, and the guest dies with "Segfault with
-no mm" in kernfs.
+unregistered by one of the two and not by both. Whichever runs second fails:
+the events worker dereferences NULL in kernfs ("Segfault with no mm") on a
+device the exit call removed, or the exit call frees the device's socket path
+a second time, which the slab check the runner enables reports.
 
 The runner serves a Virtio console through the guest kernel's
 ``virtio_uml.device=`` command-line device from a minimal backend of its own,
@@ -40,6 +41,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 
 
 REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
@@ -49,6 +51,7 @@ from guest import Guest  # noqa: E402
 
 
 EXIT_SECONDS = 60
+ACCEPT_SECONDS = 240
 CONSOLE_DEVICE = 3
 GET_FEATURES = 1
 GET_VRING_BASE = 11
@@ -77,7 +80,7 @@ class Backend(threading.Thread):
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._listener.bind(path)
         self._listener.listen(1)
-        self._listener.settimeout(240)
+        self._listener.settimeout(0.2)
         self._connection: socket.socket | None = None
         self._descriptors: list[int] = []
         self._finished = threading.Event()
@@ -122,7 +125,15 @@ class Backend(threading.Thread):
 
     def run(self) -> None:
         try:
-            self._connection, _ = self._listener.accept()
+            deadline = time.monotonic() + ACCEPT_SECONDS
+            while self._connection is None:
+                if self._finished.is_set():
+                    return
+                try:
+                    self._connection, _ = self._listener.accept()
+                except socket.timeout:
+                    if time.monotonic() > deadline:
+                        raise
             self._connection.settimeout(0.2)
             while not self._finished.is_set():
                 try:
@@ -167,8 +178,11 @@ class Backend(threading.Thread):
     def finish(self) -> None:
         self._finished.set()
         self.join(10)
+        stuck = self.is_alive()
         self._close()
         self._listener.close()
+        if stuck:
+            raise RuntimeError("the backend thread did not end in ten seconds")
 
 
 def run(arguments: argparse.Namespace, private: pathlib.Path) -> None:
