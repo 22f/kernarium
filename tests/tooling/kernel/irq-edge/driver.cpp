@@ -209,10 +209,8 @@ int main() {
  }
  // CPU0 enters its idle wait while the thread is parked on an edge: the entry
  // ends the park, so the next edge triggers at once and not at the takeover
- // deadline, which would have woken an idle secondary first. A host that
- // stalls this thread for the 20 ms of the deadline, which a loaded one does
- // for a few rounds in ten, makes a round late by itself; an entry that leaves
- // the park makes every round late, so a third of them may be.
+ // deadline, which would have woken an idle secondary first. Host scheduling
+ // may delay the thread, so a tenth of the rounds may be late.
  {
   const int rounds=100; int late=0;
   for (int r=0;r<rounds;r++) {
@@ -229,7 +227,7 @@ int main() {
    darwin_irq_idle_end();
    assert(read(idle[0],drained,sizeof drained)>=2);
   }
-  assert(late<=rounds/3);
+  assert(late<=rounds/10);
  }
  // Whatever the order, the wake is not lost: each round starts an edge and a
  // wait at about the same time, and one of the two must see the other.
