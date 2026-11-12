@@ -122,11 +122,11 @@ struct FoldSessionHostingTests {
         private(set) var guest: GuestMetalView!
 
         /// `phase` is what the root shows; Home and the boot have no guest's
-        /// display to wait for, and `withoutGuest` is the screen before a
-        /// virtual machine exists.
+        /// display to wait for, `withoutGuest` is the screen before a virtual
+        /// machine exists, and `withMachine` is Home with one to start.
         init(
-            _ pose: Pose, phase: Phase = .running(.normal), withoutGuest: Bool = false, plain: Bool = false,
-            test: FoldSessionHostingTests
+            _ pose: Pose, phase: Phase = .running(.normal), withoutGuest: Bool = false, withMachine: Bool = false,
+            plain: Bool = false, test: FoldSessionHostingTests
         ) async throws {
             self.pose = pose
             self.plain = plain
@@ -148,6 +148,7 @@ struct FoldSessionHostingTests {
             controller.view.frame = holder.bounds
             controller.didMove(toParent: container)
             if withoutGuest { model.guest = nil }
+            if withMachine { model.guest = Guest.fresh(on: model.host) }
             model.phase = phase
             controller.view.layoutIfNeeded()
             guard case .running = phase else {
@@ -594,9 +595,12 @@ struct FoldSessionHostingTests {
     }
 
     /// Home's Start, as a screen reads it: the bar's button (not Start in
-    /// recovery).
-    private func startButton(in rig: Rig) throws -> CGRect {
-        try #require(
+    /// recovery), on `pose` or, when `plain`, on a display with no hinge. The
+    /// rig is ended before it returns, for the window has one holder at a time.
+    private func homeStart(on pose: Pose, plain: Bool = false) async throws -> CGRect {
+        let rig = try await Rig(pose, phase: .home, withMachine: true, plain: plain, test: self)
+        defer { rig.end() }
+        return try #require(
             rig.labelled().first { $0.label == "Start" || $0.label.hasPrefix("Start and") }, "no Start in \(rig.labelled())"
         ).frame
     }
@@ -606,14 +610,10 @@ struct FoldSessionHostingTests {
     /// is at the foot of the first page and clear of the fold.
     @Test(arguments: Pose.allCases.filter(\.inner))
     func homeIsTheIPadsListWhenFlatAndTwoPagesWhenBent(_ pose: Pose) async throws {
-        let shown = try await Rig(pose, phase: .home, test: self)
-        defer { shown.end() }
-        let start = try startButton(in: shown)
+        let start = try await homeStart(on: pose)
         let band = try #require(pose.reading.division).frame
         if pose == .uprightFlat || pose == .turnedFlat {
-            let plain = try await Rig(pose, phase: .home, plain: true, test: self)
-            defer { plain.end() }
-            let expected = try startButton(in: plain)
+            let expected = try await homeStart(on: pose, plain: true)
             #expect(near(start, expected), "\(pose): Start is at \(start), not as with no hinge at \(expected)")
         } else {
             #expect(!start.intersects(band), "\(pose): Start is on the fold at \(start)")
@@ -802,7 +802,13 @@ struct FoldSessionHostingTests {
             let top = try #require(FoldHalves(pose.reading)).insets(for: .card, in: holder.bounds).top
             #expect(abs(card.minY - top) < 1, "\(name): the card \(card) does not start at the half's top, \(top)")
         } else {
-            #expect(abs(card.midY - holder.bounds.midY) < 1, "\(name): the card \(card) is not centred on \(holder.bounds)")
+            // Centred on its place: the whole space with no hinge or on the
+            // cover, and the display's centre, which a flat inner display's
+            // card keeps to, where that is less than the space (the window
+            // here is smaller than the display).
+            let insets = pose.flatMap { FoldHalves($0.reading) }?.insets(for: .card, in: holder.bounds) ?? FoldInsets()
+            let middle = (insets.top + holder.bounds.height - insets.bottom) / 2
+            #expect(abs(card.midY - middle) < 1, "\(name): the card \(card) is not centred on \(middle) in \(holder.bounds)")
         }
     }
 
