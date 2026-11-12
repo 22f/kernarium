@@ -1642,9 +1642,7 @@ VhostUserQueueResult VirtioCameraDevice::processQueue(std::uint32_t index, std::
         }
         /* No event is waiting: the buffer stays in the guest's ring, as an
          * input device's does, and the server offers it again when an event
-         * wakes the device. A buffer the device kept instead would be dropped
-         * unanswered when the guest suspends and the server resets the device,
-         * and the guest would not be told of a camera again. */
+         * wakes the device. */
         return {VhostUserQueueAction::retry, {}};
     }
     if (index != 0 || request.size() < sizeof(virtio_video_cmd_hdr) || capacity < sizeof(virtio_video_cmd_hdr))

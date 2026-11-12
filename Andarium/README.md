@@ -503,8 +503,10 @@ requires reopening Andarium.
   Settings may show more. Once Android has booted a normal start, the
   application reads it (`RunSpace.nextCheck`: every 2 s near the limit, every
   30 s on a roomy device) and pauses the guest below 1 GiB
-  (`RunSpace.pauseBelowBytes`), before the data disk, which Android mounts so
-  that a failed write panics, can fail to grow. The pause is the runtime's
+  (`RunSpace.pauseBelowBytes`), before the data disk can fail to grow. A full
+  volume holds the guest's disk I/O until it has room instead of
+  failing it ([kernel contract](../kernel/common/README.md#block-devices-and-filesystems)),
+  and the pause stays the guard. The pause is the runtime's
   suspension with the storage written back first and the RAM kept in the
   process: no image of it goes to the device that is short of space
   ([lifecycle](../docs/architecture.md#guest-lifecycle)). The suspension is

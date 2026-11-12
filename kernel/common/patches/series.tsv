@@ -124,3 +124,11 @@ patch	um-fail-a-user-access-to-a-mapping-of-memory-outside-guest-RAM.patch
 patch	sysrq-report-whether-a-SysRq-operation-ran.patch
 patch	um-end-an-mconsole-console-command-with-a-status-reply.patch
 patch	gnss-add-the-Kernarium-host-receiver.patch
+patch	um-let-another-CPU-dispatch-Darwin-host-events-when-CPU0-is-late.patch
+patch	um-free-an-IRQ-entry-after-a-grace-period.patch
+patch	virt_wifi-give-the-device-its-own-lockdep-classes.patch
+patch	um-skip-the-IPI-pipe-drain-when-an-idle-wait-found-it-empty.patch
+patch	virtio_input-follow-configuration-changes.patch
+patch	media-virtio-video-add-the-Kernarium-host-camera.patch
+patch	um-hold-a-Darwin-UBD-request-while-the-host-s-storage-is-full.patch
+patch	um-end-a-host-suspend-that-a-wake-overtook.patch
