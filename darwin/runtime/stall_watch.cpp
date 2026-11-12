@@ -727,7 +727,7 @@ struct StallWatch::State final {
 			if (quiet_ticks >= park_after_quiet_ticks && try_to_park()) {
 				parked = true;
 				/* Two looks again after every sleep, the one after a wake
-				 * (which measures nothing) not among them. */
+				 * (which measures nothing) the first of them. */
 				quiet_ticks = 0;
 			}
 		}

@@ -712,9 +712,10 @@ keeps it from running. The notification thread's fallback, which wakes an idle
 secondary when CPU0 is late for a device, arms the watch, so a device wake that
 stalls is still recorded, later and shorter; the case stays open for a guest of
 one vCPU, a suspended guest, a carrier woken by an IPI from one that goes idle
-again at once, and a stall shorter than the fallback needs. A carrier that stays
-blocked past its limit is looked at once and then left alone, and one that is
-due, starved, and runs before the watch has collected its wake-up is not seen.
+again within that time, and a stall shorter than the fallback needs. A carrier
+that stays blocked past its limit is looked at once and then left alone, and one
+that is due, starved, and runs before the watch has collected its wake-up is not
+seen.
 
 The watch reads no guest memory, takes no lock a carrier takes, suspends
 nothing and calls no framework from its own thread, which the kernel-thread

@@ -28,8 +28,9 @@ namespace uml::runtime {
  * wakes, wakes the watch. It sleeps after two looks in a row with every
  * carrier idle and nothing suspected, counted afresh after each sleep (the
  * first look after a wake, which starts the measurement over so that the sleep
- * is nobody's starvation, is not one of them). While some carrier is outside
- * its idle wait, or does not report its idle waits, it looks every 50 ms.
+ * is nobody's starvation and measures nothing, is the first of the two). While
+ * some carrier is outside its idle wait, or does not report its idle waits, it
+ * looks every 50 ms.
  *
  * Each event carries what the host looked like around it:
  * the thermal state, Low Power Mode and the active core count; the process's
