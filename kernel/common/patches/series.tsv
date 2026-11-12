@@ -132,3 +132,4 @@ patch	virtio_input-follow-configuration-changes.patch
 patch	media-virtio-video-add-the-Kernarium-host-camera.patch
 patch	um-hold-a-Darwin-UBD-request-while-the-host-s-storage-is-full.patch
 patch	um-end-a-host-suspend-that-a-wake-overtook.patch
+patch	um-wait-for-idle-with-one-kevent-per-virtual-CPU.patch
