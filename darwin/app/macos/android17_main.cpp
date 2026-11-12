@@ -43,6 +43,13 @@ constexpr std::string_view adb_authorization_prefix{
  * composed (--camera-layout=auto). */
 constexpr std::string_view hardware_sku_prefix{
 	"androidboot.product.hardware.sku="};
+/* Makes the guest list a device-orientation sensor, which Android's window
+ * manager then follows in place of the accelerometer (the iOS runtime's
+ * KernariumHostFeatures.hpp states it too). Only a run that feeds the sensor
+ * passes it, as the orientation check does; a release's own command line may
+ * not carry it. */
+constexpr std::string_view orientation_prefix{
+	"androidboot.kernarium.orientation="};
 
 struct AndroidOptions {
 	std::filesystem::path release;
@@ -259,6 +266,7 @@ std::vector<std::string> boot_command_line(
 		adb_authorization_prefix,
 		hardware_sku_prefix,
 		uml::camera::layoutArgumentPrefix,
+		orientation_prefix,
 		uml::android::lcdDensityPrefix,
 		uml::android::hwTimeoutMultiplierPrefix};
 	for (auto &argument : uml::android::readKernelCommandLine(

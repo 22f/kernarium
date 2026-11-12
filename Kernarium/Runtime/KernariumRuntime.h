@@ -60,6 +60,12 @@ enum {
      * guest's vibrator on it. The guest then finds a vibrator; without the bit
      * it finds none. */
     KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS = 1u << 0,
+    /* The application gives the guest the device's orientation (runtime API
+     * 37), which it follows where the device's interface does not turn. The
+     * guest then lists a device-orientation sensor, which Android's window
+     * manager follows in place of the accelerometer; without the bit it lists
+     * none and judges the accelerometer, as an image without the sensor does. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION = 1u << 1,
 };
 
 /* What the camera does for an Android guest this run (runtime API 37), the

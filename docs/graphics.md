@@ -76,6 +76,16 @@ Guest-visible guarantees:
   While the device memory budget is full the host driver can refuse the
   staging buffer of a later upload, which is then dropped without an error, so
   a texture can keep its older pixels until it is written again.
+- A classic resource that is a plain byte buffer, which is R8, one row, and
+  bind flags that name only shared, linear and the software, camera or codec
+  use (the JPEG buffer Android allocates through gralloc), has no host storage
+  and no size limit but 1 GiB. Only the guest's own creation request makes
+  one; a blob a context creates, a typed blob and an image import keep every
+  texture check. At most 16,384 are alive at once. Its attached backing is the
+  only copy: a transfer, from the virtio-gpu request or as TRANSFER3D in a
+  command buffer, checks its box and backing and moves nothing, and any other
+  command that names it reports an illegal resource. It cannot be exported or
+  shown.
 - A texture exported to another context through shared memory is written into
   its segment at the next fence after it is drawn. A read-back into client
   memory that the host driver refuses at a fence leaves the texture the newer

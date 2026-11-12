@@ -48,7 +48,9 @@ struct EndView: View {
             Spacer(minLength: 24)
         }
         .padding(.horizontal, 24)
+        .scrollsWhenTall()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onCardHalf()
         .background(Color(.systemGroupedBackground))
     }
 

@@ -161,6 +161,17 @@ multiplied by -9.80665, and events carry the guest's `CLOCK_BOOTTIME` at receipt
 a live input path, not a synchronized recording. Andarium's
 [scene policy](../../Andarium/README.md#devices) describes windowed operation.
 
+When the launch passes `androidboot.kernarium.orientation=1`, the sub-HAL also
+lists an on-change, non-wake-up `TYPE_DEVICE_ORIENTATION` sensor, and the window
+manager follows the host's orientation as a rotation proposal that Android's own
+policy (auto-rotate, the foreground application's requested orientation) still
+decides on; the sub-HAL gives the framework the host's last orientation when it
+enables the sensor, and Android keeps its rotation until the host has said one.
+Without the argument the sub-HAL lists the accelerometer and the gyroscope alone
+and Android judges the accelerometer, as before. The host sends its current
+orientation at the start of each connection whose control frames say the guest
+has the sensor (`overlay/sensors/motion_protocol.hpp` has the frames).
+
 ### Haptics
 
 The vibrator exists only on a device with haptics. The host passes

@@ -54,12 +54,13 @@ public:
 	 * interval has over a tick unless the test says its wake-up was on time
 	 * (`late_ms`), as when a tick's own work took the time. */
 	StallDetector::Change tick(unsigned interval_ms = tick_ms,
-		bool disturbed = false, int late_ms = -1)
+		bool disturbed = false, int late_ms = -1, bool rebaseline = false)
 	{
 		now_ += interval_ms * millisecond;
 		Tick current;
 		current.now_ns = now_;
 		current.disturbed = disturbed;
+		current.rebaseline = rebaseline;
 		current.late_ms = late_ms >= 0 ? static_cast<std::uint32_t>(late_ms) :
 			interval_ms > tick_ms ? interval_ms - tick_ms : 0;
 		for (unsigned cpu = 0; cpu < vcpus_; ++cpu) {
@@ -223,6 +224,60 @@ void a_late_tick_is_a_stall_of_the_process_and_a_long_gap_is_not()
 	suspended.sample(2, RunState::running, 100, 0);
 	suspended.ticks(5);
 	require(suspended.record.events.total() == 0);
+}
+
+/* A watch that slept while every carrier was idle (stall_watch.hpp) wakes
+ * 50 ms after one left its idle wait. The sleep is not an interval to measure:
+ * a carrier that ran since used a sliver of it. */
+void a_watch_that_slept_sees_every_carrier_as_for_the_first_time()
+{
+	/* Without the flag, a woken carrier that used 1% of a 2 s gap is starved at
+	 * once; this is what the flag is for. */
+	Scenario unflagged{3};
+	unflagged.ticks(4);
+	unflagged.sample(1, RunState::running, 1, 0);
+	require(unflagged.tick(2000, false, 0) == StallDetector::Change::opened);
+
+	/* With it, nothing is judged by the sleep, and the carrier is measured from
+	 * the next look: 50 ms starved, then 100 ms is a stall. */
+	Scenario slept{3};
+	slept.ticks(4);
+	slept.sample(1, RunState::running, 1, 0);
+	require(slept.tick(2000, false, 0, true) == StallDetector::Change::none);
+	require(slept.record.events.total() == 0 && !slept.detector().suspicious());
+	require(slept.tick() == StallDetector::Change::none);
+	require(slept.detector().suspicious());
+	require(slept.tick() == StallDetector::Change::opened);
+	require(slept.record.events.back().causes[1] == Cause::starved);
+
+	/* A carrier found in a wait that does not end is counted from that look,
+	 * as one found so at the watch's start is, and is an event 100 ms on. */
+	Scenario wedged{3};
+	wedged.ticks(4);
+	wedged.sample(2, RunState::waiting, 0, word(HostWait::answer, 7));
+	require(wedged.tick(2000, false, 0, true) == StallDetector::Change::none);
+	require(wedged.detector().suspicious());
+	require(wedged.tick() == StallDetector::Change::none);
+	require(wedged.tick() == StallDetector::Change::opened);
+	require(wedged.record.events.back().causes[2] == Cause::answer);
+
+	/* The look counts the carriers' idle waits, and a carrier that is busy is
+	 * nothing to it. */
+	Scenario counted{3};
+	counted.sample(1, RunState::running, 100, 0);
+	const std::uint32_t idle_before = counted.record.idle_samples;
+	require(counted.tick(2000, false, 0, true) == StallDetector::Change::none);
+	require(counted.record.idle_samples == idle_before + 2);
+	counted.ticks(8);
+	require(counted.record.events.total() == 0);
+
+	/* An event cannot be open across a sleep; if one is, it ends there. */
+	Scenario open{3};
+	open.sample(1, RunState::waiting, 0, word(HostWait::send, 3));
+	open.ticks(4);
+	require(open.detector().open());
+	require(open.tick(2000, false, 0, true) == StallDetector::Change::closed);
+	require(!open.detector().open() && !open.record.events.back().open);
 }
 
 void a_hold_ends_an_event_and_restarts_the_measurement()
@@ -643,6 +698,7 @@ int main(int argc, char **argv)
 	the_markers_are_counted_and_a_hold_is_not();
 	the_main_queue_is_asked_only_while_something_is_suspicious();
 	a_hold_ends_an_event_and_restarts_the_measurement();
+	a_watch_that_slept_sees_every_carrier_as_for_the_first_time();
 	one_event_holds_every_carrier_stalled_meanwhile_and_two_quiet_ticks_end_it();
 	an_event_ends_at_its_age_limit_and_the_next_starts_from_there();
 	the_rings_keep_their_size();

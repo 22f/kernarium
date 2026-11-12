@@ -79,10 +79,13 @@ uml_add_unit_test(NAME kernarium-guest-time-zone
     LABELS kernarium)
 
 # The features of the host an Android guest is told at boot: the table of bits
-# and the kernel arguments they become, and the launcher prefixes it adds.
+# and the kernel arguments they become, and the launcher prefixes it adds. The
+# orientation row is checked against the property the guest's motion sub-HAL
+# reads.
 add_executable(uml_kernarium_host_features_tests host_features_tests.cpp)
 target_include_directories(uml_kernarium_host_features_tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime)
+    ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/sensors)
 target_link_libraries(uml_kernarium_host_features_tests PRIVATE
     UML::AndroidBoot)
 uml_add_unit_test(NAME kernarium-host-features
