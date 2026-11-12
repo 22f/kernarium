@@ -689,8 +689,8 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
     (named_leak / "Data.bin").write_bytes(secret.encode())
     check(named_leak, passes=True, expect="Buy me tokens is compiled in", args=named_args)
 
-    # The identifiers as a binary stores a string besides UTF-8, in files up to the size the UTF-16
-    # search covers; a larger file (the staged system image) is searched as UTF-8 alone.
+    # The identifiers as a binary stores a string besides UTF-8, in every file but the staged system
+    # image, which is searched as UTF-8 alone: a large file elsewhere keeps its UTF-16 search.
     for form, content in encoded_forms(secret):
         stray = tip_app(root, f"tip-leak-{form}", clean, app_info(), table=False)
         (stray / "Data.bin").write_bytes(content)
@@ -701,10 +701,20 @@ def check_tip_jar(root: Path, check, clean: Path, feedback_feature: Path, feedba
     with (large / "Data.bin").open("wb") as stream:
         stream.write(secret.encode("utf-16-le"))
         stream.truncate(129 << 20)
-    check(large, passes=True, expect="ready for the App Store", args=local_args)
-    with (large / "Data.bin").open("r+b") as stream:
-        stream.write(secret.encode())
     check(large, passes=False, expect="Data.bin: holds a product identifier of the local configuration",
+          never=secret, args=local_args)
+    image = tip_app(root, "tip-leak-image", clean, app_info(), table=False)
+    (image / "andarium-system" / "guest").mkdir(parents=True)
+    (image / "andarium-system" / "guest" / "system.img").write_bytes(b"\0" + secret.encode("utf-16-le") + b"\0")
+    check(image, passes=True, expect="ready for the App Store", args=local_args)
+    (image / "andarium-system" / "guest" / "system.img").write_bytes(b"\0" + secret.encode() + b"\0")
+    check(image, passes=False, expect="andarium-system/guest/system.img: holds a product identifier of the local configuration",
+          never=secret, args=local_args)
+    # Only that directory is spared: a neighbour of the same name prefix is searched.
+    neighbour = tip_app(root, "tip-leak-neighbour", clean, app_info(), table=False)
+    (neighbour / "andarium-system-copy").mkdir()
+    (neighbour / "andarium-system-copy" / "system.img").write_bytes(b"\0" + secret.encode("utf-16-le") + b"\0")
+    check(neighbour, passes=False, expect="andarium-system-copy/system.img: holds a product identifier",
           never=secret, args=local_args)
 
     # Both features, alone and together: each says its own line and neither disturbs the other.

@@ -121,8 +121,8 @@ The leak scans read bytes too, so a local value of up to 15 bytes written as a
 Swift literal in code would be out of their sight; a local value reaches the
 product through a build setting and the Info.plist, never through source. A
 run walks the bundle once for all of its leak scans, and looks for a value as
-UTF-8 and as UTF-16 (the latter in files up to 128 MiB; the staged system
-image is searched as UTF-8 alone).
+UTF-8 and as UTF-16 (the staged system image, andarium-system/, is searched as
+UTF-8 alone).
 The console lines are long enough to be text in the binary, so a build whose
 code still holds one fails, whether or not anything calls it.
 
@@ -724,31 +724,32 @@ def feedback_address_problems(configuration: str, address: str) -> list[str]:
 # files, never the value. A value is searched in the encodings a binary stores
 # a string in: UTF-8 (the ASCII of a property list, the bytes of Mach-O code)
 # and the UTF-16 of a binary property list's or a CFString's non-ASCII string,
-# in either case of the ASCII letters. The UTF-16 forms are searched in files
-# up to UTF16_FILE_LIMIT: the strings of a table, a property list or code live
-# in files that size, and the staged system image (a gigabyte of compressed
-# filesystem that no build setting reaches) is searched as UTF-8 alone, which
-# keeps the cost of the scan a walk of the bytes and not three. A run asks all
-# of its questions in one walk over the bundle (`one_walk`); a question outside
-# that walk walks for itself.
+# in either case of the ASCII letters. The UTF-16 forms are searched in every
+# file but the staged system image (STAGED_SYSTEM: a gigabyte of compressed
+# filesystem that no build setting reaches), which is searched as UTF-8 alone,
+# so that the cost of the scan stays a walk of the bytes and not three. A run
+# asks all of its questions in one walk over the bundle (`one_walk`); a question
+# outside that walk walks for itself.
 @dataclasses.dataclass(frozen=True)
 class Scan:
     """One question of a walk: whether the bytes of a file hold `needle`
     (lowercase) and, where `unless` is given, are not followed by a byte
     pattern of it (an address that goes on with a path is another address);
     or, for `whole`, whether a string of a property list or strings table is
-    exactly that text (lowercase). Where `within` is given, only files up to
-    that many bytes are searched."""
+    exactly that text (lowercase). A scan with `skips` does not search the
+    files under that path of the bundle."""
     needle: bytes = b""
     unless: bytes = b""
     whole: str = ""
-    within: int = 0
+    skips: str = ""
 
 
 # Property lists and strings tables, whose strings `Scan.whole` compares.
 WHOLE_STRING_SUFFIXES = (".plist", ".strings", ".stringsdict")
 WHOLE_STRING_LIMIT = 16 << 20
-UTF16_FILE_LIMIT = 128 << 20
+# The system image the build stages into the application (stage-system-image.py): the only path
+# the UTF-16 scans skip.
+STAGED_SYSTEM = "andarium-system"
 CHUNK = 8 << 20
 # The byte that follows a value of an address in each encoding, and means the
 # address goes on: a letter, digit or one of . _ / - of the next character.
@@ -761,13 +762,13 @@ ENCODINGS = ("utf-8", "utf-16-be", "utf-16-le")
 
 
 def value_scans(values: list[str]) -> set[Scan]:
-    return {Scan(needle=value.encode(encoding).lower(), within=0 if encoding == "utf-8" else UTF16_FILE_LIMIT)
+    return {Scan(needle=value.encode(encoding).lower(), skips="" if encoding == "utf-8" else STAGED_SYSTEM)
             for value in values if value for encoding in ENCODINGS}
 
 
 def address_scans(addresses: list[str]) -> set[Scan]:
     return {Scan(needle=address.encode(encoding).lower(), unless=ADDRESS_GOES_ON[encoding],
-                 within=0 if encoding == "utf-8" else UTF16_FILE_LIMIT)
+                 skips="" if encoding == "utf-8" else STAGED_SYSTEM)
             for address in addresses if address for encoding in ENCODINGS}
 
 
@@ -792,8 +793,12 @@ def scan_bundle(app: Path, scans: set[Scan]) -> dict[Scan, list[str]]:
             relative = str(path.relative_to(app))
             try:
                 size = path.stat().st_size
-                pending_plain = [scan for scan in plain if not scan.within or size <= scan.within]
-                pending_guarded = [item for item in guarded if not item[0].within or size <= item[0].within]
+
+                def searched(scan: Scan, relative: str = relative) -> bool:
+                    return not scan.skips or not (relative == scan.skips or relative.startswith(scan.skips + "/"))
+
+                pending_plain = [scan for scan in plain if searched(scan)]
+                pending_guarded = [item for item in guarded if searched(item[0])]
                 with path.open("rb") as handle:
                     tail = b""
                     while (pending_plain or pending_guarded) and (chunk := handle.read(CHUNK)):
