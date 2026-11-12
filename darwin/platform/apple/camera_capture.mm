@@ -97,7 +97,9 @@ std::vector<Entry> discover()
         AVCaptureDeviceTypeBuiltInTripleCamera
     ]];
     // The foldable's two ultra wide cameras exist from iOS 27.1; on 27.0 the
-    // constants are null, so they are named only where they exist.
+    // constants are null, so they are named only where they exist. The
+    // application's Camera row asks the same types for a front camera
+    // (Andarium's SystemCameraSource.hasFrontCamera).
     if (@available(iOS 27.1, *)) {
         [types addObjectsFromArray:@[
             AVCaptureDeviceTypeBuiltInOuterUltraWideCamera, AVCaptureDeviceTypeBuiltInInnerUltraWideCamera

@@ -38,13 +38,17 @@ struct SystemCameraSource: CameraAccessSource {
     }
 
     /// A built-in camera faces the person: among the cameras the runtime
-    /// discovers (darwin/platform/apple/camera_capture.mm), one in the front
-    /// position. An external camera has none.
+    /// discovers, one in the front position. An external camera has none. The
+    /// device types are those of `discover` in
+    /// darwin/platform/apple/camera_capture.mm, the foldable's two included.
     static var hasFrontCamera: Bool {
-        let types: [AVCaptureDevice.DeviceType] = [
+        var types: [AVCaptureDevice.DeviceType] = [
             .builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTelephotoCamera,
             .builtInDualCamera, .builtInDualWideCamera, .builtInTripleCamera,
         ]
+        if #available(iOS 27.1, *) {
+            types += [.builtInOuterUltraWideCamera, .builtInInnerUltraWideCamera]
+        }
         return !AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .front)
             .devices.isEmpty
     }
