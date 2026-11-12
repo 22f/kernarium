@@ -190,6 +190,8 @@ A test that needs what only an earlier session leaves behind boots more than
 once: `guest-v4l2-capture` first lets the host learn the synthetic camera's
 colour data into a calibration directory of the run, because Bayer stills are
 offered from the next session on.
+A guest reaches no listener on the host; the tests that need one, and the test
+that proves it, are described in [user network](../darwin/README.md#user-network).
 `guest-hardware-input` (needs a GPU slot) checks that a Linux guest started
 with `--hardware-input` registers and unregisters the keyboard, mouse and
 pointer input devices as a VNC client plugs and unplugs them

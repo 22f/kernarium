@@ -703,8 +703,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   available only while the guest's USB debugging is on. `AdbNetworkBridge`
   listens on TCP 5555 and relays each computer to a fresh vsock stream, serving
   at most 8 at once; it understands no byte of adb, so the guest's adbd
-  authenticates the computer. iOS asks for Local Network access once, through
-  `NSLocalNetworkUsageDescription`. Nothing listens before the toggle.
+  authenticates the computer. A connection whose peer address is one of the
+  device's own, loopback included, is closed at once, so no process of the
+  device (another application, or adb on the same Mac when Andarium runs on
+  that Mac) reaches the guest's adbd through the bridge; a computer on the
+  network, another Mac included, is served. iOS asks for Local Network access
+  once, through `NSLocalNetworkUsageDescription`. Nothing listens before the
+  toggle.
 - **Privacy.** The adb features add no required-reason API beyond the
   disk-space API with reason E174.1 (the start's own space check already uses
   it) and, for the file browser, the file-timestamp API: an import reads the
