@@ -461,13 +461,14 @@ requires reopening Andarium.
   Camera on, the VRAM the System sheet and the statistics show is the pool,
   the budget less that reserve, and the ruler's graphics warning follows the
   pool too; the memory offered and the default are unchanged. The Simulator has
-  no camera: the preview states the access
-  (`-systemCamera` reads the Simulator's own permission) and the non-App Store
-  runtime serves a synthetic camera (`KERNARIUM_CAMERA_SOURCE`) to a run that
-  has none, and no camera at all for a value it does not know; an App Store
-  build has neither. No test captures a real camera, and no automated run
-  boots an Android guest through this runtime's camera wiring: a device check
-  does.
+  no camera: the preview states the access (`-systemCamera` reads the
+  Simulator's own permission) and the non-App Store runtime serves a synthetic
+  camera (`KERNARIUM_CAMERA_SOURCE`) to a run that has none, and no camera at
+  all for a value it does not know; an App Store build has neither. No test
+  captures a real camera. The default suites boot no guest; the opt-in
+  `CameraGuestTests` boots one through this runtime on the synthetic camera and
+  reads the vendor SKU, the camera IDs and the lens cover of a live and a
+  blocked session.
 - **Input.** The shared [GuestHost input](../GuestHost/README.md) maps up to
   ten fingers onto the guest's display; the hardware keyboard and mouse are
   the next item. A touch the system takes over reaches

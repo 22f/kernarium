@@ -9,9 +9,11 @@ import UIKit
 
 /// A real guest through the production scene root and runtime. Always wait
 /// for shutdown before restoring the test host, so updates finish normally.
+/// `prepare` runs on the model once the guest exists and before it starts.
 @MainActor
 func withAndroidGuest(
     cleanupCommand: String = "true",
+    prepare: @MainActor (AppModel) throws -> Void = { _ in },
     _ body: @MainActor (AppModel, AdbGuestOperations) async throws -> Void) async throws {
     let entry = AppEntry.fromArguments()
     let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -27,6 +29,7 @@ func withAndroidGuest(
         model.setMotionSensors(previousChoice)
     }
     model.setMotionSensors(false)
+    try prepare(model)
     model.start(.normal)
     try #require(model.alert == nil, "\(String(describing: model.alert))")
 

@@ -427,9 +427,12 @@ ADB-over-network hold, the background disk locks (which also requires a guest
 that was allocating buffers when the GPU was held to suspend), the resume
 after a save while the application is away, the real `HostLocation` against
 the Simulator's simulated location (the suite's header says how to grant
-access and set one) and the hardware keyboard and mouse against Android's input
-devices (`KeyboardMouseGuestTests`, which needs a kernel that follows
-configuration changes and its Android release). The storage test signs its
+access and set one), the cameras a booted guest sees (`CameraGuestTests`: the
+vendor SKU, the camera IDs and the lens cover of a live and a blocked session
+on the synthetic camera, with `TEST_RUNNER_KERNARIUM_CAMERA_SOURCE=synthetic`,
+on an image that has the camera HAL) and the hardware keyboard and mouse
+against Android's input devices (`KeyboardMouseGuestTests`, which needs a
+kernel that follows configuration changes and its Android release). The storage test signs its
 helper APK with the AOSP test key, never a release key. When derived data is on
 a removable volume, macOS prompts once for access and the launch hangs until
 answered; build to the internal disk instead.
