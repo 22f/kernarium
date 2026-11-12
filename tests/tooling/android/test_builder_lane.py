@@ -593,6 +593,18 @@ def adjust_archive(path: Path, entries: dict[str, bytes | None]) -> None:
                 archive.writestr(name, payload)
 
 
+def corrupt_archive_member(path: Path, name: str) -> None:
+    """Flips the last stored byte of a member, so that its CRC no longer matches (the archive is written
+    uncompressed)."""
+    with zipfile.ZipFile(path) as source:
+        info = source.getinfo(name)
+    data = bytearray(path.read_bytes())
+    name_length, extra_length = struct.unpack_from("<HH", data, info.header_offset + 26)
+    last = info.header_offset + 30 + name_length + extra_length + info.compress_size - 1
+    data[last] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
 def verify_target_files_fixtures(verifier: Path) -> None:
     sys.path.insert(0, str(verifier.parent))
     from release_common import BUILD_VARIANTS, configured_build_variant
@@ -1117,6 +1129,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           missing_arm_gallium_dependency: bool = False,
                           camera_variant: str | None = None,
                           entries: dict[str, bytes | None] | None = None,
+                          corrupt_member: str | None = None,
                           init_variant: str | None = None,
                           extra_entry: str | None = None,
                           build_variant: str = tracked_variant,
@@ -3088,6 +3101,8 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
             if entries:
                 adjust_archive(path, entries)
+            if corrupt_member:
+                corrupt_archive_member(path, corrupt_member)
 
         good = root / "good.zip"
         write_fixture(good)
@@ -3265,8 +3280,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              {"entries": {"VENDOR/bin/hw/android.hardware.fixture-service": synthetic_arm_elf()}}),
             ("missing-motion-backend", {"entries": {
                 "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": None}}),
-            ("motion-backend-without-orientation", {"entries": {
-                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": synthetic_aarch64_elf()}}),
             ("foreign-motion-backend", {"entries": {
                 "VENDOR/etc/sensors/hals.conf": b"/vendor/lib64/hw/other.so\n"}}),
             ("missing-motion-instance", {"entries": {
@@ -5466,6 +5479,25 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "must be a static overlay of"),
             ("camera-application-overlayable", {"camera_variant": "app-overlayable"},
              "declares an overlayable section"),
+            ("motion-backend-without-orientation", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": synthetic_aarch64_elf()}},
+             "lacks the device-orientation sensor"),
+            # The marker counts only inside a library the image can load.
+            ("motion-backend-marker-only", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
+                    b"Andarium motion: ro.boot.kernarium.orientation=%d\0"}},
+             "is not an ELF file"),
+            ("motion-backend-32-bit", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
+                    synthetic_arm_elf() + b"Andarium motion: ro.boot.kernarium.orientation=%d\0"}},
+             "32-bit ELF outside the 32-bit library and runtime paths"),
+            ("motion-backend-corrupt", {
+                "corrupt_member": "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so"},
+             "cannot read VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so from the archive"),
+            # Only the launch states whether the host feeds the sensor.
+            ("image-sets-the-orientation-property", {"entries": {
+                "SYSTEM_EXT/etc/build.prop": b"ro.boot.kernarium.orientation=1\n"}},
+             "the launch alone states whether the host feeds the device-orientation sensor"),
             ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
             ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
              "must set config_enableAuxCameras to true"),
