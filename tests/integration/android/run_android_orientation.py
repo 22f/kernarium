@@ -19,14 +19,18 @@ overlay/sensors/motion_protocol.hpp and tests/unit/andarium/fixtures/motion-orie
   sensor are turned as DisplayRotation turns them;
 - late, no host for a minute: the window manager has registered the sensor and the display stays upright; a
   host that connects late is told the sensor is in use (an "ANC2" frame with bit 2), no value turns nothing,
-  and the first value turns the display; the lock screen keeps the newest value for the unlock; a host that
+  and the first value turns the display; the lock screen keeps the newest value for the unlock; a value said
+  again changes nothing; a value sent with a finger down turns the display when the finger lifts, with no
+  further event from the host; a value sent while the screen is off turns the display once it is on, with
+  the sensor's own memory and with the application's rule of saying it again at activation; a host that
   drops and connects again is told the same, and a record the guest refuses ends the connection and leaves
-  the guest up.
+  the guest up. Restarting the framework or the sensors HAL needs root, which a user build does not give.
 
 ``--expect none`` is a release that does not list the sensor (an older release given the argument, or this
 release without it, ``--no-argument``). The guest sends "ANC1" frames only, lists no orientation sensor, the
 window manager judges the accelerometer, and the runner turns the display with accelerometer records of
-the same four postures, which proves the older path is untouched and gives the rotation each posture means.
+the same four postures (then the same repeat, touch and screen-off steps with a posture streamed until the
+next), which proves the older path is untouched and gives the rotation each posture means.
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the guest
 is reached through the shared adb server, always named with ``-s``. The runner is opt-in: it needs the
@@ -300,16 +304,30 @@ def expected_rotation(request: str, value: int | None, last: int, *, locked: boo
 # ---- The host's end of the connection.
 
 class Host:
-    """The host application's end of the stream: one connection at a time, with a thread that reads the frames."""
+    """The host application's end of the stream: one connection at a time, with a thread that reads the frames.
+
+    ``current`` is the orientation the application would say now. With ``replay`` set the host plays the
+    application's rule (Andarium/README.md, Motion sensors): after the first "ANC2" frame of a connection, and
+    each time a frame says the sensor became active, it says ``current`` again. ``sustain`` is the accelerometer
+    side of a release that lists no orientation sensor: a posture's records, streamed until another is named."""
 
     def __init__(self, port: int) -> None:
         self.port = port
         self.connection: socket.socket | None = None
         self.condition = threading.Condition()
+        self.sending = threading.Lock()
         self.frames: list[Control] = []
         self.bad: list[bytes] = []
         self.closed = False
         self.reader: threading.Thread | None = None
+        self.current: int | None = None
+        self.replay = False
+        self.replays = 0
+        self.posture: int | None = None
+        self.sustained = threading.Event()
+        self.sustainer: threading.Thread | None = None
+        self._seen_anc2 = False
+        self._active = False
 
     def connect(self) -> None:
         self.close()
@@ -320,6 +338,8 @@ class Host:
             self.frames = []
             self.bad = []
             self.closed = False
+            self._seen_anc2 = False
+            self._active = False
         self.reader = threading.Thread(target=self._read, args=(connection,), daemon=True)
         self.reader.start()
 
@@ -341,9 +361,18 @@ class Host:
                             self.condition.notify_all()
                         continue
                     with self.condition:
-                        if self.connection is connection:
-                            self.frames.append(control)
-                            self.condition.notify_all()
+                        if self.connection is not connection:
+                            continue
+                        self.frames.append(control)
+                        say = (control.version >= 2 and self.replay and self.current is not None
+                               and (not self._seen_anc2 or (control.orientation_active and not self._active)))
+                        if control.version >= 2:
+                            self._seen_anc2 = True
+                            self._active = control.orientation_active
+                        self.condition.notify_all()
+                    if say:
+                        self.replays += 1
+                        self.send(orientation_record(self.current))
         except OSError:
             pass
         with self.condition:
@@ -365,9 +394,16 @@ class Host:
                 self.condition.wait(min(remaining, 1.0))
 
     def send(self, data: bytes) -> None:
-        if self.connection is None:
+        connection = self.connection
+        if connection is None:
             raise Failure("the host has no connection")
-        self.connection.sendall(data)
+        with self.sending:
+            connection.sendall(data)
+
+    def push(self, value: int) -> None:
+        """The application says an orientation: it is the current one, and a connection hears it."""
+        self.current = value
+        self.send(orientation_record(value))
 
     def hold_posture(self, posture: int, seconds: float) -> None:
         """Accelerometer records of a posture, at 50 a second."""
@@ -375,6 +411,23 @@ class Host:
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             self.send(accelerometer_record(x, y, z))
+            time.sleep(0.02)
+
+    def sustain(self, posture: int | None) -> None:
+        """Streams the posture's accelerometer records, 50 a second, until told another (or None for none)."""
+        self.posture = posture
+        if self.sustainer is None:
+            self.sustainer = threading.Thread(target=self._sustain, daemon=True)
+            self.sustainer.start()
+
+    def _sustain(self) -> None:
+        while not self.sustained.is_set():
+            posture = self.posture
+            if posture is not None:
+                try:
+                    self.send(accelerometer_record(*POSTURES[posture]))
+                except (OSError, Failure):
+                    pass
             time.sleep(0.02)
 
     def closed_by_guest(self, seconds: float) -> bool:
@@ -396,6 +449,10 @@ class Host:
             except OSError:
                 pass
             connection.close()
+
+    def stop(self) -> None:
+        self.sustained.set()
+        self.close()
 
 
 class EarlyHost:
@@ -429,7 +486,7 @@ class EarlyHost:
             self.first = frame
             if frame.version >= 2:
                 try:
-                    self.host.send(orientation_record(self.value))
+                    self.host.push(self.value)
                 except OSError:
                     continue
                 self.sent_at = time.monotonic()
@@ -645,12 +702,12 @@ def early_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, re
         time.sleep(10)
         guest.settings_app()
         report.run("Settings follows each value", lambda: settings_values(
-            guest, lambda value: host.send(orientation_record(value))))
+            guest, host.push))
         report.run("auto-rotate off: suggestion button", lambda: auto_rotate_off(guest, host))
         report.run("applications that ask for an orientation", lambda: probe_requests(
-            guest, lambda value: host.send(orientation_record(value)), private))
+            guest, host.push, private))
     finally:
-        host.close()
+        host.stop()
         stop_guest(adb, guest)
 
 
@@ -686,7 +743,7 @@ def wizard_rotation(guest: Guest, host: Host) -> str:
     follows = request.endswith("UNSPECIFIED") or request.endswith("SENSOR") or request.endswith("USER")
     if follows:
         wait_rotation(guest, CLOCKWISE, "setup wizard")
-        host.send(orientation_record(UPRIGHT))
+        host.push(UPRIGHT)
         wait_rotation(guest, UPRIGHT, "setup wizard, back to upright")
         return f"{top.split()[-2] if top else '?'} ({request}) went to 3 with the early value and back to 0"
     return f"the wizard asks for {request}: rotation {state.rotation}, not following the sensor"
@@ -706,12 +763,12 @@ def settings_values(guest: Guest, push: Callable[[int], None]) -> str:
 
 
 def auto_rotate_off(guest: Guest, host: Host) -> str:
-    host.send(orientation_record(UPRIGHT))
+    host.push(UPRIGHT)
     wait_rotation(guest, UPRIGHT, "before locking")
     guest.auto_rotate(False)
     wait_for("the lock", 20, lambda: None if guest.rotation_state().user_mode == "USER_ROTATION_LOCKED"
              else "the user rotation mode is not locked", guest)
-    host.send(orientation_record(COUNTER_CLOCKWISE))
+    host.push(COUNTER_CLOCKWISE)
     hold_rotation(guest, UPRIGHT, "auto-rotate off, value 1", 5)
     notes = []
 
@@ -736,7 +793,7 @@ def auto_rotate_off(guest: Guest, host: Host) -> str:
     state = guest.rotation_state()
     if state.user_mode != "USER_ROTATION_LOCKED" or state.user_rotation != COUNTER_CLOCKWISE:
         raise Failure(f"after the button the user rotation is {state.user_mode} {state.user_rotation}")
-    host.send(orientation_record(UPRIGHT))
+    host.push(UPRIGHT)
     hold_rotation(guest, COUNTER_CLOCKWISE, "auto-rotate off, value 0", 4)
     guest.auto_rotate(True)
     wait_rotation(guest, UPRIGHT, "auto-rotate on again follows the newest value")
@@ -785,10 +842,13 @@ def late_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, rep
         report.run("no host: the window manager registered the sensor, the display stays", lambda: no_host(guest))
         report.run("host connects late", lambda: late_host(guest, host))
         report.run("lock screen", lambda: lock_screen(guest, host))
+        report.run("a value said again", lambda: duplicates(guest, host.push))
+        report.run("a touch held during a turn", lambda: touch_held(guest, host.push))
+        report.run("a value sent while the screen is off", lambda: screen_off_on(guest, host, host.push))
         report.run("reconnect and refused records", lambda: reconnect(guest, host))
         report.run("system_server stayed up", lambda: stayed_up(guest, server))
     finally:
-        host.close()
+        host.stop()
         stop_guest(adb, guest)
 
 
@@ -807,7 +867,7 @@ def late_host(guest: Guest, host: Host) -> str:
         raise Failure(f"the late host's first frame is ANC{first.version} with mask {first.mask:#x}; the sensor "
                       "is in use and the frame must say so (ANC2, bit 2)")
     hold_rotation(guest, UPRIGHT, "connected, no value", 5)
-    host.send(orientation_record(COUNTER_CLOCKWISE))
+    host.push(COUNTER_CLOCKWISE)
     wait_rotation(guest, COUNTER_CLOCKWISE, "the first value")
     return f"first frame ANC2 mask {first.mask:#x}; no value, no turn; value 1 turned the display to 1"
 
@@ -819,14 +879,14 @@ def lock_screen(guest: Guest, host: Host) -> str:
     time.sleep(3)
     policy = guest.shell("dumpsys window policy | grep -i -E 'showing|keyguardOccluded|isKeyguardLocked' | head -6")
     showing = re.search(r"showing=true|mShowingLockscreen=true|isKeyguardShowing.*true", policy) is not None
-    host.send(orientation_record(CLOCKWISE))
+    host.push(CLOCKWISE)
     time.sleep(6)
     state = guest.rotation_state()
     on_lock = state.rotation
     guest.shell("wm dismiss-keyguard")
     guest.shell("input keyevent KEYCODE_MENU")
     wait_rotation(guest, CLOCKWISE, "after the lock screen")
-    host.send(orientation_record(UPRIGHT))
+    host.push(UPRIGHT)
     wait_rotation(guest, UPRIGHT, "after the lock screen, a new value")
     return (f"keyguard {'showing' if showing else 'not shown (no secure lock)'}; value 3 sent there: display "
             f"{on_lock}; after unlocking it is 3 and the next value (0) turns it back")
@@ -837,7 +897,7 @@ def reconnect(guest: Guest, host: Host) -> str:
     first = host.wait_frame(FRAME_SECONDS)
     if first is None or first.version != 2 or not first.orientation_active:
         raise Failure(f"the reconnected host's first frame is {first}")
-    host.send(orientation_record(COUNTER_CLOCKWISE))
+    host.push(COUNTER_CLOCKWISE)
     wait_rotation(guest, COUNTER_CLOCKWISE, "after reconnecting")
     refused = {
         "high": orientation_record(4), "negative": orientation_record(-1), "fraction": orientation_record(1.5),
@@ -866,6 +926,93 @@ def stayed_up(guest: Guest, before: str) -> str:
     return f"system_server pid {after} throughout"
 
 
+def touch_point(guest: Guest) -> int:
+    """A coordinate inside the screen whichever way it is turned."""
+    match = re.search(r"Physical size: (\d+)x(\d+)", guest.shell("wm size"))
+    if match is None:
+        raise Failure("'wm size' states no physical size")
+    return min(int(match[1]), int(match[2])) // 2
+
+
+def duplicates(guest: Guest, push: Callable[[int], None]) -> str:
+    guest.settings_app()
+    push(UPRIGHT)
+    wait_rotation(guest, UPRIGHT, "duplicates, upright")
+    push(COUNTER_CLOCKWISE)
+    wait_rotation(guest, COUNTER_CLOCKWISE, "duplicates, the first 1")
+    for _ in range(3):
+        push(COUNTER_CLOCKWISE)
+        time.sleep(0.4)
+    hold_rotation(guest, COUNTER_CLOCKWISE, "the value 1 said again", 4)
+    push(UPRIGHT)
+    push(UPRIGHT)
+    wait_rotation(guest, UPRIGHT, "duplicates, 0 twice")
+    hold_rotation(guest, UPRIGHT, "the value 0 said twice", 4)
+    return "1 said four times and 0 twice in a row: the display followed the first and no repeat moved it"
+
+
+def touch_held(guest: Guest, push: Callable[[int], None]) -> str:
+    """A turn made while a finger is down: Android waits for the touch to end, and no further host event comes."""
+    guest.settings_app()
+    push(UPRIGHT)
+    wait_rotation(guest, UPRIGHT, "touch, upright")
+    point = touch_point(guest)
+    guest.shell(f"input touchscreen motionevent DOWN {point} {point}")
+    turned: float | None = None
+    try:
+        push(COUNTER_CLOCKWISE)
+        start = time.monotonic()
+        while time.monotonic() - start < 5:
+            if guest.rotation() != UPRIGHT:
+                turned = time.monotonic() - start
+                break
+            time.sleep(0.5)
+    finally:
+        # Away from where it went down, so that letting go is no tap on Settings.
+        guest.shell(f"input touchscreen motionevent MOVE {point + 200} {point}")
+        guest.shell(f"input touchscreen motionevent UP {point + 200} {point}")
+    wait_rotation(guest, COUNTER_CLOCKWISE, "after the touch ended")
+    when = f"{turned:.1f} s into the touch" if turned is not None else "when the touch ended"
+    return f"the value 1 sent with a finger down turned the display {when}, with no further event from the host"
+
+
+def wakefulness(guest: Guest) -> str:
+    found = re.search(r"mWakefulness=(\w+)", guest.shell("dumpsys power | grep -m1 mWakefulness="))
+    return found[1] if found else "?"
+
+
+def screen_off_on(guest: Guest, host: Host, push: Callable[[int], None]) -> str:
+    """A value sent while the screen is off turns the display once it is on. First with what the sensor
+    keeps for itself, then with the application's own rule (the host says its value again at activation)."""
+    notes = []
+    for replay, first, second in ((False, UPRIGHT, CLOCKWISE), (True, CLOCKWISE, COUNTER_CLOCKWISE)):
+        host.replay = replay
+        try:
+            guest.settings_app()
+            push(first)
+            wait_rotation(guest, first, "before the screen goes off")
+            seen = len(host.frames)
+            guest.shell("input keyevent KEYCODE_SLEEP")
+            wait_for("the screen going off", 20, lambda: None if wakefulness(guest) == "Asleep" else "awake", guest)
+            time.sleep(3)
+            push(second)
+            time.sleep(2)
+            guest.shell("input keyevent KEYCODE_WAKEUP")
+            wait_for("the screen coming on", 20, lambda: None if wakefulness(guest) == "Awake" else "asleep", guest)
+            time.sleep(2)
+            guest.shell("wm dismiss-keyguard")
+            guest.shell("input keyevent KEYCODE_MENU")
+            wait_rotation(guest, second, "after the screen is on")
+            states = "".join("A" if frame.orientation_active else "i" for frame in host.frames[seen:]
+                             if frame.version >= 2)
+            notes.append(f"{'with' if replay else 'without'} the host saying it again: {first} -> {second} "
+                         f"(frames while off and after: {states or 'none'})")
+        finally:
+            host.replay = False
+    return "; ".join(notes)
+
+
+
 def legacy_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     print("phase legacy: a release that does not list the sensor", flush=True)
     holder: dict[str, Host] = {}
@@ -882,8 +1029,12 @@ def legacy_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, r
         # values are checked against are DisplayRotation's, whichever sensor proposes the rotation.
         report.run("applications that ask for an orientation", lambda: probe_requests(
             guest, lambda value: host.hold_posture(value, 3.0), private))
+        # From here the posture is streamed until the next one, as the accelerometer's own samples would be.
+        report.run("a posture said again", lambda: duplicates(guest, host.sustain))
+        report.run("a touch held during a turn", lambda: touch_held(guest, host.sustain))
+        report.run("the screen off and on", lambda: screen_off_on(guest, host, host.sustain))
     finally:
-        host.close()
+        host.stop()
         stop_guest(adb, guest)
 
 

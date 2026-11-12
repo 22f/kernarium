@@ -246,6 +246,7 @@ class FakeGuest:
         self.first = first
         self.records: list[bytes] = []
         self.connections = 0
+        self.connections_open: list[socket.socket] = []
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
@@ -258,6 +259,7 @@ class FakeGuest:
                 return
             with self.lock:
                 self.connections += 1
+                self.connections_open.append(connection)
             connection.sendall(self.first)
             buffer = b""
             while True:
@@ -276,6 +278,12 @@ class FakeGuest:
                         connection.close()
                         break
             connection.close()
+
+    def say(self, frame: bytes) -> None:
+        """Another frame to the newest connection."""
+        with self.lock:
+            connection = self.connections_open[-1]
+        connection.sendall(frame)
 
     def close(self) -> None:
         self.server.close()
@@ -307,6 +315,87 @@ class HostTests(unittest.TestCase):
             self.assertEqual(guest.connections, 2)
         finally:
             host.close()
+            guest.close()
+
+    def records_within(self, guest: FakeGuest, count: int) -> list[bytes]:
+        for _ in range(100):
+            with guest.lock:
+                if len(guest.records) >= count:
+                    break
+            threading.Event().wait(0.05)
+        with guest.lock:
+            return list(guest.records)
+
+    def test_a_host_that_replays_says_its_value_at_the_first_anc2_and_at_each_activation(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["control-v2-orientation"])
+        host = runner.Host(guest.port)
+        try:
+            # Nothing to say yet, and a host that does not replay says nothing.
+            host.connect()
+            host.wait_frame(5)
+            threading.Event().wait(0.3)
+            self.assertEqual(guest.records, [])
+            host.replay = True
+            host.push(2)
+            self.assertEqual(self.records_within(guest, 1), [frames["orientation-2"]])
+            # A new connection: the first ANC2 of it is answered with the current value.
+            host.connect()
+            host.wait_frame(5)
+            self.assertEqual(self.records_within(guest, 2), [frames["orientation-2"]] * 2)
+            self.assertEqual(host.replays, 1)
+            # The sensor idle, then active again: said again at the edge only.
+            guest.say(frames["control-v2-idle"])
+            guest.say(frames["control-v2-idle"])
+            threading.Event().wait(0.3)
+            self.assertEqual(len(guest.records), 2)
+            host.current = 3
+            guest.say(frames["control-v2-orientation"])
+            self.assertEqual(self.records_within(guest, 3)[-1], frames["orientation-3"])
+            guest.say(frames["control-v2-orientation"])
+            threading.Event().wait(0.3)
+            self.assertEqual(len(guest.records), 3)
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_an_old_guest_is_never_answered_with_an_orientation_record(self) -> None:
+        frames = golden()
+        guest = FakeGuest(frames["control-v1-motion"])
+        host = runner.Host(guest.port)
+        try:
+            host.replay = True
+            host.current = 1
+            host.connect()
+            host.wait_frame(5)
+            threading.Event().wait(0.3)
+            self.assertEqual(guest.records, [])
+        finally:
+            host.stop()
+            guest.close()
+
+    def test_a_sustained_posture_is_streamed_until_another_is_named(self) -> None:
+        guest = FakeGuest(golden()["control-v1-motion"])
+        host = runner.Host(guest.port)
+        try:
+            host.connect()
+            host.wait_frame(5)
+            host.sustain(runner.COUNTER_CLOCKWISE)
+            self.assertGreaterEqual(len(self.records_within(guest, 5)), 5)
+            host.sustain(runner.CLOCKWISE)
+            threading.Event().wait(0.3)
+            with guest.lock:
+                newest = guest.records[-1]
+            self.assertEqual(newest, runner.accelerometer_record(*runner.POSTURES[runner.CLOCKWISE]))
+            host.sustain(None)
+            threading.Event().wait(0.2)
+            with guest.lock:
+                count = len(guest.records)
+            threading.Event().wait(0.3)
+            with guest.lock:
+                self.assertEqual(len(guest.records), count)
+        finally:
+            host.stop()
             guest.close()
 
     def test_a_host_with_no_guest_listening_gets_no_frame(self) -> None:

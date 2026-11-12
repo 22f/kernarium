@@ -710,7 +710,10 @@ listed and used by the window manager, that Android's rotation follows each
 value with auto-rotate on, stays and offers the rotation suggestion with it off,
 follows or keeps to what an application that asks for an orientation allows,
 and behaves at the lock screen, in the setup wizard, for a value sent before
-the sensor was registered and for a host that connects late or reconnects.
+the sensor was registered, for a value said again, for a turn made with a
+finger down, for a value sent while the screen is off and for a host that
+connects late or reconnects. Restarting the framework or the sensors HAL needs
+root, which a user build does not give, so the runner does not.
 `--expect none` boots a release that does not list the sensor (or this release
 without the argument) and checks that nothing changed: `ANC1` frames, the
 accelerometer judging, and the display turning with accelerometer postures. It
