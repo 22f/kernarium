@@ -589,6 +589,75 @@ class ProbeServerTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - started, 0.25)
         self.assertFalse(self.server.is_open("/s1"))
 
+    def test_the_hold_is_read_as_one_state_that_only_moves_forward(self) -> None:
+        self.assertEqual(self.server.hold_state("/s1"), "idle")
+        self.server.hold_first("/s1")
+        self.assertEqual(self.server.hold_state("/s1"), "armed")
+        self.assertEqual(self.server.hold_state("/s2"), "idle")
+        self.assertFalse(self.server.arrive("/s2/generate_204", 204))
+        self.assertFalse(self.server.arrive("/s1/gen_204", 204))
+        self.assertEqual(self.server.hold_state("/s1"), "armed")
+        self.assertTrue(self.server.arrive("/s1/generate_204", 204))
+        self.assertEqual(self.server.hold_state("/s1"), "open")
+        self.assertFalse(self.server.arrive("/s1/generate_204", 204))
+        self.server.release()
+        self.assertEqual(self.server.hold_state("/s1"), "released")
+        self.assertFalse(self.server.arrive("/s1/generate_204", 204))
+
+    def test_a_hold_that_is_released_before_its_request_arrives_holds_nothing(self) -> None:
+        self.server.hold_first("/s1")
+        self.server.release()
+        self.assertFalse(self.server.arrive("/s1/generate_204", 204))
+        self.assertEqual(self.server.hold_state("/s1"), "released")
+
+    def test_a_request_is_recorded_and_opened_under_one_acquisition_of_the_lock(self) -> None:
+        acquisitions: list[int] = []
+        real = self.server.lock
+
+        class CountingLock:
+            def __enter__(self) -> None:
+                acquisitions.append(1)
+                real.acquire()
+
+            def __exit__(self, *arguments: object) -> None:
+                real.release()
+
+        self.server.lock = CountingLock()
+        self.server.hold_first("/s1")
+        acquisitions.clear()
+        self.assertTrue(self.server.arrive("/s1/generate_204", 204))
+        self.assertEqual(len(acquisitions), 1)
+        self.server.lock = real
+        self.assertEqual(len(self.server.checks("/s1")), 1)
+        self.assertTrue(self.server.is_open("/s1"))
+
+    def test_the_handler_shows_no_request_that_is_recorded_and_not_yet_open(self) -> None:
+        # The reviewer's loopback interleaving: the handler is paused at the moment the request arrives. Nothing
+        # is recorded and nothing is open then; once it goes on, the request is recorded and open together.
+        arriving, go = threading.Event(), threading.Event()
+        original = self.server.arrive
+
+        def paused(path: str, status: int = 0, when: float | None = None) -> bool:
+            arriving.set()
+            self.assertTrue(go.wait(10))
+            return original(path, status, when)
+
+        self.server.arrive = paused
+        self.server.hold_first("/sprobe")
+        thread, statuses = self.held_get("/sprobe/generate_204")
+        try:
+            self.assertTrue(arriving.wait(10))
+            self.assertEqual(self.server.checks("/sprobe"), [])
+            self.assertEqual(self.server.hold_state("/sprobe"), "armed")
+        finally:
+            go.set()
+        self.wait_until(lambda: self.server.is_open("/sprobe"))
+        self.assertEqual(len(self.server.checks("/sprobe")), 1)
+        self.assertEqual(statuses, [])
+        self.server.release()
+        thread.join(10)
+        self.assertEqual(statuses, [204])
+
     def test_the_hold_ends_below_the_probes_own_timeout(self) -> None:
         # NetworkMonitor.SOCKET_TIMEOUT_MS is 10 s: the platform's HTTP probe gives up then.
         self.assertEqual(runner.PROBE_SOCKET_TIMEOUT_SECONDS, 10.0)
@@ -1790,8 +1859,7 @@ class SimulatedGuest(StubbedGuest):
             return
         status = {"page": 200, "redirect": 302, "expected": 204}[self.server.mode]
         path = f"{self.scenario}/generate_204"
-        self.server.record(path, status, when=when)
-        if self.server.arrived(path):
+        if self.server.arrive(path, status, when=when):
             # The server holds the answer: the check is unanswered until it goes out.
             self.in_flight = (when, status)
             return
@@ -2199,6 +2267,27 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
         guest = self.guest(slow_look=runner.HELD_ANSWER_SECONDS + 1)
         with self.assertRaisesRegex(runner.Failure, "the held answer was out before the look at the network"):
             self.recovery(guest)
+
+    def test_a_request_that_arrives_between_two_looks_at_the_hold_is_not_an_answer_that_is_out(self) -> None:
+        # The reviewer's interleaving: the hold is read as not arrived, and the request arrives right after. Read
+        # as one state, that is "no check yet" and the next look finds it open, so the section goes on.
+        guest = self.guest()
+        scenario = "/race"
+        self.server.hold_first(scenario)
+        read = self.server.hold_state
+        raced: list[bool] = []
+
+        def state_then_arrival(name: str) -> str:
+            value = read(name)
+            if not raced:
+                raced.append(True)
+                self.server.arrive(scenario + "/generate_204", 200)
+            return value
+
+        self.server.hold_state = state_then_arrival
+        pin = runner.validated_while_unanswered(guest, self.server, scenario)
+        self.assertEqual(pin.net_id, guest.net_id)
+        self.assertEqual(raced, [True])
 
     def test_a_first_check_that_never_reaches_the_server_fails_the_section(self) -> None:
         with self.assertRaisesRegex(runner.Failure, "the first check's request is held at the host's server: "

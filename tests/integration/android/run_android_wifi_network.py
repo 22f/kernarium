@@ -664,10 +664,10 @@ class ProbeServer:
         self.mode = "expected"
         self.seen: list[tuple[float, str, int]] = []
         self.lock = threading.Lock()
-        # The scenario whose first HTTP probe is held, the scenario of the request held now, and the event
-        # that ends the hold.
-        self.held: str | None = None
-        self.open: str | None = None
+        # The hold on the first HTTP probe of one scenario, as (scenario, state): armed until that request
+        # arrives, open while its answer is held, released once it may go out. The state changes only under the
+        # lock, together with the record of the request, and is read as one value.
+        self.hold: tuple[str, str] | None = None
         self.released = threading.Event()
         server = self
 
@@ -676,8 +676,7 @@ class ProbeServer:
 
             def do_GET(self) -> None:  # noqa: N802
                 mode = server.mode
-                server.record(self.path, {"redirect": 302, "page": 200}.get(mode, 204))
-                if server.arrived(self.path):
+                if server.arrive(self.path, {"redirect": 302, "page": 200}.get(mode, 204)):
                     server.released.wait(HELD_ANSWER_SECONDS)
                     server.release()
                 if mode == "redirect":
@@ -725,6 +724,17 @@ class ProbeServer:
         with self.lock:
             self.seen.append((time.monotonic() if when is None else when, path, status))
 
+    def arrive(self, path: str, status: int = 0, when: float | None = None) -> bool:
+        """A request is at the server: it is recorded and, when it is the held one, opened, in one step that no
+        reader splits. True when its answer is held, which the caller does not send until the hold is over."""
+        with self.lock:
+            self.seen.append((time.monotonic() if when is None else when, path, status))
+            if (self.hold is None or self.hold[1] != "armed" or not path.startswith(self.hold[0] + "/")
+                    or not path.endswith("/generate_204")):
+                return False
+            self.hold = (self.hold[0], "open")
+            return True
+
     def requests(self, scenario: str | None = None) -> list[tuple[float, str, int]]:
         """The requests (time, path, status), in order, of one scenario or all."""
         with self.lock:
@@ -740,35 +750,32 @@ class ProbeServer:
 
     def hold_first(self, scenario: str) -> None:
         """The answer to the first HTTP probe of the scenario is held (for at most HELD_ANSWER_SECONDS) until
-        `release`: the check it belongs to stays unanswered, and `is_open` says so."""
+        `release`: the check it belongs to stays unanswered, and `hold_state` says so."""
         with self.lock:
-            self.held, self.open = scenario, None
+            self.hold = (scenario, "armed")
             self.released.clear()
 
-    def arrived(self, path: str) -> bool:
-        """A request is at the server: True when it is the held one, which the caller answers only after the
-        hold (once: the held scenario is not held again)."""
+    def hold_state(self, scenario: str) -> str:
+        """Where the hold on the scenario is, as one value: `idle` (none), `armed` (its request has not
+        arrived), `open` (arrived, answer held) or `released` (the answer may go out)."""
         with self.lock:
-            if self.held is None or not path.startswith(self.held + "/") or not path.endswith("/generate_204"):
-                return False
-            self.held, self.open = None, path.rsplit("/", 1)[0]
-            return True
+            return self.hold[1] if self.hold is not None and self.hold[0] == scenario else "idle"
 
     def is_open(self, scenario: str) -> bool:
         """Whether the held request of the scenario is at the server and not answered."""
-        with self.lock:
-            return self.open == scenario
+        return self.hold_state(scenario) == "open"
 
     def release(self) -> None:
-        """Ends the hold: the held request is answered."""
+        """Ends the hold: the held request is answered, and none arriving later is held."""
         with self.lock:
-            self.open = None
+            if self.hold is not None:
+                self.hold = (self.hold[0], "released")
             self.released.set()
 
     def clear(self) -> None:
         with self.lock:
             self.seen.clear()
-            self.held = self.open = None
+            self.hold = None
             self.released.clear()
 
     def close(self) -> None:
@@ -1881,13 +1888,15 @@ def validated_while_unanswered(guest: Guest, server: "ProbeServer", scenario: st
     found: list[Pin] = []
 
     def look() -> str | None:
-        if not server.is_open(scenario):
-            if server.checks(scenario):
-                raise Failure("the first check's answer was out before a look at the network was made: "
-                              f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
+        # The hold is read as one state, never as the record of a request and a flag read apart.
+        state = server.hold_state(scenario)
+        if state in ("idle", "armed"):
             return "the server has seen no check"
+        if state == "released":
+            raise Failure("the first check's answer was out before a look at the network was made: "
+                          f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
         dump = guest.connectivity()
-        if not server.is_open(scenario):
+        if server.hold_state(scenario) != "open":
             raise Failure("the held answer was out before the look at the network was complete: "
                           f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
         net_id = newest_wifi_network(dump)
