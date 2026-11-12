@@ -86,14 +86,23 @@ DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): av
 REPAIR_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"
 
 def agent(net_id: int, capabilities: str, transport: str = "WIFI", validated_at: int | None = None,
-          created: str = "2026-11-10T13:30:32.485Z") -> str:
-    """The line `dumpsys connectivity` prints for a network (NetworkAgentInfo), trimmed to what the runner reads."""
+          created: str = "2026-11-10T13:30:32.485Z", private_dns_broken: bool = False,
+          first_validated_at: int | None = None) -> str:
+    """The line `dumpsys connectivity` prints for a network: NetworkAgentInfo.toString with its fields in its
+    order, trimmed to what the runner reads. `lastValidated` is printed only while the network is validated
+    (`firstValidated` once it ever was); NetworkCapabilities.toString prints broken private DNS as the token
+    ` PrivateDnsBroken` after the SSID, not in the capability list."""
+    first = validated_at if first_validated_at is None else first_validated_at
     return (f"  NetworkAgentInfo{{network{{{net_id}}}  handle{{441492361229}}  ni{{{transport} CONNECTED extra: }} "
-            f"created={created} Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED ; KeepConnected : 0) "
-            "created 149238 lp{{InterfaceName: wlan0 LinkAddresses: [ 10.0.2.16/24 ] DnsAddresses: [ /10.0.2.3 ]}} "
-            f"nc{{[ Transports: {transport} Capabilities: {capabilities} LinkUpBandwidth>=12000Kbps "
-            'Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="VirtWifi"]>]}  everValidated{true}'
-            + ("" if validated_at is None else f" firstValidated {validated_at} lastValidated {validated_at}") + "\n")
+            f"created={created} Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED ; KeepConnected : 0)  created 149238"
+            + ("" if first is None else f" firstValidated {first}")
+            + ("" if validated_at is None else f" lastValidated {validated_at}")
+            + "  lp{InterfaceName: wlan0 LinkAddresses: [ 10.0.2.16/24 ] DnsAddresses: [ /10.0.2.3 ]}"
+            + f"  nc{{[ Transports: {transport} Capabilities: {capabilities} LinkUpBandwidth>=12000Kbps "
+            'LinkDnBandwidth>=12000Kbps Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="VirtWifi"]> '
+            'TransportInfo: <SSID: "VirtWifi", BSSID: 02:00:00:00:01:00, Supplicant state: COMPLETED> '
+            'SSID: "VirtWifi"' + (" PrivateDnsBroken" if private_dns_broken else "")
+            + " UnderlyingNetworks: Null]}  factorySerialNumber=-1}\n")
 
 
 STOCK = "NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED"
@@ -152,8 +161,8 @@ def hierarchy(settings_text: str, bar_description: str | None) -> str:
         f"{bar}</hierarchy></display></displays>\nUI hierarchy dumped to: /data/local/tmp/x.xml\n")
 
 
-WARNING_SCREEN = hierarchy("Connected / Limited connection", "Wi-Fi signal full.,No internet")
-CLEAR_SCREEN = hierarchy("Connected", "Wi-Fi signal full.")
+WARNING_SCREEN = hierarchy("Connected / Limited connection", "Wifi signal full.,No internet")
+CLEAR_SCREEN = hierarchy("Connected", "Wifi signal full.")
 
 WAITS = runner.Waits(45, 180)
 
@@ -875,6 +884,79 @@ class ContinuityReadingTests(unittest.TestCase):
         elsewhere = runner.ui_nodes(CLEAR_SCREEN.replace('package="com.android.systemui"',
                                                          'package="com.android.settings"'))
         self.assertFalse(runner.status_bar_present(elsewhere))
+
+
+class PlatformFormatTests(unittest.TestCase):
+    """The lines the runner parses, in the shape the platform prints them (the print statements are named in
+    each test), where a fixture that only agreed with the parser once hid a defect."""
+
+    def test_broken_private_dns_is_the_token_after_the_ssid_not_a_capability(self) -> None:
+        # NetworkCapabilities.toString: ` SSID: ...` then ` PrivateDnsBroken`; the capability list has no such name.
+        broken = agent(7, VALIDATED, validated_at=1, private_dns_broken=True)
+        plain = agent(7, VALIDATED, validated_at=1)
+        self.assertIn(' SSID: "VirtWifi" PrivateDnsBroken UnderlyingNetworks: Null]}', broken)
+        self.assertNotIn("PRIVATE_DNS_BROKEN", broken)
+        self.assertIn("PRIVATE_DNS_BROKEN", runner.wifi_networks(broken)[7])
+        self.assertNotIn("PRIVATE_DNS_BROKEN", runner.wifi_networks(plain)[7])
+        self.assertIn("VALIDATED", runner.wifi_networks(broken)[7])
+
+    def test_the_token_is_read_only_where_the_platform_prints_it(self) -> None:
+        # An SSID that spells it, and text after `nc{...}`, are not the token.
+        named = agent(7, VALIDATED, validated_at=1).replace('SSID: "VirtWifi"', 'SSID: "PrivateDnsBroken"')
+        self.assertNotIn("PRIVATE_DNS_BROKEN", runner.wifi_networks(named)[7])
+        trailing = agent(7, VALIDATED, validated_at=1).replace("factorySerialNumber=-1", "factorySerialNumber=-1 PrivateDnsBroken")
+        self.assertNotIn("PRIVATE_DNS_BROKEN", runner.wifi_networks(trailing)[7])
+
+    def test_a_network_that_is_not_validated_prints_no_last_validated(self) -> None:
+        # NetworkAgentInfo.toString: lastValidated only while isValidated(), firstValidated once ever validated.
+        line = agent(7, STOCK, validated_at=None, first_validated_at=500)
+        self.assertIn("firstValidated 500", line)
+        self.assertNotIn("lastValidated", line)
+        self.assertEqual(runner.last_validated(line), {})
+        self.assertEqual(runner.last_validated(agent(7, VALIDATED, validated_at=800)), {7: 800})
+
+    def test_the_creation_time_is_an_instant_with_or_without_a_fraction(self) -> None:
+        # NetworkAgentInfo.toString prints `created=` + Instant.toString (no fraction when it is zero).
+        for stamp, seconds in (("2026-11-10T13:30:32.485Z", 32.485), ("2026-11-10T13:30:32Z", 32.0),
+                               ("2026-11-10T13:30:32.480Z", 32.48)):
+            with self.subTest(stamp=stamp):
+                created = runner.created_times(agent(7, VALIDATED, validated_at=1, created=stamp))[7]
+                self.assertAlmostEqual(created.second + created.microsecond / 1e6, seconds, places=3)
+
+    def test_the_validation_log_header_is_the_network_and_its_name_quoted_or_not(self) -> None:
+        # NetworkStackService prints the SharedLog tag, `<network> - <name>`, then its entries indented.
+        for name in ('"VirtWifi"', "VirtWifi", ""):
+            with self.subTest(name=name):
+                dump = ("Validation logs (most recent first):\n" + f"102 - {name}\n"
+                        "  2026-11-10T13:30:32.803492 - Wi-Fi is validated before its internet check\n\n"
+                        "useNeighborResource: false\n")
+                self.assertEqual(runner.validation_logs(dump), {102: ["Wi-Fi is validated before its internet check"]})
+
+    def test_a_local_date_time_without_seconds_or_fraction_is_read(self) -> None:
+        # LocalDateTime.toString leaves the seconds out when they and the nanoseconds are zero.
+        dump = "Validation logs (most recent first):\n102 - VirtWifi\n  2026-11-10T13:30 - x\n"
+        self.assertEqual(runner.validation_entries(dump), {102: [("2026-11-10T13:30", "x")]})
+
+    def test_a_network_listed_with_its_security_types_on_one_line_is_found(self) -> None:
+        # WifiShellCommand prints one line for each saved network, its types joined by `/` (`^` marks an upgrade).
+        listing = "Network Id      SSID                         Security type\n0            VirtWifi                         open/owe^\n"
+        self.assertEqual(runner.network_id(listing), 0)
+        self.assertEqual(runner.saved_ssids(listing), ["VirtWifi"])
+
+    def test_the_status_bar_icon_of_a_disconnected_wifi_is_not_the_mark(self) -> None:
+        # SystemUI's inactive icon says "Wifi disconnected." and "No internet"; the mark is the connected icon's.
+        off = runner.ui_nodes(hierarchy("Connected", "Wifi disconnected.,No internet"))
+        self.assertFalse(runner.status_bar_no_internet(off))
+        on = runner.ui_nodes(hierarchy("Connected", "Wifi signal full.,No internet"))
+        self.assertTrue(runner.status_bar_no_internet(on))
+
+    def test_a_forced_evaluation_that_the_platform_prints_as_unknown_is_a_failure(self) -> None:
+        # ConnectivityService prints "Unknown network (net ID not found or no default network)" and exits 0.
+        guest = StubbedGuest()
+        guest.reevaluate = lambda net_id: runner.Guest.reevaluate(guest, net_id)
+        guest.adb_run = lambda *a, timeout=0: mock.Mock(returncode=0, stdout=b"Unknown network (net ID not found or no default network)\n")
+        with self.assertRaisesRegex(runner.Failure, "Unknown network"):
+            guest.reevaluate(5)
 
 
 class ForcedEvaluationReadingTests(unittest.TestCase):
@@ -1604,8 +1686,7 @@ class SimulatedGuest(StubbedGuest):
             self.validated_at += 1000
 
     def capabilities(self) -> str:
-        names = VALIDATED if self.validated else STOCK
-        return names + "&PRIVATE_DNS_BROKEN" if self.broken else names
+        return VALIDATED if self.validated else STOCK
 
     def forget_and_save(self) -> None:
         super().forget_and_save()
@@ -1645,7 +1726,9 @@ class SimulatedGuest(StubbedGuest):
         answers = {
             "dumpsys connectivity": lambda: ("Current networks:\n" + agent(self.net_id - 1, STOCK)
                                              + agent(self.net_id, self.capabilities(),
-                                                     validated_at=self.validated_at, created=self.created)),
+                                                     validated_at=self.validated_at if self.validated else None,
+                                                     first_validated_at=self.validated_at, created=self.created,
+                                                     private_dns_broken=self.broken)),
             "dumpsys network_stack": lambda: ("Validation logs (most recent first):\n"
                                               + f'{self.net_id} - "VirtWifi"\n'
                                               + "".join(f"  {stamp} - {message}\n" for stamp, message in self.log)),
@@ -1656,7 +1739,7 @@ class SimulatedGuest(StubbedGuest):
             "dumpsys wifi": lambda: ENABLED_DUMP,
             ScriptedGuest.COMMANDS["ui"]: lambda: hierarchy(
                 "Connected / Limited connection" if self.settings_mark else "Connected",
-                "Wi-Fi signal full.,No internet" if self.bar_mark else "Wi-Fi signal full."),
+                "Wifi signal full.,No internet" if self.bar_mark else "Wifi signal full."),
         }
         return answers[command]()
 

@@ -310,14 +310,23 @@ def repair_logged(log: str) -> bool:
     return SCRIPT_LOG_LINE in log
 
 
+PRIVATE_DNS_BROKEN_TOKEN = re.compile(r"\sPrivateDnsBroken(?=[\s\]])")
+
+
 def wifi_networks(dump: str) -> dict[int, frozenset[str]]:
-    """The capabilities of each Wi-Fi network `dumpsys connectivity` lists, by network ID."""
+    """The capabilities of each Wi-Fi network `dumpsys connectivity` lists, by network ID. NetworkAgentInfo prints
+    its `nc{...}` as NetworkCapabilities.toString does: the capabilities are the `&`-joined list after
+    `Capabilities: `, and broken private DNS is a token of its own (` PrivateDnsBroken`, after the SSID), not a
+    capability. It is added to the set as PRIVATE_DNS_BROKEN."""
     found: dict[int, frozenset[str]] = {}
     for line in dump.splitlines():
         match = re.match(r"\s*NetworkAgentInfo\{network\{(\d+)\}.*?\bni\{WIFI\b.*?"
-                         r"\bnc\{\[ Transports: WIFI Capabilities: ([A-Z_&]+)", line)
+                         r"\bnc\{(\[ Transports: WIFI Capabilities: ([A-Z_&]+).*)", line)
         if match:
-            found[int(match[1])] = frozenset(match[2].split("&"))
+            capabilities = set(match[3].split("&"))
+            if PRIVATE_DNS_BROKEN_TOKEN.search(match[2].split("  factorySerialNumber=")[0]):
+                capabilities.add("PRIVATE_DNS_BROKEN")
+            found[int(match[1])] = frozenset(capabilities)
     return found
 
 
@@ -364,7 +373,8 @@ def validation_entries(dump: str) -> dict[int, list[tuple[str, str]]]:
             continue
         if not in_section:
             continue
-        header = re.fullmatch(r'(\d+) - ".*"\s*', line)
+        # The log's tag is the network and its name (`<id> - <name>`, the SSID or the network's extra info).
+        header = re.fullmatch(r"(\d+) - .*", line)
         if header:
             current = logs.setdefault(int(header[1]), [])
             continue
@@ -577,8 +587,10 @@ def summary_connected(nodes: list[UiNode]) -> bool:
 
 
 def status_bar_no_internet(nodes: list[UiNode]) -> bool:
-    """Whether the status bar's Wi-Fi icon speaks "No internet" (its description is the signal and "No internet")."""
-    return any(node.package == SYSTEMUI_PACKAGE and NO_INTERNET in node.description for node in nodes)
+    """Whether the status bar's Wi-Fi icon of a connected network speaks "No internet" (its description is the
+    signal level, a comma and "No internet"; the icon of a disconnected Wi-Fi says "No internet" as well)."""
+    return any(node.package == SYSTEMUI_PACKAGE and NO_INTERNET in node.description
+               and "disconnected" not in node.description.lower() for node in nodes)
 
 
 def status_bar_present(nodes: list[UiNode]) -> bool:
