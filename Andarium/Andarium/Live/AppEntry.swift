@@ -369,10 +369,16 @@ struct AppEntry {
     static func hostDevice() -> HostDevice {
         let info = ProcessInfo.processInfo
         let name: String
+        let idiom: HostDevice.Idiom
         if info.isiOSAppOnMac {
             name = "Mac"
+            idiom = .mac
+        } else if UIDevice.current.userInterfaceIdiom == .pad {
+            name = "iPad"
+            idiom = .pad
         } else {
-            name = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+            name = "iPhone"
+            idiom = .phone
         }
         // A guest has every processor, at most the count the memory budget is
         // measured for; the memory policy has a row for each of those counts.
@@ -382,7 +388,8 @@ struct AppEntry {
             memory: memoryPolicy(processorCount: limit),
             freeStorageBytes: freeStorageBytes(),
             runsGuestGraphics: drawsGuestGraphics(),
-            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone
+            supportsPointer: UIDevice.current.userInterfaceIdiom != .phone,
+            idiom: idiom, hasHaptics: DeviceHaptics.isAvailable
         )
     }
 

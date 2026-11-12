@@ -31,17 +31,18 @@ enum PreviewData {
         case "iphone-18-pro-max":
             return HostDevice(
                 name: "iPhone", processorCount: 6, memory: iPhone18ProMaxMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false,
+                idiom: .phone, hasHaptics: true
             )
         case "ipad-mini-6":
             return HostDevice(
                 name: "iPad", processorCount: 6, memory: iPadMini6Memory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad
             )
         case "mac-64-gib":
             return HostDevice(
                 name: "Mac", processorCount: 8, memory: mac64GiBMemory,
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 412.6), idiom: .mac
             )
         default:
             break
@@ -53,7 +54,7 @@ enum PreviewData {
                     maximumsMiB: Array(repeating: 4096, count: 8), defaultsMiB: Array(repeating: 3584, count: 8),
                     graphicsMiB: { memory, count in budget(limitMiB: 6144, memoryMiB: memory, vCPUs: count) }
                 ),
-                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3)
+                freeStorageBytes: gibibytes(lowSpace ? 1.2 : 118.3), idiom: .pad
             )
         }
         return HostDevice(
@@ -62,7 +63,8 @@ enum PreviewData {
                 maximumsMiB: [3136, 3072, 3008, 2944, 2880, 2816], defaultsMiB: Array(repeating: 2560, count: 6),
                 graphicsMiB: { memory, count in budget(limitMiB: 4096, memoryMiB: memory, vCPUs: count) }
             ),
-            freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false
+            freeStorageBytes: gibibytes(lowSpace ? 1.2 : 41.6), supportsPointer: false,
+            idiom: .phone, hasHaptics: true
         )
     }
 

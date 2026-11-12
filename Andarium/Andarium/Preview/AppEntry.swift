@@ -143,7 +143,7 @@ struct AppEntry {
         model.jitAvailable = true
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
-        model.hapticsAvailable = host.name == "iPhone"
+        model.hapticsAvailable = host.hasHaptics
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil

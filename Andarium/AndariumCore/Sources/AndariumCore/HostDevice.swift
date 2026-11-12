@@ -19,11 +19,19 @@ public struct HostDevice: Equatable, Sendable {
     /// Whether the device can have a mouse or trackpad whose pointer iOS shows
     /// the application: an iPad or a Mac, not an iPhone.
     public var supportsPointer: Bool
+    /// The kind of device it is: an iPhone, an iPad, or a Mac running the
+    /// application as an iPad app.
+    public var idiom: Idiom
+    /// Whether the device has a Taptic Engine to play the guest's haptics.
+    public var hasHaptics: Bool
+
+    public enum Idiom: Equatable, Sendable { case phone, pad, mac }
 
     /// `processorCount` is the vCPU limit.
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
-        runsGuestGraphics: Bool = true, supportsPointer: Bool = true
+        runsGuestGraphics: Bool = true, supportsPointer: Bool = true, idiom: Idiom = .phone,
+        hasHaptics: Bool = false
     ) {
         self.name = name
         self.processorCount = max(1, processorCount)
@@ -31,6 +39,8 @@ public struct HostDevice: Equatable, Sendable {
         self.freeStorageBytes = freeStorageBytes
         self.runsGuestGraphics = runsGuestGraphics
         self.supportsPointer = supportsPointer
+        self.idiom = idiom
+        self.hasHaptics = hasHaptics
     }
 
     public func hasRoom(for bytes: UInt64) -> Bool { freeStorageBytes >= bytes }

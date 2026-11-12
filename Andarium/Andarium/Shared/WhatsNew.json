@@ -10,16 +10,19 @@
         "symbol": "clock.arrow.circlepath"
       },
       {
-        "id": "languages",
-        "title": "Languages",
-        "text": "Andarium is now in Simplified Chinese, Traditional Chinese and Japanese, and follows the language of iOS.",
-        "symbol": "globe"
-      },
-      {
         "id": "resolution",
         "title": "Resolution",
         "text": "Choose the resolution of the virtual machine’s display on Home, up to your screen’s native resolution.",
         "symbol": "squareshape.split.3x3"
+      },
+      {
+        "id": "ipad-rotation",
+        "title": "Rotation on iPad",
+        "text": "On iPad, the whole app now turns with the device, also while the virtual machine runs.",
+        "symbol": "rotate.right",
+        "requirement": {
+          "device": "pad"
+        }
       },
       {
         "id": "keyboard-mouse-controllers",
@@ -32,6 +35,15 @@
         "title": "Location",
         "text": "Share this device’s location with the virtual machine. It is off until you turn it on in Capabilities on Home.",
         "symbol": "location.fill"
+      },
+      {
+        "id": "haptics",
+        "title": "Haptics",
+        "text": "On iPhone, the virtual machine’s vibration now plays on the Taptic Engine. Turn it off under Capabilities on Home.",
+        "symbol": "iphone.radiowaves.left.and.right",
+        "requirement": {
+          "device": "haptics"
+        }
       },
       {
         "id": "send-feedback",

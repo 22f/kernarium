@@ -35,6 +35,18 @@ private func host(maximumMiB: Int) -> HostDevice {
         freeStorageBytes: 40_000_000_000)
 }
 
+private func device(_ idiom: HostDevice.Idiom, hasHaptics: Bool = false) -> HostDevice {
+    HostDevice(
+        name: "\(idiom)", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [3072]),
+        freeStorageBytes: 40_000_000_000, idiom: idiom, hasHaptics: hasHaptics)
+}
+
+private let iPhone = device(.phone, hasHaptics: true)
+private let iPhoneWithoutHaptics = device(.phone)
+private let iPad = device(.pad)
+/// An iPad application running on a Mac.
+private let mac = device(.mac)
+
 struct WhatsNewRulesTests {
     @Test func aNewInstallAnnouncesNothingAndRecordsThisBuild() {
         let launch = WhatsNewRules.launch(
@@ -131,6 +143,66 @@ struct WhatsNewRulesTests {
         #expect(requirement.isMet(by: host(maximumMiB: 4608), vCPUs: 6))
         #expect(WhatsNewRequirement(memoryAboveMiB: 4096).isMet(by: host(maximumMiB: 8192), vCPUs: 1))
     }
+
+    @Test func aPadRequirementIsMetByAnIPadAndNothingElse() {
+        let requirement = WhatsNewRequirement(device: .pad)
+        #expect(requirement.isMet(by: iPad, vCPUs: 6))
+        #expect(!requirement.isMet(by: iPhone, vCPUs: 6))
+        #expect(!requirement.isMet(by: iPhoneWithoutHaptics, vCPUs: 6))
+        #expect(!requirement.isMet(by: mac, vCPUs: 6))
+    }
+
+    @Test func aHapticsRequirementIsMetByADeviceThatReportsHaptics() {
+        let requirement = WhatsNewRequirement(device: .haptics)
+        #expect(requirement.isMet(by: iPhone, vCPUs: 6))
+        #expect(!requirement.isMet(by: iPhoneWithoutHaptics, vCPUs: 6))
+        #expect(!requirement.isMet(by: iPad, vCPUs: 6))
+        #expect(!requirement.isMet(by: mac, vCPUs: 6))
+    }
+
+    @Test func aRequirementOfSeveralThingsNeedsAllOfThem() {
+        let requirement = WhatsNewRequirement(memoryAboveMiB: 4096, device: .pad)
+        #expect(!requirement.isMet(by: iPad, vCPUs: 6))
+        #expect(!requirement.isMet(by: device(.phone, hasHaptics: true), vCPUs: 6))
+        var big = iPad
+        big.memory = MemoryPolicy(maximumsMiB: [8192])
+        #expect(requirement.isMet(by: big, vCPUs: 6))
+        var bigPhone = iPhone
+        bigPhone.memory = MemoryPolicy(maximumsMiB: [8192])
+        #expect(!requirement.isMet(by: bigPhone, vCPUs: 6))
+    }
+
+    @Test func aDeviceTheNotesDoNotNameIsOfferedAnEntryWithoutARequirement() {
+        let entry = WhatsNewEntry(id: "a", title: "A", text: "T", symbol: "star")
+        for host in [iPhone, iPhoneWithoutHaptics, iPad, mac] {
+            #expect(entry.requirement?.isMet(by: host, vCPUs: 6) ?? true)
+        }
+    }
+
+    /// An update from build 8: each device is told its own entries, in the
+    /// order they are written, and never another kind's.
+    @Test func eachKindOfDeviceIsAnnouncedItsOwnEntries() {
+        let entries = [
+            WhatsNewEntry(id: "everyone", title: "E", text: "T", symbol: "star"),
+            WhatsNewEntry(
+                id: "pad", title: "P", text: "T", symbol: "star", requirement: WhatsNewRequirement(device: .pad)),
+            WhatsNewEntry(
+                id: "haptics", title: "H", text: "T", symbol: "star",
+                requirement: WhatsNewRequirement(device: .haptics)),
+            WhatsNewEntry(id: "last", title: "L", text: "T", symbol: "star"),
+        ]
+        let notes = [WhatsNewRelease(build: 9, version: "1.0 (9)", entries: entries)]
+        func announced(to host: HostDevice) -> [String] {
+            WhatsNewRules.launch(
+                releases: notes, record: WhatsNewRecord(seenBuild: 8), currentBuild: 9, hasGuest: true,
+                offers: { $0.requirement?.isMet(by: host, vCPUs: 6) ?? true }
+            ).pending.flatMap { $0.entries.map(\.id) }
+        }
+        #expect(announced(to: iPhone) == ["everyone", "haptics", "last"])
+        #expect(announced(to: iPad) == ["everyone", "pad", "last"])
+        #expect(announced(to: iPhoneWithoutHaptics) == ["everyone", "last"])
+        #expect(announced(to: mac) == ["everyone", "last"])
+    }
 }
 
 struct WhatsNewStoreTests {
@@ -178,6 +250,39 @@ struct WhatsNewCatalogTests {
         #expect(release.entries.first?.title == "File browser")
         #expect(release.entries.first?.place == .sessionSettings)
         #expect(release.entries.first?.requirement == WhatsNewRequirement(memoryAboveMiB: 4096))
+    }
+
+    private let entry = #""id": "a", "title": "A", "text": "T", "symbol": "star""#
+
+    @Test func aDeviceRequirementDecodesAlone() throws {
+        for (word, device) in [("pad", WhatsNewDevice.pad), ("haptics", .haptics)] {
+            let decoded = try decode(notes(entry: entry + #", "requirement": {"device": "\#(word)"}"#))
+            #expect(decoded.first?.entries.first?.requirement == WhatsNewRequirement(device: device))
+        }
+    }
+
+    @Test func aDeviceRequirementDecodesBesideMemory() throws {
+        let decoded = try decode(
+            notes(entry: entry + #", "requirement": {"memoryAboveMiB": 4096, "device": "pad"}"#))
+        #expect(
+            decoded.first?.entries.first?.requirement == WhatsNewRequirement(memoryAboveMiB: 4096, device: .pad))
+    }
+
+    /// Notes and the code that reads them ship in one build, so a device the
+    /// code does not know cannot come from a newer build. It is a mistake in
+    /// the notes, caught by the test that reads the bundled file: the notes are
+    /// refused whole, as for any field the code does not know, and the entries
+    /// beside it are not announced either.
+    @Test func aDeviceTheCodeDoesNotKnowRefusesTheNotes() {
+        for device in [#""watch""#, #""Pad""#, #""""#, "3", "null", #"["pad"]"#] {
+            #expect(throws: (any Error).self, "\(device)") {
+                try decode(notes(entry: entry + #", "requirement": {"device": \#(device)}"#))
+            }
+        }
+        let other = #""id": "b", "title": "B", "text": "T", "symbol": "star", "requirement": {"device": "watch"}"#
+        #expect(throws: (any Error).self) {
+            try decode(#"[{"build": 6, "version": "1.0 (6)", "entries": [{\#(entry)}, {\#(other)}]}]"#)
+        }
     }
 
     @Test func anEntryHasTextPointsOrBoth() throws {

@@ -172,24 +172,31 @@ public enum WhatsNewPlace: String, Hashable, Decodable, Sendable {
 }
 
 /// What a device must offer for an entry to be announced on it. A field the
-/// code does not know, or no field at all, is a mistake in the notes and
-/// refuses them.
+/// code does not know, a `device` it does not know, or no field at all is a
+/// mistake in the notes and refuses them: the notes and the code that reads
+/// them ship in one build, so such a value is caught where they are bundled
+/// and never shown without what it meant. A requirement with more than one
+/// field needs all of them.
 public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
     /// The device offers a guest more RAM than this, in MiB, at its vCPU
     /// count.
     public var memoryAboveMiB: Int?
+    /// The kind of device the feature is for.
+    public var device: WhatsNewDevice?
 
-    public init(memoryAboveMiB: Int? = nil) {
+    public init(memoryAboveMiB: Int? = nil, device: WhatsNewDevice? = nil) {
         self.memoryAboveMiB = memoryAboveMiB
+        self.device = device
     }
 
-    private enum CodingKeys: String, CodingKey, CaseIterable { case memoryAboveMiB }
+    private enum CodingKeys: String, CodingKey, CaseIterable { case memoryAboveMiB, device }
 
     public init(from decoder: any Decoder) throws {
         try decoder.requireOnly(CodingKeys.self)
         let values = try decoder.container(keyedBy: CodingKeys.self)
         memoryAboveMiB = try values.decodeIfPresent(Int.self, forKey: .memoryAboveMiB)
-        guard memoryAboveMiB != nil else {
+        device = try values.decodeIfPresent(WhatsNewDevice.self, forKey: .device)
+        guard memoryAboveMiB != nil || device != nil else {
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "a requirement states nothing"))
         }
@@ -197,7 +204,26 @@ public struct WhatsNewRequirement: Hashable, Decodable, Sendable {
 
     public func isMet(by host: HostDevice, vCPUs: Int) -> Bool {
         if let memoryAboveMiB, host.memory.maximumMiB(vCPUs: vCPUs) <= memoryAboveMiB { return false }
+        if let device, !device.isMet(by: host) { return false }
         return true
+    }
+}
+
+/// The kind of device an entry is for, written in the notes as `"pad"` or
+/// `"haptics"`.
+public enum WhatsNewDevice: String, Hashable, Decodable, Sendable {
+    /// An iPad: the idiom the host reports, so a Mac running the application
+    /// as an iPad app is not one.
+    case pad
+    /// A device whose Taptic Engine can play the guest's haptics, which the
+    /// host reports (`HostDevice.hasHaptics`): an iPhone, not an iPad or a Mac.
+    case haptics
+
+    public func isMet(by host: HostDevice) -> Bool {
+        switch self {
+        case .pad: host.idiom == .pad
+        case .haptics: host.hasHaptics
+        }
     }
 }
 

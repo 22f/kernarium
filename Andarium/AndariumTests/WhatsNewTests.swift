@@ -18,10 +18,19 @@ struct WhatsNewTests {
         try body(defaults)
     }
 
-    private func host(maximumMiB: Int) -> HostDevice {
+    /// An iPhone with haptics, unless said otherwise.
+    private func host(maximumMiB: Int, idiom: HostDevice.Idiom = .phone, hasHaptics: Bool = true) -> HostDevice {
         HostDevice(
-            name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [maximumMiB]),
-            freeStorageBytes: 40_000_000_000)
+            name: idiom == .pad ? "iPad" : "iPhone", processorCount: 6,
+            memory: MemoryPolicy(maximumsMiB: [maximumMiB]), freeStorageBytes: 40_000_000_000,
+            idiom: idiom, hasHaptics: hasHaptics)
+    }
+
+    private func withDefaultsReturning<Result>(_ body: (UserDefaults) -> Result) -> Result {
+        let name = "andarium-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        return body(defaults)
     }
 
     private func model(on host: HostDevice) -> AppModel {
@@ -42,10 +51,13 @@ struct WhatsNewTests {
 
     // MARK: The bundled notes
 
+    /// Build 10 as written, and as an iPhone with haptics and an iPad are told it.
     private static let buildTenIDs = [
-        "snapshots", "languages", "resolution", "keyboard-mouse-controllers", "location", "send-feedback",
-        "more-fixes",
+        "snapshots", "resolution", "ipad-rotation", "keyboard-mouse-controllers", "location", "haptics",
+        "send-feedback", "more-fixes",
     ]
+    private static let buildTenIDsOnAnIPhone = buildTenIDs.filter { $0 != "ipad-rotation" }
+    private static let buildTenIDsOnAnIPad = buildTenIDs.filter { $0 != "haptics" }
     private static let buildNineIDs = ["file-browser", "more-memory", "stability-fixes"]
 
     @Test func theBundledNotesDecodeAndStartWithBuildTen() throws {
@@ -70,30 +82,86 @@ struct WhatsNewTests {
         #expect(nineFixes.place == nil && nineFixes.requirement == nil)
     }
 
-    @Test func everyEntryHasWordsASymbolAndARequirementTheCodeKnows() throws {
+    @Test func everyEntryHasWordsASymbolAndARequirementTheCodeKnows() {
         for release in WhatsNewCatalog.load() {
             #expect(!release.version.isEmpty)
             for entry in release.entries {
                 #expect(!entry.title.isEmpty && (entry.text != nil || !entry.points.isEmpty), "\(entry.id)")
                 #expect(UIImage(systemName: entry.symbol) != nil, "\(entry.id): \(entry.symbol)")
-                // A requirement the code does not know fails to decode, so the
-                // entry would not be here; the memory one is the notes' own.
-                if let requirement = entry.requirement { #expect(requirement.memoryAboveMiB != nil) }
             }
         }
-        let memory = try #require(WhatsNewCatalog.load().flatMap(\.entries).first { $0.id == "more-memory" })
-        #expect(memory.requirement == WhatsNewRequirement(memoryAboveMiB: 4096))
+        // A requirement the code does not know fails to decode, so the notes
+        // would not be here; these three entries are the ones that have any.
+        let requirements = WhatsNewCatalog.load().flatMap(\.entries).compactMap { entry in
+            entry.requirement.map { (entry.id, $0) }
+        }
+        #expect(Dictionary(uniqueKeysWithValues: requirements) == [
+            "more-memory": WhatsNewRequirement(memoryAboveMiB: 4096),
+            "ipad-rotation": WhatsNewRequirement(device: .pad),
+            "haptics": WhatsNewRequirement(device: .haptics),
+        ])
     }
 
     @Test func theRibbonNamesTheBundledEntriesAndCountsTheRest() throws {
         let titles = try #require(WhatsNewCatalog.load().first).entries.map(\.title)
         #expect(titles == [
-            "Snapshots", "Languages", "Resolution", "Keyboard, mouse and controllers", "Location", "Send feedback",
-            "More fixes",
+            "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "Location", "Haptics",
+            "Send feedback", "More fixes",
         ])
-        #expect(WhatsNewRibbon.summary(titles, naming: 7) == titles.joined(separator: " \u{00B7} "))
-        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "Snapshots \u{00B7} Languages \u{00B7} 5 more")
-        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "7 new features")
+        #expect(WhatsNewRibbon.summary(titles, naming: 8) == titles.joined(separator: " \u{00B7} "))
+        #expect(WhatsNewRibbon.summary(titles, naming: 2) == "Snapshots \u{00B7} Resolution \u{00B7} 6 more")
+        #expect(WhatsNewRibbon.summary(titles, naming: 0) == "8 new features")
+    }
+
+    /// The ribbon lists what the device is told, in the order written: seven
+    /// entries each, but not the same seven.
+    @Test func theRibbonNamesWhatAnIPhoneAndAnIPadAreTold() {
+        func ribbon(on host: HostDevice, naming named: Int) -> String {
+            withDefaultsReturning { defaults in
+                WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
+                let model = model(on: host)
+                entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+                return WhatsNewRibbon.summary(model.whatsNew.pendingEntries.map(\.title), naming: named)
+            }
+        }
+        let separator = " \u{00B7} "
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 4) == [
+            "Snapshots", "Resolution", "Keyboard, mouse and controllers", "Location", "3 more",
+        ].joined(separator: separator))
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 4) == [
+            "Snapshots", "Resolution", "Rotation on iPad", "Keyboard, mouse and controllers", "3 more",
+        ].joined(separator: separator))
+        #expect(ribbon(on: host(maximumMiB: 4096), naming: 0) == "7 new features")
+        #expect(ribbon(on: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false), naming: 0) == "7 new features")
+    }
+
+    @Test func eachKindOfDeviceIsToldItsOwnEntries() {
+        func told(by host: HostDevice) -> [String] {
+            withDefaultsReturning { defaults in
+                WhatsNewStore(defaults: defaults).keep(WhatsNewRecord(seenBuild: 9))
+                let model = model(on: host)
+                entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
+                // Info lists the notes as written, whatever the device.
+                #expect(model.whatsNew.releases.first?.entries.map(\.id) == Self.buildTenIDs)
+                return model.whatsNew.pendingEntries.map(\.id)
+            }
+        }
+        let withoutDeviceEntries = Self.buildTenIDs.filter { $0 != "ipad-rotation" && $0 != "haptics" }
+        #expect(told(by: host(maximumMiB: 4096)) == Self.buildTenIDsOnAnIPhone)
+        #expect(told(by: host(maximumMiB: 4096, idiom: .pad, hasHaptics: false)) == Self.buildTenIDsOnAnIPad)
+        #expect(told(by: host(maximumMiB: 4096, hasHaptics: false)) == withoutDeviceEntries)
+        #expect(told(by: host(maximumMiB: 4096, idiom: .mac, hasHaptics: false)) == withoutDeviceEntries)
+    }
+
+    /// The host the application builds reports what the entries ask about.
+    @Test func theHostReportsItsKindAndWhetherItHasHaptics() {
+        let host = AppEntry.hostDevice()
+        switch host.name {
+        case "iPad": #expect(host.idiom == .pad)
+        case "Mac": #expect(host.idiom == .mac)
+        default: #expect(host.name == "iPhone" && host.idiom == .phone)
+        }
+        #expect(host.hasHaptics == DeviceHaptics.isAvailable)
     }
 
     // MARK: The person's launch
@@ -107,7 +175,7 @@ struct WhatsNewTests {
             #expect(model.whatsNew.showsRibbon)
             // Build 10's notes first, then the build 9 the person skipped.
             #expect(model.whatsNew.pending.map(\.build) == [10, 9])
-            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDs + Self.buildNineIDs)
+            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDsOnAnIPhone + Self.buildNineIDs)
             #expect(WhatsNewStore(defaults: defaults).record
                 == WhatsNewRecord(seenBuild: 5, ribbonBuild: 10, ribbonLaunches: 1))
             #expect(model.whatsNew.releases.map(\.build) == [10, 9])
@@ -120,7 +188,7 @@ struct WhatsNewTests {
             let model = model(on: host(maximumMiB: 4096))
             entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
             #expect(model.whatsNew.pending.map(\.build) == [10])
-            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDs)
+            #expect(model.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDsOnAnIPhone)
             #expect(WhatsNewStore(defaults: defaults).record
                 == WhatsNewRecord(seenBuild: 9, ribbonBuild: 10, ribbonLaunches: 1))
             // Info lists both releases.
@@ -141,9 +209,9 @@ struct WhatsNewTests {
             let model = model(on: host(maximumMiB: 4096))
             entry(announces: true, defaults: defaults).announceWhatsNew(on: model, hasGuest: true, vCPUs: 6)
             #expect(model.whatsNew.pendingEntries.map(\.id)
-                == Self.buildTenIDs + ["file-browser", "stability-fixes"])
+                == Self.buildTenIDsOnAnIPhone + ["file-browser", "stability-fixes"])
             // Info lists the notes as written.
-            #expect(model.whatsNew.releases.map(\.entries.count) == [7, 3])
+            #expect(model.whatsNew.releases.map(\.entries.count) == [8, 3])
         }
     }
 
@@ -190,7 +258,7 @@ struct WhatsNewTests {
             let ten = model(on: host(maximumMiB: 6144))
             entry(announces: true, defaults: defaults).announceWhatsNew(on: ten, hasGuest: true, vCPUs: 6)
             #expect(ten.whatsNew.pending.map(\.build) == [10])
-            #expect(ten.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDs)
+            #expect(ten.whatsNew.pendingEntries.map(\.id) == Self.buildTenIDsOnAnIPhone)
             #expect(WhatsNewStore(defaults: defaults).record
                 == WhatsNewRecord(seenBuild: 9, ribbonBuild: 10, ribbonLaunches: 1))
         }

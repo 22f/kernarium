@@ -1,29 +1,6 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Andarium is now in Simplified Chinese, Traditional Chinese and Japanese, and follows the language of iOS." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andariumが簡体字中国語、繁体字中国語、日本語に対応し、iOSの言語に合わせて表示されます。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium现已支持简体中文、繁体中文和日文，并跟随iOS的语言。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Andarium現已支援簡體中文、繁體中文和日文，並跟隨iOS的語言。"
-          }
-        }
-      }
-    },
     "Browse the virtual machine’s internal storage, and import or export files and folders." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -369,6 +346,29 @@
         }
       }
     },
+    "Haptics" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "触覚"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "触感反馈"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "觸覺回饋"
+          }
+        }
+      }
+    },
     "Keyboard, mouse and controllers" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -388,29 +388,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "鍵盤、滑鼠和遊戲控制器"
-          }
-        }
-      }
-    },
-    "Languages" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "言語"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "语言"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "語言"
           }
         }
       }
@@ -507,6 +484,52 @@
         }
       }
     },
+    "On iPad, the whole app now turns with the device, also while the virtual machine runs." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPadでは、仮想マシンの実行中も含めて、アプリ全体がデバイスの向きに合わせて回転するようになりました。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在iPad上，整个App现在会随设备旋转，虚拟机运行时也一样。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在iPad上，整個App現在會隨裝置旋轉，虛擬機器執行時也一樣。"
+          }
+        }
+      }
+    },
+    "On iPhone, the virtual machine’s vibration now plays on the Taptic Engine. Turn it off under Capabilities on Home." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPhoneでは、仮想マシンの振動がTaptic Engineで再生されるようになりました。“ホーム”の“デバイス機能”でオフにできます。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在iPhone上，虚拟机的振动现在会通过Taptic Engine播放。可在“主页”的“设备功能”中将其关闭。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在iPhone上，虛擬機器的震動現在會透過Taptic Engine播放。可在「首頁」的「裝置功能」中將其關閉。"
+          }
+        }
+      }
+    },
     "Reduced stutters and sound dropouts under load" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -549,6 +572,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "解析度"
+          }
+        }
+      }
+    },
+    "Rotation on iPad" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPadでの回転"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad旋转"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iPad旋轉"
           }
         }
       }

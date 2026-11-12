@@ -70,8 +70,8 @@ enum WhatsNewPreview {
 
     /// A device that offers a guest more than 4 GiB, so the memory entry is
     /// announced: an iPad of 16 GB or an iPhone of 12 GB, with made-up
-    /// bounds. "whatsnew-limited" keeps the idiom's usual mock, which stops
-    /// at 4 GiB.
+    /// bounds, and the idiom's haptics: an iPhone has them, an iPad does not.
+    /// "whatsnew-limited" keeps the idiom's usual mock, which stops at 4 GiB.
     static func host(for screen: String) -> HostDevice? {
         guard screens.contains(screen), screen != "whatsnew-limited" else { return nil }
         let pad = UIDevice.current.userInterfaceIdiom == .pad
@@ -84,7 +84,8 @@ enum WhatsNewPreview {
                 defaultsMiB: Array(repeating: pad ? 4_096 : 3_072, count: count),
                 graphicsMiB: { memory, _ in max(limitMiB - 900 - memory, 384) }
             ),
-            freeStorageBytes: UInt64((pad ? 118.3 : 41.6) * Double(Limits.bytesPerGiB))
+            freeStorageBytes: UInt64((pad ? 118.3 : 41.6) * Double(Limits.bytesPerGiB)),
+            idiom: pad ? .pad : .phone, hasHaptics: !pad
         )
     }
 
