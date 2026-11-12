@@ -87,12 +87,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 src/kosmickrisp/vulkan/tests/vertex_compute_draws_shaders/tile.vert.h
 
 diff --git a/docs/drivers/kosmickrisp/workarounds.rst b/docs/drivers/kosmickrisp/workarounds.rst
-index 192eb59af49ec2b87c2e1b13f49a3ba9d9732cf5..a8b3f1679d83653368123f42600ff5e7e449634c 100644
+index 306044b72f9656202d571baa2ee4613394053d7b..60ab41f862b46b1208428e076773d41a79996738 100644
 --- a/docs/drivers/kosmickrisp/workarounds.rst
 +++ b/docs/drivers/kosmickrisp/workarounds.rst
-@@ -49,6 +49,61 @@ info on what was updated.
- Workarounds
- ===========
+@@ -89,6 +89,61 @@ may move the defect to another kernel.
+ | Log:
+ | 2026-11-12: Workaround implemented
  
 +KK_WORKAROUND_21
 +----------------
