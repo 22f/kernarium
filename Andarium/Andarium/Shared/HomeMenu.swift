@@ -19,11 +19,9 @@ enum HomeMenuItem: Equatable {
     #endif
 }
 
-/// The glyphs of the menu and of its items; the designer's picks replace these
-/// lines.
+/// The glyphs of the menu's items. The menu's own button keeps Info's glyph,
+/// the one the plain button shows.
 enum HomeMenuSymbols {
-    /// Provisional.
-    static let menu = "ellipsis"
     static let info = "info.circle"
     #if FEEDBACK_MAIL
     static let sendFeedback = "envelope"
@@ -60,7 +58,9 @@ extension AppModel {
 }
 
 /// Home's trailing toolbar item: the plain Info button when Info is all there
-/// is, otherwise one menu that holds it with the others.
+/// is, otherwise Info's own glyph as a menu that holds Info first and, after a
+/// separator, the other items. It is on Welcome too, where Send feedback is
+/// reachable before a virtual machine is set up.
 struct HomeToolbarMenu: View {
     @Environment(AppModel.self) private var model
 
@@ -70,13 +70,22 @@ struct HomeToolbarMenu: View {
             HomeInfoButton()
         } else {
             Menu {
-                ForEach(items, id: \.self) { item in
-                    Button { model.choose(item) } label: { label(of: item) }
-                        .accessibilityIdentifier(identifier(of: item))
+                Button { model.choose(.info) } label: { label(of: .info) }
+                    .accessibilityIdentifier(identifier(of: .info))
+                Section {
+                    ForEach(items.filter { $0 != .info }, id: \.self) { item in
+                        Button { model.choose(item) } label: { label(of: item) }
+                            .accessibilityIdentifier(identifier(of: item))
+                            .accessibilityHint(hint(of: item))
+                    }
                 }
             } label: {
-                Label("More", systemImage: HomeMenuSymbols.menu)
+                // The plain button's own label, so the toolbar looks as it
+                // does without a menu. A hint on a toolbar menu never reaches
+                // its control, so the label alone says what it is.
+                Label("Info", systemImage: "info")
             }
+            .accessibilityLabel("Info")
             .accessibilityIdentifier("home-menu")
         }
     }
@@ -91,6 +100,15 @@ struct HomeToolbarMenu: View {
         #if TIP_JAR
         case .buyMeTokens: Label { Text(TipJarWords.name) } icon: { Image(systemName: TipJarSymbols.menuItem) }
         #endif
+        }
+    }
+
+    private func hint(of item: HomeMenuItem) -> Text {
+        switch item {
+        #if TIP_JAR
+        case .buyMeTokens: Text(TipJarWords.menuHint)
+        #endif
+        default: Text(verbatim: "")
         }
     }
 

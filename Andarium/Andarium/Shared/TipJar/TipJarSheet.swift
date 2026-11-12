@@ -55,6 +55,7 @@ struct TipJarSheet: View {
             .navigationTitle(Text(TipJarWords.name))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .principal) { TipJarTitle() }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(action: close) { Text(TipJarWords.done) }
                         .accessibilityIdentifier("tipjar-done-bar")
@@ -320,6 +321,21 @@ private struct TipJarBarFade: View {
         )
         .ignoresSafeArea(edges: .bottom)
         .allowsHitTesting(false)
+    }
+}
+
+/// The sheet's title with the menu item's icon before it.
+private struct TipJarTitle: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: TipJarSymbols.menuItem)
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+            Text(TipJarWords.name)
+                .font(.headline)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 

@@ -5,10 +5,9 @@
 import AndariumCore
 import SwiftUI
 
-/// What the Buy me tokens menu item looks like; the toolbar menu's glyph is
-/// `HomeMenuSymbols.menu`.
+/// The system symbol of Buy me tokens, beside its menu item and its sheet's
+/// title.
 enum TipJarSymbols {
-    /// Provisional; the designer's pick replaces this one line.
     static let menuItem = "cup.and.heat.waves"
 }
 
