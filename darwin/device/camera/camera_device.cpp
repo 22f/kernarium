@@ -753,7 +753,8 @@ public:
             runtime.bufferChecked = true;
             std::fprintf(stderr, "%s\n",
                          bufferCheckLine(runtime.description.index, frame.width, frame.height,
-                                         frame.luma.size() + frame.chroma.size(), frame.lumaStride).c_str());
+                                         frame.luma.size() + frame.chroma.size(), frame.lumaStride,
+                                         maximumDeliveredFrameBytes(limits)).c_str());
         }
         const auto sequence = ++runtime.sequence;
         runtime.latest = frame.exposure;

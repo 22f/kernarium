@@ -143,10 +143,11 @@ FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeig
     return {std::uint32_t(multiple * ratioWidth), std::uint32_t(multiple * ratioHeight)};
 }
 
-std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height) noexcept
+std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height,
+                                  std::uint32_t rowAlignment) noexcept
 {
     const FrameSize frame = deliveredFrameSize(format.width, format.height, width, height);
-    return std::uint64_t(frame.width) * frame.height * 3 / 2;
+    return alignedFrameBytes(frame.width, frame.height, rowAlignment);
 }
 
 OutputSizes outputSizesFor(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height,
@@ -269,7 +270,7 @@ VideoBox boxOf(const VideoFormatFacts& format, const OfferRules& rules)
         if (size.width > format.width || size.height > format.height) continue;
         const FrameSize grown {std::max(result.box.width, size.width), std::max(result.box.height, size.height)};
         if (rules.limits.maximumFrameBytes != 0 &&
-            deliveredFrameBytes(format, grown.width, grown.height) > rules.limits.maximumFrameBytes)
+            deliveredFrameBytes(format, grown.width, grown.height, rules.limits.frameRowAlignment) > rules.limits.maximumFrameBytes)
             continue;
         result.sizes.push_back(size);
         result.box = grown;

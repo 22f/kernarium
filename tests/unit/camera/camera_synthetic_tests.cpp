@@ -374,9 +374,10 @@ void anchoredCamera()
     auto session = camera->openSession(recorder);
     // The 1920x1440 format (1 to 30 fps) of the back camera, in a 12.7 MP cap.
     const std::optional<std::size_t> anchors[] {3, std::nullopt};
-    session->setAnchors(anchors, {12'700'000, 6'220'800});
+    session->setAnchors(anchors, {12'700'000, 6'220'800, 256});
     require(camera->sessionAnchorCalls() == 1 && camera->sessionAnchors() == std::vector<std::optional<std::size_t>>(anchors, anchors + 2) &&
-                camera->sessionLimits().maximumStillPixels == 12'700'000 && camera->sessionLimits().maximumFrameBytes == 6'220'800,
+                camera->sessionLimits().maximumStillPixels == 12'700'000 && camera->sessionLimits().maximumFrameBytes == 6'220'800 &&
+                camera->sessionLimits().frameRowAlignment == 256,
             "the session records every field it was told");
     require(!session->startVideo(0, 1920, 1080, 60), "a rate the anchor does not take");
     require(!session->startVideo(0, 3840, 2160, 30), "a size larger than the anchor");

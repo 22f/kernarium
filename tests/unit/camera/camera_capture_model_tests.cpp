@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -53,7 +54,10 @@ std::vector<FrameSize> candidatesFor(const std::vector<VideoFormatFacts>& format
     return sizes;
 }
 
-constexpr std::uint64_t smallFrameBound = 1920ull * 1440 * 3 / 2;
+// The capture buffer the reserve counts, by hand: rows padded to 256 bytes, so a
+// 1920-wide row is 2048 bytes.
+constexpr std::uint32_t rowAlignment = 256;
+constexpr std::uint64_t smallFrameBound = 2048ull * 1440 * 3 / 2;
 constexpr std::uint64_t largeFrameBound = 3840ull * 2880 * 3 / 2;
 
 // The small tier: 1080p video, 12 MP stills (12.7 million pixels), and the
@@ -61,7 +65,7 @@ constexpr std::uint64_t largeFrameBound = 3840ull * 2880 * 3 / 2;
 OfferRules smallRules(const std::vector<VideoFormatFacts>& formats)
 {
     OfferRules rules;
-    rules.limits = {12'700'000, smallFrameBound};
+    rules.limits = {12'700'000, smallFrameBound, rowAlignment};
     rules.maximumVideoWidth = 1920;
     rules.maximumVideoHeight = 1080;
     rules.candidateSizes = candidatesFor(formats);
@@ -71,7 +75,7 @@ OfferRules smallRules(const std::vector<VideoFormatFacts>& formats)
 OfferRules largeRules(const std::vector<VideoFormatFacts>& formats)
 {
     OfferRules rules;
-    rules.limits = {50'000'000, largeFrameBound};
+    rules.limits = {50'000'000, largeFrameBound, rowAlignment};
     rules.maximumVideoWidth = 3840;
     rules.maximumVideoHeight = 2160;
     rules.candidateSizes = candidatesFor(formats);
@@ -312,8 +316,36 @@ void everyOfferedSizeStartsInTheAnchor()
     require(chosen.index == 1, "the format that has a rate within the cap");
     require(chosen.offer.box == FrameSize({1280, 720}), "a 1080p frame from 1:1 would be 1920x1920, over the bound");
     for (const auto& size : chosen.offer.videoSizes)
-        require(deliveredFrameBytes(formats[1], size.width, size.height) <= smallFrameBound, "every offered size fits the frame bound");
-    require(deliveredFrameBytes(formats[1], chosen.offer.box.width, chosen.offer.box.height) <= smallFrameBound, "so does the box");
+        require(deliveredFrameBytes(formats[1], size.width, size.height, rowAlignment) <= smallFrameBound, "every offered size fits the frame bound");
+    require(deliveredFrameBytes(formats[1], chosen.offer.box.width, chosen.offer.box.height, rowAlignment) <= smallFrameBound, "so does the box");
+}
+
+// R2 (recheck5): a 1802x1534 format delivers 1802x1534 to every size it is asked for
+// (its reduced aspect ratio, 901:767, has no smaller even multiple). Its pixels,
+// 4,146,402 bytes tightly packed, are under the old bound of 4,147,200; in
+// capture buffers whose rows are padded to 256 bytes it is 4,712,448, over the
+// 4,423,680 the reserve counts. The offer is bounded by the reserve's figure, so
+// the format offers no size and is not an anchor, and no camera that has only it
+// is offered.
+void aFrameThatFitsTightlyButNotInTheReservedBufferIsNotOffered()
+{
+    const VideoFormatFacts odd = fmt(1802, 1534, {{4032, 3024}});
+    require(deliveredFrameSize(1802, 1534, 1280, 720) == FrameSize({1802, 1534}), "1280x720 is delivered as the whole format");
+    require(deliveredFrameBytes(odd, 1280, 720, 0) == 1802ull * 1534 * 3 / 2 && deliveredFrameBytes(odd, 1280, 720, 0) < 4'147'200,
+            "tightly packed it is under 1920x1440's bytes");
+    require(deliveredFrameBytes(odd, 1280, 720, rowAlignment) == 4'712'448, "in 256-byte rows it is 4,712,448");
+    require(deliveredFrameBytes(odd, 1280, 720, rowAlignment) > smallFrameBound, "which is over the reserved buffer");
+    const std::vector<VideoFormatFacts> alone {odd};
+    const OfferRules rules = smallRules(alone);
+    require(offerOf(odd, rules).videoSizes.empty(), "no size of it is offered");
+    require(!anchorKeyOf(odd, rules) && !chooseAnchor(alone, rules, false), "so it is no anchor");
+    // With the bound of tightly packed rows (the old figure), it was admitted.
+    OfferRules tight = rules;
+    tight.limits.frameRowAlignment = 0;
+    require(!offerOf(odd, tight).videoSizes.empty(), "the same format was offered when rows were counted tightly");
+    // Beside a format that fits, the camera runs in that one.
+    const std::vector<VideoFormatFacts> two {odd, fmt(1920, 1440, {{4032, 3024}})};
+    require(anchorOf(two).index == 1, "the format that fits is the anchor");
 }
 
 // The Mac's external camera lists near-integer rates.
@@ -723,6 +755,29 @@ Sizes refStills(const VideoFormatFacts& format, std::uint64_t cap)
     return stills;
 }
 
+// What the platform delivers for a stream, from first principles: the smallest even multiple of the format's
+// reduced aspect ratio (found by counting up) that covers the request, else the format's own size.
+FrameSize refDelivered(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height)
+{
+    const std::uint32_t common = std::gcd(format.width, format.height);
+    const std::uint32_t ratioWidth = format.width / common, ratioHeight = format.height / common;
+    for (std::uint32_t multiple = 1; multiple < common; ++multiple) {
+        const std::uint32_t w = multiple * ratioWidth, h = multiple * ratioHeight;
+        if (w % 2 != 0 || h % 2 != 0) continue;
+        if (w >= width && h >= height) return {w, h};
+    }
+    return {format.width, format.height};
+}
+
+// The buffer the reserve counts for a frame, from first principles: every row padded up to a multiple of 256
+// bytes, one luma plane and a half-height chroma plane.
+std::uint64_t refBufferBytes(FrameSize frame)
+{
+    std::uint64_t pitch = 0;
+    while (pitch < frame.width) pitch += rowAlignment;
+    return pitch * frame.height + pitch * ((frame.height + 1) / 2);
+}
+
 using RefKey = std::tuple<bool, std::uint32_t, std::uint64_t, std::uint32_t, std::uint64_t, std::int64_t, std::int64_t, bool>;
 
 // The key of §1, computed from the facts by the brute-force rules above.
@@ -743,7 +798,7 @@ std::optional<RefKey> refKey(const VideoFormatFacts& format, const OfferRules& r
         if (size.width > format.width || size.height > format.height) continue;
         if (std::find(kept.begin(), kept.end(), size) != kept.end()) continue;
         const auto w = std::max(boxWidth, size.width), h = std::max(boxHeight, size.height);
-        if (deliveredFrameBytes(format, w, h) > rules.limits.maximumFrameBytes) continue;
+        if (refBufferBytes(refDelivered(format, w, h)) > rules.limits.maximumFrameBytes) continue;
         kept.push_back(size);
         boxWidth = w;
         boxHeight = h;
@@ -827,7 +882,11 @@ void everyGeneratedTableHoldsTheInvariants()
                     return a == b;
                 }(), "P2: the stills are those the model lists" + where);
                 // P3: the delivered frame at the box is within the bound, and grows with the request.
-                require(bound == 0 || deliveredFrameBytes(anchor, offer.box.width, offer.box.height) <= bound, "P3: the box delivers within the bound" + where);
+                require(bound == 0 || refBufferBytes(refDelivered(anchor, offer.box.width, offer.box.height)) <= bound,
+                        "P3: the box's capture buffer is within the reserved one" + where);
+                require(deliveredFrameBytes(anchor, offer.box.width, offer.box.height, rowAlignment) ==
+                            refBufferBytes(refDelivered(anchor, offer.box.width, offer.box.height)),
+                        "P3: the model's byte count is the buffer's" + where);
                 // P1: every admitted run (a request inside the box, at an offered rate) runs in the anchor.
                 std::vector<std::uint32_t> offered;
                 for (const auto& range : offer.rates)
@@ -855,14 +914,16 @@ void everyGeneratedTableHoldsTheInvariants()
                     }
                     ++requestsChecked;
                     require(w <= anchor.width && h <= anchor.height, "P1: the anchor covers the request" + where);
-                    require(bound == 0 || deliveredFrameBytes(anchor, w, h) <= bound, "P1/P3: the request delivers within the bound" + where);
+                    require(bound == 0 || refBufferBytes(refDelivered(anchor, w, h)) <= bound,
+                            "P1/P3: the request's capture buffer is within the reserved one" + where);
+                    require(deliveredFrameSize(anchor.width, anchor.height, w, h) == refDelivered(anchor, w, h), "P1: the delivered frame" + where);
                 }
                 // P3: the delivered frame grows with the request in each dimension.
                 for (int draw = 0; draw < 6; ++draw) {
                     const std::uint32_t w = 16 + 2 * rng.below(anchor.width / 2), h = 16 + 2 * rng.below(anchor.height / 2);
-                    const auto base = deliveredFrameBytes(anchor, w, h);
-                    require(deliveredFrameBytes(anchor, std::min(anchor.width, w + 2 * (1 + rng.below(40))), h) >= base, "P3: grows with the width" + where);
-                    require(deliveredFrameBytes(anchor, w, std::min(anchor.height, h + 2 * (1 + rng.below(40)))) >= base, "P3: grows with the height" + where);
+                    const auto base = deliveredFrameBytes(anchor, w, h, rowAlignment);
+                    require(deliveredFrameBytes(anchor, std::min(anchor.width, w + 2 * (1 + rng.below(40))), h, rowAlignment) >= base, "P3: grows with the width" + where);
+                    require(deliveredFrameBytes(anchor, w, std::min(anchor.height, h + 2 * (1 + rng.below(40))), rowAlignment) >= base, "P3: grows with the height" + where);
                 }
                 // The rates, against the brute-force whole rates.
                 const auto whole = refRates(anchor);
@@ -900,6 +961,7 @@ int main()
     aCameraWithOnlyFastFormatsKeepsAModeAndItsPhotos();
     aFormatThatTakesTheTierSizeKeepsItsModesWhenAnotherWins();
     everyOfferedSizeStartsInTheAnchor();
+    aFrameThatFitsTightlyButNotInTheReservedBufferIsNotOffered();
     aCameraThatListsNearIntegerRatesIsOfferedWholeRates();
     theLargeTierOffersWhatItsLimitsHold();
     aFormatThatCarriesNoStreamIsNotAnAnchor();

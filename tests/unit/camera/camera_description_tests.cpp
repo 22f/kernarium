@@ -279,16 +279,25 @@ void testTheFramesAnAnchorDeliversNeverExceedTheReservesBuffer()
             const auto& anchor = info.captureFormats[*cameras[0].anchor];
             for (const auto& mode : cameras[0].video) {
                 const auto delivered = deliveredFrameSize(anchor.width, anchor.height, mode.width, mode.height);
-                require(deliveredFrameBytes(anchor, mode.width, mode.height) <= maximumDeliveredFrameBytes(limits),
-                        "the frame delivered to an offered stream is within the bound the reserve counts");
-                require(alignedFrameBytes(delivered.width, delivered.height) <= alignedDeliveredFrameBytes(limits),
-                        "and its aligned buffer is within the one the reserve counts");
+                require(deliveredFrameBytes(anchor, mode.width, mode.height, captureRowAlignment) <= maximumDeliveredFrameBytes(limits),
+                        "the capture buffer of an offered stream is within the one the reserve counts");
+                require(alignedFrameBytes(delivered.width, delivered.height) <= maximumDeliveredFrameBytes(limits),
+                        "by the reserve's own function");
             }
         }
     }
-    require(alignedDeliveredFrameBytes(limitsOf(CameraTier::small)) == 4'423'680 &&
-                deliveredFrameBytes(tabletCamera().captureFormats[1], 1920, 1080) == 1920ull * 1440 * 3 / 2,
+    require(maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) == 4'423'680 &&
+                deliveredFrameBytes(tabletCamera().captureFormats[1], 1920, 1080, 0) == 1920ull * 1440 * 3 / 2,
             "and the iPad mini's 4:3 format at 1080p is 4,147,200 bytes in 4,423,680 of buffer");
+    // 1802x1534 delivers 1802x1534 to every stream: 4,146,402 bytes tightly packed, under the old bound, but 4,712,448
+    // in 256-byte rows, which the reserve does not count. A camera that has only it is not offered.
+    CameraInfo odd;
+    odd.identifier = "odd";
+    odd.captureFormats = {{1802, 1534, {{1, 30}}, {{4032, 3024}}, true, true}};
+    odd.videoFormats.push_back({1802, 1534, 1, 30, true});
+    odd.stillSizes = {{4032, 3024}};
+    require(arrangeCameras(std::vector<CameraInfo> {odd}, {}, "tablet", CalibrationStore(), optionsOf(CameraTier::small)).empty(),
+            "a camera whose only format delivers more than the reserve counts is not offered");
 }
 
 // A camera runs with others only when the formats a multi-camera session takes offer as much as its best format.
@@ -454,11 +463,13 @@ void testACalibrationIsAdvertisedOnlyForTheAnchorItWasLearnedIn()
 void testHostMemoryReserve()
 {
     const auto small = cameraHostMemory(CameraTier::small);
-    require(maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) == 1920ull * 1440 * 3 / 2,
-            "the frame a 4:3 format delivers to a 1080p stream");
+    require(maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) == 4'423'680,
+            "the capture buffer of the frame a 4:3 format delivers to a 1080p stream");
+    require(offerRulesOf(limitsOf(CameraTier::small)).limits.maximumFrameBytes == maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) &&
+                offerRulesOf(limitsOf(CameraTier::small)).limits.frameRowAlignment == captureRowAlignment,
+            "the offer is bounded by the reserve's buffer, in the reserve's rows");
     require(alignedFrameBytes(1920, 1440) == 4'423'680 && alignedFrameBytes(640, 480) == 768ull * 480 * 3 / 2 && alignedFrameBytes(256, 2) == 768,
             "the capture buffer's rows are padded to 256 bytes: a 1920x1440 buffer is 4,423,680 bytes where its pixels are 4,147,200");
-    require(alignedDeliveredFrameBytes(limitsOf(CameraTier::small)) == 4'423'680, "the largest buffer of the small tier");
     require(heldFramesPerCamera == 6 && concurrentCameras == 2, "six frames of each of two cameras are held");
     require(small.capturePools == 4'423'680ull * 6 * 2, "the aligned buffer, six held, two cameras");
     require(small.staging == 1920ull * 1080 * 3 / 2, "one frame");
@@ -478,14 +489,20 @@ void testHostMemoryReserve()
 // The first buffer of a configuration is checked against what the reserve counts for it.
 void testTheBufferCheckLine()
 {
-    const auto line = bufferCheckLine(2, 1920, 1440, 4'423'680, 2048);
+    const std::uint64_t reserved = maximumDeliveredFrameBytes(limitsOf(CameraTier::small));
+    const auto line = bufferCheckLine(2, 1920, 1440, 4'423'680, 2048, reserved);
     require(line.find("camera 2") != std::string::npos && line.find("1920x1440") != std::string::npos &&
-                line.find("4423680") != std::string::npos && line.find("larger than the reserve counts") == std::string::npos,
+                line.find("the reserve counts 4423680 a buffer") != std::string::npos &&
+                line.find("larger than the reserve counts") == std::string::npos,
             "a buffer the reserve counts for says so without complaint");
-    require(bufferCheckLine(0, 1920, 1440, 4'423'681, 2048).find("larger than the reserve counts") != std::string::npos,
-            "a buffer above it says that it is larger");
-    require(bufferCheckLine(0, 1920, 1440, 4'147'200, 1920).find("larger than the reserve counts") == std::string::npos,
+    require(bufferCheckLine(0, 1920, 1440, 4'423'681, 2048, reserved).find("larger than the reserve counts") != std::string::npos,
+            "a buffer above the tier's reserved one says that it is larger");
+    require(bufferCheckLine(0, 1920, 1440, 4'147'200, 1920, reserved).find("larger than the reserve counts") == std::string::npos,
             "a tightly packed one is below it");
+    // The comparison is with the tier's buffer, not with what a frame of the delivered size would take: a 1802x1534
+    // frame's buffer of 4,712,448 bytes is over it.
+    require(bufferCheckLine(0, 1802, 1534, 4'712'448, 2048, reserved).find("larger than the reserve counts") != std::string::npos,
+            "the check is against the reserved buffer, whatever the frame's size");
 }
 
 void testWireFormats()

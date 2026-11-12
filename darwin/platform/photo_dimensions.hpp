@@ -111,9 +111,21 @@ struct FrameSize {
 [[nodiscard]] FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
                                            std::uint32_t height) noexcept;
 
-// The NV12 bytes of the frame a format delivers for a stream of `width` by
-// `height` (deliveredFrameSize), tightly packed.
-[[nodiscard]] std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height) noexcept;
+// The bytes of an NV12 frame of `width` by `height` in a capture buffer whose
+// rows are padded to `rowAlignment` bytes (zero or one: not padded): the luma
+// rows and the chroma rows, which are half as many, rounded up. The one
+// byte count the offer's frame bound and the host's memory reserve share.
+[[nodiscard]] constexpr std::uint64_t alignedFrameBytes(std::uint32_t width, std::uint32_t height, std::uint32_t rowAlignment) noexcept
+{
+    const std::uint64_t alignment = rowAlignment != 0 ? rowAlignment : 1;
+    const std::uint64_t pitch = (std::uint64_t(width) + alignment - 1) / alignment * alignment;
+    return pitch * (std::uint64_t(height) + (std::uint64_t(height) + 1) / 2);
+}
+
+// The bytes of the capture buffer a format delivers for a stream of `width` by
+// `height` (deliveredFrameSize), by alignedFrameBytes.
+[[nodiscard]] std::uint64_t deliveredFrameBytes(const VideoFormatFacts& format, std::uint32_t width, std::uint32_t height,
+                                                std::uint32_t rowAlignment) noexcept;
 
 // What the anchor decides about the outputs of the camera that runs in it: the
 // video output's explicit size, which AVFoundation requires to be the aspect

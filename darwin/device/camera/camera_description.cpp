@@ -495,13 +495,12 @@ std::string anchorSummary(const CameraDescription& camera)
 }
 
 std::string bufferCheckLine(std::uint32_t camera, std::uint32_t width, std::uint32_t height, std::uint64_t bufferBytes,
-                            std::size_t rowBytes)
+                            std::size_t rowBytes, std::uint64_t reservedBytes)
 {
-    const std::uint64_t counted = alignedFrameBytes(width, height);
     std::string line = "Camera: camera " + std::to_string(camera) + " delivers " + std::to_string(width) + "x" + std::to_string(height) +
-        " in buffers of " + std::to_string(bufferBytes) + " bytes (rows of " + std::to_string(rowBytes) + "); the reserve counts " +
-        std::to_string(counted);
-    if (bufferBytes > counted) line += ": the buffer is larger than the reserve counts";
+        " in buffers of " + std::to_string(bufferBytes) + " bytes (rows of " + std::to_string(rowBytes) +
+        "); the reserve counts " + std::to_string(reservedBytes) + " a buffer";
+    if (bufferBytes > reservedBytes) line += ": the buffer is larger than the reserve counts";
     return line;
 }
 

@@ -30,7 +30,7 @@ using uml::platform::videoRateCap;
 [[nodiscard]] inline uml::platform::OfferRules offerRulesOf(const CameraTierLimits& limits)
 {
     uml::platform::OfferRules rules;
-    rules.limits = {limits.maximumStillPixels, maximumDeliveredFrameBytes(limits)};
+    rules.limits = {limits.maximumStillPixels, maximumDeliveredFrameBytes(limits), captureRowAlignment};
     rules.maximumVideoWidth = limits.maximumVideoWidth;
     rules.maximumVideoHeight = limits.maximumVideoHeight;
     rules.rateCap = videoRateCap;
@@ -104,10 +104,12 @@ struct ArrangementOptions {
  * whether it runs with others. Device facts only. */
 [[nodiscard]] std::string anchorSummary(const CameraDescription& camera);
 
-/* What the log says of the first buffer of a camera's capture: its size, and the
- * pitch of its rows, against what the reserve counts for it (alignedFrameBytes). */
+/* What the log says of the first buffer of a camera's capture: its size and the
+ * pitch of its rows, against the frame the reserve counts for a buffer of the
+ * tier (`reservedBytes`, maximumDeliveredFrameBytes), and a warning when the
+ * buffer is larger. */
 [[nodiscard]] std::string bufferCheckLine(std::uint32_t camera, std::uint32_t width, std::uint32_t height,
-                                          std::uint64_t bufferBytes, std::size_t rowBytes);
+                                          std::uint64_t bufferBytes, std::size_t rowBytes, std::uint64_t reservedBytes);
 
 /* The answer to VIRTIO_VIDEO_CMD_CAMERA_QUERY from `start`, as many records as
  * fit in `capacity` bytes. Throws std::invalid_argument when not one fits. */

@@ -45,7 +45,8 @@ application's statements (the sensor orientation, the rotation that
   tier, for the layout with the most in it; the loader states it from the
   budget alone. The device keeps only the newest frame of a camera and frees
   each as soon as it is written, and checks the first buffer of each
-  configuration against the figure (a log line). The GPU's pool is the budget B
+  configuration against the reserved buffer (a log line that says when one is
+  larger). The GPU's pool is the budget B
   less the reserve while the cameras are live and B otherwise, in the runtime,
   the launcher and the applications' figure alike.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
@@ -71,7 +72,8 @@ application's statements (the sensor orientation, the rotation that
   platform is asked for exactly that size. A host whose photo sizes belong to
   its formats (`CameraInfo::captureFormats`) runs each camera in one of them,
   its **anchor**, and offers only what the anchor makes: its stills up to the
-  tier's cap, the video sizes inside it whose frames fit the reserve, and its
+  tier's cap, the video sizes inside it whose capture buffers fit the reserve (one
+  byte count, `alignedFrameBytes`, for the offer's bound and the reserve), and its
   whole frame rates up to 30 (`videoRateCap`: photos win over fast streams).
   The anchor is chosen once when the cameras are arranged, by the key in
   `photo_dimensions.hpp`: a whole rate within 30, then the largest still, then

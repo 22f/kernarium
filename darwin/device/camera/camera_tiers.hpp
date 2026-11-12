@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include "photo_dimensions.hpp"
+
 #include <cstdint>
 
 namespace uml::camera {
@@ -56,28 +58,23 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
                                      : CameraTierLimits {3840, 2160, 50'000'000, 6};
 }
 
-/* The largest frame the platform delivers to the device, in NV12 bytes: a frame
- * of the tier's width at 4:3, the tallest aspect ratio a camera format has. The
- * platform scales a format's frames to the stream's size at the format's own
- * aspect ratio, so a 4:3 format delivers a 1920x1440 frame to a 1080p stream;
- * a format that would deliver more is not run for the stream. */
-[[nodiscard]] constexpr std::uint64_t maximumDeliveredFrameBytes(const CameraTierLimits& limits) noexcept
-{
-    return std::uint64_t {limits.maximumVideoWidth} * ((std::uint64_t {limits.maximumVideoWidth} * 3 + 3) / 4) * 3 / 2;
-}
-
 /* The bytes of an NV12 frame of `width` by `height` in a capture buffer whose
- * rows are padded to captureRowAlignment. */
+ * rows are padded to captureRowAlignment: the platform model's byte count
+ * (uml::platform::alignedFrameBytes), the one the offer's frame bound and this
+ * reserve share. */
 [[nodiscard]] constexpr std::uint64_t alignedFrameBytes(std::uint32_t width, std::uint32_t height) noexcept
 {
-    const std::uint64_t pitch = (std::uint64_t {width} + captureRowAlignment - 1) / captureRowAlignment * captureRowAlignment;
-    return pitch * height * 3 / 2;
+    return uml::platform::alignedFrameBytes(width, height, captureRowAlignment);
 }
 
-/* The largest capture buffer the host holds for a tier: the frame of the tier's
- * width at 4:3 (the one maximumDeliveredFrameBytes counts) at the aligned row
- * size. */
-[[nodiscard]] constexpr std::uint64_t alignedDeliveredFrameBytes(const CameraTierLimits& limits) noexcept
+/* The largest capture buffer the host holds for a tier, and so the largest frame
+ * the offer lets a stream deliver: a frame of the tier's width at 4:3, the
+ * tallest aspect ratio a camera format has, at the aligned row size. The
+ * platform scales a format's frames to the stream's size at the format's own
+ * aspect ratio, so a 4:3 format delivers a 1920x1440 frame to a 1080p stream; a
+ * format whose frame for a size it offers would take more is not offered that
+ * size (uml::platform::offerOf, with this bound and captureRowAlignment). */
+[[nodiscard]] constexpr std::uint64_t maximumDeliveredFrameBytes(const CameraTierLimits& limits) noexcept
 {
     return alignedFrameBytes(limits.maximumVideoWidth, (limits.maximumVideoWidth * 3 + 3) / 4);
 }
@@ -88,9 +85,9 @@ inline constexpr CameraTier largestOfferedTier = CameraTier::small;
  * memory limit holds it. The figure is one per tier, for the layout with the
  * most in it: two cameras and a Bayer still. Each part is derived from the
  * tier's limits:
- *  - the capture pools: the largest frame the platform delivers, at the
- *    aligned row size (alignedDeliveredFrameBytes), for each frame the host
- *    holds (heldFramesPerCamera) of each camera that streams at once
+ *  - the capture pools: the largest capture buffer the offer lets a stream
+ *    take (maximumDeliveredFrameBytes), for each frame the host holds
+ *    (heldFramesPerCamera) of each camera that streams at once
  *    (concurrentCameras);
  *  - the device's staging: one NV12 frame of the largest video size, where a frame is
  *    cropped, rotated and scaled before it is copied to the guest;
@@ -116,7 +113,7 @@ struct CameraHostMemory {
     const CameraTierLimits limits = limitsOf(tier);
     const std::uint64_t frame = std::uint64_t {limits.maximumVideoWidth} * limits.maximumVideoHeight * 3 / 2;
     return {
-        .capturePools = alignedDeliveredFrameBytes(limits) * heldFramesPerCamera * concurrentCameras,
+        .capturePools = maximumDeliveredFrameBytes(limits) * heldFramesPerCamera * concurrentCameras,
         .staging = frame,
         .rawStill = limits.maximumStillPixels * 2 * 3,
         .jpegStill = limits.maximumStillPixels / 2 * 3,

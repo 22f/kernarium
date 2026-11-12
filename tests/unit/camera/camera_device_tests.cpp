@@ -571,7 +571,8 @@ void testVideoAndMetadata()
             "the first video buffer starts the camera at the stream's rate");
     require(rig.camera->sessionAnchorCalls() == 1 && rig.camera->sessionAnchors() == std::vector<std::optional<std::size_t>> {3, std::nullopt} &&
                 rig.camera->sessionLimits().maximumStillPixels == limitsOf(CameraTier::small).maximumStillPixels &&
-                rig.camera->sessionLimits().maximumFrameBytes == maximumDeliveredFrameBytes(limitsOf(CameraTier::small)),
+                rig.camera->sessionLimits().maximumFrameBytes == maximumDeliveredFrameBytes(limitsOf(CameraTier::small)) &&
+                rig.camera->sessionLimits().frameRowAlignment == captureRowAlignment,
             "the session is told each camera's anchor (the back camera's 1920x1440 format; the front camera lists none) and what the guest may ask, once, before it starts anything");
     require(rig.states == std::vector<CameraState> {CameraState::streaming}, "the host is streaming");
 
