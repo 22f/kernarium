@@ -553,7 +553,7 @@
       }
     },
     "You can close this sheet meanwhile.": {
-      "comment": "The note under the waiting title.",
+      "comment": "The note under the waiting title: the sheet may be closed while the approval is pending.",
       "localizations": {
         "en": {
           "stringUnit": {
