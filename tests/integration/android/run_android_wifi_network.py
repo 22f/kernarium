@@ -37,8 +37,9 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   validated with its private DNS broken, without a check at the server or in the
   log from the request on, and once the name is gone the network is validated
   and a second request is checked; each request is judged by the new line it
-  adds to the network's own log; a network is reported validated within seconds of its
-  join, and no check follows a passing one until an evaluation is forced; across all
+  adds to the network's own log; a network is observed validated while its first
+  check is still unanswered (the server holds that answer), and no check follows
+  a passing one until an evaluation is forced; across all
   of it NetworkStack, SystemUI and Settings (each by the exact name it runs
   under) neither crash nor stop answering and nothing hits an illegal
   instruction, which one continuous log stream of each boot of a guest of the
@@ -175,9 +176,13 @@ UNVALIDATED_SECONDS = 60
 # How long a network is left alone after a passing check before an evaluation is forced: no timer is left
 # after a pass, so no check reaches the server in it.
 QUIET_SECONDS = 20
-# From the join of the network to the line that reports it validated: the platform validates a Wi-Fi network
-# first and checks it after.
-VALIDATED_WITHIN_SECONDS = 5.0
+# The platform's HTTP probe gives up after 10 s (NetworkMonitor's SOCKET_TIMEOUT_MS, the connect and read timeout
+# that makeProbeConnection sets, for the single HTTP probe the sections that turn HTTPS off send). The server holds
+# the answer to a network's first check for at most HELD_ANSWER_SECONDS, below it, while the runner looks at the
+# network: the platform validates a Wi-Fi network first and checks it after, so it is validated while the check
+# is unanswered.
+PROBE_SOCKET_TIMEOUT_SECONDS = 10.0
+HELD_ANSWER_SECONDS = 8.0
 FORCED_LINE = "Forcing reevaluation"
 # Android's own words: the Wi-Fi list's summary and the status bar icon's spoken description.
 LIMITED_CONNECTION = "Limited connection"
@@ -481,36 +486,6 @@ def retry_problems(times: list[float]) -> list[str]:
     return problems
 
 
-def created_times(dump: str) -> dict[int, datetime.datetime]:
-    """When each Wi-Fi network was created (`created=` of its NetworkAgentInfo), in UTC."""
-    found: dict[int, datetime.datetime] = {}
-    for line in dump.splitlines():
-        match = re.match(r"\s*NetworkAgentInfo\{network\{(\d+)\}.*?\bni\{WIFI\b.*? created=(\S+?)Z\s", line)
-        if match:
-            found[int(match[1])] = datetime.datetime.fromisoformat(match[2]).replace(tzinfo=datetime.timezone.utc)
-    return found
-
-
-def validated_after_join(dump: str, entries: list[tuple[str, str]], net_id: int) -> float | None:
-    """Seconds from the creation of the network to the validation log's line that reports it validated before
-    its check (the log's time stamps and the creation time are on one clock, which the dump's own numbers
-    show), or None when either is missing."""
-    created = created_times(dump).get(net_id)
-    stamp = next((when for when, message in entries if VALIDATED_FIRST_LINE in message), None)
-    if created is None or stamp is None:
-        return None
-    return (datetime.datetime.fromisoformat(stamp).replace(tzinfo=datetime.timezone.utc) - created).total_seconds()
-
-
-def join_to_validated_problems(delay: float | None) -> list[str]:
-    if delay is None:
-        return ["the time from the join to the validated line cannot be read (no creation time or no such line)"]
-    if not 0 <= delay <= VALIDATED_WITHIN_SECONDS:
-        return [f"the network was reported validated {delay:.1f} s after its join, not within "
-                f"{VALIDATED_WITHIN_SECONDS:.0f} s"]
-    return []
-
-
 def private_dns_failed_problems(capabilities: frozenset[str] | None) -> list[str]:
     """What differs from the network the platform leaves when its strict private DNS name fails: not validated,
     with its private DNS reported broken."""
@@ -684,6 +659,11 @@ class ProbeServer:
         self.mode = "expected"
         self.seen: list[tuple[float, str, int]] = []
         self.lock = threading.Lock()
+        # The scenario whose first HTTP probe is held, the scenario of the request held now, and the event
+        # that ends the hold.
+        self.held: str | None = None
+        self.open: str | None = None
+        self.released = threading.Event()
         server = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -692,6 +672,9 @@ class ProbeServer:
             def do_GET(self) -> None:  # noqa: N802
                 mode = server.mode
                 server.record(self.path, {"redirect": 302, "page": 200}.get(mode, 204))
+                if server.arrived(self.path):
+                    server.released.wait(HELD_ANSWER_SECONDS)
+                    server.release()
                 if mode == "redirect":
                     self.send_response(302)
                     self.send_header("Location", f"http://127.0.0.1:{server.port}/login")
@@ -750,11 +733,41 @@ class ProbeServer:
         """When the HTTP probes of a scenario arrived: one for each check."""
         return [when for when, path, _ in self.requests(scenario) if path.endswith("/generate_204")]
 
+    def hold_first(self, scenario: str) -> None:
+        """The answer to the first HTTP probe of the scenario is held (for at most HELD_ANSWER_SECONDS) until
+        `release`: the check it belongs to stays unanswered, and `is_open` says so."""
+        with self.lock:
+            self.held, self.open = scenario, None
+            self.released.clear()
+
+    def arrived(self, path: str) -> bool:
+        """A request is at the server: True when it is the held one, which the caller answers only after the
+        hold (once: the held scenario is not held again)."""
+        with self.lock:
+            if self.held is None or not path.startswith(self.held + "/") or not path.endswith("/generate_204"):
+                return False
+            self.held, self.open = None, path.rsplit("/", 1)[0]
+            return True
+
+    def is_open(self, scenario: str) -> bool:
+        """Whether the held request of the scenario is at the server and not answered."""
+        with self.lock:
+            return self.open == scenario
+
+    def release(self) -> None:
+        """Ends the hold: the held request is answered."""
+        with self.lock:
+            self.open = None
+            self.released.set()
+
     def clear(self) -> None:
         with self.lock:
             self.seen.clear()
+            self.held = self.open = None
+            self.released.clear()
 
     def close(self) -> None:
+        self.release()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.thread.join(timeout=10)
@@ -1827,28 +1840,64 @@ def check_page_answer_warns(guest: Guest, server: "ProbeServer", mode: str) -> s
     return f"{len(server.probes(scenario))} requests answered {code} and read by the network's own probe"
 
 
+def validated_while_unanswered(guest: Guest, server: "ProbeServer", scenario: str,
+                               seconds: float = WARNING_SECONDS) -> Pin:
+    """Waits for the first check of the network (the scenario's first HTTP probe, which the server holds) to be
+    at the server, looks at `dumpsys connectivity` while that request is open and unanswered (open before the
+    look and still open after it, so the whole look fell inside), and requires the newest network to be
+    validated then, not partial, not behind a sign-in page, its private DNS not broken. It then answers the
+    request and pins that network. A network that is validated only when its check is answered fails here, as
+    does a look that did not fit in the hold (the hold is HELD_ANSWER_SECONDS, below the probe's own timeout)."""
+    found: list[Pin] = []
+
+    def look() -> str | None:
+        if not server.is_open(scenario):
+            if server.checks(scenario):
+                raise Failure("the first check's answer was out before a look at the network was made: "
+                              f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
+            return "the server has seen no check"
+        dump = guest.connectivity()
+        if not server.is_open(scenario):
+            raise Failure("the held answer was out before the look at the network was complete: "
+                          f"no look fell inside the {HELD_ANSWER_SECONDS:.0f} s hold")
+        net_id = newest_wifi_network(dump)
+        problems = validation_problems(None if net_id is None else wifi_networks(dump)[net_id])
+        when = None if net_id is None else last_validated(dump).get(net_id)
+        if when is None and not problems:
+            problems = [f"network {net_id} shows no lastValidated"]
+        if problems:
+            raise Failure("while its first internet check was unanswered: " + "; ".join(problems))
+        found.append(Pin(net_id, when))
+        return None
+
+    try:
+        wait_for("the first check's request is held at the host's server", seconds, look, guest, interval=1.0)
+    finally:
+        server.release()
+    return found[-1]
+
+
 def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | None:
     """One network, never replaced and never validated again, from a failing check to a passing one: the
     probes ask a server that answers with a page. With the Internet page in front and no other action, the
-    network is validated before its first check, the warning shows in Settings and in the status bar, the
-    check comes back after the stock back-off, and when the server answers 204 the next check passes and the
+    network is validated while its first check is still unanswered (the server holds that answer), the warning
+    shows in Settings and in the status bar, the check comes back after the stock back-off, and when the server answers 204 the next check passes and the
     warning goes from both, with a new passing line in the log. A forced re-evaluation then checks the
     network again, which brings the warning back, and the next passing check takes it away."""
     scenario = server.scenario()
     server.mode = "page"
     server.clear()
+    server.hold_first(scenario)
     guest.reverse(server.port)
     guest.show_internet_page()
     try:
         guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
                                    clear=PRIVATE_DNS_SETTINGS)
-        pin = pin_network(guest)
-        wait_for("the first check reaches the host's server", WARNING_SECONDS,
-                 lambda: None if server.checks(scenario) else "the server has seen no check", guest, interval=1.0)
-        entries = guest.validation_entries(pin.net_id)
-        first = first_validation_problems([message for _, message in entries])
-        delay = validated_after_join(guest.connectivity(), entries, pin.net_id)
-        first += join_to_validated_problems(delay)
+        pin = validated_while_unanswered(guest, server, scenario)
+        # The answer is out: the check's result is logged, and the network was validated before any probe of it.
+        wait_problems("the first check's result is logged", WARNING_SECONDS, guest,
+                      lambda: check_log_problems(guest.validation_log(pin.net_id), CHECK_FAILED_LINE), interval=1.0)
+        first = first_validation_problems(guest.validation_log(pin.net_id))
         if first:
             raise Failure("; ".join(first))
         wait_watching("the failed check shows in Settings and in the status bar, with no other action",
@@ -1889,8 +1938,8 @@ def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | 
         hold_validated(guest, SHORT_HOLD_SECONDS, pin)
     finally:
         guest.leave_internet_page()
-    return (f"network {pin.net_id} validated {delay:.1f} s after its join and at {pin.validated_at} throughout, "
-            f"{len(server.checks(scenario))} checks")
+    return (f"network {pin.net_id} validated while its first check was unanswered and at {pin.validated_at} "
+            f"throughout, {len(server.checks(scenario))} checks")
 
 
 def same_network_problems(networks: dict[int, frozenset[str]], net_id: int) -> list[str]:

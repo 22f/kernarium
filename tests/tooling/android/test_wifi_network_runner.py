@@ -27,6 +27,8 @@ import io
 from pathlib import Path
 import re
 import sys
+import threading
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -539,6 +541,64 @@ class ProbeServerTests(unittest.TestCase):
         self.assertEqual(self.server.httpd.server_address[0], "127.0.0.1")
         self.assertGreater(self.server.port, 1023)
 
+    # The held answer: the first probe of a scenario is at the server and unanswered until it is released.
+    def held_get(self, path: str) -> tuple[threading.Thread, list[int]]:
+        statuses: list[int] = []
+        thread = threading.Thread(target=lambda: statuses.append(self.get(path)[0]), daemon=True)
+        thread.start()
+        return thread, statuses
+
+    def wait_until(self, condition) -> None:
+        deadline = time.monotonic() + 10
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(condition())
+
+    def test_the_first_probe_of_a_held_scenario_is_unanswered_until_it_is_released(self) -> None:
+        self.server.mode = "expected"
+        self.server.hold_first("/s1")
+        thread, statuses = self.held_get("/s1/generate_204")
+        self.wait_until(lambda: self.server.is_open("/s1"))
+        self.assertEqual(len(self.server.checks("/s1")), 1)
+        time.sleep(0.3)
+        self.assertEqual(statuses, [])
+        self.server.release()
+        thread.join(10)
+        self.assertEqual(statuses, [204])
+        self.assertFalse(self.server.is_open("/s1"))
+
+    def test_only_the_first_probe_of_the_held_scenario_is_held(self) -> None:
+        self.server.hold_first("/s1")
+        self.assertEqual(self.get("/s2/generate_204")[0], 204)
+        self.assertEqual(self.get("/s1/gen_204")[0], 204)
+        self.assertFalse(self.server.is_open("/s1"))
+        thread, statuses = self.held_get("/s1/generate_204")
+        self.wait_until(lambda: self.server.is_open("/s1"))
+        self.assertFalse(self.server.is_open("/s2"))
+        self.server.release()
+        thread.join(10)
+        self.assertEqual(self.get("/s1/generate_204")[0], 204)
+        self.assertEqual(statuses, [204])
+
+    def test_a_held_answer_goes_out_by_itself_when_the_hold_is_over(self) -> None:
+        with mock.patch.object(runner, "HELD_ANSWER_SECONDS", 0.3):
+            self.server.hold_first("/s1")
+            started = time.monotonic()
+            status = self.get("/s1/generate_204")[0]
+        self.assertEqual(status, 204)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertFalse(self.server.is_open("/s1"))
+
+    def test_the_hold_ends_below_the_probes_own_timeout(self) -> None:
+        # NetworkMonitor.SOCKET_TIMEOUT_MS is 10 s: the platform's HTTP probe gives up then.
+        self.assertEqual(runner.PROBE_SOCKET_TIMEOUT_SECONDS, 10.0)
+        self.assertLessEqual(runner.HELD_ANSWER_SECONDS + 2, runner.PROBE_SOCKET_TIMEOUT_SECONDS)
+
+    def test_clearing_the_server_forgets_a_hold(self) -> None:
+        self.server.hold_first("/s1")
+        self.server.clear()
+        self.assertEqual(self.get("/s1/generate_204")[0], 204)
+
 
 class WarningSectionTests(unittest.TestCase):
     """The sections that show a failed check as a warning, against a guest that answers from a script."""
@@ -915,14 +975,6 @@ class PlatformFormatTests(unittest.TestCase):
         self.assertEqual(runner.last_validated(line), {})
         self.assertEqual(runner.last_validated(agent(7, VALIDATED, validated_at=800)), {7: 800})
 
-    def test_the_creation_time_is_an_instant_with_or_without_a_fraction(self) -> None:
-        # NetworkAgentInfo.toString prints `created=` + Instant.toString (no fraction when it is zero).
-        for stamp, seconds in (("2026-11-10T13:30:32.485Z", 32.485), ("2026-11-10T13:30:32Z", 32.0),
-                               ("2026-11-10T13:30:32.480Z", 32.48)):
-            with self.subTest(stamp=stamp):
-                created = runner.created_times(agent(7, VALIDATED, validated_at=1, created=stamp))[7]
-                self.assertAlmostEqual(created.second + created.microsecond / 1e6, seconds, places=3)
-
     def test_the_validation_log_header_is_the_network_and_its_name_quoted_or_not(self) -> None:
         # NetworkStackService prints the SharedLog tag, `<network> - <name>`, then its entries indented.
         for name in ('"VirtWifi"', "VirtWifi", ""):
@@ -1024,29 +1076,6 @@ class ForcedEvaluationReadingTests(unittest.TestCase):
     def test_the_entries_are_read_in_time_order(self) -> None:
         late = [self.ENTRIES[2], ("2026-11-13T03:00:14.000000", "Wi-Fi internet check passed"), self.ENTRIES[1]]
         self.assertEqual(len(runner.forced_request_problems([], late, checked=False)), 1)
-
-    def test_the_time_from_the_join_to_the_validated_line_is_read_from_the_dump_and_the_log(self) -> None:
-        dump = CONNECTIVITY
-        entries = [("2026-11-10T13:30:32.803492", runner.VALIDATED_FIRST_LINE)]
-        delay = runner.validated_after_join(dump, entries, 102)
-        self.assertAlmostEqual(delay, 0.318, places=3)
-        self.assertEqual(runner.join_to_validated_problems(delay), [])
-
-    def test_a_late_validation_is_a_problem(self) -> None:
-        entries = [("2026-11-10T13:30:46.000000", runner.VALIDATED_FIRST_LINE)]
-        delay = runner.validated_after_join(CONNECTIVITY, entries, 102)
-        self.assertIn("13.5 s after its join", runner.join_to_validated_problems(delay)[0])
-
-    def test_a_validation_before_the_join_is_a_problem(self) -> None:
-        entries = [("2026-11-10T13:30:30.000000", runner.VALIDATED_FIRST_LINE)]
-        self.assertTrue(runner.join_to_validated_problems(runner.validated_after_join(CONNECTIVITY, entries, 102)))
-
-    def test_a_time_that_cannot_be_read_is_a_problem(self) -> None:
-        self.assertIsNone(runner.validated_after_join(CONNECTIVITY, [], 102))
-        self.assertIsNone(runner.validated_after_join(CONNECTIVITY, [("2026-11-10T13:30:32.8", "x")], 102))
-        self.assertIsNone(runner.validated_after_join(
-            CONNECTIVITY, [("2026-11-10T13:30:32.8", runner.VALIDATED_FIRST_LINE)], 999))
-        self.assertIn("cannot be read", runner.join_to_validated_problems(None)[0])
 
 
 def log_line(pid: int, tid: int, priority: str, tag: str, message: str, when: str = "03:10:01.000") -> str:
@@ -1642,18 +1671,24 @@ class SimulatedGuest(StubbedGuest):
         self.log = []
         self.created = self.stamp() + "Z"
         self.broken = False
-        self.validated = True
-        if self.faults.get("validated_late"):
-            self.counter += 12
+        self.validated = not self.faults.get("capability_late")
+        self.in_flight: tuple[float, int] | None = None
         probe = "PROBE_HTTP http://127.0.0.1:1/x/generate_204 time=3ms ret=200 request={} headers={}"
         if self.faults.get("probe_first"):
             self.add(probe)
         if self.strict and not self.faults.get("no_private_dns_probe"):
             self.add("PROBE_PRIVDNS 1a2b3c4d-dnsotls-ds.metric.gstatic.com 12ms: [/8.8.8.8]")
         self.add(runner.VALIDATED_FIRST_LINE)
-        self.next_check: float | None = self.clock.now + 0.5
+        self.next_check: float | None = None if self.faults.get("no_checks") else self.clock.now + 0.5
 
     def advance(self) -> None:
+        if self.in_flight is not None:
+            # The held answer goes out when the runner releases it, or when the server's hold is over.
+            arrived, status = self.in_flight
+            if not self.server.is_open(self.scenario) or self.clock.now - arrived >= runner.HELD_ANSWER_SECONDS:
+                self.server.release()
+                self.in_flight = None
+                self.answered(self.clock.now, status)
         while self.next_check is not None and self.next_check <= self.clock.now:
             when, self.next_check = self.next_check, None
             self.check(when)
@@ -1663,17 +1698,31 @@ class SimulatedGuest(StubbedGuest):
         if self.scenario is None:
             self.add("PROBE_HTTPS https://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
             self.add("PROBE_HTTP http://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
+            self.conclude(when, False)
+            return
+        status = {"page": 200, "redirect": 302, "expected": 204}[self.server.mode]
+        path = f"{self.scenario}/generate_204"
+        self.server.record(path, status, when=when)
+        if self.server.arrived(path):
+            # The server holds the answer: the check is unanswered until it goes out.
+            self.in_flight = (when, status)
+            return
+        self.answered(when, status)
+
+    def answered(self, when: float, status: int) -> None:
+        url = f"http://127.0.0.1:41000{self.scenario}/generate_204"
+        if self.faults.get("probe_times_out"):
+            self.add(f"PROBE_HTTP {url} Probe failed with exception java.net.SocketTimeoutException: timeout")
             passed = False
         else:
-            status = {"page": 200, "redirect": 302, "expected": 204}[self.server.mode]
-            self.server.record(f"{self.scenario}/generate_204", status, when=when)
-            url = f"http://127.0.0.1:41000{self.scenario}/generate_204"
-            if self.faults.get("probe_times_out"):
-                self.add(f"PROBE_HTTP {url} Probe failed with exception java.net.SocketTimeoutException: timeout")
-                passed = False
-            else:
-                self.add(f"PROBE_HTTP {url} time=3ms ret={status} request={{}} headers={{}}")
-                passed = status == 204
+            self.add(f"PROBE_HTTP {url} time=3ms ret={status} request={{}} headers={{}}")
+            passed = status == 204
+        self.conclude(when, passed)
+
+    def conclude(self, when: float, passed: bool) -> None:
+        if self.faults.get("capability_late") and not self.validated and not self.broken:
+            # The platform of before: the network is validated only when its first check has an answer.
+            self.validated, self.validated_at = True, 5000 + int(self.clock.now * 1000)
         if self.faults.get("private_dns_for_each_check") and self.strict:
             self.add("PROBE_PRIVDNS 5e6f7a8b-dnsotls-ds.metric.gstatic.com 12ms: [/8.8.8.8]")
         if passed:
@@ -1774,6 +1823,8 @@ class SimulatedGuest(StubbedGuest):
         self.advance()
 
     def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+        if command == "dumpsys connectivity" and self.in_flight is not None:
+            self.clock.now += self.faults.get("slow_look", 0)
         self.advance()
         answers = {
             "dumpsys connectivity": lambda: ("Current networks:\n" + agent(self.net_id - 1, STOCK)
@@ -1828,7 +1879,8 @@ class SimulatedSectionTests(unittest.TestCase):
     def test_the_warning_follows_one_network_from_a_failing_check_to_a_passing_one_and_back(self) -> None:
         guest = self.guest()
         note = self.recovery(guest)
-        self.assertRegex(note, r"^network 102 validated 1\.0 s after its join and at \d+ throughout, \d+ checks$")
+        self.assertRegex(note, r"^network 102 validated while its first check was unanswered and at \d+ throughout, "
+                               r"\d+ checks$")
         # No rejoin or other action: the network joined once, and the forced check was asked for by its ID.
         self.assertEqual(guest.net_id, 102)
         self.assertEqual(guest.calls.count("forget and save"), 1)
@@ -2023,6 +2075,54 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
         self.assertFalse(guest.broken)
         self.assertEqual(guest.calls.count(f"reevaluate {guest.net_id}"), 2)
 
+    # The network is validated while its first check is unanswered.
+    def test_a_network_that_is_validated_while_its_first_check_is_unanswered_passes(self) -> None:
+        guest = self.guest()
+        note = self.recovery(guest)
+        self.assertIn("validated while its first check was unanswered", note)
+        # The server held the first answer, and it went out only after the runner looked at the network.
+        self.assertFalse(self.server.is_open(guest.scenario))
+        self.assertEqual(guest.calls.count("forget and save"), 1)
+
+    def test_the_runner_looks_at_the_network_while_the_request_is_open_and_then_answers_it(self) -> None:
+        guest = self.guest()
+        looks: list[bool] = []
+        connectivity = guest.connectivity
+
+        def look() -> str:
+            looks.append(self.server.is_open(guest.scenario))
+            return connectivity()
+
+        guest.connectivity = look
+        self.recovery(guest)
+        self.assertIn(True, looks)
+        self.assertEqual(guest.net_id, 102)
+
+    def test_an_early_explanation_with_a_late_capability_fails_the_section(self) -> None:
+        # The log's line comes at the join, and the capability only when the check is answered: the platform
+        # before the change, which no time bound between the join and the line can tell from the right one.
+        guest = self.guest(capability_late=True)
+        with self.assertRaisesRegex(runner.Failure, "while its first internet check was unanswered: "
+                                                    "the network is not validated"):
+            self.recovery(guest)
+        self.assertFalse(self.server.is_open(guest.scenario))
+
+    def test_a_look_that_does_not_fit_in_the_hold_fails_the_section(self) -> None:
+        guest = self.guest(slow_look=runner.HELD_ANSWER_SECONDS + 1)
+        with self.assertRaisesRegex(runner.Failure, "the held answer was out before the look at the network"):
+            self.recovery(guest)
+
+    def test_a_first_check_that_never_reaches_the_server_fails_the_section(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "the first check's request is held at the host's server: "
+                                                    "the server has seen no check"):
+            self.recovery(self.guest(no_checks=True))
+
+    def test_a_network_that_is_partial_while_its_check_is_unanswered_fails_the_section(self) -> None:
+        guest = self.guest()
+        guest.capabilities = lambda: VALIDATED + "&PARTIAL_CONNECTIVITY"
+        with self.assertRaisesRegex(runner.Failure, "while its first internet check was unanswered: .*PARTIAL"):
+            self.recovery(guest)
+
     # The quiet hold after a pass.
     def test_a_pass_that_leaves_no_timer_lets_the_forced_check_be_told_apart(self) -> None:
         self.assertIn("checks", self.recovery(self.guest()))
@@ -2039,14 +2139,6 @@ class SimulatedForcedEvaluationTests(unittest.TestCase):
         started = self.clock.now
         runner.hold_quiet(guest, self.server, scenario, runner.QUIET_SECONDS, pin)
         self.assertGreaterEqual(self.clock.now - started, runner.QUIET_SECONDS)
-
-    # The time from the join to the validated line.
-    def test_a_network_that_is_validated_within_a_second_of_its_join_passes(self) -> None:
-        self.assertIn("validated 1.0 s after its join", self.recovery(self.guest()))
-
-    def test_a_network_that_is_validated_late_fails_the_recovery_section(self) -> None:
-        with self.assertRaisesRegex(runner.Failure, r"reported validated 13\.0 s after its join"):
-            self.recovery(self.guest(validated_late=True))
 
 
 class RunnerNamesTests(unittest.TestCase):

@@ -705,12 +705,14 @@ each, and the host closes no stream by a reset.
 network stays enabled, joined and validated while the internet checks fail, and
 only Android's Wi-Fi mark shows the failed check in Settings and in the status
 bar, also when a sign-in or block page that the runner's server gives the probes
-answers them. On one network that is never replaced or validated again, the
-warning shows with no other action, follows the server from a failing check to
-a passing one and back, and returns when a forced re-evaluation checks the
-network; a strict private DNS name is not probed again for each failed check,
-and a forced re-evaluation of a network whose strict name fails leaves it
-unvalidated with its private DNS broken and runs no check. A guest of the
+answers them. On one network that is never replaced or validated again, which
+is validated while its first check is still unanswered (the server holds that
+answer), the warning shows with no other action, follows the server from a
+failing check to a passing one and back, and returns when a forced
+re-evaluation checks the network; a strict private DNS name is not probed again
+for each failed check, and each forced re-evaluation of a network whose strict
+name fails adds its own log line, leaves the network unvalidated with its
+private DNS broken and runs no check. A guest of the
 release under test streams its log from the start of each boot to a host file;
 crashes and ANRs of NetworkStack, SystemUI and Settings, and illegal
 instructions, are read from the whole stream and fail the run, in the section
