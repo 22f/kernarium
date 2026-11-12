@@ -4,6 +4,7 @@
 #include "audio/protocol.hpp"
 #include "battery/in_process_service.hpp"
 #include "battery/protocol.hpp"
+#include "camera/camera_layout.hpp"
 #include "camera/camera_source.hpp"
 #include "camera/in_process_service.hpp"
 #include "video/in_process_service.hpp"
@@ -379,6 +380,10 @@ struct PreparedArguments {
 	/* --camera-profile=: the synthetic camera is the source of `synthetic`
 	 * and, when this is given, of `blocked`. */
 	std::optional<CameraProfile> camera_profile;
+	/* --camera-layout=auto: the guest's camera layout is composed from the
+	 * cameras the source presents and passed as the vendor SKU, as the iOS
+	 * runtime does. Without it a run passes the layout itself. */
+	bool camera_layout_auto {};
 	/* --camera-calibration-dir=: where the colour data a Bayer still teaches
 	 * is kept; in memory when empty. */
 	std::string camera_calibration_directory;
@@ -428,14 +433,15 @@ struct PreparedArguments {
 		return std::tie(gpu, gpu_budget, audio, audio_output,
 				audio_input_host, battery, gnss, location, video,
 				video_encoder, hardware_input, camera, camera_profile,
-				camera_calibration_directory, console_socket,
+				camera_layout_auto, camera_calibration_directory,
+				console_socket,
 				serial_socket, net_forwards, vsock_forwards) ==
 			std::tie(other.gpu, other.gpu_budget, other.audio,
 				 other.audio_output, other.audio_input_host,
 				 other.battery, other.gnss, other.location,
 				 other.video, other.video_encoder,
 				 other.hardware_input, other.camera,
-				 other.camera_profile,
+				 other.camera_profile, other.camera_layout_auto,
 				 other.camera_calibration_directory,
 				 other.console_socket, other.serial_socket,
 				 other.net_forwards, other.vsock_forwards);
@@ -606,6 +612,11 @@ PreparedArguments prepare_host_arguments(
 			else
 				throw std::invalid_argument(
 					"--camera-profile must be phone, tablet or laptop");
+		} else if (valued("--camera-layout=")) {
+			if (value != "auto")
+				throw std::invalid_argument(
+					"--camera-layout must be auto");
+			prepared.camera_layout_auto = true;
 		} else if (valued("--camera-calibration-dir=")) {
 			if (value.empty())
 				throw std::invalid_argument(
@@ -755,6 +766,8 @@ PreparedArguments prepare_host_arguments(
 		throw std::invalid_argument(
 			"--camera-profile requires --camera=synthetic or "
 			"--camera=blocked");
+	if (prepared.camera_layout_auto && prepared.camera == CameraSource::none)
+		throw std::invalid_argument("--camera-layout requires --camera");
 	if (!prepared.camera_calibration_directory.empty() &&
 	    prepared.camera == CameraSource::none)
 		throw std::invalid_argument(
@@ -1691,6 +1704,37 @@ private:
 			std::fprintf(stderr, "Unable to start the camera: %s\n",
 				error.what());
 			return false;
+		}
+		if (prepared_.camera_layout_auto) {
+			/* The layout the iOS runtime composes for these cameras: the
+			 * same function, the same tier and calibration. */
+			for (const auto &argument : kernel) {
+				if (argument.starts_with(uml::camera::layoutArgumentPrefix)) {
+					std::fputs("--camera-layout=auto cannot be combined "
+						   "with an explicit camera layout\n", stderr);
+					return false;
+				}
+			}
+			try {
+				uml::camera::ArrangementOptions arrangement;
+				arrangement.tier = options.tier;
+				const auto layout = uml::camera::composeLayout(
+					*source, *camera_calibration_, arrangement);
+				kernel.emplace_back(
+					std::string{uml::camera::layoutArgumentPrefix} + layout);
+				std::fprintf(stderr, "Camera layout: %s\n", layout.c_str());
+			} catch (const std::exception &error) {
+				std::fprintf(stderr, "Unable to compose the camera layout: %s\n",
+					error.what());
+				return false;
+			}
+		}
+		/* The side keys report whether the cameras are blocked, as the iOS
+		 * runtime's do (only a guest with hardware input has them). */
+		if (services_.side_keys) {
+			services_.side_keys->setSwitch(
+				{uml::input::virtio::protocol::switchCameraLensCover,
+				 options.mode == uml::camera::CameraMode::blocked});
 		}
 		return start_virtio_device(
 			kernel, services_.camera, uml::camera::cameraDeviceId,

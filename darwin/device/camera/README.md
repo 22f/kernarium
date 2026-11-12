@@ -105,11 +105,28 @@ asks for it, and the launcher refuses to start, saying how to grant it, when it
 is not. The tier follows the launch's GPU budget, and a state line goes to
 stderr when the host starts or stops capturing.
 
+## Layout
+
+An Android image carries a closed set of camera layouts and the host names the
+one that describes its cameras as `androidboot.product.vendor.sku`
+(`camera_layout.hpp`; `android/lineage-24/tools/camera_layouts.py` is the only
+source of the set). `composeLayout()` composes that name from a platform
+camera's discovery, as the device will present the cameras
+(`arrangeCameras`), and falls back to the nearest layout an image has. It asks
+for no permission and opens no session, so the layout is the same whether the
+guest's cameras are live or blocked. The macOS launcher composes it with
+`--camera-layout=auto`, as the iOS runtime does; a launch otherwise passes the
+layout itself. A release's own command line may not carry the argument. A
+blocked guest also reports Android's camera lens cover on the side-key input
+device (`SW_CAMERA_LENS_COVER`) when its layout has cameras.
+
 ## Tests
 
 `camera-controls`, `camera-description`, `camera-jpeg-gap` and
-`camera-calibration` check the pure parts, and `camera-source` the launcher's
-factories (nothing opened, no prompt). `camera-device` drives the device
+`camera-calibration` check the pure parts, `camera-layout` the layout names,
+their fallbacks and the composition (against the image's table), and
+`camera-source` the launcher's factories (nothing opened, no prompt).
+`camera-device` drives the device
 over both queues in front of the synthetic camera, including the invariant that
 a blocked session never opens a platform session, a hostile guest, a reset with
 streams and stills in flight, an event queue that retries and wakes the server,

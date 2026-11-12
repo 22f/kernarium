@@ -257,6 +257,30 @@ void testHostsEarnTheirLayouts()
     require(!layoutDimensionsOf(apart, CameraTier::large).concurrent, "concurrency needs both to name each other");
 }
 
+// The layout of a platform camera's host is the one the device's own arrangement earns, restricted to what the
+// image has.
+void testComposeLayoutOfAHost()
+{
+    CalibrationStore store;
+    ArrangementOptions options;
+    options.tier = CameraTier::large;
+
+    SyntheticCameraOptions phoneOptions;
+    phoneOptions.profile = SyntheticCameraProfile::phone;
+    const auto phone = uml::platform::makeSyntheticCamera(phoneOptions);
+    require(composeLayout(*phone, store, options) == "bf-large-flash-manual-concurrent-front2160", "discovery composes the name");
+    require(phone->sessionsOpened() == 0, "and opens no session");
+    const auto smallOnly = [](std::string_view name) { return name.find("bf-large") == std::string_view::npos; };
+    require(composeLayout(*phone, store, options, smallOnly) == "bf-small-manual", "from the layouts an image has (the flash goes before the tier)");
+    options.tier = CameraTier::small;
+    require(composeLayout(*phone, store, options) == "bf-small-flash-manual", "the tier is the launch's");
+
+    SyntheticCameraOptions laptopOptions;
+    laptopOptions.profile = SyntheticCameraProfile::laptop;
+    require(composeLayout(*uml::platform::makeSyntheticCamera(laptopOptions), store, options) == "front", "a laptop");
+    require(layoutArgumentPrefix == "androidboot.product.vendor.sku=", "the argument Android imports");
+}
+
 // The guaranteed concurrent sizes: this file's rule is the HAL's.
 andarium::camera::Formats halFormats(const CameraDescription& camera)
 {
@@ -327,6 +351,7 @@ int main(int argc, char** argv)
     testNormalization();
     testMissingCombinations();
     testHostsEarnTheirLayouts();
+    testComposeLayoutOfAHost();
     testConcurrentRuleIsTheHals();
     std::puts("camera-layout: passed");
     return 0;

@@ -74,10 +74,24 @@ struct LayoutDimensions {
  * for the JPEG list. A size is cut from a video mode that covers it. */
 [[nodiscard]] bool meetsConcurrentStreams(const CameraDescription& camera) noexcept;
 
+/* The kernel argument the layout travels in; Android's init imports it as
+ * ro.boot.product.vendor.sku. */
+inline constexpr std::string_view layoutArgumentPrefix = "androidboot.product.vendor.sku=";
+
 /* The dimensions a host's cameras (in wire order, `arrangeCameras`) earn at a
  * tier. A host with a back camera and no front one, or with no camera that is
  * front or back, has none: the set has no layout that says so, and a front
  * camera that is not there would be declared falsely. */
 [[nodiscard]] LayoutDimensions layoutDimensionsOf(std::span<const CameraDescription> cameras, CameraTier tier) noexcept;
+
+/* The layout of a platform camera's host, composed as the camera device will
+ * present its cameras (`arrangeCameras` with `options` and what `calibration`
+ * has learned), from the layouts `available` accepts (all of them when it is
+ * empty). Discovery only: it opens no session and asks the system for nothing.
+ * It is the one place a host's layout is composed, so the application's runtime
+ * and the launcher agree with the device. */
+[[nodiscard]] std::string composeLayout(
+    const uml::platform::Camera& host, const CalibrationStore& calibration, const ArrangementOptions& options,
+    const std::function<bool(std::string_view)>& available = {});
 
 } // namespace uml::camera

@@ -235,4 +235,13 @@ LayoutDimensions layoutDimensionsOf(std::span<const CameraDescription> cameras, 
     return normalizedLayout(dimensions);
 }
 
+std::string composeLayout(const uml::platform::Camera& host, const CalibrationStore& calibration,
+                          const ArrangementOptions& options, const std::function<bool(std::string_view)>& available)
+{
+    const auto infos = host.cameras();
+    const auto sets = host.concurrentSets();
+    const auto cameras = arrangeCameras(infos, sets, host.hostModel(), calibration, options);
+    return chooseLayout(layoutDimensionsOf(cameras, options.tier), available);
+}
+
 } // namespace uml::camera
