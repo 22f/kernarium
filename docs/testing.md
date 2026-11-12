@@ -375,9 +375,11 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
-exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
-command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback)),
-and `FollowXRowTests` only with `FOLLOW_X_HANDLE=example_handle`
+and `HomeMenuTests` (Home's toolbar menu) exist only in a build with
+`FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
+above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
+`HomePlainInfoTests` (the plain Info button) only in a build without it;
+`FollowXRowTests` exist only with `FOLLOW_X_HANDLE=example_handle`
 ([Follow developer on X](../Andarium/README.md#follow-developer-on-x)); a run
 without them does not build them. The Mail composer, the picker and the
 guest's display are stand-ins. The hosted tests

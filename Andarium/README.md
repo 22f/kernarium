@@ -198,25 +198,30 @@ not declare because only an App Store build is uploaded.
 
 ### Send feedback
 
-Info and a running session's Settings open a sheet that writes an email to the
-developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
-compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
-ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
-names the receiver, so a fork, a sideload or a Debug or Release build holds none
-of it, and every configuration's bundle check says whether it does: it also
-fails on the local receiver's bytes in any file of a bundle that does not name
-it (never printing it), and on an `Info.plist` whose values differ from
-`Config/Info.plist` (the preprocessing changes the feedback key alone).
-Tests and captures turn it on in a Debug build with
-`FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
-bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
-only, never the local receiver, and its hooks into the sheet are not in the
-AppStore product. Its logic (`Shared/Feedback/Logic`) is also built, and
-tested, by AndariumCore's tests through a symlinked target no product links.
-The feature's words are looked up in the `Feedback` string table (zh-Hans,
-zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
-its information block are English whatever the interface language, and the bug
-report's overlay text is the app's own.
+Home's toolbar menu and a running session's Settings open a sheet that writes
+an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
+it). Home's toolbar holds one menu in place of the Info button, with Info and
+Send feedback; it keeps Info's glyph and accessibility label and is on Welcome
+too, where Send feedback is reachable before a virtual machine is set up. A
+build without Send feedback keeps the plain Info button and holds no menu code
+(`Shared/HomeMenu.swift`). Info itself has no Send feedback section. The
+feature is compiled in, under the `FEEDBACK_MAIL` condition, only in an
+AppStore build whose ignored `Config/Feedback.local.xcconfig` (from
+`Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
+a Debug or Release build holds none of it, and every configuration's bundle
+check says whether it does: it also fails on the local receiver's bytes in any
+file of a bundle that does not name it (never printing it), and on an
+`Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
+changes the feedback key alone). Tests and captures turn it on in a Debug build
+with `FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which
+the bundle check accepts in Debug alone; `AndariumPreview` takes that
+arrangement only, never the local receiver, and its hooks into the sheet are
+not in the AppStore product. Its logic (`Shared/Feedback/Logic`) is also built,
+and tested, by AndariumCore's tests through a symlinked target no product
+links. The feature's words are looked up in the `Feedback` string table
+(zh-Hans, zh-Hant and ja are in [Languages](#languages)); the mail's subject
+prefix and its information block are English whatever the interface language,
+and the bug report's overlay text is the app's own.
 
 ### Follow developer on X
 

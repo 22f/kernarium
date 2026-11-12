@@ -155,11 +155,6 @@ struct InfoSheet: View {
                         .accessibilityIdentifier("info-whats-new")
                     }
                 }
-                #if FEEDBACK_MAIL
-                if model.feedbackAddress != nil {
-                    Section { SendFeedbackEntrance(place: .info) }
-                }
-                #endif
                 Section("System info") {
                     LabeledContent("Build", value: model.system.buildLabel)
                     LabeledContent("Android version", value: model.system.version)
@@ -217,8 +212,5 @@ struct InfoSheet: View {
         // Tall enough for every row, in any language, without scrolling to
         // the last one; the system keeps it inside a smaller window.
         .presentationSizing(FixedSheetSizing(width: 540, height: 900))
-        #if FEEDBACK_MAIL
-        .sendFeedbackSheet(model)
-        #endif
     }
 }
