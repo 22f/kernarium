@@ -352,7 +352,11 @@ HAL passes them on as frames of the camera. Output sizes the host lacks that
 CTS and the camera API require (standard JPEG sizes, the YUV sizes of every
 smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut from the
 smallest native video mode that covers them, scaled in the HAL and, for a
-JPEG, encoded there. `BURST_CAPTURE` is never declared. The candidate's smoke
+JPEG, encoded there. A request whose outputs the host refuses or does not
+deliver within the HAL's deadline (3 s, 15 s for a request with a still) is a
+failed request (`ERROR_REQUEST`, which Camera2 and CameraX report as a failed
+capture); a request that loses only some of its outputs reports
+`ERROR_BUFFER` for those. `BURST_CAPTURE` is never declared. The candidate's smoke
 test is `tests/integration/android/run_android_camera.py` (`android-camera`).
 
 ### Networking
