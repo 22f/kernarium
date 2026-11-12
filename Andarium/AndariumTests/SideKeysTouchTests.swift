@@ -98,6 +98,14 @@ struct SideKeysTouchTests {
                 lease.give()
                 throw Failure.noDisplay
             }
+            // The session hides the status bar. Where the bar has an inset of
+            // its own (the iPhone Duo's inner display, an iPad) the safe area
+            // changes with it, so it is read once the bar is hidden.
+            _ = await test.eventually {
+                root.layoutIfNeeded()
+                return lease.scene.statusBarManager?.isStatusBarHidden ?? true
+            }
+            root.layoutIfNeeded()
             let safe = root.safeAreaInsets
             let height = root.bounds.height - safe.top - safe.bottom
             self.model = model

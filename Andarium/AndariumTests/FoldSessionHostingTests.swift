@@ -13,7 +13,7 @@ import UIKit
 /// (`FoldLayoutTests` has the numbers), supplied through the reader's stub into
 /// a window of the pose's size, so every pose is tested on every Simulator;
 /// `TheRealDisplay` reads the Simulator's own display in the pose the
-/// harness put it in (`TEST_RUNNER_DUO_EXPECT_POSE`).
+/// harness put it in (`TEST_RUNNER_ANDARIUM_FOLD_POSE`).
 @MainActor
 @Suite(.serialized)
 struct FoldSessionHostingTests {
@@ -119,7 +119,12 @@ struct FoldSessionHostingTests {
         var pose: Pose
         private(set) var guest: GuestMetalView!
 
-        init(_ pose: Pose, test: FoldSessionHostingTests) async throws {
+        /// `phase` is what the root shows; Home and the boot have no guest's
+        /// display to wait for, and `withoutGuest` is the screen before a
+        /// virtual machine exists.
+        init(
+            _ pose: Pose, phase: Phase = .running(.normal), withoutGuest: Bool = false, test: FoldSessionHostingTests
+        ) async throws {
             self.pose = pose
             let entry = AppEntry.fromArguments()
             let model = entry.makeModel()
@@ -138,8 +143,24 @@ struct FoldSessionHostingTests {
             holder.addSubview(controller.view)
             controller.view.frame = holder.bounds
             controller.didMove(toParent: container)
-            model.phase = .running(.normal)
+            if withoutGuest { model.guest = nil }
+            model.phase = phase
             controller.view.layoutIfNeeded()
+            guard case .running = phase else {
+                // The window is the application's own, not the pose's: give the
+                // root the pose's safe area, as the screens below it lay out in it.
+                let window = pose.reading.window, safe = pose.reading.safeArea
+                let have = controller.view.safeAreaInsets, extra = controller.additionalSafeAreaInsets
+                controller.additionalSafeAreaInsets = UIEdgeInsets(
+                    top: extra.top + safe.minY - window.minY - have.top,
+                    left: extra.left + safe.minX - window.minX - have.left,
+                    bottom: extra.bottom + window.maxY - safe.maxY - have.bottom,
+                    right: extra.right + window.maxX - safe.maxX - have.right)
+                _ = await test.eventually { model.fold == pose.reading }
+                try? await Task.sleep(for: .milliseconds(700))
+                controller.view.layoutIfNeeded()
+                return
+            }
             var display: GuestMetalView?
             let found = await test.eventually {
                 self.controller.view.layoutIfNeeded()
@@ -186,32 +207,63 @@ struct FoldSessionHostingTests {
 
         func hit(_ point: CGPoint) -> UIView? { holder.hitTest(point, with: nil) }
 
-        /// What the screen's accessibility tree names, with each element's
-        /// frame in the view's coordinates: Andarium's keys, statistics and
-        /// notices are the elements.
+        /// What the screen's accessibility tree names, in the order it is read,
+        /// with each element's frame in the view's coordinates: Andarium's
+        /// keys, statistics and notices are the elements.
         func labelled() -> [(label: String, frame: CGRect)] {
-            var found: [(String, CGRect)] = []
-            func walk(_ node: NSObject, depth: Int) {
-                guard depth < 8 else { return }
-                let count = node.accessibilityElementCount()
-                if count != NSNotFound, count > 0 {
-                    for index in 0..<count {
-                        if let child = node.accessibilityElement(at: index) as? NSObject { walk(child, depth: depth + 1) }
-                    }
-                }
-                if let label = node.accessibilityLabel, !label.isEmpty, node !== controller.view,
-                    let screen = holder.window?.screen {
-                    found.append((label, holder.convert(node.accessibilityFrame, from: screen.coordinateSpace)))
-                }
-            }
-            walk(controller.view, depth: 0)
-            return found
+            FoldSessionHostingTests.labelled(in: controller.view, relativeTo: holder)
         }
 
         func reachesGuest(_ point: CGPoint) -> Bool {
             guard let view = hit(point) else { return false }
             return view === guest || view.isDescendant(of: guest)
         }
+    }
+
+    /// The accessibility elements under `root`, in reading order, with their
+    /// frames in `holder`'s coordinates: those the root's own tree names, then
+    /// those of the views inside it (a navigation stack's pages are views of
+    /// their own).
+    static func labelled(in root: UIView, relativeTo holder: UIView) -> [(label: String, frame: CGRect)] {
+        var found: [(String, CGRect)] = []
+        var seen: Set<String> = []
+        func add(_ node: NSObject) {
+            guard let label = node.accessibilityLabel, !label.isEmpty, node !== root,
+                let screen = holder.window?.screen else { return }
+            let frame = holder.convert(node.accessibilityFrame, from: screen.coordinateSpace)
+            if seen.insert("\(label)|\(Int(frame.minX))|\(Int(frame.minY))").inserted { found.append((label, frame)) }
+        }
+        func walk(_ node: NSObject, depth: Int) {
+            guard depth < 10 else { return }
+            let count = node.accessibilityElementCount()
+            if count != NSNotFound, count > 0 {
+                for index in 0..<count {
+                    if let child = node.accessibilityElement(at: index) as? NSObject { walk(child, depth: depth + 1) }
+                }
+            }
+            add(node)
+        }
+        func walkViews(_ view: UIView) {
+            walk(view, depth: 0)
+            for subview in view.subviews { walkViews(subview) }
+        }
+        walkViews(root)
+        return found
+    }
+
+    /// Every label a view tree carries: its accessibility elements, and the
+    /// views UIKit draws a toolbar's buttons with.
+    static func allLabels(in root: UIView) -> [String] {
+        var labels: [String] = []
+        func walk(_ view: UIView) {
+            if let label = view.accessibilityLabel, !label.isEmpty { labels.append(label) }
+            for element in view.accessibilityElements ?? [] {
+                if let label = (element as? NSObject)?.accessibilityLabel, !label.isEmpty { labels.append(label) }
+            }
+            for subview in view.subviews { walk(subview) }
+        }
+        walk(root)
+        return labels
     }
 
     private func near(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 0.6) -> Bool {
@@ -281,6 +333,17 @@ struct FoldSessionHostingTests {
             // And no element of the screen's accessibility tree is there.
             for element in rig.labelled() {
                 #expect(!element.frame.intersects(band), "\(pose), keys open \(open): \(element.label) at \(element.frame)")
+            }
+            // Open, a touch on a key stays with the key: the keys take their
+            // own touches on the inner display as they do on a phone.
+            if open {
+                let names = ["Power", "Settings", "Back", "Home", "Volume up", "Volume down"]
+                let keys = rig.labelled().filter { names.contains($0.label) }
+                #expect(Set(keys.map(\.label)) == Set(names), "\(pose): the open keys are \(keys.map(\.label))")
+                for key in keys {
+                    let centre = CGPoint(x: key.frame.midX, y: key.frame.midY)
+                    #expect(!rig.reachesGuest(centre), "\(pose): \(key.label) at \(centre) reached the guest")
+                }
             }
         }
     }
@@ -396,7 +459,15 @@ struct FoldSessionHostingTests {
         #expect(rig.model.phase == .running(.normal))
     }
 
+    /// Only the iPhone Duo folds: every other Simulator, device and Mac reports
+    /// no hinge, and the scene reads as one that does not fold. It is asserted
+    /// there, after the interaction has had the time to report one.
     @Test func aDisplayThatDoesNotFoldHasNoPoseAndKeepsItsLayout() async throws {
+        var info = utsname()
+        uname(&info)
+        let machine = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"]
+            ?? withUnsafeBytes(of: &info.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        guard machine != "iPhone19,4" else { return }
         let entry = AppEntry.fromArguments()
         let model = entry.makeModel()
         let lease = try await HostWindow.take()
@@ -407,25 +478,286 @@ struct FoldSessionHostingTests {
         model.phase = .running(.normal)
         try await Task.sleep(for: .milliseconds(500))
         controller.view.layoutIfNeeded()
-        // Only a system that reports a hinge gives a reading. On an iPhone, an
-        // iPad or a Mac there is none, and the session is laid out as ever.
-        if !controller.foldReader.reportsHinge {
-            #expect(model.fold == nil)
-            #expect(model.sessionPlan == nil)
-            #expect(model.foldPose == .plain)
+        #expect(!controller.foldReader.reportsHinge, "\(machine) reports a hinge")
+        #expect(model.fold == nil, "\(machine)")
+        #expect(model.sessionPlan == nil, "\(machine)")
+        #expect(model.foldPose == .plain, "\(machine)")
+    }
+
+    // MARK: VoiceOver
+
+    /// The statistics and the notices are read before the keys in every pose,
+    /// as on the phone, where the keys are the last thing on the screen.
+    @Test(arguments: Pose.allCases)
+    func theStatisticsAreReadBeforeTheKeys(_ pose: Pose) async throws {
+        let rig = try await Rig(pose, test: self)
+        defer { rig.end() }
+        rig.model.session.showStats = true
+        rig.model.session.sideKeysOpen = true
+        try await Task.sleep(for: .milliseconds(900))
+        rig.controller.view.layoutIfNeeded()
+        let memoryMiB = rig.model.guest?.memoryMiB ?? Limits.defaultMemoryRangeMiB.lowerBound
+        let spoken = rig.model.session.readout.spoken(memoryMiB: memoryMiB, recovery: false)
+        let labels = rig.labelled().map(\.label)
+        let statistics = try #require(labels.firstIndex(of: spoken), "no statistics among \(labels)")
+        let power = try #require(labels.firstIndex(of: "Power"), "no Power among \(labels)")
+        #expect(statistics < power, "\(pose): the statistics come after Power in \(labels)")
+    }
+
+    // MARK: The other screens
+
+    /// Welcome's place, measured in the space it is given: a view that fills
+    /// the space, named "space", stands beside it. Welcome is the view alone
+    /// in a view the size of the pose: the navigation stack Home puts it in
+    /// lays out by the window the system has, which is not the pose's here.
+    /// Flat, it is where it is on a display that does not fold, whatever the
+    /// fold; bent, it is on the alerts' half. The captures show the centring
+    /// on the real display.
+    @Test(arguments: Pose.allCases.filter(\.inner))
+    func welcomeIsCentredAcrossTheDisplayWhenFlatAndOnAHalfWhenBent(_ pose: Pose) async throws {
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        func place(_ fold: FoldReading?) async throws -> (space: CGRect, welcome: CGRect) {
+            let model = AppEntry.fromArguments().makeModel()
+            model.guest = nil
+            model.fold = fold
+            let container = UIViewController()
+            lease.window.rootViewController = container
+            let holder = UIView(frame: pose.reading.window)
+            container.view.addSubview(holder)
+            let host = UIHostingController(rootView: ZStack {
+                Color.clear.accessibilityElement(children: .ignore).accessibilityLabel("space")
+                WelcomeView()
+            }.environment(model))
+            container.addChild(host)
+            host.view.frame = holder.bounds
+            holder.addSubview(host.view)
+            host.didMove(toParent: container)
+            defer {
+                host.willMove(toParent: nil)
+                host.view.removeFromSuperview()
+                host.removeFromParent()
+                holder.removeFromSuperview()
+            }
+            try await Task.sleep(for: .milliseconds(800))
+            host.view.layoutIfNeeded()
+            let elements = Self.labelled(in: host.view, relativeTo: holder)
+            let space = try #require(elements.first { $0.label == "space" }?.frame, "no space: \(elements)")
+            let shown = elements.filter {
+                $0.label.contains("No virtual machine yet") || $0.label.contains("Set up virtual machine")
+                    || $0.label.contains("free on this")
+            }
+            let welcome = try #require(
+                shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
+            return (space, welcome)
+        }
+        let (_, welcome) = try await place(pose.reading)
+        let band = try #require(pose.reading.division).frame
+        if pose == .uprightFlat || pose == .turnedFlat {
+            // The pose's safe area differs from the window's own by a few
+            // points; a half would be a hundred times that off.
+            let (_, plain) = try await place(nil)
+            let near = abs(welcome.midX - plain.midX) < 12 && abs(welcome.midY - plain.midY) < 12
+                && abs(welcome.width - plain.width) < 12 && abs(welcome.height - plain.height) < 12
+            #expect(near, "\(pose): Welcome is at \(welcome), not where it is without a fold, \(plain)")
+        } else {
+            let halves = try #require(FoldHalves(pose.reading))
+            #expect(!welcome.intersects(band), "\(pose): Welcome is on the fold at \(welcome)")
+            #expect(halves.card.insetBy(dx: -1, dy: -1).contains(welcome), "\(pose): Welcome \(welcome) is not on \(halves.card)")
+        }
+    }
+
+    @Test(arguments: Pose.allCases.filter(\.inner))
+    func theBootSitsOnTheUpperHalfWhenStandingAndOnTheAlertsHalfOtherwise(_ pose: Pose) async throws {
+        let rig = try await Rig(pose, phase: .booting(.normal), test: self)
+        defer { rig.end() }
+        let steps = rig.labelled().filter { $0.label.contains("Linux kernel") || $0.label.contains("System image") }
+        let boot = try #require(steps.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no boot steps")
+        let band = try #require(pose.reading.division).frame
+        let halves = try #require(FoldHalves(pose.reading))
+        #expect(!boot.intersects(band), "\(pose): the boot is on the fold at \(boot)")
+        let place = pose == .turnedBook ? halves.first : halves.card
+        #expect(place.insetBy(dx: -1, dy: -1).contains(boot), "\(pose): the boot \(boot) is not on \(place)")
+    }
+
+    /// A card is kept to its half by the space it is given, not by the
+    /// window: in a sheet that is only the leading half wide, the Send
+    /// feedback's busy card must not be padded away.
+    @Test func aCardInASheetsOwnFrameIsNotPaddedAwayByTheWindowsHalves() async throws {
+        let model = AppEntry.fromArguments().makeModel()
+        model.fold = Pose.uprightBook.reading
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let container = UIViewController()
+        lease.window.rootViewController = container
+        let host = UIHostingController(rootView: Text("Sending").onCardHalf().environment(model))
+        container.addChild(host)
+        let holder = UIView(frame: Pose.uprightBook.reading.window)
+        container.view.addSubview(holder)
+        // The sheet the system keeps to the leading half: 455.5 wide, the
+        // card's half, and nothing of the window's other half.
+        host.view.frame = CGRect(x: 0, y: 0, width: 455.5, height: 500)
+        holder.addSubview(host.view)
+        host.didMove(toParent: container)
+        try await Task.sleep(for: .milliseconds(700))
+        host.view.layoutIfNeeded()
+        let text = try #require(Self.labelled(in: host.view, relativeTo: holder).first { $0.label == "Sending" }, "no card")
+        #expect(text.frame.width > 40, "the card collapsed to \(text.frame)")
+        #expect(host.view.frame.insetBy(dx: -1, dy: -1).contains(text.frame), "the card is at \(text.frame)")
+        host.willMove(toParent: nil)
+        host.view.removeFromSuperview()
+        host.removeFromParent()
+        holder.removeFromSuperview()
+    }
+
+    /// Turning the display with a sheet open leaves the sheet's content as it
+    /// is: a sheet decides its presentation once, when it is presented.
+    @Test(arguments: [(from: Pose.uprightBook, to: Pose.turnedFlat), (from: Pose.turnedBook, to: Pose.uprightFlat)])
+    func turningTheDisplayWithASheetOpenKeepsItsContent(_ turn: (from: Pose, to: Pose)) async throws {
+        let model = AppEntry.fromArguments().makeModel()
+        model.fold = turn.from.reading
+        let counter = SheetProbe.Counter()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let host = UIHostingController(rootView: SheetProbe(model: model, counter: counter))
+        lease.window.rootViewController = host
+        #expect(await eventually { counter.appeared == 1 }, "the sheet did not appear")
+        let token = counter.tokens.first
+        model.fold = turn.to.reading
+        try await Task.sleep(for: .milliseconds(900))
+        model.fold = turn.from.reading
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(counter.appeared == 1, "\(turn): the sheet's content was built \(counter.appeared) times")
+        #expect(counter.disappeared == 0, "\(turn): the sheet's content went away")
+        #expect(counter.tokens.count == 1 && counter.tokens.first == token, "\(turn): the sheet's state was lost")
+        host.dismiss(animated: false)
+        #expect(await eventually { host.presentedViewController == nil })
+        lease.window.rootViewController = nil
+    }
+
+    /// A sheet with a counter of how many times its content was built and a
+    /// piece of state that stands for what the person typed.
+    struct SheetProbe: View {
+        @MainActor final class Counter {
+            var appeared = 0
+            var disappeared = 0
+            var tokens: Set<UUID> = []
+        }
+
+        let model: AppModel
+        let counter: Counter
+        @State private var presented = true
+
+        var body: some View {
+            Color.clear.sheet(isPresented: $presented) {
+                Content(counter: counter).foldSheet(model)
+            }
+        }
+
+        struct Content: View {
+            let counter: Counter
+            @State private var typed = UUID()
+
+            var body: some View {
+                Text("typed")
+                    .onAppear {
+                        counter.appeared += 1
+                        counter.tokens.insert(typed)
+                    }
+                    .onDisappear { counter.disappeared += 1 }
+            }
+        }
+    }
+
+    // MARK: The file browser
+
+    private static let host = HostDevice(
+        name: "iPhone", processorCount: 6, memory: MemoryPolicy(maximumsMiB: [4096]), freeStorageBytes: 40_000_000_000)
+
+    /// A model whose guest is running with its storage up, and a browser in
+    /// `Download`.
+    private func browsing() async -> (AppModel, FileBrowserModel) {
+        let host = Self.host
+        let system = SystemInfo(
+            version: "17", release: "r2", kernel: "Linux 6.18", architecture: "arm64, 4 KiB pages", appVersion: "1")
+        let model = AppModel(
+            guest: Guest.fresh(on: host), host: host, system: system, capabilities: .device, createRequirementBytes: 1)
+        let driver = StubDriver(plan: .normal)
+        driver.storage = true
+        model.driver = driver
+        model.refreshPlan()
+        let browser = FileBrowserModel(backend: FileBrowserModelTests.ScriptedBackend(), center: NotificationCenter())
+        model.fileBrowser = browser
+        model.start(.normal)
+        model.finishBoot(.normal)
+        await model.refreshStorage()
+        let download = GuestPath.child("Download", of: GuestPath.root)
+        browser.route = [FolderRoute(path: GuestPath.root), FolderRoute(path: download)]
+        await browser.load(download)
+        return (model, browser)
+    }
+
+    /// On the cover Import is a round button of the toolbar, and the bar at
+    /// the foot has the trail alone until something is selected; in every
+    /// other pose, and on a display that does not fold, it is the labelled
+    /// button in the bar and the toolbar has none.
+    @Test(arguments: Pose.allCases)
+    func importIsARoundToolbarButtonOnTheCoverAndLabelledInTheBarElsewhere(_ pose: Pose) async throws {
+        let (model, browser) = await browsing()
+        model.fold = pose.reading
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let container = UIViewController()
+        lease.window.rootViewController = container
+        let download = GuestPath.child("Download", of: GuestPath.root)
+        func present<Root: View>(_ root: Root) async throws -> ([String], () -> Void) {
+            let host = UIHostingController(rootView: root.environment(model))
+            container.addChild(host)
+            host.view.frame = pose.reading.window
+            container.view.addSubview(host.view)
+            host.didMove(toParent: container)
+            try await Task.sleep(for: .milliseconds(900))
+            host.view.layoutIfNeeded()
+            return (Self.allLabels(in: host.view), {
+                host.willMove(toParent: nil)
+                host.view.removeFromSuperview()
+                host.removeFromParent()
+            })
+        }
+        let importLabel = "Import"
+        let cover = pose == .cover
+        // The toolbar.
+        let (page, removePage) = try await present(NavigationStack {
+            FolderPage(browser: browser, route: FolderRoute(path: download), close: {})
+        })
+        #expect(page.contains(importLabel) == cover, "\(pose): the page's labels are \(page)")
+        removePage()
+        // The bar.
+        let (bar, removeBar) = try await present(FilesBar(browser: browser, usable: true, bottomInset: 0))
+        #expect(bar.contains(importLabel) == !cover, "\(pose): the bar's labels are \(bar)")
+        #expect(!bar.contains("Export"), "\(pose): nothing is selected: \(bar)")
+        removeBar()
+        // Something selected: Export replaces Import, and stays in the bar.
+        if let file = browser.entries(in: download).first(where: { !$0.isFolder }) {
+            browser.selection = [file]
+            let (selected, removeSelected) = try await present(FilesBar(browser: browser, usable: true, bottomInset: 0))
+            #expect(selected.contains("Export"), "\(pose): with a selection the bar's labels are \(selected)")
+            #expect(!selected.contains(importLabel), "\(pose): with a selection the bar's labels are \(selected)")
+            removeSelected()
+            browser.selection = []
         }
     }
 }
 
 /// The Simulator's own display, in the pose the harness put it in
-/// (`TEST_RUNNER_DUO_EXPECT_POSE`: `cover`, `upright-book`, `upright-flat`,
+/// (`TEST_RUNNER_ANDARIUM_FOLD_POSE`: `cover`, `upright-book`, `upright-flat`,
 /// `turned-book`, `turned-flat`). Without the variable the suite checks
 /// nothing, so the ordinary runs on other devices pass.
 @MainActor
 @Suite(.serialized)
 struct TheRealDisplay {
     private var expected: FoldSessionHostingTests.Pose? {
-        switch ProcessInfo.processInfo.environment["DUO_EXPECT_POSE"] {
+        switch ProcessInfo.processInfo.environment["ANDARIUM_FOLD_POSE"] {
         case "cover": .cover
         case "upright-book": .uprightBook
         case "upright-flat": .uprightFlat
