@@ -25,7 +25,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "打賞是自願的一次性購買，用於支持Andarium的開發。無論是否打賞，所有功能都免費。"
+            "value": "贊助是自願的一次性購買，用於支持Andarium的開發。無論是否贊助，所有功能都免費。"
           }
         }
       }
@@ -54,7 +54,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "給Andarium開發者的自願打賞。"
+            "value": "給Andarium開發者的自願贊助。"
           }
         }
       }
@@ -257,7 +257,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "一次性打賞"
+            "value": "一次性贊助"
           }
         }
       }
@@ -402,7 +402,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "打賞未能完成"
+            "value": "贊助未能完成"
           }
         }
       }
@@ -460,7 +460,7 @@
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "暫時無法打賞"
+            "value": "暫時無法贊助"
           }
         }
       }

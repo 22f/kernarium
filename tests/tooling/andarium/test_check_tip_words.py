@@ -19,7 +19,7 @@ STATEMENT = ("A tip is a voluntary one-time purchase that supports Andarium’s 
 # The statement in each language, as the table says it; each idea is one word of it.
 STATEMENTS = {
     "zh-Hans": "打赏是自愿的一次性购买，用于支持Andarium的开发。无论是否打赏，所有功能都免费。",
-    "zh-Hant": "打賞是自願的一次性購買，用於支持Andarium的開發。無論是否打賞，所有功能都免費。",
+    "zh-Hant": "贊助是自願的一次性購買，用於支持Andarium的開發。無論是否贊助，所有功能都免費。",
     "ja": "チップは、Andariumの開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。",
 }
 # Each language's ideas, one word that says each in STATEMENTS.
@@ -112,6 +112,17 @@ def main() -> int:
                 ("ja", "サブスク"), ("ja", "寄附"))):
             expect(f"{language}-{index}", run(table(f"cjk-{index}", {"Thanks": {language: text}})),
                    passes=False, said=f"[{language}]")
+
+        # A tip is 打赏 in Simplified and 贊助 in Traditional Chinese: each language's own word passes, and the
+        # other's, in either script, and 小费 in both, do not.
+        expect("tip-words", run(table("tip-words", {
+            "One-time tip": {"zh-Hans": "一次性打赏", "zh-Hant": "一次性贊助"}})), passes=True)
+        for index, (language, text) in enumerate((
+                ("zh-Hant", "一次性打賞"), ("zh-Hant", "一次性打赏"), ("zh-Hant", "一次性小費"),
+                ("zh-Hant", "一次性小费"), ("zh-Hant", "一次性赞助"), ("zh-Hans", "一次性小费"),
+                ("zh-Hans", "一次性小費"), ("zh-Hans", "一次性打賞"), ("zh-Hans", "一次性贊助"))):
+            expect(f"tip-word-{index}", run(table(f"tip-word-{index}", {"One-time tip": {language: text}})),
+                   passes=False, said=f"[{language}] uses")
 
         # A token amount or balance, in a number or a placeholder, either side of the word.
         for index, text in enumerate((

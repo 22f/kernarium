@@ -8,7 +8,9 @@ premium access, or quotes a token amount or balance, in any language the table
 has: the English words, and the Chinese and Japanese ones that say the same.
 The table also says plainly, in the statement string, that a tip is a voluntary
 one-time purchase and that every feature is free either way, and the statement
-says it in every language the table has: each storefront reads its own.
+says it in every language the table has: each storefront reads its own. A tip is
+打赏 in Simplified Chinese and 贊助 in Traditional Chinese, and neither language
+uses the other's word or 小费.
 
 The table is a String Catalog (`Localization/TipJar.xcstrings`) or a compiled
 strings file (`TipJar.strings` of an application's language directory); every
@@ -52,6 +54,12 @@ FORBIDDEN = (
     ("credits", re.compile("积分|積分|点数|點數|クレジット")),
     ("a balance", re.compile("余额|余額|餘額|残高")),
 )
+# A tip is 打赏 in Simplified Chinese and 贊助 in Traditional Chinese. Each language must not use the
+# other's word (in either script) or the earlier 小费, as a word of any other meaning.
+NOT_IN = {
+    "zh-Hans": ("小费", "小費", "打賞", "贊助"),
+    "zh-Hant": ("小费", "小費", "打赏", "打賞", "赞助"),
+}
 # A number, or a placeholder for one, beside the word token: Western, full-width
 # and Chinese or Japanese numerals, with the counters 个, 個, 枚 and つ between.
 NUMBER = r"(?:[0-9０-９]|%(?:\d+\$)?(?:l{0,2}d|f|@))"
@@ -161,6 +169,9 @@ def problems_in(texts: list[tuple[str, str, str]], name: str) -> list[str]:
             match = pattern.search(text)
             if match:
                 found.append(f"{name}: {key!r} [{language}] uses {label} ({match.group(0)!r})")
+        for word in NOT_IN.get(language, ()):
+            if word in text:
+                found.append(f"{name}: {key!r} [{language}] uses {word!r}, which is not this language's word for a tip")
         match = AMOUNT.search(text)
         if match:
             found.append(f"{name}: {key!r} [{language}] quotes a token amount ({match.group(0)!r})")
