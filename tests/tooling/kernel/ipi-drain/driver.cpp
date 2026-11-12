@@ -24,6 +24,7 @@
 #include <vector>
 
 extern "C" {
+#include "irq.h"
 void os_init_smp(void);
 void os_idle_sleep(void);
 int os_send_ipi(int cpu, int vector);
@@ -123,7 +124,7 @@ void darwin_timer_kernel_checkpoint(void) {}
 int darwin_irq_idle_begin(void) { return 0; }
 void darwin_irq_idle_end(void) {}
 // The dispatch before the wait is a call's first in a cycle, the one after the
-// wait its second. A result of 2 says it ran the handlers of an edge.
+// wait its second. A result of DARWIN_IRQ_HANDLED says it collected an edge.
 static std::atomic<int> dispatch_calls{0};
 static int first_dispatch_result = 1;
 int darwin_irq_dispatch(int, unsigned long long, struct uml_pt_regs *) {
@@ -197,7 +198,7 @@ int main() {
 	// a task runnable on this CPU, and the idle loop reads the flag that says
 	// so only when the wait returns: the wait must not sleep. One that found
 	// nothing leaves the wait to sleep until its deadline.
-	first_dispatch_result = 2;
+	first_dispatch_result = DARWIN_IRQ_HANDLED;
 	{
 		Cycle c = cycle(300);
 		std::printf("handled edge before the wait: %.2f ms\n", c.ms);

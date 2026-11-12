@@ -271,9 +271,10 @@ it. The bridge fields used below are defined by the comments in
   suspended. `guest-irq-takeover` holds CPU0's carrier and checks a vsock
   echo with every CPU busy, with CPU0 only busy and with every CPU idle.
   CPU0's idle wait also dispatches before it sleeps, and does not sleep when
-  that dispatch ran a handler: the handler may have made a task runnable
-  there, which only the idle loop notices when the wait returns
-  (`kernel-darwin-ipi-drain`).
+  that dispatch collected an event (`DARWIN_IRQ_HANDLED`): a handler may have
+  made a task runnable there, which only the idle loop notices when the wait
+  returns (`kernel-darwin-ipi-drain` for the wait, `kernel-darwin-irq-edge`
+  for the result).
 - A sleeping uaccess retries its fault until the handler refuses it or the task
   is dying, as native uaccess does, so a sibling's `fork()` never fails the copy
   with `-EFAULT`.

@@ -73,7 +73,7 @@ def main():
                 objects.append(str(work / f"{name}.o"))
                 run("cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", f"-I{fixtures}", f"-I{include}",
                     f"-I{sources}", "-c", str(sources / f"{name}.c"), "-o", objects[-1])
-            run("c++", "-std=c++20", "-Wall", "-Wextra", "-Werror", str(fixtures / "driver.cpp"), *objects,
+            run("c++", "-std=c++20", "-Wall", "-Wextra", "-Werror", f"-I{sources}", str(fixtures / "driver.cpp"), *objects,
                 "-o", str(work / "check"))
             run(str(work / "check"))
 

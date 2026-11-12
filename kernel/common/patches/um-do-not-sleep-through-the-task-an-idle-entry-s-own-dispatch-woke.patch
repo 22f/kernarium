@@ -17,13 +17,17 @@ left to signal, and the worker, or the task it was to wake on another
 CPU, waited for the next timer.
 
 An idle guest that echoed a message through the vsock device every
-20 ms showed it: every echo that took more than 150 ms had its edge
-taken by a dispatch that no wake preceded, followed by the wait that
-slept until the next clock deadline.
+20 ms showed it: every traced echo that took more than 150 ms had its
+edge taken by a dispatch that no wake preceded, followed by the wait
+that slept until the next clock deadline. Five of the 52 late echoes
+of the first data set were not traced.
 
-darwin_irq_dispatch() now says whether it ran the handlers of an edge,
-and the idle wait polls instead of sleeping when it did, so the idle
-loop sees the flag at once. The next entry finds nothing and sleeps.
+darwin_irq_dispatch() now says whether its poll collected an event, as
+DARWIN_IRQ_HANDLED: a handler may then have run, not that one did or
+that a task became runnable. The idle wait polls instead of sleeping
+when it says so, so the idle loop sees the flag at once. The next entry
+finds nothing and sleeps when no fresh edge, pending IPI or delayed
+notification remains.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
