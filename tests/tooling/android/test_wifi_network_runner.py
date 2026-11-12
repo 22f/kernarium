@@ -10,7 +10,9 @@ script's waits from the tracked script, and reads the overlay's integers with th
 verifier's reader of compiled resource tables. The upgrade section's checks run
 against a guest that answers from a script, on a clock that a sleep moves on. So do the sections that show
 a failed check as a warning (`dumpsys connectivity`, `dumpsys network_stack`, `dumpsys notification`,
-`dumpsys activity` and a UI dump), and the host's probe server answers a real client.
+`dumpsys activity` and a UI dump), and the host's probe server answers a real client. A simulated guest
+follows the server the probes ask, so the sections that wait for a failing check to pass, and for a check to
+come back, run over the fake clock, and each fault of the platform or of the screen fails the section.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import http.client
 import importlib.util
 import io
 from pathlib import Path
+import re
 import sys
 import unittest
 from unittest import mock
@@ -81,18 +84,19 @@ DENIAL = ("11-11 09:15:55.822   333   333 W auditd  : type=1400 audit(0.0:7): av
           "tcontext=u:object_r:system_file:s0 tclass=file permissive=0\n")
 REPAIR_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi saved again: Wi-Fi is on and nothing joined\n"
 
-def agent(net_id: int, capabilities: str, transport: str = "WIFI") -> str:
+def agent(net_id: int, capabilities: str, transport: str = "WIFI", validated_at: int | None = None) -> str:
     """The line `dumpsys connectivity` prints for a network (NetworkAgentInfo), trimmed to what the runner reads."""
     return (f"  NetworkAgentInfo{{network{{{net_id}}}  handle{{441492361229}}  ni{{{transport} CONNECTED extra: }} "
             "created=2026-11-10T13:30:32.485Z Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED ; KeepConnected : 0) "
             "created 149238 lp{{InterfaceName: wlan0 LinkAddresses: [ 10.0.2.16/24 ] DnsAddresses: [ /10.0.2.3 ]}} "
             f"nc{{[ Transports: {transport} Capabilities: {capabilities} LinkUpBandwidth>=12000Kbps "
-            'Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="VirtWifi"]>]}  everValidated{true}\n')
+            'Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="VirtWifi"]>]}  everValidated{true}'
+            + ("" if validated_at is None else f" firstValidated {validated_at} lastValidated {validated_at}") + "\n")
 
 
 STOCK = "NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED"
 VALIDATED = STOCK.replace("NOT_VPN&", "NOT_VPN&VALIDATED&")
-CONNECTIVITY = "Current networks:\n" + agent(101, STOCK) + agent(102, VALIDATED) + "Other state\n"
+CONNECTIVITY = "Current networks:\n" + agent(101, STOCK) + agent(102, VALIDATED, validated_at=5000) + "Other state\n"
 NETWORK_STACK = """\
 NetworkStack version:
 Recently active IpClient logs:
@@ -109,6 +113,11 @@ Validation logs (most recent first):
 """
 PASSED_NETWORK_STACK = NETWORK_STACK.replace(
     "Wi-Fi internet check failed, the network stays validated", "Wi-Fi internet check passed")
+
+
+def stack_of(net_id: int) -> str:
+    """The validation logs with the failed check of the network under test under another ID."""
+    return NETWORK_STACK.replace('102 - "VirtWifi"', f'{net_id} - "VirtWifi"')
 QUIET_NOTIFICATIONS = """\
 Current Notification Manager state:
   Notification List:
@@ -201,8 +210,8 @@ class StubbedGuest(ScriptedGuest):
         super().__init__(**answers)
         self.calls: list[str] = []
 
-    def reevaluate(self) -> None:
-        self.calls.append("reevaluate")
+    def reevaluate(self, net_id: int) -> None:
+        self.calls.append(f"reevaluate {net_id}")
 
     def reverse(self, port: int) -> None:
         self.calls.append(f"reverse {port}")
@@ -411,7 +420,7 @@ class WarningReadingTests(unittest.TestCase):
         self.assertEqual(runner.validation_problems(frozenset(VALIDATED.split("&"))), [])
         self.assertEqual(runner.validation_problems(None), ["dumpsys connectivity lists no Wi-Fi network"])
         self.assertEqual(runner.validation_problems(frozenset(STOCK.split("&"))), ["the network is not validated"])
-        for name in ("PARTIAL_CONNECTIVITY", "CAPTIVE_PORTAL"):
+        for name in ("PARTIAL_CONNECTIVITY", "CAPTIVE_PORTAL", "PRIVATE_DNS_BROKEN"):
             problems = runner.validation_problems(frozenset(VALIDATED.split("&") + [name]))
             self.assertEqual(problems, [f"the network has {name}"])
 
@@ -613,34 +622,61 @@ class WarningSectionTests(unittest.TestCase):
         self.assertEqual(guest.calls[0], f"delete {sorted((*runner.PRIVATE_DNS_SETTINGS, runner.USE_HTTPS_SETTING))}")
         self.assertEqual(guest.calls[1], f"put {sorted(runner.CHECK_SETTINGS)}")
         self.assertEqual(guest.calls[2:4], ["forget and save", "joined the station joins the network saved again"])
-        self.assertIn("reevaluate", guest.calls)
+        self.assertFalse([call for call in guest.calls if call.startswith("reevaluate")])
 
     def test_a_failed_check_section_fails_when_the_mark_never_shows(self) -> None:
         with self.assertRaisesRegex(runner.Failure, "shows only the warning: .*Limited connection"):
             runner.check_failed_check_warns(self.stubbed(ui=[CLEAR_SCREEN]))
 
     def test_the_warning_after_a_wake_waits_for_the_station_and_the_mark(self) -> None:
-        guest = self.stubbed(ui=[CLEAR_SCREEN, WARNING_SCREEN])
-        self.assertIsNone(runner.check_warning_after_wake(guest))
+        woken = "Current networks:\n" + agent(102, VALIDATED, validated_at=5000) \
+            + agent(103, VALIDATED, validated_at=9000) + "Other state\n"
+        guest = self.stubbed(connectivity=[CONNECTIVITY, woken], network_stack=[stack_of(103)],
+                             ui=[CLEAR_SCREEN, WARNING_SCREEN])
+        self.assertEqual(runner.check_warning_after_wake(guest), "network 102 became network 103")
         self.assertEqual(guest.calls[0], "suspend and wake")
+
+    def test_a_wake_that_leaves_the_old_network_does_not_show_the_warning_of_a_new_one(self) -> None:
+        guest = self.stubbed()
+        with self.assertRaisesRegex(runner.Failure, "the newest network is still 102, not a new one"):
+            runner.check_warning_after_wake(guest)
 
     def test_a_page_answer_section_needs_a_request_at_the_server(self) -> None:
         server = runner.ProbeServer()
         self.addCleanup(server.close)
         guest = self.stubbed()
-        with self.assertRaisesRegex(runner.Failure, "a probe reaches the host's server: the server has seen no request"):
+        with self.assertRaisesRegex(runner.Failure,
+                                    "a probe reaches the host's server: the server has seen no request of this scenario"):
             runner.check_page_answer_warns(guest, server, "redirect")
         self.assertEqual(server.mode, "redirect")
         self.assertEqual(guest.calls[0], f"reverse {server.port}")
 
+    def test_a_page_answer_section_needs_the_current_networks_probe_to_receive_the_answer(self) -> None:
+        server = runner.ProbeServer()
+        self.addCleanup(server.close)
+        scenario = "/sfixed01"
+        probe = (f"PROBE_HTTP http://127.0.0.1:{server.port}{scenario}/generate_204 time=3ms ret=302 "
+                 "request={} headers={Location=[http://127.0.0.1/login]}")
+        timeout = probe.split(" time=")[0] + " Probe failed with exception java.net.SocketTimeoutException: timeout"
+        stack = NETWORK_STACK.replace("  2026-11-10T13:30:44.971100 - PROBE_HTTP http://192.0.2.1/generate_204 "
+                                      "Probe failed with exception java.net.SocketTimeoutException: failed to connect "
+                                      "after 10000ms\n", "  2026-11-10T13:30:44.971100 - {}\n")
+
         class Asked(StubbedGuest):
             def forget_and_save(self) -> None:
                 super().forget_and_save()
-                server.record("/generate_204")
+                server.record(f"{scenario}/generate_204", 302)
 
-        guest = Asked(connectivity=[CONNECTIVITY], network_stack=[NETWORK_STACK], notifications=[QUIET_NOTIFICATIONS],
-                      activities=[QUIET_ACTIVITIES], ui=[WARNING_SCREEN], status=[JOINED], dump=[ENABLED_DUMP])
-        self.assertEqual(runner.check_page_answer_warns(guest, server, "page"), "1 probe requests answered")
+        def guest(line: str) -> StubbedGuest:
+            return Asked(connectivity=[CONNECTIVITY], network_stack=[stack.format(line)], notifications=[QUIET_NOTIFICATIONS],
+                         activities=[QUIET_ACTIVITIES], ui=[WARNING_SCREEN], status=[JOINED], dump=[ENABLED_DUMP])
+
+        with mock.patch.object(runner.ProbeServer, "scenario", staticmethod(lambda: scenario)):
+            note = runner.check_page_answer_warns(guest(probe), server, "redirect")
+            self.assertEqual(note, "1 requests answered 302 and read by the network's own probe")
+            # The server saw the request, and the network's probe timed out on it: no answer.
+            with self.assertRaisesRegex(runner.Failure, "failed without an answer"):
+                runner.check_page_answer_warns(guest(timeout), server, "redirect")
 
     def test_the_page_sections_delete_every_setting_and_the_reverse_even_when_one_fails(self) -> None:
         server = runner.ProbeServer()
@@ -649,13 +685,16 @@ class WarningSectionTests(unittest.TestCase):
         report = runner.Report()
         with contextlib.redirect_stderr(io.StringIO()):
             runner.warning_sections(guest, server, report)
-        self.assertEqual(len(report.failures), 6)
+        self.assertEqual(len(report.failures), 8)
         self.assertEqual(guest.calls[-2:], [f"delete {sorted(runner.ALL_CHECK_SETTINGS)}", f"unreverse {server.port}"])
 
     def test_the_page_settings_point_the_probes_at_the_server_and_the_black_hole(self) -> None:
         settings = runner.page_settings(41234)
         self.assertEqual(settings["captive_portal_http_url"], "http://127.0.0.1:41234/generate_204")
         self.assertEqual(settings["captive_portal_fallback_url"], "http://127.0.0.1:41234/gen_204")
+        scoped = runner.page_settings(41234, "/s1a2b3c4d")
+        self.assertEqual(scoped["captive_portal_http_url"], "http://127.0.0.1:41234/s1a2b3c4d/generate_204")
+        self.assertEqual(scoped["captive_portal_fallback_url"], "http://127.0.0.1:41234/s1a2b3c4d/gen_204")
         self.assertIn(runner.BLACKHOLE, settings["captive_portal_https_url"])
         # The strict private DNS name fails the network itself, so no warning section sets it.
         for settings in (runner.CHECK_SETTINGS, runner.page_settings(1)):
@@ -720,6 +759,371 @@ class UpgradeSectionTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Failure, "lost the probe settings"):
             runner.check_warning_on_disk(self.settings_guest({}))
         self.assertIsNone(runner.check_warning_on_disk(self.settings_guest(dict(runner.CHECK_SETTINGS))))
+
+
+class ContinuityReadingTests(unittest.TestCase):
+    """What the runner reads to hold one network, and the logs of its checks, to account."""
+
+    def test_when_a_network_was_last_validated_is_read_for_wifi_alone(self) -> None:
+        dump = (CONNECTIVITY + agent(103, VALIDATED, transport="CELLULAR", validated_at=77))
+        self.assertEqual(runner.last_validated(dump), {102: 5000})
+        self.assertEqual(runner.last_validated(agent(102, STOCK)), {})
+
+    def test_a_pinned_network_must_stay_the_newest_and_stay_as_it_was_validated(self) -> None:
+        pin = runner.Pin(102, 5000)
+        self.assertEqual(runner.pin_problems(CONNECTIVITY, pin), [])
+        replaced = CONNECTIVITY + agent(103, VALIDATED, validated_at=6000)
+        self.assertEqual(runner.pin_problems(replaced, pin), ["network 102 was replaced by network 103"])
+        again = "Current networks:\n" + agent(102, VALIDATED, validated_at=5600)
+        self.assertEqual(runner.pin_problems(again, pin),
+                         ["network 102 was validated again (lastValidated 5000 -> 5600)"])
+        lost = "Current networks:\n" + agent(102, STOCK)
+        self.assertEqual(runner.pin_problems(lost, pin), ["network 102 is no longer validated"])
+        self.assertEqual(runner.pin_problems("Current networks:\n", pin), ["network 102 is gone"])
+
+    def test_the_network_that_is_pinned_is_the_newest_validated_one(self) -> None:
+        with mock.patch.object(runner, "time", FakeClock()):
+            guest = ScriptedGuest(connectivity=["Current networks:\n" + agent(102, STOCK), CONNECTIVITY])
+            self.assertEqual(runner.pin_network(guest, 30), runner.Pin(102, 5000))
+            old = ScriptedGuest(connectivity=[CONNECTIVITY])
+            with self.assertRaisesRegex(runner.Failure, "the newest network is still 102, not a new one"):
+                runner.pin_network(old, 30, newer_than=102)
+
+    def test_the_first_check_follows_the_validation(self) -> None:
+        reason = runner.VALIDATED_FIRST_LINE
+        probe = "PROBE_HTTP http://127.0.0.1/s1/generate_204 time=3ms ret=200"
+        self.assertEqual(runner.first_validation_problems([reason, probe]), [])
+        self.assertEqual(runner.first_validation_problems([reason]), [])
+        # The strict private DNS name is probed before the network is validated, as stock does.
+        self.assertEqual(runner.first_validation_problems(["PROBE_PRIVDNS ab.dns.google 12ms: []", reason, probe]), [])
+        self.assertEqual(runner.first_validation_problems([probe, reason]),
+                         ["a probe of the check completed before the network was validated"])
+        self.assertEqual(len(runner.first_validation_problems([probe])), 1)
+
+    def test_a_passing_check_is_new_only_after_the_last_failed_one(self) -> None:
+        failed, passed = runner.CHECK_FAILED_LINE, runner.CHECK_PASSED_LINE
+        self.assertEqual(runner.passed_after_failed_problems([failed, failed, passed]), [])
+        self.assertEqual(runner.passed_after_failed_problems([passed]), [])
+        self.assertEqual(runner.passed_after_failed_problems([failed, passed, failed]),
+                         ["the last check in the validation log failed after the one that passed"])
+        self.assertEqual(runner.passed_after_failed_problems([failed]),
+                         [f"the validation log has no line {passed!r}"])
+
+    def test_the_probe_of_the_scenario_must_have_received_the_answer(self) -> None:
+        url = "http://127.0.0.1:4000/s1a2b3c4d/generate_204"
+        answered = [f"PROBE_HTTP {url} time=3ms ret=302 request={{}} headers={{}}"]
+        self.assertEqual(runner.probe_answer_problems(answered, "/s1a2b3c4d", 302), [])
+        self.assertEqual(runner.probe_answer_problems([], "/s1a2b3c4d", 302),
+                         ["the validation log shows no HTTP probe of /s1a2b3c4d"])
+        # Another scenario's probe, or a stale one of an earlier network, does not count.
+        self.assertEqual(len(runner.probe_answer_problems(answered, "/s00000000", 302)), 1)
+        # The server saw the request and the probe timed out on it.
+        timed_out = [f"PROBE_HTTP {url} Probe failed with exception java.net.SocketTimeoutException: timeout"]
+        problems = runner.probe_answer_problems(timed_out, "/s1a2b3c4d", 302)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("failed without an answer", problems[0])
+        # An answer of another kind.
+        self.assertIn("did not receive 200", runner.probe_answer_problems(answered, "/s1a2b3c4d", 200)[0])
+        failed = [f"PROBE_HTTP {url} time=3ms ret=200 request={{}} headers={{}}",
+                  f"PROBE_HTTP {url} 200 response with Content-length <= 4 interpreted as failed response."]
+        self.assertEqual(runner.probe_answer_problems(failed, "/s1a2b3c4d", 200),
+                         ["the 200 answer of /s1a2b3c4d was taken for a failed answer, not a page"])
+
+    def test_the_checks_come_back_after_the_stock_back_off(self) -> None:
+        self.assertEqual(runner.retry_problems([0.0, 1.3, 3.6, 8.0]), [])
+        self.assertEqual(runner.retry_problems([0.0, 0.2, 3.6, 8.0]),
+                         ["check 2 came 0.2 s after the one before, under the back-off of 0.9 s"])
+        self.assertEqual(runner.retry_problems([0.0, 1.0, 2.0, 3.0]),
+                         ["check 3 came 1.0 s after the one before, under the back-off of 1.8 s",
+                          "check 4 came 1.0 s after the one before, under the back-off of 3.6 s"])
+        self.assertEqual(runner.retry_problems([0.0, 1.3]), ["only 2 of 4 checks reached the server"])
+
+    def test_the_private_dns_probe_is_not_repeated_for_each_check(self) -> None:
+        self.assertEqual(runner.private_dns_probe_problems(1, 1), [])
+        self.assertEqual(len(runner.private_dns_probe_problems(1, 5)), 1)
+        self.assertEqual(len(runner.private_dns_probe_problems(0, 0)), 1)
+
+    def test_a_log_collected_over_several_polls_counts_each_entry_once(self) -> None:
+        union = runner.LogUnion()
+        first = [("2026-11-13T03:00:01.000000", "PROBE_PRIVDNS ab.dns.google 12ms: []"),
+                 ("2026-11-13T03:00:02.000000", runner.CHECK_FAILED_LINE)]
+        union.add(first)
+        union.add(first + [("2026-11-13T03:00:04.000000", runner.CHECK_FAILED_LINE)])
+        self.assertEqual((union.count(runner.PRIVATE_DNS_PROBE), union.count(runner.CHECK_FAILED_LINE)), (1, 2))
+
+    def test_the_entries_of_the_validation_log_carry_their_time_stamps(self) -> None:
+        entries = runner.validation_entries(NETWORK_STACK)[102]
+        self.assertEqual(entries[0], ("2026-11-10T13:30:32.803492", "Wi-Fi is validated before its internet check"))
+
+    def test_a_dump_that_ends_in_a_hierarchy_root_is_read_whole(self) -> None:
+        document = ("<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n<hierarchy rotation=\"0\">"
+                    '<node index="0" text="Connected" package="com.android.settings" content-desc="" />'
+                    "</hierarchy>\nUI hierarchy dumped to: /data/local/tmp/x.xml\n")
+        self.assertEqual([node.text for node in runner.ui_nodes(document)], ["Connected"])
+        displays = document.replace("<hierarchy", "<displays><hierarchy").replace("</hierarchy>", "</hierarchy></displays>")
+        self.assertEqual([node.text for node in runner.ui_nodes(displays)], ["Connected"])
+
+    def test_the_status_bar_icon_must_be_in_the_dump_to_judge_its_mark_absent(self) -> None:
+        without_bar = runner.ui_nodes(hierarchy("Connected", None))
+        self.assertFalse(runner.status_bar_present(without_bar))
+        self.assertEqual(runner.mark_problems(without_bar, shown=False),
+                         ["the dump has no status bar Wi-Fi icon, so its mark cannot be judged absent"])
+        self.assertTrue(runner.status_bar_present(runner.ui_nodes(CLEAR_SCREEN)))
+        # A node of another package that mentions Wi-Fi is not the status bar's icon.
+        elsewhere = runner.ui_nodes(CLEAR_SCREEN.replace('package="com.android.systemui"',
+                                                         'package="com.android.settings"'))
+        self.assertFalse(runner.status_bar_present(elsewhere))
+
+
+class SimulatedGuest(StubbedGuest):
+    """A guest whose network follows the server that its probes ask, on the fake clock: a check at the time the
+    platform would make it, a log line for each, and a screen that shows what the platform last reported. A
+    fault is a way the platform or the screen can be wrong: each of them must fail the section that sees it."""
+
+    def __init__(self, server: "runner.ProbeServer", clock: FakeClock, **faults: object) -> None:
+        super().__init__()
+        self.server, self.clock, self.faults = server, clock, faults
+        self.settings: dict[str, str] = {}
+        self.net_id = 100
+        self.log: list[tuple[str, str]] = []
+        self.counter = 0
+        self.join()
+
+    # What the platform does.
+    def stamp(self) -> str:
+        self.counter += 1
+        return f"2026-11-13T03:{self.counter // 60:02d}:{self.counter % 60:02d}.000000"
+
+    def add(self, message: str) -> None:
+        self.log.append((self.stamp(), message))
+        del self.log[:-20]
+
+    def join(self) -> None:
+        self.net_id += 1
+        self.validated_at = 5000 + int(self.clock.now * 1000)
+        url = self.settings.get("captive_portal_http_url", "")
+        match = re.fullmatch(r"http://127\.0\.0\.1:\d+(/s[0-9a-f]+)?/generate_204", url)
+        self.scenario = match[1] if match else None
+        self.strict = self.settings.get("private_dns_mode") == "hostname"
+        self.failures = self.checks_done = 0
+        self.settings_mark = self.bar_mark = bool(self.faults.get("mark_from_start"))
+        self.log = []
+        probe = "PROBE_HTTP http://127.0.0.1:1/x/generate_204 time=3ms ret=200 request={} headers={}"
+        if self.faults.get("probe_first"):
+            self.add(probe)
+        if self.strict and not self.faults.get("no_private_dns_probe"):
+            self.add("PROBE_PRIVDNS 1a2b3c4d-dnsotls-ds.metric.gstatic.com 12ms: [/8.8.8.8]")
+        self.add(runner.VALIDATED_FIRST_LINE)
+        self.next_check: float | None = self.clock.now + 0.5
+
+    def advance(self) -> None:
+        while self.next_check is not None and self.next_check <= self.clock.now:
+            when, self.next_check = self.next_check, None
+            self.check(when)
+
+    def check(self, when: float) -> None:
+        self.checks_done += 1
+        if self.scenario is None:
+            self.add("PROBE_HTTPS https://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
+            self.add("PROBE_HTTP http://192.0.2.1/generate_204 Probe failed with exception java.net.SocketTimeoutException")
+            passed = False
+        else:
+            status = {"page": 200, "redirect": 302, "expected": 204}[self.server.mode]
+            self.server.record(f"{self.scenario}/generate_204", status, when=when)
+            url = f"http://127.0.0.1:41000{self.scenario}/generate_204"
+            if self.faults.get("probe_times_out"):
+                self.add(f"PROBE_HTTP {url} Probe failed with exception java.net.SocketTimeoutException: timeout")
+                passed = False
+            else:
+                self.add(f"PROBE_HTTP {url} time=3ms ret={status} request={{}} headers={{}}")
+                passed = status == 204
+        if self.faults.get("private_dns_for_each_check") and self.strict:
+            self.add("PROBE_PRIVDNS 5e6f7a8b-dnsotls-ds.metric.gstatic.com 12ms: [/8.8.8.8]")
+        if passed:
+            self.add(runner.CHECK_PASSED_LINE)
+            self.failures = 0
+            if not self.faults.get("clear_only_on_rejoin"):
+                self.settings_mark = self.bar_mark = False
+        else:
+            self.add(runner.CHECK_FAILED_LINE)
+            self.failures += 1
+            self.settings_mark = True
+            self.bar_mark = self.bar_mark or not self.faults.get("bar_ignores_reports")
+            delays = self.faults.get("delays")
+            delay = delays[min(self.failures - 1, len(delays) - 1)] if delays else 2 ** (self.failures - 1)
+            if not self.faults.get("no_retries"):
+                self.next_check = when + 0.3 + delay
+        if self.checks_done == self.faults.get("replace_at"):
+            self.net_id += 1
+        if self.checks_done == self.faults.get("revalidate_at"):
+            self.validated_at += 1000
+
+    # What the runner does to it.
+    def put_settings(self, settings: dict[str, str]) -> None:
+        super().put_settings(settings)
+        self.settings.update(settings)
+
+    def delete_settings(self, keys: tuple[str, ...] | list[str]) -> None:
+        super().delete_settings(keys)
+        for key in keys:
+            self.settings.pop(key, None)
+
+    def forget_and_save(self) -> None:
+        super().forget_and_save()
+        self.join()
+
+    def suspend_and_wake(self) -> None:
+        super().suspend_and_wake()
+        if not self.faults.get("wake_keeps_network"):
+            self.join()
+
+    def reevaluate(self, net_id: int) -> None:
+        super().reevaluate(net_id)
+        if self.faults.get("reevaluate_fails"):
+            raise runner.Failure(f"cmd connectivity reevaluate {net_id} (rc 255): Permission denied")
+        if not self.faults.get("reevaluate_ignored"):
+            self.next_check = self.clock.now
+
+    # What it answers: the platform acts by itself, so every look at the guest lets the clock's checks happen.
+    def alive(self) -> None:
+        self.advance()
+
+    def shell(self, command: str, timeout: float = runner.COMMAND_SECONDS) -> str:
+        self.advance()
+        answers = {
+            "dumpsys connectivity": lambda: ("Current networks:\n" + agent(self.net_id - 1, STOCK)
+                                             + agent(self.net_id, VALIDATED, validated_at=self.validated_at)),
+            "dumpsys network_stack": lambda: ("Validation logs (most recent first):\n"
+                                              + f'{self.net_id} - "VirtWifi"\n'
+                                              + "".join(f"  {stamp} - {message}\n" for stamp, message in self.log)),
+            "dumpsys notification --noredact": lambda: (SIGN_IN_NOTIFICATIONS if self.faults.get("notification")
+                                                        else QUIET_NOTIFICATIONS),
+            "dumpsys activity activities": lambda: QUIET_ACTIVITIES,
+            "cmd wifi status": lambda: JOINED,
+            "dumpsys wifi": lambda: ENABLED_DUMP,
+            ScriptedGuest.COMMANDS["ui"]: lambda: hierarchy(
+                "Connected / Limited connection" if self.settings_mark else "Connected",
+                "Wi-Fi signal full.,No internet" if self.bar_mark else "Wi-Fi signal full."),
+        }
+        return answers[command]()
+
+
+class SimulatedSectionTests(unittest.TestCase):
+    """The sections that follow one network over time, against a guest that behaves as the platform should, and
+    against one that is wrong in each way the sections are there to catch."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        patch = mock.patch.object(runner, "time", self.clock)
+        patch.start()
+        self.addCleanup(patch.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+        self.server = runner.ProbeServer()
+        self.addCleanup(self.server.close)
+
+    def guest(self, **faults: object) -> SimulatedGuest:
+        return SimulatedGuest(self.server, self.clock, **faults)
+
+    def fails(self, section, guest: SimulatedGuest, pattern: str) -> None:
+        with self.assertRaisesRegex(runner.Failure, pattern):
+            section(guest)
+
+    def recovery(self, guest: SimulatedGuest) -> str | None:
+        return runner.check_recovery_on_one_network(guest, self.server)
+
+    # One network from failing to passing and back.
+    def test_the_warning_follows_one_network_from_a_failing_check_to_a_passing_one_and_back(self) -> None:
+        guest = self.guest()
+        note = self.recovery(guest)
+        self.assertRegex(note, r"^network 102 validated at \d+ throughout, \d+ checks$")
+        # No rejoin or other action: the network joined once, and the forced check was asked for by its ID.
+        self.assertEqual(guest.net_id, 102)
+        self.assertEqual(guest.calls.count("forget and save"), 1)
+        self.assertEqual([call for call in guest.calls if call.startswith("reevaluate")], ["reevaluate 102"])
+        self.assertEqual(self.server.mode, "expected")
+
+    def test_a_status_bar_that_does_not_redraw_for_a_report_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(bar_ignores_reports=True), "status bar's Wi-Fi icon does not say 'No internet'")
+
+    def test_a_warning_that_goes_only_when_the_network_rejoins_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(clear_only_on_rejoin=True), "still says 'Limited connection'")
+
+    def test_a_replaced_network_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(replace_at=2), "network 102 was replaced by network 103")
+
+    def test_a_network_that_is_validated_again_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(revalidate_at=2), r"network 102 was validated again \(lastValidated")
+
+    def test_checks_that_never_come_back_fail_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(no_retries=True), r"the check comes back after the back-off: 1 of 4 checks so far")
+
+    def test_checks_that_come_back_before_the_back_off_fail_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(delays=[0.1]), "under the back-off of 1.8 s")
+
+    def test_a_network_that_validates_after_its_first_probe_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(probe_first=True), "a probe of the check completed before the network was validated")
+
+    def test_a_refused_forced_re_evaluation_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(reevaluate_fails=True), "cmd connectivity reevaluate 102 .rc 255.: Permission denied")
+
+    def test_a_forced_re_evaluation_that_checks_nothing_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(reevaluate_ignored=True),
+                   "a forced re-evaluation checks the network again: the server saw no new check")
+
+    def test_a_sign_in_notification_fails_the_section(self) -> None:
+        self.fails(self.recovery, self.guest(notification=True), "a notification of ConnectivityService")
+
+    # A page in place of the answer, received by the current network's own probe.
+    def test_a_sign_in_page_and_a_block_page_are_read_by_the_probe_of_the_current_network(self) -> None:
+        for mode, code in (("redirect", 302), ("page", 200)):
+            guest = self.guest()
+            note = runner.check_page_answer_warns(guest, self.server, mode)
+            self.assertRegex(note, rf"requests answered {code} and read by the network's own probe$")
+
+    def test_a_request_that_the_probe_timed_out_on_is_not_a_page_answer(self) -> None:
+        guest = self.guest(probe_times_out=True)
+        with self.assertRaisesRegex(runner.Failure, "the current network's probe received the page answer: "
+                                    "the HTTP probe of /s[0-9a-f]+ failed without an answer"):
+            runner.check_page_answer_warns(guest, self.server, "page")
+
+    # Fresh monitors.
+    def test_a_passing_check_on_a_network_that_has_just_joined_leaves_no_warning(self) -> None:
+        self.assertIsNone(runner.check_passing_check_clears(self.guest(), self.server))
+
+    def test_a_warning_that_stays_after_a_passing_check_fails_the_section(self) -> None:
+        guest = self.guest(clear_only_on_rejoin=True, mark_from_start=True)
+        with self.assertRaisesRegex(runner.Failure, "the warning is not there when the check passes: .*"):
+            runner.check_passing_check_clears(guest, self.server)
+
+    def test_the_failed_check_of_a_black_hole_shows_only_the_warning(self) -> None:
+        self.assertIn("validated, joined and enabled", runner.check_failed_check_warns(self.guest()))
+
+    def test_a_wake_shows_the_warning_of_a_new_network(self) -> None:
+        guest = self.guest()
+        runner.check_failed_check_warns(guest)
+        self.assertEqual(runner.check_warning_after_wake(guest), "network 102 became network 103")
+
+    def test_a_wake_that_keeps_the_network_fails_the_section(self) -> None:
+        guest = self.guest(wake_keeps_network=True)
+        runner.check_failed_check_warns(guest)
+        self.fails(runner.check_warning_after_wake, guest, "the newest network is still 102, not a new one")
+
+    # Strict private DNS.
+    def test_a_check_that_fails_again_and_again_does_not_probe_a_strict_private_dns_name_again(self) -> None:
+        note = runner.check_strict_private_dns_holds(self.guest(), self.server)
+        self.assertRegex(note, r"^\d+ failed checks, 1 private DNS probes, validated throughout$")
+
+    def test_a_private_dns_probe_for_each_check_fails_the_section(self) -> None:
+        guest = self.guest(private_dns_for_each_check=True)
+        with self.assertRaisesRegex(runner.Failure, r"private DNS was probed \d+ more times while the checks failed"):
+            runner.check_strict_private_dns_holds(guest, self.server)
+
+    def test_a_strict_name_that_was_never_evaluated_proves_nothing(self) -> None:
+        guest = self.guest(no_private_dns_probe=True)
+        with self.assertRaisesRegex(runner.Failure, "the strict name was never evaluated"):
+            runner.check_strict_private_dns_holds(guest, self.server)
 
 
 class RunnerNamesTests(unittest.TestCase):

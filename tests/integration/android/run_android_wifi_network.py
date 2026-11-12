@@ -17,18 +17,30 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   SELinux denials; with the validation probes at a black hole, the network stays
   validated and joined while Settings says "Limited connection", the status bar's
   Wi-Fi icon says "No internet", the validation log says the check failed and no
-  notification or sign-in activity follows, also after a guest suspend and wake;
-  a sign-in page (a redirect) and a block page (a 200 answer) that the host's
-  server gives the probes through `adb reverse` show the same and nothing more;
-  a passing check, by the host's server and by the stock servers, takes the
-  warning away; with the probes at a black hole and a strict private DNS name that
-  does not resolve, and VirtWifi forgotten and saved again, the network stays
-  enabled and joined for a minute and a half, and is joined again after a guest
-  suspend and wake (the host's route, `suspend` and `wake` on the management
-  console) and after a restart; a network the user marked metered, or turned
-  Auto-connect off for, keeps that after a restart (the script has nothing to
-  save once the station has joined); a forgotten network is still forgotten
-  after a restart; and Wi-Fi that was turned off is still off;
+  notification or sign-in activity follows, also after a guest suspend and wake
+  (a new network, with a higher ID); a sign-in page (a redirect) and a block page
+  (a 200 answer) that the host's server gives the probes through `adb reverse`
+  show the same and nothing more, and the current network's own probe log names
+  the section's URL and the answer it received; on one network that is never
+  replaced or validated again (`lastValidated` unchanged), with the Internet
+  page in front and no other action, the network is validated before its first
+  check, the warning shows in Settings and in the status bar, the check comes
+  back after the stock back-off, and when the server answers 204 the warning
+  goes from both and a new passing check is in the log; a forced re-evaluation
+  (`cmd connectivity reevaluate`, whose failure fails the section) brings it back
+  and the next passing check takes it away; a passing check on a network that
+  has just joined, by the host's server and by the stock servers, leaves no
+  warning; with a strict private DNS name the platform can use, a check that
+  fails again and again leaves the network validated with its private DNS not
+  broken, and the private DNS probe is not repeated for each check; with the
+  probes at a black hole and a strict private DNS name that does not resolve,
+  and VirtWifi forgotten and saved again, the network stays enabled and joined for
+  a minute and a half, and is joined again after a guest suspend and wake (the
+  host's route, `suspend` and `wake` on the management console) and after a
+  restart; a network the user marked metered, or turned Auto-connect off for,
+  keeps that after a restart (the script has nothing to save once the station
+  has joined); a forgotten network is still forgotten after a restart; and Wi-Fi
+  that was turned off is still off;
 - upgrade (only with --previous-release, once for each release): the data disk
   of a release whose platform disables the network for lack of internet (the
   stock rules), on which the probes and a forgotten and saved network disable
@@ -70,6 +82,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -130,6 +143,18 @@ MARKER_PROPERTY = "persist.sys.kernarium.virtwifi_saved"
 # The validation log lines of the NetworkMonitor topic of route p0029 (the verifier requires them in the image).
 CHECK_FAILED_LINE = "Wi-Fi internet check failed, the network stays validated"
 CHECK_PASSED_LINE = "Wi-Fi internet check passed"
+VALIDATED_FIRST_LINE = "Wi-Fi is validated before its internet check"
+PRIVATE_DNS_PROBE = "PROBE_PRIVDNS "
+# A private DNS server that serves the strict name the platform probes (the host must reach it, as it must
+# reach the stock servers for the section that takes the warning away with them).
+PRIVATE_DNS_HOST = "dns.google"
+# The checks of one network that a section counts for the back-off (1 s, 2 s, 4 s between the first four),
+# and how close to the stock delay a gap between two checks must be.
+RETRIES_NEEDED = 4
+INITIAL_BACKOFF_SECONDS = 1.0
+BACKOFF_FLOOR = 0.9
+# How long a forced re-evaluation has to show: a new check at the server.
+FORCE_SECONDS = 45
 # Android's own words: the Wi-Fi list's summary and the status bar icon's spoken description.
 LIMITED_CONNECTION = "Limited connection"
 NO_INTERNET = "No internet"
@@ -273,6 +298,17 @@ def wifi_networks(dump: str) -> dict[int, frozenset[str]]:
     return found
 
 
+def last_validated(dump: str) -> dict[int, int]:
+    """When the platform last gave each Wi-Fi network the validated capability (`lastValidated`, which it
+    sets only when the capability changes, so it stays put while a check reports on a validated network)."""
+    found: dict[int, int] = {}
+    for line in dump.splitlines():
+        match = re.match(r"\s*NetworkAgentInfo\{network\{(\d+)\}.*?\bni\{WIFI\b.*?\blastValidated (\d+)", line)
+        if match:
+            found[int(match[1])] = int(match[2])
+    return found
+
+
 def newest_wifi_network(dump: str) -> int | None:
     """The ID of the Wi-Fi network `dumpsys connectivity` lists with the highest ID (the one the station
     joined last), or None."""
@@ -280,23 +316,24 @@ def newest_wifi_network(dump: str) -> int | None:
 
 
 def validation_problems(capabilities: frozenset[str] | None) -> list[str]:
-    """What is wrong with a Wi-Fi network that must stay validated: not listed, not validated, partial, or
-    behind a sign-in page."""
+    """What is wrong with a Wi-Fi network that must stay validated: not listed, not validated, partial,
+    behind a sign-in page, or with its private DNS reported broken."""
     if capabilities is None:
         return ["dumpsys connectivity lists no Wi-Fi network"]
     problems = []
     if "VALIDATED" not in capabilities:
         problems.append("the network is not validated")
-    for name in ("PARTIAL_CONNECTIVITY", "CAPTIVE_PORTAL"):
+    for name in ("PARTIAL_CONNECTIVITY", "CAPTIVE_PORTAL", "PRIVATE_DNS_BROKEN"):
         if name in capabilities:
             problems.append(f"the network has {name}")
     return problems
 
 
-def validation_logs(dump: str) -> dict[int, list[str]]:
-    """The messages of each network's validation log in `dumpsys network_stack`, by network ID."""
-    logs: dict[int, list[str]] = {}
-    current: list[str] | None = None
+def validation_entries(dump: str) -> dict[int, list[tuple[str, str]]]:
+    """The entries (time stamp, message) of each network's validation log in `dumpsys network_stack`, by
+    network ID, oldest first."""
+    logs: dict[int, list[tuple[str, str]]] = {}
+    current: list[tuple[str, str]] | None = None
     in_section = False
     for line in dump.splitlines():
         if line.startswith("Validation logs"):
@@ -308,14 +345,34 @@ def validation_logs(dump: str) -> dict[int, list[str]]:
         if header:
             current = logs.setdefault(int(header[1]), [])
             continue
-        entry = re.fullmatch(r"\s+\d{4}-\d\d-\d\dT[\d:.]+ - (.*)", line)
+        entry = re.fullmatch(r"\s+(\d{4}-\d\d-\d\dT[\d:.]+) - (.*)", line)
         if entry and current is not None:
-            current.append(entry[1])
+            current.append((entry[1], entry[2]))
         elif line.strip():
             current = None
             if not line.startswith(" "):
                 in_section = False
     return logs
+
+
+def validation_logs(dump: str) -> dict[int, list[str]]:
+    """The messages of each network's validation log in `dumpsys network_stack`, by network ID."""
+    return {net_id: [message for _, message in entries] for net_id, entries in validation_entries(dump).items()}
+
+
+class LogUnion:
+    """The entries of a validation log collected over several polls. The log keeps 20 lines, so a section
+    that counts over a long time reads it often and keeps each entry (its time stamp and message) once."""
+
+    def __init__(self) -> None:
+        self.entries: dict[tuple[str, str], None] = {}
+
+    def add(self, entries: list[tuple[str, str]]) -> None:
+        for entry in entries:
+            self.entries.setdefault(entry, None)
+
+    def count(self, text: str) -> int:
+        return sum(1 for _, message in self.entries if text in message)
 
 
 def check_log_problems(messages: list[str], expected: str, probes_failed: bool = False) -> list[str]:
@@ -328,6 +385,65 @@ def check_log_problems(messages: list[str], expected: str, probes_failed: bool =
         for probe in ("PROBE_HTTP", "PROBE_HTTPS"):
             if not any(message.startswith(f"{probe} ") and "Probe failed" in message for message in messages):
                 problems.append(f"the validation log shows no failed {probe}")
+    return problems
+
+
+def first_validation_problems(messages: list[str]) -> list[str]:
+    """Whether the network was validated before its first check: the log's reason line comes before any
+    probe of the check (the private DNS probe of a strict name comes before the validation, as stock)."""
+    reason = next((index for index, message in enumerate(messages) if VALIDATED_FIRST_LINE in message), None)
+    probe = next((index for index, message in enumerate(messages)
+                  if re.match(r"PROBE_(?!PRIVDNS)\w+ ", message)), None)
+    if reason is None:
+        return [f"the validation log has no line {VALIDATED_FIRST_LINE!r}: the network was not validated "
+                "before its check"]
+    if probe is not None and probe < reason:
+        return ["a probe of the check completed before the network was validated"]
+    return []
+
+
+def passed_after_failed_problems(messages: list[str]) -> list[str]:
+    """A new passing check after the failed ones: the last passing line comes after the last failed one."""
+    passed = [index for index, message in enumerate(messages) if CHECK_PASSED_LINE in message]
+    failed = [index for index, message in enumerate(messages) if CHECK_FAILED_LINE in message]
+    if not passed:
+        return [f"the validation log has no line {CHECK_PASSED_LINE!r}"]
+    if failed and max(failed) > max(passed):
+        return ["the last check in the validation log failed after the one that passed"]
+    return []
+
+
+def probe_answer_problems(messages: list[str], scenario: str, code: int) -> list[str]:
+    """Whether the current network's HTTP probe of this scenario's URL received the answer `code`: a line
+    of the validation log names the URL and the code (`ret=`), and is not a probe that failed (a request
+    that the server saw and the probe timed out on is no answer)."""
+    lines = [message for message in messages if message.startswith("PROBE_HTTP ") and scenario in message]
+    if not lines:
+        return [f"the validation log shows no HTTP probe of {scenario}"]
+    answered = [line for line in lines if f" ret={code} " in line and "Probe failed" not in line]
+    if not answered:
+        failures = [line for line in lines if "Probe failed" in line]
+        if failures:
+            return [f"the HTTP probe of {scenario} failed without an answer: {failures[-1][:160]}"]
+        return [f"the HTTP probe of {scenario} did not receive {code}: {lines[-1][:160]}"]
+    if code == 200 and any("interpreted as failed" in line and scenario in line for line in messages):
+        return [f"the 200 answer of {scenario} was taken for a failed answer, not a page"]
+    return []
+
+
+def retry_problems(times: list[float]) -> list[str]:
+    """The first checks of a network that fails them come back after the stock back-off: with the times at
+    which their requests reached the server, at least RETRIES_NEEDED of them, and each gap at least as long
+    as the delay that follows the failure before it (1 s, 2 s, 4 s)."""
+    if len(times) < RETRIES_NEEDED:
+        return [f"only {len(times)} of {RETRIES_NEEDED} checks reached the server"]
+    problems = []
+    for index in range(1, RETRIES_NEEDED):
+        gap = times[index] - times[index - 1]
+        floor = BACKOFF_FLOOR * INITIAL_BACKOFF_SECONDS * 2 ** (index - 1)
+        if gap < floor:
+            problems.append(f"check {index + 1} came {gap:.1f} s after the one before, under the back-off "
+                            f"of {floor:.1f} s")
     return problems
 
 
@@ -359,9 +475,13 @@ def ui_nodes(hierarchy: str) -> list[UiNode]:
     if start < 0:
         raise Failure(f"the UI dump is not XML: {hierarchy[:200]!r}")
     # What the tool prints after the document ("UI hierarchy dumped to: ...") is not part of it.
-    end = max(hierarchy.rfind("</displays>"), hierarchy.rfind("</hierarchy>"))
+    end = -1
+    for closing in ("</displays>", "</hierarchy>"):
+        found = hierarchy.rfind(closing)
+        if found >= 0 and found + len(closing) > end:
+            end = found + len(closing)
     try:
-        root = ElementTree.fromstring(hierarchy[start:end + len("</displays>")] if end >= 0 else hierarchy[start:])
+        root = ElementTree.fromstring(hierarchy[start:end] if end >= 0 else hierarchy[start:])
     except ElementTree.ParseError as error:
         raise Failure(f"the UI dump is not XML: {error}") from error
     return [UiNode(node.get("text", ""), node.get("content-desc", ""), node.get("package", ""))
@@ -383,9 +503,17 @@ def status_bar_no_internet(nodes: list[UiNode]) -> bool:
     return any(node.package == SYSTEMUI_PACKAGE and NO_INTERNET in node.description for node in nodes)
 
 
+def status_bar_present(nodes: list[UiNode]) -> bool:
+    """Whether the dump holds the status bar's Wi-Fi icon at all (a mark is judged absent only where it
+    could be seen)."""
+    return any(node.package == SYSTEMUI_PACKAGE and re.search(r"wi-?fi", node.description, re.I)
+               for node in nodes)
+
+
 def mark_problems(nodes: list[UiNode], shown: bool) -> list[str]:
     """What the screen shows against what Android's Wi-Fi mark must say: with `shown`, the list's "Limited
-    connection" and the status bar's "No internet"; without, plain "Connected" and no "No internet"."""
+    connection" and the status bar's "No internet"; without, plain "Connected" and no "No internet", the
+    status bar's Wi-Fi icon being in the dump."""
     problems = []
     if shown:
         if not summary_limited(nodes):
@@ -397,7 +525,9 @@ def mark_problems(nodes: list[UiNode], shown: bool) -> list[str]:
             problems.append(f"the Wi-Fi list still says {LIMITED_CONNECTION!r}")
         if not summary_connected(nodes):
             problems.append("the Wi-Fi list does not say 'Connected'")
-        if status_bar_no_internet(nodes):
+        if not status_bar_present(nodes):
+            problems.append("the dump has no status bar Wi-Fi icon, so its mark cannot be judged absent")
+        elif status_bar_no_internet(nodes):
             problems.append(f"the status bar's Wi-Fi icon still says {NO_INTERNET!r}")
     return problems
 
@@ -447,7 +577,7 @@ class ProbeServer:
 
     def __init__(self) -> None:
         self.mode = "expected"
-        self.paths: list[str] = []
+        self.seen: list[tuple[float, str, int]] = []
         self.lock = threading.Lock()
         server = self
 
@@ -455,8 +585,8 @@ class ProbeServer:
             protocol_version = "HTTP/1.1"
 
             def do_GET(self) -> None:  # noqa: N802
-                server.record(self.path)
                 mode = server.mode
+                server.record(self.path, {"redirect": 302, "page": 200}.get(mode, 204))
                 if mode == "redirect":
                     self.send_response(302)
                     self.send_header("Location", f"http://127.0.0.1:{server.port}/login")
@@ -492,18 +622,32 @@ class ProbeServer:
         tail = b"--></body></html>"
         return head + b"x" * (PAGE_BYTES - len(head) - len(tail)) + tail
 
-    def record(self, path: str) -> None:
-        with self.lock:
-            self.paths.append(path)
+    @staticmethod
+    def scenario() -> str:
+        """A path prefix no other section's probes use, for the URLs of one section."""
+        return "/s" + uuid.uuid4().hex[:8]
 
-    def probes(self) -> list[str]:
-        """The paths the guest's probes asked for, in order."""
+    def record(self, path: str, status: int = 0, when: float | None = None) -> None:
+        """A request the server saw, with the status it answers with, and when."""
         with self.lock:
-            return list(self.paths)
+            self.seen.append((time.monotonic() if when is None else when, path, status))
+
+    def requests(self, scenario: str | None = None) -> list[tuple[float, str, int]]:
+        """The requests (time, path, status), in order, of one scenario or all."""
+        with self.lock:
+            return [seen for seen in self.seen if scenario is None or seen[1].startswith(scenario + "/")]
+
+    def probes(self, scenario: str | None = None) -> list[str]:
+        """The paths the guest's probes asked for, in order."""
+        return [path for _, path, _ in self.requests(scenario)]
+
+    def checks(self, scenario: str) -> list[float]:
+        """When the HTTP probes of a scenario arrived: one for each check."""
+        return [when for when, path, _ in self.requests(scenario) if path.endswith("/generate_204")]
 
     def clear(self) -> None:
         with self.lock:
-            self.paths.clear()
+            self.seen.clear()
 
     def close(self) -> None:
         self.httpd.shutdown()
@@ -636,12 +780,20 @@ class Guest:
         """The boot script's marker: 1 once the network is saved, 2 once the station has joined it."""
         return self.shell(f"getprop {MARKER_PROPERTY}").strip()
 
-    def reevaluate(self) -> None:
-        """Asks the platform to check the network again. Not every build lets the shell do it, and the join
-        has already started a check, so a refusal is not a failure."""
-        net_id = newest_wifi_network(self.connectivity())
-        if net_id is not None:
-            self.adb_run("shell", f"cmd connectivity reevaluate {net_id}", timeout=60)
+    def validation_entries(self, net_id: int) -> list[tuple[str, str]]:
+        return validation_entries(self.network_stack()).get(net_id, [])
+
+    def validation_log(self, net_id: int) -> list[str]:
+        return [message for _, message in self.validation_entries(net_id)]
+
+    def reevaluate(self, net_id: int) -> None:
+        """Forces the platform to check the network again (`cmd connectivity reevaluate`, which reports the
+        opposite of what the network is and so makes the platform evaluate it). A refusal, an unknown network
+        or any error is a failure: a section that forces a check must see it run."""
+        result = self.adb_run("shell", f"cmd connectivity reevaluate {net_id}", timeout=60)
+        output = result.stdout.decode(errors="replace").strip()
+        if result.returncode != 0 or re.search(r"Unknown network|Exception|Error|denied|not found", output, re.I):
+            raise Failure(f"cmd connectivity reevaluate {net_id} (rc {result.returncode}): {output[-300:]}")
 
     def reverse(self, port: int) -> None:
         """The guest's loopback port to the host's server (the shared adb server, named with -s)."""
@@ -975,6 +1127,55 @@ def check_no_denials(guest: Guest) -> str | None:
     return f"{logged} denials logged in all, none for {SCRIPT_DOMAIN} in {guest.denial_reads} reads of the log"
 
 
+@dataclass
+class Pin:
+    """The network a section judges, and when the platform last gave it the validated capability: the same
+    network, never given it again, is what "validated throughout" means."""
+    net_id: int
+    validated_at: int
+
+
+def pin_problems(dump: str, pin: Pin) -> list[str]:
+    """How the network differs from the pinned one: replaced by a newer network, gone, or validated again
+    (`lastValidated` moved), as it would be after the capability dropped and came back."""
+    networks = wifi_networks(dump)
+    if pin.net_id not in networks:
+        return [f"network {pin.net_id} is gone"]
+    problems = []
+    newest = max(networks)
+    if newest != pin.net_id:
+        problems.append(f"network {pin.net_id} was replaced by network {newest}")
+    now = last_validated(dump).get(pin.net_id)
+    if now is None:
+        problems.append(f"network {pin.net_id} is no longer validated")
+    elif now != pin.validated_at:
+        problems.append(f"network {pin.net_id} was validated again (lastValidated {pin.validated_at} -> {now})")
+    return problems
+
+
+def pin_network(guest: "Guest", seconds: float = WARNING_SECONDS, newer_than: int | None = None) -> Pin:
+    """Waits for the newest Wi-Fi network (newer than `newer_than`, when given) to be validated, and pins it."""
+    found: list[Pin] = []
+
+    def validated() -> str | None:
+        dump = guest.connectivity()
+        net_id = newest_wifi_network(dump)
+        if net_id is None:
+            return "dumpsys connectivity lists no Wi-Fi network"
+        if newer_than is not None and net_id <= newer_than:
+            return f"the newest network is still {net_id}, not a new one"
+        if "VALIDATED" not in wifi_networks(dump)[net_id]:
+            return f"network {net_id} is not validated yet"
+        when = last_validated(dump).get(net_id)
+        if when is None:
+            return f"network {net_id} shows no lastValidated"
+        found.append(Pin(net_id, when))
+        return None
+
+    wait_for("the joined network is validated", seconds, validated, guest, interval=1.0)
+    return found[-1]
+
+
 def wait_problems(description: str, seconds: float, guest: Guest, problems: Callable[[], list[str]],
                   interval: float = 5.0) -> None:
     """Waits until `problems` returns none; the last ones are the failure."""
@@ -991,15 +1192,17 @@ def sign_in_problems(guest: Guest) -> list[str]:
     return problems
 
 
-def warning_problems(guest: Guest, probes_failed: bool) -> list[str]:
+def warning_problems(guest: Guest, probes_failed: bool, pin: Pin | None = None) -> list[str]:
     """What differs from a validated network that shows only the warning of a failed check: the capabilities
     (validated, not partial, not behind a sign-in page), the validation log, the notifications and the
-    activities (no sign-in), and the screen (Settings' "Limited connection", the status bar's "No internet")."""
+    activities (no sign-in), and the screen (Settings' "Limited connection", the status bar's "No internet").
+    With `pin` it is the pinned network, still the one."""
     dump = guest.connectivity()
-    net_id = newest_wifi_network(dump)
+    net_id = pin.net_id if pin is not None else newest_wifi_network(dump)
     if net_id is None:
         return validation_problems(None)
-    problems = validation_problems(wifi_networks(dump)[net_id])
+    problems = pin_problems(dump, pin) if pin is not None else []
+    problems += validation_problems(wifi_networks(dump).get(net_id))
     logs = validation_logs(guest.network_stack()).get(net_id, [])
     problems += check_log_problems(logs, CHECK_FAILED_LINE, probes_failed)
     problems += sign_in_problems(guest)
@@ -1007,52 +1210,71 @@ def warning_problems(guest: Guest, probes_failed: bool) -> list[str]:
     return problems
 
 
-def cleared_problems(guest: Guest) -> list[str]:
+def cleared_problems(guest: Guest, pin: Pin | None = None, after_failure: bool = False) -> list[str]:
     """What differs from a validated network whose check passed: the same, with the check's passing line and
-    without the mark."""
+    without the mark (and the status bar's icon in the dump). With `after_failure` the passing line is a
+    new one, after the last failed check of the same network."""
     dump = guest.connectivity()
-    net_id = newest_wifi_network(dump)
+    net_id = pin.net_id if pin is not None else newest_wifi_network(dump)
     if net_id is None:
         return validation_problems(None)
-    problems = validation_problems(wifi_networks(dump)[net_id])
+    problems = pin_problems(dump, pin) if pin is not None else []
+    problems += validation_problems(wifi_networks(dump).get(net_id))
     logs = validation_logs(guest.network_stack()).get(net_id, [])
-    problems += check_log_problems(logs, CHECK_PASSED_LINE)
+    problems += passed_after_failed_problems(logs) if after_failure else check_log_problems(logs, CHECK_PASSED_LINE)
     problems += sign_in_problems(guest)
     problems += mark_problems(ui_nodes(guest.ui()), shown=False)
     return problems
 
 
-def hold_validated(guest: Guest, seconds: float) -> None:
-    """For `seconds`, the network stays enabled and joined with Auto-connect on, validated (not partial, not
-    behind a sign-in page), and nothing asks to sign in."""
+def stays_validated(guest: Guest, pin: Pin | None = None) -> None:
+    """Raises unless the network is enabled and joined with Auto-connect on, validated (not partial, not
+    behind a sign-in page, its private DNS not broken), and nothing asks to sign in. With `pin` it is also
+    the one network, never validated again."""
+    dump = guest.dump()
+    status = selection_status(dump)
+    if status != "NETWORK_SELECTION_ENABLED":
+        raise Failure(f"the network became {status} ({selection_disable_reason(dump)}) while the check failed")
+    values = autojoin_values(dump)
+    if not values or not all(values):
+        raise Failure("Auto-connect is off")
+    if not guest.joined():
+        raise Failure("the station left the network")
+    connectivity = guest.connectivity()
+    net_id = pin.net_id if pin is not None else newest_wifi_network(connectivity)
+    problems = pin_problems(connectivity, pin) if pin is not None else []
+    problems += validation_problems(None if net_id is None else wifi_networks(connectivity).get(net_id))
+    problems += sign_in_problems(guest)
+    if problems:
+        raise Failure("; ".join(problems))
+
+
+def hold_validated(guest: Guest, seconds: float, pin: Pin | None = None) -> None:
+    """For `seconds`, the network stays as `stays_validated` says."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         guest.alive()
-        dump = guest.dump()
-        status = selection_status(dump)
-        if status != "NETWORK_SELECTION_ENABLED":
-            raise Failure(f"the network became {status} ({selection_disable_reason(dump)}) while the check failed")
-        values = autojoin_values(dump)
-        if not values or not all(values):
-            raise Failure("Auto-connect is off")
-        if not guest.joined():
-            raise Failure("the station left the network")
-        connectivity = guest.connectivity()
-        net_id = newest_wifi_network(connectivity)
-        problems = validation_problems(None if net_id is None else wifi_networks(connectivity)[net_id])
-        problems += sign_in_problems(guest)
-        if problems:
-            raise Failure("; ".join(problems))
+        stays_validated(guest, pin)
         time.sleep(POLL_SECONDS)
 
 
-def warning_shown(guest: Guest, probes_failed: bool, seconds: float, what: str) -> None:
+def wait_watching(description: str, seconds: float, guest: Guest, pin: Pin, check: Callable[[], str | None],
+                  interval: float = 3.0) -> None:
+    """Waits for `check` while the network stays the one validated network: a change of it fails at once."""
+    def step() -> str | None:
+        stays_validated(guest, pin)
+        return check()
+
+    wait_for(description, seconds, step, guest, interval=interval)
+
+
+def warning_shown(guest: Guest, probes_failed: bool, seconds: float, what: str, pin: Pin | None = None) -> None:
     """The warning shows within WARNING_SECONDS, and is held for `seconds`, with the Internet page in front."""
     guest.show_internet_page()
     try:
-        wait_problems(what, WARNING_SECONDS, guest, lambda: warning_problems(guest, probes_failed))
-        hold_validated(guest, seconds)
-        problems = warning_problems(guest, probes_failed)
+        wait_problems(what, WARNING_SECONDS, guest, lambda: warning_problems(guest, probes_failed, pin))
+        hold_validated(guest, seconds, pin)
+        problems = warning_problems(guest, probes_failed, pin)
         if problems:
             raise Failure("after the hold: " + "; ".join(problems))
     finally:
@@ -1063,53 +1285,189 @@ def check_failed_check_warns(guest: Guest) -> str | None:
     """The validation probes at a black hole fail the check, and nothing else: the network stays validated
     (as on a host that reaches no validation server) while Android's Wi-Fi mark shows the failed check."""
     guest.rejoin_with_settings(CHECK_SETTINGS, clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
-    guest.reevaluate()
-    warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning")
+    pin = pin_network(guest)
+    warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning", pin)
     return f"validated, joined and enabled for {WARNING_HOLD_SECONDS} s with the mark shown"
 
 
 def check_warning_after_wake(guest: Guest) -> str | None:
-    """Every wake drops the station and joins it again, as a new network with a new check."""
+    """Every wake drops the station and joins it again, as a new network with a new check: its ID is higher
+    than the one before the suspend, so an old network's log and mark cannot stand for it."""
+    before = newest_wifi_network(guest.connectivity())
+    if before is None:
+        raise Failure("dumpsys connectivity lists no Wi-Fi network before the suspend")
     guest.suspend_and_wake()
     guest.wait_joined(RESUME_SECONDS, "the station joins again after the wake")
-    warning_shown(guest, True, SHORT_HOLD_SECONDS, "the failed check shows only the warning after the wake")
-    return None
+    pin = pin_network(guest, RESUME_SECONDS, newer_than=before)
+    warning_shown(guest, True, SHORT_HOLD_SECONDS, "the failed check shows only the warning after the wake", pin)
+    return f"network {before} became network {pin.net_id}"
 
 
-def page_settings(port: int) -> dict[str, str]:
+def page_settings(port: int, scenario: str = "") -> dict[str, str]:
     """The probes' HTTP and fallback URLs at the host's server (through `adb reverse` on the guest's loopback),
-    and the HTTPS URL at the black hole, so a page answer is all the check gets."""
-    return {"captive_portal_http_url": f"http://127.0.0.1:{port}/generate_204",
-            "captive_portal_fallback_url": f"http://127.0.0.1:{port}/gen_204",
+    under the scenario's path, and the HTTPS URL at the black hole, so a page answer is all the check gets."""
+    return {"captive_portal_http_url": f"http://127.0.0.1:{port}{scenario}/generate_204",
+            "captive_portal_fallback_url": f"http://127.0.0.1:{port}{scenario}/gen_204",
             "captive_portal_https_url": f"https://{BLACKHOLE}/generate_204"}
 
 
-def check_page_answer_warns(guest: Guest, server: ProbeServer, mode: str) -> str | None:
-    """A sign-in page or a block page answers the probe in place of the expected answer: the platform stays
-    validated, no captive portal state, notification or login activity follows, and only the warning shows."""
+PAGE_CODES = {"redirect": 302, "page": 200}
+
+
+def server_answer_problems(server: "ProbeServer", scenario: str, code: int) -> list[str]:
+    """What the server gave the HTTP probes of the scenario: some request, each answered with `code`."""
+    statuses = [status for _, path, status in server.requests(scenario) if path.endswith("/generate_204")]
+    if not statuses:
+        return [f"the server saw no HTTP probe of {scenario}"]
+    wrong = sorted({status for status in statuses if status != code})
+    return [f"the server answered the probes of {scenario} with {wrong}, not {code}"] if wrong else []
+
+
+def check_page_answer_warns(guest: Guest, server: "ProbeServer", mode: str) -> str | None:
+    """A sign-in page or a block page answers the probe in place of the expected answer: the current network's
+    own probe received it (its log names the scenario's URL and the code, and the server gave that code), the
+    platform stays validated, no captive portal state, notification or login activity follows, and only the
+    warning shows."""
+    code = PAGE_CODES[mode]
+    scenario = server.scenario()
     server.mode = mode
     server.clear()
     guest.reverse(server.port)
-    guest.rejoin_with_settings(page_settings(server.port), clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
+    guest.rejoin_with_settings(page_settings(server.port, scenario), clear=(*PRIVATE_DNS_SETTINGS, USE_HTTPS_SETTING))
+    pin = pin_network(guest)
     wait_for("a probe reaches the host's server", WARNING_SECONDS,
-             lambda: None if server.probes() else "the server has seen no request", guest)
-    warning_shown(guest, False, WARNING_HOLD_SECONDS, f"the {mode} answer shows only the warning")
-    return f"{len(server.probes())} probe requests answered"
+             lambda: None if server.probes(scenario) else "the server has seen no request of this scenario", guest)
+    wait_problems(f"the current network's probe received the {mode} answer", WARNING_SECONDS, guest,
+                  lambda: probe_answer_problems(guest.validation_log(pin.net_id), scenario, code)
+                  + server_answer_problems(server, scenario, code), interval=2.0)
+    warning_shown(guest, False, WARNING_HOLD_SECONDS, f"the {mode} answer shows only the warning", pin)
+    return f"{len(server.probes(scenario))} requests answered {code} and read by the network's own probe"
 
 
-def check_passing_check_clears(guest: Guest, server: ProbeServer) -> str | None:
-    """The expected answer (the host's server with the HTTPS probe off) passes the check: the warning goes
-    and the network is still validated."""
+def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | None:
+    """One network, never replaced and never validated again, from a failing check to a passing one: the
+    probes ask a server that answers with a page. With the Internet page in front and no other action, the
+    network is validated before its first check, the warning shows in Settings and in the status bar, the
+    check comes back after the stock back-off, and when the server answers 204 the next check passes and the
+    warning goes from both, with a new passing line in the log. A forced re-evaluation then checks the
+    network again, which brings the warning back, and the next passing check takes it away."""
+    scenario = server.scenario()
+    server.mode = "page"
+    server.clear()
+    guest.reverse(server.port)
+    guest.show_internet_page()
+    try:
+        guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
+                                   clear=PRIVATE_DNS_SETTINGS)
+        pin = pin_network(guest)
+        wait_for("the first check reaches the host's server", WARNING_SECONDS,
+                 lambda: None if server.checks(scenario) else "the server has seen no check", guest, interval=1.0)
+        first = first_validation_problems(guest.validation_log(pin.net_id))
+        if first:
+            raise Failure("; ".join(first))
+        wait_watching("the failed check shows in Settings and in the status bar, with no other action",
+                      WARNING_SECONDS, guest, pin,
+                      lambda: "; ".join(warning_problems(guest, False, pin)
+                                        + probe_answer_problems(guest.validation_log(pin.net_id), scenario, 200)) or None)
+
+        def retried() -> str | None:
+            times = server.checks(scenario)
+            if len(times) < RETRIES_NEEDED:
+                return f"{len(times)} of {RETRIES_NEEDED} checks so far"
+            problems = retry_problems(times)
+            if problems:
+                raise Failure("; ".join(problems))
+            return None
+
+        wait_watching("the check comes back after the back-off", WARNING_SECONDS, guest, pin, retried)
+        wrong = server_answer_problems(server, scenario, 200)
+        if wrong:
+            raise Failure("; ".join(wrong))
+        # The server now gives the expected answer: nothing else changes, and no rejoin.
+        server.mode = "expected"
+        wait_watching("the warning goes from Settings and the status bar when a check passes", WARNING_SECONDS,
+                      guest, pin, lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)) or None)
+        # A forced re-evaluation checks the network again; no timer is left after a pass, so a new check at the
+        # server is the forced one.
+        server.mode = "page"
+        seen = len(server.checks(scenario))
+        guest.reevaluate(pin.net_id)
+        wait_watching("a forced re-evaluation checks the network again", FORCE_SECONDS, guest, pin,
+                      lambda: None if len(server.checks(scenario)) > seen else "the server saw no new check")
+        wait_watching("the warning returns after the forced check", WARNING_SECONDS, guest, pin,
+                      lambda: "; ".join(warning_problems(guest, False, pin)) or None)
+        server.mode = "expected"
+        wait_watching("the warning goes again when the next check passes", WARNING_SECONDS, guest, pin,
+                      lambda: "; ".join(cleared_problems(guest, pin, after_failure=True)) or None)
+        hold_validated(guest, SHORT_HOLD_SECONDS, pin)
+    finally:
+        guest.leave_internet_page()
+    return f"network {pin.net_id} validated at {pin.validated_at} throughout, {len(server.checks(scenario))} checks"
+
+
+def private_dns_probe_problems(first: int, last: int) -> list[str]:
+    """The strict private DNS name is probed when the network is validated and not again for each check: at
+    least one probe by the first failed check, and no more by the last."""
+    if first < 1:
+        return ["the log shows no private DNS probe: the strict name was never evaluated"]
+    if last > first:
+        return [f"private DNS was probed {last - first} more times while the checks failed ({first} -> {last}): "
+                "each check evaluates it again"]
+    return []
+
+
+def check_strict_private_dns_holds(guest: Guest, server: "ProbeServer") -> str | None:
+    """With a working strict private DNS name and a check that fails again and again, the network stays
+    validated with its private DNS not broken, and the private DNS probe is not repeated for each check
+    (the validation log, collected over the polls, holds the same probes before and after the checks)."""
+    scenario = server.scenario()
+    server.mode = "page"
+    server.clear()
+    guest.reverse(server.port)
+    settings = {**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0", "private_dns_mode": "hostname",
+                "private_dns_specifier": PRIVATE_DNS_HOST}
+    guest.rejoin_with_settings(settings, clear=())
+    try:
+        pin = pin_network(guest)
+    except Failure as problem:
+        raise Failure(f"{problem}; the host must reach the private DNS server {PRIVATE_DNS_HOST}") from problem
+    union = LogUnion()
+    first: list[int] = []
+
+    def failed_enough() -> str | None:
+        union.add(guest.validation_entries(pin.net_id))
+        failed = union.count(CHECK_FAILED_LINE)
+        if failed and not first:
+            first.append(union.count(PRIVATE_DNS_PROBE))
+        return None if failed >= RETRIES_NEEDED + 1 else f"{failed} failed checks so far"
+
+    wait_watching("the checks fail one after the other while the network stays validated", WARNING_SECONDS,
+                  guest, pin, failed_enough, interval=2.0)
+    last = union.count(PRIVATE_DNS_PROBE)
+    problems = private_dns_probe_problems(first[0], last)
+    if problems:
+        raise Failure("; ".join(problems))
+    hold_validated(guest, SHORT_HOLD_SECONDS, pin)
+    return f"{union.count(CHECK_FAILED_LINE)} failed checks, {last} private DNS probes, validated throughout"
+
+
+def check_passing_check_clears(guest: Guest, server: "ProbeServer") -> str | None:
+    """The expected answer (the host's server with the HTTPS probe off) passes the check of a network that has
+    just joined: the current network's probe received the 204, the warning is not there and the network is
+    validated."""
+    scenario = server.scenario()
     server.mode = "expected"
     server.clear()
     guest.reverse(server.port)
-    guest.rejoin_with_settings({**page_settings(server.port), USE_HTTPS_SETTING: "0"},
+    guest.rejoin_with_settings({**page_settings(server.port, scenario), USE_HTTPS_SETTING: "0"},
                                clear=PRIVATE_DNS_SETTINGS)
+    pin = pin_network(guest)
     guest.show_internet_page()
     try:
-        wait_problems("the warning clears when the check passes", WARNING_SECONDS, guest,
-                      lambda: cleared_problems(guest))
-        hold_validated(guest, SHORT_HOLD_SECONDS)
+        wait_problems("the warning is not there when the check passes", WARNING_SECONDS, guest,
+                      lambda: cleared_problems(guest, pin)
+                      + probe_answer_problems(guest.validation_log(pin.net_id), scenario, 204))
+        hold_validated(guest, SHORT_HOLD_SECONDS, pin)
     finally:
         guest.leave_internet_page()
     return None
@@ -1119,18 +1477,21 @@ def check_stock_servers_clear(guest: Guest) -> str | None:
     """With every setting deleted the probes go to the stock servers through the host's network: the check
     passes and the warning is gone. A host that reaches no stock server cannot show this."""
     guest.rejoin_with_settings({}, clear=ALL_CHECK_SETTINGS)
+    pin = pin_network(guest)
     guest.show_internet_page()
     try:
-        wait_problems("the stock servers take the warning away (the host must reach them)", WARNING_SECONDS, guest,
-                      lambda: cleared_problems(guest))
+        wait_problems("the stock servers leave no warning (the host must reach them)", WARNING_SECONDS, guest,
+                      lambda: cleared_problems(guest, pin))
     finally:
         guest.leave_internet_page()
     return None
 
 
-def warning_sections(guest: Guest, server: ProbeServer, report: "Report") -> None:
-    """A failed check, and a page in place of the answer, show only the warning; a passing check takes it
-    away. The settings are deleted after, so the sections that follow start from the stock ones."""
+def warning_sections(guest: Guest, server: "ProbeServer", report: "Report") -> None:
+    """A failed check, and a page in place of the answer, show only the warning; the warning follows one
+    network from a failing check to a passing one and back; a passing check shows none; strict private DNS
+    is not probed again for each check. The settings are deleted after, so the sections that follow start
+    from the stock ones."""
     try:
         report.section("a failed internet check shows only the warning, and the network stays validated", guest,
                        lambda: check_failed_check_warns(guest))
@@ -1140,10 +1501,14 @@ def warning_sections(guest: Guest, server: ProbeServer, report: "Report") -> Non
                        lambda: check_page_answer_warns(guest, server, "redirect"))
         report.section("a block page in place of the expected answer shows only the warning", guest,
                        lambda: check_page_answer_warns(guest, server, "page"))
-        report.section("a passing check takes the warning away", guest,
+        report.section("the warning follows one network from a failing check to a passing one and back", guest,
+                       lambda: check_recovery_on_one_network(guest, server))
+        report.section("a passing check leaves no warning", guest,
                        lambda: check_passing_check_clears(guest, server))
-        report.section("the stock servers take the warning away", guest,
+        report.section("the stock servers leave no warning", guest,
                        lambda: check_stock_servers_clear(guest))
+        report.section("a failing check does not probe a strict private DNS name again", guest,
+                       lambda: check_strict_private_dns_holds(guest, server))
     finally:
         try:
             guest.delete_settings(ALL_CHECK_SETTINGS)
@@ -1155,8 +1520,9 @@ def warning_sections(guest: Guest, server: ProbeServer, report: "Report") -> Non
 def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report, waits: Waits) -> None:
     print("fresh data disk")
     guest = start_guest(options, adb, private, options.release, private / "fresh", provision=True)
-    server = ProbeServer()
+    server: ProbeServer | None = None
     try:
+        server = ProbeServer()
         report.section("overlay is applied", guest, lambda: check_overlay(guest))
         report.section("VirtWifi is saved and joined at the first boot", guest, lambda: check_saved_and_joined(guest))
         report.section("the boot script runs without SELinux denials", guest, lambda: check_no_denials(guest))
@@ -1173,7 +1539,8 @@ def fresh(options: argparse.Namespace, adb: str, private: pathlib.Path, report: 
                        lambda: check_forgotten_stays_forgotten(guest, waits))
         report.section("Wi-Fi that is off stays off", guest, lambda: check_wifi_off_stays_off(guest, waits))
     finally:
-        server.close()
+        if server is not None:
+            server.close()
         stop(guest)
 
 
@@ -1286,7 +1653,9 @@ def check_warning_on_disk(guest: Guest) -> str | None:
     lost = [key for key, value in CHECK_SETTINGS.items() if guest.read_setting(key) != value]
     if lost:
         raise Failure(f"the data disk lost the probe settings {lost}")
-    warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning on the upgraded disk")
+    pin = pin_network(guest)
+    warning_shown(guest, True, WARNING_HOLD_SECONDS, "the failed check shows only the warning on the upgraded disk",
+                  pin)
     return None
 
 
