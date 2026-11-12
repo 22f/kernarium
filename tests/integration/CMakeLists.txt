@@ -742,6 +742,15 @@ uml_add_guest_integration_test(
     TIMEOUT 300
     CPUS 2)
 
+# A backend that goes while the guest powers off, inside the removal of its
+# device, must not have the device unregistered twice.
+uml_add_guest_integration_test(
+    NAME guest-vhost-user-power-off
+    SCRIPT kernel/run_guest_vhost_user_power_off.py
+    LABELS guest;kernel;smoke
+    TIMEOUT 300
+    CPUS 2)
+
 # Test support only: an external vhost-user backend that raises a config
 # change every few milliseconds.
 add_executable(uml-vhost-user-churn-server kernel/vhost_user_churn_server.cpp)

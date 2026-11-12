@@ -64,8 +64,8 @@ class ConnectionStopped final {};
 class ConnectionClosed final {};
 
 /* What a write goes to. A socket of the connection whose peer has closed it
- * fails a write with EPIPE, or with ECONNRESET when the peer left data
- * unread; either means the front-end closed the connection. */
+ * fails a write in the ways writeFailureMeansPeerClosed() lists, and each
+ * means the front-end closed the connection. */
 enum class WriteTarget : bool {
     descriptor,
     socket,
@@ -76,10 +76,8 @@ enum class WriteTarget : bool {
     const char* operation,
     int error)
 {
-    if (target == WriteTarget::socket &&
-        (error == EPIPE || error == ECONNRESET)) {
+    if (target == WriteTarget::socket && writeFailureMeansPeerClosed(error))
         throw ConnectionClosed {};
-    }
     throw std::runtime_error(
         std::string(operation) + ": " + std::strerror(error));
 }
@@ -490,6 +488,19 @@ void VhostUserServer::retireHeldRequests() noexcept
 {
     if (requestsAreHeld())
         resetDeviceState();
+}
+
+/* A ring still disabled when the driver ends is one the guest frees: what it
+ * puts in that memory afterwards is not a ring, so the ring is read no more
+ * until the front-end starts it again with its kick. A ring that is enabled,
+ * and a disabled one whose driver has not ended, stay read and stay refused
+ * when their flags are reserved. */
+void VhostUserServer::retireDisabledRings() noexcept
+{
+    for (auto& queue : queues_) {
+        if (!queue.enabled)
+            queue.started = false;
+    }
 }
 
 bool VhostUserServer::everyConfiguredRingIsEnabled() const noexcept
@@ -1623,6 +1634,7 @@ void VhostUserServer::handleMessage(
          * that the disables were handled, and then frees the rings. A
          * suspend never sends it. */
         retireHeldRequests();
+        retireDisabledRings();
         sendIntegerReply(socket, message.header, offeredFeatures);
         sentReply = true;
         break;
