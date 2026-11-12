@@ -394,7 +394,7 @@ final class AppModel {
     /// What Send feedback asks of the system (`SendFeedbackServices`); a test
     /// or the Simulator preview replaces it.
     @ObservationIgnored var feedbackServices = SendFeedbackServices()
-    /// The Send feedback sheet is open, over Info or over the session's Settings.
+    /// The Send feedback sheet is open, over Home or over the session's Settings.
     var feedbackSheetOpen = false
     #endif
     #if FOLLOW_X
