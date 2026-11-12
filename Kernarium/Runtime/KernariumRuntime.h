@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define KERNARIUM_RUNTIME_API_VERSION 37U
+#define KERNARIUM_RUNTIME_API_VERSION 38U
 
 #if defined(__OBJC__)
 @class MTKView;
@@ -66,6 +66,12 @@ enum {
      * manager follows in place of the accelerometer; without the bit it lists
      * none and judges the accelerometer, as an image without the sensor does. */
     KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION = 1u << 1,
+    /* The application gives the guest the device's magnetic field (runtime API
+     * 38). The guest then lists a magnetometer and declares the compass
+     * feature, from which Android derives the rotation vector and the
+     * orientation that navigation applications take their heading from;
+     * without the bit it lists none and declares none. */
+    KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS = 1u << 2,
 };
 
 /* What the camera does for an Android guest this run (runtime API 37), the

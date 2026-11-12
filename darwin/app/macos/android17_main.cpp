@@ -50,6 +50,11 @@ constexpr std::string_view hardware_sku_prefix{
  * not carry it. */
 constexpr std::string_view orientation_prefix{
 	"androidboot.kernarium.orientation="};
+/* Makes the guest list a magnetometer and declare the compass feature (the iOS
+ * runtime's KernariumHostFeatures.hpp states it too). Only a run that feeds
+ * the field passes it; a release's own command line may not carry it. */
+constexpr std::string_view compass_prefix{
+	"androidboot.kernarium.compass="};
 
 struct AndroidOptions {
 	std::filesystem::path release;
@@ -267,6 +272,7 @@ std::vector<std::string> boot_command_line(
 		hardware_sku_prefix,
 		uml::camera::layoutArgumentPrefix,
 		orientation_prefix,
+		compass_prefix,
 		uml::android::lcdDensityPrefix,
 		uml::android::hwTimeoutMultiplierPrefix};
 	for (auto &argument : uml::android::readKernelCommandLine(
