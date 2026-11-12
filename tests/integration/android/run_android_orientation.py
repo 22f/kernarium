@@ -32,6 +32,10 @@ window manager judges the accelerometer, and the runner turns the display with a
 the same four postures (then the same repeat, touch and screen-off steps with a posture streamed until the
 next), which proves the older path is untouched and gives the rotation each posture means.
 
+``--launch-only`` stops each guest once the launch's state is checked (the property, the sensor service's
+list and the sensor's flags, the sub-HAL's log line, no SELinux denial about the property, the judge the window
+manager picked and what it holds): the first thing to run on a new image.
+
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the guest
 is reached through the shared adb server, always named with ``-s``. The runner is opt-in: it needs the
 macos-android17 executable, an installed release, an adb client and a JDK (the probe application is built and
@@ -230,6 +234,36 @@ def parse_sensor_state(text: str) -> SensorState:
             active[match[1].strip()] = int(match[2])
     line = next((line for line in text.splitlines() if SENSOR_NAME in line and "type:" in line), None)
     return SensorState(listed, active, line)
+
+
+def sensor_description(text: str, name: str) -> str | None:
+    """The two lines `dumpsys sensorservice` lists a sensor with, joined: name, type and flags, then the reporting
+    mode ("continuous" or "on-change"), the rates and "non-wakeUp"."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^0x[0-9a-f]+\) " + re.escape(name) + r"\s+\|", line):
+            following = lines[index + 1].strip() if index + 1 < len(lines) else ""
+            return f"{line.strip()} {following}"
+    return None
+
+
+def judges_connected(text: str) -> list[str]:
+    """The window manager's judges holding a sensor connection, in the order the dump names them."""
+    found: list[str] = []
+    for match in re.finditer(r"WindowOrientationListener\$(\w+)", text):
+        if match[1] not in found:
+            found.append(match[1])
+    return found
+
+
+AVC_DENIAL = re.compile(r"avc:\s+denied", re.IGNORECASE)
+HAL_LOG_LINE = re.compile(r"Andarium motion: ro\.boot\.kernarium\.orientation=(\d+), (\d+) sensors")
+
+
+def sensors_hal_denials(log: str) -> list[str]:
+    """The SELinux denials in a log that concern the orientation property or the sensors HAL's own domain."""
+    return [line.strip() for line in log.splitlines() if AVC_DENIAL.search(line)
+            and ("kernarium" in line or "hal_sensors" in line or "ro.boot." in line)]
 
 
 @dataclass(frozen=True)
@@ -629,6 +663,70 @@ def check_sensor_listed(guest: Guest, expect_sensor: bool) -> str:
     return f"not listed, judge {state.judge}"
 
 
+ORIENTATION_PROPERTY = "ro.boot.kernarium.orientation"
+ACCELEROMETER_NAME = "Host Accelerometer"
+
+
+def launch_state(guest: Guest, expect_sensor: bool, argument: bool) -> str:
+    """What the launch's argument decided (``argument``: whether the launch carried it; an older release given
+    it reads the property and lists no sensor): the property, the sensors the sub-HAL listed (its own log line says
+    how many), the sensor's flags, which judge the window manager picked and which sensor it holds, and that
+    SELinux denied the sensors HAL nothing about the property."""
+    value = guest.shell(f"getprop {ORIENTATION_PROPERTY}").strip()
+    if value != ("1" if argument else ""):
+        raise Failure(f"getprop {ORIENTATION_PROPERTY} reads {value!r}, expected {'1' if argument else 'nothing'}")
+    dump = guest.shell("dumpsys sensorservice")
+    sensors = parse_sensor_state(dump)
+    for name, kind in ((ACCELEROMETER_NAME, 1), ("Host Gyroscope", 4)):
+        if sensors.listed.get(name) != kind:
+            raise Failure(f"the sensor service lists {sensors.listed}, not {name} (type {kind})")
+    notes = []
+    log = guest.shell("logcat -d -b all 2>/dev/null | grep -E 'Andarium motion: ro.boot|avc: +denied'; true")
+    said = HAL_LOG_LINE.findall(log)
+    wanted = ("1", "3") if expect_sensor else ("0", "2")
+    if not expect_sensor and argument:
+        wanted = None  # an older sub-HAL says nothing; a newer one given the argument would list the sensor
+    if said and wanted is not None and said[-1] != wanted:
+        raise Failure("the sub-HAL's log line says =%s, %s sensors; expected =%s, %s" % (*said[-1], *wanted))
+    notes.append("log line =%s, %s sensors" % said[-1] if said else "log line not found in the buffer")
+    denials = sensors_hal_denials(log)
+    if denials:
+        raise Failure(f"SELinux denials about the property or the sensors HAL: {denials[:3]}")
+    state = guest.rotation_state()
+    if expect_sensor:
+        description = sensor_description(dump, SENSOR_NAME)
+        if description is None or "type: android.sensor.device_orientation(27)" not in description:
+            raise Failure(f"the sensor service describes {SENSOR_NAME} as {description!r}")
+        if "on-change" not in description or "non-wakeUp" not in description:
+            raise Failure(f"{SENSOR_NAME} is not on-change and non-wake-up: {description!r}")
+        settle_sensor_use(guest, True)
+        dump = guest.shell("dumpsys sensorservice")
+        sensors = parse_sensor_state(dump)
+        judges = judges_connected(dump)
+        if sensors.active.get(ACCELEROMETER_NAME):
+            raise Failure(f"the accelerometer is held ({sensors.active}), by {judges}")
+        if judges != ["OrientationSensorJudge"] or state.judge != "OrientationSensorJudge":
+            raise Failure(f"the window manager's connections are {judges}, judge {state.judge}")
+        notes += ["on-change, non-wakeUp", "held by OrientationSensorJudge", "the accelerometer idle"]
+    else:
+        if SENSOR_NAME in sensors.listed:
+            raise Failure(f"the sensor service lists {SENSOR_NAME} without the argument")
+        settle_accelerometer_use(guest)
+        dump = guest.shell("dumpsys sensorservice")
+        judges = judges_connected(dump)
+        if judges != ["AccelSensorJudge"] or state.judge != "AccelSensorJudge":
+            raise Failure(f"the window manager's connections are {judges}, judge {state.judge}")
+        notes += ["two sensors and the virtual ones", "held by AccelSensorJudge"]
+    return f"{ORIENTATION_PROPERTY}={value or '(unset)'}; " + "; ".join(notes)
+
+
+def settle_accelerometer_use(guest: Guest) -> None:
+    def check() -> str | None:
+        return None if guest.sensors().active.get(ACCELEROMETER_NAME, 0) >= 1 else "the accelerometer is not held"
+
+    wait_for("the accelerometer's use", ROTATION_SECONDS, check, guest)
+
+
 def settle_sensor_use(guest: Guest, active: bool) -> None:
     """The window manager has the sensor registered (or not) once its use has settled."""
     def check() -> str | None:
@@ -693,6 +791,7 @@ def early_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, re
     host = host_holder["host"]
     early: EarlyHost = host_holder["early"]  # type: ignore[assignment]
     try:
+        report.run("launch state", lambda: launch_state(guest, True, True))
         report.run("early host", lambda: describe_early(guest, early))
         report.run("fresh disk default", lambda: fresh_default(guest))
         report.run("sensor listed", lambda: check_sensor_listed(guest, True))
@@ -838,8 +937,11 @@ def late_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, rep
     try:
         server = guest.system_server()
         guest.settings_app()
+        report.run("launch state", lambda: launch_state(guest, True, True))
         report.run("sensor listed", lambda: check_sensor_listed(guest, True))
         report.run("no host: the window manager registered the sensor, the display stays", lambda: no_host(guest))
+        if options.launch_only:
+            return
         report.run("host connects late", lambda: late_host(guest, host))
         report.run("lock screen", lambda: lock_screen(guest, host))
         report.run("a value said again", lambda: duplicates(guest, host.push))
@@ -1020,9 +1122,12 @@ def legacy_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, r
     host = holder["host"]
     try:
         guest.settings_app()
+        report.run("launch state", lambda: launch_state(guest, False, not options.no_argument))
         report.run("sensor not listed", lambda: check_sensor_listed(guest, False))
         report.run("control frames are ANC1", lambda: legacy_frames(host))
         report.run("accelerometer postures turn the display", lambda: legacy_postures(guest, host))
+        if options.launch_only:
+            return
         report.run("Settings follows each posture", lambda: settings_values(
             guest, lambda value: host.hold_posture(value, 3.0)))
         # The same applications, turned by the accelerometer judge instead: the rules the sensor's
@@ -1139,6 +1244,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not pass androidboot.kernarium.orientation=1 (an older application)")
     parser.add_argument("--phases", default="early,late",
                         help="with --expect sensor, the phases to run (early, late); default both")
+    parser.add_argument("--launch-only", action="store_true",
+                        help="stop each guest once the launch's state is checked: the property, the sensors listed, "
+                        "the judge and who holds which sensor (the first thing to run on a new image)")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int, default=slot_ports.slot_port(slot_ports.ADB_OFFSET, DEFAULT_ADB_PORT),
                         help="loopback port the launcher forwards adbd to (default: the guest slot's first port "
@@ -1167,9 +1275,9 @@ def main() -> int:
         if options.expect == "none":
             legacy_phase(options, adb, private, report)
         else:
-            if "early" in phases:
+            if "early" in phases and not options.launch_only:
                 early_phase(options, adb, private, report)
-            if "late" in phases:
+            if "late" in phases or options.launch_only:
                 late_phase(options, adb, private, report)
         print("\n".join(f"{status:4} {name}: {detail}" for name, status, detail in report.rows))
         print("FAIL" if report.failed else "PASS")

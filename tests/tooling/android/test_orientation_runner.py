@@ -100,6 +100,10 @@ Host Device Orientation (handle=0x00000003, connections=1)
 Socket Buffer size = 39 events
 
 --- Client Listeners (2 registered) ---
+1 open event connections
+Connection Number: 0
+\tOperating Mode: NORMAL
+\t com.android.server.wm.WindowOrientationListener$OrientationSensorJudge | WakeLockRefCount 0 | uid 1000 | cache size 0
 """
 
 HIERARCHY = """\
@@ -183,6 +187,29 @@ class ParserTests(unittest.TestCase):
         without = runner.parse_sensor_state(SENSOR_DUMP.replace("Host Device Orientation", "Other"))
         self.assertNotIn("Host Device Orientation", without.listed)
         self.assertIsNone(without.orientation_line)
+
+    def test_the_sensors_description_and_who_holds_it(self) -> None:
+        description = runner.sensor_description(SENSOR_DUMP, "Host Device Orientation")
+        self.assertIn("type: android.sensor.device_orientation(27)", description or "")
+        self.assertIn("on-change", description or "")
+        self.assertIn("non-wakeUp", description or "")
+        # A name that is only the start of another does not match it.
+        self.assertIsNone(runner.sensor_description(SENSOR_DUMP, "Host Device"))
+        self.assertEqual(runner.judges_connected(SENSOR_DUMP), ["OrientationSensorJudge"])
+        self.assertEqual(runner.judges_connected("nothing here"), [])
+        accelerometer = runner.sensor_description(SENSOR_DUMP, "Host Accelerometer")
+        self.assertIn("continuous", accelerometer or "")
+
+    def test_the_sub_hals_log_line_and_the_denials_that_matter(self) -> None:
+        line = "11-12 22:00:01.000   439   439 I MotionSubHal: Andarium motion: ro.boot.kernarium.orientation=1, 3 sensors"
+        self.assertEqual(runner.HAL_LOG_LINE.findall(line), [("1", "3")])
+        self.assertEqual(runner.HAL_LOG_LINE.findall(line.replace("=1, 3", "=0, 2")), [("0", "2")])
+        unrelated = "type=1400 audit: avc:  denied  { read } for comm=\"foo\" scontext=u:r:untrusted_app:s0 tcontext=u:object_r:x:s0"
+        sensors = ("avc:  denied  { read } for property=ro.boot.kernarium.orientation pid=439 "
+                   "scontext=u:r:hal_sensors_default:s0 tcontext=u:object_r:bootloader_prop:s0")
+        self.assertEqual(runner.sensors_hal_denials(unrelated), [])
+        self.assertEqual(runner.sensors_hal_denials(f"{unrelated}\n{sensors}\n"), [sensors])
+        self.assertEqual(runner.sensors_hal_denials("avc: granted { read } for hal_sensors_default"), [])
 
     def test_the_rotation_suggestion_button_is_systemuis_rotate_screen(self) -> None:
         rotation, nodes = runner.parse_hierarchy(HIERARCHY)

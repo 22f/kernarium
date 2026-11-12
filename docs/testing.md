@@ -714,10 +714,14 @@ the sensor was registered, for a value said again, for a turn made with a
 finger down, for a value sent while the screen is off and for a host that
 connects late or reconnects. Restarting the framework or the sensors HAL needs
 root, which a user build does not give, so the runner does not.
-`--expect none` boots a release that does not list the sensor (or this release
-without the argument) and checks that nothing changed: `ANC1` frames, the
-accelerometer judging, and the display turning with accelerometer postures. It
-needs a JDK, which builds and signs the probe application.
+`--launch-only` stops after the launch's state (the property, the sensors the
+service lists and their flags, the judge the window manager picked and what it
+holds, no SELinux denial about the property), which is what to run first on a
+new image. `--expect none` boots a release that does not list the sensor (or
+this release without the argument) and checks that nothing changed: `ANC1`
+frames, the accelerometer judging, and the display turning with accelerometer
+postures. The runner needs a JDK, which builds and signs the probe
+application.
 `android17-orientation-runner` (tooling) runs its wire, parsers, rotation rules,
 host and probe manifest without a guest.
 `android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
