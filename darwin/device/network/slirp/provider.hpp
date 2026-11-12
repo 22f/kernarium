@@ -52,8 +52,15 @@ inline constexpr const char *nameserver_address = "10.0.2.3";
 inline constexpr dns::Ipv4Address nameserver_ipv4{10, 0, 2, 3};
 inline constexpr dns::Ipv4Address host_alias_ipv4{10, 0, 2, 2};
 /* A frame that needs the host's addresses (dns::needs_host_check) finds them
- * read again when the table is older than this. */
+ * read again when the last good read is older than this. */
 inline constexpr std::chrono::seconds host_address_max_age{1};
+/* A read that fails is not a fresh table: the next frame that needs it reads
+ * again, at most this often. */
+inline constexpr std::chrono::milliseconds host_address_retry_interval{100};
+/* A table whose last good read is older than host_address_max_age plus this
+ * is no longer trusted: new traffic the table judges is refused until a read
+ * succeeds. */
+inline constexpr std::chrono::seconds host_address_failure_grace{3};
 
 /* One host listening socket forwarded into the guest. Registrations are
  * accepted while the provider is not open; the provider owns replaying them
@@ -269,12 +276,16 @@ private:
 	/* Called with start_mutex_ held and slirp_ valid. */
 	int install_forward(const HostForward &forward) noexcept;
 	/* Reads the host's addresses into host_addresses_; false, with the table
-	 * as it was, when the system cannot list them. Either way the read is
-	 * the latest one, and the next waits host_address_max_age. */
+	 * as it was and as old, when the system cannot list them. */
 	bool read_host_addresses_now() noexcept;
 	/* The worker's part, for a frame that needs the table: reads it again
-	 * unless a read is younger than host_address_max_age. */
+	 * when the last good read is older than host_address_max_age, and after a
+	 * failed read not before host_address_retry_interval has passed. */
 	void refresh_host_addresses_if_stale() noexcept;
+	/* Whether the table can still judge new traffic: it can until the last
+	 * good read is older than host_address_max_age plus
+	 * host_address_failure_grace. */
+	[[nodiscard]] bool host_addresses_trusted() const noexcept;
 	[[nodiscard]] std::chrono::steady_clock::time_point
 	host_clock_now() const noexcept;
 
@@ -332,7 +343,12 @@ private:
 	/* What the guest may not address: open() fills the table before the
 	 * worker exists, and the worker alone reads and refreshes it after. */
 	HostAddresses host_addresses_;
+	/* When the table was last read well; a read that fails leaves it alone,
+	 * and so does a path report. */
 	std::chrono::steady_clock::time_point host_addresses_read_at_{};
+	/* After a failed read: when to try again. */
+	std::chrono::steady_clock::time_point host_address_retry_at_{};
+	bool host_addresses_distrust_logged_{};
 	std::jthread worker_;
 	std::atomic_bool started_{false};
 	std::atomic_bool stopping_{true};

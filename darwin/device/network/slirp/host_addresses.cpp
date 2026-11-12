@@ -34,8 +34,23 @@ void HostAddresses::assign_ipv4(std::vector<std::uint32_t> addresses)
 	ipv4_ = std::move(addresses);
 }
 
+const HostAddresses &HostAddresses::everything() noexcept
+{
+	static const HostAddresses table = [] {
+		HostAddresses result;
+		result.all_ = true;
+		return result;
+	}();
+	return table;
+}
+
 bool HostAddresses::contains(const HostIpv4 &address) const noexcept
 {
+	if (all_) {
+		const auto value = ipv4_value(address);
+		return value != 0 && value != 0xffffffffU &&
+			(value & 0xf0000000U) != 0xe0000000U;
+	}
 	return std::ranges::binary_search(ipv4_, ipv4_value(address));
 }
 

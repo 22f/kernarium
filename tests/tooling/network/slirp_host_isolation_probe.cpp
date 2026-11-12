@@ -1009,22 +1009,61 @@ void check_the_table_is_read_for_the_frames_that_need_it()
 	rig.syn(elsewhere, 0, 47401);
 	expect("past the second", 3, Refusal::refused, 47401);
 
-	/* A read that fails keeps the table, and is not repeated for every
-	 * frame: the next try waits for the second as well. */
+	/* A read that fails is not a fresh table. It keeps the old one, and the
+	 * next frame that needs the table tries again, but not more often than
+	 * every 100 ms. */
+	const Address other_machine{198, 51, 100, 7};
 	set_failing(true);
 	advance(std::chrono::milliseconds{1100});
 	rig.syn(elsewhere, 0, 47500);
 	expect("a failing read", 4, Refusal::refused, 47500);
 	for (std::uint16_t port = 47510; port < 47520; ++port)
 		rig.syn(elsewhere, 0, port);
-	expect("a failing read, inside the second", 4);
+	expect("a failing read, inside the retry interval", 4);
+	advance(std::chrono::milliseconds{150});
+	rig.syn(elsewhere, 0, 47520);
+	expect("a failing read, tried again", 5, Refusal::refused, 47520);
+	/* The old table still judges for three seconds past its age limit: it
+	 * does not know an address the host may have gained, and it does not
+	 * forget the ones it knew. */
+	rig.syn(other_machine, 0, 47530);
+	expect("an address the old table lacks, while it is trusted", 5,
+	       Refusal::passed, 47530);
+	/* Three seconds after the last good read's age limit nothing new is let
+	 * through on the strength of a table that old: what is not the host's
+	 * by that table is refused as if it were. */
+	advance(std::chrono::seconds{3});
+	rig.syn(other_machine, 0, 47540);
+	expect("a table nobody could read", 6, Refusal::refused, 47540);
+	rig.syn(elsewhere, 0, 47541);
+	expect("an address in the old table, once it is not trusted", 6,
+	       Refusal::refused, 47541);
+	/* Not every frame is the host's then: a DHCP discover goes to the
+	 * broadcast address, which no interface holds, and still gets its offer. */
+	(void)rig.guest.send(udp_frame({0, 0, 0, 0}, broadcast, 68, 67,
+				       dhcp_discover()));
+	if (!rig.guest.receive([](const Bytes &frame) {
+		    return frame.size() > 42 + 240 && frame[23] == IPPROTO_UDP &&
+			    get16(frame, 34) == 67 && get16(frame, 36) == 68;
+	    }))
+		fail("a table nobody could read", "no DHCP offer");
 	/* It succeeds the next time it is tried, and the host has lost the
 	 * address meanwhile. */
 	set_failing(false);
 	set_addresses({value(loopback)});
-	advance(std::chrono::milliseconds{1100});
+	advance(std::chrono::milliseconds{150});
 	rig.syn(elsewhere, 0, 47600);
-	expect("a retried read", 5, Refusal::passed, 47600);
+	expect("a retried read", 7, Refusal::passed, 47600);
+	/* The grace runs from the last good read, not from the first failure: a
+	 * table read long ago and then unreadable is not trusted at all. */
+	set_failing(true);
+	advance(std::chrono::seconds{30});
+	rig.syn(other_machine, 0, 47610);
+	expect("a table read long ago, unreadable", 8, Refusal::refused, 47610);
+	set_failing(false);
+	advance(std::chrono::milliseconds{150});
+	rig.syn(other_machine, 0, 47620);
+	expect("a table read again", 9, Refusal::passed, 47620);
 
 	/* A fragment is judged by the table like any other frame to the host,
 	 * so a first fragment that stops before the flags byte cannot hide a
@@ -1050,7 +1089,7 @@ void check_the_table_is_read_for_the_frames_that_need_it()
 		8);
 	(void)rig.guest.send(head);
 	(void)rig.guest.send(tail);
-	expect("a fragmented connect attempt", 6);
+	expect("a fragmented connect attempt", 10);
 	if (listener && listener->saw_connection())
 		fail("fragments", "a fragmented SYN reached a host listener");
 }

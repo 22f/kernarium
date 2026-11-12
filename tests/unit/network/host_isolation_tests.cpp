@@ -585,6 +585,59 @@ void aFrameThatNeedsNoLookUpIsJudgedAlikeWhateverTheTableHolds()
 	require(unjudged > frames.size() / 3);
 }
 
+void aTableThatHoldsEveryAddressRefusesWhatTheTableJudges()
+{
+	/* The provider judges by this table when it has not been able to read the
+	 * host's addresses for a while: everything that would open a flow to
+	 * another machine is refused, and what it serves at its own addresses
+	 * still is not. */
+	const auto &all = HostAddresses::everything();
+	require(!all.empty() && all.contains(other_machine) &&
+		all.contains(lan_host) && all.contains(virtual_host));
+	/* An ordinary table is not affected, and tables compare apart. */
+	require(!the_host().contains(other_machine));
+	require(all != HostAddresses{});
+	require(classify(ip_frame(other_machine, protocol_tcp,
+				  tcp_segment(40000, 80, 1000, 0, tcp_syn)),
+			 all).action == FrameAction::reset);
+	require(classify(ip_frame(other_machine, protocol_udp, udp_datagram(1, 2)),
+			 all).action == FrameAction::unreachable);
+	require(classify(ip_frame(other_machine, protocol_icmp, Bytes(8, 0)),
+			 all).action == FrameAction::drop);
+	require(classify(ip_frame(gateway, protocol_icmp, Bytes(8, 0)), all).action ==
+		FrameAction::pass);
+	require(classify(ip_frame(name_server, protocol_udp, udp_datagram(40000, 53)),
+			 all).action == FrameAction::pass);
+	require(classify(ip_frame(gateway, protocol_udp, udp_datagram(68, 67)), all).action ==
+		FrameAction::pass);
+}
+
+void aTableThatHoldsEveryAddressLeavesWhatNoTableHoldsAlone()
+{
+	/* A guest's DHCP discover is a broadcast from 0.0.0.0, and its group
+	 * traffic goes to a multicast address: no interface holds either, so
+	 * they are no more the host's under this table than under any other. */
+	const auto &all = HostAddresses::everything();
+	for (const auto &address : {Ipv4Address{255, 255, 255, 255},
+				    Ipv4Address{0, 0, 0, 0},
+				    Ipv4Address{224, 0, 0, 0},
+				    Ipv4Address{224, 0, 0, 251},
+				    Ipv4Address{239, 255, 255, 255}}) {
+		require(!all.contains(address));
+		require(classify(ip_frame(address, protocol_udp, udp_datagram(68, 67)),
+				 all).action == FrameAction::pass);
+		require(classify(ip_frame(address, protocol_tcp,
+					  tcp_segment(40000, 80, 1, 0, tcp_syn)),
+				 all).action == FrameAction::pass);
+	}
+	/* The addresses beside them are the host's. */
+	for (const auto &address : {Ipv4Address{223, 255, 255, 255},
+				    Ipv4Address{240, 0, 0, 1},
+				    Ipv4Address{0, 0, 0, 1},
+				    Ipv4Address{255, 255, 255, 254}})
+		require(all.contains(address));
+}
+
 } // namespace
 
 int main()
@@ -604,5 +657,7 @@ int main()
 	framesThatAreNotIpv4AreLeftToSlirp();
 	onlyAFrameJudgedByTheTableMakesTheProviderLookItUp();
 	aFrameThatNeedsNoLookUpIsJudgedAlikeWhateverTheTableHolds();
+	aTableThatHoldsEveryAddressRefusesWhatTheTableJudges();
+	aTableThatHoldsEveryAddressLeavesWhatNoTableHoldsAlone();
 	return EXIT_SUCCESS;
 }
