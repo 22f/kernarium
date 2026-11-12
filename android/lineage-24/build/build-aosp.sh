@@ -568,8 +568,11 @@ done
 PRODUCT_VENDOR_PROPERTIES=" $(get_build_var PRODUCT_VENDOR_PROPERTIES) "
 [[ "$PRODUCT_VENDOR_PROPERTIES" == *" ro.vendor.camera.config=v4l2 "* ]] ||
 	fail "the camera HAL is not told to take its cameras from the camera device: ro.vendor.camera.config=v4l2"
-[[ "$PRODUCT_VENDOR_PROPERTIES" != *" ro.camerax.extensions.enabled="* ]] ||
-	fail "the inherited CameraX extensions switch remains: the image has no vendor extensions"
+# An inherited vendor property cannot be removed from PRODUCT_VENDOR_PROPERTIES: the
+# denylist drops it when the build writes the vendor property file, and the verifier
+# requires its absence there.
+[[ " $(get_build_var PRODUCT_VENDOR_PROPERTY_BLACKLIST) " == *" ro.camerax.extensions.enabled "* ]] ||
+	fail "the inherited CameraX extensions switch is not denylisted: the image has no vendor extensions"
 [[ "$PRODUCT_VENDOR_PROPERTIES" != *" ro.rebootescrow.device="* ]] ||
 	fail "the unsupported reboot-escrow backing property remains present"
 for property in \
