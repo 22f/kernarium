@@ -8,7 +8,8 @@ tested too. The driver runs them on one thread as CPU0 and counts the host
 calls an idle cycle makes: a wake by the clock must not look at the IPI wake
 pipe unless a vector is pending, no cycle drains it twice, and an IPI sent
 before, during or after the wait must be handled without a lost wake and with
-at most one spurious cycle.
+at most one spurious cycle. A wait whose dispatch before it ran the handlers
+of an edge must not sleep, for a handler may have made a task runnable here.
 """
 __import__("sys").dont_write_bytecode = True
 
