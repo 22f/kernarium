@@ -87,10 +87,11 @@ struct MotionTests {
         mount.begin(interface: .portrait)
         var restart = restarts(&mount, .guest, .landscapeLeft)
         #expect(restart && mount.axes == .landscapeLeft)
-        // UIKit holds the locked orientation; a differing reading is ignored.
+        // UIKit holds the orientation; a differing reading is ignored.
         restart = restarts(&mount, .guest, .portrait)
         #expect(!restart && mount.axes == .landscapeLeft)
-        // Returning to a locked scene mounts the orientation now held, once.
+        // When the host owns rotation again the mount follows the interface,
+        // once.
         restart = restarts(&mount, .host, .portrait)
         #expect(restart && mount.axes == .portrait)
         restart = restarts(&mount, .guest, .landscapeRight)

@@ -29,8 +29,7 @@ struct SceneUpdateTests {
             SceneUpdateInputs(
                 scene: ObjectIdentifier(scene), driver: ObjectIdentifier(driver),
                 sceneSize: CGSize(width: 393, height: 852), screenSize: CGSize(width: 393, height: 852),
-                interfaceOrientation: UIInterfaceOrientation.portrait.rawValue, interfaceLocked: false,
-                phase: .home)
+                interfaceOrientation: UIInterfaceOrientation.portrait.rawValue, phase: .home)
         }
     }
 
@@ -120,7 +119,6 @@ struct SceneUpdateTests {
             ("the screen's width", { $0.screenSize.width = 430 }),
             ("the screen's height", { $0.screenSize.height = 932 }),
             ("the interface orientation", { $0.interfaceOrientation = UIInterfaceOrientation.landscapeLeft.rawValue }),
-            ("the interface lock", { $0.interfaceLocked = true }),
             ("the phase", { $0.phase = .running(.normal) }),
             ("the mode of the phase", { $0.phase = .running(.recovery) }),
         ]
@@ -170,7 +168,7 @@ struct SceneUpdateTests {
         await settle()
         #expect(first.geometryChanges == before, "the scene is where it was")
         // A phase change is an input, and reaches the driver at once (a second
-        // call may follow where the scene then applies the interface lock).
+        // call may follow a layout the phase change causes).
         model.phase = .running(.normal)
         #expect(await eventually { first.geometryChanges > before })
         await settle()
