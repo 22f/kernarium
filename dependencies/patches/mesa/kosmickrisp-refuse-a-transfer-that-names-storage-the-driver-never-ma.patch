@@ -39,9 +39,9 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  src/kosmickrisp/vulkan/kk_buffer.c    | 21 +++++++++++-
  src/kosmickrisp/vulkan/kk_cmd_clear.c |  9 +++--
- src/kosmickrisp/vulkan/kk_cmd_copy.c  | 48 +++++++++++++++++++++++++++
+ src/kosmickrisp/vulkan/kk_cmd_copy.c  | 49 +++++++++++++++++++++++++++
  src/kosmickrisp/vulkan/kk_image.c     | 42 +++++++++++++++++++----
- 4 files changed, 110 insertions(+), 10 deletions(-)
+ 4 files changed, 111 insertions(+), 10 deletions(-)
 
 diff --git a/src/kosmickrisp/vulkan/kk_buffer.c b/src/kosmickrisp/vulkan/kk_buffer.c
 index 2a53a8e6ca7a5c1433388093bd2a740f43c4159d..fa9e458bb9f3ff12833d105c8bd87c5b4e0d31c3 100644
@@ -110,18 +110,19 @@ index 3d47aec9399bbc01ffae6be11231912c272cdb6c..f64e82142a569eeb3fb75fe6402d0e6a
           VkRenderingInfo render = {
              .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
 diff --git a/src/kosmickrisp/vulkan/kk_cmd_copy.c b/src/kosmickrisp/vulkan/kk_cmd_copy.c
-index 8636a37742d03b93db2000f29bd4c362fd91857f..529b7ea7e3f14b10e6471425d4e11e811660a775 100644
+index 8636a37742d03b93db2000f29bd4c362fd91857f..103b02cc2a375420cc1b72795d0e1b494ea0bddb 100644
 --- a/src/kosmickrisp/vulkan/kk_cmd_copy.c
 +++ b/src/kosmickrisp/vulkan/kk_cmd_copy.c
-@@ -19,6 +19,33 @@
+@@ -19,6 +19,34 @@
  
  #include "util/format/u_format.h"
  
 +/* A transfer hands Metal the Metal object of every buffer and image plane it
 + * names. A buffer or image that was never bound, or whose bind failed, has
 + * none, and Apple's GPU drivers dereference a nil argument and end the
-+ * process. The command then records an error on its command buffer and
-+ * records nothing. */
++ * process. The command then records an error on its command buffer and hands
++ * Metal nothing for that object; the regions of a copy before the first one
++ * that names it are already recorded. */
 +static bool
 +kk_cmd_buffer_has_metal_buffer(struct kk_cmd_buffer *cmd,
 +                               const struct kk_buffer *buffer)
@@ -147,7 +148,7 @@ index 8636a37742d03b93db2000f29bd4c362fd91857f..529b7ea7e3f14b10e6471425d4e11e81
  VKAPI_ATTR void VKAPI_CALL
  kk_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
                    const VkCopyBufferInfo2 *pCopyBufferInfo)
-@@ -27,6 +54,10 @@ kk_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
+@@ -27,6 +55,10 @@ kk_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
     VK_FROM_HANDLE(kk_buffer, src, pCopyBufferInfo->srcBuffer);
     VK_FROM_HANDLE(kk_buffer, dst, pCopyBufferInfo->dstBuffer);
  
@@ -158,7 +159,7 @@ index 8636a37742d03b93db2000f29bd4c362fd91857f..529b7ea7e3f14b10e6471425d4e11e81
     mtl_compute_encoder *encoder = cs_get_compute(cmd, true);
     for (uint32_t i = 0; i < pCopyBufferInfo->regionCount; i++) {
        const VkBufferCopy2 *region = &pCopyBufferInfo->pRegions[i];
-@@ -119,12 +150,17 @@ kk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+@@ -119,12 +151,17 @@ kk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
     VK_FROM_HANDLE(kk_buffer, buffer, pCopyBufferToImageInfo->srcBuffer);
     VK_FROM_HANDLE(kk_image, image, pCopyBufferToImageInfo->dstImage);
  
@@ -176,7 +177,7 @@ index 8636a37742d03b93db2000f29bd4c362fd91857f..529b7ea7e3f14b10e6471425d4e11e81
        struct kk_buffer_image_copy_info info =
           vk_buffer_image_copy_to_mtl_buffer_image_copy(region, plane);
        info.mtl_data.buffer = buffer->mtl_handle;
-@@ -150,12 +186,17 @@ kk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+@@ -150,12 +187,17 @@ kk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
     VK_FROM_HANDLE(kk_image, image, pCopyImageToBufferInfo->srcImage);
     VK_FROM_HANDLE(kk_buffer, buffer, pCopyImageToBufferInfo->dstBuffer);
  
@@ -194,7 +195,7 @@ index 8636a37742d03b93db2000f29bd4c362fd91857f..529b7ea7e3f14b10e6471425d4e11e81
        struct kk_buffer_image_copy_info info =
           vk_buffer_image_copy_to_mtl_buffer_image_copy(region, plane);
        info.mtl_data.buffer = buffer->mtl_handle;
-@@ -213,6 +254,8 @@ kk_cmd_copy_memory_image(VkCommandBuffer commandBuffer,
+@@ -213,6 +255,8 @@ kk_cmd_copy_memory_image(VkCommandBuffer commandBuffer,
        const uint8_t plane_index = kk_image_memory_aspects_to_plane(
           image, region->imageSubresource.aspectMask);
        struct kk_image_plane *plane = &image->planes[plane_index];
@@ -203,7 +204,7 @@ index 8636a37742d03b93db2000f29bd4c362fd91857f..529b7ea7e3f14b10e6471425d4e11e81
        struct kk_buffer_image_copy_info info =
           vk_buffer_image_copy_to_mtl_buffer_image_copy(&buffer_region, plane);
        info.mtl_data.buffer = address.buffer;
-@@ -538,6 +581,11 @@ kk_CmdCopyImage2(VkCommandBuffer commandBuffer,
+@@ -538,6 +582,11 @@ kk_CmdCopyImage2(VkCommandBuffer commandBuffer,
        uint8_t dst_index =
           kk_image_aspects_to_plane(dst, region->dstSubresource.aspectMask);
  
