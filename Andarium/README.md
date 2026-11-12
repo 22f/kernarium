@@ -32,10 +32,10 @@ The project file is the JSON format Xcode 27 reads, kept in the canonical form
 after every hand edit. Every configuration takes its base settings from
 `Config/Andarium.xcconfig`, which includes
 `../GuestHost/Config/Signing.xcconfig` and sets what decides
-[Send feedback](#send-feedback); the signer's team is only in the ignored
-`Signing.local.xcconfig` beside the signing file
-([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the project names
-no team.
+[Send feedback](#send-feedback) and [Buy me tokens](#buy-me-tokens); the
+signer's team is only in the ignored `Signing.local.xcconfig` beside the
+signing file ([`GuestHost/README.md`](../GuestHost/README.md#signing)), so the
+project names no team.
 
 ## Targets
 
@@ -174,7 +174,9 @@ everything that exists for automation or only pretends:
   ([`scripts/check-privacy-manifests.py`](../scripts/check-privacy-manifests.py));
   the script's header is the complete list.
 - It alone can carry [Send feedback](#send-feedback), and only when the
-  receiver's address is in the ignored `Config/Feedback.local.xcconfig`.
+  receiver's address is in the ignored `Config/Feedback.local.xcconfig`, and
+  [Buy me tokens](#buy-me-tokens), and only when the four product identifiers
+  are in the ignored `Config/TipJar.local.xcconfig`.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -193,15 +195,16 @@ not declare because only an App Store build is uploaded.
 
 ### Send feedback
 
-Info and a running session's Settings open a sheet that writes an email to the
-developer (`Shared/Feedback/`, the system's Mail composer sends it). It is
-compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore build whose
-ignored `Config/Feedback.local.xcconfig` (from `Feedback.local.xcconfig.example`)
-names the receiver, so a fork, a sideload or a Debug or Release build holds none
-of it, and every configuration's bundle check says whether it does: it also
-fails on the local receiver's bytes in any file of a bundle that does not name
-it (never printing it), and on an `Info.plist` whose values differ from
-`Config/Info.plist` (the preprocessing changes the feedback key alone).
+Home's toolbar menu and a running session's Settings open a sheet that writes
+an email to the developer (`Shared/Feedback/`, the system's Mail composer sends
+it). It is compiled in, under the `FEEDBACK_MAIL` condition, only in an AppStore
+build whose ignored `Config/Feedback.local.xcconfig` (from
+`Feedback.local.xcconfig.example`) names the receiver, so a fork, a sideload or
+a Debug or Release build holds none of it, and every configuration's bundle
+check says whether it does: it also fails on the local receiver's bytes in any
+file of a bundle that does not name it (never printing it), and on an
+`Info.plist` whose values differ from `Config/Info.plist` (the preprocessing
+changes the feedback and tip keys alone).
 Tests and captures turn it on in a Debug build with
 `FEEDBACK_ADDRESS=feedback@example.com` on the `xcodebuild` line, which the
 bundle check accepts in Debug alone; `AndariumPreview` takes that arrangement
@@ -211,6 +214,55 @@ tested, by AndariumCore's tests through a symlinked target no product links.
 The feature's words are looked up in the `Feedback` string table; the mail's
 subject prefix and its information block are English whatever the interface
 language, and the bug report's overlay text is the app's own.
+
+### Buy me tokens
+
+A sheet in the shape of a chat offers four one-time tips, Lite, Pro, Max and
+Ultra (`Shared/TipJar/`), as consumable In-App Purchases through StoreKit 2.
+A tip is voluntary and unlocks nothing: every feature is free either way, and
+nothing about a tip is remembered, counted or shown outside the sheet, which
+says only thanks and then only Done. There is no prompt, badge or banner; the
+one entrance is the item in [Home's toolbar menu](#home-toolbar-menu), offered
+once a virtual machine is set up. The words never use "donate", "plan" or
+"subscribe" and name no amount of tokens, and `scripts/check-tip-words.py`
+(`andarium-tip-words`) rejects those words in every language of the `TipJar`
+string table; each tier's price is the store's own.
+
+The feature is compiled in, under the `TIP_JAR` condition, only in an AppStore
+build whose ignored `Config/TipJar.local.xcconfig` (from
+`TipJar.local.xcconfig.example`) names all four products, so a fork, a
+sideload or a Debug or Release build holds none of it: no entrance, no
+StoreKit use, no `TipJar` string table, no identifier. The bundle check says
+for every configuration whether it does, fails on a build that has the
+identifiers without the code or the code without the identifiers, and fails on
+the local identifiers' bytes in any file of a bundle that does not name them
+(never printing them). Tests and captures turn it on in a Debug build with
+`TIP_LITE=com.example.andarium.tip.lite` and the same for `TIP_PRO`,
+`TIP_MAX` and `TIP_ULTRA` on the `xcodebuild` line, which the bundle check
+accepts in Debug alone; `AndariumPreview` takes that arrangement only, and its
+hooks into the sheet are not in the AppStore product.
+
+The sheet's states (loading, the tiers the store answered, none answered with
+Try again, purchases not allowed on the device, purchasing, thanks, waiting for
+approval, the store's own failure message; a cancel shows nothing) live in
+`Shared/TipJar/Logic`, behind a store seam the tests drive without the App
+Store, and AndariumCore's tests build and run them through a symlinked target
+no product links. A listener from launch finishes every transaction the store
+holds unfinished (an approved Ask to Buy, an interrupted purchase), verified
+or not, because nothing is unlocked and an unfinished consumable blocks buying
+it again. `AndariumTests/TipJar.storekit` is the StoreKit test configuration
+of the hosted tests, with the example identifiers only. Purchase history is
+not collected, and no account, receipt or analytics leaves the device, so the
+privacy manifest declares nothing for it.
+
+### Home toolbar menu
+
+When Send feedback or Buy me tokens is compiled in, Home's toolbar holds one
+menu instead of the Info button: Info, then Send feedback, then Buy me tokens,
+each present only when its own feature is (`Shared/HomeMenu.swift`; Buy me
+tokens also needs a virtual machine). Without either feature, or with only
+Info to offer, Info stays the plain button and the build holds no menu code
+that names a feature.
 
 ## Model and storage
 

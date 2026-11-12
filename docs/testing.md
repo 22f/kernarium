@@ -339,8 +339,10 @@ mock data, `Andarium` the device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com`; the scheme without the filter also runs
-`AndariumUITests`). `SnapshotFileApiTests`
+FEEDBACK_ADDRESS=feedback@example.com TIP_LITE=com.example.andarium.tip.lite
+TIP_PRO=com.example.andarium.tip.pro TIP_MAX=com.example.andarium.tip.max
+TIP_ULTRA=com.example.andarium.tip.ultra`; the scheme without the filter also
+runs `AndariumUITests`). `SnapshotFileApiTests`
 checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
@@ -348,8 +350,15 @@ fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
 exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
 command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
-a run without it does not build them. The Mail composer, the picker and the
-guest's display are stand-ins. The hosted tests
+a run without it does not build them. `TipJarScreenTests` and
+`TipJarStoreKitTests` ([Buy me tokens](../Andarium/README.md#buy-me-tokens)) need
+the four `TIP_` settings the same way; the second plays purchases, Ask to Buy
+and unfinished transactions against `AndariumTests/TipJar.storekit` (example
+identifiers only) in StoreKit's test session, never the App Store.
+`HomeMenuTests` checks the content of Home's toolbar menu in every combination
+of the two features the build holds, and `HomePlainInfoTests` that a build with
+neither keeps the plain Info button ([Home toolbar menu](../Andarium/README.md#home-toolbar-menu)).
+The Mail composer, the picker and the guest's display are stand-ins. The hosted tests
 share the application's one key window: a test that replaces its root view
 controller or connects a window takes it with `HostWindow.take()`, and none
 opens the system's Settings or another app. The bundle's principal class
@@ -410,6 +419,10 @@ Tooling tests cover `scripts/check-privacy-manifests.py`
 device slice it packages), `Andarium/scripts/check-app-store-bundle.py`
 (`andarium-app-store-bundle`, the last build phase of the AppStore
 configuration, [configurations](../Andarium/README.md#configurations)), the
+tip sheet's words (`andarium-tip-words`: `Andarium/scripts/check-tip-words.py`
+rejects the forbidden terms and a token amount in the `TipJar` table, and
+requires the statement that a tip is voluntary, one-time and the features
+free), the
 Acknowledgements resource (`andarium-acknowledgements`) and the stand-in
 debugger that serves the JIT's request for executable memory on a device
 (`andarium-ios-jit-debugger`). The JIT's region route has host tests that run
