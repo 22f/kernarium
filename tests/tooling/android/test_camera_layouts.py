@@ -284,21 +284,29 @@ class Files(unittest.TestCase):
             self.assertEqual(target, generator.MEDIA_PROPERTY)
         self.assertEqual(len(triggers), len(expected))
 
-    def test_the_init_file_starts_the_provider_in_the_layouts_that_have_cameras_and_no_other(self):
-        # cameraserver lists only a provider that has registered and nothing but init starts the lazy
-        # AIDL provider the first time, so every layout with cameras starts it, once, and no other layout does.
+    def test_the_init_file_starts_the_provider_with_cameraserver_in_the_layouts_that_have_cameras_and_no_other(self):
+        # cameraserver lists only a provider that has registered, and nothing but init starts the lazy AIDL
+        # provider: the first time, and when cameraserver starts again after the provider has exited. So the
+        # action is on cameraserver's state (and the layout's SKU), never on the SKU alone.
         text = generator.init_file().decode()
-        starting = set()
+        actions = {}
         for action in re.split(r"^(?=on )", text, flags=re.MULTILINE):
-            match = re.match(rf"on property:{re.escape(generator.SKU_PROPERTY)}=(\S+)\n", action)
-            if match is None:
-                continue
-            self.assertEqual(re.findall(r"^    start (\S+)$", action, re.MULTILINE), [generator.PROVIDER_SERVICE],
-                             match[1])
-            starting.add(match[1])
-        self.assertEqual(starting, {layout.name for layout in generator.all_layouts() if layout.cameras != "none"})
-        self.assertNotIn("none", starting)
-        self.assertEqual(text.count(f"start {generator.PROVIDER_SERVICE}"), len(starting))
+            match = re.match(r"on (.+)\n((?:    .+\n)*)", action)
+            if match is not None:
+                actions[match[1]] = [line.strip() for line in match[2].splitlines()]
+        wanted = {generator.provider_trigger(layout.name): [f"start {generator.PROVIDER_SERVICE}"]
+                  for layout in generator.all_layouts() if layout.has_front}
+        self.assertEqual({trigger: body for trigger, body in actions.items() if "start" in " ".join(body)}, wanted)
+        self.assertNotIn(generator.provider_trigger("none"), actions)
+        self.assertEqual(text.count(f"start {generator.PROVIDER_SERVICE}"), len(wanted))
+        # the profile actions select the media profiles and start nothing
+        for trigger, body in actions.items():
+            if trigger.startswith(f"property:{generator.SKU_PROPERTY}="):
+                self.assertEqual([line.split()[0] for line in body], ["setprop"], trigger)
+
+    def test_the_provider_trigger_is_cameraserver_running_and_the_layout(self):
+        self.assertEqual(generator.provider_trigger("phone"),
+                         "property:init.svc.cameraserver=running && property:ro.boot.product.vendor.sku=phone")
 
     def test_the_provider_service_is_the_one_of_the_stock_lazy_rc(self):
         self.assertEqual(generator.PROVIDER_SERVICE, "vendor.camera-provider-2-7-google")

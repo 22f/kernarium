@@ -781,7 +781,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         )
         gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
         gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
-        # The host's cameras: the lazy provider (a service that the layouts' init file starts at boot), its one
+        # The host's cameras: the lazy provider (a service that the layouts' init file starts when cameraserver runs), its one
         # declaration, the HWL library that holds the V4L2 source (the names only route p0030 puts in
         # it), the characteristics template, and the layouts' files (the generator's own).
         camera_provider = "android.hardware.camera.provider@2.7-service-google-lazy"
@@ -790,6 +790,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         camera_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.camera.provider@2.7-service-google.xml"
         camera_library_path = "VENDOR/lib64/libgooglecamerahwl_impl.so"
         camera_template_path = "VENDOR/etc/config/emu_camera_v4l2.json"
+        camera_init_path = f"VENDOR/etc/init/{camera_layouts.INIT_FILE}"
+        camera_init = camera_layouts.installed()[camera_init_path].decode()
+        camera_service = camera_layouts.PROVIDER_SERVICE
+        camera_with_cameras = [layout.name for layout in camera_layouts.all_layouts() if layout.has_front]
+        camera_start_action = (f"\non {camera_layouts.provider_trigger(camera_with_cameras[0])}\n"
+                               f"    start {camera_service}\n")
         camera_app_path = "PRODUCT/app/Aperture/Aperture.apk"
         camera_overlay_path = tool.CAMERA_APP_OVERLAY
         camera_app_package = tool.CAMERA_APP_PACKAGE
@@ -5278,6 +5284,39 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("camera-provider-service-renamed", {"entries": {
                 camera_rc_path: good_camera_rc.replace("vendor.camera-provider-2-7-google", "vendor.camera-provider").encode()}},
              "which the init file of the camera layouts starts"),
+            # The contract in the form that catches the defects of the launches that listed no camera: a start only at
+            # boot, a start only in the profile action, a layout with cameras that lacks its action, an action on another
+            # property than cameraserver's state, and a start anywhere else.
+            ("camera-provider-started-at-boot-only", {"entries": {
+                camera_init_path: camera_init.replace("on property:init.svc.cameraserver=running && ", "on ").encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-provider-started-in-the-profile-action", {"entries": {
+                camera_init_path: (camera_init.replace(camera_start_action, "").replace(
+                    f"on property:{camera_layouts.SKU_PROPERTY}={camera_with_cameras[0]}\n",
+                    f"on property:{camera_layouts.SKU_PROPERTY}={camera_with_cameras[0]}\n    start {camera_service}\n", 1)).encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-layout-without-its-provider-action", {"entries": {
+                camera_init_path: camera_init.replace(camera_start_action, "").encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-provider-action-on-another-property", {"entries": {
+                camera_init_path: camera_init.replace(f"property:{camera_layouts.SERVER_PROPERTY}=running",
+                                                      "property:sys.boot_completed=1").encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-provider-action-without-the-sku", {"entries": {
+                camera_init_path: camera_init.replace(
+                    f"on {camera_layouts.provider_trigger(camera_with_cameras[0])}\n",
+                    f"on property:{camera_layouts.SERVER_PROPERTY}=running\n").encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-provider-started-for-a-layout-without-cameras", {"entries": {
+                camera_init_path: (camera_init + f"\non {camera_layouts.provider_trigger('none')}\n"
+                                   f"    start {camera_service}\n").encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-provider-started-twice", {"entries": {
+                camera_init_path: camera_init.replace(
+                    camera_start_action, camera_start_action + f"    start {camera_service}\n", 1).encode()}},
+             "must start the camera provider in one action for each layout"),
+            ("camera-provider-init-file-missing", {"entries": {camera_init_path: None}},
+             "nothing starts the camera provider"),
             ("camera-provider-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                 good_video_contexts.replace("hal_camera_default_exec", "vendor_file").encode()}},
              "hal_camera_default_exec label"),
