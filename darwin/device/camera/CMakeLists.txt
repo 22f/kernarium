@@ -9,6 +9,7 @@ add_library(uml_camera_device STATIC
     camera_controls.cpp
     camera_description.cpp
     camera_device.cpp
+    camera_layout.cpp
     in_process_service.cpp
     jpeg_gap.cpp)
 add_library(UML::CameraDevice ALIAS uml_camera_device)

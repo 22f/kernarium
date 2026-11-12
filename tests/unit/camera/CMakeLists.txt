@@ -95,3 +95,18 @@ if(TARGET UML::SyntheticCamera)
     uml_add_unit_test(NAME camera-device COMMAND uml_camera_device_tests
         LABELS "device;camera" TIMEOUT 120)
 endif()
+
+# The layouts a host composes for the Android image: the closed set and its fallback order against the image's own
+# table (the generator's output, which the test takes as its argument), and the concurrent feature against the HAL's
+# own rule (its headers compile without Android).
+if(TARGET UML::SyntheticCamera)
+    add_executable(uml_camera_layout_tests camera_layout_tests.cpp)
+    target_include_directories(uml_camera_layout_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal
+        ${PROJECT_SOURCE_DIR}/kernel/common/video)
+    target_link_libraries(uml_camera_layout_tests PRIVATE UML::CameraDevice UML::SyntheticCamera)
+    uml_add_unit_test(NAME camera-layout
+        COMMAND uml_camera_layout_tests
+            ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/generated/layouts.tsv
+        LABELS "device;camera")
+endif()
