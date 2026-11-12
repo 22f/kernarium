@@ -315,7 +315,9 @@ def app_info(**overrides: object) -> dict:
         "ITSAppUsesNonExemptEncryption": False,
         "UIRequiredDeviceCapabilities": ["arm64", "metal"],
         "UIDeviceFamily": [1, 2],
+        "NSCameraUsageDescription": "Uses the camera only while Camera is on.",
         "NSMicrophoneUsageDescription": "Records only while Microphone is on.",
+        "NSLocationWhenInUseUsageDescription": "Shares the location only while Location is on.",
     }
     keys.update(overrides)
     return {key: value for key, value in keys.items() if value is not None}
@@ -456,6 +458,13 @@ def main() -> int:
               passes=False, expect="UIDeviceFamily")
         check(make_app(root, "background", clean, app_info(UIBackgroundModes=["audio"])),
               passes=False, expect="background mode")
+        # Each permission text the application shows is present and not empty.
+        for key in ("NSCameraUsageDescription", "NSMicrophoneUsageDescription",
+                    "NSLocationWhenInUseUsageDescription"):
+            check(make_app(root, f"no-{key}", clean, app_info(**{key: None})),
+                  passes=False, expect=f"{key} must be a non-empty string")
+            check(make_app(root, f"blank-{key}", clean, app_info(**{key: "  "})),
+                  passes=False, expect=f"{key} must be a non-empty string")
 
         # Automation knobs in the host code of the application or a framework.
         check(make_app(root, "app-knob", knob, app_info()),

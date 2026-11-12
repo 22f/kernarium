@@ -335,6 +335,15 @@ def build_host_traces(path: Path, debug_map: bool = True) -> list[str]:
     return found
 
 
+# The permissions Andarium asks of the person, one capability each: Camera,
+# Microphone and Location.
+USAGE_DESCRIPTIONS = (
+    "NSCameraUsageDescription",
+    "NSMicrophoneUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+)
+
+
 def info_problems(info: dict) -> list[str]:
     found = []
     if info.get("ITSAppUsesNonExemptEncryption") is not False:
@@ -347,6 +356,12 @@ def info_problems(info: dict) -> list[str]:
         found.append("Info.plist: UIDeviceFamily must be [1, 2], iPhone and iPad")
     if "UIBackgroundModes" in info:
         found.append("Info.plist: the application has no background mode")
+    # The system shows these when the person turns a capability on, and ends
+    # the application at the request of a capability whose text is missing.
+    for key in USAGE_DESCRIPTIONS:
+        value = info.get(key)
+        if not isinstance(value, str) or not value.strip():
+            found.append(f"Info.plist: {key} must be a non-empty string")
     return found
 
 
