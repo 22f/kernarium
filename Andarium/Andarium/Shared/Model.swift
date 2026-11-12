@@ -1204,10 +1204,19 @@ final class AppModel {
         return file
     }
 
-    /// Starts the access that a picked file's URL carries and returns what
-    /// ends it. The hosted tests give their own, to see when it is held.
+    #if !APP_STORE
+    /// What the hosted tests put in place of the picked file's access, to see
+    /// when it is held. The App Store configuration leaves this out.
     @ObservationIgnored
-    var accessPickedFile: @MainActor (URL) -> (@MainActor () -> Void) = { url in
+    var accessPickedFileStub: (@MainActor (URL) -> (@MainActor () -> Void))?
+    #endif
+
+    /// Starts the access that a picked file's URL carries and returns what
+    /// ends it.
+    private func accessPickedFile(_ url: URL) -> @MainActor () -> Void {
+        #if !APP_STORE
+        if let accessPickedFileStub { return accessPickedFileStub(url) }
+        #endif
         guard url.startAccessingSecurityScopedResource() else { return {} }
         return { url.stopAccessingSecurityScopedResource() }
     }

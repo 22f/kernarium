@@ -477,7 +477,7 @@ struct LegacyApkInstallModelTests {
     @Test func thePickedFilesAccessIsHeldAcrossTheQuestionAndEndsOnceWithTheInstall() async throws {
         let (model, driver) = running()
         let events = EventLog()
-        model.accessPickedFile = { _ in
+        model.accessPickedFileStub = { _ in
             events.add("start")
             return { events.add("end") }
         }
@@ -503,7 +503,7 @@ struct LegacyApkInstallModelTests {
             let (model, driver) = running()
             refusing(driver)
             let events = EventLog()
-            model.accessPickedFile = { _ in
+            model.accessPickedFileStub = { _ in
                 events.add("start")
                 return { events.add("end") }
             }

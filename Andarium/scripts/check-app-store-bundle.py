@@ -419,6 +419,9 @@ DEBUG_SYMBOLS = (
     # The reading a test puts in place of the system's hinge and regions
     # (Andarium/Shared/FoldSceneReader.swift), compiled out by APP_STORE.
     ("fold reader stub", (b"15FoldSceneReaderC4stub",)),
+    # The picked file's access that a hosted test puts in place of the real
+    # one (AppModel.accessPickedFileStub), compiled out by APP_STORE.
+    ("picked file access stub", (b"20accessPickedFileStub",)),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.
