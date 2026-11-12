@@ -63,10 +63,30 @@ Presentation:
 
 Guest-visible guarantees:
 
-- A texture the renderer creates reads as zeros until the guest writes it,
+- A texture the renderer creates holds zeros until the guest writes it,
   because the host driver hands out a released resource's memory with its old
-  pixels, which may have belonged to another guest process. Imported and
-  compressed-format textures keep their content.
+  pixels, which may have belonged to another guest process. That holds for
+  every level and layer of every format, multisampled ones included. A
+  compressed texture holds zero blocks, which its format decodes as it
+  defines, not always to a zero texel (sRGB ASTC to its error colour); a
+  creation whose fill the host driver refuses room for fails with ENOMEM like
+  one whose storage it refuses, and a host without `glCopyImageSubData`
+  (none of the product hosts) leaves compressed textures as the driver found
+  them. Only an imported texture keeps the content it was imported with.
+  While the device memory budget is full the host driver can refuse the
+  staging buffer of a later upload, which is then dropped without an error, so
+  a texture can keep its older pixels until it is written again.
+- A texture exported to another context through shared memory is written into
+  its segment at the next fence after it is drawn. A read-back into client
+  memory that the host driver refuses at a fence leaves the texture the newer
+  copy, and the next fence tries again; a read-back into a pinned segment is
+  not checked. The read-back of the first export leaves the texture clean when
+  it is refused, because the importer may write the segment before any fence:
+  an importer that reads the segment first, and GL's own next read of the
+  texture, see zeros until GL draws it again, and an importer's own frame is
+  never replaced by an older texture. The retry cannot see an importer write,
+  so a buffer with a GL writer and an importer writer can lose the importer's
+  frame to the retry.
 - Images shared through native Metal heaps keep tiled storage but disable
   lossless compression, so a compositor can sample a render target. A Virgl
   import of such a blob is bounded by what backs it; an import that does not

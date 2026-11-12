@@ -78,6 +78,7 @@ DEBUG_SUPPORT = (
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
+    ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV24previewKeepsConfirmationSbvg(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Buy me tokens sheet.
     ("tip jar preview", "int _s8Andarium14TipJarServicesV16previewOpensSheetSbvg(void) { return 1; }\n"),
     ("tip jar preview", "int _s8Andarium14TipJarServicesV12previewPlaysyyAA0aB5ModelCYaYbcvg(void) { return 1; }\n"),
@@ -96,6 +97,8 @@ DEBUG_SUPPORT = (
     ("input probe", "int _s8Andarium8AppModelC10inputProbeAA0cD0CSgvg(void) { return 1; }\n"),
     ("input probe", 'const char *fixture(void) { return "inputProbeLog"; }\n'),
     ("input probe", 'const char *fixture(void) { return "inputProbeField"; }\n'),
+    # The fold reader's test hook, which replaces the system's reading.
+    ("fold reader stub", "int _s8Andarium15FoldSceneReaderC4stubSo9FoldReadingVSgyYbcSgvg(void) { return 1; }\n"),
     # The synthetic camera: its class, its entries and its profiles' names.
     ("synthetic camera", "int _ZN3uml8platform15SyntheticCamera13sessionsOpenedEv(void) { return 1; }\n"),
     ("synthetic camera", "int _ZN3uml8platform19makeSyntheticCameraERKNS0_22SyntheticCameraOptionsE(void) { return 1; }\n"),

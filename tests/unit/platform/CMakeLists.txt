@@ -121,6 +121,20 @@ uml_add_unit_test(
     NAME platform-host-environment
     COMMAND uml_host_environment_tests)
 
+# The Apple thermal source's notices of a change of the thermal state or of Low
+# Power Mode, until the caller withdraws and after the provider ends.
+add_executable(uml_host_thermal_tests
+    host_thermal_tests.mm
+    $<TARGET_OBJECTS:uml_host_thermal>)
+target_link_libraries(uml_host_thermal_tests PRIVATE
+    UML::PlatformContract
+    "-framework Foundation")
+target_include_directories(uml_host_thermal_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform)
+uml_add_unit_test(
+    NAME platform-host-thermal
+    COMMAND uml_host_thermal_tests)
+
 # The host GPU's fixed budget: what the limit leaves above the floor, the
 # guest's RAM where there is no limit, and when the process is short of the
 # floor.

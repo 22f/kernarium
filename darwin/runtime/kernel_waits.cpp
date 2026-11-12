@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "kernel_waits.hpp"
 
+#include "carrier_activity.hpp"
 #include "platform/host_wait.hpp"
+#include "vcpu_carrier_name.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -9,6 +11,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <string_view>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -39,6 +42,7 @@ struct Real final {
 	ssize_t (*pread)(int, void *, size_t, off_t){};
 	ssize_t (*pwrite)(int, const void *, size_t, off_t){};
 	int (*fsync)(int){};
+	int (*setname)(const char *){};
 };
 
 Real real;
@@ -49,19 +53,24 @@ int kernel_pselect(int count, fd_set *readable, fd_set *writable,
 	/* An immediate poll waits for nothing. */
 	if (timeout != nullptr && timeout->tv_sec == 0 && timeout->tv_nsec == 0)
 		return real.pselect(count, readable, writable, failed, timeout, mask);
+	/* The mark is made first and undone last, so a carrier that is counted
+	 * in its idle wait shows the idle mark too. */
 	const ScopedHostWait wait{HostWait::idle};
+	const CarrierIdle carrier{timeout, CarrierIdle::Limit::relative};
 	return real.pselect(count, readable, writable, failed, timeout, mask);
 }
 
 int kernel_pause()
 {
 	const ScopedHostWait wait{HostWait::idle};
+	const CarrierIdle carrier;
 	return real.pause();
 }
 
 int kernel_cond_wait(pthread_cond_t *condition, pthread_mutex_t *mutex)
 {
 	const ScopedHostWait wait{HostWait::idle};
+	const CarrierIdle carrier;
 	return real.cond_wait(condition, mutex);
 }
 
@@ -69,6 +78,7 @@ int kernel_cond_timedwait(pthread_cond_t *condition, pthread_mutex_t *mutex,
 	const timespec *deadline)
 {
 	const ScopedHostWait wait{HostWait::idle};
+	const CarrierIdle carrier{deadline, CarrierIdle::Limit::realtime};
 	return real.cond_timedwait(condition, mutex, deadline);
 }
 
@@ -127,6 +137,19 @@ int kernel_fsync(int descriptor)
 	return real.fsync(descriptor);
 }
 
+/* A thread that names itself as a vCPU's carrier says so to the watch's
+ * activity record (carrier_activity.hpp). */
+int kernel_setname(const char *name)
+{
+	const int result = real.setname(name);
+	if (result == 0 && name != nullptr) {
+		const int vcpu = vcpu_carrier_index(std::string_view{name});
+		if (vcpu >= 0)
+			carrier_named(static_cast<unsigned>(vcpu));
+	}
+	return result;
+}
+
 struct Import final {
 	const char *name;
 	void *wrapper;
@@ -172,6 +195,8 @@ void *kernel_wait_import(const char *name) noexcept
 		{"pwrite", reinterpret_cast<void *>(&kernel_pwrite),
 			slot(real.pwrite)},
 		{"fsync", reinterpret_cast<void *>(&kernel_fsync), slot(real.fsync)},
+		{"pthread_setname_np", reinterpret_cast<void *>(&kernel_setname),
+			slot(real.setname)},
 	};
 	for (const auto &import : imports) {
 		if (std::strcmp(import.name, system_name) != 0)

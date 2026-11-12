@@ -525,9 +525,11 @@ DEBUG_SYMBOLS = (
     # the Simulator cannot be denied the network, so the preview plays it.
     ("network notice preview", (b"20previewNetworkNotice",)),
     # The Simulator preview's hooks into the Send feedback sheet
-    # (SendFeedbackServices.previewOpensAtLaunch and previewPrepare): the
-    # preview opens the sheet and fills a draft; the application never does.
-    ("send feedback preview", (b"20previewOpensAtLaunch", b"14previewPrepare")),
+    # (SendFeedbackServices.previewOpensAtLaunch, previewPrepare and
+    # previewKeepsConfirmation): the preview opens the sheet, fills a draft and
+    # holds the confirmation; the application never does.
+    ("send feedback preview",
+     (b"20previewOpensAtLaunch", b"14previewPrepare", b"24previewKeepsConfirmation")),
     # The Simulator preview's hooks into the Buy me tokens sheet
     # (TipJarServices.previewOpensSheet, previewPlays, previewScrollsToTop and
     # openLink, and the environment value that scrolls the sheet): the preview
@@ -544,6 +546,9 @@ DEBUG_SYMBOLS = (
     ("input probe", (b"10InputProbe", b"16InputProbeLaunch", b"29RecordingHardwareInputRuntime",
                      b"15beginInputProbe", b"17InputProbeReadout", b"19makeInputProbeModel",
                      b"10inputProbe")),
+    # The reading a test puts in place of the system's hinge and regions
+    # (Andarium/Shared/FoldSceneReader.swift), compiled out by APP_STORE.
+    ("fold reader stub", (b"15FoldSceneReaderC4stub",)),
     # The camera without hardware (darwin/platform/synthetic_camera): a source
     # for tests and launchers, which an App Store runtime does not build.
     # namespace uml::platform, its class and entries.

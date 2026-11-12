@@ -12,8 +12,9 @@ namespace uml::platform {
 /* What the host's own state was when it was last observed: the thermal state,
  * Low Power Mode and the active core count, and the memory pressure level
  * (0 normal, 1 warning, 2 critical). The stall watch (runtime/stall_watch.hpp)
- * observes them every 250 ms for its record of why the vCPUs stopped, and
- * publishes what it saw here, so that the session record's checkpoint
+ * observes them for its record of why the vCPUs stopped, when the system says
+ * they changed and every 250 ms while it suspects a stall, and publishes what
+ * it saw here, so that the session record's checkpoint
  * (runtime/session_record.hpp) reads the same observation instead of making a
  * second one. Nothing is published before the watch starts or after it ends.
  * One copy per image, and the runtime shares it with the watch. */
