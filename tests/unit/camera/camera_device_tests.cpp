@@ -2017,6 +2017,82 @@ void testTheMostFramesHeldAtOnceIsWhatTheReserveCounts()
     rig.onStateChange = nullptr;
 }
 
+/* R5 (recheck5): the interruption ends and the system has moved the camera out of its format meanwhile. The platform
+ * session puts it back and only then says it is back, so the guest is told resumed after the repair, and the frames the
+ * capture produced meanwhile (outside the anchor) never reach it: its buffers get black ones, flagged interrupted. */
+void testARecoveryRepairsTheCameraBeforeItIsToldItIsBack()
+{
+    Rig rig;
+    EventQueue events(rig, 8);
+    videoStream(rig, 1, 0, 640, 480, 6);
+    const auto live = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    rig.camera->interrupt();
+    rig.step();
+    rig.camera->moveOutOfAnchor(true);
+    // The capture goes on in the wrong format while the cameras are interrupted.
+    const auto outside = rig.queue(1, 2);
+    rig.camera->pump(0, 2);
+    rig.step();
+    require(rig.camera->framesOutsideAnchor() == 2, "the platform produced frames outside the anchor");
+    require(rig.waitFor([&] { return rig.done(outside); }) && rig.result(outside).base.flags == (blackFlag | interruptedFlag),
+            "the guest's buffer got a black one, not the frame");
+    require(events.arrived().size() == 2, "the guest has only been told of the interruption");
+    rig.camera->resume();
+    rig.step();
+    require(rig.camera->repairs() == 1, "the camera was put back");
+    require(events.arrived().size() == 4 && events.arrived()[2].first == VIRTIO_VIDEO_EVENT_CAMERA_RESUMED,
+            "and then the guest is told it is back");
+    const auto after = rig.queue(1, 3);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(after) && rig.result(after).base.flags == 0 && rig.camera->framesOutsideAnchor() == 2,
+            "its next frame is live, from the anchor");
+}
+
+/* A repair the device refuses is the session's failure: the guest is never told it is back, the session is closed,
+ * and a new one opened a second later starts every camera in its anchor. */
+void testARecoveryThatFailsIsAFailureAndNeverResumes()
+{
+    Rig rig;
+    EventQueue events(rig, 8);
+    videoStream(rig, 1, 0, 640, 480, 6);
+    const auto live = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    rig.camera->interrupt();
+    rig.step();
+    rig.camera->moveOutOfAnchor(true);
+    rig.camera->refuseRepair(true);
+    rig.camera->resume();
+    rig.step();
+    require(rig.camera->repairs() == 0, "the device refused the repair");
+    require(rig.camera->sessionsOpen() == 0, "the failed session is closed");
+    // The camera that has the stream (camera 0); the other has none and is told its interruption ended with the session.
+    const auto resumed = [&] {
+        const auto all = events.arrived();
+        return std::count(all.begin(), all.end(), std::make_pair(std::uint32_t(VIRTIO_VIDEO_EVENT_CAMERA_RESUMED), 0u));
+    };
+    require(resumed() == 0, "the guest is never told it is back");
+    const auto black = rig.queue(1, 2);
+    require(rig.waitFor([&] { return rig.done(black); }) && rig.result(black).base.flags == (blackFlag | interruptedFlag),
+            "black frames bridge the failure");
+    // The retry opens a session whose cameras start in their anchors.
+    rig.camera->refuseRepair(false);
+    rig.camera->advanceClock(1'200'000'000);
+    require(rig.waitFor([&] { return rig.camera->videoRunning(0); }), "a new session is opened");
+    require(resumed() == 0, "and the guest is still not told it is back before the capture delivers");
+    const auto fresh = rig.queue(1, 3);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(fresh) && rig.result(fresh).base.flags == 0 && rig.camera->framesOutsideAnchor() == 0,
+            "a live frame, from the anchor");
+    require(resumed() == 1, "now it is back");
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -2064,6 +2140,8 @@ int main()
     testHostileGuest();
     testEveryOfferedRunStartsInTheAnchor();
     testABurstOfFramesIsTheNewestFrame();
+    testARecoveryRepairsTheCameraBeforeItIsToldItIsBack();
+    testARecoveryThatFailsIsAFailureAndNeverResumes();
     testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
     testService();
     return 0;

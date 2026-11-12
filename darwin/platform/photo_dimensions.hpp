@@ -370,6 +370,23 @@ struct ResizeSteps {
 enum class Resizing : std::uint8_t { resized, durationsRefused, sizeRefused };
 [[nodiscard]] Resizing resizeStream(const ResizeSteps& steps);
 
+// An interruption has ended, or the session restarted after an error, and the
+// system may have moved a device to another format meanwhile. Every camera that
+// is out of its anchor is put back, outputs and settings with it, and only then
+// is the session said to be back: the client delivers nothing from a camera it
+// has been told is interrupted, so no frame outside an anchor reaches the guest,
+// and none is announced as resumed that was not repaired. The first repair that
+// is refused (the device would not lock, a setter raised) makes the outcome
+// `failed`, the session's failure that the client already handles by closing it
+// and opening another; no camera is announced as back by a failed recovery.
+enum class Recovery : std::uint8_t { resumed, failed };
+struct RecoverySteps {
+    std::function<bool(std::size_t camera)> outOfAnchor;
+    std::function<bool(std::size_t camera)> repair;  // false: refused
+    std::function<void(Recovery)> announce;          // told once, after the last repair
+};
+Recovery recoverAnchors(std::span<const std::size_t> cameras, const RecoverySteps& steps);
+
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------

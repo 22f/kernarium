@@ -91,7 +91,20 @@ public:
     [[nodiscard]] virtual std::pair<std::uint32_t, std::uint32_t> videoSize(std::size_t camera) const = 0;
     // Interrupts every session, as the host does; no frames flow until resume().
     virtual void interrupt(CameraEventKind kind = CameraEventKind::interrupted) = 0;
+    // Ends the interruption as the platform session does: every camera the system
+    // moved out of its anchor (moveOutOfAnchor) is repaired first, and only then
+    // are the sessions told they are back; a refused repair (refuseRepair) tells
+    // them they failed instead (recoverAnchors).
     virtual void resume() = 0;
+    // The system has moved the anchored cameras out of their formats, as it may
+    // while they are interrupted; a session that opens afterwards starts afresh.
+    virtual void moveOutOfAnchor(bool moved) = 0;
+    virtual void refuseRepair(bool refuse) = 0;
+    // The cameras the sessions put back before saying they were back, and the
+    // frames a session produced while a camera was out of its anchor (the
+    // capture goes on; the client must not pass them on).
+    [[nodiscard]] virtual unsigned repairs() const noexcept = 0;
+    [[nodiscard]] virtual unsigned framesOutsideAnchor() const noexcept = 0;
     // Delivers an event to every session, as the host does, and changes
     // nothing else (a failed session or an unavailable camera, for instance).
     virtual void post(CameraEvent event) = 0;

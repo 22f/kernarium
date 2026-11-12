@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -721,6 +722,64 @@ void aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldDurationsOnARefusal()
 }
 
 // ---------------------------------------------------------------------------
+// Recovery
+// ---------------------------------------------------------------------------
+
+// R5 (recheck5): a fake device that records the order of what recovery does.
+struct FakeRecovery {
+    std::vector<std::string> log;
+    std::set<std::size_t> moved;    // the cameras the system moved out of their anchors
+    std::set<std::size_t> refused;  // the cameras whose repair the device refuses
+    RecoverySteps steps()
+    {
+        RecoverySteps s;
+        s.outOfAnchor = [this](std::size_t camera) { return moved.contains(camera); };
+        s.repair = [this](std::size_t camera) {
+            log.push_back("repair " + std::to_string(camera));
+            if (refused.contains(camera)) return false;
+            moved.erase(camera);
+            return true;
+        };
+        s.announce = [this](Recovery outcome) { log.push_back(outcome == Recovery::resumed ? "resumed" : "failed"); };
+        return s;
+    }
+};
+
+void everyCameraIsRepairedBeforeTheSessionIsToldItIsBack()
+{
+    const std::size_t cameras[] {0, 1, 2};
+    FakeRecovery none;
+    require(recoverAnchors(cameras, none.steps()) == Recovery::resumed && none.log == std::vector<std::string> {"resumed"},
+            "cameras in their anchors need no repair, and the session is back");
+    FakeRecovery two;
+    two.moved = {0, 2};
+    require(recoverAnchors(cameras, two.steps()) == Recovery::resumed &&
+                two.log == std::vector<std::string> {"repair 0", "repair 2", "resumed"},
+            "every camera out of its anchor is put back, then the session is told");
+    FakeRecovery empty;
+    require(recoverAnchors({}, empty.steps()) == Recovery::resumed && empty.log == std::vector<std::string> {"resumed"}, "no camera, no repair");
+}
+
+void aRefusedRepairIsAFailureAndNothingIsAnnouncedAsBack()
+{
+    const std::size_t cameras[] {0, 1, 2};
+    FakeRecovery first;
+    first.moved = {0, 1};
+    first.refused = {0};
+    require(recoverAnchors(cameras, first.steps()) == Recovery::failed && first.log == std::vector<std::string> {"repair 0", "failed"},
+            "the first refusal ends the recovery: failed, with no resumed");
+    require(first.moved.contains(1), "no further repair is attempted in a session that is being closed");
+    FakeRecovery later;
+    later.moved = {0, 2};
+    later.refused = {2};
+    require(recoverAnchors(cameras, later.steps()) == Recovery::failed &&
+                later.log == std::vector<std::string> {"repair 0", "repair 2", "failed"},
+            "a refusal after a success is a failure too, and no camera is announced as back");
+    for (const auto& entry : {first.log, later.log})
+        require(std::find(entry.begin(), entry.end(), "resumed") == entry.end(), "never resumed");
+}
+
+// ---------------------------------------------------------------------------
 // Pressure
 // ---------------------------------------------------------------------------
 
@@ -1154,6 +1213,8 @@ int main()
     aSessionOverItsBudgetRemovesWhatTheJoinAdded();
     aRefusedStreamOnACameraInTheSessionPutsItsDurationsBack();
     aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldDurationsOnARefusal();
+    everyCameraIsRepairedBeforeTheSessionIsToldItIsBack();
+    aRefusedRepairIsAFailureAndNothingIsAnnouncedAsBack();
     aPressureNotificationIsAppliedWhileTheStreamRunsAndNeverAfterIt();
     aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges();
     everyGeneratedTableHoldsTheInvariants();

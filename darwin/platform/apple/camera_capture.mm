@@ -560,12 +560,14 @@ public:
             std::lock_guard lock(state->mutex);
             if (state->session) state->session->deliver(event);
         };
-        // The anchors are looked at again when an interruption ends and when the
-        // session restarts after an error: the system may have changed a
-        // device's format meanwhile.
-        const auto check = [state] {
+        // An interruption that ends, and a restart after an error, are recoveries:
+        // the system may have changed a device's format meanwhile, so the session
+        // puts its cameras back in their anchors first and only then says it is
+        // back (recoverAfterInterruption); the client delivers nothing from a
+        // camera until it is.
+        const auto recover = [state] {
             std::lock_guard lock(state->mutex);
-            if (state->session) state->session->requestAnchorCheck();
+            if (state->session) state->session->requestRecovery();
         };
         interrupted_ = [center addObserverForName:AVCaptureSessionWasInterruptedNotification
                                            object:session_
@@ -588,10 +590,7 @@ public:
         resumed_ = [center addObserverForName:AVCaptureSessionInterruptionEndedNotification
                                        object:session_
                                         queue:nil
-                                   usingBlock:^(NSNotification*) {
-                                       post({allCameras, CameraEventKind::resumed});
-                                       check();
-                                   }];
+                                   usingBlock:^(NSNotification*) { recover(); }];
         // A restart after a runtime error ends with the session running again,
         // which is no interruption ending: the capture tells its client itself.
         // The blocks hold locals only: a block that read an instance variable
@@ -625,10 +624,7 @@ public:
                                        object:session_
                                         queue:nil
                                    usingBlock:^(NSNotification*) {
-                                       if (restarting->exchange(false)) {
-                                           post({allCameras, CameraEventKind::resumed});
-                                           check();
-                                       }
+                                       if (restarting->exchange(false)) recover();
                                    }];
     }
 
@@ -668,7 +664,7 @@ public:
 
     // Called under the state's mutex while the session lives, like
     // deliverStill's release: the block runs before the session can end.
-    void requestAnchorCheck() { dispatch_async(queue_, ^{ ensureAnchors(); }); }
+    void requestRecovery() { dispatch_async(queue_, ^{ recoverAfterInterruption(); }); }
 
     bool startVideo(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate) override
     {
@@ -1361,30 +1357,55 @@ private:
                              : admitCamera(camera, true, false, width, height, frameRate);
     }
 
-    // After an interruption or a restart: an input whose device is no longer in
-    // its anchor is put back, with the sizes of its outputs, which follow the
-    // format (a stream's frame and a photo's maximum).
-    void ensureAnchors()
+    // After an interruption or a restart (uml::platform::recoverAnchors): an
+    // input whose device is no longer in its anchor is put back, with the sizes
+    // of its outputs, which follow the format (a stream's frame and a photo's
+    // maximum). Only when every camera is in its anchor is the session said to be
+    // back; a repair that is refused (the device would not lock, a setter raised)
+    // says it failed, which the client answers by closing the session and opening
+    // another, whose cameras start in their anchors. This runs on the session's
+    // queue and the announcement is the last thing it does.
+    void recoverAfterInterruption()
     {
         if (stopped_) return;
-        for (auto& [camera, running] : cameras_) {
+        std::vector<std::size_t> inputs;
+        for (const auto& [camera, running] : cameras_)
+            if (running.input != nil) inputs.push_back(camera);
+        RecoverySteps steps;
+        steps.outOfAnchor = [&](std::size_t camera) {
             const Anchor* anchor = anchorOf(camera);
-            if (anchor == nullptr || running.input == nil || entries_[camera].device.activeFormat == anchor->format) continue;
-            std::fprintf(stderr, "Camera: camera %zu's device was moved out of its anchor: put back\n", camera);
-            const Entry& entry = entries_[camera];
-            [session_ beginConfiguration];
-            const bool ok = guarded(camera, [&] {
-                if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, pressureCapOf(running)) : std::nullopt))
-                    return false;
-                if (running.videoOutput != nil) running.videoOutput.videoSettings = videoSettingsOf(anchor->facts, running.width, running.height);
-                if (running.photoOutput != nil)
-                    if (const auto maximum = photoMaximum(anchor->facts, limits_.maximumStillPixels))
-                        running.photoOutput.maxPhotoDimensions = CMVideoDimensions {std::int32_t(maximum->width), std::int32_t(maximum->height)};
-                return true;
-            });
-            [session_ commitConfiguration];
-            if (ok && running.applied) applyOnQueue(camera, running.settings, true);
-        }
+            return anchor != nullptr && entries_[camera].device.activeFormat != anchor->format;
+        };
+        steps.repair = [&](std::size_t camera) { return repairAnchor(camera); };
+        steps.announce = [&](Recovery outcome) {
+            if (outcome == Recovery::failed) std::fprintf(stderr, "Camera: the cameras could not be put back in their anchors\n");
+            std::lock_guard lock(state_->mutex);
+            if (state_->session) deliver({allCameras, outcome == Recovery::resumed ? CameraEventKind::resumed : CameraEventKind::failed});
+        };
+        (void)recoverAnchors(inputs, steps);
+    }
+
+    // Puts a camera whose device was moved out of its anchor back: the format
+    // and the durations of its stream, the sizes of its outputs, its settings.
+    bool repairAnchor(std::size_t camera)
+    {
+        auto& running = cameras_[camera];
+        const Anchor* anchor = anchorOf(camera);
+        const Entry& entry = entries_[camera];
+        std::fprintf(stderr, "Camera: camera %zu's device was moved out of its anchor: put back\n", camera);
+        [session_ beginConfiguration];
+        const bool ok = guarded(camera, [&] {
+            if (!activate(entry.device, *anchor, running.video ? programmedFor(*anchor, running.frameRate, pressureCapOf(running)) : std::nullopt))
+                return false;
+            if (running.videoOutput != nil) running.videoOutput.videoSettings = videoSettingsOf(anchor->facts, running.width, running.height);
+            if (running.photoOutput != nil)
+                if (const auto maximum = photoMaximum(anchor->facts, limits_.maximumStillPixels))
+                    running.photoOutput.maxPhotoDimensions = CMVideoDimensions {std::int32_t(maximum->width), std::int32_t(maximum->height)};
+            return true;
+        });
+        [session_ commitConfiguration];
+        if (ok && running.applied) applyOnQueue(camera, running.settings, true);
+        return ok;
     }
 
     void startSession()

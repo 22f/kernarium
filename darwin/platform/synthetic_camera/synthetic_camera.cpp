@@ -469,6 +469,12 @@ public:
     std::atomic<bool> rawRefused {false};
     std::atomic<bool> rawFails {false};
     std::atomic<bool> stillsOfAnotherSize {false};
+    // The system moved the anchored cameras out of their formats while the cameras were
+    // interrupted; a session that opens puts them back by starting afresh.
+    std::atomic<bool> movedOutOfAnchor {false};
+    std::atomic<bool> repairRefused {false};
+    std::atomic<unsigned> repairs {0};
+    std::atomic<unsigned> framesOutsideAnchor {0};
     std::mutex mutex;  // guards the sessions list and the interrupted flag
     std::set<class Session*> sessions;
     bool interrupted {};
@@ -485,6 +491,7 @@ public:
         }
         ++core_.opened;
         ++core_.open;
+        core_.movedOutOfAnchor = false;  // a session that opens starts every camera in its anchor
         if (!core_.options_.manualClock) worker_ = std::thread([this] { run(); });
     }
 
@@ -586,7 +593,9 @@ public:
                 if (stopped_ || !cameras_[camera].video) return;
                 rate = cameras_[camera].video->frameRate;
             }
-            if (!interrupted()) produceFrame(camera);
+            // A camera the system moved out of its anchor goes on capturing in the other format, as the
+            // platform's does; the client must not pass those frames on.
+            if (!interrupted() || core_.movedOutOfAnchor) produceFrame(camera);
             core_.clock += 1'000'000'000ull / rate;
         }
     }
@@ -613,6 +622,31 @@ public:
         return camera < cameras_.size() && cameras_[camera].video ? cameras_[camera].video->frameRate : 0;
     }
     void deliver(CameraEvent event) { delegate_.cameraEvent(event); }
+
+    // The interruption is over: every anchored camera the system moved out of its format is put
+    // back, and only then is the session said to be back (recoverAnchors, which the Apple session
+    // runs too). A refused repair says the session failed instead.
+    void recover()
+    {
+        std::vector<std::size_t> running;
+        {
+            std::lock_guard lock(mutex_);
+            for (std::size_t camera = 0; camera < cameras_.size(); ++camera)
+                if (cameras_[camera].video) running.push_back(camera);
+        }
+        RecoverySteps steps;
+        steps.outOfAnchor = [this](std::size_t) { return core_.movedOutOfAnchor.load(); };
+        steps.repair = [this](std::size_t) {
+            if (core_.repairRefused) return false;
+            ++core_.repairs;
+            return true;
+        };
+        steps.announce = [this](Recovery outcome) {
+            if (outcome == Recovery::resumed) core_.movedOutOfAnchor = false;
+            deliver({allCameras, outcome == Recovery::resumed ? CameraEventKind::resumed : CameraEventKind::failed});
+        };
+        recoverAnchors(running, steps);
+    }
 
 private:
     // The format a camera was told to run in, when it was told one.
@@ -872,6 +906,7 @@ private:
             if (stopped_ || !state.video) return;
             auto outcome = this->outcome(camera, state.video->frameRate);
             outcome.scene.counter = ++state.video->counter;
+            if (core_.movedOutOfAnchor) ++core_.framesOutsideAnchor;
             // The picture counts itself while a frame holds it.
             const auto counts = core_.frames;
             const unsigned alive = ++counts->alive;
@@ -1101,8 +1136,12 @@ public:
             core_.interrupted = false;
             sessions.assign(core_.sessions.begin(), core_.sessions.end());
         }
-        for (auto* session : sessions) session->deliver({allCameras, CameraEventKind::resumed});
+        for (auto* session : sessions) session->recover();
     }
+    void moveOutOfAnchor(bool moved) override { core_.movedOutOfAnchor = moved; }
+    void refuseRepair(bool refuse) override { core_.repairRefused = refuse; }
+    unsigned repairs() const noexcept override { return core_.repairs; }
+    unsigned framesOutsideAnchor() const noexcept override { return core_.framesOutsideAnchor; }
 
 private:
     template<typename Function, typename Result>

@@ -460,6 +460,20 @@ Resizing resizeStream(const ResizeSteps& steps)
     return Resizing::resized;
 }
 
+Recovery recoverAnchors(std::span<const std::size_t> cameras, const RecoverySteps& steps)
+{
+    Recovery outcome = Recovery::resumed;
+    for (const std::size_t camera : cameras) {
+        if (!steps.outOfAnchor(camera)) continue;
+        if (!steps.repair(camera)) {
+            outcome = Recovery::failed;
+            break;
+        }
+    }
+    steps.announce(outcome);
+    return outcome;
+}
+
 std::string_view refusalName(Refusal reason) noexcept
 {
     switch (reason) {

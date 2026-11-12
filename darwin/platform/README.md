@@ -161,9 +161,13 @@ interface to the wire.
   cap (`throttledRate`), before the session is interrupted; the work a
   pressure notification queues holds what it uses (`PressureWatch`) and does
   nothing once the stream or the session has ended. A runtime
-  error is restarted once: the restart ends with a `resumed` event, and an
-  error before that ends the episode with `failed`, so that the client closes
-  the session and tries again later.
+  error is restarted once, and the restart, like an interruption that ends,
+  is a recovery (`recoverAnchors`): every camera the system moved out of its
+  anchor is put back, with its outputs and settings, and only then is a
+  `resumed` event sent. A repair that is refused, and an error before the
+  restart, end the episode with `failed`, so that the client closes the
+  session and tries again later; the client delivers nothing from a camera
+  it has been told is interrupted.
 - `nv12_transform.hpp` crops, rotates and scales NV12 pictures: the portable
   `transformNv12()` is the reference, and `Camera::makeFrameTransformer()` gives
   the host's fastest. The Apple camera's (`apple/accelerated_nv12.hpp`) scales a
