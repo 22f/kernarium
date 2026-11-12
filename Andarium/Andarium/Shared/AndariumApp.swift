@@ -179,13 +179,15 @@ extension LegacyInstallAlert {
     /// stands and no alert is up, the alert is withdrawn and offered again. An
     /// alert that is up, whoever's it is, is left alone: UIKit shows ours after it.
     fileprivate func presentUntilShown() async {
-        guard model.legacyInstallQuestion != nil else { return }
-        for _ in 0..<120 {
-            try? await Task.sleep(for: .milliseconds(500))
+        // The question's own life bounds the loop: its id is the task's, so an
+        // answer, the overlay's Cancel or the guest ending cancels the task.
+        defer { withdrawn = false }
+        while model.legacyInstallQuestion != nil {
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
             guard model.legacyInstallQuestion != nil else { return }
             guard !Self.alertIsUp else { continue }
             withdrawn = true
-            try? await Task.sleep(for: .milliseconds(100))
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
             withdrawn = false
         }
     }
