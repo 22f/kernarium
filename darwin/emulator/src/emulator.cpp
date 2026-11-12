@@ -601,6 +601,8 @@ public:
 	{
 		std::lock_guard lock{guest_lifecycle_mutex_};
 		if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
+			/* A console request ends a suspend the guest took itself. */
+			::uml::runtime::note_host_wake();
 			(void)::uml::device::trim_guest_page_cache(
 				guest_trim_wait_ms);
 			guest_suspension_ = ::uml::device::suspend_guest(
@@ -630,6 +632,10 @@ public:
 		const auto suspension = std::exchange(guest_suspension_,
 			::uml::device::GuestSuspension::none);
 		::uml::runtime::note_host_wake();
+		/* The host may have changed its thermal state or power mode while
+		 * the process was suspended, and the system's notice with it: the
+		 * stall watch reads them once. */
+		::uml::runtime::request_host_state_reading();
 		::uml::device::resume_guest(suspension);
 		if (const auto enabled = std::exchange(pending_page_cache_trim_,
 			    std::nullopt))
@@ -646,6 +652,7 @@ public:
 			return UML_EMULATOR_OK;
 		}
 		pending_page_cache_trim_.reset();
+		::uml::runtime::note_host_wake();
 		return guest_request_result(
 			::uml::device::set_guest_page_cache_trim(enabled));
 	}
@@ -656,6 +663,7 @@ public:
 		/* Quiescing already trimmed it, and a request would wake it. */
 		if (guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return UML_EMULATOR_OK;
+		::uml::runtime::note_host_wake();
 		return guest_request_result(
 			::uml::device::trim_guest_page_cache(guest_trim_wait_ms));
 	}
@@ -695,6 +703,7 @@ public:
 		if (!lock.owns_lock() ||
 			guest_suspension_ != ::uml::device::GuestSuspension::none)
 			return -UML_EMULATOR_UNSUPPORTED;
+		::uml::runtime::note_host_wake();
 		auto query = ::uml::device::GuestMemoryQuery::start();
 		lock.unlock();
 		if (!query)
@@ -1261,6 +1270,7 @@ extern "C" int uml_emulator_sync(uml_emulator *emulator)
 	 * flushing the host before it would push down a prefix of what the guest
 	 * still holds. A guest without a management console simply does not
 	 * answer, which leaves the host flush doing what it did before. */
+	::uml::runtime::note_host_wake();
 	(void)::uml::device::request_guest_writeback(
 		::uml::emulator::guest_writeback_settle_ms);
 	const auto result = ::uml::runtime::sync_guest_files();
