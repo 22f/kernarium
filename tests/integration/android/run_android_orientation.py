@@ -264,6 +264,11 @@ AVC_DENIAL = re.compile(r"avc:\s+denied", re.IGNORECASE)
 HAL_LOG_LINE = re.compile(r"Andarium motion: ro\.boot\.kernarium\.orientation=(\d+), (\d+) sensors")
 
 
+def hal_log_lines(log: str) -> str:
+    """The lines of a log that launch_state reads: the sub-HAL's own line and every SELinux denial."""
+    return "\n".join(line for line in log.splitlines() if "Andarium motion: ro.boot" in line or AVC_DENIAL.search(line))
+
+
 def sensors_hal_denials(log: str) -> list[str]:
     """The SELinux denials in a log that concern the orientation property or the sensors HAL's own domain."""
     return [line.strip() for line in log.splitlines() if AVC_DENIAL.search(line)
@@ -554,6 +559,9 @@ class Guest:
         self.forward_port = forward_port
         #: When sys.boot_completed was seen (time.monotonic), for the early host's ordering check.
         self.boot_completed_at: float | None = None
+        #: What launch_state reads from the log, taken at boot_completed: the sub-HAL logs once, early, and
+        #: the buffer has rolled over it by the time a step looks.
+        self.early_log = ""
 
     def adb_run(self, *arguments: str, timeout: float = COMMAND_SECONDS) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -692,7 +700,7 @@ def launch_state(guest: Guest, expect_sensor: bool, argument: bool) -> str:
         if sensors.listed.get(name) != kind:
             raise Failure(f"the sensor service lists {sensors.listed}, not {name} (type {kind})")
     notes = []
-    log = guest.shell("logcat -d -b all 2>/dev/null | grep -E 'Andarium motion: ro.boot|avc: +denied'; true")
+    log = guest.early_log + "\n" + guest.shell("logcat -d -b all 2>/dev/null | grep -E 'Andarium motion: ro.boot|avc: +denied'; true")
     said = HAL_LOG_LINE.findall(log)
     wanted = ("1", "3") if expect_sensor else ("0", "2")
     if not expect_sensor and argument:
@@ -1283,6 +1291,7 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, *,
     if not boot_android.wait_for_boot_completed(adb, serial, process, options.boot_timeout):
         raise Failure("Android did not reach sys.boot_completed")
     guest.boot_completed_at = time.monotonic()
+    guest.early_log = hal_log_lines(guest.adb_run("logcat", "-d", "-b", "all", timeout=90).stdout)
     boot_android.android_instance.booted(instance, identity)
     if provision and not options.instance:
         boot_android.provision_guest(adb, serial)

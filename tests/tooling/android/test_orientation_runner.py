@@ -208,6 +208,9 @@ class ParserTests(unittest.TestCase):
         unrelated = "type=1400 audit: avc:  denied  { read } for comm=\"foo\" scontext=u:r:untrusted_app:s0 tcontext=u:object_r:x:s0"
         sensors = ("avc:  denied  { read } for property=ro.boot.kernarium.orientation pid=439 "
                    "scontext=u:r:hal_sensors_default:s0 tcontext=u:object_r:bootloader_prop:s0")
+        both = f"noise\n{line}\nmore noise\n{unrelated}\nI/other: nothing\n"
+        self.assertEqual(runner.hal_log_lines(both), f"{line}\n{unrelated}")
+        self.assertEqual(runner.hal_log_lines("nothing here"), "")
         self.assertEqual(runner.sensors_hal_denials(unrelated), [])
         self.assertEqual(runner.sensors_hal_denials(f"{unrelated}\n{sensors}\n"), [sensors])
         self.assertEqual(runner.sensors_hal_denials("avc: granted { read } for hal_sensors_default"), [])
