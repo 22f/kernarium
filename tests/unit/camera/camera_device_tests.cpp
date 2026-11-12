@@ -1395,6 +1395,37 @@ void testCalibrationRawIsACourtesy()
     require((rig.result(raw).base.flags & errorFlag) != 0 && rig.result(raw).base.timestamp == 9, "and the RAW buffer fails alone");
 }
 
+/* The guest asked for a JPEG of one size: a platform picture of another size
+ * fails its buffer, and the next still, of the right size, is delivered. */
+void testAStillOfAnotherSizeFails()
+{
+    Rig rig;
+    rig.create(1, 0, stillKind);
+    rig.create(2, 0, metaKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    const auto bufferSize = rig.params(1).plane_formats[0].plane_size;
+    rig.attach(1, 1, bufferSize);
+    rig.attach(2, 1, metaSize);
+    rig.camera->stillsOfAnotherSize(true);
+    const auto meta = rig.queue(2, 1);
+    const auto wrong = rig.queue(1, 1, 31);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(wrong) && rig.result(wrong).base.flags == errorFlag && rig.result(wrong).base.data_sizes[0] == 0 &&
+                rig.result(wrong).base.timestamp == 31,
+            "a picture of another size fails the guest's buffer, without bytes");
+    require(rig.done(meta) && metaOf(rig, 2, 1).jpeg_gap_length == 0, "and no gap is described for it");
+    require(rig.camera->sessionsOpen() == 0, "the capture session is released");
+
+    rig.camera->stillsOfAnotherSize(false);
+    rig.attach(1, 2, bufferSize);
+    const auto right = rig.queue(1, 2, 32);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(right) && rig.result(right).base.flags == 0 && rig.result(right).base.data_sizes[0] > 4000,
+            "the same stream takes a picture of the size it asked for");
+}
+
 /* An interruption belongs to the platform session it happened in. */
 void testInterruptionEndsWithTheSession()
 {
@@ -1890,6 +1921,7 @@ int main()
     testFrontCameraChoice();
     testCamerasJoin();
     testCalibrationRawIsACourtesy();
+    testAStillOfAnotherSizeFails();
     testInterruptionEndsWithTheSession();
     testSystemPressure();
     testResetAndTheDriverRecreates();

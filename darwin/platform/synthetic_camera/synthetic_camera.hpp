@@ -80,6 +80,9 @@ public:
     // alone, leaving the JPEG of the same capture.
     virtual void refuseRaw(bool refuse) = 0;
     virtual void failRaw(bool fail) = 0;
+    // The platform makes a JPEG of another size than the request names (the
+    // device must fail that still, not pass the picture on).
+    virtual void stillsOfAnotherSize(bool another) = 0;
 };
 
 [[nodiscard]] std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options = {});

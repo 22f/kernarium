@@ -428,6 +428,7 @@ public:
     std::atomic<std::uint64_t> clock {1'000'000'000};
     std::atomic<bool> rawRefused {false};
     std::atomic<bool> rawFails {false};
+    std::atomic<bool> stillsOfAnotherSize {false};
     std::mutex mutex;  // guards the sessions list and the interrupted flag
     std::set<class Session*> sessions;
     bool interrupted {};
@@ -813,7 +814,10 @@ private:
             result.exposure = outcome.exposure;
             if (request.jpegWidth != 0) {
                 const auto* size = stillSize(info, request.jpegWidth, request.jpegHeight);
-                const auto picture = render(base(state, size->width, size->height), outcome.scene);
+                // A platform that made another size than the request names (a test
+                // hook): half of it each way.
+                const auto divisor = core_.stillsOfAnotherSize ? 2u : 1u;
+                const auto picture = render(base(state, size->width / divisor, size->height / divisor), outcome.scene);
                 result.jpeg = encodeSyntheticJpeg(picture.luma.data(), picture.width, picture.chroma.data(),
                                                   picture.width, picture.width, picture.height, request.jpegQuality);
             }
@@ -970,6 +974,7 @@ public:
 
     void refuseRaw(bool refuse) override { core_.rawRefused = refuse; }
     void failRaw(bool fail) override { core_.rawFails = fail; }
+    void stillsOfAnotherSize(bool another) override { core_.stillsOfAnotherSize = another; }
 
     void resume() override
     {

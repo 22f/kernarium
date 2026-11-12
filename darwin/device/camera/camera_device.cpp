@@ -1000,7 +1000,15 @@ public:
             std::uint32_t size = 0;
             bool ok = false;
             if (stream.format == VIRTIO_VIDEO_FORMAT_CAMERA_JPEG) {
-                if (auto plan = reserveExifGap(result.jpeg); plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
+                auto plan = reserveExifGap(result.jpeg);
+                // The guest asked for this size and gets this size or an error: a
+                // platform picture of another size is not the one it configured.
+                if (plan && (plan->frameWidth != stream.width || plan->frameHeight != stream.height)) {
+                    std::fprintf(stderr, "Virtio camera stream %u: the still is %ux%u, not the %ux%u that was asked for\n", stream.id,
+                                 unsigned(plan->frameWidth), unsigned(plan->frameHeight), stream.width, stream.height);
+                    plan.reset();
+                }
+                if (plan && plan->size() <= resource.capacity && !resource.planes.empty()) {
                     // The scan is the end of the platform's own bytes, written from where they lie.
                     const std::span<std::uint8_t> tail(result.jpeg.data() + (plan->tail.data() - result.jpeg.data()), plan->tail.size());
                     ok = transferSegments(mapper, regions.get(), resource.planes[0], plan->head, true) &&
