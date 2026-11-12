@@ -357,8 +357,13 @@ it. The bridge fields used below are defined by the comments in
   `DMA_BUF_IOCTL_SYNC`; CPU access must be bracketed and a producer must flush
   its commands first. The optional `guest-gbm-dmabuf` test checks it.
 - The driver paces each CRTC with the DRM vblank timer at its mode's refresh
-  rate: a flip's event and out-fence signal at the next tick. The optional
-  `guest-drm-vblank` test checks the rate.
+  rate: a flip's event and out-fence signal at the next tick. The timer runs
+  only while something holds a vblank reference. A restart after an idle stop
+  keeps the grid: the first tick is a whole number of periods after the last
+  one, and the vblank count and timestamp the core derives for the gap stay a
+  pair on that grid. A mode change, or the CRTC being turned off and on, starts
+  a new grid. The optional `guest-drm-vblank` test checks the rate, the grid
+  across idle gaps and the kernel's vblank trace.
 - A Virtio-GPU context's debug name ends in its creating process,
   `<name>|pid=<tgid>|comm=<comm>`: the thread group ID in the initial PID
   namespace and the group leader's command name (a `|` in it becomes `?`), cut

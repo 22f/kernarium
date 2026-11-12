@@ -120,7 +120,7 @@ test's header holds the mechanics.
 | `guest-v4l2-mmap-capture` | `UML_V4L2_MMAP_CAPTURE_PROBE_BINARY` | blob-backed capture buffers allocate on an idle guest |
 | `guest-futex-atomic` | `UML_FUTEX_PROBE_BINARY` | the futex contract in the [common kernel README](../kernel/common/README.md) |
 | `guest-gbm-dmabuf` | `UML_GBM_DMABUF_PROBE_BINARY` | the virtio-gpu dma-buf contract |
-| `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing |
+| `guest-drm-vblank` | `UML_DRM_FLIP_PROBE_BINARY` | Virtio-GPU's vblank pacing and the grid it keeps across idle gaps |
 | `guest-aarch32-kernel` | built from `tests/integration/aarch32/` | the kernel's AArch32 task support (needs `python3`, `as`, `ld` in the rootfs) |
 | `apple-audio-playback`, `-interruption`, `guest-virtio-sound-delay-host` | `UML_TEST_APPLE_AUDIO=ON` | the real macOS audio output, the iOS interruption behavior (which needs an iOS Simulator runtime, and runs in a simulator device it creates and deletes) and a guest's stream delay on the real output |
 

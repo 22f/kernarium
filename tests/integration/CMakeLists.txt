@@ -306,7 +306,9 @@ if(UML_DRM_FLIP_PROBE_BINARY)
     if(NOT EXISTS "${UML_DRM_FLIP_PROBE_BINARY}")
         message(FATAL_ERROR "The vblank pacing test requires its compiled guest probe")
     endif()
-    # A four-vCPU guest with the GPU; the probe takes the card's first output.
+    # A four-vCPU guest with the GPU; the probe takes the card's first output,
+    # checks the pacing rate, and checks that the vblank timer keeps its grid
+    # across idle gaps, flips and mode changes against the kernel's trace.
     uml_add_guest_integration_test(
         NAME guest-drm-vblank
         SCRIPT gpu/run_gpu_guest.py
@@ -318,7 +320,7 @@ if(UML_DRM_FLIP_PROBE_BINARY)
 do
     sleep 1
 done'"
-            --command "timeout 60 /usr/local/libexec/drm-flip-probe"
+            --command "timeout 150 /usr/local/libexec/drm-flip-probe"
             --
             ncpus=4 --execution-engine=jit --gpu --gpu-display=vnc
             --gpu-vnc-bind=127.0.0.1 --gpu-vnc-port=0
