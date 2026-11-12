@@ -362,8 +362,9 @@ reports it validated once private DNS passes and then probes it, again after a
 back-off while the checks fail, and without evaluating private DNS again. A
 failed check, including one that a sign-in or block page answers, shows a warning
 in the status bar and the Wi-Fi list (route `p0033`) and changes nothing else:
-the network is never left unvalidated and no sign-in notification is posted. A
-VPN, a test network, a network under CTS's test URLs, a network the stock rules
+a failed check never leaves the network unvalidated and no sign-in notification
+is posted. A forced re-evaluation checks a validated network; a network whose
+private DNS has failed is evaluated as the stock rules say. A VPN, a test network, a network under CTS's test URLs, a network the stock rules
 do not validate, DNS and the private DNS settings keep the stock rules. The
 product's one network, VirtWifi, is saved once and is never disabled for lack of
 internet (`overlay/rro/KernariumWifiOverlay`), because the platform never joins a
