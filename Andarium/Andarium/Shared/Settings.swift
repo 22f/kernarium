@@ -369,7 +369,7 @@ extension View {
                 .statusBarHidden(true)
                 // On a turned inner display the sheet rises to the fold and
                 // lets touches through to the guest above it.
-                .foldSheet(reachesBehind: true)
+                .foldSheet(model, reachesBehind: true)
         }
     }
 }

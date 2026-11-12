@@ -23,18 +23,23 @@ extension View {
     /// the hinge crosses between bent and flat. `reachesBehind` lets touches
     /// reach what the sheet leaves uncovered, as the session's Settings does
     /// over the guest. Apply it outside the sheet's own presentation
-    /// modifiers, and inside the model's environment.
-    func foldSheet(reachesBehind: Bool = false) -> some View {
-        modifier(FoldSheetPresentation(reachesBehind: reachesBehind))
+    /// modifiers. It is handed the model and does not read the environment:
+    /// a sheet's presentation preferences are read before the sheet inherits
+    /// its presenter's environment, on a Mac and in a harness that gives the
+    /// presenter no model.
+    func foldSheet(_ model: AppModel, reachesBehind: Bool = false) -> some View {
+        modifier(FoldSheetPresentation(model: model, reachesBehind: reachesBehind))
     }
 }
 
 private struct OnCardHalf: ViewModifier {
-    @Environment(AppModel.self) private var model
+    /// Optional: a card shown without a model, as a harness does, is laid out
+    /// as it always was.
+    @Environment(AppModel.self) private var model: AppModel?
 
     func body(content: Content) -> some View {
-        let safe = model.fold?.safeArea
-        let half = model.fold.flatMap(FoldHalves.init)?.card
+        let safe = model?.fold?.safeArea
+        let half = model?.fold.flatMap(FoldHalves.init)?.card
         // The view fills the space it is given, then keeps to the half: a
         // card in a stack centres on the half and not on the safe area. With
         // no fold band the frame proposes nothing and the padding is zero.
@@ -53,7 +58,7 @@ private struct OnCardHalf: ViewModifier {
 }
 
 private struct FoldSheetPresentation: ViewModifier {
-    @Environment(AppModel.self) private var model
+    let model: AppModel
     let reachesBehind: Bool
 
     func body(content: Content) -> some View {

@@ -77,7 +77,7 @@ struct HomeView: View {
                 }
             }
             .environment(model)
-            .foldSheet()
+            .foldSheet(model)
         }
         .microphoneAccessAlert()
         .locationAccessAlert()
