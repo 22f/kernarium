@@ -6,7 +6,7 @@ import SwiftUI
 
 // Home's toolbar menu. Info is the plain button it has always been; each
 // feature that is compiled in and available adds its item, and with none the
-// menu does not exist (a build without either feature has no menu code at all).
+// menu does not exist (a build without any feature has no menu code at all).
 
 /// What the menu holds, in order.
 enum HomeMenuItem: Equatable {

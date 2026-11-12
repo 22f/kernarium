@@ -9,13 +9,14 @@ import Security
 ///
 /// The counter and the previous run's end are in the application's defaults. The
 /// record that the prompt was asked for, or the review page opened, is in the
-/// defaults and in a Keychain item, and is read back as the furthest of the two. The defaults go with the application when
-/// it is deleted; the Keychain item stays, as every Keychain item of the
-/// application does, so a person who reinstalls is not asked again. The item
-/// is the application's own default access group, local to the device and
-/// excluded from backups to another one: no iCloud, no new capability or
-/// entitlement. Erase guest deletes the adb key (`AdbKeyStore`) and nothing
-/// else, so it leaves this item alone.
+/// defaults and in a Keychain item, and is read back as the furthest of the
+/// two. The defaults go with the application when it is deleted; the Keychain
+/// item stays, as every Keychain item of the application does, so a person
+/// who reinstalls is not asked again. The item is the application's own
+/// default access group, local to the device and excluded from backups to
+/// another one: no iCloud, no new capability or entitlement. Erase guest
+/// deletes the adb key (`AdbKeyStore`) and nothing else, so it leaves this
+/// item alone.
 nonisolated struct ReviewAskStore: ReviewAskPersistence, @unchecked Sendable {
     static let secondsKey = "ReviewAskActiveSeconds"
     static let lastRunKey = "ReviewAskLastRunNormal"
