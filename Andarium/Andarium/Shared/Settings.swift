@@ -140,7 +140,7 @@ struct SessionSettingsSheet: View {
     private var diagnostics: some View {
         Section("Diagnostics") {
             #if FEEDBACK_MAIL
-            if model.feedbackAddress != nil { SendFeedbackEntrance(place: .settings) }
+            if model.feedbackAddress != nil { SendFeedbackEntrance() }
             #endif
             Button {
                 dismiss()
