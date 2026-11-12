@@ -40,6 +40,17 @@ enum class CameraState : std::uint8_t {
     interruptedBySystemPressure,
 };
 
+/* Where a diagnostic reading of the process's memory is useful, to measure
+ * what the host's capture costs outside the guest's allowance. */
+enum class CameraCheckpoint : std::uint8_t {
+    /* The platform's capture session has just opened. */
+    sessionOpened,
+    /* A still has been delivered (or has failed) and its session is still open. */
+    stillDelivered,
+    /* The platform's capture session has just closed. */
+    sessionClosed,
+};
+
 struct CameraDeviceOptions {
     CameraMode mode {CameraMode::live};
     CameraTier tier {CameraTier::small};
@@ -59,6 +70,9 @@ struct CameraDeviceOptions {
      * automatic) and the clockwise degrees applied. It shows what reaches the
      * host; it changes nothing. */
     std::function<void(std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees)> onRotateAndCrop;
+    /* Told on the transport thread at each CameraCheckpoint, for a diagnostic
+     * line; it changes nothing and must not block. */
+    std::function<void(CameraCheckpoint)> onCheckpoint;
     /* Called on the transport thread when the state changes. */
     std::function<void(CameraState)> onState;
     /* The clock frame ages are measured on; the platform's where empty. */

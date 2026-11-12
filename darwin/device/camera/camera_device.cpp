@@ -400,6 +400,7 @@ public:
         session = host->openSession(*this);
         sessionFailed = session == nullptr;
         if (session) {
+            checkpoint(CameraCheckpoint::sessionOpened);
             // A session that opens runs; what interrupted the last one is over.
             // A camera with a stream waiting for frames starts its capture again
             // on its next turn, which is now.
@@ -425,10 +426,24 @@ public:
             runtime.videoRunning = false;
             runtime.appliedValid = false;
         }
-        std::lock_guard lock(inboxMutex);
-        inboxFrames.clear();
-        inboxStills.clear();
-        inboxEvents.clear();
+        {
+            std::lock_guard lock(inboxMutex);
+            inboxFrames.clear();
+            inboxStills.clear();
+            inboxEvents.clear();
+        }
+        checkpoint(CameraCheckpoint::sessionClosed);
+    }
+
+    /* A diagnostic reading, never allowed to fail the device (it also runs
+     * from the destructor). */
+    void checkpoint(CameraCheckpoint where) noexcept
+    {
+        if (!options.onCheckpoint) return;
+        try {
+            options.onCheckpoint(where);
+        } catch (...) {
+        }
     }
 
     [[nodiscard]] bool sessionNeeded() const
@@ -965,6 +980,7 @@ public:
         if (!result.ok) {
             failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             eraseGroup(result.token);
+            checkpoint(CameraCheckpoint::stillDelivered);
             releaseSessionIfIdle();
             reportState();
             return;
@@ -1000,6 +1016,7 @@ public:
         }
         pushMeta(runtime, meta, 0);
         eraseGroup(result.token);
+        checkpoint(CameraCheckpoint::stillDelivered);
         releaseSessionIfIdle();
         reportState();
     }

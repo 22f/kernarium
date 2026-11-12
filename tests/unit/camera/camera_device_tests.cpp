@@ -85,6 +85,7 @@ struct Rig final {
         options.calibration = store;
         options.onState = [this](CameraState state) { states.push_back(state); };
         options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
+        options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
         options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
             rotations.push_back({camera, setting, degrees});
         };
@@ -96,11 +97,16 @@ struct Rig final {
     }
     Rig(const Rig&) = delete;
     Rig& operator=(const Rig&) = delete;
+    // The device closes a session that is open as it goes, and says so to the
+    // recorders below, which must outlive it.
+    ~Rig() { device.reset(); }
 
     std::shared_ptr<SyntheticCamera> camera;
     std::shared_ptr<CalibrationStore> store;
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
+    /* The diagnostic checkpoints the device reported, in order. */
+    std::vector<CameraCheckpoint> checkpoints;
     /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
     std::vector<std::array<std::uint32_t, 3>> rotations;
     std::uint32_t* automaticDegrees {};
@@ -596,6 +602,8 @@ void testVideoAndMetadata()
     require(rig.done(queued) && (rig.result(queued).base.flags & errorFlag), "a cleared buffer completes with an error");
     require(!rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 0, "with no stream left the capture is released");
     require(rig.states == std::vector<CameraState> {CameraState::streaming, CameraState::idle}, "the host is idle again");
+    require(rig.checkpoints == std::vector<CameraCheckpoint> {CameraCheckpoint::sessionOpened, CameraCheckpoint::sessionClosed},
+            "the memory checkpoints are the session opening and closing");
     rig.destroy(1);
     rig.destroy(2);
 }
@@ -736,6 +744,8 @@ void testBlockedNeverOpensASession()
                     meta.flags == (VIRTIO_VIDEO_CAMERA_FRAME_F_BLACK | VIRTIO_VIDEO_CAMERA_FRAME_F_BLOCKED),
                 "metadata says black and blocked");
     }
+    // Black frames are not capture: the host is idle however many flow.
+    require(rig.states.empty(), "a blocked session with streams running is idle and reports no change");
     // A still is refused at once.
     const auto still = rig.queue(3, 1, 4321);
     require(rig.done(still), "a still in a blocked session completes at once");
@@ -753,8 +763,6 @@ void testBlockedNeverOpensASession()
     rig.ok(virtio_video_queue_clear {{VIRTIO_VIDEO_CMD_QUEUE_CLEAR, 1}, output, {}});
     rig.destroy(1);
     rig.destroy(2);
-    // Black frames are not capture: the host is idle however many flow.
-    require(rig.states.empty(), "a blocked session with streams running is idle and reports no change");
     rig.destroy(3);
     rig.device->reset();
     require(rig.camera->sessionsOpened() == 0 && rig.camera->sessionsOpen() == 0,
@@ -892,6 +900,9 @@ void testStillsAndCalibration()
                     record.jpeg_gap_offset == 6 && record.jpeg_gap_length == exifGapLength && record.active_camera == 0,
                 "describes the still and where its gap is");
         require(rig.camera->sessionsOpen() == 0 && rig.states.back() == CameraState::idle, "the capture session is released");
+        require(rig.checkpoints == std::vector<CameraCheckpoint> {CameraCheckpoint::sessionOpened, CameraCheckpoint::stillDelivered,
+                                                                  CameraCheckpoint::sessionClosed},
+                "a still is bracketed by its session's checkpoints, read while the session is open");
 
         // The first still of a lens taught the device its colour data.
         const auto learned = store->load(model, CalibrationStore::lensKey(info));

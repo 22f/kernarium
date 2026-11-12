@@ -241,8 +241,9 @@ private:
         receiver.publish(state);
     };
 #ifndef UML_APP_STORE_RUNTIME
-    /* What reaches the host, for a development run to read. */
+    /* What reaches the host and what it costs, for a development run to read. */
     options.onRotateAndCrop = uml::camera::printRotateAndCrop;
+    options.onCheckpoint = uml::camera::printCheckpoint;
 #endif
     return options;
 }

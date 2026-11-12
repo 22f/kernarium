@@ -234,8 +234,9 @@ Kernarium attaches:
   ([orientation](../darwin/device/camera/README.md#orientation)). A runtime
   that is not an App Store build serves the synthetic camera when
   `KERNARIUM_CAMERA_SOURCE` names it and prints the ROTATE_AND_CROP settings
-  that reach the cameras. The Linux runtime keeps both entries and never calls
-  back;
+  that reach the cameras and the process's footprint when a capture session
+  opens, closes and after each still. The Linux runtime keeps both entries and
+  never calls back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then

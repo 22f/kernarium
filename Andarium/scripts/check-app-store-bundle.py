@@ -419,6 +419,11 @@ DEBUG_SYMBOLS = (
                           # The runtime's choice of it from the environment
                           # (Kernarium/Runtime/KernariumCamera.hpp).
                           b"6camera11parseSource")),
+    # The camera's development lines (darwin/device/camera/camera_diagnostics.hpp):
+    # what ROTATE_AND_CROP asks of the host and the footprint at each capture
+    # checkpoint, printed by a launcher or a runtime that is not an App Store
+    # build.
+    ("camera diagnostics", (b"17printRotateAndCrop", b"15printCheckpoint")),
     # Simulated game controllers: the scripted input and the guest end of the
     # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
     # tool link) and the host reader that moved there.
@@ -446,6 +451,7 @@ DEBUG_STRINGS = (
                     b"ADB authorization is off", b"removed the boot payload")),
     ("remote framebuffer", (b"RFB 003.00",)),
     ("input probe", (b"inputProbeLog", b"inputProbeField")),
+    ("camera diagnostics", (b"ROTATE_AND_CROP", b"Camera: memory: ")),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
                           b"SyntheticLaptop1,1", b"synthetic-back-wide",
                           b"KERNARIUM_CAMERA_SOURCE")),

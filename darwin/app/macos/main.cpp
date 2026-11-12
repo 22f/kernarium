@@ -1664,8 +1664,9 @@ private:
 		options.onState = [](uml::camera::CameraState state) {
 			std::fprintf(stderr, "Camera: %s\n", camera_state_name(state));
 		};
-		/* A development run reads what reaches the host. */
+		/* A development run reads what reaches the host and what it costs. */
 		options.onRotateAndCrop = uml::camera::printRotateAndCrop;
+		options.onCheckpoint = uml::camera::printCheckpoint;
 		uml::camera::CameraSourceHandle source;
 		try {
 			if (prepared_.camera == CameraSource::synthetic ||

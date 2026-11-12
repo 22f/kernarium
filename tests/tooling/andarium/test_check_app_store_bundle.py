@@ -93,6 +93,11 @@ DEBUG_SUPPORT = (
     # The runtime's environment knob for it and the function that reads it.
     ("synthetic camera", 'const char *knob(void) { return "KERNARIUM_CAMERA_SOURCE"; }\n'),
     ("synthetic camera", "int _ZN9kernarium6camera11parseSourceEPKc(void) { return 1; }\n"),
+    # The camera's development lines.
+    ("camera diagnostics", "int _ZN3uml6camera17printRotateAndCropEjjj(void) { return 1; }\n"),
+    ("camera diagnostics", "int _ZN3uml6camera15printCheckpointENS0_16CameraCheckpointE(void) { return 1; }\n"),
+    ("camera diagnostics", 'const char *fixture(void) { return "Camera: camera %u: ROTATE_AND_CROP %u"; }\n'),
+    ("camera diagnostics", 'const char *fixture(void) { return "Camera: memory: %s, footprint"; }\n'),
     # The simulated controllers: the scripted input, the guest end of the wire
     # and the test-support module that holds them.
     ("synthetic controllers", "int _s12AndariumCore13GamepadScriptV8identityACvgZ(void) { return 1; }\n"),
