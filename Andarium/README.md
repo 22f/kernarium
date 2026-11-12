@@ -105,12 +105,13 @@ reports no hinge keeps every layout it has.
   statistics and notices above them.
 - **Other screens.** Home is one page each side of the fold; the cards and
   overlays sit on the half where the system puts its alerts. Welcome is centred
-  across the whole display while the device is flat, and on a half while it is
-  bent. The boot sits on the upper half while the device stands, and as a card
-  otherwise. A sheet turned rises to a little below the fold, and keeps its
-  presentation, and what has been typed in it, when the display turns. On the
-  cover the file browser's Import is a round button in the toolbar's column
-  beside the camera, between More and Done, and the bar keeps Export.
+  on the fold, across the whole display, while the device is flat, and on a
+  half while it is bent. The boot sits on the upper half while the device
+  stands, and as a card otherwise. A sheet turned rises to a little below the
+  fold, and keeps its presentation, and what has been typed in it, when the
+  display turns. On the cover the file browser's Import is a round button in
+  the toolbar's column beside the camera, between More and Done, and the bar
+  keeps Export.
 
 The guest is resized only where its shape changes (the cover and the inner
 display, standing and the other turned poses), through the display's ordinary

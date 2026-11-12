@@ -506,73 +506,64 @@ struct FoldSessionHostingTests {
 
     // MARK: The other screens
 
-    /// Welcome's place, measured in the space it is given: a view that fills
-    /// the space, named "space", stands beside it. Welcome is the view alone
-    /// in a view the size of the pose: the navigation stack Home puts it in
-    /// lays out by the window the system has, which is not the pose's here.
-    /// Flat, it is where it is on a display that does not fold, centred across
-    /// the fold; bent, it is on the alerts' half.
+    /// Welcome's place, measured in the space it is given: Welcome is the view
+    /// alone in a view the size of the pose, with the pose's safe area: the
+    /// navigation stack Home puts it in lays out by the window the system has,
+    /// which is not the pose's here, and its bar and strip are the captures'.
+    /// Flat, its area is centred on the fold; bent, it is on the alerts' half.
     @Test(arguments: Pose.allCases.filter(\.inner))
-    func welcomeIsCentredAcrossTheDisplayWhenFlatAndOnAHalfWhenBent(_ pose: Pose) async throws {
+    func welcomeIsCentredOnTheFoldWhenFlatAndOnAHalfWhenBent(_ pose: Pose) async throws {
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        func place(_ fold: FoldReading?) async throws -> (space: CGRect, welcome: CGRect) {
-            let model = AppEntry.fromArguments().makeModel()
-            model.guest = nil
-            model.fold = fold
-            let container = UIViewController()
-            lease.window.rootViewController = container
-            let holder = UIView(frame: pose.reading.window)
-            container.view.addSubview(holder)
-            let host = UIHostingController(rootView: ZStack {
-                Color.clear.accessibilityElement(children: .ignore).accessibilityLabel("space")
-                WelcomeView()
-            }.environment(model))
-            container.addChild(host)
-            host.view.frame = holder.bounds
-            holder.addSubview(host.view)
-            host.didMove(toParent: container)
-            defer {
-                host.willMove(toParent: nil)
-                host.view.removeFromSuperview()
-                host.removeFromParent()
-                holder.removeFromSuperview()
-            }
-            // The window is the application's own, not the pose's: give the view
-            // the pose's safe area, as the screen lays out in it.
-            host.view.layoutIfNeeded()
-            let window = pose.reading.window, safe = pose.reading.safeArea
-            let have = host.view.safeAreaInsets, extra = host.additionalSafeAreaInsets
-            host.additionalSafeAreaInsets = UIEdgeInsets(
-                top: extra.top + safe.minY - window.minY - have.top,
-                left: extra.left + safe.minX - window.minX - have.left,
-                bottom: extra.bottom + window.maxY - safe.maxY - have.bottom,
-                right: extra.right + window.maxX - safe.maxX - have.right)
-            try await Task.sleep(for: .milliseconds(800))
-            host.view.layoutIfNeeded()
-            let elements = Self.labelled(in: host.view, relativeTo: holder)
-            let space = try #require(elements.first { $0.label == "space" }?.frame, "no space: \(elements)")
-            let shown = elements.filter {
-                $0.label.contains("No virtual machine yet") || $0.label.contains("Set up virtual machine")
-                    || $0.label.contains("free on this")
-            }
-            let welcome = try #require(
-                shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
-            return (space, welcome)
+        let model = AppEntry.fromArguments().makeModel()
+        model.guest = nil
+        model.fold = pose.reading
+        let container = UIViewController()
+        lease.window.rootViewController = container
+        let holder = UIView(frame: pose.reading.window)
+        container.view.addSubview(holder)
+        let host = UIHostingController(rootView: WelcomeView().environment(model))
+        container.addChild(host)
+        host.view.frame = holder.bounds
+        holder.addSubview(host.view)
+        host.didMove(toParent: container)
+        defer {
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+            holder.removeFromSuperview()
         }
-        let (_, welcome) = try await place(pose.reading)
+        // The window is the application's own, not the pose's: give the view
+        // the pose's safe area, as the screen lays out in it.
+        host.view.layoutIfNeeded()
+        let window = pose.reading.window, safe = pose.reading.safeArea
+        let have = host.view.safeAreaInsets, extra = host.additionalSafeAreaInsets
+        host.additionalSafeAreaInsets = UIEdgeInsets(
+            top: extra.top + safe.minY - window.minY - have.top,
+            left: extra.left + safe.minX - window.minX - have.left,
+            bottom: extra.bottom + window.maxY - safe.maxY - have.bottom,
+            right: extra.right + window.maxX - safe.maxX - have.right)
+        try await Task.sleep(for: .milliseconds(800))
+        host.view.layoutIfNeeded()
+        let elements = Self.labelled(in: host.view, relativeTo: holder)
+        let shown = elements.filter {
+            $0.label.contains("No virtual machine yet") || $0.label.contains("Set up virtual machine")
+        }
+        let welcome = try #require(shown.map(\.frame).reduce(nil as CGRect?) { $0?.union($1) ?? $1 }, "no Welcome")
+        let footer = try #require(elements.first { $0.label.contains("free on this") }?.frame, "no footer")
         let band = try #require(pose.reading.division).frame
+        let halves = try #require(FoldHalves(pose.reading))
+        let area = halves.area(for: .welcome)
         if pose == .uprightFlat || pose == .turnedFlat {
-            // The whole display, across the fold: where Welcome is on a display
-            // that does not fold, and centred on the display.
-            let (space, plain) = try await place(nil)
-            let near = abs(welcome.midX - plain.midX) < 2 && abs(welcome.midY - plain.midY) < 2
-                && abs(welcome.width - plain.width) < 2 && abs(welcome.height - plain.height) < 2
-            #expect(near, "\(pose): Welcome is at \(welcome), not where it is without a fold, \(plain)")
-            // Its content is a column, centred on the display's width.
-            #expect(abs(welcome.midX - space.midX) < 2, "\(pose): Welcome \(welcome) is not centred on \(space)")
+            // Centred on the fold, across it: the column is on the middle of the
+            // area, and the footer sits at its foot.
+            #expect(abs(welcome.midX - area.midX) < 2, "\(pose): Welcome \(welcome) is not centred on \(area)")
+            #expect(abs(footer.midX - area.midX) < 3, "\(pose): the footer \(footer) is not centred on \(area)")
+            #expect(abs(footer.maxY - (area.maxY - 12)) < 4, "\(pose): the footer \(footer) is not at the foot of \(area)")
+            #expect(area.intersects(band) && area != halves.card, "\(pose): the area \(area) is a half")
+            let along = pose == .uprightFlat ? (area.midX, band.midX) : (area.midY, band.midY)
+            #expect(abs(along.0 - along.1) < 0.5, "\(pose): the area \(area) is not centred on the fold \(band)")
         } else {
-            let halves = try #require(FoldHalves(pose.reading))
             #expect(!welcome.intersects(band), "\(pose): Welcome is on the fold at \(welcome)")
             #expect(halves.card.insetBy(dx: -1, dy: -1).contains(welcome), "\(pose): Welcome \(welcome) is not on \(halves.card)")
         }

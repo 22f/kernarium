@@ -12,8 +12,9 @@ extension View {
     /// `FoldHalves.area(for:)`): by default the half where the system puts its
     /// own alerts, the leading one upright and the lower one turned, so a card
     /// or a boot step never straddles the fold. The view is padded away from
-    /// the rest of the space it has; elsewhere there is no padding, so it
-    /// lays out as it always did. It measures the space it is given and not
+    /// the rest of the space it has, or reaches past that space to the whole
+    /// display (Welcome, flat); elsewhere there is no padding, so it lays out
+    /// as it always did. It measures the space it is given and not
     /// the window's safe area, so it holds in a sheet and under a navigation
     /// bar. Apply it to a view that fills the space it is shown in.
     func onCardHalf(_ screen: FoldScreen = .card) -> some View { modifier(OnCardHalf(screen: screen)) }
@@ -46,25 +47,24 @@ private struct OnCardHalf: ViewModifier {
 
     func body(content: Content) -> some View {
         let fold = model?.fold
-        let half = fold.flatMap(FoldHalves.init)?.area(for: screen)
-        // The view fills the space it is given, then keeps to the half: a
-        // card in a stack centres on the half and not on that space. With no
-        // fold band the frame proposes nothing and the padding is zero. Until
-        // the space is measured the window's safe area stands for it.
-        let folds = half != nil
+        let halves = fold.flatMap(FoldHalves.init)
+        // The view fills the space it is given, then keeps to the place of its
+        // screen: a card in a stack centres on its half and not on that space.
+        // With no fold band the frame proposes nothing and the padding is
+        // zero. Until the space is measured the window's safe area stands for
+        // it.
+        let folds = halves != nil
         content
             .frame(maxWidth: folds ? .infinity : nil, maxHeight: folds ? .infinity : nil)
-            .padding(Self.insets(of: half, in: folds ? (measured ?? fold?.safeArea) : nil))
+            .padding(Self.padding(halves?.insets(for: screen, in: (measured ?? fold?.safeArea) ?? .zero)))
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
                 if folds, measured != frame { measured = frame }
             }
     }
 
-    static func insets(of half: CGRect?, in space: CGRect?) -> EdgeInsets {
-        guard let half, let space else { return EdgeInsets() }
-        return EdgeInsets(
-            top: max(0, half.minY - space.minY), leading: max(0, half.minX - space.minX),
-            bottom: max(0, space.maxY - half.maxY), trailing: max(0, space.maxX - half.maxX))
+    private static func padding(_ insets: FoldInsets?) -> EdgeInsets {
+        guard let insets else { return EdgeInsets() }
+        return EdgeInsets(top: insets.top, leading: insets.leading, bottom: insets.bottom, trailing: insets.trailing)
     }
 }
 
