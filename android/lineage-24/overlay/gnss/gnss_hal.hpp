@@ -14,53 +14,64 @@
 #include <utility>
 
 #include "gnss_engine.hpp"
+#include "gnss_reporter.hpp"
 
 namespace andarium::gnss {
 
 // The framework's binder threads call these entry points, any of them at any
-// time. `mutex_` guards only the engine pointer and the settings: it is never
-// held while an engine runs or is torn down, and nothing here calls the
-// framework (the engine's reporter does, from a thread of its own), so a
-// framework thread that calls an entry point while it holds a lock of its own
-// can never wait on a thread of this HAL that waits for the framework.
+// time, and a framework thread may hold a lock of its own while it does. No
+// entry point calls the framework or waits for a delivery to it: every call is
+// posted to the one Reporter of the HAL (gnss_reporter.hpp), which makes them
+// from a thread of its own. So the locks here are held only across work that
+// does not depend on the framework: joining the receiver's reader thread (which
+// only posts), the wakelock, and opening the receiver.
+//  - `ops_` serializes start, stop, close and setCallback, so that what they
+//    post is in the order they ran, across callbacks.
+//  - `mutex_` guards the engine pointer and the settings, and is held only for
+//    moves, copies and atomic stores. It is never held across a call that takes
+//    `ops_` or an engine's control lock.
+// The order is `ops_`, then `mutex_`. The settings entry points take only
+// `mutex_`.
 class Hal {
 public:
     enum class StartResult { started, no_callback, no_receiver };
 
-    explicit Hal(Env env) : env_(std::move(env)) {}
+    explicit Hal(Env env) : env_(std::move(env)), reporter_(std::make_shared<Reporter>()) {}
 
     ~Hal() { close(); }
 
     // The framework's setCallback: a new engine for the new callback replaces
-    // the old one, which ends silently. The engine tells the callback what the
-    // receiver is (`sink.ready`) before anything else.
+    // the old one, which ends silently (what it posted is still delivered, to
+    // its callback, before anything of the new one). The engine tells the
+    // callback what the receiver is (`sink.ready`) before anything else.
     void set_callback(Sink sink) {
-        auto fresh = std::make_shared<Engine>(env_, std::move(sink));
-        std::shared_ptr<Engine> old;
-        {
-            std::lock_guard lock(mutex_);
-            fresh->set_min_interval_ms(interval_ms_);
-            fresh->set_nmea(nmea_);
-            fresh->set_sv_status(sv_status_);
-            old = std::move(engine_);
-            engine_ = std::move(fresh);
-        }
+        std::lock_guard ops(ops_);
+        const std::shared_ptr<Engine> old = current();
         if (old) old->close();
+        auto fresh = std::make_shared<Engine>(env_, std::move(sink), reporter_);
+        std::lock_guard lock(mutex_);
+        fresh->set_min_interval_ms(interval_ms_);
+        fresh->set_nmea(nmea_);
+        fresh->set_sv_status(sv_status_);
+        engine_ = std::move(fresh);
     }
 
     StartResult start() {
+        std::lock_guard ops(ops_);
         const auto engine = current();
         if (!engine) return StartResult::no_callback;
         return engine->start() ? StartResult::started : StartResult::no_receiver;
     }
 
     void stop() {
+        std::lock_guard ops(ops_);
         if (const auto engine = current()) engine->stop();
     }
 
     // The framework's close(): the session ends silently and the callback is
-    // dropped, with what was still queued for it.
+    // dropped, with the locations still queued for it.
     void close() {
+        std::lock_guard ops(ops_);
         std::shared_ptr<Engine> old;
         {
             std::lock_guard lock(mutex_);
@@ -115,6 +126,8 @@ private:
     }
 
     const Env env_;
+    const std::shared_ptr<Reporter> reporter_;
+    std::mutex ops_;
     // Guards the members below, and nothing else.
     std::mutex mutex_;
     std::shared_ptr<Engine> engine_;

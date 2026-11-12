@@ -611,7 +611,7 @@ headers ([Location](../android/lineage-24/README.md#location)) against the host
 writer's own epochs: the reading of the stream, the reporting rules, the
 session and the AIDL entry points, with a pipe for the receiver and a counting
 wakelock, and with a framework callback that does not answer, so that no entry
-point waits for one.
+point waits for one and what the framework hears is the delivery contract's.
 
 A release candidate is qualified on its image, opt-in, on every engine that
 runs Android (the Mac gadgets and JIT engines, the iPad gadgets). A `SIGILL`

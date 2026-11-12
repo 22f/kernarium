@@ -107,8 +107,8 @@ Gnss::Gnss(andarium::gnss::Env env) : env_(env), hal_(std::move(env)) {}
 
 Gnss::~Gnss() = default;
 
-// The engine's reporter thread makes these calls, one at a time and in order,
-// with no lock of the HAL held (gnss_reporter.hpp); no entry point of Gnss does.
+// The HAL's reporter thread makes these calls, one at a time and in order, with
+// no lock of the HAL held (gnss_reporter.hpp); no entry point of Gnss does.
 andarium::gnss::Sink Gnss::sink_for(const std::shared_ptr<IGnssCallback>& callback) const {
     andarium::gnss::Sink sink;
     // Positions only: no scheduling, no measurements, no geofencing, nothing

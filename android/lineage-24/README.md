@@ -235,13 +235,18 @@ for as long as a client listens. The lock belongs to the HAL's process, so it
 goes with the HAL, and it holds back only Android's own autosuspend.
 
 The HAL never calls the framework from an entry point or under one of its own
-locks: the engine posts every status and report to one reporter thread, which
-makes the calls in the order posted, so a framework thread that holds a lock of
-its own while it calls the HAL cannot wait on a HAL thread that waits for it. A
-session's `engine_on` and `session_begin` come before its first location and
-its `session_end` and `engine_off` after the last, `stop()` returns before the
-framework has heard them, and a replaced or closed callback hears nothing more
-than the call already in flight.
+locks: every announcement, status and report is posted to the HAL's one
+reporter thread, which makes the calls in the order posted, so a framework
+thread that holds a lock of its own while it calls the HAL cannot wait on a HAL
+thread that waits for it, and no entry point waits for a delivery. A callback's
+announcement and every status are never dropped: they reach the callback they
+were posted for, in one order across callbacks, even if the HAL is closed or
+the callback replaced first, and a `start()` is refused while 64 sessions'
+statuses are still undelivered. A session's `engine_on` and `session_begin`
+come before its first location and its `session_end` and `engine_off` after the
+last. Locations, sentences and satellite reports may be dropped: a session's
+queued ones go when it is restarted, or the HAL is closed or its callback
+replaced, and only the newest 64 are kept when the framework is slow.
 
 `overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
 rules, `gnss_engine.hpp` the session, `gnss_reporter.hpp` the calls to the

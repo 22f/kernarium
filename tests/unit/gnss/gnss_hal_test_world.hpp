@@ -76,6 +76,19 @@ struct World {
     int svStatuses = 0;
     std::vector<std::string> logs;  // what the engine said about itself (Env::log)
 
+    /* What the sinks reach the world through. The reporter delivers what it
+     * still holds after the engine is gone, so a call may come after the case
+     * that made the world has ended: it finds the world gone and is ignored. */
+    struct Alive {
+        std::mutex mutex;
+        World* world = nullptr;
+    };
+    std::shared_ptr<Alive> alive = std::make_shared<Alive>();
+
+    World() { alive->world = this; }
+    World(const World&) = delete;
+    World& operator=(const World&) = delete;
+
     static const char* statusName(Status status)
     {
         switch (status) {
@@ -133,38 +146,41 @@ struct World {
 
     Sink sink()
     {
+        // Each call holds `alive` while it records, which takes no lock of
+        // another sink, so the world cannot go while a call is in it.
+        const auto reach = [alive = alive](auto record) {
+            return [alive, record](auto&&... arguments) {
+                std::lock_guard guard(alive->mutex);
+                if (alive->world == nullptr)
+                    return;
+                World& world = *alive->world;
+                std::lock_guard lock(world.mutex);
+                record(world, arguments...);
+                world.changed.notify_all();
+            };
+        };
         Sink result;
-        result.ready = [this] {
-            std::lock_guard lock(mutex);
-            ++readies;
-            log.push_back("ready");
-            changed.notify_all();
-        };
-        result.status = [this](Status status) {
-            std::lock_guard lock(mutex);
-            statuses.push_back(status);
-            log.push_back(statusName(status));
-            changed.notify_all();
-        };
-        result.location = [this](const Location& location) {
-            std::lock_guard lock(mutex);
-            locations.push_back(location);
-            log.push_back("location");
-            changed.notify_all();
-        };
-        result.nmea = [this](std::int64_t at, const std::string& sentence) {
-            std::lock_guard lock(mutex);
-            sentenceTimes.push_back(at);
-            sentences.push_back(sentence);
-            log.push_back("nmea");
-            changed.notify_all();
-        };
-        result.sv_status = [this] {
-            std::lock_guard lock(mutex);
-            ++svStatuses;
-            log.push_back("sv");
-            changed.notify_all();
-        };
+        result.ready = reach([](World& world) {
+            ++world.readies;
+            world.log.push_back("ready");
+        });
+        result.status = reach([](World& world, Status status) {
+            world.statuses.push_back(status);
+            world.log.push_back(statusName(status));
+        });
+        result.location = reach([](World& world, const Location& location) {
+            world.locations.push_back(location);
+            world.log.push_back("location");
+        });
+        result.nmea = reach([](World& world, std::int64_t at, const std::string& sentence) {
+            world.sentenceTimes.push_back(at);
+            world.sentences.push_back(sentence);
+            world.log.push_back("nmea");
+        });
+        result.sv_status = reach([](World& world) {
+            ++world.svStatuses;
+            world.log.push_back("sv");
+        });
         return result;
     }
 
@@ -223,6 +239,10 @@ struct World {
 
     ~World()
     {
+        {
+            std::lock_guard guard(alive->mutex);
+            alive->world = nullptr;
+        }
         if (feed >= 0)
             ::close(feed);
     }
