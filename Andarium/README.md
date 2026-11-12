@@ -86,6 +86,31 @@ one, as in a window. The guest's own rotation preferences are restored when
 the host stops driving it. The display keeps the last frame's proportions
 while it turns, until Android draws the new layout.
 
+A folding iPhone (iPhone Duo) has two displays. Its cover is an iPhone's, and
+its inner display turns with the device as an iPad's does, the host driving the
+guest. The layout follows the display the system lights, which the scene's root
+reads from the hinge and the view's reserved regions (`FoldSceneReader`) and
+`AndariumCore/FoldLayout.swift` decides as pure functions; a device that
+reports no hinge keeps every layout it has.
+
+- **Cover.** The guest keeps an iPhone's shape beside the strip the camera
+  keeps, which holds the side keys as an always-open column and the statistics.
+- **Inner display, upright (bent or flat).** The guest is one display across
+  both halves, so moving the hinge never resizes Android. The side keys stay on
+  its edge, and the statistics and notices hang from the half the keys are on;
+  Andarium's own pieces never sit on the fold.
+- **Inner display, turned.** Flat, the guest fills the display and the keys
+  never rest on the fold. Bent, the device stands like a laptop: the guest is the
+  upper half and the lower half is a deck with the keys in one row and the
+  statistics and notices above them.
+- **Other screens.** Home is one page each side of the fold; the boot, the
+  overlays and the cards sit on the half where the system puts its alerts; a
+  sheet turned rises to a little below the fold.
+
+The guest is resized only where its shape changes (the cover and the inner
+display, standing and the other turned poses), through the display's ordinary
+resize. Telling Android where the crease is is not done.
+
 While the guest's display is shown (the boot and the run) everything behind it
 is black, in the light appearance too: the scene's root view and its window
 carry it, so the area outside the safe area stays black through a rotation or
