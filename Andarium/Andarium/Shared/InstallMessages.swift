@@ -55,10 +55,20 @@ nonisolated enum PackageInstallMessages {
         let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
         if lines.contains(where: { $0.hasPrefix("Success") }) { return nil }
         guard let line = lines.last(where: { $0.hasPrefix("Failure") }) else {
+            // Session creation can fail on the exception alone, with no line
+            // of its own: `IOException: Requested internal only, but not
+            // enough space`.
+            if isStorageException(output) { return message(forCode: "FAILED_INSUFFICIENT_STORAGE") }
             return String(localized: "The virtual machine couldn\u{2019}t install the app.")
         }
         guard let code = code(inFailure: line) else { return String(localized: "The virtual machine couldn\u{2019}t install the app.") }
         return message(forCode: code)
+    }
+
+    /// Whether the output is an exception that says the partition is full.
+    private static func isStorageException(_ output: String) -> Bool {
+        let text = output.lowercased()
+        return text.contains("not enough space") || text.contains("no space left on device")
     }
 
     /// `Failure [INSTALL_FAILED_INVALID_APK: ...]` is `FAILED_INVALID_APK`.

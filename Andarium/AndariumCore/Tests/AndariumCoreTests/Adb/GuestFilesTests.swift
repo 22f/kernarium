@@ -417,6 +417,29 @@ struct GuestFilesHelperTests {
         #expect(GuestFiles.freeSpaceCommand(for: root) == "df -Pk '\(root)'")
     }
 
+    @Test func thePartitionsRoomIsReadWithDfOnTheConnection() throws {
+        let table = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/block/dm-7 67108864 1048576 2411776 2% /data\n"
+        func serving(_ stdout: String, exit: UInt8) -> FakeAdbd {
+            FakeAdbd(services: [
+                "shell,v2,raw:*": { stream in
+                    if !stdout.isEmpty { try stream.send(ShellPacket(id: ShellPacket.stdout, data: Data(stdout.utf8)).encoded()) }
+                    try stream.send(ShellPacket(id: ShellPacket.exit, data: Data([exit])).encoded())
+                }
+            ])
+        }
+        let adbd = serving(table, exit: 0)
+        defer { adbd.shutdown() }
+        #expect(try GuestFiles.freeSpace(of: "/data", on: try connected(adbd)) == 2_411_776 * 1024)
+        #expect(adbd.servicesOpened == ["shell,v2,raw:df -Pk '/data'"])
+        // A shell that fails, and output that does not read, are no reading.
+        let failing = serving("df: /data: No such file or directory\n", exit: 1)
+        defer { failing.shutdown() }
+        #expect(try GuestFiles.freeSpace(of: "/data", on: try connected(failing)) == nil)
+        let odd = serving("nothing\n", exit: 0)
+        defer { odd.shutdown() }
+        #expect(try GuestFiles.freeSpace(of: "/data", on: try connected(odd)) == nil)
+    }
+
     @Test func theGuestKeepsItsReserve() {
         let reserve = GuestFiles.guestReserveBytes
         #expect(GuestFiles.guestHasRoom(for: 1000, free: 1000 + reserve))

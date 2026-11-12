@@ -10,26 +10,35 @@ import UIKit
 @testable import Andarium
 
 /// The sender line of Buy me tokens: a circular avatar, the developer's name and role, and a logo
-/// button for each profile. The values here are the arrangement's placeholders (`example`) and the
-/// drawn artwork of `Config/DeveloperExample`; the maker's own are local to an AppStore build.
+/// button for each profile. The values here are the arrangement's placeholders (`example`) and
+/// images drawn in the test; the maker's own are local to an AppStore build.
 @MainActor
 @Suite(.serialized)
 struct TipJarHeaderTests {
-    /// The drawn stand-ins, found from this file so that no path is written in it.
-    private static let example = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent("Config").appendingPathComponent("DeveloperExample")
+    /// The sites the build gives a button: the header's X button exists only where the build names
+    /// a handle for it (`SHEET_X`).
+    private static var sites: [TipJarSenderContent.Link.Site] {
+        #if SHEET_X
+        [.github, .x]
+        #else
+        [.github]
+        #endif
+    }
 
-    private static func path(_ name: String) -> String { example.appendingPathComponent(name).path }
+    private static func drawn() -> UIImage {
+        UIGraphicsImageRenderer(size: CGSize(width: 24, height: 20)).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 2, y: 2, width: 20, height: 16))
+        }
+    }
 
     private static func content(
-        name: String? = "example", github: String? = "example", x: String? = "example",
+        name: String? = "example", github: String? = "example", x: String? = "example_handle",
         avatar: Bool = true, githubLogo: Bool = true, xLogo: Bool = true
     ) -> TipJarSenderContent {
         TipJarSenderContent(
             developer: TipJarDeveloper(name: name, githubHandle: github, xHandle: x),
-            avatarPath: avatar ? path("developer-avatar.jpeg") : nil,
-            githubPath: githubLogo ? path("github-logo.svg") : nil, xPath: xLogo ? path("x-logo.svg") : nil)
+            avatar: avatar ? drawn() : nil, githubLogo: githubLogo ? drawn() : nil, xLogo: xLogo ? drawn() : nil)
     }
 
     private func eventually(_ condition: () -> Bool) async -> Bool {
@@ -42,20 +51,23 @@ struct TipJarHeaderTests {
 
     // MARK: What the header holds
 
-    @Test func theDrawnArtworkMakesTheWholeHeader() throws {
+    @Test func theArtworkMakesTheWholeHeader() throws {
         let header = Self.content()
         #expect(header.name == "example")
         #expect(header.avatar != nil)
-        #expect(header.links.map(\.site) == [.github, .x])
-        #expect(header.links.map(\.url.absoluteString) == ["https://github.com/example", "https://x.com/example"])
-        #expect(header.links.map(\.name) == ["GitHub", "X"], "the brands' names, whatever the language")
+        #expect(header.links.map(\.site) == Self.sites)
+        let addresses = ["github": "https://github.com/example", "x": "https://x.com/example_handle"]
+        #expect(header.links.map(\.url.absoluteString) == header.links.map { addresses[$0.site.rawValue]! })
+        #expect(header.links.map(\.name) == header.links.map { $0.site == .github ? "GitHub" : "X" },
+                "the brands' names, whatever the language")
         for link in header.links {
-            #expect(!link.glyph.path.boundingBoxOfPath.isEmpty, "\(link.name) draws something")
+            #expect(link.logo.renderingMode == .alwaysTemplate, "\(link.name) takes the text's colour")
+            #expect(link.aspectRatio == 1.2, "\(link.name) keeps the logo's proportions")
         }
     }
 
     /// Each piece follows what exists: no avatar keeps the mark, no name reads the role alone, and a
-    /// logo button needs its handle and its file.
+    /// logo button needs its handle and its logo.
     @Test func eachPieceFollowsWhatExists() {
         let role = String(localized: TipJarWords.sender)
         let anonymous = TipJarSenderContent()
@@ -66,41 +78,34 @@ struct TipJarHeaderTests {
         #expect(named.links.isEmpty)
         #expect(Self.content(avatar: false).avatar == nil)
         #expect(Self.content(name: nil).line == role)
-        #expect(Self.content(githubLogo: false).links.map(\.site) == [.x], "no logo file, no button")
-        #expect(Self.content(github: nil).links.map(\.site) == [.x], "no handle, no button")
+        #expect(Self.content(githubLogo: false).links.map(\.site) == Self.sites.filter { $0 != .github }, "no logo, no button")
+        #expect(Self.content(github: nil).links.map(\.site) == Self.sites.filter { $0 != .github }, "no handle, no button")
         #expect(Self.content(github: nil, xLogo: false).links.isEmpty)
         // A handle that is no account name builds no address.
         #expect(Self.content(github: "-bad", x: "way_too_long_for_an_x_account").links.isEmpty)
         #expect(Self.content(github: "a/b", x: "a b").links.isEmpty)
     }
 
-    @Test func aMissingOrBrokenFileMakesNoLogoOrAvatar() throws {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("tipjar-header-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: folder) }
-        let broken = folder.appendingPathComponent("broken.svg")
-        try "<svg viewBox=\"0 0 10 10\"><circle r=\"3\"/></svg>".write(to: broken, atomically: true, encoding: .utf8)
-        let notAnImage = folder.appendingPathComponent("avatar")
-        try Data("not an image".utf8).write(to: notAnImage)
-        let header = TipJarSenderContent(
-            developer: TipJarDeveloper(name: "example", githubHandle: "example", xHandle: "example"),
-            avatarPath: notAnImage.path, githubPath: broken.path, xPath: folder.appendingPathComponent("absent").path)
-        #expect(header.avatar == nil && header.links.isEmpty && header.name == "example")
-    }
-
-    /// The build's own values and artwork: whatever Info.plist and the product hold, no more.
+    /// The build's own values and assets: whatever Info.plist and the product hold, no more.
     @Test func theLiveHeaderHoldsExactlyWhatTheBuildHolds() {
         typealias Configuration = TipJarDeveloperConfiguration
         let live = TipJarSenderContent.live
         func key(_ name: String) -> String? { Bundle.main.object(forInfoDictionaryKey: name) as? String }
         #expect(live.name == key(Configuration.nameKey))
-        #expect((live.avatar != nil) == (Configuration.artworkPath(Configuration.avatarFile) != nil))
-        #expect(live.links.contains { $0.site == .github } == (key(Configuration.githubKey) != nil && Configuration.artworkPath(Configuration.githubFile) != nil))
-        #expect(live.links.contains { $0.site == .x } == (key(Configuration.xKey) != nil && Configuration.artworkPath(Configuration.xFile) != nil))
+        #expect((live.avatar != nil) == (UIImage(named: Configuration.avatarAsset) != nil))
+        #expect((live.avatar != nil) == (key(Configuration.nameKey) != nil), "the avatar comes with the name")
+        #expect(live.links.contains { $0.site == .github } == (key(Configuration.githubKey) != nil && UIImage(named: Configuration.githubAsset) != nil))
+        #expect(live.links.contains { $0.site == .github } == (key(Configuration.githubKey) != nil), "the mark comes with the handle")
+        #if SHEET_X
+        #expect(live.links.contains { $0.site == .x } == (key(Configuration.xKey) != nil && UIImage(named: Configuration.xAsset) != nil))
+        #else
+        #expect(!live.links.contains { $0.site == .x }, "no X button without a handle of its own")
+        #expect(key(Configuration.xKey) == nil)
+        #endif
         // The arrangement states all three placeholders and takes the drawn artwork.
         if key(Configuration.nameKey) == "example" {
             #expect(live.name == "example" && live.avatar != nil)
-            #expect(live.links.map(\.url.absoluteString) == ["https://github.com/example", "https://x.com/example"])
+            #expect(live.links.map(\.url.absoluteString).first == "https://github.com/example")
         }
     }
 
@@ -141,7 +146,7 @@ struct TipJarHeaderTests {
 
     /// One sender element, read once before the messages, with the role in it; each logo its own
     /// link; the avatar nowhere in the accessibility tree.
-    @Test func voiceOverReadsTheSenderOnceAndFindsTwoLinks() async throws {
+    @Test func voiceOverReadsTheSenderOnceAndFindsTheLinks() async throws {
         let model = app()
         var opened: [URL] = []
         model.tipJarServices.sender = { Self.content() }
@@ -160,16 +165,18 @@ struct TipJarHeaderTests {
         // No element without a label in the header's band: the avatar is decorative.
         let band = elements.filter { $0.label.isEmpty && abs($0.top - sender[0].top) < 40 }
         #expect(band.isEmpty, "unlabelled elements by the sender: \(band.map(\.description))")
-        // Two links, each its own element with the link trait, labelled with the brand.
+        // Each link its own element with the link trait, labelled with the brand.
+        let brands = Self.sites.map { $0 == .github ? "GitHub" : "X" }
         let links = elements.filter { $0.traits.contains(.link) }
-        #expect(links.map(\.label).sorted() == ["GitHub", "X"], "\(elements.map(\.description))")
+        #expect(links.map(\.label).sorted() == brands.sorted(), "\(elements.map(\.description))")
         // A tap hands the profile to openURL, which the arrangement's seam sees.
-        for name in ["GitHub", "X"] {
+        for name in brands {
             let link = try #require(links.first { $0.label == name })
             #expect(link.object.accessibilityActivate(), "\(name) activates")
         }
-        #expect(await eventually { opened.count == 2 })
-        #expect(opened.map(\.absoluteString).sorted() == ["https://github.com/example", "https://x.com/example"])
+        #expect(await eventually { opened.count == brands.count })
+        let addresses = ["GitHub": "https://github.com/example", "X": "https://x.com/example_handle"]
+        #expect(opened.map(\.absoluteString).sorted() == brands.map { addresses[$0]! }.sorted())
     }
 
     @Test func withoutTheDeveloperTheHeaderIsTheRoleAlone() async throws {

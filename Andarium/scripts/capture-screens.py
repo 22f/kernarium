@@ -61,6 +61,16 @@ identifiers and never read the local file:
         TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro \\
         TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
 
+The header of Buy me tokens shows the developer's avatar, name and profile
+logos in a Preview built with `SHEET_DEVELOPER_NAME=example
+SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle` (and
+`SHEET_ARTWORK_SOURCE=local` with `FOLLOW_X_LOGO_SOURCE=local` for the files of
+`Config/Local/`); without them it reads the role alone.
+
+The Info shots show Follow developer on X in a Preview built with
+`FOLLOW_X_HANDLE=example_handle` (and `FOLLOW_X_LOGO_SOURCE=local` for the real
+logo from `Config/Local/`); without it the row is absent from them.
+
 Light mode is captured for every screen; dark mode only for the screens flagged
 in the table, where the design adapts to it. Every Simulator command has a hard
 time bound. A rerun replaces the files and manifest entries it captures and

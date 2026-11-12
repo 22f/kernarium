@@ -60,6 +60,12 @@ let package = Package(
             name: "AndariumReviewLogic",
             swiftSettings: [.define("APP_REVIEW")]
         ),
+        // Follow developer on X's logic, for the package's tests only, by the same
+        // rule (a symlink to Andarium/Shared/FollowX/Logic).
+        .target(
+            name: "AndariumFollowXLogic",
+            swiftSettings: [.define("FOLLOW_X")]
+        ),
         // A test-only tool that plays a gamepad script to the guest's relay.
         .executableTarget(
             name: "andarium-gamepad-probe",
@@ -67,7 +73,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AndariumCoreTests",
-            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumTipJarLogic", "AndariumReviewLogic"]
+            dependencies: ["AndariumCore", "AndariumCoreTestSupport", "AndariumFeedbackLogic", "AndariumFollowXLogic", "AndariumTipJarLogic", "AndariumReviewLogic"]
         ),
     ]
 )

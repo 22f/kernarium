@@ -136,6 +136,20 @@ kernarium_launch_memory_set kernarium_runtime_loader_maximum_memory_set(void);
  * a macOS window, and no more than the host's own RAM, on the 64 MiB steps. The
  * settings' ruler ends here at most. */
 uint32_t kernarium_runtime_loader_guest_memory_ceiling_mib(void);
+/* 1 when a run starts a guest of `memory_mib` MiB on this host, 0 when the
+ * runtime refuses that size: the runtime's own test, the sizes from the
+ * range's minimum through the ceiling above in its steps. Every size the
+ * settings offer is one. */
+uint32_t kernarium_runtime_loader_guest_memory_admitted(uint32_t memory_mib);
+/* The shape of that test, for the applications' own restatements of it to be
+ * checked against: the least size, the step and the top of any host's range
+ * (no ceiling is above it). */
+typedef struct kernarium_guest_memory_range {
+    uint32_t minimum_mib;
+    uint32_t step_mib;
+    uint32_t largest_mib;
+} kernarium_guest_memory_range;
+kernarium_guest_memory_range kernarium_runtime_loader_guest_memory_range(void);
 /* The most guest RAM, in MiB, the settings offer at `guest_processor_count`
  * vCPUs with `parameters` (zero vCPUs count as one): the largest multiple of 64
  * from 512 through the ceiling above that leaves the host GPU its 384 MiB floor

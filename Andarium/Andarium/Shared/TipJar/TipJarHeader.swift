@@ -9,9 +9,9 @@ import UIKit
 // developer's name and role, and a logo button for each profile. Every piece
 // follows what the build holds: without the avatar the header keeps the app's
 // own mark, without the name it reads the role alone, and a logo button exists
-// only where its handle and its logo file both do. The values and the artwork
-// are the maker's, local to an AppStore build (`Config/Developer.local.xcconfig`);
-// nothing here names one.
+// only where its handle and its logo asset both do. The values are the
+// maker's, local to an AppStore build (`Config/Developer.local.xcconfig`), and
+// so are the assets, which are catalogs of their own; nothing here names one.
 
 /// What the header shows, read once when the sheet opens.
 struct TipJarSenderContent {
@@ -20,10 +20,12 @@ struct TipJarSenderContent {
 
         let site: Site
         let url: URL
-        let glyph: TipJarGlyph
+        /// A template image: it takes the colour of the text around it.
+        let logo: UIImage
         var id: String { site.rawValue }
         /// The brand's own name, which no language translates.
         var name: String { site == .github ? "GitHub" : "X" }
+        var aspectRatio: Double { logo.size.height > 0 ? logo.size.width / logo.size.height : 1 }
     }
 
     var name: String?
@@ -36,28 +38,28 @@ struct TipJarSenderContent {
         self.links = links
     }
 
-    /// The developer and the artwork files, each piece only where both parts of it exist.
-    init(developer: TipJarDeveloper, avatarPath: String?, githubPath: String?, xPath: String?) {
-        func glyph(_ path: String?) -> TipJarGlyph? {
-            path.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }.flatMap { TipJarGlyph(svg: $0) }
-        }
+    /// The developer and the artwork, each piece only where both parts of it exist.
+    init(developer: TipJarDeveloper, avatar: UIImage?, githubLogo: UIImage?, xLogo: UIImage?) {
         var links: [Link] = []
-        if let url = developer.githubURL, let glyph = glyph(githubPath) {
-            links.append(Link(site: .github, url: url, glyph: glyph))
+        if let url = developer.githubURL, let logo = githubLogo {
+            links.append(Link(site: .github, url: url, logo: logo.withRenderingMode(.alwaysTemplate)))
         }
-        if let url = developer.xURL, let glyph = glyph(xPath) {
-            links.append(Link(site: .x, url: url, glyph: glyph))
+        #if SHEET_X
+        // The profile's address is Follow developer on X's to build.
+        if let url = developer.xHandle.flatMap({ FollowXProfile.url(handle: $0) }), let logo = xLogo {
+            links.append(Link(site: .x, url: url, logo: logo.withRenderingMode(.alwaysTemplate)))
         }
-        self.init(name: developer.name, avatar: avatarPath.flatMap { UIImage(contentsOfFile: $0) }, links: links)
+        #endif
+        self.init(name: developer.name, avatar: avatar, links: links)
     }
 
-    /// The build's own: the Info.plist values and the artwork copied into the product.
+    /// The build's own: the Info.plist values and the assets compiled into the product.
     @MainActor
     static var live: TipJarSenderContent {
         typealias Configuration = TipJarDeveloperConfiguration
         return TipJarSenderContent(
-            developer: Configuration.developer, avatarPath: Configuration.artworkPath(Configuration.avatarFile),
-            githubPath: Configuration.artworkPath(Configuration.githubFile), xPath: Configuration.artworkPath(Configuration.xFile))
+            developer: Configuration.developer, avatar: UIImage(named: Configuration.avatarAsset),
+            githubLogo: UIImage(named: Configuration.githubAsset), xLogo: UIImage(named: Configuration.xAsset))
     }
 
     /// The sender line, as VoiceOver reads it and as the header shows it.
@@ -69,25 +71,6 @@ struct TipJarSenderContent {
     var spokenLine: String {
         let role = String(localized: TipJarWords.sender)
         return name.map { "\($0), \(role)" } ?? role
-    }
-}
-
-/// A one-path logo drawn in the rectangle it is given, whole and unmodified.
-private struct TipJarGlyphShape: Shape {
-    let path: Path
-    let box: CGRect
-
-    init(_ glyph: TipJarGlyph) {
-        path = Path(glyph.path)
-        box = glyph.viewBox
-    }
-
-    nonisolated func path(in rect: CGRect) -> Path {
-        let scale = min(rect.width / box.width, rect.height / box.height)
-        let transform = CGAffineTransform(
-            translationX: rect.midX - box.midX * scale, y: rect.midY - box.midY * scale
-        ).scaledBy(x: scale, y: scale)
-        return path.applying(transform)
     }
 }
 
@@ -162,11 +145,13 @@ struct TipJarSender: View {
             ForEach(shownLinks) { link in
                 SwiftUI.Link(destination: link.url) {
                     // The label colour, black or white as the appearance says, never the tint.
-                    TipJarGlyphShape(link.glyph)
-                        .fill(Color(.label))
-                        .aspectRatio(link.glyph.viewBox.width / link.glyph.viewBox.height, contentMode: .fit)
+                    Image(uiImage: link.logo)
+                        .renderingMode(.template)
+                        .resizable()
+                        .aspectRatio(link.aspectRatio, contentMode: .fit)
+                        .foregroundStyle(Color(.label))
                         .frame(height: glyphMetric)
-                        // The glyph is small; the touch target is not.
+                        // The logo is small; the touch target is not.
                         .frame(minWidth: target, minHeight: target)
                         .contentShape(.rect)
                 }
@@ -180,8 +165,7 @@ struct TipJarSender: View {
     /// logo under the text lines up with it.
     private var logoInset: Double {
         guard let first = shownLinks.first else { return 0 }
-        let box = first.glyph.viewBox
-        return max(0, (target - glyphMetric * box.width / box.height) / 2)
+        return max(0, (target - glyphMetric * first.aspectRatio) / 2)
     }
 }
 

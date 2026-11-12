@@ -28,12 +28,10 @@ import UIKit
 ///     -tipDeveloperParts a,b    which of name, avatar, github and x the header
 ///                               shows (all); empty shows none
 ///
-/// The header's developer comes from the environment, so that no value is in a
-/// file: `TIPJAR_DEVELOPER_DIR` names a folder holding `developer-avatar.jpeg`,
-/// `github-logo.svg` and `x-logo.svg` (the maker's `Config/Local`, or the
-/// tracked `Config/DeveloperExample`), and `TIPJAR_DEVELOPER_NAME`, `_GITHUB`
-/// and `_X` the name and the handles. Without the folder the header is the one
-/// a build without developer values shows.
+/// The header's developer is the one the build holds: the values the arrangement
+/// states (`SHEET_DEVELOPER_NAME`, `_GITHUB` and `_X`) and the assets compiled in
+/// with them, the plain glyphs or, for a capture, the files of `Config/Local`.
+/// A build without developer values shows the header a product without them does.
 enum TipJarPreview {
     static func opensSheet(_ screen: String) -> Bool { screen.hasPrefix("tipjar") && screen != "tipjar-home" }
 
@@ -52,22 +50,15 @@ enum TipJarPreview {
         model.tipJarServices = services
     }
 
-    /// The developer for the header, as the environment and `-tipDeveloperParts` say.
+    /// The developer for the header: what the build holds, kept to the parts `-tipDeveloperParts` names.
     @MainActor
     private static func sender() -> TipJarSenderContent {
-        let environment = ProcessInfo.processInfo.environment
-        guard let directory = environment["TIPJAR_DEVELOPER_DIR"] else { return TipJarSenderContent() }
-        let parts = Set(
-            (UserDefaults.standard.string(forKey: "tipDeveloperParts") ?? "name,avatar,github,x")
-                .split(separator: ",").map(String.init))
-        func value(_ part: String, _ key: String) -> String? { parts.contains(part) ? environment[key] : nil }
-        func file(_ part: String, _ name: String) -> String? { parts.contains(part) ? "\(directory)/\(name)" : nil }
+        let live = TipJarSenderContent.live
+        guard let named = UserDefaults.standard.string(forKey: "tipDeveloperParts") else { return live }
+        let parts = Set(named.split(separator: ",").map(String.init))
         return TipJarSenderContent(
-            developer: TipJarDeveloper(
-                name: value("name", "TIPJAR_DEVELOPER_NAME"), githubHandle: value("github", "TIPJAR_DEVELOPER_GITHUB"),
-                xHandle: value("x", "TIPJAR_DEVELOPER_X")),
-            avatarPath: file("avatar", "developer-avatar.jpeg"), githubPath: file("github", "github-logo.svg"),
-            xPath: file("x", "x-logo.svg"))
+            name: parts.contains("name") ? live.name : nil, avatar: parts.contains("avatar") ? live.avatar : nil,
+            links: live.links.filter { parts.contains($0.site.rawValue) })
     }
 
     private nonisolated static let identifiers = [

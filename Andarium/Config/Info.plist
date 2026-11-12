@@ -31,6 +31,10 @@
 	<key>AndariumDeveloperX</key>
 	<string>$(SHEET_DEVELOPER_X)</string>
 #endif
+#ifdef FOLLOW_X
+	<key>AndariumFollowXHandle</key>
+	<string>$(FOLLOW_X_HANDLE)</string>
+#endif
 #ifdef APP_REVIEW
 	<key>AndariumReviewID</key>
 	<string>$(REVIEW_ID)</string>

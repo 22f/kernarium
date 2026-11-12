@@ -176,7 +176,24 @@ REVIEW_PARTIAL = (
 REVIEW_NO_ASK = (
     'const char *fixture(void) { return "AndariumReviewID" "_$s8Andarium10ReviewLinkV" "action=write-review"; }\n'
 )
-# Config/Info.plist as a fixture: the feedback, tip, review and developer blocks are conditional, and a value
+# Follow developer on X as a binary holds it: the Info.plist key, a line of
+# the row's text, and its types (the row's and the profile address's builder it
+# shares with the tip header). The partial one has lost the text and the types.
+FOLLOW_X_FEATURE = (
+    "const char *fixture(void) {\n"
+    '  return "AndariumFollowXHandle" "Follow developer on %@" "_$s8Andarium11FollowXRowV" '
+    '"_$s8Andarium14FollowXProfileO";\n'
+    "}\n"
+)
+FOLLOW_X_PARTIAL = 'const char *fixture(void) { return "AndariumFollowXHandle"; }\n'
+# The header's X button without the row: the profile address's builder, the logo
+# and the tip's own code, and none of the row's.
+FOLLOW_X_PROFILE_ONLY = (
+    "const char *fixture(void) {\n"
+    '  return "AndariumTipProducts" "_$s8Andarium11TipJarModelC" "_$s8Andarium14FollowXProfileO";\n'
+    "}\n"
+)
+# Config/Info.plist as a fixture: the optional blocks are conditional, and a value
 # names a build setting inside nested containers.
 INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -214,6 +231,10 @@ INFO_SOURCE = """<?xml version="1.0" encoding="UTF-8"?>
 #ifdef SHEET_X
 \t<key>AndariumDeveloperX</key>
 \t<string>$(SHEET_DEVELOPER_X)</string>
+#endif
+#ifdef FOLLOW_X
+\t<key>AndariumFollowXHandle</key>
+\t<string>$(FOLLOW_X_HANDLE)</string>
 #endif
 \t<key>CFBundleName</key>
 \t<string>Fixture</string>
@@ -372,12 +393,35 @@ def write_feedback_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Han
             plistlib.dumps({"Send feedback": "Feedback fixture"}, fmt=plistlib.FMT_BINARY))
 
 
+def write_follow_x_tables(app: Path, languages: tuple[str, ...] = ("ja", "zh-Hans", "zh-Hant")) -> None:
+    """The FollowX strings table the build compiles in with the row, in each language."""
+    for language in languages:
+        lproj = app / f"{language}.lproj"
+        lproj.mkdir(exist_ok=True)
+        (lproj / "FollowX.strings").write_bytes(
+            plistlib.dumps({"Follow developer on %@": "Row fixture %@"}, fmt=plistlib.FMT_BINARY))
+
+
+# The assets the build compiles in with a value of the Info.plist: the logo of X with
+# the row's handle or the header's, the avatar with the developer's name and the GitHub
+# mark with its handle.
+CATALOG_ASSETS = {
+    "AndariumFollowXHandle": "XLogo", "AndariumDeveloperX": "XLogo",
+    "AndariumDeveloperName": "DeveloperAvatar", "AndariumDeveloperGitHub": "GitHubLogo",
+}
+
+
 def make_app(
     root: Path, name: str, executable: Path, info: dict,
     framework: Path | None = None, manifest: bool = True, feedback_tables: bool | None = None,
+    follow_x_tables: bool | None = None, follow_x_logo: bool | None = None,
+    assets: dict[str, bool] | None = None,
 ) -> Path:
     """A fixture application. A product whose Info.plist names a receiver holds the
-    Feedback strings table too (`feedback_tables` says otherwise)."""
+    Feedback strings table too (`feedback_tables` says otherwise), and one that
+    names a handle of X holds the FollowX table (`follow_x_tables`). The asset catalog
+    holds the assets the Info.plist's values bring (CATALOG_ASSETS); `assets` and
+    `follow_x_logo` add or remove one by its name."""
     app = root / name / "Fixture.app"
     app.mkdir(parents=True)
     shutil.copyfile(executable, app / "Fixture")
@@ -386,6 +430,16 @@ def make_app(
         feedback_tables = "AndariumFeedbackAddress" in info
     if feedback_tables:
         write_feedback_tables(app)
+    named = "AndariumFollowXHandle" in info
+    if follow_x_tables is None:
+        follow_x_tables = named
+    if follow_x_tables:
+        write_follow_x_tables(app)
+    wanted = {asset for key, asset in CATALOG_ASSETS.items() if key in info}
+    for asset, present in {**(assets or {}), **({} if follow_x_logo is None else {"XLogo": follow_x_logo})}.items():
+        (wanted.add if present else wanted.discard)(asset)
+    if wanted:
+        (app / "Assets.car").write_bytes(b"\0BOMStore\0" + b"".join(item.encode() + b"\0" for item in sorted(wanted)))
     if manifest:
         (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps(MANIFEST))
     if framework is not None:
@@ -406,10 +460,10 @@ def make_app(
 
 
 def tip_app(root: Path, name: str, executable: Path, info: dict, *, table: bool = True,
-            framework: Path | None = None) -> Path:
+            framework: Path | None = None, **options) -> Path:
     """An application with the String Catalog table of Buy me tokens, which the build compiles
     in with the feature, unless `table` is false."""
-    app = make_app(root, name, executable, info, framework=framework)
+    app = make_app(root, name, executable, info, framework=framework, **options)
     if table:
         for language in ("en", "ja", "zh-Hans", "zh-Hant"):
             (app / f"{language}.lproj").mkdir(exist_ok=True)
@@ -811,152 +865,152 @@ def check_review(root: Path, check, clean: Path, feedback_info: dict, tip_info: 
 
 
 def check_developer(root: Path, check, clean: Path) -> None:
-    """The tip header's developer: its Info.plist keys and its artwork are in the product exactly
-    where the build names the value, and a copy of an artwork file or a local profile address is in
-    no other place. Every value and file here is made up."""
-    config = root / "developer-config"
-    local, example = config / "Local", config / "DeveloperExample"
-    local.mkdir(parents=True)
-    example.mkdir()
-    files = {"developer-avatar.jpeg": b"\xff\xd8local-avatar\xff\xd9", "github-logo.svg": b"<svg>local github</svg>",
-             "x-logo.svg": b"<svg>local x</svg>"}
-    for name, content in files.items():
-        (local / name).write_bytes(content)
-        (example / name).write_bytes(b"example " + content)
+    """The tip header's developer: its Info.plist keys and its assets are in the product exactly
+    where the build names the value, and no artwork file or local profile address is in any
+    other place. Every value and file here is made up."""
     ids = {tier: f"com.fixture.product.{tier}" for tier in ("lite", "pro", "max", "ultra")}
     named = ",".join(ids.values())
     tip = ["--tip-products", named, "--tip-local-products", named]
-    artwork = ["--developer-artwork", str(config)]
-    handles = ["--developer-local-github", "fixturehub", "--developer-local-x", "fixturex"]
+    handles = ["--developer-local-github", "fixturehub", "--developer-x-handle", "fixturex"]
     values = ["--developer-name", "Fixture Name", "--developer-github", "fixturehub", "--developer-x", "fixturex"]
     feature = build(root, "developer-feature", TIP_FEATURE, ["-framework", "StoreKit"])
+    profile = build(root, "developer-profile", FOLLOW_X_PROFILE_ONLY, ["-framework", "StoreKit"])
     info = app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name",
                     AndariumDeveloperGitHub="fixturehub", AndariumDeveloperX="fixturex")
-    pieces = {"avatar": "developer-avatar.jpeg", "github": "github-logo.svg", "x": "x-logo.svg"}
+    name_info = app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name")
+    # The tip's strings tables come with the feature, which the Info.plist key stands for here;
+    # the header's X button brings the profile address's builder, and a product without a value
+    # of X is the same code without it.
 
-    def developer_app(name: str, info: dict, copied: dict[str, Path] | None = None, **options) -> Path:
-        # The tip's strings tables come with the feature, which the Info.plist key stands for here.
-        app = tip_app(root, name, options.pop("executable", feature), info, table="AndariumTipProducts" in info)
-        if copied:
-            (app / "DeveloperArtwork").mkdir()
-            for piece, source in copied.items():
-                (app / "DeveloperArtwork" / piece).write_bytes(source.read_bytes())
-        return app
+    def developer_app(name: str, info: dict, executable: Path = profile, **options) -> Path:
+        return tip_app(root, name, executable, info, table="AndariumTipProducts" in info, **options)
 
-    def artwork_of(folder: Path, *which: str) -> dict[str, Path]:
-        return {piece: folder / pieces[piece] for piece in which}
-
-    appstore = [*tip, *artwork, *handles]
-    everything = artwork_of(local, "avatar", "github", "x")
-    check(developer_app("dev-built", info, everything), passes=True,
+    appstore = [*tip, *handles]
+    check(developer_app("dev-built", info), passes=True,
           expect="Buy me tokens is compiled in", args=[*appstore, *values])
-    # Each piece follows its value: no handle, no mark; no name, no key (the avatar stays).
-    name_only = app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name")
-    check(developer_app("dev-name-only", name_only, artwork_of(local, "avatar")), passes=True,
+    # Each piece follows its value: no handle, no mark; no name, no avatar; no X, no logo.
+    check(developer_app("dev-name-only", name_info, feature), passes=True,
           expect="Buy me tokens is compiled in", args=[*appstore, "--developer-name", "Fixture Name"])
-    github_only = app_info(AndariumTipProducts=ids, AndariumDeveloperGitHub="fixturehub")
-    check(developer_app("dev-github-only", github_only, artwork_of(local, "avatar", "github")), passes=True,
+    check(developer_app("dev-github-only", app_info(AndariumTipProducts=ids, AndariumDeveloperGitHub="fixturehub"),
+                        feature), passes=True,
           expect="Buy me tokens is compiled in", args=[*appstore, "--developer-github", "fixturehub"])
-    check(developer_app("dev-none-named", app_info(AndariumTipProducts=ids), artwork_of(local, "avatar")), passes=True,
+    x_only = developer_app("dev-x-only", app_info(AndariumTipProducts=ids, AndariumDeveloperX="fixturex"))
+    check(x_only, passes=True, expect="Follow developer on X is not compiled in",
+          args=[*appstore, "--developer-x", "fixturex"])
+    check(developer_app("dev-none-named", app_info(AndariumTipProducts=ids), feature), passes=True,
           expect="Buy me tokens is compiled in", args=appstore)
-    # A product without the folder of local files (a clone that has none): nothing is expected.
-    check(developer_app("dev-no-local-dir", info), passes=True, expect="Buy me tokens is compiled in",
-          args=[*tip, *values])
-    # With the maker's folder but no value, the avatar still goes in, and nothing else.
-    check(developer_app("dev-absent", app_info(AndariumTipProducts=ids)), passes=False,
-          expect="DeveloperArtwork/avatar: is missing", args=appstore)
+    # The header's X button is not the row: the handle of the row is not the header's.
+    check(x_only, passes=False, expect="has AndariumDeveloperX though the build names no such developer value",
+          args=[*appstore, "--follow-x-handle", "fixturex"])
 
-    # A key or a file that does not match the build.
+    # A key, an asset or a piece of code that does not match the build.
     check(developer_app("dev-no-key", app_info(AndariumTipProducts=ids, AndariumDeveloperName="Fixture Name",
-                                               AndariumDeveloperX="fixturex"), everything),
+                                               AndariumDeveloperX="fixturex")),
           passes=False, expect="AndariumDeveloperGitHub must be the developer value", args=[*appstore, *values])
-    check(developer_app("dev-other-key", app_info(**{**info, "AndariumDeveloperName": "Someone Else"}), everything),
+    check(developer_app("dev-other-key", app_info(**{**info, "AndariumDeveloperName": "Someone Else"})),
           passes=False, expect="AndariumDeveloperName must be the developer value", args=[*appstore, *values])
-    check(developer_app("dev-unnamed-key", info, artwork_of(local, "avatar", "github")), passes=False,
+    check(developer_app("dev-unnamed-key", info), passes=False,
           expect="has AndariumDeveloperX though the build names no such developer value",
           args=[*appstore, "--developer-name", "Fixture Name", "--developer-github", "fixturehub"])
-    check(developer_app("dev-mark-unnamed", name_only, artwork_of(local, "avatar", "x")), passes=False,
-          expect="DeveloperArtwork/x: is developer artwork the build does not take",
+    check(developer_app("dev-no-avatar", info, assets={"DeveloperAvatar": False}), passes=False,
+          expect="Assets.car: lacks DeveloperAvatar", args=[*appstore, *values])
+    check(developer_app("dev-no-mark", info, assets={"GitHubLogo": False}), passes=False,
+          expect="Assets.car: lacks GitHubLogo", args=[*appstore, *values])
+    check(developer_app("dev-no-x-logo", info, assets={"XLogo": False}), passes=False,
+          expect="Assets.car: lacks the logo of Follow developer on X", args=[*appstore, *values])
+    check(developer_app("dev-no-profile", info, feature), passes=False,
+          expect="lacks the profile address's builder", args=[*appstore, *values])
+    check(developer_app("dev-avatar-unnamed", app_info(AndariumTipProducts=ids), feature,
+                        assets={"DeveloperAvatar": True}), passes=False,
+          expect="Assets.car: holds DeveloperAvatar though the build names no developer name", args=appstore)
+    check(developer_app("dev-mark-unnamed", name_info, feature, assets={"GitHubLogo": True}), passes=False,
+          expect="Assets.car: holds GitHubLogo though the build names no developer github",
           args=[*appstore, "--developer-name", "Fixture Name"])
-    check(developer_app("dev-no-avatar", info, artwork_of(local, "github", "x")), passes=False,
-          expect="DeveloperArtwork/avatar: is missing", args=[*appstore, *values])
-    check(developer_app("dev-no-mark", info, artwork_of(local, "avatar", "x")), passes=False,
-          expect="DeveloperArtwork/github: is missing", args=[*appstore, *values])
-    check(developer_app("dev-example-in-appstore", info, artwork_of(example, "avatar", "github", "x")),
-          passes=False, expect="is not the artwork file of the build's folder", args=[*appstore, *values])
-    folder_file = developer_app("dev-folder-is-file", info)
-    (folder_file / "DeveloperArtwork").write_bytes(b"x")
-    check(folder_file, passes=False, expect="DeveloperArtwork: is not a folder", args=[*appstore, *values])
+    check(developer_app("dev-logo-unnamed", name_info, feature, assets={"XLogo": True}), passes=False,
+          expect="Assets.car: holds the logo of Follow developer on X though the build names no handle",
+          args=[*appstore, "--developer-name", "Fixture Name"])
+    check(developer_app("dev-profile-unnamed", name_info, profile), passes=False,
+          expect="carries the profile address's builder", args=[*appstore, "--developer-name", "Fixture Name"])
+    # The row's code and key are for the row's handle, not the header's.
+    row = build(root, "developer-row", FOLLOW_X_FEATURE + TIP_FEATURE.replace("const char *fixture(void)",
+                                                                              "const char *tip_fixture(void)"),
+                ["-framework", "StoreKit"])
+    check(developer_app("dev-row-code", app_info(AndariumTipProducts=ids, AndariumDeveloperX="fixturex"), row),
+          passes=False, expect="carries Follow developer on X", args=[*appstore, "--developer-x", "fixturex"])
+
+    # The handles the local configuration names are handles of GitHub and X, and no placeholder.
+    for kind, bad, said in (("github", "-bad-", "not a handle of GitHub"), ("x", "bad handle", "not a handle of X"),
+                            ("x", "example_handle", "the placeholder handle")):
+        piece = {"github": "AndariumDeveloperGitHub", "x": "AndariumDeveloperX"}[kind]
+        check(developer_app(f"dev-bad-{kind}-{len(bad)}", app_info(AndariumTipProducts=ids, **{piece: bad}),
+                            feature, assets={"GitHubLogo": kind == "github", "XLogo": False}),
+              passes=False, expect=said, args=[*appstore, f"--developer-{kind}={bad}"])
 
     # No product identifiers: no developer at all, whatever the build says about it.
-    check(developer_app("dev-values-no-tip", app_info(AndariumDeveloperName="Fixture Name"), executable=clean),
+    check(developer_app("dev-values-no-tip", app_info(AndariumDeveloperName="Fixture Name"), clean),
           passes=False, expect="names developer values though it names no product identifiers", args=values)
-    check(developer_app("dev-key-no-tip", app_info(AndariumDeveloperName="Fixture Name"), executable=clean),
+    check(developer_app("dev-key-no-tip", app_info(AndariumDeveloperName="Fixture Name"), clean,
+                        assets={"DeveloperAvatar": False}),
           passes=False, expect="has AndariumDeveloperName though the build names no such developer value")
-    check(developer_app("dev-folder-no-tip", app_info(), artwork_of(local, "avatar"), executable=clean),
-          passes=False, expect="DeveloperArtwork/avatar: is developer artwork the build does not take", args=artwork)
-    check(developer_app("dev-clean", app_info(), executable=clean), passes=True, expect="ready for the App Store",
-          args=[*artwork, *handles])
+    check(developer_app("dev-asset-no-tip", app_info(), clean, assets={"DeveloperAvatar": True}),
+          passes=False, expect="Assets.car: holds DeveloperAvatar though the build names no developer name")
+    check(developer_app("dev-clean", app_info(), clean), passes=True, expect="ready for the App Store",
+          args=handles)
 
-    # A copy of an artwork file anywhere else, whichever folder it is from, in any product.
-    for source_name, source in (("local", local), ("example", example)):
-        for kind, piece in pieces.items():
-            leak = developer_app(f"dev-copy-{source_name}-{kind}", app_info(), executable=clean)
-            (leak / "en.lproj").mkdir(exist_ok=True)
-            (leak / "en.lproj" / "Copy.dat").write_bytes((source / piece).read_bytes())
-            check(leak, passes=False, expect="en.lproj/Copy.dat: is a copy of a developer artwork file", args=artwork)
-    copy_in_tip = developer_app("dev-copy-in-tip", info, everything)
-    (copy_in_tip / "Extra.dat").write_bytes((local / "x-logo.svg").read_bytes())
-    check(copy_in_tip, passes=False, expect="Extra.dat: is a copy of a developer artwork file",
-          args=[*appstore, *values])
-    check(developer_app("dev-copy-different", app_info(), executable=clean), passes=True,
-          expect="ready for the App Store", args=artwork)
+    # Artwork files lie in no bundle, named or not.
+    for artwork in ("github-logo.svg", "developer-avatar.jpeg"):
+        loose = developer_app(f"dev-loose-{artwork}", info)
+        (loose / artwork).write_bytes(b"artwork")
+        check(loose, passes=False, expect=f"{artwork}: is artwork of the tip header", args=[*appstore, *values])
+        bare = developer_app(f"dev-loose-bare-{artwork}", app_info(), clean)
+        (bare / "en.lproj").mkdir(exist_ok=True)
+        (bare / "en.lproj" / artwork).write_bytes(b"artwork")
+        check(bare, passes=False, expect=f"en.lproj/{artwork}: is artwork of the tip header")
 
     # The profile addresses of the local handles are in no file of any product.
     for kind, address in (("github", "https://github.com/fixturehub"), ("x", "https://x.com/FixtureX")):
         leaky = build(root, f"dev-address-{kind}", f'const char *fixture(void) {{ return "{address}"; }}\n')
-        app = developer_app(f"dev-address-{kind}", app_info(), executable=leaky)
-        check(app, passes=False, expect="holds a profile address of the local configuration",
-              never=address.rpartition("/")[2], args=[*artwork, *handles])
-        check(app, passes=True, expect="ready for the App Store", args=artwork)
+        app = developer_app(f"dev-address-{kind}", app_info(), leaky)
+        check(app, passes=False, expect="holds a profile address of the local configuration"
+              if kind == "github" else "holds the handle of the local configuration",
+              never=address.rpartition("/")[2], args=handles)
+        check(app, passes=True, expect="ready for the App Store")
+    # A local handle the build names is the build's to hold.
+    check(developer_app("dev-address-named", info, build(
+        root, "dev-address-named", 'const char *fixture(void) { return "https://x.com/fixturex"; }\n')),
+          passes=False, expect="lacks the profile address's builder", args=[*appstore, *values])
 
     # The other configurations: nothing, or Debug's arrangement of `example` with the drawn artwork.
     other = ["--tip-jar", "--configuration"]
     arranged_ids = {tier: f"com.example.andarium.tip.{tier}" for tier in ids}
     arranged_tip = ["--tip-products", ",".join(arranged_ids.values())]
-    arranged_values = ["--developer-name", "example", "--developer-github", "example", "--developer-x", "example"]
+    arranged_values = ["--developer-name", "example", "--developer-github", "example", "--developer-x", "example_handle"]
     arranged_info = app_info(AndariumTipProducts=arranged_ids, AndariumDeveloperName="example",
-                             AndariumDeveloperGitHub="example", AndariumDeveloperX="example")
-    arranged_art = artwork_of(example, "avatar", "github", "x")
-    check(developer_app("dev-Debug-arranged", arranged_info, arranged_art), passes=True,
-          expect="Buy me tokens is compiled in (Debug)",
-          args=[*other, "Debug", *arranged_tip, *artwork, *arranged_values, *handles])
-    check(developer_app("dev-Debug-arranged-local-art", arranged_info, everything), passes=False,
-          expect="is not the artwork file of the build's folder",
-          args=[*other, "Debug", *arranged_tip, *artwork, *arranged_values])
-    check(developer_app("dev-Debug-tip-only", app_info(AndariumTipProducts=arranged_ids)), passes=True,
-          expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_tip, *artwork])
-    check(developer_app("dev-Debug-tip-only-art", app_info(AndariumTipProducts=arranged_ids), arranged_art),
-          passes=False, expect="is developer artwork the build does not take",
-          args=[*other, "Debug", *arranged_tip, *artwork])
+                             AndariumDeveloperGitHub="example", AndariumDeveloperX="example_handle")
+    check(developer_app("dev-Debug-arranged", arranged_info), passes=True,
+          expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_tip, *arranged_values, *handles])
+    check(developer_app("dev-Debug-tip-only", app_info(AndariumTipProducts=arranged_ids), feature), passes=True,
+          expect="Buy me tokens is compiled in (Debug)", args=[*other, "Debug", *arranged_tip])
+    check(developer_app("dev-Debug-tip-only-asset", app_info(AndariumTipProducts=arranged_ids), feature,
+                        assets={"GitHubLogo": True}), passes=False,
+          expect="Assets.car: holds GitHubLogo", args=[*other, "Debug", *arranged_tip])
     # Only Debug takes the arrangement at all, so Release names no usable identifiers either.
     for configuration, said in (("Debug", "not the arranged placeholders"),
                                 ("Release", "names developer values though it names no product identifiers")):
-        check(developer_app(f"dev-{configuration}-local-values", info, everything), passes=False,
-              expect=said, args=[*other, configuration, *arranged_tip, *artwork, *values])
+        check(developer_app(f"dev-{configuration}-local-values", info), passes=False,
+              expect=said, args=[*other, configuration, *arranged_tip, *values])
     for configuration in ("Debug", "Release"):
-        check(developer_app(f"dev-{configuration}-absent", app_info(), executable=clean), passes=True,
-              expect="Buy me tokens is not compiled in", args=[*other, configuration, *artwork, *handles])
-        check(developer_app(f"dev-{configuration}-folder", app_info(), artwork_of(example, "avatar"),
-                            executable=clean),
-              passes=False, expect="is developer artwork the build does not take",
-              args=[*other, configuration, *artwork])
-        check(developer_app(f"dev-{configuration}-key", app_info(AndariumDeveloperX="example"), executable=clean),
+        check(developer_app(f"dev-{configuration}-absent", app_info(), clean), passes=True,
+              expect="Buy me tokens is not compiled in", args=[*other, configuration, *handles])
+        check(developer_app(f"dev-{configuration}-asset", app_info(), clean, assets={"GitHubLogo": True}),
+              passes=False, expect="Assets.car: holds GitHubLogo", args=[*other, configuration])
+        check(developer_app(f"dev-{configuration}-key", app_info(AndariumDeveloperX="example_handle"), clean,
+                            assets={"XLogo": False}),
               passes=False, expect="has AndariumDeveloperX though the build names no such developer value",
-              args=[*other, configuration, *artwork])
-    check(developer_app("dev-Release-arranged", arranged_info, arranged_art), passes=False,
+              args=[*other, configuration])
+    check(developer_app("dev-Release-arranged", arranged_info), passes=False,
           expect="only Debug takes the arrangement",
-          args=[*other, "Release", *arranged_tip, *artwork, *arranged_values])
+          args=[*other, "Release", *arranged_tip, *arranged_values])
 
 
 def main() -> int:
@@ -1385,6 +1439,227 @@ def main() -> int:
         check_review(root, check, clean, feedback_info, app_info(AndariumTipProducts=tip_ids), appstore,
                      ["--tip-products", tip_list, "--tip-local-products", tip_list])
         check_developer(root, check, clean)
+        # Follow developer on X is compiled in only where the build names a handle,
+        # by the same rule. The fixtures stand for the application with it (the
+        # Info.plist key, a line of the row's text, a type, the FollowX table and the
+        # logo in Assets.car); the handle is a made-up one that is also a word of
+        # the bundle identifier, as the real one is.
+        handle = "someone_real"
+        x_feature = build(root, "x-feature", FOLLOW_X_FEATURE)
+        x_partial = build(root, "x-partial", FOLLOW_X_PARTIAL)
+        x_info = app_info(AndariumFollowXHandle=handle)
+        x_appstore = ["--follow-x-handle", handle, "--developer-x-handle", handle]
+        x_local = ["--developer-x-handle", handle]
+        x_arranged = ["--follow-x-handle", "example_handle"]
+        x_other = ["--follow-x", "--configuration"]
+        check(make_app(root, "x-built", x_feature, x_info), passes=True,
+              expect="Follow developer on X is compiled in", args=x_appstore)
+        check(make_app(root, "x-absent", clean, app_info()), passes=True,
+              expect="Follow developer on X is not compiled in")
+        check(make_app(root, "x-no-key", x_feature, app_info()), passes=False,
+              expect="AndariumFollowXHandle must be the handle", args=x_appstore)
+        check(make_app(root, "x-other-key", x_feature, app_info(AndariumFollowXHandle="another_one")),
+              passes=False, expect="must be the handle the build names", args=x_appstore)
+        check(make_app(root, "x-not-built", clean, x_info), passes=False,
+              expect="lacks Follow developer on X", args=x_appstore)
+        check(make_app(root, "x-partial", x_partial, x_info), passes=False,
+              expect="Follow developer on", args=x_appstore)
+        # A row that lost its logo draws a blank: the asset catalog holds it.
+        check(make_app(root, "x-no-logo", x_feature, x_info, follow_x_logo=False), passes=False,
+              expect="Assets.car: lacks the logo", args=x_appstore)
+        # No handle, so nothing of it: not the code, key, strings, table or logo.
+        check(make_app(root, "x-code-without-handle", x_feature, app_info()), passes=False,
+              expect="carries Follow developer on X")
+        check(make_app(root, "x-key-without-handle", clean, x_info), passes=False,
+              expect="has AndariumFollowXHandle though the build names no handle")
+        check(make_app(root, "x-framework-without-handle", clean, app_info(), framework=x_feature),
+              passes=False, expect="Runtime.framework/Runtime: carries Follow developer on X")
+        x_words = make_app(root, "x-words", clean, app_info())
+        (x_words / "en.lproj").mkdir()
+        (x_words / "en.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Follow developer on %@": "Follow developer on %@"}, fmt=plistlib.FMT_BINARY))
+        check(x_words, passes=False, expect="has Follow developer on X strings")
+        for name, suffix, content in (
+                ("strings", "strings", {"Hello": "Hello"}), ("stringsdict", "stringsdict", {})):
+            table = make_app(root, f"x-table-{name}", clean, app_info())
+            (table / "en.lproj").mkdir()
+            (table / "en.lproj" / f"FollowX.{suffix}").write_bytes(plistlib.dumps(content, fmt=plistlib.FMT_BINARY))
+            expect = f"en.lproj/FollowX.{suffix}: is the FollowX strings table though the build names no handle"
+            check(table, passes=False, expect=expect)
+            for configuration in ("Debug", "Release"):
+                check(table, passes=False, expect=expect, args=[*x_other, configuration])
+        check(make_app(root, "x-logo-without-handle", clean, app_info(), follow_x_logo=True), passes=False,
+              expect="Assets.car: holds the logo of Follow developer on X though the build names no handle")
+        for artwork in ("x-logo.svg", "glyph.svg"):
+            loose = make_app(root, f"x-loose-{artwork}", clean, app_info())
+            (loose / artwork).write_bytes(b"<svg/>")
+            check(loose, passes=False, expect=f"{artwork}: is artwork of the row")
+            check(make_app(root, f"x-loose-named-{artwork}", x_feature, x_info), passes=True, args=x_appstore)
+        # A product with the handle holds the table in every language.
+        check(make_app(root, "x-table-missing", x_feature, x_info, follow_x_tables=False), passes=False,
+              expect="lacks the FollowX strings table in ja, zh-Hans, zh-Hant", args=x_appstore)
+        x_partly = make_app(root, "x-table-partial", x_feature, x_info, follow_x_tables=False)
+        write_follow_x_tables(x_partly, ("ja", "zh-Hans"))
+        check(x_partly, passes=False, expect="lacks the FollowX strings table in zh-Hant", args=x_appstore)
+        # The handle of the local configuration is one of X's: 1 to 15 letters,
+        # digits and underscores, and not the placeholder. (FollowXProfile.isWellFormed
+        # holds the same rules; AndariumCore's FollowXTests pin that side.)
+        for index, bad in enumerate((
+                "a" * 16, "has space", "dash-x", "@someone", "https://x.com/someone", "someone/", "so.meone",
+                "some\none", "\u00e9cole", "example_handle", "Example_Handle", "EXAMPLE_HANDLE")):
+            check(make_app(root, f"x-handle-{index}", x_feature, app_info(AndariumFollowXHandle=bad)),
+                  passes=False, expect="Follow developer on X: the handle in the local configuration",
+                  args=["--follow-x-handle", bad])
+        for index, good in enumerate(("a", "A_1", "_", "a" * 15, "someone_real", "Some_One_99")):
+            check(make_app(root, f"x-handle-ok-{index}", x_feature, app_info(AndariumFollowXHandle=good)),
+                  passes=True, expect="Follow developer on X is compiled in", args=["--follow-x-handle", good])
+        # A build that names no handle still has the row's file names in the linker's
+        # debug map of its Debug or Release product; the map's symbol names count.
+        mapped_x = build_with_debug_map(root, "mapped-x", "/Users/NAME/FollowXRow")
+        symbol_x = build_with_debug_map(
+            root, "symbol-x", "/Users/NAME/Project",
+            "__attribute__((visibility(\"hidden\"))) int plain_first(void) { return 2; }\n"
+            "__attribute__((visibility(\"hidden\"))) int _s8Andarium11FollowXRowV4bodyyF(void) { return 1; }\n")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"x-{configuration}-debug-map", mapped_x, app_info()),
+                  passes=True, expect=f"Follow developer on X is not compiled in ({configuration})",
+                  args=[*x_other, configuration])
+            check(make_app(root, f"x-{configuration}-symbol-only", symbol_x, app_info()),
+                  passes=False, expect="carries Follow developer on X (FollowXRow)", args=[*x_other, configuration])
+        check(make_app(root, "x-appstore-debug-map", mapped_x, app_info()), passes=True,
+              expect="Follow developer on X is not compiled in")
+        check(make_app(root, "x-appstore-symbol-only", symbol_x, app_info()),
+              passes=False, expect="carries Follow developer on X (FollowXRow)")
+        x_debug = make_app(root, "x-debug-library", clean, app_info())
+        shutil.copyfile(x_feature, x_debug / "Fixture.debug.dylib")
+        check(x_debug, passes=False, expect="Fixture.debug.dylib: carries Follow developer on X")
+        # The other configurations: absent, or the arranged placeholder, which Debug alone takes.
+        x_arranged_info = app_info(AndariumFollowXHandle="example_handle")
+        for configuration in ("Debug", "Release"):
+            check(make_app(root, f"x-{configuration}-absent", clean, app_info()), passes=True,
+                  expect=f"Follow developer on X is not compiled in ({configuration})", args=[*x_other, configuration])
+            # The local configuration's handle never reaches them.
+            check(make_app(root, f"x-{configuration}-handle", x_feature, x_info), passes=False,
+                  expect="not the arranged placeholder", args=[*x_other, configuration, *x_appstore])
+            check(make_app(root, f"x-{configuration}-code", x_feature, app_info()), passes=False,
+                  expect="carries Follow developer on X", args=[*x_other, configuration])
+            check(make_app(root, f"x-{configuration}-key", clean, x_info), passes=False,
+                  expect="though the build names no handle", args=[*x_other, configuration])
+        check(make_app(root, "x-Debug-arranged", x_feature, x_arranged_info), passes=True,
+              expect="Follow developer on X is compiled in (Debug)", args=[*x_other, "Debug", *x_arranged])
+        check(make_app(root, "x-Release-arranged", x_feature, x_arranged_info), passes=False,
+              expect="only Debug takes the arrangement", args=[*x_other, "Release", *x_arranged])
+        check(make_app(root, "x-Release-arranged-absent", clean, app_info()), passes=False,
+              expect="only Debug takes the arrangement", args=[*x_other, "Release", *x_arranged])
+        check(make_app(root, "x-appstore-arranged", x_feature, x_arranged_info), passes=False,
+              expect="placeholder handle", args=x_arranged)
+        # The arranged placeholder is in no product that does not arrange it.
+        x_stray = make_app(root, "x-placeholder-stray", clean, app_info())
+        (x_stray / "Data.bin").write_bytes(b"\0Example_Handle\0")
+        check(x_stray, passes=False, expect="Data.bin: holds the placeholder handle of the arrangement")
+        check(x_stray, passes=False, expect="Data.bin: holds the placeholder handle of the arrangement",
+              args=[*x_other, "Debug"])
+        check(make_app(root, "x-placeholder-key", clean, x_arranged_info), passes=False,
+              expect="Info.plist: holds the placeholder handle of the arrangement")
+        # The tip header's X button names a handle of its own. It shares the logo and the
+        # profile address's builder with the row and nothing else: the row's code, key and
+        # table stay out of a product that names no handle for the row.
+        sheet_info = app_info(AndariumDeveloperX=handle)
+        sheet_args = ["--developer-x", handle]
+        profile_only = build(root, "x-profile-only", FOLLOW_X_PROFILE_ONLY)
+        check(make_app(root, "x-sheet", profile_only, sheet_info), passes=True,
+              expect="Follow developer on X is not compiled in", args=[*x_other, "AppStore", *sheet_args, *x_local])
+        check(make_app(root, "x-sheet-no-logo", profile_only, sheet_info, follow_x_logo=False), passes=False,
+              expect="Assets.car: lacks the logo of Follow developer on X", args=[*x_other, "AppStore", *sheet_args])
+        check(make_app(root, "x-sheet-no-builder", clean, sheet_info), passes=False,
+              expect="lacks the profile address's builder", args=[*x_other, "AppStore", *sheet_args])
+        check(make_app(root, "x-sheet-row-code", x_feature, sheet_info), passes=False,
+              expect="carries Follow developer on X (", args=[*x_other, "AppStore", *sheet_args])
+        check(make_app(root, "x-sheet-row-key", profile_only, {**sheet_info, **x_info}), passes=False,
+              expect="has AndariumFollowXHandle though the build names no handle",
+              args=[*x_other, "AppStore", *sheet_args])
+        check(make_app(root, "x-sheet-row-table", profile_only, sheet_info, follow_x_tables=True), passes=False,
+              expect="is the FollowX strings table though the build names no handle",
+              args=[*x_other, "AppStore", *sheet_args])
+        check(make_app(root, "x-sheet-other-local", profile_only, sheet_info), passes=True,
+              expect="Follow developer on X is not compiled in",
+              args=[*x_other, "AppStore", *sheet_args, "--developer-x-handle", "someone_else"])
+        leaked_sheet = make_app(root, "x-sheet-address", profile_only, sheet_info)
+        (leaked_sheet / "Data.bin").write_bytes(b"https://x.com/someone_else")
+        check(leaked_sheet, passes=False, expect="Data.bin: holds the handle of the local configuration",
+              never="someone_else", args=[*x_other, "AppStore", *sheet_args, "--developer-x-handle", "someone_else"])
+        # The row and the header may name the same handle, and each product has the logo once.
+        check(make_app(root, "x-sheet-and-row", x_feature, {**sheet_info, **x_info}), passes=True,
+              expect="Follow developer on X is compiled in", args=[*x_other, "AppStore", *x_appstore, *sheet_args])
+        # Debug's arrangement of the placeholder handle for the header alone.
+        check(make_app(root, "x-sheet-arranged", profile_only, app_info(AndariumDeveloperX="example_handle")),
+              passes=True, expect="Follow developer on X is not compiled in (Debug)",
+              args=[*x_other, "Debug", "--developer-x", "example_handle"])
+        # Both features' phase in one run says both.
+        both = run([sys.executable, "-B", str(options.checker), "--feedback", "--follow-x", "--configuration", "Debug",
+                    str(make_app(root, "x-both", clean, app_info()))])
+        if both.returncode != 0 or "Send feedback is not compiled in (Debug)" not in both.stdout \
+                or "Follow developer on X is not compiled in (Debug)" not in both.stdout:
+            failures.append(f"x-both: expected both features reported:\n{both.stdout}")
+
+        # The local handle is in no file of a bundle that does not name it, as a
+        # profile address or as a whole string of a property list, and the check
+        # never prints it. The bare word is no leak: it is also in the bundle
+        # identifier, the name of a keychain item and the project's page.
+        x_address = build(root, "x-address", f'const char *fixture(void) {{ return "https://x.com/{handle}"; }}\n')
+        x_old_address = build(root, "x-old-address", f'const char *fixture(void) {{ return "twitter.com/{handle}"; }}\n')
+        x_data = make_app(root, "x-leak-data-file", clean, app_info())
+        (x_data / "Data.bin").write_bytes(b"\0\1HTTPS://X.COM/" + handle.upper().encode() + b"\2")
+        x_plist = make_app(root, "x-leak-plist-value", clean, app_info(Developer=handle.upper()))
+        x_strings = make_app(root, "x-leak-strings", clean, app_info())
+        (x_strings / "en.lproj").mkdir()
+        (x_strings / "en.lproj" / "Localizable.strings").write_bytes(
+            plistlib.dumps({"Contact": handle}, fmt=plistlib.FMT_BINARY))
+        x_straddle = make_app(root, "x-leak-straddle", clean, app_info())
+        (x_straddle / "Big.bin").write_bytes(b"\0" * ((8 << 20) - 5) + f"x.com/{handle}".encode() + b"\0")
+        x_leaks = (
+            ("executable", make_app(root, "x-leak-executable", x_address, app_info()), "Fixture"),
+            ("old-address", make_app(root, "x-leak-old", x_old_address, app_info()), "Fixture"),
+            ("framework", make_app(root, "x-leak-framework", clean, app_info(), framework=x_address),
+             "Frameworks/Runtime.framework/Runtime"),
+            ("data-file", x_data, "Data.bin"),
+            ("plist-value", x_plist, "Info.plist"),
+            ("strings", x_strings, "en.lproj/Localizable.strings"),
+            ("straddle", x_straddle, "Big.bin"),
+        )
+        for name, app, path in x_leaks:
+            for configuration in ("Debug", "Release"):
+                for arguments in (x_local, [*x_local, *x_arranged]):
+                    check(app, passes=False, expect=f"{path}: holds the handle of the local configuration",
+                          never=handle, args=[*x_other, configuration, *arguments])
+            check(app, passes=False, expect=f"{path}: holds the handle of the local configuration",
+                  never=handle, args=x_local)
+        # The bare word is in a bundle that does not name it, as the real one is.
+        word = make_app(
+            root, "x-word-only",
+            build(root, "x-word", f'const char *fixture(void) {{ return "https://github.com/{handle}/Project"; }}\n'),
+            app_info(CFBundleIdentifier=f"org.{handle}.Fixture"))
+        (word / "Data.bin").write_bytes(f"keychain org.{handle}.fixture.key".encode())
+        check(word, passes=True, expect="ready for the App Store", args=x_local)
+        check(word, passes=True, expect="Follow developer on X is not compiled in (Debug)",
+              args=[*x_other, "Debug", *x_local])
+        check(make_app(root, "x-leak-none", clean, app_info(), framework=clean), passes=True,
+              expect="ready for the App Store", args=x_local)
+        check(make_app(root, "x-leak-none-arranged", x_feature, x_arranged_info), passes=True,
+              expect="Follow developer on X is compiled in (Debug)", args=[*x_other, "Debug", *x_local, *x_arranged])
+        # An App Store build that names it holds it in Info.plist, and may hold the address too.
+        check(make_app(root, "x-leak-named", x_feature, x_info), passes=True,
+              expect="Follow developer on X is compiled in", args=x_appstore)
+        x_named = make_app(root, "x-leak-named-elsewhere", x_feature, x_info)
+        (x_named / "Data.bin").write_bytes(f"x.com/{handle}".encode())
+        check(x_named, passes=True, expect="Follow developer on X is compiled in", args=x_appstore)
+        # The two features are independent: each in its product, each absent from the other's.
+        check(make_app(root, "both-built", x_feature, {**feedback_info, **x_info}), passes=False,
+              expect="has AndariumFeedbackAddress though the build names no receiver", args=x_appstore)
+        check(make_app(root, "x-only-built", x_feature, x_info), passes=True,
+              expect="Send feedback is not compiled in", args=x_appstore)
+        check(make_app(root, "feedback-only-built", feature, feedback_info), passes=True,
+              expect="Follow developer on X is not compiled in", args=appstore)
 
         # The built Info.plist keeps every value of Config/Info.plist, whichever
         # way the feedback block went: the preprocessor changes the feedback key
@@ -1406,6 +1681,11 @@ def main() -> int:
                   args=[*other, configuration, *extra, *info_args])
         check(make_app(root, "info-source-appstore", clean, app_info(**base_info)), passes=True,
               expect="ready for the App Store", args=info_args)
+        check(make_app(root, "info-source-x-Debug", x_feature,
+                       app_info(AndariumFollowXHandle="example_handle", **base_info)),
+              passes=True, expect="compiled in", args=[*x_other, "Debug", *x_arranged, *info_args])
+        check(make_app(root, "info-source-x-appstore", x_feature, app_info(AndariumFollowXHandle=handle, **base_info)),
+              passes=True, expect="ready for the App Store", args=[*x_appstore, *info_args])
         check(make_app(root, "info-source-appstore-named", feature,
                        app_info(AndariumFeedbackAddress=receiver, **base_info)),
               passes=True, expect="ready for the App Store", args=[*appstore, *info_args])

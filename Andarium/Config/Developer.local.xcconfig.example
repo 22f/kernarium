@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Copy to Developer.local.xcconfig, which Git ignores, and name the developer
-// the Buy me tokens sheet shows: a name (shown as it is), and the handles of
-// the GitHub and X profiles the two logo buttons open (the handle alone, never
-// an address: a double slash starts a comment here, and the code builds the
-// addresses). The avatar and the two logos are local files, never tracked:
+// Copy to Developer.local.xcconfig, which Git ignores, and name the developer:
+// a name (shown as it is) and the handles of the profiles on GitHub and X. Store
+// a handle, never a whole address: `//` starts a comment in an xcconfig, and the
+// code builds the addresses. Only an AppStore build made with this file has what
+// they turn on; every other build carries none of it and no value.
 //
-//   Config/Local/developer-avatar.jpeg   the avatar, shown as a circle
-//   Config/Local/github-logo.svg         GitHub's mark (one path)
-//   Config/Local/x-logo.svg              X's mark (one path)
+// DEVELOPER_X_HANDLE turns on Follow developer on X, an Info row that opens the
+// developer's profile on X, and the X button of the Buy me tokens header.
+// DEVELOPER_NAME turns on the header's name and avatar, and
+// DEVELOPER_GITHUB_HANDLE its GitHub button. The header's pieces are in a build
+// that has Buy me tokens, and each exists only where its value does.
 //
-// Each piece is in an AppStore build only when its value and its file are
-// there; every other build carries none of it. DeveloperExample/ holds drawn
-// stand-ins the tests and screen captures use with the arrangement below.
+// Each value also needs its file in the ignored Local directory beside this one,
+// where a build made with the value and without the file fails:
+//
+//   Local/x-logo.svg             X's logo, a single-colour vector (one path, any
+//                                fill) drawn as a template image
+//   Local/github-logo.svg        GitHub's mark, the same
+//   Local/developer-avatar.jpeg  the avatar, shown as a circle
 
 DEVELOPER_NAME = example
 DEVELOPER_GITHUB_HANDLE = example
-DEVELOPER_X_HANDLE = example
+DEVELOPER_X_HANDLE = example_handle

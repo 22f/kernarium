@@ -179,10 +179,13 @@ everything that exists for automation or only pretends:
 - It alone can carry [Send feedback](#send-feedback), and only when the
   receiver's address is in the ignored `Config/Feedback.local.xcconfig`,
   [Buy me tokens](#buy-me-tokens), and only when the four product identifiers
-  are in the ignored `Config/TipJar.local.xcconfig`, and
+  are in the ignored `Config/TipJar.local.xcconfig`,
   [Review on the App Store](#review-on-the-app-store), and only when the
   application's App Store identifier is in the ignored
-  `Config/Review.local.xcconfig`. The three switches are independent.
+  `Config/Review.local.xcconfig`, and
+  [Follow developer on X](#follow-developer-on-x), and only when the handle is
+  in the ignored `Config/Developer.local.xcconfig` and the logo in the ignored
+  `Config/Local/`. The four switches are independent.
 
 ```sh
 cmake --preset kernarium-ios-device-android-app-store
@@ -221,6 +224,40 @@ The feature's words are looked up in the `Feedback` string table (zh-Hans,
 zh-Hant and ja are in [Languages](#languages)); the mail's subject prefix and
 its information block are English whatever the interface language, and the bug
 report's overlay text is the app's own.
+
+### Follow developer on X
+
+Info has one passive outward link more: Follow developer on X, a row in the
+section of Project on GitHub, which opens the developer's profile through the
+system (`openURL`: the X app when it is installed, the browser otherwise;
+`Shared/FollowX/`). It has no badge, prompt or counter, and nothing is
+remembered about a tap. The name X in its text is the service's logo, drawn
+inline at the text's size and colour as a template image, and the same logo is
+the row's leading icon; VoiceOver reads "Follow developer on X" with the link
+trait. The profile and the logo belong to the developer and are tracked
+nowhere: the row is compiled in, under the `FOLLOW_X` condition, only in an
+AppStore build whose ignored `Config/Developer.local.xcconfig` (from
+`Developer.local.xcconfig.example`) names the handle (`DEVELOPER_X_HANDLE`: a
+handle, never an address, as `//` starts an xcconfig comment; the code builds
+the address) and whose ignored `Config/Local/` directory holds `x-logo.svg`, a
+single-colour vector that `XLogoLocal.xcassets` links to. A build with the
+handle and without the logo fails its first build phase. A fork, a sideload
+or a Debug or Release build holds none of it (no row, handle, logo or
+`FollowX` strings table), and the bundle check asserts both directions as it
+does for Send feedback: it also fails on the local handle as a profile
+address, or as a whole string of a property list, in any file of a bundle that
+does not name it (never printing it), and on the arranged handle in any
+product that does not arrange it. Tests and captures turn the row on in a
+Debug build with `FOLLOW_X_HANDLE=example_handle` on the `xcodebuild` line,
+with a glyph drawn for them (`XLogoGlyph.xcassets`) in place of the logo;
+adding `FOLLOW_X_LOGO_SOURCE=local` takes the logo from `Config/Local/`.
+`AndariumPreview` takes the arrangement only, never the local handle. The
+handle's shape and the address are in `Shared/FollowX/Logic`, which
+AndariumCore's tests build through a symlinked target no product links, and
+the words are in the `FollowX` string table. The [Buy me tokens](#buy-me-tokens)
+header's X button shares the logo and `FollowXProfile` and is keyed on a handle
+of its own, so a build with the button and without the row holds the logo and
+the address's builder and nothing else of the row.
 
 ### Buy me tokens
 
@@ -267,27 +304,33 @@ privacy manifest declares nothing for it.
 The sheet opens on its sender line: the developer's circular avatar (a hairline
 border from the separator colour, hidden from accessibility), the name as a
 person wrote it and the role "Andarium's developer", then one logo button each
-for the developer's GitHub and X profiles, drawn in the label colour from the
-vector files and opened through `openURL` (no web view; a touch target of at
-least 44 pt; at larger text sizes they move under the text). VoiceOver reads the sender once, as "name, role", before the
-messages. Every piece follows what the build holds: no avatar keeps the
-application's mark, no name reads the role alone, and a logo button exists
-only where its handle and its logo file both do. The name, the two handles and
-the three files are the maker's own, in the ignored
+for the developer's GitHub and X profiles, drawn in the label colour as
+template images and opened through `openURL` (no web view; a touch target of at
+least 44 pt; at larger text sizes they move under the text). VoiceOver reads
+the sender once, as "name, role", before the messages. Every piece follows what
+the build holds: no avatar keeps the application's mark, no name reads the role
+alone, and a logo button exists only where its handle does. The name, the two
+handles and the three files are the maker's own, in the ignored
 `Config/Developer.local.xcconfig` (from `Developer.local.xcconfig.example`) and
 `Config/Local/` (`developer-avatar.jpeg`, `github-logo.svg`, `x-logo.svg`; the
-logos are single-path SVGs, parsed at run time by `TipJarGlyph` because UIKit
-cannot load an SVG file). They reach the product only in an AppStore build that
-has Buy me tokens: Info.plist keys for the values the build names and a
-`DeveloperArtwork` folder that `scripts/copy-developer-artwork.py` fills; the
-addresses are built in code from the handles. The bundle check compares keys
-and files by content (a handle is part of the bundle identifier, so its bytes
-prove nothing), fails on a copy of any artwork file elsewhere in any bundle,
-and on a local profile address in any file. The tests' arrangement states
-`SHEET_DEVELOPER_NAME`, `SHEET_DEVELOPER_GITHUB` and `SHEET_DEVELOPER_X` as
-`example` and takes the drawn stand-ins of `Config/DeveloperExample/`;
-`AndariumPreview` reads its header from `TIPJAR_DEVELOPER_*` environment
-variables instead, outside the AppStore product.
+logos are single-path SVGs), the same file and directory that
+[Follow developer on X](#follow-developer-on-x) reads. They reach the product
+only in an AppStore build that has Buy me tokens: Info.plist keys for the
+values the build names (`AndariumDeveloperName`, `AndariumDeveloperGitHub`,
+`AndariumDeveloperX`) and asset catalogs the avatar, the GitHub mark and the X
+logo are linked into (`Shared/TipJar/DeveloperAvatarLocal.xcassets` and its
+neighbours, each a symlink to the file in `Config/Local/`); a build that names
+a value and lacks its file fails its first build phase. The addresses are built
+in code from the handles, the X one by `FollowXProfile`, the row's. The
+bundle check compares keys and the asset names in `Assets.car`, fails on an
+artwork file lying in any bundle and on a local profile address in any file of
+a bundle that does not name it. The tests' arrangement states
+`SHEET_DEVELOPER_NAME` and `SHEET_DEVELOPER_GITHUB` as `example` and
+`SHEET_DEVELOPER_X` as `example_handle`, with a plain glyph in place of each
+artwork (the `...Glyph.xcassets` catalogs); adding `SHEET_ARTWORK_SOURCE=local`
+and `FOLLOW_X_LOGO_SOURCE=local` takes the artwork from `Config/Local/`, for a
+capture. `AndariumPreview` takes the same arrangement, and its
+`-tipDeveloperParts` keeps the pieces a screen shows.
 
 ### Review on the App Store
 
@@ -392,7 +435,10 @@ control out.
   from 1.5 GiB, so a guest has at least that (`Limits.minimumMemoryMiB`,
   Andarium's own: the runtime still accepts less for Kernarium's guests); a
   stored smaller size is raised to it on load, and a device whose bound is
-  lower offers the bound alone. `MemoryPolicy` holds those bounds, defaults
+  lower offers the bound alone. The runtime starts every size the picker
+  offers: a start whose memory the loader refuses
+  (`kernarium_runtime_loader_guest_memory_admitted`) ends before the run with
+  that reason. `MemoryPolicy` holds those bounds, defaults
   and the estimates and no formula of its own. A guest with more than the
   runtime's conservative size for its vCPU count (`safeMemoryMiB`) is likely
   to be closed by iOS: Home shows a notice and the memory ruler a line and red
@@ -758,7 +804,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   session. A bug report is Android's zip with Andarium's session records and
   MetricKit reports added under `andarium/`, the application's container paths
   taken out (`BugReportAttachments`); a zip that cannot be amended safely is
-  shared as Android made it.
+  shared as Android made it. An install streams the file to the package
+  manager in pieces that never outlive their read (`FileChunkReader`). It
+  reads the file's size once the coordinated read has the file, and refuses
+  before the first byte when the device (`TransferRoom`) or the virtual
+  machine's data partition lacks room for the app and its reserve
+  (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
+  Android cannot install (`InstallRefusal.tooLarge`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
@@ -817,13 +869,13 @@ The strings are String Catalogs in `Localization/` (screens, permission texts,
 What's New notes) and in `AndariumCore`'s resources. The JIT texts are their own
 catalog, table `JIT`, which the App Store configuration leaves out of the
 bundle and its check asserts is absent. The texts of Send feedback, Buy me
-tokens and Review on the App Store are catalogs of their own, tables
-`Feedback`, `TipJar` and `Review`, built only where their feature is compiled
-in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`); the bundle
-check refuses a table, by its file name, in a product without its feature and
-asks for it in every language of one with it. The tip's words keep to its
-rules in each language (`scripts/check-tip-words.py`): no donation, plan or
-subscription word, the tier names untranslated. English is the key (a readout or a
+tokens, Review on the App Store and Follow developer on X are catalogs of their
+own, tables `Feedback`, `TipJar`, `Review` and `FollowX`, built only where their
+feature is compiled in (`EXCLUDED_SOURCE_FILE_NAMES` in `Config/Andarium.xcconfig`);
+the bundle check refuses a table, by its file name, in a product without its
+feature and asks for it in every language of one with it. The tip's words keep
+to its rules in each language (`scripts/check-tip-words.py`): no donation, plan
+or subscription word, the tier names untranslated. English is the key (a readout or a
 joined list has a named key whose comment says which readout it serves), and
 the person's virtual machine is "virtual machine" in English, 虚拟机, 虛擬機器
 and 仮想マシン. Chinese says 你 and writes no space next to Latin text; a
@@ -836,10 +888,10 @@ short quoted Chinese or Japanese name is not cut across two lines.
 `SWIFT_EMIT_LOC_STRINGS=YES`, `scripts/localization.py sync --check
 --stringsdata <DerivedData>` fails on a key the code uses and a catalog lacks,
 or the reverse. It runs on a development build made with
-`FEEDBACK_ADDRESS=feedback@example.com`, the four `TIP_*` identifiers and
-`REVIEW_ID=id0000000000` (the output of `Andarium` and `AndariumPreview`
-together; one without a feature has none of its strings and fails) and on an
-App Store build with `--app-store`. A
+`FEEDBACK_ADDRESS=feedback@example.com`, the four `TIP_*` identifiers,
+`REVIEW_ID=id0000000000` and `FOLLOW_X_HANDLE=example_handle` (the output of
+`Andarium` and `AndariumPreview` together; one without a feature has none of its
+strings and fails) and on an App Store build with `--app-store`. A
 string no catalog reaches (a `String` built in code) shows as English under
 Xcode's Accented Pseudolanguage, so a run with it on is part of adding a
 screen.

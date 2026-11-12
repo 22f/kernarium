@@ -274,6 +274,10 @@ the run never starts, so the first build phase of each application's target
 one. The shared schemes gather no code coverage; a coverage run passes
 `-enableCodeCoverage YES`.
 
+A change to the guest memory the applications offer is proven by a start through
+the applications' runtime (`kernarium_runtime_loader_run`) at the largest offered
+size, in the Simulator or on a Mac, not by a command-line launcher.
+
 On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
@@ -341,10 +345,10 @@ device application,
 [targets](../Andarium/README.md#targets)); `AndariumTests` is
 hosted in `Andarium` and runs on an iPad, in the Simulator and as an iPad app on
 an Apple silicon Mac (`xcodebuild test -scheme Andarium -only-testing:AndariumTests
-FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000
+FEEDBACK_ADDRESS=feedback@example.com REVIEW_ID=id0000000000 FOLLOW_X_HANDLE=example_handle
 TIP_LITE=com.example.andarium.tip.lite TIP_PRO=com.example.andarium.tip.pro
 TIP_MAX=com.example.andarium.tip.max TIP_ULTRA=com.example.andarium.tip.ultra
-SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example`;
+SHEET_DEVELOPER_NAME=example SHEET_DEVELOPER_GITHUB=example SHEET_DEVELOPER_X=example_handle`;
 the scheme without the filter also runs `AndariumUITests`). The scheme's Test
 action pins English, so the tests that read the application's words do not
 depend on the language of the device; `LocalizationTests` names a lost pin and
@@ -357,14 +361,18 @@ fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
 exist only in a build with `FEEDBACK_ADDRESS=feedback@example.com` on the
 command line, as the command above has it ([Send feedback](../Andarium/README.md#send-feedback));
-a run without it does not build them. `TipJarScreenTests` and
+a run without it does not build them. `FollowXRowTests` need
+`FOLLOW_X_HANDLE=example_handle`
+([Follow developer on X](../Andarium/README.md#follow-developer-on-x)).
+`TipJarScreenTests` and
 `TipJarStoreKitTests` ([Buy me tokens](../Andarium/README.md#buy-me-tokens)) need
 the four `TIP_` settings the same way; the second plays purchases, Ask to Buy
 and unfinished transactions against `AndariumTests/TipJar.storekit` (example
 identifiers only) in StoreKit's test session, never the App Store.
 `TipJarHeaderTests` checks the sheet's sender line (VoiceOver's reading, the
 two links and what a tap hands to `openURL`) with the `SHEET_DEVELOPER_*`
-placeholders and the drawn artwork of `Andarium/Config/DeveloperExample`, and
+placeholders and the tracked glyph catalogs the tests draw in place of the
+developer's artwork, and
 `ReviewScreenTests` ([Review on the App Store](../Andarium/README.md#review-on-the-app-store))
 needs `REVIEW_ID`, as do `ReviewAskFlowTests`, `ReviewAskStoreTests` and
 `ReviewPromptWatcherTests` ([Rating prompt](../Andarium/README.md#rating-prompt)):

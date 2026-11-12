@@ -13,6 +13,7 @@ text is the key. The strings live in:
   Andarium/Localization/Feedback.xcstrings      the texts of Send feedback (table "Feedback"), carried by the builds that have it only
   Andarium/Localization/TipJar.xcstrings        the texts of Buy me tokens (table "TipJar"), carried by the builds that have it only
   Andarium/Localization/Review.xcstrings        the text of Review on the App Store (table "Review"), carried by the builds that have it only
+  Andarium/Localization/FollowX.xcstrings       the text of Follow developer on X (table "FollowX"), carried by the builds that have it only
   Andarium/AndariumCore/Sources/AndariumCore/Resources/Localizable.xcstrings
                                                 the words the model says
 
@@ -64,7 +65,9 @@ Buy me tokens and Review on the App Store are the same: each has a table
 check needs a build that has them (the four `TIP_` settings and
 `REVIEW_ID=id0000000000` on the `xcodebuild` line) and fails on one that
 extracted no string of the table; an App Store build without the feature does
-not compare its catalog.
+not compare its catalog. Follow developer on X
+(Andarium/README.md#follow-developer-on-x) is the same with its FollowX table
+and `FOLLOW_X_HANDLE=example_handle`.
 """
 
 from __future__ import annotations
@@ -100,6 +103,7 @@ CATALOGS = {
     "Feedback": "Andarium/Localization/Feedback.xcstrings",
     "TipJar": "Andarium/Localization/TipJar.xcstrings",
     "Review": "Andarium/Localization/Review.xcstrings",
+    "FollowX": "Andarium/Localization/FollowX.xcstrings",
     "AndariumCore": CORE_CATALOG,
 }
 ENGLISH_ONLY = "Andarium/Localization/english-only.json"
@@ -114,6 +118,7 @@ FEATURE_TABLES = {
     "Feedback": "FEEDBACK_ADDRESS=feedback@example.com to compile Send feedback in",
     "TipJar": "TIP_LITE, TIP_PRO, TIP_MAX and TIP_ULTRA (com.example.andarium.tip.lite and so on) to compile Buy me tokens in",
     "Review": "REVIEW_ID=id0000000000 to compile Review on the App Store in",
+    "FollowX": "FOLLOW_X_HANDLE=example_handle to compile Follow developer on X in",
 }
 
 # Where the compiler-extracted strings of each source tree belong.
@@ -123,6 +128,7 @@ SYNC_SOURCES = {
     "Feedback": ("Andarium/Andarium/",),
     "TipJar": ("Andarium/Andarium/",),
     "Review": ("Andarium/Andarium/",),
+    "FollowX": ("Andarium/Andarium/",),
     "AndariumCore": ("Andarium/AndariumCore/Sources/AndariumCore/",),
 }
 
