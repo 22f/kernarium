@@ -63,15 +63,19 @@ Presentation:
 
 Guest-visible guarantees:
 
-- A texture the renderer creates reads as zeros until the guest writes it,
+- A texture the renderer creates holds zeros until the guest writes it,
   because the host driver hands out a released resource's memory with its old
   pixels, which may have belonged to another guest process. That holds for
-  every level and layer of every format, multisampled and compressed ones
-  included (a compressed texture is written zero blocks); only an imported
-  texture keeps the content it was imported with. While the device memory
-  budget is full the host driver can refuse the staging buffer of a later
-  upload, which is then dropped without an error, so a texture can keep its
-  older pixels until it is written again.
+  every level and layer of every format, multisampled ones included. A
+  compressed texture holds zero blocks, which its format decodes as it
+  defines, not always to a zero texel (sRGB ASTC to its error colour); a
+  creation whose fill the host driver refuses room for fails with ENOMEM like
+  one whose storage it refuses, and a host without `glCopyImageSubData`
+  (none of the product hosts) leaves compressed textures as the driver found
+  them. Only an imported texture keeps the content it was imported with.
+  While the device memory budget is full the host driver can refuse the
+  staging buffer of a later upload, which is then dropped without an error, so
+  a texture can keep its older pixels until it is written again.
 - A texture exported to another context through shared memory is written into
   its segment at the next fence after it is drawn. A read-back into client
   memory that the host driver refuses at a fence leaves the texture the newer

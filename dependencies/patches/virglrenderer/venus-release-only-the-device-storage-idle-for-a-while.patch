@@ -59,10 +59,10 @@ index a5815912cb918406ace6dd96c1a6242db51df57d..da6106e3dc0098750896116d68e72089
  uint64_t
  vkr_renderer_release_cached_memory(void);
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 771e76ad8c7e04c8cbaa4811fcc1c45cc64ecbe3..92e082ebab62d48ca1c517965aa9c62aa4d66c5e 100644
+index f437ce508de167ff960cf1e94d48f758311e2d39..0630ff3ca27502045c43c144a0a9001df121ea12 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -13633,7 +13633,10 @@ static void vrend_reclaim_trim(void)
+@@ -13659,7 +13659,10 @@ static void vrend_reclaim_trim(void)
   * finish that work, trims every context so the driver drops the references
   * its completed batches kept, frees the shared-memory segments that were
   * waiting behind a fence (the GPU is idle now, as that drain requires), and

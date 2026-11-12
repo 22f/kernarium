@@ -407,6 +407,17 @@ if(TARGET uml_gpu_service)
         INCLUDES ${_uml_gpu_device_directory}
         UNIT_DIRECTORY)
 
+    # The zero fill of a new compressed texture has several steps that the
+    # host driver can refuse room for. A refused step fails the creation with
+    # ENOMEM, which the renderer retries after giving back what it can, and
+    # no texture is left partly written.
+    uml_add_gpu_unit_test(gpu-compressed-zero-refusal
+        uml_gpu_compressed_zero_refusal_tests
+        host_gl_compressed_zero_refusal_tests.cpp
+        LIBRARIES ${_uml_host_gl_libraries}
+        INCLUDES ${_uml_gpu_device_directory}
+        UNIT_DIRECTORY)
+
     # The OpenGL path stays within the host GPU's fixed budget: a texture past
     # it is refused at creation with ENOMEM, the host never holds more than the
     # budget, and the renderer stores new textures once the guest has released
@@ -634,7 +645,8 @@ if(TARGET uml_gpu_service)
     # A host without a usable GL stack or renderer skips these with status 77.
     set_tests_properties(
         gpu-transfer-context-error gpu-blob-copy-transfer
-        gpu-texture-zero-fill gpu-texture-zero-fill-special gpu-scanout-caps
+        gpu-texture-zero-fill gpu-texture-zero-fill-special
+        gpu-compressed-zero-refusal gpu-scanout-caps
         gpu-import-bounds
         gpu-resource-metal-texture gpu-cross-context-readback
         gpu-depth-format-advertisement gpu-stencil-only-target

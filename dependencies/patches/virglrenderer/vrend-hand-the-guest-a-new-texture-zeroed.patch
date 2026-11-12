@@ -18,41 +18,55 @@ keeps the content it was imported with.
 
 A compressed format cannot be cleared that way, and writing zero blocks
 over the whole texture makes the driver stage them in buffers as large
-as the texture, held until the GPU is done and refused when the device
-memory budget is full. The zero blocks are written once instead, into a
-tile: a texture of the same format as large as the first level up to
-128 x 128 blocks (256 KiB for 16-byte blocks), uploaded in calls of at
-most 16 KiB. Every level and layer then receives its whole blocks by
-glCopyImageSubData from the tile, a copy between textures of one format
-that Metal does without a staging buffer. Only the part block at the
-right and bottom edge of a level whose size is not a whole number of
-blocks, and a level smaller than one block, are uploaded, at most 16 KiB
-a call. The tile is deleted before the texture is returned. A host
-without glCopyImageSubData, or one that refuses the tile, leaves the
-texture as it finds it.
+as the texture, held until the context reuses that batch state and
+refused when the device memory budget is full. The zero blocks are
+written once instead, into a tile: a texture of the same format as large
+as the first level up to 128 x 128 blocks (256 KiB for 16-byte blocks),
+uploaded in calls of at most 16 KiB. Every level and layer then receives
+its whole blocks by glCopyImageSubData from the tile, a copy between
+textures of one format that Metal does without a staging buffer. Only
+the part block at the right and bottom edge of a level whose size is not
+a whole number of blocks, and a level smaller than one block, are
+uploaded, at most 16 KiB a call, for every layer. The tile is deleted
+before the texture is returned. The texture then holds zero blocks,
+which the format decodes as it defines, not always to a zero texel: sRGB
+ASTC samples as its error colour.
 
-The clear is queued on the GPU and costs the creating thread no more
-than the creation did. Each level adds about a tenth of a millisecond
-before the GPU has finished the texture, plus the bandwidth to fill it.
-A compressed texture costs the creating thread, on an M1 Ultra, about
-0.06 to 0.1 ms for a 256x256 ETC2 texture with its levels, 0.1 ms at
-1024x1024, 0.15 ms at 2048x2048 and 0.35 ms for 4096x4096 ASTC 4x4,
-and the GPU 0.3 to 2.2 ms more before the texture is finished; nothing
-once it exists. The driver holds the tile and the staging of its upload,
-512 KiB at most, until the GPU is done, and frees a released compressed
-texture when the creating context next reuses the batch state of its
-zeroing, as it does for a texture the renderer clears, not at once.
+A step the driver refuses room for raises GL_OUT_OF_MEMORY: the tile, an
+upload, a copy. It fails the creation with ENOMEM, as a refused storage
+does, so the request meets the reclaim and retry, and a texture the
+fill left partly written is released and never reaches the guest. A
+host without glCopyImageSubData leaves a compressed texture as the
+driver finds it.
+
+Cost on an M1 Ultra under load, creating thread, main against this:
+0.01 -> 0.2 ms for a 256x256 ETC2 texture with its levels and for ASTC
+4x4 at 1024x1024, 0.01 -> 0.9 ms for a cube, 0.01 -> 15 to 20 ms for
+a 256-layer array and 0.01 -> 40 to 60 ms for a 4096-high array one
+to five texels wide, with 512 layers. The cost is a copy for each layer
+and level; copying the layers from the first, or by doubling, was not
+faster on Zink over KosmicKrisp, which does a Metal copy per layer. The
+GPU needs 0.4 to 0.7 ms more for a 2D texture before it is finished.
+Nothing is paid once the texture exists.
+
+The driver holds the tile (256 KiB at most) and the staging of its
+upload, as much again, and the staging of the part block uploads, which
+grow with the layers: the Metal allocation of a 1 x 4096 x 512 ASTC 4x4
+array is 4 MiB above its 8 MiB, and that of a 1022 x 1022 x 64 array
+with levels 8 MiB above its 86 MiB. A released compressed texture is
+freed when its context next reuses the batch state of its zeroing, is
+trimmed as idle, or a refused creation reclaims, not at once.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/vrend/vrend_renderer.c | 179 +++++++++++++++++++++++++++++++++++++
- 1 file changed, 179 insertions(+)
+ src/vrend/vrend_renderer.c | 205 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 205 insertions(+)
 
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a540a5436 100644
+index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..03fba507c3e5a40a4d871105ff08d9ca2d81bc0f 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -9470,6 +9470,183 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)
+@@ -9470,6 +9470,202 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)
     return gr;
  }
  
@@ -68,6 +82,8 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 + * from: 128 x 128 blocks of 16 bytes is 256 KiB. */
 +#define VREND_ZERO_TILE_BLOCKS 128
 +
++/* Upload zero blocks over a part of one layer of a level: a face of a cube,
++ * a slice of an array or a volume. */
 +static void vrend_zero_compressed_part(struct vrend_resource *gr,
 +                                       GLenum internalformat, uint32_t level,
 +                                       uint32_t layer, uint32_t x, uint32_t y,
@@ -92,20 +108,34 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 + * as vrend_resource_zero_texture clears the others. A compressed format
 + * cannot be cleared, and uploading zero blocks over the whole texture makes
 + * the driver stage them in buffers as large as the texture, which it holds
-+ * until the GPU has finished with them and a full device memory budget
++ * until its context reuses that batch state and a full device memory budget
 + * refuses. So the zero blocks are written once, into a tile: a texture of the
 + * same format as large as the first level up to 128 x 128 blocks (256 KiB
 + * for 16-byte blocks), uploaded in calls of at most 16 KiB. The whole blocks
 + * of every level and layer are then copied from the tile on the GPU, a copy
 + * between textures of one format that needs no staging. Only the part block
 + * at the right and bottom edge of a level whose size is not a whole number of
-+ * blocks, and a level smaller than one block, are uploaded, at most 16 KiB
-+ * a call. What the driver holds for this beyond the texture is the tile and
-+ * the staging of its upload, 512 KiB at most, until the GPU is done; the tile
-+ * is deleted before the texture is returned. A host that cannot copy images,
-+ * or refuses the tile, leaves the texture as it finds it.
++ * blocks, and a level smaller than one block in either direction, are
++ * uploaded, at most 16 KiB a call, once for every layer.
++ *
++ * What the driver holds for this beyond the texture is the tile (256 KiB at
++ * most) and the staging of its upload (as much again), and the staging of
++ * every part block upload, until the context reuses that batch state or is
++ * trimmed. The part blocks of one layer take 256 KiB at most, but a texture
++ * with many layers stages them all: a level narrower than one block stages
++ * its whole image once for every layer, which is 8 MiB for an ASTC 4x4 array
++ * 1 texel wide, 4096 high and 512 deep. Copying the layers from the first
++ * instead stages one layer's part blocks, and costs more creation time.
++ *
++ * Returns false when the driver refused one of the steps, which leaves the
++ * texture partly written: the caller releases it and reports ENOMEM, so that
++ * the guest's request meets the reclaim and retry a refused storage does. An
++ * upload the driver refuses raises GL_OUT_OF_MEMORY (it fails to map the
++ * texture), and a copy allocates nothing on the product hosts. A host that
++ * cannot copy images leaves the texture as the driver gave it, and returns
++ * true.
 + */
-+static void vrend_resource_zero_compressed(struct vrend_resource *gr)
++static bool vrend_resource_zero_compressed(struct vrend_resource *gr)
 +{
 +   const enum virgl_formats fmt = gr->base.format;
 +   const GLenum internalformat = tex_conv_table[fmt].internalformat;
@@ -121,7 +151,7 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +   if (!has_feature(feat_copy_image) || !internalformat ||
 +       blocksize > sizeof(vrend_zero_blocks) ||
 +       (gr->target != GL_TEXTURE_2D && !cube && !layered))
-+      return;
++      return true;
 +
 +   const uint32_t tile_w = MIN2(gr->base.width0 / block_width,
 +                                VREND_ZERO_TILE_BLOCKS);
@@ -129,8 +159,8 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +                                VREND_ZERO_TILE_BLOCKS);
 +   GLuint tile = 0;
 +
++   vrend_drain_gl_errors();
 +   if (tile_w && tile_h) {
-+      vrend_drain_gl_errors();
 +      glGenTextures(1, &tile);
 +      glBindTexture(GL_TEXTURE_2D, tile);
 +      glTexStorage2D(GL_TEXTURE_2D, 1, internalformat, tile_w * block_width,
@@ -147,7 +177,7 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +      glBindTexture(GL_TEXTURE_2D, 0);
 +      if (vrend_storage_refused("a compressed texture's zero tile")) {
 +         glDeleteTextures(1, &tile);
-+         return;
++         return false;
 +      }
 +   }
 +
@@ -179,7 +209,8 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +               const uint32_t y = by * block_height;
 +               vrend_zero_compressed_part(gr, internalformat, level, layer, x,
 +                                          y, width - x,
-+                                          MIN2(n * block_height, height - y), n);
++                                          MIN2(n * block_height, height - y),
++                                          n);
 +            }
 +         }
 +
@@ -198,6 +229,7 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +   glBindTexture(gr->target, 0);
 +   if (tile)
 +      glDeleteTextures(1, &tile);
++   return !vrend_storage_refused("a compressed texture's zero blocks");
 +}
 +
 +/* The storage of a new texture is memory the host driver hands out again once
@@ -205,9 +237,11 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 + * the guest allocated zeroed pages for the same resource. Fill a texture the
 + * renderer created with zeros before the guest can read it, so the guest sees
 + * what it allocated and never another resource's pixels. An imported image
-+ * keeps the content it was imported with.
++ * keeps the content it was imported with. A compressed texture is filled with
++ * zero blocks, which the format decodes as it defines. Returns false when the
++ * driver refused room for the fill of a compressed texture.
 + */
-+static void vrend_resource_zero_texture(struct vrend_resource *gr)
++static bool vrend_resource_zero_texture(struct vrend_resource *gr)
 +{
 +   const enum virgl_formats fmt = gr->base.format;
 +   const GLenum format = tex_conv_table[fmt].glformat;
@@ -215,15 +249,13 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +
 +   if (!has_bit(gr->storage_bits, VREND_STORAGE_GL_TEXTURE) ||
 +       has_bit(gr->storage_bits, VREND_STORAGE_EGL_IMAGE))
-+      return;
++      return true;
 +
-+   if (util_format_is_compressed(fmt)) {
-+      vrend_resource_zero_compressed(gr);
-+      return;
-+   }
++   if (util_format_is_compressed(fmt))
++      return vrend_resource_zero_compressed(gr);
 +
 +   if (!has_feature(feat_clear_texture) || !format || !type)
-+      return;
++      return true;
 +
 +   for (uint32_t level = 0; level <= gr->base.last_level; level++) {
 +      if (vrend_state.use_gles)
@@ -231,17 +263,25 @@ index eeefd299f3ef4ad8ab0fd5ca8af0336ef81bf79c..ebe78c2786486b6a1c50e270f1307d4a
 +      else
 +         glClearTexImage(gr->gl_id, level, format, type, NULL);
 +   }
++   return true;
 +}
 +
  struct pipe_resource *
  vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args *args,
                                 void *image_oes)
-@@ -9486,6 +9663,8 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
+@@ -9486,6 +9682,15 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
     } else {
        const enum virgl_formats format = gr->base.format;
        ret = vrend_resource_alloc_texture(gr, format, image_oes);
-+      if (!ret && !image_oes)
-+         vrend_resource_zero_texture(gr);
++      if (!ret && !image_oes && !vrend_resource_zero_texture(gr)) {
++         /* A texture the fill left partly written is released, as one whose
++          * storage was refused is, and the request is refused for room. */
++         glDeleteTextures(1, &gr->gl_id);
++         gr->gl_id = 0;
++         gr->storage_bits &= ~(VREND_STORAGE_GL_TEXTURE |
++                               VREND_STORAGE_GL_IMMUTABLE);
++         ret = ENOMEM;
++      }
     }
  
     if (ret) {
