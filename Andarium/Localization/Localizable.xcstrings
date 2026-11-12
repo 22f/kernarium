@@ -3819,28 +3819,6 @@
         }
       }
     },
-    "Gyroscope" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ジャイロスコープ"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "陀螺仪"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "陀螺儀"
-          }
-        }
-      }
-    },
     "Haptics" : {
       "comment" : "A switch under Capabilities: the virtual machine's vibration and haptic feedback play on this device's Taptic Engine. Haptics is iOS's own name (Sounds & Haptics).",
       "localizations" : {
@@ -8998,28 +8976,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此裝置僅剩%1$@可用空間。%2$@正在將資料寫入儲存空間。"
-          }
-        }
-      }
-    },
-    "This device has no gyroscope or accelerometer to share." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このデバイスには利用可能なジャイロスコープや加速度センサーがありません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此设备没有可供使用的陀螺仪或加速度计。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此裝置沒有可供使用的陀螺儀或加速度計。"
           }
         }
       }

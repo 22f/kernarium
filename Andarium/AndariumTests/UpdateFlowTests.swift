@@ -40,12 +40,10 @@ final class StubDriver: RuntimeDriver {
         // The files now say the update waits for the next start.
         plan = .update(from: "r1", to: "r2")
     }
-    var motionSensors = false
     var savedGuest: Guest?
     /// The denials of the network the model told the driver, in order; nil is none.
     private(set) var networkNotices: [NetworkDenial?] = []
     func setNetworkNotice(_ denial: NetworkDenial?) { networkNotices.append(denial) }
-    func setMotionSensors(_ on: Bool) { motionSensors = on }
     /// What the Haptics switch told the driver.
     var haptics = true
     func setHaptics(_ on: Bool) { haptics = on }

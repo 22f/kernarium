@@ -18,25 +18,17 @@ public protocol MotionDevice: AnyObject, Sendable {
     func stop(_ sensor: MotionSample.Sensor)
 }
 
-/// Why the guest is not getting the device's motion.
-public enum MotionProblem: Equatable, Sendable {
-    /// The guest's motion sensor service is not there (an image without it).
-    case guestUnavailable
-    /// The device's sensors could not be read.
-    case deviceFailed
-}
-
-/// Shares the device's sensors with the guest while the person's switch is
-/// on and the guest is in front, and reads each sensor only while the guest
+/// Shares the device's sensors with the guest while the guest is in front,
+/// wherever the device has them, and reads each sensor only while the guest
 /// says an application uses it (`MotionSampling`). The axes are set when a run
 /// begins and never change per sample; a new mounting is a new run
 /// (`MotionMount` decides when). No samples are retained across a run.
 ///
 /// Where the guest follows the device's orientation (an iPhone), the same
 /// connection also gives a guest that has the device-orientation sensor the
-/// orientation the device reports (`setOrientation`), with the switch on or
-/// off. It is sent when it changes and, once, on each connection and each
-/// time the guest enables the sensor; nothing runs for it between changes.
+/// orientation the device reports (`setOrientation`), on a device without
+/// sensors too. It is sent when it changes and, once, on each connection and
+/// each time the guest enables the sensor; nothing runs for it between changes.
 ///
 /// Every call returns at once; the work is in order on one queue, and the
 /// device and the stream are only touched there.
@@ -44,7 +36,6 @@ public final class MotionSession: @unchecked Sendable {
     private let opener: any GuestStreamOpener
     private let device: any MotionDevice
     private let retryDelay: DispatchTimeInterval
-    private let problem: @Sendable (MotionProblem?) -> Void
     private let queue = DispatchQueue(label: "andarium-motion-session")
 
     // Touched only on `queue`.
@@ -54,30 +45,24 @@ public final class MotionSession: @unchecked Sendable {
     private var streamEpoch: UInt64 = 0
     private var run: UInt64 = 0
     private var applied = MotionPlan.off
-    /// The guest's service has accepted a connection in this run.
-    private var answered = false
 
     public init(
         opener: any GuestStreamOpener, device: any MotionDevice,
-        retryDelay: DispatchTimeInterval = .seconds(1),
-        problem: @escaping @Sendable (MotionProblem?) -> Void
+        retryDelay: DispatchTimeInterval = .seconds(1)
     ) {
         self.opener = opener
         self.device = device
         self.retryDelay = retryDelay
-        self.problem = problem
     }
 
     deinit { stream?.stop() }
 
-    /// What is wanted now. A run begins when the switch is on, or the guest
-    /// follows the device's orientation, and the guest is in front. It ends
-    /// when either stops being true or the axes change.
-    public func update(
-        enabled: Bool, foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false
-    ) {
+    /// What is wanted now. A run begins when the device has sensors, or the
+    /// guest follows the device's orientation, and the guest is in front. It
+    /// ends when either stops being true or the axes change.
+    public func update(foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false) {
         queue.async { [self] in
-            sampling.enabled = enabled && (device.hasAccelerometer || device.hasGyroscope)
+            sampling.hasSensors = device.hasAccelerometer || device.hasGyroscope
             sampling.followsOrientation = followsOrientation
             if !followsOrientation { sampling.orientation = nil }
             sampling.foreground = foreground
@@ -129,23 +114,12 @@ public final class MotionSession: @unchecked Sendable {
         let current = run
         sampling.connectionChanged(false)
         applied = .off
-        answered = false
         let stream = MotionStream(
             opener: opener, retryDelay: retryDelay,
             connectionChanged: { [weak self] connected in
                 self?.queue.async { [weak self] in
                     guard let self, run == current else { return }
                     sampling.connectionChanged(connected)
-                    // A service that answered is there: its connection ends
-                    // when the guest goes down or the service restarts.
-                    if connected {
-                        answered = true
-                        problem(nil)
-                    } else if !answered, sampling.enabled {
-                        // The Gyroscope switch's note: a connection held only
-                        // for the orientation says nothing about the sensors.
-                        problem(.guestUnavailable)
-                    }
                     reconcile()
                 }
             },
@@ -158,7 +132,6 @@ public final class MotionSession: @unchecked Sendable {
             }
         )
         self.stream = stream
-        problem(nil)
         streamEpoch = stream.start()
     }
 
@@ -190,7 +163,6 @@ public final class MotionSession: @unchecked Sendable {
                     self?.queue.async { [weak self] in
                         guard let self, run == current else { return }
                         endRun()
-                        problem(.deviceFailed)
                     }
                 })
             } else {

@@ -9,8 +9,8 @@ import Testing
 /// What the host sends a guest that has the device-orientation sensor, and
 /// reads from one: the mapping from iOS's orientation, the record against the
 /// golden frames, the guest's "ANC2" frames, the rules for when a record is
-/// sent, and the session over a fake guest with the Gyroscope switch on and
-/// off.
+/// sent, and the session over a fake guest, on a device with sensors and on
+/// one without.
 struct MotionOrientationTests {
     // MARK: The mapping from iOS
 
@@ -183,19 +183,19 @@ struct MotionOrientationTests {
         #expect(sampling.orientationToSend() == nil)
     }
 
-    @Test func theConnectionIsHeldForTheOrientationWithTheSwitchOffAndSensorsStayOff() {
+    @Test func theConnectionIsHeldForTheOrientationOnADeviceWithoutSensorsAndSensorsStayOff() {
         var sampling = following()
-        #expect(!sampling.enabled && sampling.wantsConnection)
+        #expect(!sampling.hasSensors && sampling.wantsConnection)
         // The legacy continuous reading of a service that has not spoken is
-        // the switch's, not the orientation's.
+        // for a device that has sensors, not for the orientation.
         #expect(sampling.plan == .off)
         sampling.received(MotionDemand(accelerometer: 20_000, orientationSensor: .active))
         #expect(sampling.plan == .off)
-        sampling.enabled = true
+        sampling.hasSensors = true
         #expect(sampling.plan != .off)
         sampling.followsOrientation = false
         #expect(sampling.wantsConnection)
-        sampling.enabled = false
+        sampling.hasSensors = false
         #expect(!sampling.wantsConnection)
         sampling.followsOrientation = true
         sampling.foreground = false
@@ -266,24 +266,22 @@ struct MotionOrientationTests {
         }
     }
 
+    /// A device with both sensors, or with none (a Mac, the Simulator).
     private final class Device: MotionDevice, @unchecked Sendable {
-        let hasAccelerometer = true
-        let hasGyroscope = true
+        let hasAccelerometer: Bool
+        let hasGyroscope: Bool
         private let lock = NSLock()
         private var running: Set<MotionSample.Sensor> = []
+        init(sensors: Bool = true) {
+            hasAccelerometer = sensors
+            hasGyroscope = sensors
+        }
         func start(
             _ sensor: MotionSample.Sensor, interval: TimeInterval,
             handler: @escaping @Sendable (Double, Double, Double) -> Void, failure: @escaping @Sendable () -> Void
         ) { lock.withLock { _ = running.insert(sensor) } }
         func stop(_ sensor: MotionSample.Sensor) { lock.withLock { _ = running.remove(sensor) } }
         var started: Set<MotionSample.Sensor> { lock.withLock { running } }
-    }
-
-    private final class Problems: @unchecked Sendable {
-        private let lock = NSLock()
-        private var seen: [MotionProblem?] = []
-        func record(_ problem: MotionProblem?) { lock.withLock { seen.append(problem) } }
-        var failures: [MotionProblem] { lock.withLock { seen.compactMap { $0 } } }
     }
 
     private func eventually(_ timeout: Double = 3, _ condition: () -> Bool) -> Bool {
@@ -295,19 +293,19 @@ struct MotionOrientationTests {
         return condition()
     }
 
-    private func session(_ guest: Guest, _ device: Device, _ problems: Problems = Problems()) -> MotionSession {
-        MotionSession(opener: guest, device: device, retryDelay: .milliseconds(40), problem: problems.record)
+    private func session(_ guest: Guest, _ device: Device) -> MotionSession {
+        MotionSession(opener: guest, device: device, retryDelay: .milliseconds(40))
     }
 
     private func fixture(_ orientation: GuestOrientation) throws -> [UInt8] {
         try MotionOrientationFixture.bytes("orientation-\(orientation.rawValue)")
     }
 
-    @Test func theSwitchOffStillGivesAGuestThatTakesThemTheDevicesOrientation() throws {
+    @Test func aDeviceWithoutSensorsStillGivesAGuestThatTakesThemTheDevicesOrientation() throws {
         let guest = Guest()
-        let device = Device()
+        let device = Device(sensors: false)
         let session = session(guest, device)
-        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 1 })
         session.setOrientation(.turnedCounterClockwise)
         session.settle()
@@ -328,58 +326,38 @@ struct MotionOrientationTests {
         #expect(guest.record() == (try fixture(.upright)))
         session.settle()
         #expect(device.started.isEmpty)
-        session.update(enabled: false, foreground: false, axes: .portrait, followsOrientation: true)
+        session.update(foreground: false, axes: .portrait, followsOrientation: true)
         #expect(guest.sawClose())
     }
 
-    @Test func aServiceWithoutTheSensorIsSentNothingAndIsNotReportedAsMissing() throws {
+    @Test func aServiceWithoutTheSensorIsSentNothing() throws {
         let guest = Guest()
-        let device = Device()
-        let problems = Problems()
-        let session = session(guest, device, problems)
-        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        let device = Device(sensors: false)
+        let session = session(guest, device)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 1 })
         session.setOrientation(.turnedClockwise)
         try guest.say("control-v1-idle")
         session.settle()
         #expect(guest.record(timeout: 100) == nil)
-        #expect(problems.failures.isEmpty)
-        session.update(enabled: false, foreground: false, axes: .portrait, followsOrientation: true)
-    }
-
-    @Test func aGuestThatIsNotThereIsNotReportedToTheSwitchWhileItIsOff() {
-        let guest = Guest()
-        let device = Device()
-        let problems = Problems()
-        let off = session(guest, device, problems)
-        guest.goDown()
-        off.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
-        usleep(200_000)
-        off.settle()
-        #expect(problems.failures.isEmpty)
-        off.update(enabled: false, foreground: false, axes: .portrait)
-        // With the switch on the same absence is the switch's problem.
-        let on = session(guest, device, problems)
-        on.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
-        #expect(eventually { problems.failures == [.guestUnavailable] })
-        on.update(enabled: false, foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait, followsOrientation: true)
     }
 
     @Test func comingBackFromTheBackgroundGivesTheCurrentOrientationOnANewConnection() throws {
         let guest = Guest()
         let device = Device()
         let session = session(guest, device)
-        session.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 1 })
         session.setOrientation(.turnedClockwise)
         try guest.say("control-v2-idle")
         #expect(guest.record() == (try fixture(.turnedClockwise)))
         // The guest leaves the foreground: the connection ends and the
         // application forgets the orientation, whose reports stop.
-        session.update(enabled: true, foreground: false, axes: .portrait, followsOrientation: true)
+        session.update(foreground: false, axes: .portrait, followsOrientation: true)
         session.setOrientation(nil)
         #expect(guest.sawClose())
-        session.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 2 })
         try guest.say("control-v2-idle")
         session.settle()
@@ -388,14 +366,14 @@ struct MotionOrientationTests {
         #expect(guest.record(timeout: 100) == nil)
         session.setOrientation(.upsideDown)
         #expect(guest.record() == (try fixture(.upsideDown)))
-        session.update(enabled: false, foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait)
     }
 
     @Test func aNewConnectionStartsFromWhatTheServiceSaysOnIt() throws {
         let guest = Guest()
-        let device = Device()
+        let device = Device(sensors: false)
         let session = session(guest, device)
-        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 1 })
         session.setOrientation(.turnedClockwise)
         // The start of a frame ("ANC"), and the connection ends with it. Read as the start of the
@@ -419,44 +397,55 @@ struct MotionOrientationTests {
         #expect(guest.record(timeout: 100) == nil)
         try guest.say("control-v2-idle")
         #expect(guest.record() == (try fixture(.turnedClockwise)))
-        session.update(enabled: false, foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait)
     }
 
-    @Test func theSwitchDecidesTheSensorsWhateverTheGuestAsksFor() throws {
+    @Test func aDeviceWithoutSensorsReadsNoneWhateverTheGuestAsksForAndTheOrientationFlows() throws {
         let guest = Guest()
-        let device = Device()
+        let device = Device(sensors: false)
         let session = session(guest, device)
-        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 1 })
         try guest.say("control-v2-all")
         session.settle()
-        // The service asks for the accelerometer and the gyroscope, and the switch is off:
+        // The service asks for the accelerometer and the gyroscope, and the device has neither:
         // no reading is started, and the orientation still flows.
         #expect(device.started.isEmpty)
         session.setOrientation(.upsideDown)
         #expect(guest.record() == (try fixture(.upsideDown)))
         #expect(device.started.isEmpty)
-        // The switch comes on: the sensors the service asked for are read, and the orientation
-        // does not stop.
-        session.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func aDeviceWithSensorsReadsWhatTheGuestAsksForAndTheOrientationDoesNotStop() throws {
+        let guest = Guest()
+        let device = Device()
+        let session = session(guest, device)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { guest.connections == 1 })
+        // The service speaks as it connects, and no application uses a sensor:
+        // nothing stays read.
+        try guest.say("control-v2-idle")
+        #expect(eventually { device.started.isEmpty && session.demand != nil })
+        // An application takes both sensors: they are read, and the orientation goes out.
+        try guest.say("control-v2-all")
         #expect(eventually { device.started == [.accelerometer, .gyroscope] })
         session.setOrientation(.upright)
         #expect(guest.record() == (try fixture(.upright)))
-        // And off again: the readings stop, the connection stays.
-        session.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        // Nobody uses a sensor again: the readings stop and the connection stays.
+        try guest.say("control-v2-idle")
         #expect(eventually { device.started.isEmpty })
         session.setOrientation(.turnedCounterClockwise)
         #expect(guest.record() == (try fixture(.turnedCounterClockwise)))
         #expect(guest.connections == 1)
-        session.update(enabled: false, foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait)
     }
 
     @Test func anOlderServiceKeepsTheOldMotionPathAndGetsNoRecord() throws {
         let guest = Guest()
         let device = Device()
-        let problems = Problems()
-        let session = session(guest, device, problems)
-        session.update(enabled: true, foreground: true, axes: .portrait, followsOrientation: true)
+        let session = session(guest, device)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
         #expect(eventually { guest.connections == 1 })
         session.setOrientation(.turnedClockwise)
         // "ANC1": the sensors it asks for are read, as before, and no orientation is sent.
@@ -468,22 +457,21 @@ struct MotionOrientationTests {
         session.setOrientation(.upsideDown)
         #expect(guest.record(timeout: 100) == nil)
         #expect(guest.connections == 1)
-        #expect(problems.failures.isEmpty)
-        session.update(enabled: false, foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait)
     }
 
     @Test func aSessionThatDoesNotFollowTheOrientationSendsNone() throws {
         let guest = Guest()
         let device = Device()
         let session = session(guest, device)
-        session.update(enabled: true, foreground: true, axes: .portrait)
+        session.update(foreground: true, axes: .portrait)
         #expect(eventually { guest.connections == 1 })
         session.setOrientation(.turnedClockwise)
         try guest.say("control-v2-orientation")
         session.settle()
         #expect(guest.record(timeout: 100) == nil)
-        // The sensors are the switch's, as before: this guest uses neither.
+        // The sensors are the applications': this guest uses neither.
         #expect(device.started.isEmpty)
-        session.update(enabled: false, foreground: false, axes: .portrait)
+        session.update(foreground: false, axes: .portrait)
     }
 }

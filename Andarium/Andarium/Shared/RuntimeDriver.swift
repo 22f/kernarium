@@ -116,8 +116,6 @@ protocol RuntimeDriver: AnyObject {
     /// the session record. The runtime keeps it; saying it again changes
     /// nothing.
     func setNetworkNotice(_ denial: NetworkDenial?)
-    /// Enables or stops sharing motion with the guest.
-    func setMotionSensors(_ on: Bool)
     /// Lets the guest play its haptics on the device, or not: the Haptics
     /// switch, which applies at once.
     func setHaptics(_ on: Bool)

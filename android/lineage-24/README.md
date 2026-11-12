@@ -151,7 +151,7 @@ layout once, so a guest created earlier keeps its home screen.
 The product installs Android's AIDL multi-HAL service and a motion sub-HAL
 (`overlay/sensors/`) advertising an accelerometer and a gyroscope with
 continuous delivery and 10 ms minimum periods. Andarium supplies samples only
-while its Gyroscope switch is on and an application uses the sensor. The sub-HAL
+while an application uses the sensor, on a device that has it. The sub-HAL
 accepts a single stream on vsock port 5556 from host CID 2 (no guest-originated
 source) and tells the host which sensors are active.
 `overlay/sensors/motion_protocol.hpp` and
