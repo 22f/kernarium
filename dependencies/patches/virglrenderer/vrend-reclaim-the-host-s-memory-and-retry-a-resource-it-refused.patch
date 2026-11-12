@@ -112,7 +112,7 @@ index 0f5e0e951f2e242b1c614ee994a20f5f8360a551..b98aaf7a98bd46580f61c6a863e02811
  #endif
  
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index 5e67afc5b95e6a74755e0d52406e46f98798a0ed..35e541f7fdd38f41f6a2ed811ad523e661336da4 100644
+index 5e1bef9517a72479abe9b478ddfe60078c367871..ed4590fc5789b00834b9c227d20472cb00377bd4 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -31,6 +31,7 @@
@@ -193,7 +193,7 @@ index 5e67afc5b95e6a74755e0d52406e46f98798a0ed..35e541f7fdd38f41f6a2ed811ad523e6
  
     int glver = get_glsl_version();
     if (glver < 0) {
-@@ -9788,10 +9810,10 @@ static void vrend_resource_zero_texture(struct vrend_resource *gr)
+@@ -9862,10 +9884,10 @@ static void vrend_resource_zero_texture(struct vrend_resource *gr)
     }
  }
  
@@ -208,7 +208,7 @@ index 5e67afc5b95e6a74755e0d52406e46f98798a0ed..35e541f7fdd38f41f6a2ed811ad523e6
  {
     struct vrend_resource *gr;
     int ret;
-@@ -9848,6 +9870,39 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
+@@ -9922,6 +9944,39 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
     return &gr->base;
  }
  
@@ -248,7 +248,7 @@ index 5e67afc5b95e6a74755e0d52406e46f98798a0ed..35e541f7fdd38f41f6a2ed811ad523e6
  /* The R8 texture of a planes-only packed YUV image is the 1x1 texture that
   * gives the image a name; the planes hold its pixels. */
  static int vrend_packed_yuv_alloc_name(struct vrend_resource *gr)
-@@ -10270,6 +10325,7 @@ void vrend_resource_sync_shm_import(struct vrend_resource *res)
+@@ -10344,6 +10399,7 @@ void vrend_resource_sync_shm_import(struct vrend_resource *res)
  
  void vrend_renderer_resource_destroy(struct vrend_resource *res)
  {
@@ -256,7 +256,7 @@ index 5e67afc5b95e6a74755e0d52406e46f98798a0ed..35e541f7fdd38f41f6a2ed811ad523e6
     if (res->packed_yuv) {
        for (unsigned i = 0; i < ARRAY_SIZE(res->packed_yuv->plane); i++)
           vrend_resource_reference(&res->packed_yuv->plane[i], NULL);
-@@ -13422,6 +13478,109 @@ void vrend_renderer_host_context_trim(void)
+@@ -13496,6 +13552,109 @@ void vrend_renderer_host_context_trim(void)
     vrend_renderer_context_trim(vrend_state.ctx0);
  }
  

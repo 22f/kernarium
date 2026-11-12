@@ -229,22 +229,31 @@ constexpr std::array kinds {
     Kind {VIRGL_FORMAT_ASTC_8x8, "ASTC_8x8", 8, 8, astcConstant},
 };
 
-constexpr std::uint32_t compressedSide = 64;
-// 64, 32, 16, 8, 4, 2 and 1 texels wide: levels from a whole number of blocks
-// down to one that is a part of a block.
-constexpr std::uint32_t compressedLastLevel = 6;
+// The shapes of compressed texture the check runs, each with every level down
+// to the one the size ends at. A side of 100 texels is a whole number of 4x4
+// blocks and leaves a part block against 8x8 blocks, its levels (50, 25, 12, 6,
+// 3, 1) leave one against both, and the last ones are smaller than a block. A
+// side of 1100 texels is 275 blocks of 4x4, more than one tile of the host's
+// zero fill across.
+struct Shape {
+    std::uint32_t side;
+    std::uint32_t lastLevel;
+};
+
+constexpr std::array shapes {Shape {100, 6}, Shape {1100, 2}};
 
 // A compressed texture of the kind, with guest storage for every level.
 class CompressedTexture final {
 public:
     CompressedTexture(VirglRenderer& renderer, std::uint32_t resourceId,
-        const Kind& kind)
+        const Kind& kind, const Shape& shape)
         : renderer_ {renderer}
         , resourceId_ {resourceId}
         , kind_ {kind}
+        , shape_ {shape}
     {
         std::size_t total = 0;
-        for (std::uint32_t level = 0; level <= compressedLastLevel; ++level) {
+        for (std::uint32_t level = 0; level <= shape_.lastLevel; ++level) {
             offsets_.push_back(total);
             total += static_cast<std::size_t>(blocksWide(level)) *
                 blocksHigh(level) * kind_.pattern.size();
@@ -255,11 +264,11 @@ public:
                     .target = pipeTexture2d,
                     .format = kind_.format,
                     .bind = virglBindSamplerView,
-                    .width = compressedSide,
-                    .height = compressedSide,
+                    .width = shape_.side,
+                    .height = shape_.side,
                     .depth = 1,
                     .arraySize = 1,
-                    .lastLevel = compressedLastLevel,
+                    .lastLevel = shape_.lastLevel,
                 }) == 0,
             "the compressed texture could not be created");
         // The renderer keeps this array, not a copy of it.
@@ -293,7 +302,7 @@ public:
             else
                 std::memset(storage_.data() + offset, 0, kind_.pattern.size());
         }
-        for (std::uint32_t level = 0; level <= compressedLastLevel; ++level) {
+        for (std::uint32_t level = 0; level <= shape_.lastLevel; ++level) {
             const VirglRenderer::Box box {
                 .width = levelSize(level),
                 .height = levelSize(level),
@@ -308,9 +317,9 @@ public:
         }
     }
 
-    [[nodiscard]] static std::uint32_t levelSize(std::uint32_t level) noexcept
+    [[nodiscard]] std::uint32_t levelSize(std::uint32_t level) const noexcept
     {
-        return std::max(compressedSide >> level, 1U);
+        return std::max(shape_.side >> level, 1U);
     }
 
 private:
@@ -326,6 +335,7 @@ private:
     VirglRenderer& renderer_;
     std::uint32_t resourceId_;
     const Kind& kind_;
+    const Shape& shape_;
     std::vector<std::size_t> offsets_;
     std::vector<std::uint8_t> storage_;
     std::array<iovec, 1> vectors_ {};
@@ -333,36 +343,36 @@ private:
 
 // The texels a texture shows at one level, decoded by the hardware.
 [[nodiscard]] std::vector<std::uint8_t> samplesOf(VirglRenderer& renderer,
-    Pipeline& pipeline, std::uint32_t resourceId, const Kind& kind, std::uint32_t level)
+    Pipeline& pipeline, const CompressedTexture& texture, const Kind& kind,
+    std::uint32_t level)
 {
     const std::uint32_t view = pipeline.newHandle();
     Commands commands;
     commands.add(commandCreateObject, objectSamplerView,
-        {view, resourceId, kind.format | (pipeTexture2d << 24U), 0,
+        {view, texture.id(), kind.format | (pipeTexture2d << 24U), 0,
             level | (level << 8U), 0U | (1U << 3U) | (2U << 6U) | (3U << 9U)});
     require(commands.submit(renderer) == 0,
         "the sampler view could not be created");
-    return pipeline.sample(view, CompressedTexture::levelSize(level),
-        CompressedTexture::levelSize(level));
+    return pipeline.sample(
+        view, texture.levelSize(level), texture.levelSize(level));
 }
 
 void checkCompressed(VirglRenderer& renderer, Pipeline& pipeline,
-    std::uint32_t& resourceId)
+    std::uint32_t& resourceId, const Shape& shape)
 {
     for (const Kind& kind : kinds) {
         // What a block of zeros decodes to at each level, and the control that
         // the pattern decodes to something else.
-        std::array<std::vector<std::uint8_t>, compressedLastLevel + 1> zeros;
+        std::vector<std::vector<std::uint8_t>> zeros(shape.lastLevel + 1U);
         {
-            CompressedTexture zero(renderer, resourceId++, kind);
+            CompressedTexture zero(renderer, resourceId++, kind, shape);
             zero.fill(false);
-            CompressedTexture pattern(renderer, resourceId++, kind);
+            CompressedTexture pattern(renderer, resourceId++, kind, shape);
             pattern.fill(true);
-            for (std::uint32_t level = 0; level <= compressedLastLevel;
-                 ++level) {
-                zeros[level] = samplesOf(renderer, pipeline, zero.id(), kind, level);
+            for (std::uint32_t level = 0; level <= shape.lastLevel; ++level) {
+                zeros[level] = samplesOf(renderer, pipeline, zero, kind, level);
                 check(zeros[level] !=
-                        samplesOf(renderer, pipeline, pattern.id(), kind, level),
+                        samplesOf(renderer, pipeline, pattern, kind, level),
                     "the pattern and a block of zeros decode alike");
             }
         }
@@ -374,41 +384,26 @@ void checkCompressed(VirglRenderer& renderer, Pipeline& pipeline,
                 for (std::uint32_t index = 0; index < texturesPerRound;
                      ++index) {
                     written.push_back(std::make_unique<CompressedTexture>(
-                        renderer, resourceId++, kind));
+                        renderer, resourceId++, kind, shape));
                     written.back()->fill(true);
                 }
             }
             std::vector<std::unique_ptr<CompressedTexture>> fresh;
             for (std::uint32_t index = 0; index < texturesPerRound; ++index) {
                 fresh.push_back(std::make_unique<CompressedTexture>(
-                    renderer, resourceId++, kind));
+                    renderer, resourceId++, kind, shape));
                 ++total;
                 bool differs = false;
-                for (std::uint32_t level = 0; level <= compressedLastLevel;
-                     ++level)
+                for (std::uint32_t level = 0; level <= shape.lastLevel; ++level)
                     differs = differs ||
-                        samplesOf(renderer, pipeline, fresh.back()->id(), kind,
-                            level) !=
-                            zeros[level];
+                        samplesOf(renderer, pipeline, *fresh.back(), kind,
+                            level) != zeros[level];
                 differing += differs ? 1U : 0U;
-                if (differs && differing == 1U) {
-                    for (std::uint32_t level = 0; level <= compressedLastLevel;
-                         ++level) {
-                        const auto got = samplesOf(renderer, pipeline,
-                            fresh.back()->id(), kind, level);
-                        std::fprintf(stderr,
-                            "  level %u: fresh %u,%u,%u,%u zero %u,%u,%u,%u%s\n",
-                            level, got[0], got[1], got[2], got[3],
-                            zeros[level][0], zeros[level][1], zeros[level][2],
-                            zeros[level][3],
-                            got == zeros[level] ? "" : " DIFFERS");
-                    }
-                }
             }
         }
         std::fprintf(stderr,
-            "%s: %u of %u new textures decode other than zero blocks\n",
-            kind.name, differing, total);
+            "%s %ux%u: %u of %u new textures decode other than zero blocks\n",
+            kind.name, shape.side, shape.side, differing, total);
         check(differing == 0,
             "a new compressed texture showed what a released one held");
     }
@@ -431,7 +426,8 @@ int main()
     std::uint32_t handle = firstTransientHandle;
     checkMultisampled(*renderer, resourceId, handle, fence);
     Pipeline pipeline(*renderer);
-    checkCompressed(*renderer, pipeline, resourceId);
+    for (const Shape& shape : shapes)
+        checkCompressed(*renderer, pipeline, resourceId, shape);
     if (failureCount != 0)
         return 1;
     std::fputs("Texture zero fill (special): ok\n", stderr);
