@@ -29,7 +29,7 @@ using HostIpv4 = std::array<std::uint8_t, 4>;
 class HostAddresses final {
 public:
 	/* A table that holds every address an interface could hold: what the
-	 * provider judges new traffic by while it cannot tell which addresses
+	 * provider judges traffic by while it cannot tell which addresses
 	 * the host has (the system has not listed them for too long), so that
 	 * nothing is let through on the strength of a list it no longer trusts.
 	 * It lacks what no table holds: 0.0.0.0, 255.255.255.255 and the

@@ -174,14 +174,16 @@ bool SlirpProvider::answer_locally(std::span<const std::byte> frame) noexcept
 		if (needs_table)
 			refresh_host_addresses_if_stale();
 		/* A table the system has not let the provider refresh for a few
-		 * seconds judges nothing new: until a read succeeds, new traffic
-		 * is refused as if every address were the host's. */
+		 * seconds judges nothing: until a read succeeds, whatever the
+		 * table decides is refused as if every address were the host's,
+		 * the datagrams of a flow already open with the rest. */
 		const bool trusted = !needs_table || host_addresses_trusted();
 		if (!trusted && !host_addresses_distrust_logged_) {
 			host_addresses_distrust_logged_ = true;
 			std::fprintf(stderr, "Darwin user network: the host's "
-					     "addresses cannot be read; new "
-					     "connections are refused\n");
+					     "addresses cannot be read; "
+					     "connection attempts, datagrams "
+					     "and ICMP are refused\n");
 		}
 		classified = dns::classify_host_bound_frame(
 			bytes, trusted ? host_addresses_ :

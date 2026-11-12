@@ -182,10 +182,12 @@ patches provide the behaviors the `slirp-network-*` tests check.
   an address that is not one of SLiRP's own services finds the last listing a
   second old, never otherwise, so a quiet guest costs no wake-up and no system
   call, and the network does not open without a first listing. A listing that
-  fails is tried again by the next such frame, at most every 100 ms; once the
-  last good listing is four seconds old, new flows are refused as if every
-  address were the host's (a DHCP broadcast and multicast excepted, which no
-  interface holds), until a listing succeeds. The virtual network is no
+  fails is tried again by the next such frame. Once the last good listing is
+  four seconds old, every address counts as the host's until a listing
+  succeeds (the limited broadcast address, which carries DHCP, stays outside
+  it): each connect attempt, UDP datagram and ICMP packet that the table
+  judges is refused, those of flows already open included, and only the
+  segments of TCP connections already open pass. The virtual network is no
   exception: SLiRP connects a flow to every address of it but the gateway as
   given, so an address of it that a host interface holds is the host's and is
   refused like any other. Only what SLiRP and the provider serve at their own

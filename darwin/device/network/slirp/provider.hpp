@@ -58,8 +58,8 @@ inline constexpr std::chrono::seconds host_address_max_age{1};
  * again, at most this often. */
 inline constexpr std::chrono::milliseconds host_address_retry_interval{100};
 /* A table whose last good read is older than host_address_max_age plus this
- * is no longer trusted: new traffic the table judges is refused until a read
- * succeeds. */
+ * is no longer trusted: what the table judges is refused until a read
+ * succeeds, the datagrams of a flow already open included. */
 inline constexpr std::chrono::seconds host_address_failure_grace{3};
 
 /* One host listening socket forwarded into the guest. Registrations are
@@ -282,7 +282,7 @@ private:
 	 * when the last good read is older than host_address_max_age, and after a
 	 * failed read not before host_address_retry_interval has passed. */
 	void refresh_host_addresses_if_stale() noexcept;
-	/* Whether the table can still judge new traffic: it can until the last
+	/* Whether the table can still judge traffic: it can until the last
 	 * good read is older than host_address_max_age plus
 	 * host_address_failure_grace. */
 	[[nodiscard]] bool host_addresses_trusted() const noexcept;
