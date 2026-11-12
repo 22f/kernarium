@@ -520,10 +520,12 @@ struct StallWatch::State final {
 		event.low_power = state.lowPowerMode;
 		event.processors_start = state.activeProcessors;
 		event.pressure = ::uml::platform::publishedMemoryPressure();
-		/* The five seconds before, from the samples the ring holds. */
+		/* The five seconds before, from the samples the ring holds; when the
+		 * sample before the newest is older (the watch slept between them),
+		 * the span since that one. */
 		if (recent_count >= 2) {
 			const Context &last = recent[recent_count - 1];
-			std::size_t first = recent_count - 1;
+			std::size_t first = recent_count - 2;
 			while (first > 0 &&
 			       last.at_ns - recent[first - 1].at_ns <= before_window_ns)
 				--first;

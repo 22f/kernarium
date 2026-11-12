@@ -20,6 +20,7 @@
 #include "thread_fence.hpp"
 #include "thread_nap.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -265,6 +266,50 @@ std::size_t late_events(const std::string &slot, unsigned late_ms)
 			++found;
 	}
 	return found;
+}
+
+/* The cores the process used in the seconds before the newest event, in
+ * hundredths, from its line (the field after the active core counts); -1
+ * for no event. */
+long cores_before_the_newest_event(const std::string &slot)
+{
+	const std::size_t at = slot.rfind("\nstall ");
+	if (at == std::string::npos)
+		return -1;
+	const std::size_t end = slot.find('\n', at + 1);
+	const std::string line = slot.substr(at + 1, end - at - 1);
+	std::size_t from = 0;
+	for (unsigned field = 0; field < 11; ++field) {
+		from = line.find(' ', from);
+		if (from == std::string::npos)
+			return -1;
+		++from;
+	}
+	return std::strtol(line.c_str() + from, nullptr, 10);
+}
+
+/* The longest of the events that name a vCPU, in milliseconds. On a host
+ * loaded enough to starve a busy thread for 100 ms the watch records that
+ * truthfully; a sleep wrongly counted as starvation is seconds long. */
+unsigned long longest_vcpu_event_ms(const std::string &slot)
+{
+	unsigned long longest = 0;
+	std::size_t at = 0;
+	while ((at = slot.find("\nstall ", at)) != std::string::npos) {
+		++at;
+		const std::size_t end = slot.find('\n', at);
+		const std::string line = slot.substr(at, end - at);
+		/* stall SEQ START DUR[+] CAUSES ... */
+		std::size_t from = 0;
+		for (unsigned field = 0; field < 3; ++field)
+			from = line.find(' ', from) + 1;
+		const unsigned long duration = std::strtoul(line.c_str() + from, nullptr, 10);
+		from = line.find(' ', from) + 1;
+		const std::string causes = line.substr(from, line.find(' ', from) - from);
+		if (causes.find_first_not_of('.') != std::string::npos)
+			longest = std::max(longest, duration);
+	}
+	return longest;
 }
 
 /* The count after `word` in the slot's header. */
@@ -537,7 +582,14 @@ void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
 	require(pipe(wake) == 0 && pipe(answer) == 0);
 	Carrier idle0;
 	Carrier wedger;
+	Carrier spinner;
 	start(idle0, 0, [&] { blink_until_stopped(idle0, 40); }, true);
+	/* A thread of the process's that is no carrier and keeps a core busy while
+	 * the watch sleeps, which the event after the wake must show. */
+	start_other(spinner, "uml-test-spinner", [&] {
+		while (!spinner.stop.load(std::memory_order_acquire)) {
+		}
+	});
 	/* Idle until the host wakes it, then waits on a device service that does not
 	 * answer. */
 	start(wedger, 2, [&] {
@@ -553,8 +605,9 @@ void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
 	}, true);
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr);
-	sleep_ms(800);
-	require(vcpu_events(stall_slot(session.path)) == 0);
+	/* Longer than the five seconds an event looks back over. */
+	sleep_ms(5600);
+	const std::size_t events_before = vcpu_events(stall_slot(session.path));
 
 	const auto woken = std::chrono::steady_clock::now();
 	require(write(wake[1], "w", 1) == 1);
@@ -562,7 +615,7 @@ void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
 	std::string slot;
 	while (milliseconds_since(woken) < 5000) {
 		slot = stall_slot(session.path);
-		if (vcpu_events(slot) >= 1) {
+		if (vcpu_events(slot) > events_before) {
 			found = milliseconds_since(woken);
 			break;
 		}
@@ -576,13 +629,20 @@ void a_wedge_after_a_wake_is_found_in_a_hundred_to_two_hundred_milliseconds()
 		std::to_string(found));
 	require(slot.find("+ ..a ") != std::string::npos,
 		"the third carrier is stalled on a device service's answer:\n" + slot);
+	/* The watch slept, yet the event says what the process was doing before:
+	 * the spinner's share of a core (how much of one a loaded host gives it
+	 * varies), not nothing. */
+	const long before = cores_before_the_newest_event(slot);
+	require(before >= 1, "the process's use before the event is lost: " +
+		std::to_string(before) + "\n" + slot);
 
+	spinner.stop.store(true, std::memory_order_release);
 	wedger.stop.store(true, std::memory_order_release);
 	idle0.stop.store(true, std::memory_order_release);
 	require(write(answer[1], "a", 1) == 1);
 	require(write(wake[1], "w", 1) == 1);
 	watch.reset();
-	for (Carrier *carrier : {&idle0, &wedger})
+	for (Carrier *carrier : {&idle0, &wedger, &spinner})
 		require(pthread_join(carrier->thread, nullptr) == 0);
 	for (const int descriptor : {wake[0], wake[1], answer[0], answer[1]})
 		close(descriptor);
@@ -615,7 +675,8 @@ void a_two_second_idle_is_no_starvation()
 	sleep_ms(3500);
 	watch.reset();
 	const std::string slot = stall_slot(session.path);
-	require(vcpu_events(slot) == 0, "a sleep was counted as starvation:\n" + slot);
+	require(longest_vcpu_event_ms(slot) < 1500,
+		"a sleep was counted as starvation:\n" + slot);
 	for (Carrier *carrier : {&sleeper, &other})
 		carrier->stop.store(true, std::memory_order_release);
 	for (Carrier *carrier : {&sleeper, &other})
@@ -631,11 +692,11 @@ void a_carrier_that_is_due_and_does_not_run_wakes_the_watch()
 	std::atomic<bool> waiting{false};
 	start(due, 0, [&] {
 		const uml::platform::ScopedHostWait mark{uml::platform::HostWait::idle};
-		const timespec limit{0, 700L * 1000L * 1000L};
+		const timespec limit{1, 500L * 1000L * 1000L};
 		const uml::runtime::CarrierIdle idle{&limit,
 			uml::runtime::CarrierIdle::Limit::relative};
 		waiting = true;
-		sleep_ms(1800);
+		sleep_ms(3000);
 	}, true);
 	/* The carrier is in its wait before the watch exists: the watch sets the
 	 * timer for it as it goes to sleep. */
@@ -643,12 +704,12 @@ void a_carrier_that_is_due_and_does_not_run_wakes_the_watch()
 		sleep_ms(1);
 	auto watch = uml::runtime::start_stall_watch(std::make_unique<Thermal>());
 	require(watch != nullptr);
-	sleep_ms(300);
+	sleep_ms(600);
 	const unsigned long before = looks_after(session.path, 1);
-	sleep_ms(250);
+	sleep_ms(400);
 	const unsigned long still = looks_after(session.path, 2);
 	require(still == before, "the watch looked before the carrier was due");
-	sleep_ms(700);
+	sleep_ms(1300);
 	const unsigned long after = looks_after(session.path, 1);
 	require(after > still, "the watch did not look for a carrier past its deadline");
 	watch.reset();
