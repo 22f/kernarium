@@ -664,12 +664,18 @@ public:
 			 * this one is at. */
 			state.space->observe(changes, code_change_reader_,
 				code_change_context_);
+			/* A place goes to make room, but not an address space
+			 * another executor is running: retiring it here would
+			 * free the code that executor is in. */
 			window_.trim([this](std::uint64_t retiring) {
 #if UML_GADGET_CACHE_CENSUS
 				if (!window_.generations.contains(retiring))
 					++lru_tomb_;
 #endif
 				retire(retiring);
+			},
+			[now = gadget_cache::epoch()](const Generation &held) {
+				return held.space->in_use_elsewhere(now);
 			});
 			return;
 		}

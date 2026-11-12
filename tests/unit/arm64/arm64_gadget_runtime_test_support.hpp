@@ -10,6 +10,8 @@
 #include "jit_test_support.hpp"
 
 #include "cpu/arm64/gadgets/executor.hpp"
+#include "cpu/gadget_cache_budget.hpp"
+#include "wait_until.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -75,6 +77,18 @@ struct Outcome final {
 	}
 	require(false);
 	return executed;
+}
+
+/* Wait until no executor has entered any address space for a whole activity
+ * window (about 175 ms), after which a cache's window takes none for one that
+ * another executor is running. Never short: the clock only advances. */
+inline void let_activity_lapse()
+{
+	namespace budget = ::uml::cpu::gadget_cache;
+	const auto until = budget::epoch() + budget::window_epochs + 1;
+	require(::uml::testing::waitUntil(
+		[until] { return budget::epoch() >= until; },
+		std::chrono::seconds{10}, std::chrono::milliseconds{5}));
 }
 
 /* `movz xreg, #value`. */

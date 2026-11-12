@@ -275,6 +275,15 @@ public:
 		return account_;
 	}
 
+	/* Whether an executor besides the one asking is probably running this
+	 * address space at epoch `now`: another holds it, and some executor
+	 * entered it within the account's window of activity. The asking
+	 * executor holds the space, so a space it alone holds never is. */
+	[[nodiscard]] bool in_use_elsewhere(std::uint64_t now) const
+	{
+		return attached_.size() > 1 && account_.activity(now) != 0;
+	}
+
 	/* ---- Bodies ---- */
 
 	/* The pages a build will cover, held in the page index until unpinned,

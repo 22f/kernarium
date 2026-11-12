@@ -34,9 +34,11 @@
 #include "cpu/x86_64/gadgets/program.hpp"
 #include "memory/guest_address_space.hpp"
 #include "require.hpp"
+#include "wait_until.hpp"
 #include "x86_64_code_change_history.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +58,7 @@ namespace {
 using namespace uml::cpu::x86_64;
 using uml::cpu::EngineEvent;
 using uml::testing::require;
+using uml::testing::waitUntil;
 
 using uml::test::x86_64_code_change_history::Sequences;
 using uml::test::x86_64_code_change_history::read_code_changes;
@@ -215,11 +218,25 @@ void load_writer(Memory &memory)
 	memory.load(writer_block, {0x88, 0x1a, 0x0f, 0x05});
 }
 
-void prepare(gadgets::Executor &executor, Memory &memory, Sequences &sequences)
+void prepare(gadgets::Executor &executor, Memory &memory, Sequences &sequences,
+	std::uint64_t in = generation)
 {
-	executor.prepare(memory, generation, sequences.mapping_changes,
+	executor.prepare(memory, in, sequences.mapping_changes,
 		sequences.code_changes, &sequences, read_sequences,
 		read_code_changes);
+}
+
+/* Wait until no executor has entered any address space for a whole activity
+ * window (about 175 ms), after which a cache's window takes none for one that
+ * another executor is running. Never short: the clock only advances. */
+void let_activity_lapse()
+{
+	namespace gadget_cache = uml::cpu::gadget_cache;
+	const auto until =
+		gadget_cache::epoch() + gadget_cache::window_epochs + 1;
+	require(waitUntil([until] { return gadget_cache::epoch() >= until; },
+		std::chrono::seconds{10}, std::chrono::milliseconds{5}),
+		"the activity window did not lapse");
 }
 
 [[nodiscard]] gadgets::ProgramSelection select(gadgets::Executor &executor,
@@ -407,6 +424,74 @@ void test_an_unrelated_executor_letting_go_keeps_the_others()
 	require(back.cache_hit && first.cache_diagnostics().translations == 2,
 		"an executor that came back to the address space built its "
 		"blocks again");
+}
+
+/* An executor whose window is full does not retire an address space another
+ * executor is running, which would free, as the last holder, the code that
+ * executor is in. The second executor holds only the entry block and runs the
+ * next through the link the first armed, so the first's slots are what keep
+ * that block alive. The window retires an address space only it holds, or one
+ * nobody has entered for an activity window, in its place. */
+void test_a_window_keeps_the_address_space_another_executor_runs()
+{
+	/* The window keeps eight address spaces, as the arm64 cache does. */
+	constexpr std::uint64_t window = 8;
+	World world;
+	auto &first = world.add();
+	auto &second = world.add();
+	(void)select(first, world.memory, entry_block);
+	(void)select(first, world.memory, target_block);
+	const auto x = select(second, world.memory, entry_block);
+	require(chained(run(second, world.memory, *x.program)),
+		"the chain was not armed");
+	require(second.cache_diagnostics().translations == 0,
+		"the second executor built what the address space held");
+
+	for (std::uint64_t other = 1; other <= window + 1; ++other) {
+		prepare(first, world.memory, world.sequences,
+			generation + other);
+		/* The second executor enters the address space each turn. */
+		prepare(second, world.memory, world.sequences);
+	}
+	require(first.resident_generations() == window,
+		"the first executor's window did not stay full");
+	require(chained(run(second, world.memory, *x.program)),
+		"an executor retired an address space another was running");
+	require(second.cache_diagnostics().translations == 0,
+		"the second executor built a block again");
+	/* The first executor still holds its blocks. */
+	prepare(first, world.memory, world.sequences);
+	const auto kept = select(first, world.memory, target_block);
+	require(kept.cache_hit && first.cache_diagnostics().translations == 2,
+		"the first executor lost the address space it shared");
+
+	/* Once the second executor has stopped entering it, the first's window
+	 * retires it in its turn, and the block only the first held goes. */
+	let_activity_lapse();
+	for (std::uint64_t other = 1; other <= window + 1; ++other)
+		prepare(first, world.memory, world.sequences,
+			generation + other);
+	require(stopped_at_the_jump(run(second, world.memory, *x.program)),
+		"an address space nobody was running stayed in the window");
+}
+
+/* An address space only one executor holds is retired in its turn, however
+ * lately that executor ran it. */
+void test_a_window_retires_a_space_no_other_executor_holds()
+{
+	constexpr std::uint64_t window = 8;
+	World world;
+	auto &only = world.add();
+	(void)select(only, world.memory, entry_block);
+	for (std::uint64_t other = 1; other <= window; ++other)
+		prepare(only, world.memory, world.sequences,
+			generation + other);
+	require(only.resident_generations() == window,
+		"the window did not retire the oldest address space");
+	prepare(only, world.memory, world.sequences);
+	const auto again = select(only, world.memory, entry_block);
+	require(!again.cache_hit && only.cache_diagnostics().translations == 2,
+		"an address space nobody else held stayed in the window");
 }
 
 void test_executors_built_for_different_exceptions_share_nothing()
@@ -870,6 +955,8 @@ int main(int argc, char **argv)
 		test_a_second_executor_adopts();
 		test_a_code_change_reaches_every_executors_links();
 		test_an_unrelated_executor_letting_go_keeps_the_others();
+		test_a_window_keeps_the_address_space_another_executor_runs();
+		test_a_window_retires_a_space_no_other_executor_holds();
 		test_executors_built_for_different_exceptions_share_nothing();
 		test_executors_keep_their_own_when_asked();
 		test_a_shared_space_is_never_swept();

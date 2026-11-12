@@ -735,6 +735,15 @@ public:
 		account_.ran(epoch);
 	}
 
+	/* Whether an executor besides the one asking is probably running this
+	 * address space at epoch `now`: another holds it, and some executor
+	 * entered it within the account's window of activity. The asking
+	 * executor holds the space, so a space it alone holds never is. */
+	[[nodiscard]] bool in_use_elsewhere(std::uint64_t now) const
+	{
+		return attached_.size() > 1 && account_.activity(now) != 0;
+	}
+
 #if UML_GADGET_SWEEP_STRESS
 	[[nodiscard]] std::size_t stress_arena_bytes() const noexcept
 	{
@@ -2428,8 +2437,9 @@ private:
 
 	/* The address space translation is currently running in, bound to its
 	 * space -- made, or shared with the other executors running it -- on
-	 * first sight, when the least recently current one beyond the resident
-	 * bound is retired.
+	 * first sight, when one beyond the resident bound is retired: the least
+	 * recently current, unless another executor is running it (the
+	 * window's victim()).
 	 *
 	 * prepare() sets this on every switch, but its caller may skip the call
 	 * when nothing changed, and on the very first entry there is nothing to
@@ -2454,12 +2464,18 @@ private:
 				},
 				state.changes, announcement_);
 			touch(window_.current_generation);
+			/* A place goes to make room, but not an address space
+			 * another executor is running: retiring it here would
+			 * free the code that executor is in. */
 			window_.trim([this](unsigned long generation) {
 #if UML_GADGET_CACHE_CENSUS
 				if (!window_.generations.contains(generation))
 					++lru_tomb_;
 #endif
 				retire(generation);
+			},
+			[now = gadget_cache::epoch()](const Generation &held) {
+				return held.space->in_use_elsewhere(now);
 			});
 		}
 		window_.bind(*window_.current);

@@ -115,7 +115,10 @@ void retiring_in_one_executor_keeps_the_other()
 	require(second.cache_diagnostics().adoptions == 1);
 
 	/* Nine other address spaces retire this one from the first executor,
-	 * which held the successor alone: its link goes with it. */
+	 * which held the successor alone: its link goes with it. Neither
+	 * executor has entered it for a while, so its window takes it for an
+	 * address space nobody is running. */
+	let_activity_lapse();
 	std::vector<std::unique_ptr<JitBacking>> others;
 	std::vector<std::unique_ptr<JitMapping>> mappings;
 	for (unsigned long other = 0;
@@ -141,6 +144,55 @@ void retiring_in_one_executor_keeps_the_other()
 	require(cpu.registers[0] == 8 && cpu.registers[1] == 9);
 	require(first.cache_diagnostics().translations == before.translations);
 	require(first.cache_diagnostics().adoptions == before.adoptions + 1);
+}
+
+/* An executor whose window is full does not retire an address space another
+ * executor is running, which would free, as the last holder, the code that
+ * executor is in: the oldest address space only it holds goes instead. The
+ * second executor reaches the first's bodies through the links the first
+ * armed, and holds only the entry block. */
+void a_window_keeps_the_address_space_another_executor_runs()
+{
+	constexpr unsigned long generation = 944;
+	JitBacking backing{1};
+	put_program(backing, 6, 7);
+	JitMapping mapping{generation, code_base, backing, 1};
+	StaticGuestMemory first_memory;
+	StaticGuestMemory second_memory;
+	gadgets::GadgetExecutor first{sharing_options()};
+	gadgets::GadgetExecutor second{sharing_options()};
+	arm64::CpuState cpu{};
+	require(run_to_system_call(first, first_memory, generation, cpu,
+		code_base) == 4);
+	require(run_to_system_call(second, second_memory, generation, cpu,
+		code_base) == 4);
+	require(second.cache_diagnostics().translations == 0);
+	require(second.cache_diagnostics().adoptions == 1);
+
+	std::vector<std::unique_ptr<JitBacking>> others;
+	std::vector<std::unique_ptr<JitMapping>> mappings;
+	for (unsigned long other = 0;
+	     other <= UML_GADGET_RESIDENT_GENERATIONS; ++other) {
+		others.push_back(std::make_unique<JitBacking>(1));
+		put_program(*others.back(), 1, 2);
+		mappings.push_back(std::make_unique<JitMapping>(
+			970 + other, code_base, *others.back(), 1));
+		require(run_to_system_call(first, first_memory, 970 + other,
+			cpu, code_base) == 4);
+		/* The second executor runs it throughout. */
+		require(run_to_system_call(second, second_memory, generation,
+			cpu, code_base) == 4);
+	}
+
+	/* Neither executor lost its bodies: the second translates nothing and
+	 * the first finds its own, with no adoption. */
+	require(second.cache_diagnostics().translations == 0);
+	const auto before = first.cache_diagnostics();
+	require(run_to_system_call(first, first_memory, generation, cpu,
+		code_base) == 4);
+	require(cpu.registers[0] == 6 && cpu.registers[1] == 7);
+	require(first.cache_diagnostics().translations == before.translations);
+	require(first.cache_diagnostics().adoptions == before.adoptions);
 }
 
 /* Executors built with other options make other streams, so they never
@@ -252,6 +304,7 @@ int main()
 	a_second_executor_adopts_instead_of_translating();
 	a_code_change_reaches_every_executor();
 	retiring_in_one_executor_keeps_the_other();
+	a_window_keeps_the_address_space_another_executor_runs();
 	different_options_do_not_share();
 	a_shared_space_is_never_swept();
 	concurrent_executors_follow_code_changes();

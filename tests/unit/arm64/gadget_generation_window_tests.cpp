@@ -2,6 +2,7 @@
 #include "cpu/gadget_generation_window.hpp"
 #include "require.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -39,6 +40,23 @@ void retire(Window &window, unsigned long generation, bool tombstone = false)
 	}
 	if (!tombstone)
 		window.forget_place(generation);
+}
+
+/* An address space no other executor runs. */
+constexpr auto idle = [](const State &) { return false; };
+
+/* Trim the window, retiring as a cache does, and say what went in order. */
+template <typename Running>
+std::vector<unsigned long> trim(Window &window, Running &&running)
+{
+	std::vector<unsigned long> retired;
+	window.trim(
+		[&](unsigned long generation) {
+			retired.push_back(generation);
+			retire(window, generation);
+		},
+		running);
+	return retired;
 }
 
 void ids_count_from_one_and_are_recycled_last_in_first_out()
@@ -164,25 +182,23 @@ void the_order_keeps_the_least_recently_current_first()
 {
 	Window window;
 	std::vector<unsigned long> retired;
-	const auto trim = [&] {
-		window.trim([&](unsigned long generation) {
-			retired.push_back(generation);
-			retire(window, generation);
-		});
+	const auto trim_window = [&] {
+		const auto went = trim(window, idle);
+		retired.insert(retired.end(), went.begin(), went.end());
 	};
 	for (unsigned long generation = 1; generation <= limit; ++generation)
 		admit(window, generation);
-	trim();
+	trim_window();
 	require(retired.empty() && window.generations.size() == limit);
 
 	/* Current again, 1 is the most recent and 2 the oldest. */
 	window.touch(1);
 	require((window.order == std::vector<unsigned long>{2, 3, 1}));
 	admit(window, 4);
-	trim();
+	trim_window();
 	require((retired == std::vector<unsigned long>{2}));
 	admit(window, 5);
-	trim();
+	trim_window();
 	require((retired == std::vector<unsigned long>{2, 3}));
 	require((window.order == std::vector<unsigned long>{1, 4, 5}));
 	require(window.generations.size() == limit);
@@ -215,16 +231,212 @@ void a_tombstone_holds_a_place_and_no_address_space()
 	 * long, retires the tombstone with no address space to let go of. */
 	auto &fourth = admit(window, 4);
 	require(fourth.id == 1 && window.owners.size() == ids);
-	std::vector<unsigned long> retired;
-	window.trim([&](unsigned long generation) {
-		retired.push_back(generation);
-		retire(window, generation);
-	});
+	const auto retired = trim(window, idle);
 	require((retired == std::vector<unsigned long>{1}));
 	require((window.order == std::vector<unsigned long>{2, 3, 4}));
 	require(window.generations.size() == limit);
 	/* Retiring the tombstone freed no id. */
 	require(window.free_ids.empty());
+}
+
+/* The address spaces another executor is running, by number: what a cache's
+ * `running` answers from the space's holders and activity. */
+struct Running final {
+	std::vector<unsigned long> generations;
+	std::size_t asked{};
+
+	bool operator()(const State &state)
+	{
+		++asked;
+		return std::find(generations.begin(), generations.end(),
+			       state.value) != generations.end();
+	}
+};
+
+/* The window of `count` address spaces, 1 the oldest and `count` the one just
+ * made current. */
+Window window_of(unsigned long count)
+{
+	Window window;
+	for (unsigned long generation = 1; generation <= count; ++generation)
+		admit(window, generation);
+	return window;
+}
+
+/* Name `count` slots in an address space's state, as stores into them do. */
+void name_slots(Window &window, unsigned long generation, std::size_t count)
+{
+	auto &state = window.generations.at(generation);
+	state.slots.resize(count);
+	for (std::size_t index = 0; index < count; ++index)
+		state.slots[index] = static_cast<std::uint32_t>(index);
+}
+
+using Generations = std::vector<unsigned long>;
+
+void a_window_within_its_limit_asks_nothing()
+{
+	auto window = window_of(limit);
+	Running running{{1, 2, 3}};
+	require(trim(window, running).empty() && running.asked == 0);
+	require((window.order == Generations{1, 2, 3}));
+}
+
+void an_address_space_nobody_runs_goes_in_order_of_recency()
+{
+	auto window = window_of(limit + 1);
+	/* The others run, the oldest does not. */
+	Running running{{2, 3, 4}};
+	require((trim(window, running) == Generations{1}));
+	require((window.order == Generations{2, 3, 4}));
+}
+
+void a_running_address_space_keeps_its_place_for_the_oldest_idle_one()
+{
+	auto window = window_of(limit + 1);
+	/* 1 is the least recently current and is running; 2 is the oldest
+	 * that is not. */
+	Running running{{1, 3}};
+	require((trim(window, running) == Generations{2}));
+	require((window.order == Generations{1, 3, 4}));
+	require(window.generations.count(1) == 1 &&
+		window.generations.count(2) == 0);
+
+	/* 1 and 2 are running, 3 is the oldest left that is not. */
+	window = window_of(limit + 1);
+	running = Running{{1, 2}};
+	require((trim(window, running) == Generations{3}));
+	require((window.order == Generations{1, 2, 4}));
+}
+
+void a_tombstone_is_as_good_as_an_idle_address_space()
+{
+	/* The oldest of the places that are tombstones or idle goes, whichever
+	 * it is. */
+	auto window = window_of(limit + 1);
+	retire(window, 2, true);
+	Running running{{1}};
+	require((trim(window, running) == Generations{2}));
+	require((window.order == Generations{1, 3, 4}));
+	/* The tombstone was not asked about: it holds no address space. */
+	require(running.asked == 1);
+
+	window = window_of(limit + 1);
+	retire(window, 3, true);
+	running = Running{{1}};
+	require((trim(window, running) == Generations{2}));
+	require((window.order == Generations{1, 3, 4}));
+
+	/* A tombstone in front goes as it always has, though what follows
+	 * runs. */
+	window = window_of(limit + 1);
+	retire(window, 1, true);
+	running = Running{{2, 3}};
+	require((trim(window, running) == Generations{1}));
+	require((window.order == Generations{2, 3, 4}));
+	require(running.asked == 0);
+}
+
+void the_one_just_made_current_is_never_the_one_to_go()
+{
+	/* The newest place is idle and holds nothing, and still stays. */
+	auto window = window_of(limit + 1);
+	for (unsigned long generation = 1; generation <= limit; ++generation)
+		name_slots(window, generation, 10);
+	Running running{{1, 2, 3}};
+	require((trim(window, running) == Generations{1}));
+	require(window.generations.count(limit + 1) == 1 &&
+		window.order.back() == limit + 1);
+
+	/* With room for one, the only place that can go is the other. */
+	using Single = cache::GenerationWindow<unsigned long, State, 1>;
+	Single single;
+	for (unsigned long generation = 1; generation <= 2; ++generation) {
+		auto [entry, inserted] =
+			single.generations.try_emplace(generation);
+		require(inserted);
+		single.enroll(entry->second, generation);
+		single.touch(generation);
+	}
+	std::vector<unsigned long> retired;
+	single.trim(
+		[&](unsigned long generation) {
+			retired.push_back(generation);
+			const auto owner = single.generations.find(generation);
+			single.reserve_id();
+			single.leave(owner, owner->second.id);
+			single.forget_place(generation);
+		},
+		[](const State &) { return true; });
+	require((retired == Generations{1}) &&
+		(single.order == Generations{2}));
+}
+
+void when_every_address_space_runs_the_one_with_fewest_slots_goes()
+{
+	auto window = window_of(limit + 1);
+	name_slots(window, 1, 5);
+	name_slots(window, 2, 2);
+	name_slots(window, 3, 9);
+	name_slots(window, 4, 1);
+	Running running{{1, 2, 3, 4}};
+	require((trim(window, running) == Generations{2}));
+	require((window.order == Generations{1, 3, 4}));
+
+	/* Of equal ones the least recently current. */
+	window = window_of(limit + 1);
+	name_slots(window, 1, 4);
+	name_slots(window, 2, 4);
+	name_slots(window, 3, 9);
+	running = Running{{1, 2, 3, 4}};
+	require((trim(window, running) == Generations{1}));
+
+	/* A list that overflowed counts as the most there is, however many
+	 * entries it kept. */
+	window = window_of(limit + 1);
+	name_slots(window, 1, 1);
+	window.generations.at(1).slots_complete = false;
+	name_slots(window, 2, 7);
+	name_slots(window, 3, 8);
+	running = Running{{1, 2, 3, 4}};
+	require((trim(window, running) == Generations{2}));
+	window = window_of(limit + 1);
+	for (unsigned long generation = 1; generation <= limit; ++generation)
+		window.generations.at(generation).slots_complete = false;
+	running = Running{{1, 2, 3, 4}};
+	require((trim(window, running) == Generations{1}));
+}
+
+/* A new address space's account counts as running for as long as its history
+ * is its own, and names no slot yet, so every place of a window that has only
+ * met new ones looks alike: the least recently current goes, as it always
+ * has. */
+void places_that_look_alike_go_in_order_of_recency()
+{
+	auto window = window_of(limit + 1);
+	Running running{{1, 2, 3, 4}};
+	require((trim(window, running) == Generations{1}));
+	require((window.order == Generations{2, 3, 4}));
+}
+
+void a_trim_that_retires_several_asks_again_each_time()
+{
+	auto window = window_of(limit + 2);
+	/* 1 and 2 run; 3 and 4 do not. Retiring 3 first leaves 1, 2, 4. */
+	Running running{{1, 2}};
+	require((trim(window, running) == Generations{3, 4}));
+	require((window.order == Generations{1, 2, 5}));
+
+	/* Every one runs and holds slots: the fewest go first, and a place that
+	 * went is not asked about again. */
+	window = window_of(limit + 2);
+	name_slots(window, 1, 3);
+	name_slots(window, 2, 1);
+	name_slots(window, 3, 2);
+	name_slots(window, 4, 5);
+	running = Running{{1, 2, 3, 4, 5}};
+	require((trim(window, running) == Generations{2, 3}));
+	require((window.order == Generations{1, 4, 5}));
 }
 
 void clearing_forgets_everything_but_the_id_zero_slot()
@@ -255,6 +467,14 @@ int main()
 	an_epoch_wrap_clears_the_validations_it_would_repeat();
 	the_order_keeps_the_least_recently_current_first();
 	a_tombstone_holds_a_place_and_no_address_space();
+	a_window_within_its_limit_asks_nothing();
+	an_address_space_nobody_runs_goes_in_order_of_recency();
+	a_running_address_space_keeps_its_place_for_the_oldest_idle_one();
+	a_tombstone_is_as_good_as_an_idle_address_space();
+	the_one_just_made_current_is_never_the_one_to_go();
+	when_every_address_space_runs_the_one_with_fewest_slots_goes();
+	places_that_look_alike_go_in_order_of_recency();
+	a_trim_that_retires_several_asks_again_each_time();
 	clearing_forgets_everything_but_the_id_zero_slot();
 	return 0;
 }

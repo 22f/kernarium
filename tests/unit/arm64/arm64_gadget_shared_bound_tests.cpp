@@ -174,6 +174,9 @@ void a_mostly_free_space_is_renewed(unsigned long generation, Leave leave,
 	const auto closes = stress::closes();
 
 	if (leave == Leave::window) {
+		/* The window retires the space once no executor is running it;
+		 * B stopped, so a pause shows that. */
+		let_activity_lapse();
 		for (unsigned long other = 0;
 		     other <= UML_GADGET_RESIDENT_GENERATIONS; ++other)
 			require(run_to_system_call(a, a_memory,
@@ -218,6 +221,127 @@ void a_mostly_free_space_is_renewed_and_a_busy_one_is_not()
 	/* The space gets no store after A leaves it: its executors let go of
 	 * bodies, and the one that did closes it. */
 	a_mostly_free_space_is_renewed(1040, Leave::eviction, true);
+}
+
+/* What retiring the space frees is what the other executor is running:
+ * while B enters it, A's window leaves it, retires the oldest address space
+ * only A holds instead, and does not close it, though A's bodies are most of
+ * the arena. B goes on through the links A armed and translates nothing. Once
+ * B has stopped for a window of activity, A's window retires it as it would
+ * any other. */
+void a_window_leaves_a_space_another_executor_is_running(
+	unsigned long generation)
+{
+	constexpr std::size_t blocks = 700;
+	constexpr std::size_t width = 31;
+	constexpr std::size_t arena_chunk = std::size_t{64} << 10;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{pages_for((blocks * width + 1) * 4)};
+	put_chain(backing, blocks, width);
+	JitMapping mapping{generation, code_base, backing,
+		pages_for((blocks * width + 1) * 4)};
+	std::vector<std::unique_ptr<JitBacking>> others;
+	std::vector<std::unique_ptr<JitMapping>> mappings;
+	for (unsigned long other = 0;
+	     other <= UML_GADGET_RESIDENT_GENERATIONS; ++other) {
+		others.push_back(std::make_unique<JitBacking>(1));
+		put_program(*others.back(), 1, 2);
+		mappings.push_back(std::make_unique<JitMapping>(
+			generation + 1 + other, code_base, *others.back(), 1));
+	}
+	const auto a_vcpu = std::make_unique<Vcpu>();
+	const auto b_vcpu = std::make_unique<Vcpu>();
+	auto &a = a_vcpu->executor;
+	auto &b = b_vcpu->executor;
+	auto &a_memory = a_vcpu->memory;
+	auto &b_memory = b_vcpu->memory;
+	auto &cpu = a_vcpu->cpu;
+
+	require(run_to_system_call(a, a_memory, generation, cpu, code_base,
+		blocks + 4) != 0);
+	require(run_to_system_call(b, b_memory, generation, cpu, code_base,
+		blocks) != 0);
+	require(b.cache_diagnostics().translations == 0);
+	/* B holds a body in four chunks of the arena, so that what A lets go of
+	 * would leave it mostly free. */
+	for (const auto at : {blocks / 4, blocks / 2, blocks * 3 / 4}) {
+		cpu = {};
+		cpu.pc = code_base + at * width * 4;
+		(void)run_once(b, b_memory, generation, cpu);
+	}
+	const auto full = stress::open_space_bytes(generation);
+	require(full.spaces == 1 && full.held <= full.arena &&
+		full.arena >= 4 * arena_chunk);
+	/* A renewal would follow the retirement, as in the test above. */
+	stress::set_renewal_floor(2 * arena_chunk);
+	const auto closes = stress::closes();
+
+	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
+	     ++other) {
+		require(run_to_system_call(a, a_memory, generation + 1 + other,
+			cpu, code_base) == 4);
+		/* B enters the space on every turn of A's. */
+		cpu = {};
+		cpu.pc = code_base;
+		(void)run_once(b, b_memory, generation, cpu);
+	}
+	const auto kept = stress::open_space_bytes(generation);
+	require(kept.spaces == 1 && stress::closes() == closes);
+	require(kept.held == full.held);
+	const auto translations = b.cache_diagnostics().translations;
+	const auto adoptions = a.cache_diagnostics().adoptions;
+	require(run_to_system_call(b, b_memory, generation, cpu, code_base,
+		blocks) != 0);
+	require(b.cache_diagnostics().translations == translations);
+	/* A still holds its bodies: it finds them in its own slots. */
+	require(run_to_system_call(a, a_memory, generation, cpu, code_base,
+		blocks + 4) != 0);
+	require(a.cache_diagnostics().adoptions == adoptions);
+
+	/* B has gone quiet. A turn of A's through other address spaces lets the
+	 * window retire this one, and what it frees closes the space. */
+	let_activity_lapse();
+	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
+	     ++other)
+		require(run_to_system_call(a, a_memory, generation + 1 + other,
+			cpu, code_base) == 4);
+	require(stress::open_space_bytes(generation).spaces == 0 &&
+		stress::closes() == closes + 1);
+}
+
+/* An address space only one executor holds is retired in its turn, however
+ * lately that executor ran it: nobody else could be in the code it frees. */
+void a_window_retires_a_space_no_other_executor_holds()
+{
+	constexpr unsigned long generation = 1160;
+	stress::set_renewal_period(0);
+	stress::set_renewal_floor(std::numeric_limits<std::size_t>::max());
+	JitBacking backing{1};
+	put_program(backing, 4, 5);
+	JitMapping mapping{generation, code_base, backing, 1};
+	std::vector<std::unique_ptr<JitBacking>> others;
+	std::vector<std::unique_ptr<JitMapping>> mappings;
+	for (unsigned long other = 0;
+	     other <= UML_GADGET_RESIDENT_GENERATIONS; ++other) {
+		others.push_back(std::make_unique<JitBacking>(1));
+		put_program(*others.back(), 1, 2);
+		mappings.push_back(std::make_unique<JitMapping>(
+			generation + 1 + other, code_base, *others.back(), 1));
+	}
+	const auto vcpu = std::make_unique<Vcpu>();
+	auto &memory = vcpu->memory;
+	auto &executor = vcpu->executor;
+	auto &cpu = vcpu->cpu;
+	require(run_to_system_call(executor, memory, generation, cpu,
+		code_base) == 4);
+	require(stress::open_space_bytes(generation).spaces == 1);
+	for (unsigned long other = 0; other <= UML_GADGET_RESIDENT_GENERATIONS;
+	     ++other)
+		require(run_to_system_call(executor, memory,
+			generation + 1 + other, cpu, code_base) == 4);
+	/* Its only executor retired it, so it went. */
+	require(stress::open_space_bytes(generation).spaces == 0);
 }
 
 /* A private cache is not renewed, whatever its arena holds: its window
@@ -384,6 +508,8 @@ int main()
 	require(setenv("DARWIN_UML_GADGET_SHARED_BODIES", "1", 1) == 0);
 	held_bytes_follow_the_slots();
 	a_mostly_free_space_is_renewed_and_a_busy_one_is_not();
+	a_window_leaves_a_space_another_executor_is_running(1120);
+	a_window_retires_a_space_no_other_executor_holds();
 	a_private_cache_is_never_renewed();
 	renewal_reaches_every_executor();
 	concurrent_executors_follow_renewals();

@@ -73,10 +73,10 @@ struct GenerationState {
  * far as a slot's validation can tell, from one to `max_epoch`.
  *
  * `order` lists the address spaces least recently current first. Only
- * `Limit` of them stay resident: a switch to a new one retires the least
- * recently current beyond that (trim()). An address space the MMU destroyed
- * may keep its place in the order without being held, a tombstone that
- * retiring only drops.
+ * `Limit` of them stay resident: a switch to a new one retires one beyond
+ * that (trim()), the least recently current unless another executor is
+ * running it. An address space the MMU destroyed may keep its place in the
+ * order without being held, a tombstone that retiring only drops.
  *
  * `State` is the engine's record of one address space, a GenerationState or
  * a type derived from it, kept in `generations` and so at a stable address.
@@ -166,14 +166,59 @@ struct GenerationWindow final {
 			order.erase(found);
 	}
 
-	/* Retire, with `retire(generation)`, the least recently current beyond
-	 * the limit. `retire` takes the number by value, and drops its place in
-	 * the order. */
-	template <typename Retire>
-	void trim(Retire &&retire)
+	/* Retire, with `retire(generation)`, places until only the limit
+	 * remain, each the victim() that `running` names. `retire` takes the
+	 * number by value, and drops its place in the order. */
+	template <typename Retire, typename Running>
+	void trim(Retire &&retire, Running &&running)
 	{
 		while (order.size() > Limit)
-			retire(order.front());
+			retire(victim(running));
+	}
+
+	/* The place a trim retires: the least recently current, unless it holds
+	 * an address space that `running(state)` says another executor is
+	 * running. That executor reaches the bodies through links this cache
+	 * armed, which hold nothing, so retiring the address space here would
+	 * free, as the last holder, the code it is in. The oldest place that is
+	 * a tombstone or an address space not running goes instead, and when
+	 * every place is running, the one whose state names the fewest slots,
+	 * the oldest of equals. The most recently current place, the one just
+	 * made current, is never chosen. Needs more than one place. */
+	template <typename Running>
+	[[nodiscard]] Number victim(Running &&running) const
+	{
+		assert(order.size() > 1);
+		const auto state_of = [this](Number place) -> const State * {
+			const auto found = generations.find(place);
+			return found != generations.end() ? &found->second :
+							    nullptr;
+		};
+		const auto *first = state_of(order.front());
+		if (first == nullptr || !running(*first))
+			return order.front();
+		auto fewest = order.front();
+		auto fewest_slots = slots_named(*first);
+		for (std::size_t place = 1; place + 1 < order.size(); ++place) {
+			const auto *state = state_of(order[place]);
+			if (state == nullptr || !running(*state))
+				return order[place];
+			const auto slots = slots_named(*state);
+			if (slots < fewest_slots) {
+				fewest = order[place];
+				fewest_slots = slots;
+			}
+		}
+		return fewest;
+	}
+
+	/* How many slots an address space's state names: the cost of retiring
+	 * it, the most when its list overflowed. */
+	[[nodiscard]] static std::size_t slots_named(
+		const State &state) noexcept
+	{
+		return state.slots_complete ? state.slots.size() :
+					      ~std::size_t{};
 	}
 
 	/* Make room for retiring an address space, which is the one step of it
