@@ -49,6 +49,10 @@ KernariumRestartHandler restartHandler;
 std::mutex locationHandlerMutex;
 std::mutex locationRegistrationMutex;
 KernariumLocationReceiverHandler locationHandler;
+/* And for the camera state. */
+std::mutex cameraStateHandlerMutex;
+std::mutex cameraStateRegistrationMutex;
+KernariumCameraStateHandler cameraStateHandler;
 /* And for the input status. */
 std::mutex inputStatusHandlerMutex;
 std::mutex inputStatusRegistrationMutex;
@@ -139,6 +143,34 @@ void updateLocationReceiverForwarder(const kernarium_runtime_api* runtime)
     }
     runtime->set_location_receiver_callback(
         wanted ? forwardLocationReceiver : nullptr, nullptr);
+}
+
+/* Runs on a runtime thread, inside the runtime's call, so it only hands the
+ * state to the main queue. */
+void forwardCameraState(void*, int state)
+{
+    KernariumCameraStateHandler handler;
+    {
+        std::lock_guard lock(cameraStateHandlerMutex);
+        handler = cameraStateHandler;
+    }
+    if (handler == nil)
+        return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        handler(state);
+    });
+}
+
+void updateCameraStateForwarder(const kernarium_runtime_api* runtime)
+{
+    std::lock_guard registration(cameraStateRegistrationMutex);
+    bool wanted;
+    {
+        std::lock_guard lock(cameraStateHandlerMutex);
+        wanted = cameraStateHandler != nil;
+    }
+    runtime->set_camera_state_callback(
+        wanted ? forwardCameraState : nullptr, nullptr);
 }
 
 /* Runs on a runtime thread, inside the runtime's call, so it only hands the
@@ -315,7 +347,9 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
         api->send_pointer == nullptr ||
         api->send_mouse == nullptr ||
         api->set_input_status_callback == nullptr ||
-        api->set_network_notice == nullptr) {
+        api->set_network_notice == nullptr ||
+        api->set_camera_state_callback == nullptr ||
+        api->set_camera_rotation == nullptr) {
         std::fputs("Kernarium: runtime API validation failed\n", stderr);
         return false;
     }
@@ -367,6 +401,7 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
     updateConsoleOutputForwarder(api);
     updateRestartForwarder(api);
     updateLocationReceiverForwarder(api);
+    updateCameraStateForwarder(api);
     updateInputStatusForwarder(api);
 #ifndef UML_APP_STORE_APPLICATION
     /* Optional: only a runtime built for automation has it. */
@@ -787,6 +822,24 @@ extern "C" void kernarium_runtime_loader_set_location_receiver_handler(
     const kernarium_runtime_api* runtime = api();
     if (runtime != nullptr)
         updateLocationReceiverForwarder(runtime);
+}
+
+extern "C" void kernarium_runtime_loader_set_camera_state_handler(
+    KernariumCameraStateHandler handler)
+{
+    {
+        std::lock_guard lock(cameraStateHandlerMutex);
+        cameraStateHandler = [handler copy];
+    }
+    const kernarium_runtime_api* runtime = api();
+    if (runtime != nullptr)
+        updateCameraStateForwarder(runtime);
+}
+
+extern "C" int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ? -ENODEV : runtime->set_camera_rotation(degrees);
 }
 
 extern "C" void kernarium_runtime_loader_set_input_status_handler(

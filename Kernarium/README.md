@@ -213,6 +213,24 @@ Kernarium attaches:
   (`report_location`) and tells it when the guest powers the receiver
   (`set_location_receiver_callback`; runtime API 32). The Linux runtime keeps
   both entries and answers `-ENODEV`;
+- an Android-only Virtio camera ([the device](../darwin/device/camera/README.md)),
+  made after the GNSS receiver when the host has a front camera. The runtime
+  discovers the host's cameras, which needs no permission, and names the layout
+  that describes them as `androidboot.product.vendor.sku`, a kernel argument a
+  release's command-line file cannot set. The boot request states the mode
+  (`android_camera_mode`, runtime API 37): live opens a capture session only
+  while a guest app has a camera open, and blocked lists the same cameras with
+  black frames, never opens a session and reports Android's camera lens cover
+  on the side keys. The application asks the system for access and states live
+  only when it has it, and nothing changes the mode before the guest powers
+  off. The camera tier follows the launch's GPU budget, the colour data a Bayer
+  still teaches is kept in `android_camera_calibration_path`, the state of the
+  capture (idle, streaming, interrupted, interrupted by iPad multitasking, by
+  system pressure) comes back through `set_camera_state_callback` and
+  `set_camera_rotation` gives ROTATE_AND_CROP's automatic setting the host's
+  rotation. A runtime that is not an App Store build serves the synthetic
+  camera when `KERNARIUM_CAMERA_SOURCE` names it. The Linux runtime keeps both
+  entries and never calls back;
 - an Android-only hardware keyboard, mouse and pointer
   ([the devices](../darwin/device/input/README.md)), the last Virtio devices,
   unplugged until the application plugs them (`set_input_connected`) and then
