@@ -30,6 +30,9 @@
 #include <optional>
 #include <random>
 
+#include <pthread.h>
+#include <signal.h>
+
 namespace {
 
 using andarium::gnss::Engine;
@@ -920,6 +923,182 @@ void concurrentSettersLeaveTheEngineWithTheSavedSettings()
     }
 }
 
+/* What a session reports, read as soon as everything the reader posted for it
+ * is heard: the receiver's two epochs are read, the session is stopped, and its
+ * end is the barrier. Quicker than observe(), which polls, for a case that
+ * makes hundreds of observations. */
+Observed observeQuickly(World& world, Hal& hal)
+{
+    {
+        std::lock_guard lock(world.mutex);
+        world.log.clear();
+    }
+    require(hal.start() == Hal::StartResult::started);
+    world.write(epoch(preciseFix(baseNs, sessionLatitude(1))));
+    world.write(epoch(preciseFix(baseNs + second, sessionLatitude(1))));
+    // Until the reader has taken both epochs off the pipe; stop() then waits
+    // for it to finish handling them.
+    const auto deadline = std::chrono::steady_clock::now() + gnsshaltest::limit;
+    for (;;) {
+        int pending = -1;
+        {
+            std::lock_guard lock(world.mutex);
+            require(world.receiver >= 0 && ioctl(world.receiver, FIONREAD, &pending) == 0);
+        }
+        if (pending == 0)
+            break;
+        require(std::chrono::steady_clock::now() < deadline, "the reader did not take the epochs");
+        std::this_thread::yield();
+    }
+    hal.stop();
+    require(world.wait([&] { return std::count(world.log.begin(), world.log.end(), "off") == 1; }));
+    Observed result;
+    std::lock_guard lock(world.mutex);
+    int locations = 0;
+    for (const auto& entry : world.log) {
+        result.sentences |= entry == "nmea";
+        result.satellites |= entry == "sv";
+        locations += entry == "location" ? 1 : 0;
+    }
+    result.everyEpoch = locations == 2;
+    return result;
+}
+
+/* A thread that a signal interrupted waits in the signal handler until the test
+ * lets it go. The handler touches only atomics. */
+struct Interruption {
+    std::atomic<bool> waiting{false};
+    std::atomic<bool> go{false};
+};
+
+std::atomic<Interruption*> interruption{nullptr};
+
+void waitForTheTest(int)
+{
+    Interruption* const current = interruption.load();
+    if (current == nullptr)
+        return;
+    current->waiting.store(true);
+    // A bound, so that a test that never lets go ends instead of hanging.
+    for (long spin = 0; spin < 1'000'000'000 && !current->go.load(); ++spin) {
+    }
+}
+
+enum class Setting { nmea, satellites, interval };
+
+/* The setter's call with the value that `first` picks of two that differ in
+ * what a session reports. */
+void applySetting(Hal& hal, Setting setting, bool first)
+{
+    switch (setting) {
+    case Setting::nmea:
+        hal.set_nmea(first);
+        break;
+    case Setting::satellites:
+        hal.set_sv_status(first);
+        break;
+    case Setting::interval:
+        hal.set_position_mode(first ? 1 : 4000);
+        break;
+    }
+}
+
+/* What an entry point saves is what the engine runs, even when two calls of the
+ * same setter meet at the worst point. A setter that saved its value under the
+ * lock and told the engine after releasing it leaves a window of a few
+ * instructions in which another call can save its own value and tell the engine
+ * before this one does, so that the engine keeps the value of the call that
+ * saved first and a replacement engine is given the other. Nothing in the HAL
+ * lets a test stop a thread in that window, so the test stops one there itself:
+ * a writer repeats a setter in a loop, and a signal sent at a random instant
+ * makes it wait in the handler, where the opposite call is made and returns
+ * before the writer goes on. A split update shows in about one such round in
+ * ten; a setter that updates under the lock cannot show one wherever the writer
+ * waits (inside the lock the opposite call cannot return, and the round is not
+ * read). Each round that is read compares what the live engine reports with
+ * what a replacement, given the saved settings, reports: they must be the same.
+ *
+ * No schedule makes a correct HAL fail: the settings are compared after both
+ * calls have returned, and the signal only decides where the writer waits. The
+ * case runs until each setter has been read enough rounds to show a split
+ * update, and fails if a loaded host does not give it those within a bound. */
+void aSetterStoppedAnywhereLeavesTheEngineWithTheSavedSettings()
+{
+    World world;
+    world.boottimeStep = second / 2;
+    Hal hal(world.env());
+    hal.set_callback(world.sink());
+
+    struct sigaction action {};
+    action.sa_handler = waitForTheTest;
+    sigemptyset(&action.sa_mask);
+    struct sigaction previous {};
+    require(sigaction(SIGUSR1, &action, &previous) == 0);
+
+    constexpr int readsPerSetting = 130;
+    int reads[3] = {0, 0, 0};
+    std::minstd_rand random(2468);
+    // Normally about half a second; the bound is for a host that is far too
+    // busy to schedule the threads of a round.
+    const auto deadline = std::chrono::steady_clock::now() + 60s;
+    for (int round = 0; reads[0] < readsPerSetting || reads[1] < readsPerSetting || reads[2] < readsPerSetting;
+         ++round) {
+        require(std::chrono::steady_clock::now() < deadline, "the writer was too rarely stopped outside the lock");
+        const int which = round % 3;
+        const Setting setting = static_cast<Setting>(which);
+        const bool first = (round / 3) % 2 == 0;
+        Interruption stopped;
+        std::atomic<bool> writing{true};
+        std::atomic<bool> started{false};
+        interruption.store(&stopped);
+        std::thread writer([&] {
+            started.store(true);
+            while (writing.load())
+                applySetting(hal, setting, first);
+        });
+        while (!started.load())
+            std::this_thread::yield();
+        // The writer's loop takes a few dozen nanoseconds; a delay of a few
+        // microseconds puts the signal anywhere in it.
+        const auto sent = std::chrono::steady_clock::now() + std::chrono::nanoseconds(random() % 20'000);
+        while (std::chrono::steady_clock::now() < sent) {
+        }
+        require(pthread_kill(writer.native_handle(), SIGUSR1) == 0);
+        const auto arrival = std::chrono::steady_clock::now() + 5ms;
+        while (!stopped.waiting.load() && std::chrono::steady_clock::now() < arrival)
+            std::this_thread::yield();
+        bool oppositeReturned = false;
+        if (stopped.waiting.load()) {
+            std::atomic<bool> returned{false};
+            std::thread opposite([&] {
+                applySetting(hal, setting, !first);
+                returned.store(true);
+            });
+            // It returns at once unless the writer stopped inside the lock.
+            const auto within = std::chrono::steady_clock::now() + 2ms;
+            while (!returned.load() && std::chrono::steady_clock::now() < within)
+                std::this_thread::yield();
+            oppositeReturned = returned.load();
+            writing.store(false);
+            stopped.go.store(true);
+            opposite.join();
+        } else {
+            writing.store(false);
+            stopped.go.store(true);
+        }
+        writer.join();
+        interruption.store(nullptr);
+        if (!oppositeReturned)
+            continue;
+        ++reads[which];
+        const Observed live = observeQuickly(world, hal);
+        hal.set_callback(world.sink());
+        const Observed replacement = observeQuickly(world, hal);
+        require(live == replacement, "the engine's settings are not the saved ones");
+    }
+    require(sigaction(SIGUSR1, &previous, nullptr) == 0);
+}
+
 /* One thread starts, stops, restarts and replaces at random while a writer
  * feeds the receiver: the framework hears exactly the sequence the entry
  * points ran, with no end or off lost to a restart, and every location is of
@@ -1278,6 +1457,8 @@ int main()
         {"a-refused-start-leaves-the-running-session-alone", aRefusedStartLeavesTheRunningSessionAlone},
         {"concurrent-setters-leave-the-engine-with-the-saved-settings",
          concurrentSettersLeaveTheEngineWithTheSavedSettings},
+        {"a-setter-stopped-anywhere-leaves-the-engine-with-the-saved-settings",
+         aSetterStoppedAnywhereLeavesTheEngineWithTheSavedSettings},
         {"a-driver-hears-exactly-the-sessions-it-ran", aDriverHearsExactlyTheSessionsItRan},
         {"random-starts-and-stops-keep-the-calls-in-order", randomStartsAndStopsKeepTheCallsInOrder},
         {"a-callback-may-call-back-into-the-hal", aCallbackMayCallBackIntoTheHal},
