@@ -38,15 +38,18 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   log from the request on, and once the name is gone the network is validated
   and a second request is checked; each request is judged by the new line it
   adds to the network's own log; a network is observed validated while its first
-  check is still unanswered (the server holds that answer), and no check follows
-  a passing one until an evaluation is forced; across all
+  check is still unanswered (the server holds that answer, and the network's log
+  has no probe or check that completed before it), and no check follows a
+  passing one until an evaluation is forced; across all
   of it NetworkStack, SystemUI and Settings (each by the exact name it runs
   under) neither crash nor stop answering and nothing hits an illegal
   instruction, which one continuous log stream of each boot of a guest of the
   release under test carries (the main, system and crash buffers from their
   start, kept in a host file), each finding belonging to the section whose time
   window holds it or to none, and either fails the run; a stream that ends while
-  its guest is up fails the section in progress; with the
+  its guest is up fails the section in progress, and is confirmed alive and
+  carrying before a restart or suspend; one that does not end when the old boot
+  is drained fails the run; with the
   probes at a black hole and a strict private DNS name that does not resolve,
   and VirtWifi forgotten and saved again, the network stays enabled and joined for
   a minute and a half, and is joined again after a guest suspend and wake (the
@@ -66,6 +69,11 @@ show Android's own Wi-Fi mark. The runner shows all of it:
   a black hole, boots the release under test: nothing saves the network again,
   the setting and the join are kept, and a failed check warns.
 
+Limits: a log buffer that wrapped before the stream attached cannot be detected;
+a crash during the final cleanup after the summary section is not scanned; and
+the 60 s hold on a network whose private DNS failed ends with an observation
+that precedes its last sleep, so a check in its final second is not seen.
+
 The checks of one section do not stop the others, so a release that lacks the
 overlay shows every symptom; the run passes only if none failed. Every wait has a
 deadline. The guest is reached through the shared adb server, always named with
@@ -82,7 +90,6 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
-import datetime
 import http.server
 import importlib.util
 import io
@@ -1956,9 +1963,10 @@ def validated_while_unanswered(guest: Guest, server: "ProbeServer", scenario: st
 def check_recovery_on_one_network(guest: Guest, server: "ProbeServer") -> str | None:
     """One network, never replaced and never validated again, from a failing check to a passing one: the
     probes ask a server that answers with a page. With the Internet page in front and no other action, the
-    network is validated while its first check is still unanswered (the server holds that answer), the warning
-    shows in Settings and in the status bar, the check comes back after the stock back-off, and when the server answers 204 the next check passes and the
-    warning goes from both, with a new passing line in the log. A forced re-evaluation then checks the
+    network is validated while its first check is still unanswered (the server holds that answer, and no probe
+    or check of the network's log completed before it), the warning shows in Settings and in the status bar,
+    the check comes back after the stock back-off, and when the server answers 204 the next check passes and
+    the warning goes from both, with a new passing line in the log. A forced re-evaluation then checks the
     network again, which brings the warning back, and the next passing check takes it away."""
     scenario = server.scenario()
     server.mode = "page"
