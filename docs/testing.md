@@ -627,11 +627,13 @@ library and launcher over the storage layout
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
-library created. `gnss-hal-nmea`, `gnss-hal-policy` and `gnss-hal-engine`
-(unit) compile the guest GNSS HAL's headers
-([Location](../android/lineage-24/README.md#location)) against the host
-writer's own epochs: the reading of the stream, the reporting rules and the
-session, with a pipe for the receiver and a counting wakelock.
+library created. `gnss-hal-nmea`, `gnss-hal-policy`, `gnss-hal-engine`,
+`gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the guest GNSS HAL's
+headers ([Location](../android/lineage-24/README.md#location)) against the host
+writer's own epochs: the reading of the stream, the reporting rules, the
+session and the AIDL entry points, with a pipe for the receiver and a counting
+wakelock, and with a framework callback that does not answer, so that no entry
+point waits for one and what the framework hears is the delivery contract's.
 
 A release candidate is qualified on its image, opt-in, on every engine that
 runs Android (the Mac gadgets and JIT engines, the iPad gadgets). A `SIGILL`
@@ -686,7 +688,8 @@ anywhere is a blocker. The candidate must show:
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
   `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  provider process exists only while a camera is open, no denial of
+  provider process runs from cameraserver's start until cameraserver holds no
+  camera, and again while an application holds one, no denial of
   `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)
