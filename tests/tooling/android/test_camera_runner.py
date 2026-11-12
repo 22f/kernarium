@@ -461,5 +461,207 @@ class JpegTests(unittest.TestCase):
                 runner.parse_jpeg(data)
 
 
+REAL_DUMP_CLIENT = (
+    "Active Camera Clients:\n(Camera ID: 1, Cost: 100, PID: 2131, Score: 0, State: 2User Id: 0, "
+    "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {2, 3, 4, })\n"
+    "Active Client listener PIDs: 605, 876, 2131\n")
+CONTENT_ROWS = (
+    "Row: 0 _id=33, _display_name=VID_20261112_123456.mp4, _data=/storage/emulated/0/Movies/Aperture/"
+    "VID_20261112_123456.mp4, duration=4021, _size=912345\n"
+    "Row: 1 _id=34, _display_name=a, b.mp4, _data=/storage/emulated/0/Movies/x.mp4, duration=NULL, _size=0\n")
+HAL_LOG = """\
+11-12 12:38:31.955  2194  2215 I GCH_AidlCameraDeviceSession: ProcessBatchCaptureResult: First frame done
+11-12 12:38:32.059  2194  2204 E V4l2Stream: Queue: every buffer of the stream is in flight
+11-12 12:38:32.059  2194  2204 E V4l2FrameSource: BeginRequest: cannot queue a 1008x756 buffer of format 23
+11-12 12:38:32.059  2194  2204 W EmulatedSensorHost: CaptureFromHost: frame 2 was not queued completely (-2)
+11-12 12:38:32.100  2194  2204 W V4l2FrameSource: BeginRequest: 1 buffers of earlier requests were never collected
+11-12 12:38:32.200  2194  2204 W V4l2Stream: Wait: the camera did not deliver the buffer of slot 0; the stream starts over
+11-12 12:38:32.300  2194  2204 W V4l2FrameSource: QueueBuffer: the node refused the dma-buf; the 1x1 stream copies
+11-12 12:38:32.400  2194  2204 E SomeOtherTag: unrelated error
+"""
+
+
+def box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I4s", len(payload) + 8, kind) + payload
+
+
+def movie(seconds: float, scale: int = 1000, video: bool = True, version: int = 0) -> bytes:
+    if version == 1:
+        mvhd = struct.pack(">B3xQQIQ", 1, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
+    else:
+        mvhd = struct.pack(">B3xIIII", 0, 0, 0, scale, int(seconds * scale)) + b"\x00" * 80
+    handler = box(b"hdlr", b"\x00\x00\x00\x00\x00\x00\x00\x00" + (b"vide" if video else b"soun") + b"\x00" * 12)
+    return (box(b"ftyp", b"isom\x00\x00\x02\x00isom") + box(b"mdat", b"\x00" * 40)
+            + box(b"moov", box(b"mvhd", mvhd) + box(b"trak", box(b"mdia", handler))))
+
+
+class VideoAndFrontTests(unittest.TestCase):
+    def test_the_cameras_a_package_holds(self) -> None:
+        package = "org.lineageos.aperture"
+        self.assertEqual(runner.active_client_camera_ids(REAL_DUMP_CLIENT, package), {"1"})
+        self.assertEqual(runner.active_client_camera_ids(MEDIA_CAMERA_ACTIVE, package), {"0"})
+        self.assertEqual(runner.active_client_camera_ids(MEDIA_CAMERA_IDLE, package), set())
+        self.assertEqual(runner.active_client_camera_ids(MEDIA_CAMERA_OTHER_ACTIVE, package), set())
+
+    def test_the_rows_of_a_content_query(self) -> None:
+        rows = runner.parse_content_rows(CONTENT_ROWS + "No result found.\n")
+        self.assertEqual([row["_id"] for row in rows], ["33", "34"])
+        self.assertEqual(rows[0]["duration"], "4021")
+        self.assertTrue(rows[0]["_data"].endswith("VID_20261112_123456.mp4"))
+        self.assertEqual(rows[1]["_display_name"], "a, b.mp4")
+        self.assertEqual(runner.parse_content_rows("No result found.\n"), [])
+
+    def test_the_duration_and_tracks_of_a_movie(self) -> None:
+        for version in (0, 1):
+            info = runner.parse_mp4(movie(4.0, version=version))
+            self.assertAlmostEqual(info.seconds, 4.0)
+            self.assertTrue(info.video)
+            self.assertFalse(info.audio)
+        self.assertFalse(runner.parse_mp4(movie(2.0, video=False)).video)
+        self.assertAlmostEqual(runner.parse_mp4(movie(1.5, scale=90000)).seconds, 1.5)
+
+    def test_an_unfinished_movie_is_refused(self) -> None:
+        whole = movie(3.0)
+        for data in (b"", b"\x00\x00\x00\x18ftypisom", whole[:-30], box(b"ftyp", b"isom") + box(b"mdat", b"\x00" * 8)):
+            with self.subTest(length=len(data)), self.assertRaises(ValueError):
+                runner.parse_mp4(data)
+
+    def test_the_hal_log_failures(self) -> None:
+        failures = runner.hal_failures(HAL_LOG)
+        self.assertEqual(len(failures), 5)
+        self.assertTrue(all("SomeOtherTag" not in line and "dma-buf" not in line for line in failures))
+        self.assertEqual(runner.hal_failures(HAL_LOG.split("\n")[0] + "\n"), [])
+        self.assertEqual(runner.hal_failures(""), [])
+
+
+class FakeGuest:
+    """A guest that answers the runner's commands from a script and records them."""
+
+    def __init__(self, plan, front_holds: bool = True, movies=None) -> None:
+        self.plan = plan
+        self.commands: list[str] = []
+        self.held = {"0"}
+        self.front_holds = front_holds
+        self.rows: dict[str, dict[str, str]] = {"1": {"_id": "1", "_data": "/sdcard/old.mp4"}}
+        self.recording = False
+        self.movie = movies if movies is not None else movie(3.5)
+        self.still_files = {"IMG_old.jpg"}
+        self.log = ""
+        chart = [bytes(value for x in range(40) for value in ((255,) * 4 if (x // 5 + y // 5) % 2 else (20, 20, 20, 255)))
+                 for y in range(40)]
+        self.chart = runner.decode_png(png(40, 40, 6, chart, [0]))
+
+    def alive(self) -> None:
+        pass
+
+    def shell(self, command: str, timeout: float = 0) -> str:
+        self.commands.append(command)
+        if command.startswith("am start") and "USE_FRONT_CAMERA true" in command:
+            # The laptop's only camera is the front one, camera 0.
+            front = "0" if self.plan.profile == "laptop" else "1"
+            self.held = {front} if self.front_holds else {"0"}
+        elif command.startswith("am start"):
+            self.held = {"0"}
+        if command == f"input keyevent {runner.CAMERA_KEYCODE}":
+            if "VIDEO_CAMERA" in " ".join(self.commands):
+                if self.recording:
+                    self.rows["2"] = {"_id": "2", "_data": "/sdcard/new.mp4", "_display_name": "new.mp4"}
+                self.recording = not self.recording
+            else:
+                self.still_files.add("IMG_new%d.jpg" % len(self.still_files))
+        return ""
+
+    def media_camera(self) -> str:
+        clients = "".join(
+            f"(Camera ID: {camera}, Cost: 100, PID: 1301, Score: 0, State: 2User Id: 0, "
+            "Client Package Name: org.lineageos.aperture, Conflicting Client Devices: {})\n" for camera in sorted(self.held))
+        return "Active Camera Clients:\n" + clients + "Active Client listener PIDs: 1\n"
+
+    def screenshot(self):
+        return self.chart
+
+    def videos(self):
+        return dict(self.rows), "Row: 0 ..."
+
+    def stills(self) -> set[str]:
+        return set(self.still_files)
+
+    def hal_log(self) -> str:
+        return self.log
+
+    def pull(self, remote: str) -> bytes:
+        return jpeg(4000, 3000) if remote.endswith(".jpg") else self.movie
+
+
+class VideoAndFrontFlowTests(unittest.TestCase):
+    def run_step(self, step, plan, guest) -> None:
+        with mock.patch.object(runner.time, "sleep", lambda seconds: None):
+            step(guest, plan)
+
+    def test_the_video_step_records_with_the_shutter_key_in_video_mode(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_video, plan, guest)
+        starts = [command for command in guest.commands if command.startswith("am start")]
+        self.assertEqual(starts, [f"am start -a {runner.VIDEO_ACTION} --ez {runner.FRONT_EXTRA} false"])
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 2)
+        self.assertIn(f"am force-stop {runner.CAMERA_PACKAGE}", guest.commands)
+
+    def test_a_movie_that_is_too_short_or_has_no_video_fails(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        for data, what in ((movie(0.4), "lasts 0.40 s"), (movie(3.0, video=False), "no video track"),
+                           (b"junk", "not a finished movie")):
+            with self.subTest(what=what), self.assertRaisesRegex(runner.Failure, what):
+                self.run_step(runner.check_video, plan, FakeGuest(plan, movies=data))
+
+    def test_no_new_movie_fails_with_the_query(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        guest.rows = {"1": {"_id": "1"}}
+        guest.shell = lambda command, timeout=0: ""  # the shutter key records nothing
+        with mock.patch.object(runner, "VIDEO_SECONDS", 0.2), self.assertRaisesRegex(
+                runner.Failure, "MediaStore lists no new movie"):
+            self.run_step(runner.check_video, plan, guest)
+
+    def test_the_laptop_records_with_its_front_camera(self) -> None:
+        plan = runner.make_plan("front", "laptop", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_video, plan, guest)
+        self.assertIn(f"am start -a {runner.VIDEO_ACTION} --ez {runner.FRONT_EXTRA} true", guest.commands)
+
+    def test_the_front_step_opens_camera_1_and_takes_a_still(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_front, plan, guest)
+        self.assertIn(f"am start -a android.media.action.STILL_IMAGE_CAMERA --ez {runner.FRONT_EXTRA} true",
+                      guest.commands)
+        self.assertEqual(guest.commands.count(f"input keyevent {runner.CAMERA_KEYCODE}"), 1)
+
+    def test_the_front_step_fails_when_the_application_holds_the_back_camera(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "live")
+        with mock.patch.object(runner, "PREVIEW_SECONDS", 0.2), self.assertRaisesRegex(
+                runner.Failure, r"holding camera 1 \(front\).*it holds \['0'\]"):
+            self.run_step(runner.check_front, plan, FakeGuest(plan, front_holds=False))
+
+    def test_a_front_only_profile_has_no_second_facing(self) -> None:
+        plan = runner.make_plan("front", "laptop", "live")
+        guest = FakeGuest(plan)
+        self.run_step(runner.check_front, plan, guest)
+        self.assertEqual(guest.commands, [])
+
+    def test_the_hal_log_check(self) -> None:
+        guest = FakeGuest(None)
+        runner.check_hal_log(guest)
+        guest.log = HAL_LOG
+        with self.assertRaisesRegex(runner.Failure, "5 failed buffer lines; the first: .*every buffer"):
+            runner.check_hal_log(guest)
+
+    def test_the_new_steps_run_in_live_mode_only(self) -> None:
+        source = SCRIPT.read_text()
+        run_checks = source[source.index("def run_checks"):source.index("def cameraserver_restart_skip")]
+        self.assertRegex(run_checks, r'if plan.mode == "live":\n\s+check_video\(guest, plan\)\n\s+check_front\(guest, plan\)\n'
+                         r'\s+check_hal_log\(guest\)')
+
+
 if __name__ == "__main__":
     unittest.main()

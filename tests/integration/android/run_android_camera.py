@@ -21,7 +21,11 @@ The runner checks, in this order:
   (``ps -A`` is all a user build offers; a restart of cameraserver itself needs root, so that path is
   the init action the target-files verifier requires, not something this runner exercises);
 - live: the camera application previews the synthetic chart (a screenshot is not black), and the camera
-  key takes one still, a complete JPEG with Exif data inside the layout's size cap;
+  key takes one still, a complete JPEG with Exif data inside the layout's size cap; then, on the same
+  boot, it records about four seconds of video with the back camera (a movie file of at least a second
+  with a video track), previews and takes a still with the front camera when the profile has one, and the
+  camera HAL has logged no failed buffer ("every buffer of the stream is in flight", a request "not
+  queued completely", a buffer "never collected");
 - blocked: the same cameras are listed, the preview is not the chart on two samples, and the camera key
   takes nothing;
 - none: no camera feature and no camera at all.
@@ -107,6 +111,18 @@ STILL_MINIMUM_SIDE = 480
 BLOCKED_SAMPLES = 2
 BLOCKED_SAMPLE_GAP_SECONDS = 10
 CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
+# The camera application's intents: its video mode, and the extra that picks the front camera.
+VIDEO_ACTION = "android.media.action.VIDEO_CAMERA"
+FRONT_EXTRA = "android.intent.extra.USE_FRONT_CAMERA"
+# Video: how long the shutter key's recording runs, how long the file may take to appear, and the movie
+# duration it must have (the recording is shorter than the hold by the application's start-up).
+VIDEO_HOLD_SECONDS = 4
+VIDEO_SECONDS = 90
+VIDEO_MINIMUM_SECONDS = 1.0
+VIDEO_MAXIMUM_SECONDS = 15.0
+VIDEO_URI = "content://media/external/video/media"
+# The camera HAL's own tags: a failed buffer is an error or a warning of one of these.
+HAL_TAGS = ("V4l2Stream", "V4l2FrameSource", "EmulatedSensorHost")
 
 # The cameras each synthetic profile presents, and the camera IDs Android gives them
 # (android/lineage-24/overlay/camera/hal/camera_ids.hpp).
@@ -202,6 +218,81 @@ def active_client_packages(text: str) -> set[str]:
                 packages.add(match[1])
         break
     return packages
+
+
+def active_client_camera_ids(text: str, package: str) -> set[str]:
+    """`dumpsys media.camera`: the IDs of the cameras the package holds, from its lines of the Active
+    Camera Clients block (`(Camera ID: 1, Cost: 100, PID: .., Client Package Name: .., ..)`)."""
+    return set(re.findall(rf"Camera ID: (\w+),[^\n]*?Client Package Name: {re.escape(package)}\b", text))
+
+
+def parse_content_rows(text: str) -> list[dict[str, str]]:
+    """`content query`: one dict per `Row: N key=value, key=value` line. A value runs to the next `, key=`."""
+    rows = []
+    for line in text.splitlines():
+        if not (head := re.match(r"Row: \d+ (.*)", line.strip())):
+            continue
+        rows.append({match[1]: match[2] for match in re.finditer(r"(\w+)=(.*?)(?=, \w+=|$)", head[1])})
+    return rows
+
+
+@dataclass
+class Movie:
+    seconds: float
+    video: bool
+    audio: bool
+
+
+def mp4_boxes(data: bytes, start: int, end: int):
+    """The boxes of an MP4 between two offsets: (type, payload start, box end)."""
+    position = start
+    while position + 8 <= end:
+        size, kind = struct.unpack_from(">I4s", data, position)
+        header = 8
+        if size == 1:
+            size, header = struct.unpack_from(">Q", data, position + 8)[0], 16
+        elif size == 0:
+            size = end - position
+        if size < header or position + size > end:
+            raise ValueError(f"a box of {size} bytes at {position} does not fit")
+        yield kind, position + header, position + size
+        position += size
+
+
+def parse_mp4(data: bytes) -> Movie:
+    """The duration and the track kinds of an MP4 file: its `ftyp`, and in `moov` the `mvhd` and the handlers."""
+    boxes = {kind: (payload, end) for kind, payload, end in mp4_boxes(data, 0, len(data))}
+    if b"ftyp" not in boxes or b"moov" not in boxes:
+        raise ValueError("no ftyp and moov: not a finished movie")
+    start, end = boxes[b"moov"]
+    inner = {kind: (payload, stop) for kind, payload, stop in mp4_boxes(data, start, end)}
+    if b"mvhd" not in inner:
+        raise ValueError("no mvhd")
+    payload, _ = inner[b"mvhd"]
+    if data[payload] == 1:
+        scale, duration = struct.unpack_from(">IQ", data, payload + 20)
+    else:
+        scale, duration = struct.unpack_from(">II", data, payload + 12)
+    if scale == 0:
+        raise ValueError("a time scale of zero")
+    moov = data[start:end]
+    return Movie(duration / scale, b"vide" in moov, b"soun" in moov)
+
+
+def hal_failures(text: str) -> list[str]:
+    """`logcat -d` lines of the camera HAL's tags that say a buffer failed: an error of any of them, a request
+    that was not queued completely, a buffer that never arrived or was never collected."""
+    failures = []
+    for line in text.splitlines():
+        if not (match := re.search(r"\s([EW])\s+(\w+)\s*: (.*)$", line)):
+            continue
+        level, tag, message = match.groups()
+        if tag not in HAL_TAGS:
+            continue
+        if level == "E" or any(part in message for part in (
+                "was not queued completely", "did not deliver", "never collected")):
+            failures.append(line.strip())
+    return failures
 
 
 def camera_connected(text: str, package: str) -> bool:
@@ -485,6 +576,15 @@ class Guest:
         return {name for name in parse_listing(self.shell(f"ls {STILL_DIRECTORY} 2>&1 || true"))
                 if name.lower().endswith((".jpg", ".jpeg"))}
 
+    def videos(self) -> tuple[dict[str, dict[str, str]], str]:
+        """The movies MediaStore lists, by their `_id`, and the raw text of the query."""
+        text = self.shell(f"content query --uri {VIDEO_URI} --projection _id:_display_name:_data:duration:_size "
+                          "2>&1 || true")
+        return {row["_id"]: row for row in parse_content_rows(text) if "_id" in row}, text
+
+    def hal_log(self) -> str:
+        return self.shell("logcat -d -b all " + " ".join(f"{tag}:W" for tag in HAL_TAGS) + " '*:S' 2>&1 || true")
+
     def screenshot(self) -> Image:
         result = self.adb_run("exec-out", "screencap", "-p", timeout=SCREENSHOT_SECONDS, binary=True)
         if result.returncode != 0:
@@ -580,11 +680,14 @@ def blocked_preview(sample: Callable[[], tuple[float, float]], sleep: Callable[[
     return None
 
 
-def start_camera_application(guest: Guest) -> None:
+def start_camera_application(guest: Guest, action: str = "android.media.action.STILL_IMAGE_CAMERA",
+                             front: bool | None = None) -> None:
+    """Starts the application: with its `front` extra (the application keeps its last choice otherwise)."""
     for permission in CAMERA_PERMISSIONS:
         guest.shell(f"pm grant {CAMERA_PACKAGE} {permission} 2>&1 || true")
     guest.shell("input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard 2>&1 || true")
-    guest.shell("am start -a android.media.action.STILL_IMAGE_CAMERA")
+    extra = "" if front is None else f" --ez {FRONT_EXTRA} {'true' if front else 'false'}"
+    guest.shell(f"am start -a {action}{extra}")
 
 
 def check_preview(guest: Guest, plan: Plan) -> None:
@@ -663,6 +766,79 @@ def check_still(guest: Guest, plan: Plan, before: set[str]) -> None:
     print(f"  still: {found[-1]} {jpeg.width}x{jpeg.height}")
 
 
+def wait_for_chart(guest: Guest, camera_id: str, what: str) -> None:
+    """The application holds camera `camera_id` and its preview is the chart."""
+    wait_for(f"the camera application holding camera {camera_id} ({what})", PREVIEW_SECONDS,
+             lambda: None if camera_id in active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE)
+             else f"it holds {sorted(active_client_camera_ids(guest.media_camera(), CAMERA_PACKAGE))}", guest)
+    seen: list[tuple[float, float]] = []
+
+    def previewing() -> str | None:
+        seen.append(luma_statistics(guest.screenshot()))
+        mean, deviation = seen[-1]
+        return None if deviation >= CHART_MINIMUM_DEVIATION else \
+            f"the preview is flat (mean {mean:.1f}, deviation {deviation:.1f})"
+
+    wait_for(f"the {what} preview showing the chart", PREVIEW_SECONDS, previewing, guest)
+    print(f"  {what} preview: mean {seen[-1][0]:.1f}, deviation {seen[-1][1]:.1f}")
+
+
+def check_video(guest: Guest, plan: Plan) -> None:
+    """The camera key starts and stops a recording of the application's video mode on the profile's first
+    camera: MediaStore lists a new movie of at least VIDEO_MINIMUM_SECONDS with a video track."""
+    before, _ = guest.videos()
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, VIDEO_ACTION, front=PROFILE_CAMERAS[plan.profile][0] == "front")
+    wait_for_chart(guest, plan.camera_ids[0], "video")
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    time.sleep(VIDEO_HOLD_SECONDS)
+    guest.shell(f"input keyevent {CAMERA_KEYCODE}")
+    raw = ["not queried"]
+    found: list[dict[str, str]] = []
+
+    def recorded() -> str | None:
+        rows, raw[0] = guest.videos()
+        added = [row for _, row in sorted(rows.items()) if row["_id"] not in before]
+        if not added:
+            return f"MediaStore lists no new movie (query: {raw[0].strip()[-200:]!r})"
+        found[:] = added
+        return None
+
+    wait_for("a movie in MediaStore", VIDEO_SECONDS, recorded, guest)
+    time.sleep(3)  # the file is finished when the application has closed it; give the last write time to land
+    path = found[-1].get("_data", "")
+    try:
+        movie = parse_mp4(guest.pull(path))
+    except ValueError as problem:
+        raise Failure(f"{path} is not a finished movie: {problem}") from problem
+    if not movie.video:
+        raise Failure(f"{path} has no video track")
+    if not VIDEO_MINIMUM_SECONDS <= movie.seconds <= VIDEO_MAXIMUM_SECONDS:
+        raise Failure(f"{path} lasts {movie.seconds:.2f} s; the recording ran {VIDEO_HOLD_SECONDS} s "
+                      f"and must last between {VIDEO_MINIMUM_SECONDS} and {VIDEO_MAXIMUM_SECONDS} s")
+    print(f"  video: {found[-1].get('_display_name', path)} {movie.seconds:.2f} s, audio {'yes' if movie.audio else 'no'}")
+
+
+def check_front(guest: Guest, plan: Plan) -> None:
+    """With a front camera (the profile's camera "1"): the application opens it, the preview is the chart and
+    the camera key takes a still."""
+    if PROFILE_CAMERAS[plan.profile][0] != "back+front":
+        print("  front: the profile's only camera is the front one, checked above")
+        return
+    before = guest.stills()
+    guest.shell(f"am force-stop {CAMERA_PACKAGE}")
+    start_camera_application(guest, front=True)
+    wait_for_chart(guest, "1", "front")
+    check_still(guest, plan, before)
+
+
+def check_hal_log(guest: Guest) -> None:
+    failures = hal_failures(guest.hal_log())
+    if failures:
+        raise Failure(f"the camera HAL logged {len(failures)} failed buffer lines; the first: {failures[0]}")
+    print("  the camera HAL logged no failed buffer")
+
+
 def run_checks(guest: Guest, plan: Plan) -> None:
     print(f"layout {plan.layout.name}, profile {plan.profile}, {plan.mode}")
     check_layout(guest, plan)
@@ -685,6 +861,10 @@ def run_checks(guest: Guest, plan: Plan) -> None:
         raise Failure("the camera application holds a camera and no camera provider runs: the open did not start it")
     print(f"  provider: started again by the open, pid {running}")
     check_still(guest, plan, before)
+    if plan.mode == "live":
+        check_video(guest, plan)
+        check_front(guest, plan)
+        check_hal_log(guest)
     guest.shell(f"am force-stop {CAMERA_PACKAGE}")
     exited = wait_provider_exit(guest, "after the camera application is stopped")
     print(f"  provider: gone {exited:.0f} s after the application stopped")
