@@ -289,6 +289,36 @@ void theEnvironmentNamesTheSyntheticCamera()
     }
 }
 
+
+void anUnknownSourceNeverFallsBackToTheHostsCamera()
+{
+    // The host's source is made only for a value that names it: a test knob
+    // that cannot be read must never open a real camera.
+    int hostSources = 0;
+    const auto host = [&hostSources]() -> uml::camera::CameraSourceHandle {
+        ++hostSources;
+        return uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::laptop);
+    };
+    for (const char* bad : {"synthetic:watch", "webcam", "Synthetic", "synthetic:", "SYNTHETIC:PHONE", " host",
+                            "host ", "synthetic:phone:2", "0"}) {
+        require(parseSource(bad).invalid, bad);
+        require(chooseSource(parseSource(bad), host) == nullptr, bad);
+    }
+    require(hostSources == 0, "an unknown value asked for the host's camera");
+
+    // An unknown value presents a host without cameras, and a camera never
+    // fails a boot.
+    const auto none = present(chooseSource(parseSource("webcam"), host), CameraTier::small, "");
+    require(none.layout == "none" && !none.hasCameras() && none.source == nullptr);
+    require(!uml::camera::lensCoverAdvertised(CameraMode::blocked, none.layout));
+
+    for (const char* named : {static_cast<const char*>(nullptr), "", "host"}) {
+        require(chooseSource(parseSource(named), host) != nullptr);
+    }
+    require(hostSources == 3, "the host's own value asks for the host's camera");
+    require(chooseSource(parseSource("synthetic:tablet"), host) != nullptr && hostSources == 3,
+        "the synthetic camera is not the host's");
+}
 #endif
 
 } // namespace
@@ -309,6 +339,7 @@ int main()
         {"a-boot-states-the-orientation-and-a-later-turn-is-a-delta", aBootStatesTheOrientationAndALaterTurnIsADelta},
 #ifndef UML_APP_STORE_RUNTIME
         {"the-environment-names-the-synthetic-camera", theEnvironmentNamesTheSyntheticCamera},
+        {"an-unknown-source-never-falls-back-to-the-hosts-camera", anUnknownSourceNeverFallsBackToTheHostsCamera},
 #endif
     };
     return uml::testing::runNamedTests(tests);

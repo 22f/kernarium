@@ -1426,27 +1426,29 @@ void sayBootloaderConsumed()
 #endif
 
 #if KERNARIUM_RUNTIME_ANDROID_GUEST
-/* The cameras this run presents: the host's, discovered once for the run (a
- * guest that restarts finds the same layout), or, in a runtime that is not an
- * App Store build, the synthetic ones its environment names. A host whose
- * cameras cannot be discovered has none, and a camera never fails a boot. */
+/* The cameras this run presents: the host's, discovered once for the run, or,
+ * in a runtime that is not an App Store build, the synthetic ones its
+ * environment names (a value that names none gives the guest no cameras, never
+ * the host's). A host whose cameras cannot be discovered has none, and a
+ * camera never fails a boot. */
 kernarium::camera::Presentation presentCameras(const GuestRequest& request)
 {
     const auto tier = uml::camera::cameraTierForBudget(request.gpuBudgetBytes);
     try {
-        uml::camera::CameraSourceHandle source;
 #ifndef UML_APP_STORE_RUNTIME
         const auto choice = kernarium::camera::parseSource(
             std::getenv(kernarium::camera::sourceVariable));
         if (choice.invalid)
             std::fprintf(
-                stderr, "Kernarium: ignoring unknown %s\n",
+                stderr,
+                "Kernarium: unknown %s: the guest gets no cameras, and never "
+                "the host's\n",
                 kernarium::camera::sourceVariable);
-        if (choice.synthetic)
-            source = uml::camera::makeSyntheticCameraSource(choice.profile);
-        else
+        auto source = kernarium::camera::chooseSource(
+            choice, [] { return uml::camera::makeHostCameraSource(); });
+#else
+        auto source = uml::camera::makeHostCameraSource();
 #endif
-            source = uml::camera::makeHostCameraSource();
         auto cameras = kernarium::camera::present(
             std::move(source), tier, request.camera.calibrationDirectory);
         std::printf(

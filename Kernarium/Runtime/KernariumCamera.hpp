@@ -258,7 +258,9 @@ inline constexpr const char* sourceVariable = "KERNARIUM_CAMERA_SOURCE";
 struct SourceChoice {
     bool synthetic {};
     uml::camera::SyntheticProfile profile {uml::camera::SyntheticProfile::phone};
-    /* The value was not one of the names: the host's camera is used. */
+    /* The value was not one of the names. A test knob that cannot be read must
+     * never fall back to a real camera, so the guest gets no cameras
+     * (`chooseSource`). */
     bool invalid {};
 };
 
@@ -282,6 +284,19 @@ struct SourceChoice {
         choice.invalid = true;
     }
     return choice;
+}
+/* The source the choice names: the synthetic camera, the host's (made by
+ * `host`, which is not called for any other choice), or none, a host with no
+ * cameras, for a value that is not a name. */
+template <class HostSource>
+[[nodiscard]] uml::camera::CameraSourceHandle chooseSource(
+    const SourceChoice& choice, HostSource&& host)
+{
+    if (choice.invalid)
+        return nullptr;
+    if (choice.synthetic)
+        return uml::camera::makeSyntheticCameraSource(choice.profile);
+    return host();
 }
 #endif
 

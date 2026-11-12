@@ -418,7 +418,7 @@ DEBUG_SYMBOLS = (
                           b"17decodeChartMarker",
                           # The runtime's choice of it from the environment
                           # (Kernarium/Runtime/KernariumCamera.hpp).
-                          b"6camera11parseSource")),
+                          b"6camera11parseSource", b"6camera12chooseSource")),
     # The camera's development lines (darwin/device/camera/camera_diagnostics.hpp):
     # what ROTATE_AND_CROP asks of the host and the footprint at each capture
     # checkpoint, printed by a launcher or a runtime that is not an App Store

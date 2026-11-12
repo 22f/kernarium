@@ -233,7 +233,8 @@ Kernarium attaches:
   the difference
   ([orientation](../darwin/device/camera/README.md#orientation)). A runtime
   that is not an App Store build serves the synthetic camera when
-  `KERNARIUM_CAMERA_SOURCE` names it and prints the ROTATE_AND_CROP settings
+  `KERNARIUM_CAMERA_SOURCE` names it, gives the guest no cameras for any other
+  value (never the host's), and prints the ROTATE_AND_CROP settings
   that reach the cameras and the process's footprint when a capture session
   opens, closes and after each still. The Linux runtime keeps both entries and
   never calls back;
