@@ -43,12 +43,14 @@ application's statements (the sensor orientation, the rotation that
   staging and the transients of a 12 MP RAW still with its DNG and JPEG, 145
   MiB at the small tier (`cameraHostMemoryReserveMiB`). The figure is one a
   tier, for the layout with the most in it; the loader states it from the
-  budget alone. The device keeps only the newest frame of a camera and frees
-  each as soon as it is written, and checks the first buffer of each
-  configuration against the reserved buffer (a log line that says when one is
-  larger). The GPU's pool is the budget B
-  less the reserve while the cameras are live and B otherwise, in the runtime,
-  the launcher and the applications' figure alike.
+  budget alone. The six are a maximum of the code: the inbox keeps a camera's
+  newest three, the pump takes the newest frame of a camera and frees the older
+  ones before it lets go of the inbox, and frees each as soon as it is written;
+  one more frame arrives and one is being filled. The device checks the first
+  buffer of each configuration against the reserved buffer (a log line that says
+  when one is larger). The GPU's pool is the budget B less the reserve while the
+  cameras are live and B otherwise, in the runtime, the launcher and the
+  applications' figure alike.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer

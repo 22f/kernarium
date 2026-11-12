@@ -73,6 +73,12 @@ public:
     [[nodiscard]] virtual std::vector<std::optional<std::size_t>> sessionAnchors() const = 0;
     [[nodiscard]] virtual CameraLimits sessionLimits() const noexcept = 0;
     [[nodiscard]] virtual unsigned sessionAnchorCalls() const noexcept = 0;
+    // The frames that exist: made by a session's capture and not yet freed by
+    // whoever holds them (the capture's buffer of the real camera), the most
+    // there were at once since resetFramePeak(), and the count now.
+    [[nodiscard]] virtual unsigned framesAlive() const noexcept = 0;
+    [[nodiscard]] virtual unsigned framePeak() const noexcept = 0;
+    virtual void resetFramePeak() noexcept = 0;
     // The settings last applied to a camera, and the cameras running video.
     [[nodiscard]] virtual CameraSettings appliedSettings(std::size_t camera) const = 0;
     [[nodiscard]] virtual bool videoRunning(std::size_t camera) const = 0;

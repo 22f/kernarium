@@ -457,6 +457,13 @@ public:
     std::vector<std::optional<std::size_t>> anchors;  // guarded by anchorMutex
     CameraLimits anchorLimits;                        // guarded by anchorMutex
     std::atomic<unsigned> anchorCalls {0};
+    // The frames made and not yet freed by their owners, and the most there were at once. A frame
+    // can outlive the camera, so each holds the counts.
+    struct FrameCounts {
+        std::atomic<unsigned> alive {0};
+        std::atomic<unsigned> peak {0};
+    };
+    const std::shared_ptr<FrameCounts> frames {std::make_shared<FrameCounts>()};
     std::atomic<unsigned> open {0};
     std::atomic<std::uint64_t> clock {1'000'000'000};
     std::atomic<bool> rawRefused {false};
@@ -865,7 +872,16 @@ private:
             if (stopped_ || !state.video) return;
             auto outcome = this->outcome(camera, state.video->frameRate);
             outcome.scene.counter = ++state.video->counter;
-            auto picture = std::make_shared<Picture>(render(base(state, state.video->width, state.video->height), outcome.scene));
+            // The picture counts itself while a frame holds it.
+            const auto counts = core_.frames;
+            const unsigned alive = ++counts->alive;
+            for (unsigned peak = counts->peak; alive > peak && !counts->peak.compare_exchange_weak(peak, alive);) {
+            }
+            std::shared_ptr<Picture> picture(new Picture(render(base(state, state.video->width, state.video->height), outcome.scene)),
+                                             [counts](Picture* freed) {
+                                                 delete freed;
+                                                 --counts->alive;
+                                             });
             frame.width = picture->width;
             frame.height = picture->height;
             frame.luma = picture->luma;
@@ -1014,6 +1030,9 @@ public:
         return core_.anchorLimits;
     }
     unsigned sessionAnchorCalls() const noexcept override { return core_.anchorCalls; }
+    unsigned framesAlive() const noexcept override { return core_.frames->alive; }
+    unsigned framePeak() const noexcept override { return core_.frames->peak; }
+    void resetFramePeak() noexcept override { core_.frames->peak = core_.frames->alive.load(); }
     unsigned sessionsOpened() const noexcept override { return core_.opened; }
     unsigned sessionsOpen() const noexcept override { return core_.open; }
 

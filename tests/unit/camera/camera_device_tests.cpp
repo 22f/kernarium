@@ -83,7 +83,10 @@ struct Rig final {
         options.mode = rigOptions.mode;
         options.tier = rigOptions.tier;
         options.calibration = store;
-        options.onState = [this](CameraState state) { states.push_back(state); };
+        options.onState = [this](CameraState state) {
+            states.push_back(state);
+            if (onStateChange) onStateChange();
+        };
         options.automaticRotation = [this](const uml::platform::CameraInfo&) { return automaticDegrees ? *automaticDegrees : 0u; };
         options.onCheckpoint = [this](CameraCheckpoint where) { checkpoints.push_back(where); };
         options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
@@ -105,6 +108,9 @@ struct Rig final {
     std::shared_ptr<CalibrationStore> store;
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
+    /* Called on the worker where the device tells the application its state changed, which is
+     * while it handles a platform event, with the frames of its batch in hand. */
+    std::function<void()> onStateChange;
     /* The diagnostic checkpoints the device reported, in order. */
     std::vector<CameraCheckpoint> checkpoints;
     /* What the device reported to onRotateAndCrop: camera, setting, degrees. */
@@ -1978,6 +1984,39 @@ void testABurstOfFramesIsTheNewestFrame()
     require(rig.done(second) && rig.result(second).sequence == 2, "the next frame is the next");
 }
 
+// R3 (recheck5): the reserve counts six held frames a camera (heldFramesPerCamera): the inbox's three, the one the
+// pump writes, the one arriving and the one the capture fills. The pump takes the newest frame of a camera and frees
+// the older ones before it lets go of the inbox, so the capture can refill the inbox to its limit while the pump
+// handles a platform event and no more than one frame of the pump is held beside it. (A pump that kept its whole
+// batch while the inbox refilled held seven: three, three, and the arriving one.)
+void testTheMostFramesHeldAtOnceIsWhatTheReserveCounts()
+{
+    Rig rig;
+    rig.create(1, 0, videoKind);
+    rig.setVideo(1, 640, 480);
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(1, resource, nv12Size(640, 480));
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(1, resource);
+    // A burst of three frames waits in the inbox with an event behind it.
+    rig.camera->pump(0, 3);
+    require(rig.camera->framesAlive() == inboxFramesPerCamera, "the inbox holds the newest three");
+    rig.camera->post({uml::platform::allCameras, CameraEventKind::interrupted});
+    bool refilled = false;
+    rig.onStateChange = [&] {
+        if (refilled) return;
+        refilled = true;
+        // The capture goes on while the event is handled: more frames than the inbox holds.
+        rig.camera->pump(0, 4);
+    };
+    rig.camera->resetFramePeak();
+    rig.step();
+    require(refilled, "the event was handled with frames in the pump's hand");
+    require(rig.camera->framePeak() <= inboxFramesPerCamera + 2,
+            "at most the inbox's three, the pump's one and the arriving one are held at once");
+    require(rig.camera->framePeak() <= heldFramesPerCamera, "and so never more than the reserve counts");
+    require(rig.camera->framesAlive() <= inboxFramesPerCamera, "what is left afterwards is the inbox's");
+    rig.onStateChange = nullptr;
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -2025,6 +2064,7 @@ int main()
     testHostileGuest();
     testEveryOfferedRunStartsInTheAnchor();
     testABurstOfFramesIsTheNewestFrame();
+    testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
     testService();
     return 0;
 }

@@ -1159,27 +1159,27 @@ public:
     /* Takes what the platform produced since the last pass. */
     void pump()
     {
-        std::deque<InboxFrame> frames;
+        std::vector<InboxFrame> newest;
         std::deque<InboxStill> stills;
         std::deque<CameraEvent> platformEvents;
         {
             std::lock_guard lock(inboxMutex);
-            frames.swap(inboxFrames);
+            // Only the newest frame of a camera is kept, and the older ones are
+            // freed here, before the lock is let go: a frame is stale by the time
+            // the worker takes it, and each holds the capture's buffer. So the
+            // pump holds one frame a camera while the inbox refills to its limit,
+            // which is the count the reserve assumes (heldFramesPerCamera).
+            for (auto& entry : inboxFrames) {
+                const auto same = std::find_if(newest.begin(), newest.end(), [&](const InboxFrame& kept) { return kept.camera == entry.camera; });
+                if (same != newest.end()) *same = std::move(entry);
+                else newest.push_back(std::move(entry));
+            }
+            inboxFrames.clear();
             stills.swap(inboxStills);
             platformEvents.swap(inboxEvents);
         }
         for (const auto& platformEvent : platformEvents) handlePlatformEvent(platformEvent);
         for (auto& still : stills) deliverStill(still.camera, still.result);
-        // Only the newest frame of a camera is written: an older one is stale by
-        // the time the worker takes it, and holding it holds the capture's buffer
-        // (the reserve counts heldFramesPerCamera of them).
-        std::vector<InboxFrame> newest;
-        for (auto& entry : frames) {
-            const auto same = std::find_if(newest.begin(), newest.end(), [&](const InboxFrame& kept) { return kept.camera == entry.camera; });
-            if (same != newest.end()) *same = std::move(entry);
-            else newest.push_back(std::move(entry));
-        }
-        frames.clear();
         for (auto& entry : newest) {
             const auto wire = wireOfPlatform.find(entry.camera);
             if (wire == wireOfPlatform.end()) continue;
