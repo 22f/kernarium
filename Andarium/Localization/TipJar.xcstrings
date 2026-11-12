@@ -1,31 +1,31 @@
 {
   "sourceLanguage": "en",
   "strings": {
-    "A tip is a voluntary one-time purchase that supports Andarium’s independent development. Every feature is free either way.": {
+    "A tip is a voluntary one-time purchase that supports Andarium’s development. Every feature is free either way.": {
       "comment": "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "A tip is a voluntary one-time purchase that supports Andarium’s independent development. Every feature is free either way."
+            "value": "A tip is a voluntary one-time purchase that supports Andarium’s development. Every feature is free either way."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "チップは、Andariumの個人開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。"
+            "value": "チップは、Andariumの開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "小费是自愿的一次性购买，用于支持Andarium的独立开发。无论是否给小费，所有功能都免费。"
+            "value": "打赏是自愿的一次性购买，用于支持Andarium的开发。无论是否打赏，所有功能都免费。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "小費是自願的一次性購買，用於支持Andarium的獨立開發。無論是否給小費，所有功能都免費。"
+            "value": "打賞是自願的一次性購買，用於支持Andarium的開發。無論是否打賞，所有功能都免費。"
           }
         }
       }
@@ -48,13 +48,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "给Andarium开发者的自愿小费。"
+            "value": "给Andarium开发者的自愿打赏。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "給Andarium開發者的自願小費。"
+            "value": "給Andarium開發者的自願打賞。"
           }
         }
       }
@@ -193,42 +193,42 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果Andarium对你有帮助，不妨请我来点。"
+            "value": "如果觉得Andarium好用，不妨请我来点。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果Andarium對你有幫助，不妨請我來點。"
+            "value": "如果覺得Andarium好用，不妨請我來點。"
           }
         }
       }
     },
-    "In-app purchases are restricted on this %@. Every feature stays free.": {
+    "In-app purchases are restricted on this %@.": {
       "comment": "The note under the restricted title. The placeholder is iPhone or iPad.",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "In-app purchases are restricted on this %@. Every feature stays free."
+            "value": "In-app purchases are restricted on this %@."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "この%@ではApp内課金が制限されています。すべての機能は引き続き無料です。"
+            "value": "この%@ではApp内課金が制限されています。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "此%@已限制App内购买。所有功能仍然免费。"
+            "value": "此%@已限制App内购买。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "此%@已限制App內購買。所有功能仍然免費。"
+            "value": "此%@已限制App內購買。"
           }
         }
       }
@@ -280,13 +280,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "一次性小费"
+            "value": "一次性打赏"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "一次性小費"
+            "value": "一次性打賞"
           }
         }
       }
@@ -425,13 +425,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "小费未能完成"
+            "value": "打赏未能完成"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "小費未能完成"
+            "value": "打賞未能完成"
           }
         }
       }
@@ -483,13 +483,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "此小费需要经过批准才会完成。你可以先关闭此页面。"
+            "value": "此打赏需要经过批准才会完成。你可以先关闭此页面。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "此小費需要經過核准才會完成。你可以先關閉此頁面。"
+            "value": "此打賞需要經過核准才會完成。你可以先關閉此頁面。"
           }
         }
       }
@@ -512,13 +512,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "暂时无法给小费"
+            "value": "暂时无法打赏"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "暫時無法給小費"
+            "value": "暫時無法打賞"
           }
         }
       }

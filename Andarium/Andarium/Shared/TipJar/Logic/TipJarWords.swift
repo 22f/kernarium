@@ -40,7 +40,7 @@ nonisolated enum TipJarWords {
         "If Andarium is useful to you, you can buy me some.", table: "TipJar",
         comment: "Third message of the chat: the invitation to tip, in the developer's first-person voice.")
     static let statement = LocalizedStringResource(
-        "A tip is a voluntary one-time purchase that supports Andarium\u{2019}s independent development. Every feature is free either way.",
+        "A tip is a voluntary one-time purchase that supports Andarium\u{2019}s development. Every feature is free either way.",
         table: "TipJar",
         comment: "The plain statement under the chat, as a centred note. It must say that a tip is voluntary, one-time and a purchase, and that every feature is free whether or not someone tips.")
 
@@ -78,7 +78,7 @@ nonisolated enum TipJarWords {
     }
     static func restrictedText(device: String) -> LocalizedStringResource {
         LocalizedStringResource(
-            "In-app purchases are restricted on this \(device). Every feature stays free.", table: "TipJar",
+            "In-app purchases are restricted on this \(device).", table: "TipJar",
             comment: "The note under the restricted title. The placeholder is iPhone or iPad.")
     }
 

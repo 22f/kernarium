@@ -14,19 +14,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-STATEMENT = ("A tip is a voluntary one-time purchase that supports Andarium’s independent development. "
+STATEMENT = ("A tip is a voluntary one-time purchase that supports Andarium’s development. "
              "Every feature is free either way.")
 # The statement in each language, as the table says it; each idea is one word of it.
 STATEMENTS = {
-    "zh-Hans": "小费是自愿的一次性购买，用于支持Andarium的独立开发。无论是否给小费，所有功能都免费。",
-    "zh-Hant": "小費是自願的一次性購買，用於支持Andarium的獨立開發。無論是否給小費，所有功能都免費。",
-    "ja": "チップは、Andariumの独立した開発を支える任意の1回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。",
+    "zh-Hans": "打赏是自愿的一次性购买，用于支持Andarium的开发。无论是否打赏，所有功能都免费。",
+    "zh-Hant": "打賞是自願的一次性購買，用於支持Andarium的開發。無論是否打賞，所有功能都免費。",
+    "ja": "チップは、Andariumの開発を支える任意の一回限りの購入です。チップの有無にかかわらず、すべての機能は無料です。",
 }
 # Each language's ideas, one word that says each in STATEMENTS.
 IDEAS = {
     "zh-Hans": ("自愿", "一次性", "购买", "免费"),
     "zh-Hant": ("自願", "一次性", "購買", "免費"),
-    "ja": ("任意", "1回限り", "購入", "無料"),
+    "ja": ("任意", "一回限り", "購入", "無料"),
 }
 
 
