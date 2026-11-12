@@ -122,6 +122,8 @@ FOREGROUND_COMMAND = ("dumpsys activity activities | grep -a -E 'ResumedActivity
 APP_EVENTS_PATTERN = (f"{CAMERA_PACKAGE}|FATAL EXCEPTION|ANR in|am_crash|am_anr|am_proc_died|am_kill|"
                       "ActivityTaskManager|WindowManager: (Resumed|Destroying|Changing focus)")
 APP_EVENTS_LINES = 80
+# The application's own log lines (its errors, what it logged before it left) come by process id: they do not name the package.
+APP_OWN_LOG_LINES = 80
 CONCURRENT_FEATURE = "android.hardware.camera.concurrent"
 # The camera application's intents: its video mode, and the extra that picks the front camera.
 VIDEO_ACTION = "android.media.action.VIDEO_CAMERA"
@@ -1141,6 +1143,10 @@ def print_application_events(guest: Guest, stream) -> None:
         events = guest.shell(f"logcat -d -b all | grep -a -E '{APP_EVENTS_PATTERN}' | grep -a -v -E '{FAILURE_LOG_NOISE}' "
                              f"| tail -n {APP_EVENTS_LINES}", timeout=120)
         print("events of the camera application and its windows:\n" + events.rstrip(), file=stream)
+        own = guest.shell(f"for pid in $(pidof {CAMERA_PACKAGE}); do logcat -d -b all --pid=$pid; done "
+                          f"| grep -a -v -E '{FAILURE_LOG_NOISE}' | tail -n {APP_OWN_LOG_LINES}", timeout=120)
+        print("the camera application's own log lines (by process id):\n" + (own.rstrip() or "(none: no process)"),
+              file=stream)
     except Exception as problem:
         print(f"(no application events: {problem})", file=stream)
 

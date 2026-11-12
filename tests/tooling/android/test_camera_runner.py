@@ -813,7 +813,8 @@ class FailureLogTests(unittest.TestCase):
         commands: list[str] = []
         answers = ["E CameraService: a line\n",
                    "topResumedActivity=ActivityRecord{x u0 org.lineageos.aperture/.CameraActivity}\n",
-                   "I ActivityTaskManager: Displayed org.lineageos.aperture\n"]
+                   "I ActivityTaskManager: Displayed org.lineageos.aperture\n",
+                   "E Aperture: its own line, which does not name the package\n"]
         guest.shell = lambda command, timeout=0: (commands.append(command), answers[len(commands) - 1])[1]
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -827,6 +828,19 @@ class FailureLogTests(unittest.TestCase):
         self.assertIn("mCurrentFocus", commands[1])
         for what in ("FATAL EXCEPTION", "ANR in", "am_crash", "am_anr", "am_proc_died", "org.lineageos.aperture"):
             self.assertIn(what, commands[2])
+        # The application's own lines name no package: they come by process id.
+        self.assertIn("the camera application's own log lines (by process id):\nE Aperture: its own line", text)
+        self.assertIn("pidof org.lineageos.aperture", commands[3])
+        self.assertIn("logcat -d -b all --pid=$pid", commands[3])
+        self.assertIn("grep -a -v -E", commands[3])
+
+    def test_an_application_without_a_process_has_no_own_lines(self) -> None:
+        plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
+        guest = FakeGuest(plan)
+        guest.shell = lambda command, timeout=0: ""
+        out = io.StringIO()
+        runner.print_application_events(guest, out)
+        self.assertIn("the camera application's own log lines (by process id):\n(none: no process)", out.getvalue())
 
     def test_a_guest_lost_after_the_log_keeps_the_log(self) -> None:
         plan = runner.make_plan("bf-large-flash-manual-concurrent-front2160", "phone", "blocked")
