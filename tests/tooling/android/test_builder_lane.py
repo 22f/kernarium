@@ -781,7 +781,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
         )
         gnss_rc_path = "VENDOR/etc/init/android.hardware.gnss-service.andarium.rc"
         gnss_fragment_path = "VENDOR/etc/vintf/manifest/android.hardware.gnss-service.andarium.xml"
-        # The host's cameras: the lazy provider (a service that init starts when a client asks), its one
+        # The host's cameras: the lazy provider (a service that the layouts' init file starts at boot), its one
         # declaration, the HWL library that holds the V4L2 source (the names only route p0030 puts in
         # it), the characteristics template, and the layouts' files (the generator's own).
         camera_provider = "android.hardware.camera.provider@2.7-service-google-lazy"
@@ -5275,6 +5275,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("camera-provider-triggered", {"entries": {
                 camera_rc_path: (good_camera_rc + "\non boot\n    start vendor.camera-provider-2-7-google\n").encode()}},
              "may have no trigger"),
+            ("camera-provider-service-renamed", {"entries": {
+                camera_rc_path: good_camera_rc.replace("vendor.camera-provider-2-7-google", "vendor.camera-provider").encode()}},
+             "which the init file of the camera layouts starts"),
             ("camera-provider-label", {"entries": {"VENDOR/etc/selinux/vendor_file_contexts":
                 good_video_contexts.replace("hal_camera_default_exec", "vendor_file").encode()}},
              "hal_camera_default_exec label"),

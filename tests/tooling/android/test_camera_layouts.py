@@ -284,6 +284,25 @@ class Files(unittest.TestCase):
             self.assertEqual(target, generator.MEDIA_PROPERTY)
         self.assertEqual(len(triggers), len(expected))
 
+    def test_the_init_file_starts_the_provider_in_the_layouts_that_have_cameras_and_no_other(self):
+        # cameraserver lists only a provider that has registered and nothing but init starts the lazy
+        # AIDL provider the first time, so every layout with cameras starts it, once, and no other layout does.
+        text = generator.init_file().decode()
+        starting = set()
+        for action in re.split(r"^(?=on )", text, flags=re.MULTILINE):
+            match = re.match(rf"on property:{re.escape(generator.SKU_PROPERTY)}=(\S+)\n", action)
+            if match is None:
+                continue
+            self.assertEqual(re.findall(r"^    start (\S+)$", action, re.MULTILINE), [generator.PROVIDER_SERVICE],
+                             match[1])
+            starting.add(match[1])
+        self.assertEqual(starting, {layout.name for layout in generator.all_layouts() if layout.cameras != "none"})
+        self.assertNotIn("none", starting)
+        self.assertEqual(text.count(f"start {generator.PROVIDER_SERVICE}"), len(starting))
+
+    def test_the_provider_service_is_the_one_of_the_stock_lazy_rc(self):
+        self.assertEqual(generator.PROVIDER_SERVICE, "vendor.camera-provider-2-7-google")
+
     def test_the_table_lists_every_layout_with_its_fallback(self):
         rows = [line.split("\t") for line in generator.table().decode().splitlines() if not line.startswith("#")]
         self.assertEqual([row[0] for row in rows], [layout.name for layout in generator.all_layouts()])
