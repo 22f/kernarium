@@ -234,13 +234,18 @@ constexpr std::array kinds {
 // blocks and leaves a part block against 8x8 blocks, its levels (50, 25, 12, 6,
 // 3, 1) leave one against both, and the last ones are smaller than a block. A
 // side of 1100 texels is 275 blocks of 4x4, more than one tile of the host's
-// zero fill across.
+// zero fill across. The third is a 2D array of three layers, whose layers each
+// need the same.
 struct Shape {
     std::uint32_t side;
     std::uint32_t lastLevel;
+    std::uint32_t layers;
 };
 
-constexpr std::array shapes {Shape {100, 6}, Shape {1100, 2}};
+constexpr std::array shapes {
+    Shape {100, 6, 1}, Shape {1100, 2, 1}, Shape {70, 3, 3}};
+
+constexpr std::uint32_t pipeTexture2dArray = 7;
 
 // A compressed texture of the kind, with guest storage for every level.
 class CompressedTexture final {
@@ -255,19 +260,19 @@ public:
         std::size_t total = 0;
         for (std::uint32_t level = 0; level <= shape_.lastLevel; ++level) {
             offsets_.push_back(total);
-            total += static_cast<std::size_t>(blocksWide(level)) *
-                blocksHigh(level) * kind_.pattern.size();
+            total += layerBytes(level) * shape_.layers;
         }
         storage_.resize(total);
         require(renderer_.createResource3d(VirglRenderer::Resource3d {
                     .resourceId = resourceId_,
-                    .target = pipeTexture2d,
+                    .target = shape_.layers > 1 ? pipeTexture2dArray
+                                                : pipeTexture2d,
                     .format = kind_.format,
                     .bind = virglBindSamplerView,
                     .width = shape_.side,
                     .height = shape_.side,
                     .depth = 1,
-                    .arraySize = 1,
+                    .arraySize = shape_.layers,
                     .lastLevel = shape_.lastLevel,
                 }) == 0,
             "the compressed texture could not be created");
@@ -303,17 +308,21 @@ public:
                 std::memset(storage_.data() + offset, 0, kind_.pattern.size());
         }
         for (std::uint32_t level = 0; level <= shape_.lastLevel; ++level) {
-            const VirglRenderer::Box box {
-                .width = levelSize(level),
-                .height = levelSize(level),
-                .depth = 1,
-            };
-            require(renderer_.transferResource(true, resourceId_, contextId,
-                        level,
-                        static_cast<std::uint32_t>(blocksWide(level) *
-                            kind_.pattern.size()),
-                        0, box, offsets_[level]) == 0,
-                "the blocks could not be written to the texture");
+            for (std::uint32_t layer = 0; layer < shape_.layers; ++layer) {
+                const VirglRenderer::Box box {
+                    .z = layer,
+                    .width = levelSize(level),
+                    .height = levelSize(level),
+                    .depth = 1,
+                };
+                require(renderer_.transferResource(true, resourceId_,
+                            contextId, level,
+                            static_cast<std::uint32_t>(blocksWide(level) *
+                                kind_.pattern.size()),
+                            static_cast<std::uint32_t>(layerBytes(level)), box,
+                            offsets_[level] + layer * layerBytes(level)) == 0,
+                    "the blocks could not be written to the texture");
+            }
         }
     }
 
@@ -323,6 +332,12 @@ public:
     }
 
 private:
+    [[nodiscard]] std::size_t layerBytes(std::uint32_t level) const noexcept
+    {
+        return static_cast<std::size_t>(blocksWide(level)) * blocksHigh(level) *
+            kind_.pattern.size();
+    }
+
     [[nodiscard]] std::uint32_t blocksWide(std::uint32_t level) const noexcept
     {
         return (levelSize(level) + kind_.blockWidth - 1U) / kind_.blockWidth;
@@ -344,13 +359,14 @@ private:
 // The texels a texture shows at one level, decoded by the hardware.
 [[nodiscard]] std::vector<std::uint8_t> samplesOf(VirglRenderer& renderer,
     Pipeline& pipeline, const CompressedTexture& texture, const Kind& kind,
-    std::uint32_t level)
+    std::uint32_t level, std::uint32_t layer)
 {
     const std::uint32_t view = pipeline.newHandle();
     Commands commands;
     commands.add(commandCreateObject, objectSamplerView,
-        {view, texture.id(), kind.format | (pipeTexture2d << 24U), 0,
-            level | (level << 8U), 0U | (1U << 3U) | (2U << 6U) | (3U << 9U)});
+        {view, texture.id(), kind.format | (pipeTexture2d << 24U),
+            layer | (layer << 16U), level | (level << 8U),
+            0U | (1U << 3U) | (2U << 6U) | (3U << 9U)});
     require(commands.submit(renderer) == 0,
         "the sampler view could not be created");
     return pipeline.sample(
@@ -360,19 +376,24 @@ private:
 void checkCompressed(VirglRenderer& renderer, Pipeline& pipeline,
     std::uint32_t& resourceId, const Shape& shape)
 {
+    const std::uint32_t views = (shape.lastLevel + 1U) * shape.layers;
     for (const Kind& kind : kinds) {
-        // What a block of zeros decodes to at each level, and the control that
-        // the pattern decodes to something else.
-        std::vector<std::vector<std::uint8_t>> zeros(shape.lastLevel + 1U);
+        // What a block of zeros decodes to at each level of each layer, and
+        // the control that the pattern decodes to something else.
+        std::vector<std::vector<std::uint8_t>> zeros(views);
         {
             CompressedTexture zero(renderer, resourceId++, kind, shape);
             zero.fill(false);
             CompressedTexture pattern(renderer, resourceId++, kind, shape);
             pattern.fill(true);
-            for (std::uint32_t level = 0; level <= shape.lastLevel; ++level) {
-                zeros[level] = samplesOf(renderer, pipeline, zero, kind, level);
-                check(zeros[level] !=
-                        samplesOf(renderer, pipeline, pattern, kind, level),
+            for (std::uint32_t view = 0; view < views; ++view) {
+                const std::uint32_t level = view % (shape.lastLevel + 1U);
+                const std::uint32_t layer = view / (shape.lastLevel + 1U);
+                zeros[view] =
+                    samplesOf(renderer, pipeline, zero, kind, level, layer);
+                check(zeros[view] !=
+                        samplesOf(renderer, pipeline, pattern, kind, level,
+                            layer),
                     "the pattern and a block of zeros decode alike");
             }
         }
@@ -394,16 +415,18 @@ void checkCompressed(VirglRenderer& renderer, Pipeline& pipeline,
                     renderer, resourceId++, kind, shape));
                 ++total;
                 bool differs = false;
-                for (std::uint32_t level = 0; level <= shape.lastLevel; ++level)
+                for (std::uint32_t view = 0; view < views; ++view)
                     differs = differs ||
                         samplesOf(renderer, pipeline, *fresh.back(), kind,
-                            level) != zeros[level];
+                            view % (shape.lastLevel + 1U),
+                            view / (shape.lastLevel + 1U)) != zeros[view];
                 differing += differs ? 1U : 0U;
             }
         }
         std::fprintf(stderr,
-            "%s %ux%u: %u of %u new textures decode other than zero blocks\n",
-            kind.name, shape.side, shape.side, differing, total);
+            "%s %ux%ux%u: %u of %u new textures decode other than zero "
+            "blocks\n",
+            kind.name, shape.side, shape.side, shape.layers, differing, total);
         check(differing == 0,
             "a new compressed texture showed what a released one held");
     }
