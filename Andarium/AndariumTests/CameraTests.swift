@@ -271,6 +271,8 @@ struct CameraFlowTests {
         let s = setup(.authorized, chosen: true)
         let runtime = LiveRuntime(
             model: s.model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
+        // The runtime put the system's own source on the model; the test puts the fake back.
+        s.model.camera = CameraController(model: s.model, source: s.system)
         #expect(runtime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_LIVE))
         // iOS takes the access away after Home read it: the boot says blocked.
         s.system.access = .denied
@@ -280,10 +282,12 @@ struct CameraFlowTests {
         let off = setup(.authorized, chosen: false)
         let offRuntime = LiveRuntime(
             model: off.model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
+        off.model.camera = CameraController(model: off.model, source: off.system)
         #expect(offRuntime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED))
         let none = setup(.unavailable, chosen: true)
         let noneRuntime = LiveRuntime(
             model: none.model, storage: storage, marker: PauseMarker(url: directory.appendingPathComponent("pause.json")))
+        none.model.camera = CameraController(model: none.model, source: none.system)
         #expect(noneRuntime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED))
     }
 
