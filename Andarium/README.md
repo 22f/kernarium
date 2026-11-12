@@ -91,30 +91,33 @@ its inner display turns with the device as an iPad's does, the host driving the
 guest. The layout follows the display the system lights, which the scene's root
 reads from the hinge and the view's reserved regions (`FoldSceneReader`) and
 `AndariumCore/FoldLayout.swift` decides as pure functions; a device that
-reports no hinge keeps every layout it has.
+reports no hinge keeps every layout it has. Only the inner display bent at the
+fold is placed around the hinge (`FoldPose.spreads`): flat, upright or turned,
+every screen is laid out as on an iPad of the same size and shape.
 
 - **Cover.** The guest keeps an iPhone's shape beside the strip the camera
   keeps, which holds the side keys as an always-open column and the statistics.
-- **Inner display, upright (bent or flat).** The guest is one display across
-  both halves, so moving the hinge never resizes Android. The side keys stay on
-  its edge, and the statistics and notices hang from the trailing half;
-  Andarium's own pieces never sit on the fold.
-- **Inner display, turned.** Flat, the guest fills the display and the keys
-  never rest on the fold. Bent, the device stands like a laptop: the guest is the
-  upper half and the lower half is a deck with the keys in one row and the
-  statistics and notices above them.
-- **Other screens.** Home is one page each side of the fold. While the device
-  is flat every popup is placed as on an iPad, centred across the whole
-  display: Welcome, the boot, the busy, low-space and end cards, and the cards
-  inside a sheet, which is the system's. While it is bent they keep to the half
-  where the system puts its alerts, and the boot of a standing device to the
-  upper half; Welcome and the end card scroll there when a half is too short
-  for them. System alerts stay where iOS puts them, inside the device's own
-  safe area. A sheet turned and bent rises to a little below the fold, and
-  keeps its presentation, and what has been typed in it, when the display
-  turns. On the cover the file browser's Import is a round button in the
-  toolbar's column beside the camera, between More and Done, and the bar keeps
-  Export.
+- **Inner display, upright.** The guest is one display across both halves, so
+  moving the hinge never resizes Android, and the side keys stay on its edge.
+  Bent, the statistics and notices hang from the trailing half and Andarium's
+  own pieces never sit on the fold; flat, they hang from the top of the display.
+- **Inner display, turned.** Flat, the guest fills the display, with the keys
+  on its edge and the statistics and notices at its top. Bent, the device
+  stands like a laptop: the guest is the upper half and the lower half is a
+  deck with the keys in one row and the statistics and notices above them.
+- **Other screens.** Bent, Home is one page each side of the fold; flat it is
+  Home as on an iPad, one scrolling list with Start at the foot of the screen.
+  While the device is flat every popup is placed as on an iPad, centred across
+  the whole display: Welcome, the boot, the busy, low-space and end cards, and
+  the cards inside a sheet, which is the system's. While it is bent they keep
+  to the half where the system puts its alerts, and the boot of a standing
+  device to the upper half. On a folding device, Welcome and the end screen
+  scroll when taller than their place. System alerts stay where iOS puts them,
+  inside the device's own safe area. A sheet turned and bent rises to a little
+  below the fold; a sheet keeps the placement it opened with, and what has been
+  typed in it, until it closes, whatever the hinge or the turn does meanwhile.
+  On the cover the file browser's Import is a round button in the toolbar's
+  column beside the camera, between More and Done, and the bar keeps Export.
 
 The guest is resized only where its shape changes (the cover and the inner
 display, standing and the other turned poses), through the display's ordinary

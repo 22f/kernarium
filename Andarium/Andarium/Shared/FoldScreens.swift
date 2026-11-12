@@ -32,9 +32,10 @@ extension View {
     /// and does not read the environment: a sheet's presentation preferences
     /// are read before the sheet inherits its presenter's environment, on a
     /// Mac and in a harness that gives the presenter no model. A sheet decides
-    /// once, when it is presented, whether it takes the turned presentation;
-    /// turning the display with it open leaves its content, and what the person
-    /// has typed in it, in place.
+    /// once, when it is presented, whether it takes the turned presentation,
+    /// and keeps that placement until it closes: moving the hinge or turning
+    /// the display with it open leaves its content, and what the person has
+    /// typed in it, in place.
     func foldSheet(_ model: AppModel, reachesBehind: Bool = false) -> some View {
         modifier(FoldSheetPresentation(model: model, reachesBehind: reachesBehind))
     }
