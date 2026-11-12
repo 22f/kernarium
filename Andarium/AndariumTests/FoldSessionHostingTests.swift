@@ -510,9 +510,8 @@ struct FoldSessionHostingTests {
     /// the space, named "space", stands beside it. Welcome is the view alone
     /// in a view the size of the pose: the navigation stack Home puts it in
     /// lays out by the window the system has, which is not the pose's here.
-    /// Flat, it is where it is on a display that does not fold, whatever the
-    /// fold; bent, it is on the alerts' half. The captures show the centring
-    /// on the real display.
+    /// Flat, it is where it is on a display that does not fold, centred across
+    /// the fold; bent, it is on the alerts' half.
     @Test(arguments: Pose.allCases.filter(\.inner))
     func welcomeIsCentredAcrossTheDisplayWhenFlatAndOnAHalfWhenBent(_ pose: Pose) async throws {
         let lease = try await HostWindow.take()
@@ -539,6 +538,16 @@ struct FoldSessionHostingTests {
                 host.removeFromParent()
                 holder.removeFromSuperview()
             }
+            // The window is the application's own, not the pose's: give the view
+            // the pose's safe area, as the screen lays out in it.
+            host.view.layoutIfNeeded()
+            let window = pose.reading.window, safe = pose.reading.safeArea
+            let have = host.view.safeAreaInsets, extra = host.additionalSafeAreaInsets
+            host.additionalSafeAreaInsets = UIEdgeInsets(
+                top: extra.top + safe.minY - window.minY - have.top,
+                left: extra.left + safe.minX - window.minX - have.left,
+                bottom: extra.bottom + window.maxY - safe.maxY - have.bottom,
+                right: extra.right + window.maxX - safe.maxX - have.right)
             try await Task.sleep(for: .milliseconds(800))
             host.view.layoutIfNeeded()
             let elements = Self.labelled(in: host.view, relativeTo: holder)
@@ -554,12 +563,14 @@ struct FoldSessionHostingTests {
         let (_, welcome) = try await place(pose.reading)
         let band = try #require(pose.reading.division).frame
         if pose == .uprightFlat || pose == .turnedFlat {
-            // The pose's safe area differs from the window's own by a few
-            // points; a half would be a hundred times that off.
-            let (_, plain) = try await place(nil)
-            let near = abs(welcome.midX - plain.midX) < 12 && abs(welcome.midY - plain.midY) < 12
-                && abs(welcome.width - plain.width) < 12 && abs(welcome.height - plain.height) < 12
+            // The whole display, across the fold: where Welcome is on a display
+            // that does not fold, and centred on the display.
+            let (space, plain) = try await place(nil)
+            let near = abs(welcome.midX - plain.midX) < 2 && abs(welcome.midY - plain.midY) < 2
+                && abs(welcome.width - plain.width) < 2 && abs(welcome.height - plain.height) < 2
             #expect(near, "\(pose): Welcome is at \(welcome), not where it is without a fold, \(plain)")
+            // Its content is a column, centred on the display's width.
+            #expect(abs(welcome.midX - space.midX) < 2, "\(pose): Welcome \(welcome) is not centred on \(space)")
         } else {
             let halves = try #require(FoldHalves(pose.reading))
             #expect(!welcome.intersects(band), "\(pose): Welcome is on the fold at \(welcome)")
