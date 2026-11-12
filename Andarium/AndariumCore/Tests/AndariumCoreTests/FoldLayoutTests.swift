@@ -330,21 +330,51 @@ struct FoldScreensTests {
         #expect(FoldHalves(reading(.cover)) == nil)
     }
 
-    @Test func welcomeIsCentredAcrossTheWholeDisplayWhileFlatAndSitsOnAHalfWhileBent() throws {
+    @Test func welcomeIsCentredOnTheFoldWhileFlatAndSitsOnAHalfWhileBent() throws {
         for hidden in [true, false] {
-            let flatUpright = try #require(FoldHalves(reading(.upright(bent: false), statusBarHidden: hidden)))
-            #expect(flatUpright.area(for: .welcome) == reading(.upright(bent: false), statusBarHidden: hidden).safeArea)
-            let flatTurned = try #require(FoldHalves(reading(.turned(bent: false), statusBarHidden: hidden)))
-            #expect(flatTurned.area(for: .welcome) == reading(.turned(bent: false), statusBarHidden: hidden).safeArea)
-            // The whole area is across the band: the content is centred on the
-            // display, not on a half.
-            #expect(flatUpright.area(for: .welcome) != flatUpright.card)
-            #expect(flatTurned.area(for: .welcome) != flatTurned.card)
+            for pose in [Pose.upright(bent: false), .turned(bent: false)] {
+                let read = reading(pose, statusBarHidden: hidden)
+                let halves = try #require(FoldHalves(read))
+                let area = halves.area(for: .welcome)
+                // Centred on the fold along the axis it crosses, whole along the
+                // other, and the most of the safe area that is.
+                if halves.upright {
+                    #expect(area.midX == halves.band.midX && area.minY == read.safeArea.minY && area.height == read.safeArea.height)
+                    #expect(area.minX == read.safeArea.minX || area.maxX == read.safeArea.maxX)
+                } else {
+                    #expect(area.midY == halves.band.midY && area.minX == read.safeArea.minX && area.width == read.safeArea.width)
+                    #expect(area.minY == read.safeArea.minY || area.maxY == read.safeArea.maxY)
+                }
+                #expect(read.safeArea.contains(area))
+                #expect(area.intersects(halves.band) && area != halves.card)
+            }
         }
+        // The status bar's strip leaves the safe area off the display's centre:
+        // the area is cut to the fold's.
+        let strip = try #require(FoldHalves(reading(.upright(bent: false), statusBarHidden: false)))
+        #expect(strip.safe == rect(0, 0, 867, 635))
+        #expect(strip.area(for: .welcome) == rect(84, 0, 783, 635))
         let book = try #require(FoldHalves(reading(.upright(bent: true), statusBarHidden: false)))
         #expect(book.area(for: .welcome) == book.card)
         let standing = try #require(FoldHalves(reading(.turned(bent: true), statusBarHidden: false)))
         #expect(standing.area(for: .welcome) == standing.card)
+    }
+
+    @Test func flatWelcomeReachesPastTheSpaceABarLeavesAndAHalfIsNeverPaddedOutward() throws {
+        let flat = try #require(FoldHalves(reading(.upright(bent: false), statusBarHidden: false)))
+        // A navigation bar takes the top 60 points of the space: Welcome reaches
+        // past it to centre on the display, and keeps off the strip's side.
+        let space = CGRect(x: 0, y: 60, width: 867, height: 575)
+        #expect(flat.insets(for: .welcome, in: space) == FoldInsets(top: -60, leading: 84, bottom: 0, trailing: 0))
+        // A card keeps to its half and is never padded outward.
+        let inside = flat.insets(for: .card, in: space)
+        #expect(inside.top >= 0 && inside.leading >= 0 && inside.bottom >= 0 && inside.trailing >= 0)
+        #expect(inside.trailing == space.maxX - flat.card.maxX)
+        let bent = try #require(FoldHalves(reading(.upright(bent: true), statusBarHidden: false)))
+        let around = bent.insets(for: .welcome, in: space)
+        #expect(around.top >= 0 && around.leading >= 0 && around.bottom >= 0 && around.trailing >= 0)
+        // A space of the half's own leaves no padding.
+        #expect(bent.insets(for: .card, in: bent.card) == FoldInsets())
     }
 
     @Test func theBootSitsOnTheUpperHalfWhenStandingAndAsACardInEveryOtherPose() throws {

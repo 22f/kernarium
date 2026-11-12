@@ -268,6 +268,8 @@ public struct FoldHalves: Equatable, Sendable {
     public var bent: Bool
     /// The safe area the halves divide.
     public var safe: CGRect
+    /// The fold band between the halves.
+    public var band: CGRect
 
     /// Nil where the display has no fold band.
     public init?(_ reading: FoldReading) {
@@ -277,6 +279,7 @@ public struct FoldHalves: Equatable, Sendable {
         if case .upright = reading.pose { upright = true } else { upright = false }
         bent = reading.division?.isActive ?? false
         safe = reading.safeArea
+        band = reading.division?.frame ?? .zero
     }
 
     /// Where Andarium's cards, the boot's steps and its overlays go: the half
@@ -284,18 +287,67 @@ public struct FoldHalves: Equatable, Sendable {
     /// lower one turned.
     public var card: CGRect { upright ? first : second }
 
+    /// The safe area cut to the most of it that is centred on the fold along
+    /// the axis the fold crosses, so that content centred in it is centred on
+    /// the display and the fold runs through its middle. The status bar's
+    /// strip leaves the safe area off the display's centre; this is not.
+    public var centred: CGRect {
+        var area = safe
+        if upright {
+            let half = max(0, min(band.midX - safe.minX, safe.maxX - band.midX))
+            area.origin.x = band.midX - half
+            area.size.width = 2 * half
+        } else {
+            let half = max(0, min(band.midY - safe.minY, safe.maxY - band.midY))
+            area.origin.y = band.midY - half
+            area.size.height = 2 * half
+        }
+        return area
+    }
+
     /// Where `screen` goes.
-    /// - Welcome: on the whole display, across the fold, while the device is
-    ///   flat, as on an iPad; on a half, as a card, while it is bent.
+    /// - Welcome: centred on the display, across the fold, while the device is
+    ///   flat, as on an iPad (`centred`); on a half, as a card, while it is
+    ///   bent.
     /// - Boot: on the upper half when the device stands turned and bent, the
     ///   half that faces the person; as a card in every other pose.
     /// - Anything else: as a card.
     public func area(for screen: FoldScreen) -> CGRect {
         switch screen {
         case .card: card
-        case .welcome: bent ? card : safe
+        case .welcome: bent ? card : centred
         case .boot: !upright && bent ? first : card
         }
+    }
+
+    /// How far in from each edge of `space`, the space a view is given, the
+    /// view is kept to the area of `screen`. A half is never padded
+    /// outward. The area centred on the display is: a navigation bar, or the
+    /// strip the status bar and the toolbar take beside the camera, leaves a
+    /// screen less than the display, and content centred on the display
+    /// reaches past that space (a negative inset) to centre on the fold.
+    public func insets(for screen: FoldScreen, in space: CGRect) -> FoldInsets {
+        let area = area(for: screen)
+        let reaches = screen == .welcome && !bent
+        func kept(_ inset: CGFloat) -> CGFloat { reaches ? inset : max(0, inset) }
+        return FoldInsets(
+            top: kept(area.minY - space.minY), leading: kept(area.minX - space.minX),
+            bottom: kept(space.maxY - area.maxY), trailing: kept(space.maxX - area.maxX))
+    }
+}
+
+/// Distances from the edges of a space, in points; negative reaches past it.
+public struct FoldInsets: Equatable, Sendable {
+    public var top: CGFloat
+    public var leading: CGFloat
+    public var bottom: CGFloat
+    public var trailing: CGFloat
+
+    public init(top: CGFloat = 0, leading: CGFloat = 0, bottom: CGFloat = 0, trailing: CGFloat = 0) {
+        self.top = top
+        self.leading = leading
+        self.bottom = bottom
+        self.trailing = trailing
     }
 }
 
