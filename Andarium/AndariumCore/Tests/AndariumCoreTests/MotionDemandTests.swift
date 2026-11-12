@@ -436,7 +436,7 @@ struct MotionDemandTests {
         session.update(foreground: false, axes: .portrait)
     }
 
-    @Test func aFailingDeviceEndsTheRunAndTheNextUpdateBeginsAnother() {
+    @Test func aFailingDeviceStopsTheSensorsAndKeepsTheConnection() {
         let guest = FakeGuest()
         let device = FakeDevice()
         let session = session(guest, device)
@@ -444,9 +444,20 @@ struct MotionDemandTests {
         #expect(eventually { device.intervals.count == 2 })
         device.fail()
         #expect(eventually { device.intervals.isEmpty })
-        #expect(guest.sawClose())
+        session.settle()
+        #expect(guest.isQuiet() && guest.connections == 1)
+        // Nothing is read again on its own: a sample the device still delivers is not sent.
+        device.emit(.accelerometer, 0, 0, -1)
+        #expect(guest.receive(count: 20, timeout: 60).isEmpty)
+        // The guest's demand changes: the sensors are tried again, on the same connection.
+        guest.say(MotionDemand(accelerometer: 20_000))
+        #expect(eventually { device.intervals == [.accelerometer: 0.01] })
+        // And the next update does the same after another failure.
+        device.fail()
+        #expect(eventually { device.intervals.isEmpty })
         session.update(foreground: true, axes: .portrait)
-        #expect(eventually { guest.connections == 2 && device.intervals.count == 2 })
+        #expect(eventually { device.intervals == [.accelerometer: 0.01] })
+        #expect(guest.connections == 1)
         session.update(foreground: false, axes: .portrait)
     }
 }

@@ -590,8 +590,10 @@ requires reopening Andarium.
   lists both sensors. The host reads a sensor only while the guest is in front
   and an application in it uses the sensor, and sends samples over private
   vsock port 5556 from the process's one Core Motion manager, which is never
-  released (a released manager crashes inside Core Motion); the system image
-  must include the
+  released (a released manager crashes inside Core Motion). A failure of the
+  device's sensors stops them and keeps the connection, which also carries the
+  orientation; they are tried again when the guest's demand changes or the
+  application next updates the session. The system image must include the
   [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and

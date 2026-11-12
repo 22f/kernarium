@@ -272,6 +272,7 @@ struct MotionOrientationTests {
         let hasGyroscope: Bool
         private let lock = NSLock()
         private var running: Set<MotionSample.Sensor> = []
+        private var failures: [@Sendable () -> Void] = []
         init(sensors: Bool = true) {
             hasAccelerometer = sensors
             hasGyroscope = sensors
@@ -279,9 +280,19 @@ struct MotionOrientationTests {
         func start(
             _ sensor: MotionSample.Sensor, interval: TimeInterval,
             handler: @escaping @Sendable (Double, Double, Double) -> Void, failure: @escaping @Sendable () -> Void
-        ) { lock.withLock { _ = running.insert(sensor) } }
+        ) {
+            lock.withLock {
+                running.insert(sensor)
+                failures.append(failure)
+            }
+        }
         func stop(_ sensor: MotionSample.Sensor) { lock.withLock { _ = running.remove(sensor) } }
         var started: Set<MotionSample.Sensor> { lock.withLock { running } }
+        /// Core Motion reports that the sensors can no longer be read.
+        func fail() {
+            let failure = lock.withLock { failures.last }
+            failure?()
+        }
     }
 
     private func eventually(_ timeout: Double = 3, _ condition: () -> Bool) -> Bool {
@@ -437,6 +448,35 @@ struct MotionOrientationTests {
         #expect(eventually { device.started.isEmpty })
         session.setOrientation(.turnedCounterClockwise)
         #expect(guest.record() == (try fixture(.turnedCounterClockwise)))
+        #expect(guest.connections == 1)
+        session.update(foreground: false, axes: .portrait)
+    }
+
+    @Test func aFailingDeviceStopsTheSensorsAndTheOrientationStillFlows() throws {
+        let guest = Guest()
+        let device = Device()
+        let session = session(guest, device)
+        session.update(foreground: true, axes: .portrait, followsOrientation: true)
+        #expect(eventually { guest.connections == 1 })
+        try guest.say("control-v2-all")
+        #expect(eventually { device.started == [.accelerometer, .gyroscope] })
+        session.setOrientation(.upright)
+        #expect(guest.record() == (try fixture(.upright)))
+        // Core Motion fails: the sensors stop, and the connection that carries the orientation stays.
+        device.fail()
+        #expect(eventually { device.started.isEmpty })
+        session.setOrientation(.upsideDown)
+        #expect(guest.record() == (try fixture(.upsideDown)))
+        #expect(guest.connections == 1)
+        // The guest's demand changes: the sensors are tried again, and the orientation goes on.
+        try guest.say("control-v2-idle")
+        #expect(eventually { device.started.isEmpty && session.demand?.isIdle == true })
+        try guest.say("control-v2-all")
+        #expect(eventually { device.started == [.accelerometer, .gyroscope] })
+        // The window manager enabling the sensor again is given the current value once more.
+        #expect(guest.record() == (try fixture(.upsideDown)))
+        session.setOrientation(.turnedClockwise)
+        #expect(guest.record() == (try fixture(.turnedClockwise)))
         #expect(guest.connections == 1)
         session.update(foreground: false, axes: .portrait)
     }

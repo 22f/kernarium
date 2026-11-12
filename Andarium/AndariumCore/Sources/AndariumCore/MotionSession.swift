@@ -30,6 +30,11 @@ public protocol MotionDevice: AnyObject, Sendable {
 /// sensors too. It is sent when it changes and, once, on each connection and
 /// each time the guest enables the sensor; nothing runs for it between changes.
 ///
+/// A failure of the device's sensors stops the sensors and leaves the
+/// connection, which also carries the orientation, as it is. They are tried
+/// again when the guest's demand changes or the next `update` comes, and not
+/// before.
+///
 /// Every call returns at once; the work is in order on one queue, and the
 /// device and the stream are only touched there.
 public final class MotionSession: @unchecked Sendable {
@@ -45,6 +50,9 @@ public final class MotionSession: @unchecked Sendable {
     private var streamEpoch: UInt64 = 0
     private var run: UInt64 = 0
     private var applied = MotionPlan.off
+    /// The device's sensors failed in this run: none is read until the guest's
+    /// demand changes or the next `update`.
+    private var deviceFailed = false
 
     public init(
         opener: any GuestStreamOpener, device: any MotionDevice,
@@ -62,6 +70,7 @@ public final class MotionSession: @unchecked Sendable {
     /// ends when either stops being true or the axes change.
     public func update(foreground: Bool, axes: MotionSample.Axes, followsOrientation: Bool = false) {
         queue.async { [self] in
+            deviceFailed = false
             sampling.hasSensors = device.hasAccelerometer || device.hasGyroscope
             sampling.followsOrientation = followsOrientation
             if !followsOrientation { sampling.orientation = nil }
@@ -114,6 +123,7 @@ public final class MotionSession: @unchecked Sendable {
         let current = run
         sampling.connectionChanged(false)
         applied = .off
+        deviceFailed = false
         let stream = MotionStream(
             opener: opener, retryDelay: retryDelay,
             connectionChanged: { [weak self] connected in
@@ -126,6 +136,7 @@ public final class MotionSession: @unchecked Sendable {
             demandChanged: { [weak self] demand in
                 self?.queue.async { [weak self] in
                     guard let self, run == current else { return }
+                    deviceFailed = false
                     sampling.received(demand)
                     reconcile()
                 }
@@ -154,7 +165,7 @@ public final class MotionSession: @unchecked Sendable {
         let epoch = streamEpoch
         let axes = axes
         for sensor in [MotionSample.Sensor.accelerometer, .gyroscope] {
-            let wanted = hasSensor(sensor) ? plan.interval(of: sensor) : nil
+            let wanted = hasSensor(sensor) && !deviceFailed ? plan.interval(of: sensor) : nil
             guard wanted != applied.interval(of: sensor) else { continue }
             if let wanted {
                 device.start(sensor, interval: wanted, handler: { x, y, z in
@@ -162,7 +173,8 @@ public final class MotionSession: @unchecked Sendable {
                 }, failure: { [weak self] in
                     self?.queue.async { [weak self] in
                         guard let self, run == current else { return }
-                        endRun()
+                        deviceFailed = true
+                        reconcile()
                     }
                 })
             } else {
