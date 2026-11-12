@@ -545,7 +545,9 @@ final class LiveRuntime: RuntimeDriver {
 
     /// What adb does for the screens, with the key this boot carries.
     private var operations: AdbGuestOperations {
-        AdbGuestOperations(identity: adbIdentity, clock: clock, device: model?.host.name ?? "device", run: runMark)
+        AdbGuestOperations(
+            identity: adbIdentity, clock: clock, device: model?.host.name ?? "device", hostFree: freeSpace,
+            run: runMark)
     }
 
     /// A new run has its own mark, and a normal one sweeps the partial files
@@ -591,8 +593,8 @@ final class LiveRuntime: RuntimeDriver {
         await operations.guestProcFiles()
     }
 
-    func installApk(at url: URL, sizeBytes: Int, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
-        try await operations.installApk(at: url, sizeBytes: sizeBytes, update: update)
+    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
+        try await operations.installApk(at: url, update: update)
     }
 
     func usbDebugging() async -> Bool? {
