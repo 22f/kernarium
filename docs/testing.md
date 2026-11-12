@@ -346,10 +346,10 @@ what the runtime tells an Android guest about the host's cameras (the camera
 fields of the boot request, the composed layout and its recomposition at each
 boot, the lens cover, the host memory a live session reserves (none for a
 host with no cameras), the camera state and rotation, and that an unknown or
-empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera), `camera-layout`
-(unit) that the layout name composed from a host's cameras is one of the
-image's layouts, and `camera-orientation` (unit) the sensor orientation of
-every interface orientation and facing
+empty `KERNARIUM_CAMERA_SOURCE` never reaches the host's camera),
+`camera-layout` (unit) that the layout name composed from a host's cameras is
+one of the image's layouts, and `camera-orientation` (unit) the sensor
+orientation of every interface orientation and facing
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`) play iOS's permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
@@ -432,10 +432,11 @@ vendor SKU, the camera IDs and the lens cover of a live and a blocked session
 on the synthetic camera, with `TEST_RUNNER_KERNARIUM_CAMERA_SOURCE=synthetic`,
 on an image that has the camera HAL) and the hardware keyboard and mouse
 against Android's input devices (`KeyboardMouseGuestTests`, which needs a
-kernel that follows configuration changes and its Android release). The storage test signs its
-helper APK with the AOSP test key, never a release key. When derived data is on
-a removable volume, macOS prompts once for access and the launch hangs until
-answered; build to the internal disk instead.
+kernel that follows configuration changes and its Android release). The
+storage test signs its helper APK with the AOSP test key, never a release
+key. When derived data is on a removable volume, macOS prompts once for
+access and the launch hangs until answered; build to the internal disk
+instead.
 
 Tooling tests cover `scripts/check-privacy-manifests.py`
 (`ios-privacy-manifests`, which `package-ios-frameworks.sh` also runs on every
