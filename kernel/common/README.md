@@ -245,15 +245,13 @@ it. The bridge fields used below are defined by the comments in
   must service them: the IPI signal is only a wake edge. An idle virtual CPU
   waits in one `kevent()` on its own queue, which holds its wake pipe, the
   host's stop descriptor and, on CPU0, the event the notification thread
-  triggers. The call also adds the one-shot critical timer of the guest's next
-  deadline, because Darwin coalesces a wait's own timeout, so a wake by the
-  clock is that one call. A timer left by another wake is replaced by the next
-  wait's, or deleted by a wait that has no deadline. An idle virtual CPU never
+  triggers. Its deadline is a one-shot critical timer that the call adds,
+  because Darwin coalesces a wait's own timeout. An idle virtual CPU never
   blocks while one of its IPI vectors is pending. The byte in its wake pipe
   only ends a wait and the vectors are the pending mask, so an idle exit
-  whose wait found the pipe empty drains it only if a vector is pending, one
-  that reported it reads the bytes it counted without a `poll()`, and a byte
-  that lands later costs at most one spurious wait (`kernel-darwin-ipi-drain`).
+  whose wait found the pipe empty drains it only if a vector is pending, and
+  a byte that lands later costs at most one spurious wait
+  (`kernel-darwin-ipi-drain`).
 - Darwin has no per-thread SIGIO, so a CPU collects the host's descriptor
   events at its clock tick and when it leaves idle, one CPU at a time: a
   non-blocking token guards the dispatch, and a CPU that finds it taken skips.
