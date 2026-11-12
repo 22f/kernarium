@@ -1,0 +1,582 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 07:29:03 +0900
+Subject: [PATCH] gallium: reclaim a driver's memory and retry a refused
+ request
+
+A driver refuses an allocation when the process's budget is full, and a
+budget that is full often still holds memory for work that has finished:
+buffers a finished batch references, storage the driver caches for
+reuse. A request dropped for it is lost without a word.
+
+u_reclaim is how a caller that can run its request again does so.
+u_reclaim_begin() flushes the caller's context, waits for the work it
+submitted, 2 s in all, trims the context, so that completed work
+releases what it holds, and releases what the screen caches. Work that
+does not finish in time ends the reclaim and rules out another for ten
+seconds, since a GPU that is not finishing is not worth waiting for
+again soon. The caller retries, and while that fails and
+u_reclaim_settle() allows it, retries again a few milliseconds later:
+the room a release frees can reach the host's budget a quarter of a
+second after the release. The wait is over after 300 ms, or after 20 ms
+when the reclaim freed nothing worth waiting for, which a screen
+reports through the new optional pipe_screen::get_freed_memory. A
+reclaim that did not help rules out another for 250 ms, since a budget
+that is really full gains nothing from it and a caller that keeps
+meeting the refusal would otherwise finish its context for every
+request.
+
+u_texture_subdata_try() is u_default_texture_subdata() that says whether
+it wrote.
+
+The gallium-reclaim test runs u_reclaim against a context and a screen
+that answer as it says: the steps and the bound of a reclaim, the grace
+and the end of the retries, the damping, and a fence that never signals.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/gallium/auxiliary/meson.build           |  16 ++
+ src/gallium/auxiliary/util/u_reclaim.c      | 130 ++++++++++++++
+ src/gallium/auxiliary/util/u_reclaim.h      |  68 ++++++++
+ src/gallium/auxiliary/util/u_reclaim_test.c | 184 ++++++++++++++++++++
+ src/gallium/auxiliary/util/u_transfer.c     |  33 +++-
+ src/gallium/auxiliary/util/u_transfer.h     |  11 ++
+ src/gallium/include/pipe/p_screen.h         |   8 +
+ 7 files changed, 441 insertions(+), 9 deletions(-)
+ create mode 100644 src/gallium/auxiliary/util/u_reclaim.c
+ create mode 100644 src/gallium/auxiliary/util/u_reclaim.h
+ create mode 100644 src/gallium/auxiliary/util/u_reclaim_test.c
+
+diff --git a/src/gallium/auxiliary/meson.build b/src/gallium/auxiliary/meson.build
+index 56f8b4bbb2a703fb186d8329c18910f3f66a207e..b8767881a89bee02408847eac52738b7a0039788 100644
+--- a/src/gallium/auxiliary/meson.build
++++ b/src/gallium/auxiliary/meson.build
+@@ -68,6 +68,8 @@ files_libgallium = files(
+   'util/u_pstipple.h',
+   'util/u_pwr8.h',
+   'util/u_range.h',
++  'util/u_reclaim.c',
++  'util/u_reclaim.h',
+   'util/u_rect.h',
+   'util/u_resource.c',
+   'util/u_resource.h',
+@@ -541,6 +543,20 @@ if with_tests
+     timeout : 120,
+   )
+ 
++  test('gallium-reclaim',
++    executable(
++      'gallium-reclaim',
++      [
++        'util/u_reclaim.c',
++        'util/u_reclaim_test.c',
++      ],
++      include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux],
++      dependencies : [idep_mesautil, idep_mesautilformat, dep_thread],
++    ),
++    suite : 'gallium',
++    timeout : 60,
++  )
++
+   test('gallium-aux',
+     executable(
+       'gallium-aux',
+diff --git a/src/gallium/auxiliary/util/u_reclaim.c b/src/gallium/auxiliary/util/u_reclaim.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..86b0d75d01822c95f1e88561133725feaefadf8b
+--- /dev/null
++++ b/src/gallium/auxiliary/util/u_reclaim.c
+@@ -0,0 +1,130 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "util/u_reclaim.h"
++
++#include "pipe/p_context.h"
++#include "pipe/p_defines.h"
++#include "pipe/p_screen.h"
++#include "util/macros.h"
++#include "util/os_time.h"
++#include "util/u_atomic.h"
++
++/* The most a reclaim waits, in all, for the GPU to finish the caller's
++ * work. */
++#define U_RECLAIM_FINISH_NS (2000ll * 1000 * 1000)
++/* How long the room a reclaim freed is waited for: the budget's own
++ * accounting follows a release by a periodic sweep of a quarter of a second
++ * at most. Memory that has not been freed after a short grace is not coming,
++ * and the retry stops waiting for it. */
++#define U_RECLAIM_SETTLE_NS (300ll * 1000 * 1000)
++#define U_RECLAIM_GRACE_NS (20ll * 1000 * 1000)
++#define U_RECLAIM_MIN_FREED (1ull << 20)
++#define U_RECLAIM_POLL_US 4000
++/* How long a reclaim that did not help rules out another, and how long one
++ * whose work did not finish in time does: a GPU that is not finishing is
++ * not worth waiting for again soon. */
++#define U_RECLAIM_FUTILE_NS (250ll * 1000 * 1000)
++#define U_RECLAIM_HUNG_NS (10000ll * 1000 * 1000)
++
++static int64_t futile_until_ns;
++
++static void
++rule_out_until(int64_t until_ns)
++{
++   int64_t current = p_atomic_read(&futile_until_ns);
++
++   while (current < until_ns) {
++      const int64_t seen = p_atomic_cmpxchg(&futile_until_ns, current, until_ns);
++      if (seen == current)
++         return;
++      current = seen;
++   }
++}
++
++static uint64_t
++freed_since(const struct u_reclaim *reclaim)
++{
++   struct pipe_screen *screen = reclaim->screen;
++   return screen->get_freed_memory ?
++          screen->get_freed_memory(screen) - reclaim->freed_mark : 0;
++}
++
++/* Flushes the context and waits until deadline_ns for everything it
++ * submitted. Returns false when the work has not finished by then. */
++static bool
++finish(struct pipe_context *pipe, int64_t deadline_ns)
++{
++   struct pipe_screen *screen = pipe->screen;
++   struct pipe_fence_handle *fence = NULL;
++   bool finished = true;
++
++   pipe->flush(pipe, &fence, PIPE_FLUSH_ASYNC | PIPE_FLUSH_HINT_FINISH);
++   if (fence) {
++      const int64_t left_ns = deadline_ns - os_time_get_nano();
++
++      finished = left_ns > 0 &&
++                 screen->fence_finish(screen, NULL, fence, left_ns);
++      screen->fence_reference(screen, &fence, NULL);
++   }
++   return finished;
++}
++
++bool
++u_reclaim_begin(struct pipe_context *pipe, bool may_finish,
++                struct u_reclaim *reclaim)
++{
++   struct pipe_screen *screen = pipe->screen;
++   const int64_t now = os_time_get_nano();
++
++   if (now < p_atomic_read(&futile_until_ns))
++      return false;
++
++   reclaim->screen = screen;
++   reclaim->started_ns = now;
++   reclaim->freed_mark = screen->get_freed_memory ?
++                         screen->get_freed_memory(screen) : 0;
++
++   if (may_finish) {
++      const int64_t deadline_ns = now + U_RECLAIM_FINISH_NS;
++      bool finished = finish(pipe, deadline_ns);
++
++      if (finished && pipe->trim) {
++         pipe->trim(pipe);
++         /* A threaded context runs the trim on its driver thread, behind
++          * what is queued: finishing again waits for it. */
++         finished = finish(pipe, deadline_ns);
++      }
++      if (!finished) {
++         /* The GPU has not finished what it was given: what the work holds
++          * is not coming back soon, and the caller's request stays refused.
++          */
++         rule_out_until(os_time_get_nano() + U_RECLAIM_HUNG_NS);
++         return false;
++      }
++   }
++   if (screen->release_cached_memory)
++      screen->release_cached_memory(screen);
++   return true;
++}
++
++bool
++u_reclaim_settle(struct u_reclaim *reclaim)
++{
++   const int64_t age = os_time_get_nano() - reclaim->started_ns;
++
++   if (age >= U_RECLAIM_SETTLE_NS)
++      return false;
++   if (age >= U_RECLAIM_GRACE_NS && freed_since(reclaim) < U_RECLAIM_MIN_FREED)
++      return false;
++   os_time_sleep(U_RECLAIM_POLL_US);
++   return true;
++}
++
++void
++u_reclaim_end(UNUSED struct u_reclaim *reclaim, bool recovered)
++{
++   if (!recovered)
++      rule_out_until(os_time_get_nano() + U_RECLAIM_FUTILE_NS);
++}
+diff --git a/src/gallium/auxiliary/util/u_reclaim.h b/src/gallium/auxiliary/util/u_reclaim.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5cafd59a08a2d308a7f321ae3d2fbb2f99020813
+--- /dev/null
++++ b/src/gallium/auxiliary/util/u_reclaim.h
+@@ -0,0 +1,68 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++/* Give back the memory a driver holds, and try a refused request again.
++ *
++ * A driver refuses an allocation when the process's budget is full, and a
++ * budget that is full is often one that still holds memory for work that has
++ * finished: buffers a finished batch still references, storage the driver
++ * caches for reuse. A caller that can run its request again calls
++ * u_reclaim_begin() after the refusal, tries again, and while that fails and
++ * u_reclaim_settle() says the room may still show, tries again after it.
++ * u_reclaim_end() records whether it worked.
++ *
++ * The room a reclaim frees can show in the budget a little after it is
++ * freed, which is why a retry that frees something is repeated for a short
++ * time. A reclaim that did not help rules out another for a short time too,
++ * since a budget that is really full gains nothing from one, and a caller
++ * that keeps meeting the refusal would otherwise finish its context for
++ * each. */
++
++#ifndef U_RECLAIM_H
++#define U_RECLAIM_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct pipe_context;
++struct pipe_screen;
++
++struct u_reclaim {
++   struct pipe_screen *screen;
++   uint64_t freed_mark;
++   int64_t started_ns;
++};
++
++/* Gives back what the driver can for the caller's refused request: when
++ * may_finish is set, the caller's context is flushed, the work it has
++ * submitted finished, and the context trimmed, which lets completed work
++ * release the storage it holds; then the screen releases what it caches.
++ * Set may_finish only on the thread that owns the context, and not in a
++ * call that is not synchronized with it. The wait for the GPU is bounded, 2 s
++ * in all. Returns false when no reclaim was made, because a reclaim a moment
++ * ago did not help, or because the work did not finish in time, which rules
++ * out another for ten seconds: the caller's request stays refused. */
++bool
++u_reclaim_begin(struct pipe_context *pipe, bool may_finish,
++                struct u_reclaim *reclaim);
++
++/* After a retry that failed: waits a few milliseconds and returns true while
++ * the room the reclaim freed may not have shown yet. Returns false when the
++ * reclaim freed nothing worth waiting for, or the time to wait has passed. */
++bool
++u_reclaim_settle(struct u_reclaim *reclaim);
++
++/* Records the outcome of the retries. */
++void
++u_reclaim_end(struct u_reclaim *reclaim, bool recovered);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/gallium/auxiliary/util/u_reclaim_test.c b/src/gallium/auxiliary/util/u_reclaim_test.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..8696acdfdef1eb4f0b1b895add5d2b83646ce4e0
+--- /dev/null
++++ b/src/gallium/auxiliary/util/u_reclaim_test.c
+@@ -0,0 +1,184 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++/* What bounds a reclaim, against a context and a screen that count what the
++ * reclaim asks of them and answer as the test says. */
++
++#include <stdio.h>
++#include <stdlib.h>
++
++#include "pipe/p_context.h"
++#include "pipe/p_defines.h"
++#include "pipe/p_screen.h"
++#include "util/macros.h"
++#include "util/os_time.h"
++#include "util/u_reclaim.h"
++
++#define CHECK(cond)                                                       \
++   do {                                                                   \
++      if (!(cond)) {                                                      \
++         fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #cond);       \
++         exit(1);                                                         \
++      }                                                                   \
++   } while (0)
++
++#define MIB (1ull << 20)
++
++static struct {
++   unsigned flushes;
++   unsigned trims;
++   unsigned releases;
++   unsigned waits;
++   int64_t last_timeout_ns;
++   bool fence_signals;
++   uint64_t freed;
++   uint64_t freed_by_release;
++} fake;
++
++static int fence_token;
++
++static void
++fake_flush(UNUSED struct pipe_context *pipe, struct pipe_fence_handle **fence,
++           unsigned flags)
++{
++   CHECK(flags & PIPE_FLUSH_ASYNC);
++   fake.flushes++;
++   if (fence)
++      *fence = (struct pipe_fence_handle *)&fence_token;
++}
++
++static void
++fake_trim(UNUSED struct pipe_context *pipe)
++{
++   fake.trims++;
++}
++
++static bool
++fake_fence_finish(UNUSED struct pipe_screen *screen,
++                  UNUSED struct pipe_context *ctx,
++                  UNUSED struct pipe_fence_handle *fence, uint64_t timeout)
++{
++   fake.waits++;
++   fake.last_timeout_ns = (int64_t)timeout;
++   return fake.fence_signals;
++}
++
++static void
++fake_fence_reference(UNUSED struct pipe_screen *screen,
++                     struct pipe_fence_handle **ptr,
++                     struct pipe_fence_handle *fence)
++{
++   *ptr = fence;
++}
++
++static unsigned
++fake_release(UNUSED struct pipe_screen *screen)
++{
++   fake.releases++;
++   fake.freed += fake.freed_by_release;
++   return 1;
++}
++
++static uint64_t
++fake_freed(UNUSED struct pipe_screen *screen)
++{
++   return fake.freed;
++}
++
++static struct pipe_screen screen;
++static struct pipe_context context;
++
++static void
++reset(void)
++{
++   const bool signals = true;
++
++   fake = (typeof(fake)){0};
++   fake.fence_signals = signals;
++}
++
++int
++main(void)
++{
++   struct u_reclaim reclaim;
++
++   screen.fence_finish = fake_fence_finish;
++   screen.fence_reference = fake_fence_reference;
++   screen.release_cached_memory = fake_release;
++   screen.get_freed_memory = fake_freed;
++   context.screen = &screen;
++   context.flush = fake_flush;
++   context.trim = fake_trim;
++
++   /* A reclaim finishes the context's work, trims it, finishes again for the
++    * trim, and releases what the screen caches. Each wait is bounded. */
++   reset();
++   CHECK(u_reclaim_begin(&context, true, &reclaim));
++   CHECK(fake.flushes == 2 && fake.waits == 2 && fake.trims == 1);
++   CHECK(fake.releases == 1);
++   CHECK(fake.last_timeout_ns > 0 && fake.last_timeout_ns <= 2000ll * 1000 * 1000);
++   u_reclaim_end(&reclaim, true);
++
++   /* A call that does not own the context only releases the caches. */
++   reset();
++   CHECK(u_reclaim_begin(&context, false, &reclaim));
++   CHECK(fake.flushes == 0 && fake.waits == 0 && fake.trims == 0);
++   CHECK(fake.releases == 1);
++   u_reclaim_end(&reclaim, true);
++
++   /* A reclaim that freed nothing stops the retries after a short grace,
++    * not after the whole time to wait. */
++   reset();
++   CHECK(u_reclaim_begin(&context, true, &reclaim));
++   const int64_t begin_ns = os_time_get_nano();
++   while (u_reclaim_settle(&reclaim))
++      CHECK(os_time_get_nano() - begin_ns < 1000ll * 1000 * 1000);
++   CHECK(os_time_get_nano() - begin_ns < 200ll * 1000 * 1000);
++   u_reclaim_end(&reclaim, true);
++
++   /* One that freed memory keeps retrying until the time to wait is over,
++    * which it is within a second whatever the screen reports. */
++   reset();
++   fake.freed_by_release = 2 * MIB;
++   CHECK(u_reclaim_begin(&context, true, &reclaim));
++   const int64_t waited_from_ns = os_time_get_nano();
++   unsigned polls = 0;
++   while (u_reclaim_settle(&reclaim))
++      polls++;
++   const int64_t waited_ns = os_time_get_nano() - waited_from_ns;
++   CHECK(polls > 5);
++   CHECK(waited_ns < 1000ll * 1000 * 1000);
++   u_reclaim_end(&reclaim, true);
++
++   /* A reclaim that did not help rules out another for a moment, which does
++    * not flush or wait. */
++   reset();
++   CHECK(u_reclaim_begin(&context, true, &reclaim));
++   u_reclaim_end(&reclaim, false);
++   reset();
++   CHECK(!u_reclaim_begin(&context, true, &reclaim));
++   CHECK(fake.flushes == 0 && fake.waits == 0 && fake.releases == 0);
++   os_time_sleep(300 * 1000);
++   CHECK(u_reclaim_begin(&context, true, &reclaim));
++   u_reclaim_end(&reclaim, true);
++
++   /* Work that does not finish: the wait ends at its bound, nothing is
++    * trimmed or released, no reclaim is made, and the next ones are ruled
++    * out at once, for longer than a failed retry would rule them out. */
++   reset();
++   fake.fence_signals = false;
++   const int64_t hung_from_ns = os_time_get_nano();
++   CHECK(!u_reclaim_begin(&context, true, &reclaim));
++   CHECK(os_time_get_nano() - hung_from_ns < 1000ll * 1000 * 1000);
++   CHECK(fake.waits == 1 && fake.trims == 0 && fake.releases == 0);
++   CHECK(fake.last_timeout_ns > 0 && fake.last_timeout_ns <= 2000ll * 1000 * 1000);
++   reset();
++   CHECK(!u_reclaim_begin(&context, true, &reclaim));
++   os_time_sleep(300 * 1000);
++   CHECK(!u_reclaim_begin(&context, true, &reclaim));
++   CHECK(fake.flushes == 0 && fake.waits == 0 && fake.releases == 0);
++
++   printf("u_reclaim: ok\n");
++   return 0;
++}
+diff --git a/src/gallium/auxiliary/util/u_transfer.c b/src/gallium/auxiliary/util/u_transfer.c
+index 01ca534a1b7b25b28e36febfed8fe4c862329744..5194159b1137560a9bd6dd3e5ede64973f2d2163 100644
+--- a/src/gallium/auxiliary/util/u_transfer.c
++++ b/src/gallium/auxiliary/util/u_transfer.c
+@@ -71,14 +71,14 @@ void u_default_clear_buffer(struct pipe_context *pipe,
+    pipe_buffer_unmap(pipe, transfer);
+ }
+ 
+-void u_default_texture_subdata(struct pipe_context *pipe,
+-                               struct pipe_resource *resource,
+-                               unsigned level,
+-                               unsigned usage,
+-                               const struct pipe_box *box,
+-                               const void *data,
+-                               unsigned stride,
+-                               uintptr_t layer_stride)
++bool u_texture_subdata_try(struct pipe_context *pipe,
++                           struct pipe_resource *resource,
++                           unsigned level,
++                           unsigned usage,
++                           const struct pipe_box *box,
++                           const void *data,
++                           unsigned stride,
++                           uintptr_t layer_stride)
+ {
+    struct pipe_transfer *transfer = NULL;
+    const uint8_t *src_data = data;
+@@ -98,7 +98,7 @@ void u_default_texture_subdata(struct pipe_context *pipe,
+                             usage,
+                             box, &transfer);
+    if (!map)
+-      return;
++      return false;
+ 
+    util_copy_box(map,
+                  resource->format,
+@@ -114,6 +114,21 @@ void u_default_texture_subdata(struct pipe_context *pipe,
+                  0, 0, 0);
+ 
+    pipe_texture_unmap(pipe, transfer);
++   return true;
++}
++
++
++void u_default_texture_subdata(struct pipe_context *pipe,
++                               struct pipe_resource *resource,
++                               unsigned level,
++                               unsigned usage,
++                               const struct pipe_box *box,
++                               const void *data,
++                               unsigned stride,
++                               uintptr_t layer_stride)
++{
++   u_texture_subdata_try(pipe, resource, level, usage, box, data, stride,
++                         layer_stride);
+ }
+ 
+ void u_default_transfer_flush_region(UNUSED struct pipe_context *pipe,
+diff --git a/src/gallium/auxiliary/util/u_transfer.h b/src/gallium/auxiliary/util/u_transfer.h
+index 7c4f73d787c6451a8e2bbf58aaff654956fbce8f..c5d63757ad3d349b4b87759148cc3879a827923f 100644
+--- a/src/gallium/auxiliary/util/u_transfer.h
++++ b/src/gallium/auxiliary/util/u_transfer.h
+@@ -22,6 +22,17 @@ void u_default_clear_buffer(struct pipe_context *pipe,
+                             const void *clear_value,
+                             int clear_value_size);
+ 
++/* u_default_texture_subdata() that says whether it wrote: false when the
++ * driver could not map the range, so the caller can try again. */
++bool u_texture_subdata_try(struct pipe_context *pipe,
++                           struct pipe_resource *resource,
++                           unsigned level,
++                           unsigned usage,
++                           const struct pipe_box *box,
++                           const void *data,
++                           unsigned stride,
++                           uintptr_t layer_stride);
++
+ void u_default_texture_subdata(struct pipe_context *pipe,
+                                struct pipe_resource *resource,
+                                unsigned level,
+diff --git a/src/gallium/include/pipe/p_screen.h b/src/gallium/include/pipe/p_screen.h
+index 0645f26e5b1168a7fb57199e5c0acb689b0eb580..471cc259dd22d49787db67ce8c577e6e1a2da73d 100644
+--- a/src/gallium/include/pipe/p_screen.h
++++ b/src/gallium/include/pipe/p_screen.h
+@@ -659,6 +659,14 @@ struct pipe_screen {
+     */
+    unsigned (*release_cached_memory)(struct pipe_screen *screen);
+ 
++   /**
++    * The bytes of device memory the driver has freed since the screen was
++    * created. A caller that reclaims memory for a request the driver
++    * refused compares two readings to see whether the reclaim freed
++    * anything. Optional. May be called from any thread.
++    */
++   uint64_t (*get_freed_memory)(struct pipe_screen *screen);
++
+    /**
+     * Run driver-specific NIR lowering and optimization passes.
+     *

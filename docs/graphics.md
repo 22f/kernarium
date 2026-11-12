@@ -368,15 +368,23 @@ that reached its bound is not repeated until Metal's counter falls again.
   and fails before the guest holds a handle (`-ENOMEM` for an out-of-memory
   answer, `-EINVAL` for any other error), so gralloc fails the allocation and
   no refusal leaves a buffer another process can import
-  (`guest-virtgpu-blob-refusal`). A driver's own
-  staging buffer that is refused inside a transfer is not retried. The buffers
-  a draw uploads, the program's constants and the attributes it has no array
-  for, come from the driver too: a draw whose upload is refused is skipped and
-  raises `GL_OUT_OF_MEMORY`, and the next draw sets its state up again
-  (`gpu-host-gl-upload-refusal`). The upload buffer glthread shares between a
-  context's `glBufferSubData` calls is refused the same way: the write then
-  copies its data through the command stream and needs no buffer
-  (`gpu-host-gl-glthread-upload-refusal`).
+  (`guest-virtgpu-blob-refusal`). The staging buffer of a buffer or texture
+  upload, and the buffers a draw uploads (the program's constants and the
+  attributes it has no array for), come from the driver and are refused there.
+  Mesa then flushes the context and waits, 2 s in all, for its work, trims it,
+  releases what the screen caches, and tries the upload or the draw's state
+  once more, again for 300 ms at most while the freed memory reaches the pool
+  (`gpu-host-gl-refusal-retry-draw`, `gpu-host-gl-refusal-retry-upload`). An
+  upload made without synchronizing with the context's thread only releases
+  what the screen caches. Work that does not finish in time rules out another
+  reclaim for ten seconds, and one that did not help for a quarter of a
+  second. What still does not fit is dropped: an upload is lost without an
+  error (`gpu-host-gl-refusal-retry-persist`), and a draw whose upload is
+  refused is skipped and raises `GL_OUT_OF_MEMORY`, and the next draw sets its
+  state up again (`gpu-host-gl-upload-refusal`). The upload buffer glthread
+  shares between a context's `glBufferSubData` calls is refused at the driver
+  too and is not retried: the write then copies its data through the command
+  stream and needs no buffer (`gpu-host-gl-glthread-upload-refusal`).
 - Venus: the guest driver submits `vkAllocateMemory` asynchronously, so a
   refusal reaches the guest as a failed context at the next command naming the
   allocation, and only that guest process aborts. The Android guest allocates
