@@ -536,10 +536,10 @@ void test_a_window_does_not_take_a_busy_private_space_for_the_one_it_spares()
 	 * leaves the shared one the oldest place; the second enters the shared
 	 * one, which is then running elsewhere. */
 	let_activity_lapse();
+	const auto stamp = activity_stamp();
 	for (std::uint64_t other = 1; other < window; ++other)
 		prepare(first, world.memory, world.sequences,
 			generation + other);
-	const auto stamp = activity_stamp();
 	prepare(second, world.memory, world.sequences);
 	/* One address space more than the window holds. */
 	prepare(first, world.memory, world.sequences, generation + window);

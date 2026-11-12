@@ -2072,9 +2072,10 @@ public:
 	 * A destroyed generation never runs again, so nothing it holds can be
 	 * looked up again. A closed space's generation leaves the window's
 	 * order; a destroyed one's number keeps its place in it as a tombstone,
-	 * which holds nothing and which the window retires before any address
-	 * space it has a reason to keep (GenerationWindow::victim()), so the
-	 * window keeps the live address spaces it would have kept. Say whether
+	 * which holds nothing and which the window retires in its turn, or
+	 * sooner in place of an address space another executor is running
+	 * (GenerationWindow::victim()), so the window keeps the live address
+	 * spaces it would have kept. Say whether
 	 * the one last prepared was among those let go of.
 	 * The caller runs no translated code of this cache from before this call
 	 * until after the next prepare(), which it must therefore make: a retired

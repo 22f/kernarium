@@ -346,10 +346,10 @@ void a_window_does_not_take_a_busy_private_space_for_the_one_it_spares()
 	 * leaves the shared one the oldest place; the second enters the shared
 	 * one, which is then running elsewhere. */
 	let_activity_lapse();
+	const auto stamp = activity_stamp();
 	for (unsigned long space = 1; space < places; ++space)
 		require(run_to_system_call(first, first_memory, shared + space,
 			cpu, code_base) == 4);
-	const auto stamp = activity_stamp();
 	require(run_to_system_call(second, second_memory, shared, cpu,
 		code_base) == 4);
 	/* One address space more than the window holds. */
