@@ -23,8 +23,8 @@ namespace uml::runtime {
  *     them out of the process's footprint, the only memory the iOS compressor
  *     cannot shrink (guest RAM is wired while committed).
  *
- * A warning starts at most one response per `warn_interval`, counted from the
- * start of the last response of either level, on the clock of
+ * A warning starts at most one response per `warn_interval_ns`, counted from
+ * the start of the last response of either level, on the clock of
  * PressureActions::now_ns. A critical level always starts one. No response
  * starts while one is running: the event is dropped and counted, since the
  * running trim has the guest hand over all its cold page cache. The
@@ -35,9 +35,9 @@ namespace uml::runtime {
  * quiesced (it trimmed the guest when it did, and a trim would wake it) and
  * for one with no console. When another lifecycle call of the guest is in
  * progress (TrimOutcome::busy) the response keeps one trim pending and tries
- * it again after `retry_interval`, up to `retry_attempts` times: on_retry()
- * runs it, and the next response (which tries for itself) or the normal level
- * replaces or ends it. A retry never changes when a warning may start.
+ * it again after `PressureTiming::retry_interval_ns`, up to `retry_attempts`
+ * times: on_retry() runs it, and the next response (which tries for itself) or
+ * the normal level replaces or ends it. A retry never changes when a warning may start.
  *
  * Each change of the level and each response (or its last retry) is one line
  * on stderr (the console of both applications). A level line carries the level
