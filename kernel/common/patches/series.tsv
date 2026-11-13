@@ -135,3 +135,4 @@ patch	um-end-a-host-suspend-that-a-wake-overtook.patch
 patch	uml-virtio_uml-unregister-a-command-line-device-only-once.patch
 patch	um-do-not-sleep-through-the-task-an-idle-entry-s-own-dispatch-woke.patch
 patch	um-add-an-mconsole-sync-command.patch
+patch	um-wait-for-idle-with-one-kevent-per-virtual-CPU.patch

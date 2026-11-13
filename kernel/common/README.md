@@ -146,9 +146,9 @@ it. The bridge fields used below are defined by the comments in
 - The virtual CPU has no SVE outside streaming mode: there is no `NT_ARM_SVE`,
   `PR_SVE_*` fails with `EINVAL`, and the bridge tail holds no SVE state.
 - Because XNU delivers a signal to a thread in streaming mode without leaving
-  it, a carrier of an SME run blocks SIGUSR1 outside its idle `pselect()` and
-  the process-directed SIGINT, SIGTERM, SIGHUP, SIGQUIT, and SIGCHLD
-  throughout. Without SME no carrier blocks them.
+  it, a carrier of an SME run blocks SIGUSR1 and the process-directed SIGINT,
+  SIGTERM, SIGHUP, SIGQUIT, and SIGCHLD throughout, its idle wait included,
+  which its wake pipe ends. Without SME no carrier blocks them.
 
 ## Memory and address space
 
@@ -243,10 +243,14 @@ it. The bridge fields used below are defined by the comments in
   vectors at safe kernel spin, retry, TLB-walk, and `cond_resched()` boundaries
   and in `schedule()` when the caller stays runnable, so a kernel retry loop
   must service them: the IPI signal is only a wake edge. An idle virtual CPU
-  never blocks while one of its IPI vectors is pending. The byte in its wake
-  pipe only ends a wait and the vectors are the pending mask, so an idle exit
-  whose wait found the pipe empty drains it only if a vector is pending, and a
-  byte that lands later costs at most one spurious wait
+  waits in one `kevent()` on its own queue, which holds its wake pipe, the
+  host's stop descriptor and, on CPU0, the event the notification thread
+  triggers. Its deadline is a one-shot critical timer that the call adds,
+  because Darwin coalesces a wait's own timeout. An idle virtual CPU never
+  blocks while one of its IPI vectors is pending. The byte in its wake pipe
+  only ends a wait and the vectors are the pending mask, so an idle exit
+  whose wait found the pipe empty drains it only if a vector is pending, and
+  a byte that lands later costs at most one spurious wait
   (`kernel-darwin-ipi-drain`).
 - Darwin has no per-thread SIGIO, so a CPU collects the host's descriptor
   events at its clock tick and when it leaves idle, one CPU at a time: a
@@ -256,7 +260,7 @@ it. The bridge fields used below are defined by the comments in
   CPU tries only when no CPU has begun a dispatch for two ticks (20 ms), which
   is how an event waits no longer when the host holds CPU0's carrier, since a
   busy CPU0 collects at its tick only. The `uml-irq-notify` thread takes no
-  lock a CPU holds, so a stopped CPU0 cannot hold it up. It signals a CPU0
+  lock a CPU holds, so a stopped CPU0 cannot hold it up. It wakes a CPU0
   that idles, and for an event no dispatch has followed within 20 ms it also
   wakes an idle secondary through the pipe its idle wait reads. While CPU0 is
   not idle it parks after one event until CPU0's next idle entry or its 20 ms
