@@ -52,13 +52,13 @@ using WaitClock = std::chrono::steady_clock;
 
 #if UML_VHOST_USER_WAIT_TESTING
 std::atomic<WaitClock::time_point (*)() noexcept> testingWaitClock {nullptr};
+std::atomic<std::int64_t> testingWaitBoundMilliseconds {0};
+std::atomic<int> testingWaitIntervalMilliseconds {0};
 #endif
 
-/* The time of a backend wait and of a frame in it. std::chrono::steady_clock
- * is the one the GPU's fence timer counts by too; the device layer has no
- * clock that stops while the guest is held suspended, and needs none, because
- * the deadline runs only while the guest is demonstrably running (see
- * backendAcknowledgementBound). */
+/* The clock the polls of a backend wait are timed by. It measures one poll at a
+ * time and is never compared with an earlier reading, so it needs no property
+ * but running while the process does. */
 [[nodiscard]] WaitClock::time_point waitNow() noexcept
 {
 #if UML_VHOST_USER_WAIT_TESTING
@@ -76,6 +76,31 @@ constexpr std::uint32_t maximumGuestMemoryRegions =
 constexpr int socketPollTimeoutMilliseconds =
     UML_GPU_STOP_POLL_TIMEOUT_MILLISECONDS;
 static_assert(socketPollTimeoutMilliseconds > 0);
+
+[[nodiscard]] WaitClock::duration waitBound() noexcept
+{
+#if UML_VHOST_USER_WAIT_TESTING
+    if (const auto bound =
+            testingWaitBoundMilliseconds.load(std::memory_order_acquire);
+        bound > 0) {
+        return std::chrono::milliseconds {bound};
+    }
+#endif
+    return backendAcknowledgementBound;
+}
+
+/* How long one poll of a backend wait asks for. */
+[[nodiscard]] int waitInterval() noexcept
+{
+#if UML_VHOST_USER_WAIT_TESTING
+    if (const auto interval =
+            testingWaitIntervalMilliseconds.load(std::memory_order_acquire);
+        interval > 0) {
+        return interval;
+    }
+#endif
+    return socketPollTimeoutMilliseconds;
+}
 /* The start of the line written when a ring disable resets a device that
  * holds deferred requests, followed by ` device=<name> ring=<index>
  * deferred=<count>`. The Android runners match it. */
@@ -464,6 +489,16 @@ namespace testing {
 void setBackendWaitClock(WaitClock::time_point (*now)() noexcept) noexcept
 {
     testingWaitClock.store(now, std::memory_order_release);
+}
+
+void setBackendWaitTiming(
+    std::chrono::milliseconds bound,
+    int pollIntervalMilliseconds) noexcept
+{
+    testingWaitBoundMilliseconds.store(
+        bound.count(), std::memory_order_release);
+    testingWaitIntervalMilliseconds.store(
+        pollIntervalMilliseconds, std::memory_order_release);
 }
 
 } // namespace testing
@@ -1066,21 +1101,35 @@ void VhostUserServer::waitForBackendAcknowledgement(
      * acknowledgement, and handling it here could start another backend
      * request inside this one.
      *
-     * A deadline runs only while a reply the front-end waits for depends on
+     * A budget is spent only while a reply the front-end waits for depends on
      * this wait: that front-end drains the channel as it waits, so the
-     * acknowledgement is due at once. A wait with nothing behind it, such as a
-     * notification the guest has not read because its suspend came first,
+     * acknowledgement is due at once. It is spent by the polls of the wait, each
+     * charged at most the interval it asked for, not by the clock: a stretch in
+     * which the whole process could not run, such as an application the system
+     * suspended mid-wait, costs one poll. A wait with nothing behind it, such as
+     * a notification the guest has not read because its suspend came first,
      * takes as long as the guest does; the end of the main socket, the end of
      * the channel and a stop end it. An acknowledgement that has already
-     * arrived is read, whatever the time. */
-    const FrameBound frame {
-        .allowance = backendAcknowledgementBound,
-        .now = &waitNow,
-    };
-    std::optional<WaitClock::time_point> deadline;
+     * arrived is read, whatever the budget. */
+    const auto bound = waitBound();
+    const int interval = waitInterval();
+    std::optional<WaitBudget> budget;
     const auto armIfRepliesAreOwed = [&] {
-        if (!deadline && frontendWaitsForReply())
-            deadline = waitNow() + backendAcknowledgementBound;
+        if (!budget && frontendWaitsForReply()) {
+            budget.emplace(
+                bound,
+                std::string("vhost-user ") + channel +
+                    " acknowledgement missing for " + describeWaitTime(bound));
+        }
+    };
+    const auto boundFor = [&](int watch) {
+        return FrameBound {
+            .allowance = bound,
+            .now = &waitNow,
+            .pollIntervalMilliseconds = interval,
+            .wait = budget ? &*budget : nullptr,
+            .watch = watch,
+        };
     };
     armIfRepliesAreOwed();
     for (;;) {
@@ -1096,32 +1145,17 @@ void VhostUserServer::waitForBackendAcknowledgement(
                 .revents = 0,
             },
         }};
-        int timeout = socketPollTimeoutMilliseconds;
-        /* A poll that finds nothing after the deadline has passed is the one
+        /* A poll that finds nothing after the budget is spent is the one
          * that fails the wait, so whatever had arrived by then was read. */
-        bool expired = false;
-        const auto failIfExpired = [&] {
-            if (!expired)
-                return;
-            throw VhostUserTimeout(
-                std::string("vhost-user ") + channel +
-                " acknowledgement missing for " +
-                std::to_string(
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        backendAcknowledgementBound).count()) +
-                " s");
-        };
-        if (deadline) {
-            const auto left = std::chrono::ceil<std::chrono::milliseconds>(
-                *deadline - waitNow()).count();
-            expired = left <= 0;
-            timeout = static_cast<int>(
-                std::clamp<long long>(left, 0, timeout));
-        }
+        const bool spentBefore = budget && budget->spent();
+        const int asked = budget ? budget->pollTimeout(interval) : interval;
+        const auto started = budget ? waitNow() : WaitClock::time_point {};
         const int ready = ::poll(
             descriptors.data(),
             static_cast<nfds_t>(descriptors.size()),
-            timeout);
+            asked);
+        if (budget)
+            budget->charge(waitNow() - started, asked);
         if (connectionStopRequested_ != nullptr &&
             connectionStopRequested_->load(std::memory_order_acquire)) {
             throw ConnectionStopped {};
@@ -1133,7 +1167,8 @@ void VhostUserServer::waitForBackendAcknowledgement(
                 std::string("vhost-user ") + channel + " poll failed");
         }
         if (ready == 0) {
-            failIfExpired();
+            if (spentBefore)
+                budget->fail();
             continue;
         }
         if ((descriptors[0].revents & POLLNVAL) != 0 ||
@@ -1146,11 +1181,12 @@ void VhostUserServer::waitForBackendAcknowledgement(
          * go, the acknowledgement releases nothing to write to. */
         if (descriptors[1].revents != 0) {
             VhostUserMessage frontendRequest;
+            const auto frontendBound = boundFor(-1);
             if (!receiveVhostUserMessage(
                     frontendDescriptor_,
                     frontendRequest,
                     connectionStopRequested_,
-                    &frame)) {
+                    &frontendBound)) {
                 if (connectionStopRequested_ != nullptr &&
                     connectionStopRequested_->load(std::memory_order_acquire)) {
                     throw ConnectionStopped {};
@@ -1184,14 +1220,27 @@ void VhostUserServer::waitForBackendAcknowledgement(
         }
         if (descriptors[0].revents != 0) {
             VhostUserMessage reply;
-            if (!receiveVhostUserMessage(
+            /* The reception watches the main socket: an acknowledgement that
+             * arrives as the front-end lets the device go releases nothing,
+             * whether it comes in one piece or in several. */
+            const auto backendBound = boundFor(frontendDescriptor_);
+            bool received = false;
+            try {
+                received = receiveVhostUserMessage(
                     slaveRequestDescriptor_.get(),
                     reply,
                     connectionStopRequested_,
-                    &frame)) {
+                    &backendBound);
+            } catch (const VhostUserWatchedPeerEnded&) {
                 if (connectionStopRequested_ != nullptr &&
-                    connectionStopRequested_->load(
-                        std::memory_order_acquire)) {
+                    connectionStopRequested_->load(std::memory_order_acquire)) {
+                    throw ConnectionStopped {};
+                }
+                throw ConnectionClosed {};
+            }
+            if (!received) {
+                if (connectionStopRequested_ != nullptr &&
+                    connectionStopRequested_->load(std::memory_order_acquire)) {
                     throw ConnectionStopped {};
                 }
                 /* A guest that powers off with a configuration change still
@@ -1199,6 +1248,8 @@ void VhostUserServer::waitForBackendAcknowledgement(
                  * closes the main socket. */
                 throw ConnectionClosed {};
             }
+            if (vhostUserPeerHasEnded(frontendDescriptor_))
+                throw ConnectionClosed {};
             constexpr std::uint32_t expectedReplyFlags =
                 protocol::vhostUserVersion | protocol::vhostUserReply;
             if (reply.header.request != request.request ||
@@ -1212,7 +1263,8 @@ void VhostUserServer::waitForBackendAcknowledgement(
             }
             return;
         }
-        failIfExpired();
+        if (spentBefore)
+            budget->fail();
     }
 }
 

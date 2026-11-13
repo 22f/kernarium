@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The server's wait for the front-end's acknowledgement of a backend request
 // (a shared-memory map or unmap, an in-band completion, a configuration
-// change), behind the real transport and with the clock a test moves.
+// change), behind the real transport, in time a test moves.
 //
-// The wait ends with the acknowledgement. A deadline runs only while a reply
-// the front-end waits for depends on it, and then fails the wait and closes the
-// backend channel; a wait nothing is behind, such as a notification a
-// suspended guest has not read, has none. The end of the main socket aborts
-// the operation before anything the acknowledgement would release is written,
-// and a frame that stays incomplete is bound the same way. A service stop ends
-// every wait as it always has.
+// The wait ends with the acknowledgement. A budget runs only while a reply the
+// front-end waits for depends on it; the wait's own polls spend it, so a clock
+// that jumps, as when the whole process is suspended, costs one poll. A spent
+// budget fails the wait and closes the backend channel; a wait nothing is
+// behind, such as a notification a suspended guest has not read, has none. The
+// end of the main socket aborts the operation before anything the
+// acknowledgement would release is written, even while the acknowledgement
+// arrives, and a frame received during the wait is bound the same way. A
+// service stop ends every wait as it always has.
 #include "held_request_harness.hpp"
 #include "vhost_user_server_testing.hpp"
 
@@ -20,6 +22,7 @@
 #include <csignal>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -30,26 +33,52 @@
 namespace {
 
 using namespace uml::virtio::held_request_harness;
-using uml::gpu::backendAcknowledgementBound;
 using uml::gpu::VhostUserServer;
 using std::chrono::milliseconds;
 
-constexpr auto bound = std::chrono::duration_cast<milliseconds>(backendAcknowledgementBound);
+/* The budget and the poll interval the server's waits have while a test runs,
+ * so that a wait is spent in half a second: fifty polls of ten milliseconds,
+ * where the server's budget is a hundred polls of a hundred. */
+constexpr auto testBound = milliseconds {500};
+constexpr int testInterval = 10;
+/* What the clock advances by at every read once it ticks: the wait reads it
+ * twice for each poll, so one poll is charged one tick, and the budget lasts
+ * `turns` polls. */
+constexpr auto tick = milliseconds {10};
+constexpr std::uint64_t turns = testBound / tick;
+static_assert(turns * tick == testBound && tick.count() == testInterval);
 constexpr auto map = protocol::VhostSlaveRequest::sharedMemoryMap;
 constexpr auto unmap = protocol::VhostSlaveRequest::sharedMemoryUnmap;
 
-/* The clock of every wait the server makes while it lives. It starts where
- * steady_clock is and moves only when the test says, so a bound passes by
- * advance(), not by waiting. The server looks at the clock at least every stop
- * interval while a deadline or a frame runs, so awaitReads() shows that it has
- * judged the time as it now is. */
-class FakeClock {
+/* The budget and the poll interval of the waits of every server that runs
+ * while this lives. */
+class ShortWait {
+public:
+    ShortWait() { uml::gpu::testing::setBackendWaitTiming(testBound, testInterval); }
+    ~ShortWait() { uml::gpu::testing::setBackendWaitTiming({}, 0); }
+    ShortWait(const ShortWait&) = delete;
+    ShortWait& operator=(const ShortWait&) = delete;
+};
+
+/* The clock that times the polls of every wait the server makes while it
+ * lives. It stands still, and moves only when the test says: advance() jumps it
+ * and startTicking() makes every read move it. The wait reads it twice for
+ * each poll it spends, first and last, so the reads are counted from 1 and read
+ * 2k is the end of poll k, and atRead() runs a test's action inside one read, on
+ * the server's thread, at a known point of the wait. Only a wait that spends a
+ * budget reads the clock: a read count of zero shows one that does not. */
+class FakeClock : private ShortWait {
 public:
     FakeClock()
     {
         base().store(std::chrono::steady_clock::now().time_since_epoch().count());
         offset().store(0);
         reads().store(0);
+        tickLength().store(0);
+        {
+            const std::lock_guard lock {gate().mutex};
+            gate().actions.clear();
+        }
         uml::gpu::testing::setBackendWaitClock(&FakeClock::now);
     }
     ~FakeClock() { uml::gpu::testing::setBackendWaitClock(nullptr); }
@@ -57,6 +86,20 @@ public:
     FakeClock& operator=(const FakeClock&) = delete;
 
     void advance(milliseconds by) { offset().fetch_add(std::chrono::nanoseconds {by}.count()); }
+    /* From now every read moves the clock by `by`, and the count starts again.
+     * Call it while no wait that spends a budget is running: the server reads
+     * the clock in pairs. */
+    void startTicking(milliseconds by)
+    {
+        tickLength().store(std::chrono::nanoseconds {by}.count());
+        reads().store(0);
+    }
+    /* `action` runs inside read number `index`, before it returns. */
+    void atRead(std::uint64_t index, std::function<void()> action)
+    {
+        const std::lock_guard lock {gate().mutex};
+        gate().actions[index] = std::move(action);
+    }
     /* The server's next read of the clock does not return until release(), so
      * that the test can change what it will find, with the server stopped at a
      * known point of its loop. awaitHeld() returns once it is stopped there. */
@@ -90,23 +133,25 @@ public:
                 "the server did not look at the clock");
     }
     /* The server has read the clock at all since `before`, which a wait does
-     * as its deadline begins. */
+     * once it spends a budget. */
     void awaitFirstRead(std::uint64_t before) const
     {
         require(uml::testing::waitUntil(
                     [&] { return readCount() > before; }, std::chrono::seconds {20}),
-                "the server did not start a deadline");
+                "the server did not start a budget");
     }
 
 private:
     static std::atomic<std::int64_t>& base() { static std::atomic<std::int64_t> value; return value; }
     static std::atomic<std::int64_t>& offset() { static std::atomic<std::int64_t> value; return value; }
+    static std::atomic<std::int64_t>& tickLength() { static std::atomic<std::int64_t> value; return value; }
     static std::atomic<std::uint64_t>& reads() { static std::atomic<std::uint64_t> value; return value; }
     struct Gate {
         std::mutex mutex;
         std::condition_variable changed;
         bool hold {};
         bool blocked {};
+        std::map<std::uint64_t, std::function<void()>> actions;
     };
     static Gate& gate() { static Gate value; return value; }
     static std::chrono::steady_clock::time_point now() noexcept
@@ -120,18 +165,27 @@ private:
                 gate().blocked = false;
             }
         }
-        const std::chrono::steady_clock::time_point time {
-            std::chrono::steady_clock::duration {base().load() + offset().load()}};
-        // Counted once the time is read, so a count shows a time before any
-        // advance that follows it.
-        reads().fetch_add(1);
-        return time;
+        const auto index = reads().fetch_add(1) + 1;
+        std::function<void()> action;
+        {
+            const std::lock_guard lock {gate().mutex};
+            if (const auto found = gate().actions.find(index); found != gate().actions.end()) {
+                action = std::move(found->second);
+                gate().actions.erase(found);
+            }
+        }
+        if (action)
+            action();
+        // Taken after the action, so that a jump it makes is in this reading.
+        const auto at = offset().fetch_add(tickLength().load());
+        return std::chrono::steady_clock::time_point {
+            std::chrono::steady_clock::duration {base().load() + at}};
     }
 };
 
 /* How many bytes the server sent on `socket` before it closed it, or -1 if it
  * has not within `timeoutMilliseconds`. */
-[[nodiscard]] long bytesBeforeEnd(int socket, int timeoutMilliseconds = 2000)
+[[nodiscard]] long bytesBeforeEnd(int socket, int timeoutMilliseconds = 20000)
 {
     long bytes = 0;
     const auto deadline = std::chrono::steady_clock::now() + milliseconds {timeoutMilliseconds};
@@ -257,10 +311,29 @@ void requireWaitFailed(const HeldSession& session, unsigned resetsBefore)
     require(session.requests.usedIndex() == 0, "an answer was written by a failed wait");
 }
 
+/* The backend acknowledges the request it holds, and has done so when this
+ * returns: the acknowledgement is on the channel. */
+void releaseAcknowledgement(BackendAnswerer& backend)
+{
+    const auto before = backend.answered();
+    backend.hold(false);
+    awaitCondition([&] { return backend.answered() == before + 1; });
+}
+
+/* The failure of an armed wait that nothing answers. */
+constexpr const char* missingAcknowledgementReport =
+    "holding vhost-user connection failed: vhost-user shared-memory "
+    "acknowledgement missing for 500 ms\n";
+constexpr const char* incompleteFrameReport =
+    "holding vhost-user connection failed: vhost-user frame incomplete: "
+    "its remaining bytes did not arrive within 500 ms of its first byte\n";
+
 /* A missing acknowledgement no longer strands the teardown: once the query has
- * waited for the bound, the wait fails with a report, the query is not
+ * waited the whole budget, the wait fails with a report, the query is not
  * answered, and the connection and the backend channel end. An acknowledgement
- * that arrives afterwards completes nothing. */
+ * that arrives afterwards completes nothing. Every poll is charged one tick, so
+ * the budget lasts exactly `turns` polls and the failure comes on the poll after
+ * them, the last chance of an acknowledgement that is there. */
 void aMissingAcknowledgementEndsTheWait()
 {
     FakeClock clock;
@@ -270,19 +343,16 @@ void aMissingAcknowledgementEndsTheWait()
         const int socket = session.socket;
         const auto resets = device.resets();
 
+        clock.startTicking(tick);
         askForTheFeaturesInsideTheWait(socket);
-        require(connectionOpen(socket), "the wait ended before the bound");
 
         long sent = 0;
-        const auto said = captureStderr([&] {
-            clock.advance(3 * bound);
-            sent = bytesBeforeEnd(socket);
-        });
-        require(sent == 0, "the wait did not fail at the bound, or a reply was made up");
-        require(said == "holding vhost-user connection failed: vhost-user shared-memory "
-                        "acknowledgement missing for 10 s\n",
-                "the failure was not reported as expected: " + said);
+        const auto said = captureStderr([&] { sent = bytesBeforeEnd(socket); });
+        require(sent == 0, "the wait did not fail, or a reply was made up");
+        require(said == missingAcknowledgementReport, "the failure was not reported as expected: " + said);
         requireWaitFailed(session, resets);
+        require(clock.readCount() == 2 * turns + 2,
+                "the wait failed after " + std::to_string(clock.readCount()) + " reads");
 
         const auto answered = backend.answered();
         backend.hold(false);
@@ -292,34 +362,33 @@ void aMissingAcknowledgementEndsTheWait()
     });
 }
 
-/* The bound is exact: a millisecond short of it the server is still waiting,
- * and at it the wait fails. */
-void theBoundIsExact()
+/* The wait is armed by the query and by nothing else, and from the start of the
+ * wait the budget holds the whole time the real clock keeps: an awake front-end
+ * that stays silent fails the wait after the budget and not before, in the
+ * time the wait's polls took. */
+void anAwakeSilentFrontEndFailsAfterTheBudget()
 {
-    FakeClock clock;
+    ShortWait timing;
     withPendingMap([&](const HeldSession& session) {
         const int socket = session.socket;
         const auto resets = session.device.resets();
+
+        const auto began = std::chrono::steady_clock::now();
         askForTheFeaturesInsideTheWait(socket);
-
-        clock.advance(bound - milliseconds {1});
-        clock.awaitReads(4);
-        require(connectionOpen(socket) && !session.backend->channelEnded(100),
-                "the wait failed a millisecond before the bound");
-
         long sent = 0;
-        (void)captureStderr([&] {
-            clock.advance(milliseconds {1});
-            sent = bytesBeforeEnd(socket);
-        });
-        require(sent == 0, "the wait did not fail at the bound");
+        (void)captureStderr([&] { sent = bytesBeforeEnd(socket); });
+        const auto took = std::chrono::steady_clock::now() - began;
+        require(sent == 0, "the wait did not fail");
+        require(took >= testBound, "the wait failed before its budget could be spent");
         requireWaitFailed(session, resets);
     });
 }
 
-/* An acknowledgement that arrives a millisecond before the bound ends the wait
- * as usual: the query is answered after it, behind the reset it asks for. */
-void anAcknowledgementJustBeforeTheBoundIsAccepted()
+/* Where an acknowledgement falls against the last poll the budget pays for:
+ * the wait reads the clock before the poll and after it, and the failure comes
+ * from a poll that finds nothing after the budget is spent. A read of the clock
+ * is the place a test puts the acknowledgement. */
+void anAcknowledgementAtReadIsAccepted(std::uint64_t index, bool accepted)
 {
     FakeClock clock;
     withPendingMap([&](const HeldSession& session) {
@@ -327,62 +396,36 @@ void anAcknowledgementJustBeforeTheBoundIsAccepted()
         auto& backend = *session.backend;
         const int socket = session.socket;
         const auto resets = device.resets();
-        askForTheFeaturesInsideTheWait(socket);
 
-        clock.advance(bound - milliseconds {1});
-        clock.awaitReads(4);
-        require(connectionOpen(socket));
-        const auto said = captureStderr([&] {
-            backend.hold(false);
+        clock.startTicking(tick);
+        clock.atRead(index, [&] { releaseAcknowledgement(backend); });
+        askForTheFeaturesInsideTheWait(socket);
+        if (accepted) {
+            bool replied = false;
+            const auto said = captureStderr([&] {
+                pollfd ready {.fd = socket, .events = POLLIN};
+                replied = ::poll(&ready, 1, 20000) == 1;
+            });
+            require(said.empty(), "the wait reported a failure: " + said);
+            require(replied, "the features request was not answered");
             (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
-        });
-        require(said.empty(), "the wait reported a failure: " + said);
-        require(device.resets() == resets + 1 && device.held() == 0 && device.mapped() == 0,
-                "the features request did not reset the device once the wait was over");
-        require(!backend.channelEnded(100), "the backend channel was closed");
-        (void)readConfig(socket, 0, 1);
-    });
-}
-
-/* An acknowledgement that is already waiting on the channel when the bound
- * passes is read, whatever the time: only a poll that finds nothing after the
- * bound fails the wait. The server is stopped just before that poll while the
- * clock moves past the bound and the acknowledgement arrives. */
-void anAcknowledgementAlreadyWaitingAtTheBoundIsAccepted()
-{
-    FakeClock clock;
-    withPendingMap([&](const HeldSession& session) {
-        auto& device = session.device;
-        auto& backend = *session.backend;
-        const int socket = session.socket;
-        const auto resets = device.resets();
-        askForTheFeaturesInsideTheWait(socket);
-
-        clock.holdNextRead();
-        clock.awaitHeld();
-        clock.advance(2 * bound);
-        const auto answered = backend.answered();
-        backend.hold(false);
-        awaitCondition([&] { return backend.answered() == answered + 1; });
-        bool replied = false;
-        const auto said = captureStderr([&] {
-            clock.release();
-            pollfd ready {.fd = socket, .events = POLLIN};
-            replied = ::poll(&ready, 1, 5000) == 1;
-        });
-        require(said.empty(), "the wait reported a failure: " + said);
-        require(replied, "the features request was not answered");
-        (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
-        require(device.resets() == resets + 1 && device.held() == 0 && device.mapped() == 0,
-                "the features request did not reset the device once the wait was over");
-        require(!backend.channelEnded(100), "the backend channel was closed");
-        (void)readConfig(socket, 0, 1);
+            require(device.resets() == resets + 1 && device.held() == 0 && device.mapped() == 0,
+                    "the features request did not reset the device once the wait was over");
+            require(!backend.channelEnded(100), "the backend channel was closed");
+            (void)readConfig(socket, 0, 1);
+        } else {
+            long sent = 0;
+            const auto said = captureStderr([&] { sent = bytesBeforeEnd(socket); });
+            require(sent == 0, "the wait did not fail, or a reply was made up");
+            require(said == missingAcknowledgementReport, "the failure was not reported as expected: " + said);
+            requireWaitFailed(session, resets);
+        }
     });
 }
 
 /* A request that asks for an acknowledgement is a reply the front-end waits
- * for, as a query is: the enable of a ring that starts a map begins the count
- * as the wait does, and no query is needed. */
+ * for, as a query is: the enable of a ring that starts a map arms the budget as
+ * the wait begins, and no query is needed. */
 void aRequestThatAsksForAReplyStartsTheCount()
 {
     FakeClock clock;
@@ -396,23 +439,70 @@ void aRequestThatAsksForAReplyStartsTheCount()
             const auto resets = session.device.resets();
             backend.hold(true);
             session.requests.postRequest(2);
+            clock.startTicking(tick);
             session.requests.sendEnable(socket, true);
             awaitCondition([&] { return backend.count(map) == 2; });
             // Answered inside the wait the enable began, so the count has begun.
             (void)readConfig(socket, 0, 1);
-            require(connectionOpen(socket));
 
             long sent = 0;
-            (void)captureStderr([&] {
-                clock.advance(bound);
-                sent = bytesBeforeEnd(socket);
-            });
+            (void)captureStderr([&] { sent = bytesBeforeEnd(socket); });
             // The server releases the sender of the request it could not finish.
-            require(sent >= 0, "the wait did not fail at the bound");
+            require(sent >= 0, "the wait did not fail");
             requireWaitFailed(session, resets);
+            require(clock.readCount() == 2 * turns + 2,
+                    "the wait failed after " + std::to_string(clock.readCount()) + " reads");
         },
         {},
         true);
+}
+
+/* The whole process cannot run for a while, as when the system suspends an
+ * application with a wait in flight: the clock jumps, and the poll that spans
+ * the jump is charged what a poll costs, not the jump. The acknowledgement is
+ * not queued when the process runs again, because its sender stopped too, and
+ * the wait goes on; without it, it fails the poll later than a wait that was
+ * never stopped by no more than the slack of one poll. */
+void aStretchTheProcessDidNotRunCostsOnePoll(bool acknowledged)
+{
+    FakeClock clock;
+    withPendingMap([&](const HeldSession& session) {
+        auto& device = session.device;
+        auto& backend = *session.backend;
+        const int socket = session.socket;
+        const auto resets = device.resets();
+
+        clock.startTicking(tick);
+        // The end of poll 10; a year later.
+        clock.atRead(20, [&] { clock.advance(milliseconds {365LL * 24 * 3600 * 1000}); });
+        if (acknowledged)
+            clock.atRead(2 * turns - 12, [&] { releaseAcknowledgement(backend); });
+        askForTheFeaturesInsideTheWait(socket);
+
+        if (acknowledged) {
+            bool replied = false;
+            const auto said = captureStderr([&] {
+                pollfd ready {.fd = socket, .events = POLLIN};
+                replied = ::poll(&ready, 1, 20000) == 1;
+            });
+            require(said.empty(), "the wait reported a failure: " + said);
+            require(replied, "the features request was not answered");
+            (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
+            require(device.resets() == resets + 1 && !backend.channelEnded(100));
+            (void)readConfig(socket, 0, 1);
+        } else {
+            long sent = 0;
+            const auto said = captureStderr([&] { sent = bytesBeforeEnd(socket); });
+            require(sent == 0 && said == missingAcknowledgementReport, "the wait did not fail as it should: " + said);
+            requireWaitFailed(session, resets);
+            // The jump took 35 ms of the budget, a tick and the slack; a charge of
+            // the year would have failed the wait at poll 11.
+            constexpr auto slack = std::chrono::duration_cast<milliseconds>(uml::gpu::WaitBudget::slack);
+            constexpr std::uint64_t cost = (slack / tick) + 1;
+            require(clock.readCount() >= 2 * (turns - cost) + 2 && clock.readCount() <= 2 * turns + 2,
+                    "the wait failed after " + std::to_string(clock.readCount()) + " reads");
+        }
+    });
 }
 
 /* The reviewer's second probe: the main socket closes while the map is
@@ -445,7 +535,6 @@ void theEndOfTheMainSocketAbortsTheWait()
     requests.writeKickPipe();
     awaitCondition([&] { return backend.count(map) == 1; });
     const auto resets = recorder->resets();
-    const auto reads = clock.readCount();
 
     bool exited = false;
     const auto said = captureStderr([&] {
@@ -467,7 +556,72 @@ void theEndOfTheMainSocketAbortsTheWait()
             "response bytes were written after the main socket closed");
     require(recorder->resets() == resets + 1 && recorder->held() == 0 && recorder->mapped() == 0);
     require(!regions->contains(0, 0, 1), "a range stayed in the host index");
-    require(clock.readCount() == reads, "the abort waited for a deadline");
+    require(clock.readCount() == 0, "the abort spent a budget");
+}
+
+/* The end of the main socket while the acknowledgement is being received,
+ * which the reviewer's probe showed releasing the completion: nothing the
+ * acknowledgement would have released is written. `when` says where the end
+ * falls in the reception of one acknowledgement: 0 after the first bytes of a
+ * frame that is sent in two parts, 1 after the header of one sent whole, as the
+ * receiver is about to poll for the rest, and 2 after the last byte, with no
+ * poll left. */
+void theEndOfTheMainSocketDuringAnAcknowledgementAbortsTheWait(int when)
+{
+    FakeClock clock;
+    auto device = std::make_unique<HoldingDevice>(HoldingDevice::Options {true, false, true, true});
+    auto* recorder = device.get();
+    VhostUserServer server {std::move(device)};
+    auto regions = std::make_shared<uml::virtio::SharedMemoryRegions>();
+    server.setSharedMemoryRegions(regions);
+    SplitRing ring;
+    TestQueue requests {ring, requestQueue, requestLayout};
+    TestQueue events {ring, eventQueue, eventLayout};
+    ServerThread connection {server};
+    const int socket = connection.socket();
+
+    auto backendChannel = openBackendChannel(socket, negotiatedSharedMemory);
+    backendChannel.descriptors[1].reset();
+    BackendAnswerer backend {backendChannel.descriptors[0].get()};
+    backend.tolerateClosedChannel();
+    configureMemory(socket, ring.descriptor());
+    requests.start(socket, true, true);
+    events.start(socket, true, true);
+    backend.hold(true);
+    requests.postRequest(1);
+    requests.writeKickPipe();
+    awaitCondition([&] { return backend.count(map) == 1; });
+    const auto resets = recorder->resets();
+
+    // The wait reads the clock once a frame has begun: the first poll after the
+    // header is read 1, and its end read 2.
+    clock.startTicking(tick);
+    if (when != 0)
+        clock.atRead(when, [&] { connection.closeSocket(); });
+    else
+        backend.splitNextReplyAt(5);
+    bool exited = false;
+    const auto said = captureStderr([&] {
+        backend.hold(false);
+        if (when == 0) {
+            awaitCondition([&] { return backend.answered() == 1; });
+            clock.awaitFirstRead(0);
+            connection.closeSocket();
+        }
+        exited = connection.waitForExit();
+    });
+    require(exited, "the end of the main socket left the wait running");
+    require(said.empty(), "the end of the connection was reported as a failure: " + said);
+    if (when == 0)
+        backend.finishSplitReply();
+    awaitCondition([&] { return backend.answered() == 1; });
+    require(requests.usedIndex() == 0, "an answer was written after the main socket closed");
+    require(ring.memory()[responseBufferOffset] == 0 && ring.memory()[responseBufferOffset + 1] == 0,
+            "response bytes were written after the main socket closed");
+    require(recorder->mapsCompleted() == 0, "the map was completed after the main socket closed");
+    require(recorder->resets() == resets + 1 && recorder->held() == 0 && recorder->mapped() == 0);
+    require(!regions->contains(0, 0, 1), "a range stayed in the host index");
+    require(backend.channelEnded(), "the backend channel was left open");
 }
 
 /* A guest that suspends with a backend notification unread leaves the server
@@ -501,12 +655,13 @@ void aNotificationPendingAcrossASuspendIsNotAFailure()
         const auto resets = recorder->resets();
 
         // The guest is suspended: a year passes, and its queries are answered.
+        clock.startTicking(tick);
         clock.advance(milliseconds {365LL * 24 * 3600 * 1000});
         (void)readConfig(socket, 0, 1);
         bool stillWaiting = false;
-        // A deadline would fail the wait within a stop interval of the advance.
+        // A budget would be spent within the time it takes to run out.
         const auto said = captureStderr([&] {
-            stillWaiting = connectionOpen(socket) && !backend.channelEnded(500);
+            stillWaiting = connectionOpen(socket) && !backend.channelEnded(2 * testBound.count());
         });
         require(stillWaiting, "a pending notification was failed while the guest was suspended");
         require(said.empty(), "the wait reported a failure: " + said);
@@ -526,8 +681,8 @@ void aNotificationPendingAcrossASuspendIsNotAFailure()
 
 /* The same guest, suspending as the maintained front-end does: it disables its
  * rings and waits for each reply while it serves the backend channel, so its
- * acknowledgement comes within the bound, and an ordinary suspend is not
- * turned into a failure by the count the replies it waits for start. */
+ * acknowledgement comes at once, and an ordinary suspend is not turned into a
+ * failure by the budget the replies it waits for arm. */
 void aSuspendWithANotificationPendingAnswersInTime()
 {
     FakeClock clock;
@@ -551,10 +706,12 @@ void aSuspendWithANotificationPendingAnswersInTime()
         awaitCondition([&] { return backend.count(protocol::VhostSlaveRequest::vringCall) == 1; });
         const auto resets = recorder->resets();
 
+        clock.startTicking(tick);
         events.sendEnable(socket, false);
         requests.sendEnable(socket, false);
         (void)readConfig(socket, 0, 1);
-        clock.advance(bound - milliseconds {1});
+        // Armed now: a few polls have been spent, and the front-end drains the
+        // channel and answers.
         clock.awaitReads(4);
         require(connectionOpen(socket) && !backend.channelEnded(100));
 
@@ -568,8 +725,9 @@ void aSuspendWithANotificationPendingAnswersInTime()
 }
 
 /* A partial acknowledgement that never completes: the first bytes of the frame
- * arrive and the rest does not, and nothing is owed to the front-end. The wait
- * fails the bound after the frame began, and not before. */
+ * arrive and the rest does not, and nothing is owed to the front-end. The frame
+ * has its own allowance from its first byte, spent by the polls that wait for
+ * the rest. */
 void aPartialAcknowledgementThatNeverCompletesFails()
 {
     FakeClock clock;
@@ -578,33 +736,26 @@ void aPartialAcknowledgementThatNeverCompletesFails()
         const int socket = session.socket;
         const auto resets = session.device.resets();
 
-        const auto reads = clock.readCount();
+        clock.startTicking(tick);
         backend.splitNextReplyAt(5);
-        backend.hold(false);
-        awaitCondition([&] { return backend.answered() == 2; });
-        clock.awaitFirstRead(reads);
-        clock.awaitReads(2);
-
-        clock.advance(bound - milliseconds {1});
-        clock.awaitReads(4);
-        require(connectionOpen(socket), "the frame was failed a millisecond before the bound");
         long sent = 0;
         const auto said = captureStderr([&] {
-            clock.advance(milliseconds {1});
+            backend.hold(false);
             sent = bytesBeforeEnd(socket);
         });
         require(sent == 0, "the incomplete frame did not fail the wait");
-        require(said == "holding vhost-user connection failed: vhost-user frame incomplete: "
-                        "its remaining bytes did not arrive within 10000 ms of its first byte\n",
-                "the failure was not reported as expected: " + said);
+        require(said == incompleteFrameReport, "the failure was not reported as expected: " + said);
         requireWaitFailed(session, resets);
+        require(clock.readCount() == 2 * turns + 2,
+                "the frame failed after " + std::to_string(clock.readCount()) + " reads");
     });
 }
 
-/* A frame that completes before the bound is accepted however long its first
- * bytes were alone: the bound counts from the first byte, and a late peer is
- * not a silent one. */
-void aFrameThatCompletesInTimeIsAccepted()
+/* A frame that completes before its allowance is spent is accepted however
+ * long its first bytes were alone, and a clock that jumps while it is partly
+ * there costs one poll, as in the wait: the allowance counts from the first
+ * byte, and a late peer is not a silent one. The wait is armed or not. */
+void aFrameThatCompletesInTimeIsAccepted(bool armed)
 {
     FakeClock clock;
     withPendingMap([&](const HeldSession& session) {
@@ -612,29 +763,34 @@ void aFrameThatCompletesInTimeIsAccepted()
         const int socket = session.socket;
         const auto resets = session.device.resets();
 
-        const auto reads = clock.readCount();
+        clock.startTicking(tick);
         backend.splitNextReplyAt(5);
-        backend.hold(false);
-        awaitCondition([&] { return backend.answered() == 2; });
-        clock.awaitFirstRead(reads);
-        clock.awaitReads(2);
-
-        clock.advance(bound - milliseconds {1});
-        clock.awaitReads(4);
-        require(connectionOpen(socket));
+        // The end of poll 5 inside the frame, and the rest of it at poll 40.
+        clock.atRead(10, [&] { clock.advance(milliseconds {365LL * 24 * 3600 * 1000}); });
+        clock.atRead(80, [&] { backend.finishSplitReply(); });
+        if (armed) {
+            // The first bytes are sent at poll 3 of the armed wait.
+            clock.atRead(6, [&] { backend.hold(false); });
+            askForTheFeaturesInsideTheWait(socket);
+        } else {
+            backend.hold(false);
+            awaitCondition([&] { return backend.answered() == 2; });
+        }
         const auto said = captureStderr([&] {
-            backend.finishSplitReply();
             // The map was acknowledged: the request ring's request is held, and
             // the connection goes on.
             awaitCondition([&] { return session.device.mapsCompleted() == 2; });
+            if (armed)
+                (void)readValueReply<std::uint64_t>(socket, protocol::VhostRequest::getFeatures);
             (void)readConfig(socket, 0, 1);
         });
         require(said.empty(), "the late frame was reported as a failure: " + said);
-        require(session.device.resets() == resets);
+        require(armed || session.device.resets() == resets);
     });
 }
 
-/* A partial request from the front-end, in the wait, is bound the same way. */
+/* A partial request from the front-end, in the wait, is bound the same way,
+ * and a fragment that arrives later does not start the allowance again. */
 void aPartialRequestFromTheFrontEndFails()
 {
     FakeClock clock;
@@ -642,28 +798,62 @@ void aPartialRequestFromTheFrontEndFails()
         const int socket = session.socket;
         const auto resets = session.device.resets();
 
-        const auto reads = clock.readCount();
+        clock.startTicking(tick);
         const std::array<std::uint8_t, 5> beginning {};
-        require(::write(socket, beginning.data(), beginning.size()) ==
-                static_cast<ssize_t>(beginning.size()));
-        clock.awaitFirstRead(reads);
-        clock.awaitReads(2);
+        // More of the header comes at poll 20, which does not renew the
+        // allowance: it is counted from the first byte.
+        clock.atRead(40, [&] {
+            require(::write(socket, beginning.data(), 2) == 2);
+        });
+        long sent = 0;
+        const auto said = captureStderr([&] {
+            require(::write(socket, beginning.data(), beginning.size()) ==
+                    static_cast<ssize_t>(beginning.size()));
+            sent = bytesBeforeEnd(socket);
+        });
+        require(sent == 0, "the incomplete request did not fail the wait");
+        require(said == incompleteFrameReport, "the failure was not reported as expected: " + said);
+        requireWaitFailed(session, resets);
+        require(clock.readCount() == 2 * turns + 2,
+                "the frame failed after " + std::to_string(clock.readCount()) + " reads");
+    });
+}
 
-        clock.advance(bound);
+/* The wait is armed at the start, and a frame that begins late in it does not
+ * get a fresh allowance: the wait's budget runs on, spent by the polls the
+ * frame makes too, and the wait fails with the report of the acknowledgement
+ * that is missing, as soon as the budget is spent and not an allowance after
+ * the frame began. */
+void anArmedBudgetCoversAFrameThatBeginsInIt()
+{
+    FakeClock clock;
+    withPendingMap([&](const HeldSession& session) {
+        auto& backend = *session.backend;
+        const int socket = session.socket;
+        const auto resets = session.device.resets();
+
+        clock.startTicking(tick);
+        backend.splitNextReplyAt(5);
+        // The first bytes arrive after poll 20, and the rest never.
+        clock.atRead(40, [&] { backend.hold(false); });
+        askForTheFeaturesInsideTheWait(socket);
         long sent = 0;
         const auto said = captureStderr([&] { sent = bytesBeforeEnd(socket); });
-        require(sent == 0, "the incomplete request did not fail the wait");
-        require(said == "holding vhost-user connection failed: vhost-user frame incomplete: "
-                        "its remaining bytes did not arrive within 10000 ms of its first byte\n",
-                "the failure was not reported as expected: " + said);
+        require(sent == 0, "the wait did not fail");
+        require(said == missingAcknowledgementReport, "the failure was not reported as expected: " + said);
         requireWaitFailed(session, resets);
+        // The frame polls twice per poll too: the budget was spent by the poll
+        // the frame began in, and the failure is the one after it, give or take
+        // the poll the frame's first bytes interrupted.
+        require(clock.readCount() >= 2 * turns && clock.readCount() <= 2 * turns + 6,
+                "the wait failed after " + std::to_string(clock.readCount()) + " reads");
     });
 }
 
 /* A reset's unmaps are a wait the guest no longer has a connection behind:
  * once the main socket is gone the teardown has only the acknowledgements to
- * wait for, and fails them at the bound, with the device reset and every range
- * dropped from the host index. */
+ * wait for, and fails them when the budget is spent, with the device reset and
+ * every range dropped from the host index. */
 void aTeardownUnmapThatIsNeverAcknowledgedFails()
 {
     FakeClock clock;
@@ -693,29 +883,83 @@ void aTeardownUnmapThatIsNeverAcknowledgedFails()
     // The guest goes without a word to the device, and the unmap is not answered.
     backend.hold(true);
     const auto resets = recorder->resets();
-    const auto reads = clock.readCount();
-    connection.closeSocket();
-    awaitCondition([&] { return backend.count(unmap) == 1; });
-    clock.awaitFirstRead(reads);
-    require(!connection.exited(), "the teardown did not wait for the unmap");
-
-    clock.advance(bound - milliseconds {1});
-    clock.awaitReads(4);
-    require(!connection.exited(), "the teardown gave up a millisecond before the bound");
+    clock.startTicking(tick);
     bool exited = false;
     const auto said = captureStderr([&] {
-        clock.advance(milliseconds {1});
-        exited = connection.waitForExit();
+        connection.closeSocket();
+        awaitCondition([&] { return backend.count(unmap) == 1; });
+        exited = connection.waitForExit(milliseconds {20000});
     });
     require(exited, "the teardown went on waiting for the unmap");
     require(said == "holding vhost-user reset: vhost-user shared-memory acknowledgement missing for "
-                    "10 s\n",
+                    "500 ms\n",
             "the failure was not reported as expected: " + said);
+    require(clock.readCount() == 2 * turns + 2,
+            "the teardown gave up after " + std::to_string(clock.readCount()) + " reads");
     require(recorder->resets() == resets + 1,
             "the device was reset " + std::to_string(recorder->resets() - resets) + " times");
     require(recorder->held() == 0 && recorder->mapped() == 0, "the reset left state");
     require(!regions->contains(0, 0, 1), "a range stayed in the host index");
     require(backend.channelEnded(), "the backend channel was left open");
+}
+
+/* What a budget charges: a poll costs what it took, never more than the
+ * interval it asked for and the slack, and nothing for a clock that ran
+ * backwards; the budget is spent exactly when the polls' charges add up to it. */
+void aBudgetIsSpentByThePollsItIsChargedFor()
+{
+    using uml::gpu::WaitBudget;
+    constexpr auto year = milliseconds {365LL * 24 * 3600 * 1000};
+    WaitBudget budget {testBound, "spent"};
+    require(!budget.spent() && budget.pollTimeout(1000) == testBound.count());
+    require(budget.pollTimeout(testInterval) == testInterval, "a poll was asked longer than its interval");
+
+    budget.charge(year, testInterval);
+    require(budget.pollTimeout(1000) == testBound.count() - testInterval - WaitBudget::slack.count(),
+            "a stretch the process did not run cost more than one poll");
+    budget.charge(-year, testInterval);
+    require(budget.pollTimeout(1000) == testBound.count() - testInterval - WaitBudget::slack.count(),
+            "a clock that ran backwards was charged");
+    budget.charge(milliseconds {3}, testInterval);
+    require(budget.pollTimeout(1000) == testBound.count() - testInterval - WaitBudget::slack.count() - 3,
+            "a poll was not charged what it took");
+
+    WaitBudget exact {testBound, "spent"};
+    for (std::uint64_t poll = 1; poll < turns; ++poll) {
+        exact.charge(tick, testInterval);
+        require(!exact.spent(), "the budget was spent before its polls were");
+    }
+    require(exact.pollTimeout(testInterval) == testInterval);
+    exact.charge(tick, testInterval);
+    require(exact.spent() && exact.pollTimeout(testInterval) == 0, "the budget outlived its polls");
+    bool failed = false;
+    try {
+        exact.fail();
+    } catch (const uml::gpu::VhostUserTimeout& timeout) {
+        failed = std::string {timeout.what()} == "spent";
+    }
+    require(failed, "a spent budget did not fail with its report");
+}
+
+/* A poll for POLLPRI alone reports the end of a socket, with data queued or
+ * not, and reports nothing for data or an idle peer: the signal a receive
+ * wakes for without taking what the front-end has sent. */
+void thePeerOfASocketIsSeenToEndBehindQueuedData()
+{
+    using uml::gpu::vhostUserPeerHasEnded;
+    auto pair = makeSocketPair();
+    const int ours = pair.descriptors[0].get();
+    require(!vhostUserPeerHasEnded(ours), "an idle peer was seen to end");
+    const std::array<std::uint8_t, 4> data {1, 2, 3, 4};
+    require(::write(pair.descriptors[1].get(), data.data(), data.size()) == 4);
+    require(!vhostUserPeerHasEnded(ours), "queued data was seen as the end of the peer");
+    pair.descriptors[1].reset();
+    require(vhostUserPeerHasEnded(ours), "the end of the peer behind queued data was not seen");
+
+    auto shut = makeSocketPair();
+    require(!vhostUserPeerHasEnded(shut.descriptors[0].get()));
+    require(::shutdown(shut.descriptors[1].get(), SHUT_RDWR) == 0);
+    require(vhostUserPeerHasEnded(shut.descriptors[0].get()), "a shut down peer was not seen to end");
 }
 
 /* A service stop still ends the wait, with or without a reply owed behind it,
@@ -778,19 +1022,32 @@ int main(int argc, char** argv)
     };
     const std::vector<Case> cases {
         {"missing-acknowledgement", aMissingAcknowledgementEndsTheWait},
-        {"bound-is-exact", theBoundIsExact},
-        {"acknowledgement-before-the-bound", anAcknowledgementJustBeforeTheBoundIsAccepted},
-        {"acknowledgement-ready-at-the-bound", anAcknowledgementAlreadyWaitingAtTheBoundIsAccepted},
+        {"awake-silent-front-end", anAwakeSilentFrontEndFailsAfterTheBudget},
+        {"acknowledgement-before-the-bound", [] { anAcknowledgementAtReadIsAccepted(2 * turns - 1, true); }},
+        {"acknowledgement-at-the-bound", [] { anAcknowledgementAtReadIsAccepted(2 * turns + 1, true); }},
+        {"acknowledgement-after-the-bound", [] { anAcknowledgementAtReadIsAccepted(2 * turns + 2, false); }},
         {"reply-request-starts-the-count", aRequestThatAsksForAReplyStartsTheCount},
+        {"stretch-not-run-acknowledged", [] { aStretchTheProcessDidNotRunCostsOnePoll(true); }},
+        {"stretch-not-run-unanswered", [] { aStretchTheProcessDidNotRunCostsOnePoll(false); }},
         {"main-socket-closed", theEndOfTheMainSocketAbortsTheWait},
+        {"main-socket-closed-in-a-split-acknowledgement",
+         [] { theEndOfTheMainSocketDuringAnAcknowledgementAbortsTheWait(0); }},
+        {"main-socket-closed-after-the-header",
+         [] { theEndOfTheMainSocketDuringAnAcknowledgementAbortsTheWait(1); }},
+        {"main-socket-closed-after-the-last-byte",
+         [] { theEndOfTheMainSocketDuringAnAcknowledgementAbortsTheWait(2); }},
         {"notification-across-suspend", aNotificationPendingAcrossASuspendIsNotAFailure},
         {"suspend-with-notification", aSuspendWithANotificationPendingAnswersInTime},
         {"partial-acknowledgement", aPartialAcknowledgementThatNeverCompletesFails},
-        {"partial-frame-completes", aFrameThatCompletesInTimeIsAccepted},
+        {"partial-frame-completes", [] { aFrameThatCompletesInTimeIsAccepted(false); }},
+        {"partial-frame-completes-armed", [] { aFrameThatCompletesInTimeIsAccepted(true); }},
         {"partial-request", aPartialRequestFromTheFrontEndFails},
+        {"armed-budget-covers-a-frame", anArmedBudgetCoversAFrameThatBeginsInIt},
         {"teardown-unmap", aTeardownUnmapThatIsNeverAcknowledgedFails},
         {"stop", [] { aStopEndsTheWait(false); }},
         {"stop-with-a-reply-owed", [] { aStopEndsTheWait(true); }},
+        {"budget-arithmetic", aBudgetIsSpentByThePollsItIsChargedFor},
+        {"peer-end-behind-data", thePeerOfASocketIsSeenToEndBehindQueuedData},
     };
     try {
         for (const auto& test : cases) {

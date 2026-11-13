@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace uml::gpu {
@@ -109,19 +110,100 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-/* How long the rest of a frame may take once its first byte has arrived. The
- * time starts at that byte, so a peer with nothing to say is not timed; it is
- * read from `now`, so that one clock serves a caller and the receive it makes
- * (a null `now` reads std::chrono::steady_clock). */
+/* Thrown by receiveVhostUserMessage() when the socket it was asked to watch
+ * (FrameBound::watch) ended while the receive waited. */
+class VhostUserWatchedPeerEnded final {};
+
+/* Whether the peer of `socket` has closed it or shut it down, however much
+ * data is still queued for the reader. A poll that asks for POLLPRI alone
+ * reports POLLHUP on Darwin then, and nothing for queued data or an idle peer,
+ * so a receive can wake for the end of a socket whose data it must leave
+ * alone. */
+[[nodiscard]] bool vhostUserPeerHasEnded(int socket) noexcept;
+
+/* The time `allowance` as a person reads it: "10 s", or "300 ms" when it is
+ * not a whole number of seconds. */
+[[nodiscard]] std::string describeWaitTime(
+    std::chrono::steady_clock::duration allowance);
+
+/* Time allowed to a wait, spent by the polls the wait makes and by nothing
+ * else: no instant is kept, so a clock that jumps costs nothing. A poll costs
+ * the time it took, but never more than the interval it asked for plus
+ * `slack`, so a stretch in which the whole process could not run (an
+ * application the system has suspended, threads the host holds) costs the one
+ * poll it interrupted, not its length. A peer that is awake and silent uses the
+ * allowance in its own length of real time, plus what the wait does between
+ * polls; a worker delayed past the slack at every poll stretches that by the
+ * delay of each poll over (interval + slack). */
+class WaitBudget final {
+public:
+    static constexpr std::chrono::milliseconds slack {25};
+
+    WaitBudget(
+        std::chrono::steady_clock::duration allowance,
+        std::string whenSpent)
+        : remaining_(allowance), whenSpent_(std::move(whenSpent))
+    {
+    }
+
+    [[nodiscard]] bool spent() const noexcept
+    {
+        return remaining_ <= std::chrono::steady_clock::duration::zero();
+    }
+
+    /* `limit` milliseconds, cut so that a poll ends with the budget. */
+    [[nodiscard]] int pollTimeout(int limit) const noexcept
+    {
+        const auto left =
+            std::chrono::ceil<std::chrono::milliseconds>(remaining_).count();
+        return static_cast<int>(
+            left < 0 ? 0 : (left < limit ? left : limit));
+    }
+
+    /* A poll that asked for `askedMilliseconds` and took `elapsed`. */
+    void charge(
+        std::chrono::steady_clock::duration elapsed,
+        int askedMilliseconds) noexcept
+    {
+        const auto most =
+            std::chrono::milliseconds {askedMilliseconds} + slack;
+        remaining_ -= elapsed < std::chrono::steady_clock::duration::zero()
+            ? std::chrono::steady_clock::duration::zero()
+            : (elapsed < most ? elapsed : most);
+    }
+
+    [[noreturn]] void fail() const { throw VhostUserTimeout(whenSpent_); }
+
+private:
+    std::chrono::steady_clock::duration remaining_;
+    std::string whenSpent_;
+};
+
+/* How long the rest of a frame may take once its first byte has arrived, and
+ * what else limits the receive. The frame's allowance is a WaitBudget that
+ * starts at that byte, so a peer with nothing to say is not timed. Time is read
+ * from `now` (a null `now` reads std::chrono::steady_clock) and only while a
+ * budget runs; an unbounded receive reads no clock. */
 struct FrameBound final {
+    /* The frame's allowance; zero gives the frame none. */
     std::chrono::steady_clock::duration allowance {};
     std::chrono::steady_clock::time_point (*now)() noexcept {};
+    /* The longest one poll of the receive waits; zero is the stop interval. */
+    int pollIntervalMilliseconds {};
+    /* A budget the receive spends too, which fails the receive with its own
+     * report when it is spent before the frame is complete. May be null. */
+    WaitBudget* wait {};
+    /* A socket whose end ends the receive, which then throws
+     * VhostUserWatchedPeerEnded, as soon as it has ended and before it takes
+     * a byte more. -1 watches none. */
+    int watch {-1};
 };
 
 /* Returns false only for an orderly peer close or a truncated stream. A frame
  * that stays incomplete beyond `bound` throws VhostUserTimeout; without a
  * bound the receive waits for the rest of a frame as long as the peer leaves
- * the socket open and nobody asks it to stop. */
+ * the socket open and nobody asks it to stop. A byte that has arrived is read
+ * whatever the time: only a poll that found nothing fails a spent budget. */
 [[nodiscard]] bool receiveVhostUserMessage(
     int socket,
     VhostUserMessage& message,
