@@ -12,7 +12,11 @@ import Foundation
 /// services a transfer uses: `abb_exec` (the install stream: it counts the
 /// bytes, then prints `installOutput`), `sync:` (`SEND`, `STA2`, `QUIT`; the
 /// file's length is all it remembers) and `shell,v2,raw:` (`df` answers with
-/// `guestFreeKiB`, anything else exits 0). Every message it handles is inside
+/// `guestFreeKiB`, `getprop ro.product.cpu.abilist` with `abiList`, anything
+/// else exits 0). It also keeps the package manager's install sessions:
+/// `install-create` makes one, `install-write` takes a file into it (name,
+/// length and SHA-256 are what it remembers), `install-commit` and
+/// `install-abandon` end it. Every message it handles is inside
 /// an autorelease pool of its own, so the memory it uses is never the memory
 /// the test measures.
 nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
@@ -25,6 +29,93 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private var outputs: [String] = []
     private var sentBytes: UInt64 = 0
     private var connections = 0
+    private var sessions: [String: FakeSession] = [:]
+    private var nextSession = 1000
+    private var committed: [CommittedSession] = []
+    private var abandoned: [String] = []
+    private var createAnswers: [String] = []
+    private var commitAnswers: [String] = []
+    private var pieceHook: (@Sendable (_ written: UInt64) -> Void)?
+    private var syncRecords: [SyncRecord] = []
+    private var syncSeen: UInt64 = 0
+    private var syncHook: (@Sendable (_ seen: UInt64) -> Void)?
+    private var syncError: String?
+    private var hashing = false
+
+    /// A file a `SEND` wrote: where, how long, and (with `hashesSyncData`)
+    /// the SHA-256 of what it carried.
+    struct SyncRecord: Equatable {
+        var path: String
+        var bytes: UInt64
+        var digest: String
+    }
+
+    /// A file written into a session.
+    struct SessionPart: Equatable {
+        var name: String
+        var bytes: UInt64
+        var digest: String
+    }
+
+    /// A session that was committed, as it stood at the commit.
+    struct CommittedSession: Equatable {
+        var id: String
+        var createService: String
+        var parts: [SessionPart]
+    }
+
+    private struct FakeSession {
+        var createService: String
+        var parts: [SessionPart] = []
+    }
+
+    /// What `install-create` prints when it makes a session; the id is the
+    /// next number of the fake package manager's.
+    var createOutputs: [String] {
+        get { lock.withLock { createAnswers } }
+        set { lock.withLock { createAnswers = newValue } }
+    }
+    /// What the next commits print, one each, before `Success` is the answer
+    /// again. A commit ends its session whatever it prints.
+    var commitOutputs: [String] {
+        get { lock.withLock { commitAnswers } }
+        set { lock.withLock { commitAnswers = newValue } }
+    }
+    /// What `getprop ro.product.cpu.abilist` prints.
+    var abiList = "arm64-v8a,armeabi-v7a,armeabi"
+    /// Told, on the thread that serves the connection, the running total of
+    /// every byte an `install-write` has taken, after each piece it reads.
+    var onWritten: (@Sendable (_ written: UInt64) -> Void)? {
+        get { lock.withLock { pieceHook } }
+        set { lock.withLock { pieceHook = newValue } }
+    }
+    /// Whether `SEND` keeps a digest of the bytes it carries (otherwise it
+    /// only counts them, as a large import test needs).
+    var hashesSyncData: Bool {
+        get { lock.withLock { hashing } }
+        set { lock.withLock { hashing = newValue } }
+    }
+    /// Answers every `SEND` with this failure instead of `OKAY`.
+    var syncFailure: String? {
+        get { lock.withLock { syncError } }
+        set { lock.withLock { syncError = newValue } }
+    }
+    /// Told, on the thread that serves the connection, the running total of
+    /// the bytes of `SEND` data, after each frame.
+    var onSynced: (@Sendable (_ seen: UInt64) -> Void)? {
+        get { lock.withLock { syncHook } }
+        set { lock.withLock { syncHook = newValue } }
+    }
+    /// The files `SEND` wrote, in order.
+    var syncedFiles: [SyncRecord] { lock.withLock { syncRecords } }
+    /// The ids of the sessions made and neither committed nor abandoned.
+    var openSessions: [String] { lock.withLock { sessions.keys.sorted() } }
+    /// The sessions that were committed, in order.
+    var committedSessions: [CommittedSession] { lock.withLock { committed } }
+    /// The ids `install-abandon` removed, in order.
+    var abandonedSessions: [String] { lock.withLock { abandoned } }
+    /// The files of a session still open.
+    func parts(ofSession id: String) -> [SessionPart]? { lock.withLock { sessions[id]?.parts } }
 
     /// What the install stream prints when its bytes have all arrived.
     var installOutput = "Success\n"
@@ -38,6 +129,10 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     /// write instead of reading the whole file, as `createSession` failing
     /// does.
     var failsAtOnce = false
+    /// The peer does not acknowledge the writes of an `install-write`: it answers and closes, as a package manager that is done with the file may.
+    var closeSuccessfulWriteWithoutFinalAck = false
+    /// The API level `getprop ro.build.version.sdk` answers.
+    var sdkLevel = "37"
     /// The free space `df` reports for any path, in kibibytes.
     var guestFreeKiB: UInt64 = 64 << 20
 
@@ -116,7 +211,7 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
             nextRemote += 1
             try send(transport, AdbMessage(command: AdbWire.okay, arg0: stream.ownId, arg1: stream.peerId))
             if service.hasPrefix("abb_exec:") {
-                try serveInstall(stream, service: service)
+                try serveAbb(stream, service: service)
             } else if service == "sync:" {
                 try serveSync(stream)
             } else if service.hasPrefix("shell,v2,raw:") {
@@ -127,6 +222,75 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     }
 
     // MARK: Services
+
+    /// An `abb_exec` command: a session verb or the single-file `install`.
+    private func serveAbb(_ stream: Channel, service: String) throws {
+        let words = service.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        switch words.count > 1 ? words[1] : "" {
+        case "install-create":
+            let output = lock.withLock { () -> String in
+                if !createAnswers.isEmpty { return createAnswers.removeFirst() }
+                let id = String(nextSession)
+                nextSession += 1
+                sessions[id] = FakeSession(createService: service)
+                return "Success: created install session [\(id)]\n"
+            }
+            try stream.send(Data(output.utf8))
+        case "install-write":
+            try serveSessionWrite(stream, words: words)
+        case "install-commit":
+            let id = words.count > 2 ? words[2] : ""
+            let output = lock.withLock { () -> String in
+                guard let session = sessions.removeValue(forKey: id) else { return Self.noAccess(verb: "install-commit") }
+                committed.append(CommittedSession(id: id, createService: session.createService, parts: session.parts))
+                return commitAnswers.isEmpty ? "Success\n" : commitAnswers.removeFirst()
+            }
+            try stream.send(Data(output.utf8))
+        case "install-abandon":
+            let id = words.count > 2 ? words[2] : ""
+            let output = lock.withLock { () -> String in
+                guard sessions.removeValue(forKey: id) != nil else { return Self.noAccess(verb: "install-abandon") }
+                abandoned.append(id)
+                return "Success\n"
+            }
+            try stream.send(Data(output.utf8))
+        default:
+            try serveInstall(stream, service: service)
+        }
+    }
+
+    private static func noAccess(verb: String) -> String {
+        "\nException occurred while executing '\(verb)':\njava.lang.SecurityException: Caller has no access to session\n"
+    }
+
+    /// `install-write -S <bytes> <session> <name> -`: takes the bytes, then
+    /// answers; the file is part of the session only when all of it arrived.
+    private func serveSessionWrite(_ stream: Channel, words: [String]) throws {
+        guard words.count >= 7, let size = UInt64(words[3]) else { return }
+        let id = words[4]
+        let name = words[5]
+        var received: UInt64 = 0
+        var hash = SHA256()
+        while received < size {
+            guard let piece = try autoreleasepool(invoking: { try stream.receive(acknowledge: !closeSuccessfulWriteWithoutFinalAck) }) else { break }
+            received += UInt64(piece.count)
+            hash.update(data: piece)
+            let hook = lock.withLock { () -> (@Sendable (UInt64) -> Void)? in
+                installedBytes += UInt64(piece.count)
+                return pieceHook
+            }
+            hook?(lock.withLock { installedBytes })
+        }
+        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let output = lock.withLock { () -> String in
+            guard received == size, sessions[id] != nil else {
+                return sessions[id] == nil ? Self.noAccess(verb: "install-write") : "Failure [INSTALL_FAILED_INVALID_APK: short write]\n"
+            }
+            sessions[id]?.parts.append(SessionPart(name: name, bytes: size, digest: digest))
+            return "Success: streamed \(size) bytes\n"
+        }
+        try stream.send(Data(output.utf8))
+    }
 
     private func serveInstall(_ stream: Channel, service: String) throws {
         let size = service.split(separator: "\0", omittingEmptySubsequences: false).last.flatMap { UInt64($0) } ?? 0
@@ -156,7 +320,10 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private func serveShell(_ stream: Channel, command: String) throws {
         lock.withLock { commands.append(command) }
         var out = Data()
-        if command.hasPrefix("df -Pk") {
+        if command == "getprop ro.product.cpu.abilist" || command == "getprop ro.build.version.sdk" {
+            let text = (command.hasSuffix("abilist") ? abiList : sdkLevel) + "\n"
+            out = Data([1]) + Self.bytes(UInt32(text.utf8.count)) + Data(text.utf8)
+        } else if command.hasPrefix("df -Pk") {
             let text = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
                 + "/dev/block/dm-7 67108864 1048576 \(guestFreeKiB) 2% /data\n"
             out = Data([1]) + Self.bytes(UInt32(text.utf8.count)) + Data(text.utf8)
@@ -179,13 +346,25 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
                 let text = String(decoding: request, as: UTF8.self)
                 let path = String(text[..<(text.lastIndex(of: ",") ?? text.endIndex)])
                 var total: UInt64 = 0
+                var hash = SHA256()
+                let hashes = lock.withLock { hashing }
                 frames: while true {
                     guard let frame = try stream.take(8) else { return }
                     let frameLength = Int(Self.le32(frame, 4))
                     switch String(decoding: frame.prefix(4), as: UTF8.self) {
                     case "DATA":
-                        guard try stream.skip(frameLength) else { return }
+                        if hashes {
+                            guard let data = try autoreleasepool(invoking: { try stream.take(frameLength) }) else { return }
+                            hash.update(data: data)
+                        } else {
+                            guard try stream.skip(frameLength) else { return }
+                        }
                         total += UInt64(frameLength)
+                        let hook = lock.withLock { () -> (@Sendable (UInt64) -> Void)? in
+                            syncSeen += UInt64(frameLength)
+                            return syncHook
+                        }
+                        hook?(lock.withLock { syncSeen })
                     case "DONE":
                         break frames
                     default:
@@ -193,8 +372,19 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
                     }
                 }
                 lengths[path] = total
-                lock.withLock { sentBytes += total }
-                try stream.send(Data("OKAY".utf8) + Self.bytes(UInt32(0)))
+                let failure = lock.withLock { () -> String? in
+                    sentBytes += total
+                    if syncError == nil {
+                        syncRecords.append(SyncRecord(
+                            path: path, bytes: total, digest: hashes ? hash.finalize().map { String(format: "%02x", $0) }.joined() : ""))
+                    }
+                    return syncError
+                }
+                if let failure {
+                    try stream.send(Data("FAIL".utf8) + Self.bytes(UInt32(failure.utf8.count)) + Data(failure.utf8))
+                } else {
+                    try stream.send(Data("OKAY".utf8) + Self.bytes(UInt32(0)))
+                }
             case "STA2":
                 guard let request = try stream.take(length) else { return }
                 let path = String(decoding: request, as: UTF8.self)
@@ -231,11 +421,11 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
         }
 
         /// The next write of the client, acknowledged; nil when it closed.
-        func receive() throws -> Data? {
+        func receive(acknowledge: Bool = true) throws -> Data? {
             while !closed {
                 let message = try adbd.receive(transport)
                 if message.command == AdbWire.write {
-                    try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: ownId, arg1: peerId))
+                    if acknowledge { try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: ownId, arg1: peerId)) }
                     return message.payload
                 }
                 if message.command == AdbWire.close { closed = true }
