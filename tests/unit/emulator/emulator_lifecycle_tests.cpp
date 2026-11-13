@@ -47,6 +47,7 @@ using uml::testing::bindServer;
 using uml::testing::receiveRequest;
 using uml::testing::require;
 using uml::testing::sendReply;
+using uml::testing::waitUntil;
 
 /* Stands where the guest's console would be and answers every request the
  * way a guest that has the trim command would. */
@@ -71,6 +72,10 @@ public:
 
 	/* Called on the console's thread with each request, before its reply. */
 	std::function<void(const std::string &)> onRequest;
+	/* A guest that answers this many "trim once" requests and then stops
+	 * answering them, as one that sleeps through the pass does; negative
+	 * answers them all. */
+	int trimsAnsweredBeforeSilence {-1};
 	/* A guest that cannot suspend: it refuses "suspend" for a reason that
 	 * waiting does not cure (not busy), and keeps running. */
 	bool refuseSuspend {false};
@@ -120,6 +125,9 @@ private:
 		const auto command = receiveRequest(descriptor_, client, clientLength);
 		if (onRequest)
 			onRequest(command);
+		if (command == "trim once" && trimsAnsweredBeforeSilence >= 0 &&
+		    trimsHeard_++ >= trimsAnsweredBeforeSilence)
+			return command;
 		if (command == "suspend" && holdSuspend != Hold::none) {
 			suspendClient_ = client;
 			suspendClientLength_ = clientLength;
@@ -175,6 +183,7 @@ private:
 
 	std::string path_;
 	int descriptor_ {-1};
+	mutable int trimsHeard_ {0};
 	mutable sockaddr_un suspendClient_ {};
 	mutable socklen_t suspendClientLength_ {};
 	mutable sockaddr_un memoryClient_ {};
@@ -1180,6 +1189,150 @@ void aPressureTrimBesideATrimChangeIsBusyThenSent()
 	}) == Requests {"trim once"});
 }
 
+/* A clock the test sets by hand, for the lifecycle calls' waits, and counts
+ * the reads of. */
+std::atomic<std::int64_t> manualMilliseconds {0};
+std::atomic<int> manualReads {0};
+
+std::chrono::steady_clock::time_point manualNow() noexcept
+{
+	++manualReads;
+	return std::chrono::steady_clock::time_point {
+		std::chrono::milliseconds {manualMilliseconds.load()}};
+}
+
+class ManualClock final {
+public:
+	ManualClock()
+	{
+		manualMilliseconds = 1'000'000;
+		manualReads = 0;
+		uml::emulator::testing::set_lifecycle_clock(&manualNow);
+	}
+
+	~ManualClock()
+	{
+		uml::emulator::testing::set_lifecycle_clock(nullptr);
+	}
+
+	ManualClock(const ManualClock &) = delete;
+	ManualClock &operator=(const ManualClock &) = delete;
+};
+
+/* A pressure trim holds the lifecycle mutex while it waits for the guest, and
+ * a quiesce called meanwhile queues behind it. `passes` is how long the
+ * quiesce waited, by the clock the test sets: the pressure trim's reply is
+ * held until the quiesce has noted its call, and then the clock moves. The
+ * quiesce's requests are returned, with the time from its call to its end. */
+struct QuiesceBesideTrim final {
+	Requests heard;
+	std::chrono::milliseconds took {};
+	::uml::runtime::TrimOutcome pressure {};
+};
+
+QuiesceBesideTrim aQuiesceCalledDuringAPressureTrim(
+	std::int64_t passes, int trimsAnswered, std::size_t requests)
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	const ManualClock clock;
+	console.trimsAnsweredBeforeSilence = trimsAnswered;
+	std::mutex mutex;
+	std::condition_variable changed;
+	bool trimming {false};
+	bool released {false};
+	/* Only the first "trim once", the pressure trim's, is held. */
+	console.onRequest = [&](const std::string &command) {
+		if (command != "trim once")
+			return;
+		std::unique_lock lock {mutex};
+		if (trimming)
+			return;
+		trimming = true;
+		changed.notify_all();
+		(void)changed.wait_for(lock, std::chrono::seconds {10},
+			[&] { return released; });
+	};
+	QuiesceBesideTrim result;
+	result.heard = console.requests(requests, [&] {
+		std::thread pressure {[&] {
+			result.pressure =
+				uml::emulator::testing::trim_for_memory_pressure(
+					emulator.get());
+		}};
+		{
+			std::unique_lock lock {mutex};
+			require(changed.wait_for(lock, std::chrono::seconds {10},
+				[&] { return trimming; }),
+				"the pressure trim never reached the guest");
+		}
+		const auto called = std::chrono::steady_clock::now();
+		std::thread quiescing {[&] {
+			require(uml_emulator_quiesce(emulator.get()) == 0);
+			result.took =
+				std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now() - called);
+		}};
+		require(waitUntil([] { return manualReads.load() >= 1; },
+			std::chrono::seconds {10}), "the quiesce never noted its call");
+		manualMilliseconds += passes;
+		{
+			const std::lock_guard lock {mutex};
+			released = true;
+		}
+		changed.notify_all();
+		pressure.join();
+		quiescing.join();
+	});
+	return result;
+}
+
+/* A pressure trim that held the lifecycle mutex for the whole of the trim's
+ * wait has asked the guest for the same pass, so the quiesce behind it sends
+ * none and its edge does not wait for another. Without the deduction it sent
+ * a second "trim once" and waited its full wait again. */
+void aQuiesceBesideAPressureTrimThatSpentTheWaitSendsNoSecondTrim()
+{
+	const auto result =
+		aQuiesceCalledDuringAPressureTrim(3000, -1, 2U);
+	require(result.pressure == ::uml::runtime::TrimOutcome::done);
+	require(result.heard == Requests {"trim once", "suspend"},
+		"a quiesce sent a second trim after the pressure trim's wait");
+}
+
+/* What the wait spent beside the pressure trim is taken from the quiesce's
+ * own: it sends its trim, for what is left, and ends that long after its
+ * call, not the full wait later. */
+void aQuiesceBesideAPressureTrimWaitsForWhatIsLeft()
+{
+	const auto result =
+		aQuiesceCalledDuringAPressureTrim(1000, 1, 3U);
+	require(result.heard == Requests {"trim once", "trim once", "suspend"},
+		"the quiesce did not send its trim");
+	require(result.took >= std::chrono::milliseconds {1900},
+		"the quiesce did not wait for the trim");
+	require(result.took < std::chrono::milliseconds {2900},
+		"the quiesce waited its full wait after the pressure trim");
+}
+
+/* With nothing ahead of it the quiesce's trim has the whole wait. */
+void aQuiesceWithNothingAheadWaitsTheWholeTrimWait()
+{
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	console.trimsAnsweredBeforeSilence = 0;
+	std::chrono::milliseconds took {};
+	require(console.requests(2U, [&] {
+		const auto called = std::chrono::steady_clock::now();
+		require(uml_emulator_quiesce(emulator.get()) == 0);
+		took = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - called);
+	}) == Requests {"trim once", "suspend"});
+	require(took >= std::chrono::milliseconds {2900},
+		"the quiesce did not wait the trim's whole wait");
+	require(took < std::chrono::seconds {8});
+}
+
 /* The wait for the reply is outside the lifecycle mutex, so a quiesce that
  * starts after the request was sent is heard while it waits. A request that
  * held the mutex would time out before the quiesce was heard. */
@@ -1276,5 +1429,8 @@ int main(int argc, char **argv)
 	aLifecycleCallInProgressIsNotWaitedFor("suspend");
 	aPressureTrimBesideATrimChangeIsBusyThenSent();
 	aQuiesceDoesNotWaitForAMemoryRequest();
+	aQuiesceBesideAPressureTrimThatSpentTheWaitSendsNoSecondTrim();
+	aQuiesceBesideAPressureTrimWaitsForWhatIsLeft();
+	aQuiesceWithNothingAheadWaitsTheWholeTrimWait();
 	return EXIT_SUCCESS;
 }

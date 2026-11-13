@@ -64,8 +64,44 @@ constexpr unsigned int guest_writeback_settle_ms = 1500U;
  * guest reclaims for at most a second and compacts for at most another, so
  * this also covers the release and the reply. A pass still running when it
  * expires finishes before the guest takes the suspend request queued behind
- * it. */
+ * it. A quiesce counts it from its call. */
 constexpr unsigned int guest_trim_wait_ms = 3000U;
+
+using SteadyTime = std::chrono::steady_clock::time_point;
+
+[[nodiscard]] SteadyTime steady_now() noexcept
+{
+	return std::chrono::steady_clock::now();
+}
+
+#if UML_EMULATOR_TESTING
+/* The clock the lifecycle calls count their waits by; a test replaces it. */
+std::atomic<SteadyTime (*)() noexcept> lifecycle_clock{&steady_now};
+#endif
+
+[[nodiscard]] SteadyTime lifecycle_now() noexcept
+{
+#if UML_EMULATOR_TESTING
+	return lifecycle_clock.load()();
+#else
+	return steady_now();
+#endif
+}
+
+/* What is left of the guest trim's wait for a call made at `called`: the time
+ * the call spent waiting for the lifecycle mutex counts against it, so that
+ * the trim ends no later than `guest_trim_wait_ms` after the call. A pressure
+ * trim that held the mutex for its whole wait has asked the guest for the
+ * same pass, and leaves nothing. */
+[[nodiscard]] unsigned int trim_wait_left(SteadyTime called) noexcept
+{
+	const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+		lifecycle_now() - called).count();
+	if (waited >= static_cast<std::int64_t>(guest_trim_wait_ms))
+		return 0U;
+	return guest_trim_wait_ms -
+		static_cast<unsigned int>(std::max<std::int64_t>(waited, 0));
+}
 
 /* The most a request for the guest's memory figures waits for its reply. The
  * guest answers from its console interrupt, so a reply that has not come by
@@ -608,12 +644,15 @@ public:
 	 * and the threads are held by the handle's own fence. */
 	[[nodiscard]] int quiesce(bool resident = false) noexcept
 	{
+		/* The edge has a bound, and the trim's wait is counted from the call:
+		 * a lifecycle call or a pressure trim ahead of it spends some of it. */
+		const SteadyTime called = lifecycle_now();
 		std::lock_guard lock{guest_lifecycle_mutex_};
 		if (guest_suspension_ == ::uml::device::GuestSuspension::none) {
 			/* A console request ends a suspend the guest took itself. */
 			::uml::runtime::note_host_wake();
-			(void)::uml::device::trim_guest_page_cache(
-				guest_trim_wait_ms);
+			if (const unsigned int wait = trim_wait_left(called); wait != 0U)
+				(void)::uml::device::trim_guest_page_cache(wait);
 			guest_suspension_ = ::uml::device::suspend_guest(
 				guest_writeback_settle_ms);
 		}
@@ -1213,6 +1252,13 @@ bool kernel_image_borrowed(const uml_emulator *emulator) noexcept
 	uml_emulator *emulator) noexcept
 {
 	return emulator->implementation.trim_for_memory_pressure();
+}
+
+void set_lifecycle_clock(std::chrono::steady_clock::time_point (*now)()
+	noexcept) noexcept
+{
+	::uml::emulator::lifecycle_clock.store(
+		now != nullptr ? now : &::uml::emulator::steady_now);
 }
 
 } // namespace uml::emulator::testing

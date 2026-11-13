@@ -4,6 +4,7 @@
 #if UML_EMULATOR_TESTING
 #include "uml/emulator.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -99,6 +100,11 @@ void report_guest_shutdown(::uml::runtime::GuestShutdownKind kind,
  * pressure. A test variant never listens to the system. */
 [[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
 	uml_emulator *emulator) noexcept;
+
+/* Replaces the clock the lifecycle calls count their waits by (the quiesce's
+ * trim wait, from its call); null restores the steady clock. */
+void set_lifecycle_clock(std::chrono::steady_clock::time_point (*now)()
+	noexcept) noexcept;
 
 /* Replaces the steps a hibernation takes, and what a failed restore does, on
  * `emulator`; the quiesce and resume calls then run the same ordering over
