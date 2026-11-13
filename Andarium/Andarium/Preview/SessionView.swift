@@ -103,7 +103,7 @@ struct SessionView: View {
                 SideKeysOverlay(
                     mode: mode, lit: screen != .off,
                     open: $model.session.sideKeysOpen, leading: model.sessionPreset.leftEdge,
-                    offersInstall: model.capabilities.offersApkInstall(in: mode), actions: keyActions
+                    tip: SideKeysTip(offersInstall: model.capabilities.offersApkInstall(in: mode)), actions: keyActions
                 )
             }
         }

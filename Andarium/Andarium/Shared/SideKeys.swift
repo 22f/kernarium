@@ -48,17 +48,18 @@ struct SideKeysOverlay: View {
     /// tip wants to show.
     @State private var tipShown = false
 
-    /// `offersInstall` is whether Settings has Install APK in this session
-    /// (`Capabilities.offersApkInstall`), which the tip then says.
+    /// `tip` is the tip beside the closed keys. It says where Install APK is
+    /// where Settings has the row in this session
+    /// (`Capabilities.offersApkInstall`).
     init(
-        mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, offersInstall: Bool,
+        mode: StartMode, lit: Bool, open: Binding<Bool>, leading: Bool = false, tip: SideKeysTip,
         actions: SideKeyActions
     ) {
         self.mode = mode
         self.lit = lit
         _open = open
         self.actions = actions
-        tip = SideKeysTip(offersInstall: offersInstall)
+        self.tip = tip
         _leading = State(initialValue: leading)
     }
 
@@ -114,7 +115,9 @@ struct SideKeysOverlay: View {
                     // keys or Home, where its card takes their touches.
                     // SwiftUI dismisses its popover with the closed keys.
                     .popover(isPresented: $tipShown, arrowEdge: leading ? .leading : .trailing) {
-                        SideKeysTipCard(tip: tip, maxHeight: SideKeysTipCard.maxHeight(in: size.height))
+                        SideKeysTipCard(
+                            tip: tip, maxHeight: SideKeysTipCard.maxHeight(in: size.height),
+                            width: SideKeysTipCard.width(in: size.width))
                     }
                     .task {
                         for await shows in tip.shouldDisplayUpdates { tipShown = shows }
@@ -495,20 +498,28 @@ struct KeyDeck: View {
 /// Shown once Android has booted, pointing at the side keys. It stops once the
 /// keys have been opened or the tip closed, and appears at most three times.
 nonisolated struct SideKeysTip: Tip {
-    /// Settings has Install APK in this session, so the tip says where. The
-    /// tip is the same one either way (its identity and its count of
-    /// displays do not change), so a person who closed it is not shown it
-    /// again for the added line.
-    let offersInstall: Bool
+    /// The tip's words, which say where Install APK is when Settings has the
+    /// row in this session. The tip is the same one either way (its identity
+    /// and its count of displays do not change), so a person who closed it is
+    /// not shown it again for the added line.
+    let words: String
+
+    /// `locale` is the language of the words: the person's own, and a
+    /// language's table for a test that reads one.
+    init(offersInstall: Bool, locale: Locale = .current) {
+        words = Self.words(offersInstall: offersInstall, locale: locale)
+    }
 
     var title: Text { Text("Side keys") }
-    var message: Text? { Text(Self.words(offersInstall: offersInstall).keepingTogether) }
+    var message: Text? { Text(words.keepingTogether) }
 
     /// The tip's words: the keys, and a second line for Install APK.
-    static func words(offersInstall: Bool) -> String {
-        let keys = String(localized: "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.")
+    static func words(offersInstall: Bool, locale: Locale = .current) -> String {
+        let keys = String(localized: LocalizedStringResource(
+            "Tap for Back, Home and Settings. Hold Power for the power menu. Drag to move.", locale: locale))
         guard offersInstall else { return keys }
-        return keys + "\n" + String(localized: "To install an app, open Settings here and choose Install APK.")
+        return keys + "\n" + String(localized: LocalizedStringResource(
+            "To install an app, open Settings here and choose Install APK.", locale: locale))
     }
 
     var image: Image? { Image(systemName: "hand.tap") }
@@ -522,13 +533,29 @@ nonisolated struct SideKeysTip: Tip {
 /// `maxHeight`: what does not fit scrolls inside it, so the card, the
 /// icon and the close button stay on the screen on the smallest iPhone, and
 /// in the half of a folding iPhone, at any text size.
+///
+/// The popover is as high as the card measures at its ideal width, so that
+/// width has to be the one UIKit gives it: UIKit narrows a popover to the room
+/// beside the keys, the text then wraps to more lines than were measured, and
+/// the card cuts off the first or the last of them. `width` is the card's
+/// ideal width, from `width(in:)`.
 struct SideKeysTipCard: View {
     let tip: SideKeysTip
     let maxHeight: CGFloat
+    let width: CGFloat
+
+    /// The widest the card is.
+    static let widest: CGFloat = 400
 
     /// The most height the card takes where the keys have `height` points: the
     /// popover keeps its own margins from the screen's edges.
     static func maxHeight(in height: CGFloat) -> CGFloat { max(160, height - 120) }
+
+    /// The width of the card where the keys have `available` points across:
+    /// the room beside them less what the popover keeps for its margin, its
+    /// arrow and the keys (UIKit gives it 41 points less than the screen is
+    /// wide), with some to spare so that UIKit never narrows it.
+    static func width(in available: CGFloat) -> CGFloat { min(widest, max(240, available - 60)) }
 
     var body: some View {
         ScrollView {
@@ -538,7 +565,7 @@ struct SideKeysTipCard: View {
         }
         .scrollBounceBehavior(.basedOnSize)
         .frame(maxHeight: maxHeight)
-        .frame(idealWidth: 400, maxWidth: 400)
+        .frame(idealWidth: width, maxWidth: Self.widest)
         .fixedSize(horizontal: false, vertical: true)
         .presentationCompactAdaptation(.popover)
         .presentationBackgroundInteraction(.enabled)
