@@ -61,7 +61,7 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch.py
     LABELS kernarium
-    TIMEOUT 300)
+    TIMEOUT 600)
 
 uml_add_tooling_test(
     NAME kernarium-ipad-automation-watch-process

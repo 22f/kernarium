@@ -15,14 +15,26 @@ Scenario kinds:
   `hold` it serves only once the test says `go` for it. The test then ends it
   with `FakeDevice.control(nonce, action)`: `die` (xcodebuild exits),
   `lifetime` (a clean end at the host's own deadline), `relaunch` (xcodebuild
-  starts the runner again, which never serves), `silent` (the runner stops
+  starts the runner again, which never serves and never says anything),
+  `relaunch-quiet` (the same, and xcodebuild ends at once: nothing was asked
+  of the device), `relaunch-timeout`, `relaunch-authentication` and
+  `relaunch-authentication-localized` (the same, and the device's approval
+  was not given: XCTest's timeout line, or the authentication cancelled with
+  an English or a localized description), `silent` (the runner stops
   beating and xcodebuild stays) or `busy` (a command that never ends shows in
   the heartbeat, which keeps beating).
 - `approval`: the runner comes up, and 0.3 s later XCTest gives up on the
-  prompt with its own line and xcodebuild exits with status 65.
+  prompt with its own line and xcodebuild exits with status 65 (`after` sets
+  the delay, `signal` the kind of line: `timeout`, `authentication` or
+  `authentication-localized`).
 - `exit`: xcodebuild exits at once with `status`, as with no device.
 - `no-runner`: xcodebuild hangs and the runner never comes up.
 - `up-silent`: the runner comes up and neither serves nor says why.
+
+Any scenario with `stubborn` set makes xcodebuild ignore SIGTERM, as a hung
+one does: only SIGKILL ends it. With `child` set it also starts a helper
+process (its pid is in the invocation record) that outlives it unless
+something ends its whole process group.
 """
 
 from __future__ import annotations
@@ -81,6 +93,7 @@ XCODEBUILD = r'''#!@PYTHON@
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -110,6 +123,28 @@ def say(text):
 def runner_up():
     stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".123456+0900"
     say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Running tests...")
+
+
+def approval_failure(signal_kind):
+    """The line XCTest prints when the device's approval was not given: its
+    own 60 s timeout, or the owner's authentication cancelled (the description
+    is localized on a device; the domain and the code are not)."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".654321+0900"
+    if signal_kind == "authentication":
+        reason = ('Error Domain=com.apple.LocalAuthentication Code=-4 "UI canceled by '
+                  'system." UserInfo={NSDebugDescription=UI canceled by system., '
+                  "NSLocalizedDescription=UI canceled by system.}")
+    elif signal_kind == "authentication-localized":
+        reason = ('Error Domain=com.apple.LocalAuthentication Code=-4 "Authentication '
+                  'was cancelled." UserInfo={BiometryType=1, '
+                  "NSLocalizedDescription=Authentication was cancelled.}")
+    else:
+        reason = ('Error Domain=com.apple.dt.XCTest.XCTFuture Code=1000 "Timed out '
+                  'while enabling automation mode." UserInfo={NSLocalizedDescription='
+                  "Timed out while enabling automation mode.}")
+    say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Failed to initialize for UI "
+        f"testing: {reason}")
+    say("** TEST EXECUTE FAILED **")
 
 
 def write_state(started, served, finished=False, command=None, deadline=None):
@@ -157,13 +192,19 @@ def answer(served):
 
 
 scenario = next_scenario()
+if scenario.get("stubborn"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child = None
+if scenario.get("child"):
+    # What xcodebuild leaves behind when it dies: a helper in its group.
+    child = subprocess.Popen(["sleep", "3600"]).pid
 parent = subprocess.run(["ps", "-o", "command=", "-p", str(os.getppid())],
                         stdout=subprocess.PIPE, text=True).stdout.strip()
 with open(os.path.join(root, "invocations.jsonl"), "a") as handle:
     handle.write(json.dumps({
         "pid": os.getpid(), "ppid": os.getppid(), "argv": sys.argv[1:],
         "nonce": nonce, "seconds": seconds, "supervisor": parent,
-        "scenario": scenario, "time": time.time()}) + "\n")
+        "scenario": scenario, "child": child, "time": time.time()}) + "\n")
 kind = scenario["kind"]
 if kind == "exit":
     say("xcodebuild: error: Unable to find a destination matching the provided destination specifier")
@@ -175,12 +216,7 @@ if kind == "up-silent":
     time.sleep(3600)
 if kind == "approval":
     time.sleep(scenario.get("after", 0.3))
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".654321+0900"
-    say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Failed to initialize for UI "
-        'testing: Error Domain=com.apple.dt.XCTest.XCTFuture Code=1000 "Timed out '
-        'while enabling automation mode." UserInfo={NSLocalizedDescription=Timed out '
-        "while enabling automation mode.}")
-    say("** TEST EXECUTE FAILED **")
+    approval_failure(scenario.get("signal", "timeout"))
     sys.exit(65)
 for sub in ("inbox", "outbox"):
     os.makedirs(os.path.join(channel, sub), exist_ok=True)
@@ -202,6 +238,15 @@ while True:
     if now == "relaunch":
         runner_up()
         time.sleep(3600)
+    if now.startswith("relaunch-"):
+        # The runner started again asks the device for its approval, or not.
+        runner_up()
+        if now == "relaunch-quiet":
+            say("Test Suite 'Selected tests' passed at 2026-11-13 23:59:35.792.")
+            sys.exit(65)
+        time.sleep(0.3)
+        approval_failure(now[len("relaunch-"):])
+        sys.exit(65)
     if now == "silent":
         time.sleep(3600)
     if now == "busy" and busy is None:
@@ -286,9 +331,11 @@ class FakeDevice:
             return None
 
     def serving(self, nonce: str | None = None) -> bool:
+        """Whether the host the heartbeat names runs and has not finished:
+        its process is alive, which no wall-clock threshold says."""
         state = self.heartbeat()
         return bool(state and not state.get("finished")
-                    and time.time() - state["time"] < 1.0
+                    and self.alive(state["pid"])
                     and (nonce is None or state["nonce"] == nonce))
 
     def wait(self, condition, seconds: float, what: str):

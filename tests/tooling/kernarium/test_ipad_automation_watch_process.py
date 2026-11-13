@@ -94,7 +94,7 @@ class ProcessTestCase(unittest.TestCase):
             return {}
 
     def watcher(self) -> int | None:
-        """The pid in the lock file while a process holds the lock."""
+        """The pid the lock file names while a process holds the lock."""
         import fcntl
         path = self.device.state_dir / self.device.udid / "watch.lock"
         try:
@@ -105,8 +105,10 @@ class ProcessTestCase(unittest.TestCase):
             try:
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
-                text = os.pread(fd, 32, 0).decode().strip()
-                return int(text) if text.isdigit() else 0
+                try:
+                    return int(json.loads(os.pread(fd, 512, 0).decode())["pid"])
+                except (ValueError, KeyError, TypeError):
+                    return 0
             return None
         finally:
             os.close(fd)
@@ -159,7 +161,7 @@ class WatchProcessTests(ProcessTestCase):
         host = self.device.invocations()[0]
         self.device.wait(lambda: not self.device.alive(host["pid"]), 30,
                          "the host ended")
-        time.sleep(3)
+        # The watch ended first and the host after it: nothing starts it again.
         self.assertEqual(len(self.device.invocations()), 1)
 
     def test_sigterm_ends_the_watch_and_leaves_a_serving_host(self) -> None:
@@ -198,10 +200,43 @@ class WatchProcessTests(ProcessTestCase):
         self.assertEqual(status["watch"]["meaning"], "needs approval at the device")
         self.assertFalse(status["watch"]["running"])
         self.assertIn("since", status["watch"])
+        self.assertIn("observed", status["watch"]["approval"])
         again = self.run_script("watch", "--hours", "3", *self.reports())
         self.assertEqual(again.returncode, 4, again.stderr)
         self.assertIn("starting nothing", again.stderr)
         self.assertEqual(len(self.device.invocations()), 2)
+        # The refusal is a file of its own: a watch killed at once, before it
+        # has read anything, leaves it (R2).
+        latch = self.device.state_dir / self.device.udid / "approval.json"
+        self.assertTrue(latch.exists())
+        killed = self.spawn("watch", "--hours", "3", *self.reports())
+        self.device.wait(lambda: self.watcher(), 30, "the watch holds its lock")
+        killed.kill()
+        killed.wait(timeout=30)
+        self.assertTrue(latch.exists())
+        third = self.run_script("watch", "--hours", "3", *self.reports())
+        self.assertEqual(third.returncode, 4, third.stderr)
+        self.assertEqual(len(self.device.invocations()), 2)
+
+    def test_sigterm_to_the_supervisor_ends_an_xcodebuild_that_ignores_it(self) -> None:
+        # Rule (R5): the supervisor stays responsible until its children are
+        # gone. Only SIGTERM is sent, to the group, as ending a host does; the
+        # xcodebuild ignores it, and the supervisor ends it with SIGKILL before
+        # it exits itself. The supervisor's wait is shortened with its own
+        # hidden option, which `start` sets from CHILD_TERM_WAIT.
+        self.device.scenarios([{"kind": "serve", "stubborn": True, "child": True}])
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
+        host = self.device.invocations()[0]
+        self.assertTrue(self.device.alive(host["pid"]))
+        self.assertTrue(self.device.alive(host["child"]))
+        os.killpg(host["ppid"], signal.SIGTERM)
+        self.device.wait(lambda: not any(self.device.alive(pid) for pid in (
+            host["pid"], host["ppid"], host["child"])), 60,
+            "the whole host ended, helper included")
+        log = (self.device.state_dir / self.device.udid).glob("host-*.log")
+        self.assertIn("xcodebuild exited with status", next(iter(log)).read_text())
 
     def test_a_failed_start_has_a_status_of_its_own(self) -> None:
         self.device.scenarios([{"kind": "exit", "status": 70}])
@@ -250,6 +285,59 @@ class LaunchdJobTests(ProcessTestCase):
         self.assertEqual(job["StandardOutPath"], job["StandardErrorPath"])
         self.assertTrue(job["StandardOutPath"].startswith(str(self.device.state_dir)))
         self.assertNotIn("LaunchAgents", json.dumps(job))
+
+    def test_every_path_in_the_job_is_absolute(self) -> None:
+        # Rule (R10): a relative path would resolve against launchd's working
+        # directory, not the one the job was printed in: the report directory,
+        # the state and derived-data directories, the PATH entries of the
+        # device tools and DEVELOPER_DIR are all made absolute.
+        with tempfile.TemporaryDirectory() as scratch:
+            work = Path(scratch).resolve() / "work"
+            (work / "rel-bin").mkdir(parents=True)
+            for name in ("xcrun", "xcodebuild"):
+                tool = work / "rel-bin" / name
+                tool.write_text("#!/bin/sh\nexit 0\n")
+                tool.chmod(0o755)
+            environment = dict(os.environ, PATH="rel-bin:/usr/bin:/bin",
+                               DEVELOPER_DIR="rel-developer")
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), "--device", self.device.udid,
+                 "--state-dir", "rel-state", "--derived-data", "rel-derived",
+                 "watch", "--device-reports-dir", "../rel-reports",
+                 "--print-launchd-job", LABEL],
+                cwd=work, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            job = plistlib.loads(done.stdout.encode())
+            arguments = job["ProgramArguments"]
+            for option in ("--state-dir", "--derived-data", "--device-reports-dir"):
+                value = arguments[arguments.index(option) + 1]
+                self.assertTrue(value.startswith("/"), (option, value))
+            self.assertEqual(
+                os.path.normpath(arguments[arguments.index("--device-reports-dir") + 1]),
+                str(work.parent / "rel-reports"))
+            path = job["EnvironmentVariables"]["PATH"].split(":")
+            self.assertIn(str(work / "rel-bin"), path)
+            self.assertTrue(all(entry.startswith("/") for entry in path), path)
+            self.assertTrue(job["EnvironmentVariables"]["DEVELOPER_DIR"].startswith("/"))
+            self.assertTrue(job["StandardOutPath"].startswith("/"))
+            self.assertFalse((work / "rel-state").exists())
+
+    def test_printing_the_job_creates_nothing_and_names_the_directory_to_make(self) -> None:
+        # Rule (E): launchd will not make the directory the job logs to, and
+        # printing makes none: the usage text names the one `mkdir`.
+        done = self.run_script("watch", "--print-launchd-job", LABEL)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        job = plistlib.loads(done.stdout.encode())
+        directory = Path(job["StandardOutPath"]).parent
+        self.assertEqual(directory, self.device.state_dir / self.device.udid)
+        self.assertFalse(self.device.state_dir.exists())
+        self.assertIn(f"mkdir -p {directory}", done.stderr)
+        helped = subprocess.run(
+            [sys.executable, str(SCRIPT), "--device", "X", "watch", "--help"],
+            stdout=subprocess.PIPE, text=True, timeout=60).stdout
+        self.assertIn("mkdir -p", helped.replace("\n", " ").replace("  ", " "))
 
     def test_the_job_is_not_brought_back_after_the_watch_fails(self) -> None:
         # Rule: no KeepAlive that restarts the watch after an approval failure

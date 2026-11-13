@@ -527,10 +527,13 @@ A host ends on its own now and then, and a new one started within minutes needs
 no approval at the device while one started hours later does. `watch` keeps one
 device's host serving: it adopts a serving host, starts the next the moment one
 stops serving (with the watch's own options), and fails once, with a state
-`status` reports, when the device asks for approval. Run it in a terminal,
+`status` reports, when the device asks for approval; the refusal stays in the
+state directory until a host serves. A command in flight when its host is
+replaced is not repeated, and its sender gets status 3. Run it in a terminal,
 detached with `watch --detach`, or as a job manager's job
-(`watch --print-launchd-job <label>` prints a launchd job); `stop --force`
-ends the watch before the host. The `kernarium-ipad-automation-watch` and
+(`watch --print-launchd-job <label>` prints a launchd job and creates nothing:
+make its log directory first); `stop --force` ends the watch before the host.
+The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests run the real script
 against fake `xcrun` and `xcodebuild` executables.
 
