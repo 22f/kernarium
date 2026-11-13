@@ -35,6 +35,10 @@ window manager judges the accelerometer, and the runner turns the display with a
 the same four postures (then the same repeat, touch, screen-off and lock-screen steps with a posture streamed
 until the next), which proves the older path is untouched and gives the rotation each posture means.
 
+``--with-compass`` also passes ``androidboot.kernarium.compass=1``, as an iPhone with a magnetometer boots: the
+guest then lists the magnetometer too and sends the 20-byte "ANC3" frame (bit 4 says the orientation sensor is
+listed) in place of "ANC2", and every step above is the same.
+
 ``--launch-only`` stops each guest once the launch's state is checked (the property, the sensor service's
 list and the sensor's flags, the sub-HAL's log line, no SELinux denial about the property, the judge the window
 manager picked and what it holds): the first thing to run on a new image.
@@ -44,6 +48,7 @@ is reached through the shared adb server, always named with ``-s``. The runner i
 macos-android17 executable, an installed release, an adb client and a JDK (the probe application is built and
 signed with ``keytool`` and ``jarsigner``).
 usage: run_android_orientation.py --emulator uml-darwin-android17 [--release DIR] [--expect sensor|none]
+       [--with-compass]
 """
 
 from __future__ import annotations
@@ -82,6 +87,7 @@ SPEC.loader.exec_module(boot_android)
 DEFAULT_ADB_PORT = 5586
 MOTION_PORT = 5556
 ORIENTATION_ARGUMENT = "androidboot.kernarium.orientation=1"
+COMPASS_ARGUMENT = "androidboot.kernarium.compass=1"
 FORWARD = re.compile(r"vsock forward (\S+):(\d+) -> guest port (\d+)")
 FORWARD_SECONDS = 60
 COMMAND_SECONDS = 120
@@ -91,7 +97,8 @@ HOLD_SECONDS = 6
 CLOSE_SECONDS = 15
 FRAME_SECONDS = 20
 SEND_SECONDS = 10
-CONTROL_SIZE = 16
+# Frame lengths by the magic's last byte: "ANC1" and "ANC2" are 16 bytes, "ANC3" (with the magnetometer) 20.
+FRAME_LENGTHS = {ord("1"): 16, ord("2"): 16, ord("3"): 20}
 RECORD_SIZE = 20
 ORIENTATION_TYPE = 27
 ACCELEROMETER_TYPE = 1
@@ -127,26 +134,44 @@ def accelerometer_record(x: float, y: float, z: float) -> bytes:
 
 @dataclass(frozen=True)
 class Control:
-    """A guest-to-host control frame."""
+    """A guest-to-host control frame: "ANC1", "ANC2" or the 20-byte "ANC3" (mask bit 2: the orientation sensor is
+    in use; bit 3: the magnetometer is; bit 4: the orientation sensor is listed)."""
     version: int
     mask: int
     accelerometer_us: int
     gyroscope_us: int
+    magnetometer_us: int | None = None
 
     @property
     def orientation_active(self) -> bool:
         return bool(self.mask & 4)
 
+    @property
+    def orientation_listed(self) -> bool:
+        """Whether the guest lists the orientation sensor: version 2 always does, version 3 says so in bit 4."""
+        return self.version == 2 or (self.version == 3 and bool(self.mask & 16))
+
+
+def frame_length(prefix: bytes) -> int | None:
+    """How long the frame is that begins with these (at least four) bytes; None for a magic no frame has."""
+    if prefix[:3] != b"ANC" or prefix[3] not in FRAME_LENGTHS:
+        return None
+    return FRAME_LENGTHS[prefix[3]]
+
 
 def parse_control(frame: bytes) -> Control:
-    """Reads "ANC1" or "ANC2"; anything else the host would end the connection for is a ValueError."""
-    if len(frame) != CONTROL_SIZE or frame[:3] != b"ANC" or frame[3:4] not in (b"1", b"2"):
+    """Reads "ANC1", "ANC2" or "ANC3"; anything else the host would end the connection for is a ValueError."""
+    length = frame_length(frame[:4]) if len(frame) >= 4 else None
+    if length is None or len(frame) != length:
         raise ValueError(f"not a control frame: {frame.hex(' ')}")
     version = frame[3] - ord("0")
-    mask, accelerometer, gyroscope = struct.unpack("<3I", frame[4:])
-    if mask & ~(3 if version == 1 else 7):
+    words = struct.unpack(f"<{length // 4 - 1}I", frame[4:])
+    mask = words[0]
+    if version < 3 and mask & ~(3 if version == 1 else 7):
         raise ValueError(f"reserved bits in the mask {mask:#x} of a version {version} frame")
-    return Control(version, mask, accelerometer, gyroscope)
+    if version == 3 and (mask & ~0b11111 or (mask & 0b100 and not mask & 0b10000)):
+        raise ValueError(f"no such state: the mask {mask:#x} of a version 3 frame")
+    return Control(version, mask, words[1], words[2], words[3] if version == 3 else None)
 
 
 # What the gravity vector of each posture looks like to the accelerometer (Android's axes: x to the right of the
@@ -404,8 +429,18 @@ class Host:
                 if not data:
                     break
                 buffer += data
-                while len(buffer) >= CONTROL_SIZE:
-                    frame, buffer = buffer[:CONTROL_SIZE], buffer[CONTROL_SIZE:]
+                # A frame is cut where its magic says; a prefix of a longer frame is waited for.
+                while len(buffer) >= 4:
+                    length = frame_length(buffer)
+                    if length is None:
+                        with self.condition:
+                            self.bad.append(buffer)
+                            self.condition.notify_all()
+                        buffer = b""
+                        break
+                    if len(buffer) < length:
+                        break
+                    frame, buffer = buffer[:length], buffer[length:]
                     try:
                         control = parse_control(frame)
                     except ValueError:
@@ -417,9 +452,9 @@ class Host:
                         if self.connection is not connection:
                             continue
                         self.frames.append(control)
-                        say = (control.version >= 2 and self.replay and self.current is not None
+                        say = (control.orientation_listed and self.replay and self.current is not None
                                and (not self._seen_anc2 or (control.orientation_active and not self._active)))
-                        if control.version >= 2:
+                        if control.orientation_listed:
                             self._seen_anc2 = True
                             self._active = control.orientation_active
                         self.condition.notify_all()
@@ -539,7 +574,7 @@ class EarlyHost:
                 time.sleep(1.0)
                 continue
             self.first = frame
-            if frame.version >= 2:
+            if frame.orientation_listed:
                 try:
                     self.host.push(self.value)
                 except OSError:
@@ -692,11 +727,12 @@ ORIENTATION_PROPERTY = "ro.boot.kernarium.orientation"
 ACCELEROMETER_NAME = "Host Accelerometer"
 
 
-def launch_state(guest: Guest, expect_sensor: bool, argument: bool) -> str:
+def launch_state(guest: Guest, expect_sensor: bool, argument: bool, compass: bool = False) -> str:
     """What the launch's argument decided (``argument``: whether the launch carried it; an older release given
     it reads the property and lists no sensor): the property, the sensors the sub-HAL listed (its own log line says
     how many), the sensor's flags, which judge the window manager picked and which sensor it holds, and that
-    SELinux denied the sensors HAL nothing about the property."""
+    SELinux denied the sensors HAL nothing about the property. ``compass``: the launch also carried the compass
+    argument, which lists the magnetometer as a fourth sensor."""
     value = guest.shell(f"getprop {ORIENTATION_PROPERTY}").strip()
     if value != ("1" if argument else ""):
         raise Failure(f"getprop {ORIENTATION_PROPERTY} reads {value!r}, expected {'1' if argument else 'nothing'}")
@@ -708,7 +744,7 @@ def launch_state(guest: Guest, expect_sensor: bool, argument: bool) -> str:
     notes = []
     log = guest.early_log + "\n" + guest.shell("logcat -d -b all 2>/dev/null | grep -E 'Andarium motion: ro.boot|avc: +denied'; true")
     said = HAL_LOG_LINE.findall(log)
-    wanted = ("1", "3") if expect_sensor else ("0", "2")
+    wanted = ("1", str(3 + int(compass))) if expect_sensor else ("0", "2")
     if not expect_sensor and argument:
         wanted = None  # an older sub-HAL says nothing; a newer one given the argument would list the sensor
     if said and wanted is not None and said[-1] != wanted:
@@ -809,6 +845,12 @@ class Report:
 
 # ---- Phases.
 
+def with_compass(options: argparse.Namespace) -> bool:
+    """Whether the launch carries the compass argument: this runner's option, or an argument another runner built
+    on this one passes."""
+    return bool(getattr(options, "with_compass", False)) or COMPASS_ARGUMENT in getattr(options, "extra_arguments", ())
+
+
 def early_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Report) -> None:
     print("phase early: a fresh disk, a host that sends a value before the window manager has the sensor", flush=True)
     host_holder: dict[str, Host] = {}
@@ -816,7 +858,7 @@ def early_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, re
     host = host_holder["host"]
     early: EarlyHost = host_holder["early"]  # type: ignore[assignment]
     try:
-        report.run("launch state", lambda: launch_state(guest, True, True))
+        report.run("launch state", lambda: launch_state(guest, True, True, with_compass(options)))
         report.run("early host", lambda: describe_early(guest, early))
         report.run("fresh disk default", lambda: fresh_default(guest))
         report.run("sensor listed", lambda: check_sensor_listed(guest, True))
@@ -839,8 +881,8 @@ def describe_early(guest: Guest, early: EarlyHost) -> str:
     early.join()
     if early.first is None:
         raise Failure("the early host never received a frame from the guest")
-    if early.first.version != 2:
-        raise Failure(f"the first frame was version {early.first.version}, not ANC2")
+    if not early.first.orientation_listed:
+        raise Failure(f"the first frame was ANC{early.first.version} without the orientation sensor listed")
     if early.first.orientation_active:
         raise Failure(f"the first frame already says the sensor is in use (mask {early.first.mask:#x}): the window "
                       "manager had registered it, so the value was not sent ahead of the registration")
@@ -849,7 +891,7 @@ def describe_early(guest: Guest, early: EarlyHost) -> str:
     if guest.boot_completed_at is None or early.sent_at >= guest.boot_completed_at:
         raise Failure("the early value was not sent before sys.boot_completed")
     ahead = guest.boot_completed_at - early.sent_at
-    return (f"first frame ANC2 mask {early.first.mask:#x}; value 3 sent {ahead:.0f} s before "
+    return (f"first frame ANC{early.first.version} mask {early.first.mask:#x}; value 3 sent {ahead:.0f} s before "
             "sys.boot_completed, ahead of the window manager's registration")
 
 
@@ -986,7 +1028,7 @@ def late_phase(options: argparse.Namespace, adb: str, private: pathlib.Path, rep
     try:
         server = guest.system_server()
         guest.settings_app()
-        report.run("launch state", lambda: launch_state(guest, True, True))
+        report.run("launch state", lambda: launch_state(guest, True, True, with_compass(options)))
         report.run("sensor listed", lambda: check_sensor_listed(guest, True))
         report.run("no host: the window manager registered the sensor, the display stays", lambda: no_host(guest))
         if options.launch_only:
@@ -1014,13 +1056,13 @@ def late_host(guest: Guest, host: Host) -> str:
     first = host.wait_frame(FRAME_SECONDS)
     if first is None:
         raise Failure("the guest sent no frame to the late host")
-    if first.version != 2 or not first.orientation_active:
+    if not first.orientation_listed or not first.orientation_active:
         raise Failure(f"the late host's first frame is ANC{first.version} with mask {first.mask:#x}; the sensor "
-                      "is in use and the frame must say so (ANC2, bit 2)")
+                      "is in use and the frame must say so (ANC2 or ANC3, bit 2)")
     hold_rotation(guest, UPRIGHT, "connected, no value", 5)
     host.push(COUNTER_CLOCKWISE)
     wait_rotation(guest, COUNTER_CLOCKWISE, "the first value")
-    return f"first frame ANC2 mask {first.mask:#x}; no value, no turn; value 1 turned the display to 1"
+    return f"first frame ANC{first.version} mask {first.mask:#x}; no value, no turn; value 1 turned the display to 1"
 
 
 def keyguard_showing(text: str) -> bool | None:
@@ -1085,7 +1127,7 @@ def lock_screen(guest: Guest, push: Callable[[int], None]) -> str:
 def reconnect(guest: Guest, host: Host) -> str:
     host.connect()
     first = host.wait_frame(FRAME_SECONDS)
-    if first is None or first.version != 2 or not first.orientation_active:
+    if first is None or not first.orientation_listed or not first.orientation_active:
         raise Failure(f"the reconnected host's first frame is {first}")
     host.push(COUNTER_CLOCKWISE)
     wait_rotation(guest, COUNTER_CLOCKWISE, "after reconnecting")
@@ -1106,7 +1148,7 @@ def reconnect(guest: Guest, host: Host) -> str:
     host.connect()
     if host.wait_frame(FRAME_SECONDS) is None:
         raise Failure("the guest does not accept a connection after the refused records")
-    return f"a new connection is told ANC2 and takes a value; {', '.join(refused)} records end the connection and change nothing"
+    return f"a new connection is told the sensor is in use and takes a value; {', '.join(refused)} records end the connection and change nothing"
 
 
 def stayed_up(guest: Guest, before: str) -> str:
@@ -1300,6 +1342,7 @@ def start_guest(options: argparse.Namespace, adb: str, private: pathlib.Path, *,
             boot_android.data_capacity(boot_options, identity)),
         f"--vsock-forward=127.0.0.1:0-{MOTION_PORT}",
         *([] if options.no_argument else [ORIENTATION_ARGUMENT]),
+        *([COMPASS_ARGUMENT] if getattr(options, "with_compass", False) else []),
         # More kernel arguments of a runner that builds on this one (run_android_compass.py).
         *getattr(options, "extra_arguments", ()),
     ]
@@ -1345,6 +1388,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="sensor: the release lists the orientation sensor when asked; none: it does not")
     parser.add_argument("--no-argument", action="store_true",
                         help="do not pass androidboot.kernarium.orientation=1 (an older application)")
+    parser.add_argument("--with-compass", action="store_true",
+                        help="also pass androidboot.kernarium.compass=1, as a phone with a magnetometer boots: the "
+                        "guest sends ANC3 frames and lists the magnetometer too")
     parser.add_argument("--phases", default="early,late",
                         help="with --expect sensor, the phases to run (early, late); default both")
     parser.add_argument("--launch-only", action="store_true",

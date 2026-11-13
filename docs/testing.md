@@ -750,17 +750,6 @@ that a value sent while the screen is off turns the display once it is on (the
 sensor idle while off and in use again), and how a host that connects late or
 reconnects is served. Restarting the framework or the sensors HAL needs root,
 which a user build does not give, so the runner does not.
-`android-compass` and `android-compass-absent` (integration) register when
-`UML_ANDROID_COMPASS_RELEASE` names the release and
-`UML_ANDROID_COMPASS_PROBE_APK` the motion probe (built by
-`tests/integration/android/motion/build-apk.sh`): the runner plays the host
-over a vsock forward with the `androidboot.kernarium.compass=1` argument and
-checks the magnetometer, the compass feature, the idle demand, the field a
-listener sees for each mount, the compass points and the four accuracies; the
-second boots without the argument and checks that the image lists no sensor,
-declares no feature and ends the connection on a magnetic field record.
-`android17-compass-runner` (tooling) runs its wire, oracle and parsers without a
-guest.
 `--launch-only` stops after the launch's state (the property, the sensors the
 service lists and their flags, the judge the window manager picked and what it
 holds, no SELinux denial about the property), which is what to run first on a
@@ -771,6 +760,14 @@ postures. The runner needs a JDK, which builds and signs the probe
 application.
 `android17-orientation-runner` (tooling) runs its wire, parsers, rotation rules,
 host and probe manifest without a guest.
+`android-compass` and `android-compass-absent` (integration) register when
+`UML_ANDROID_COMPASS_RELEASE` names the release and
+`UML_ANDROID_COMPASS_PROBE_APK` the motion probe (built by
+`tests/integration/android/motion/build-apk.sh`): the runner plays the host over
+a vsock forward and qualifies the magnetometer and the compass feature a release
+declares when the launch says the host has one, and that it declares neither
+without. `android17-compass-runner` (tooling) runs its wire, oracle and parsers
+without a guest.
 `android-gamepad` (integration) registers when `UML_ANDROID_GAMEPAD_RELEASE`
 names the release and `UML_ANDROID_GAMEPAD_PROBE_APK` the APK of
 [`gamepad/build-apk.sh`](../tests/integration/android/gamepad/README.md): the

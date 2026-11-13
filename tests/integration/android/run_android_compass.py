@@ -16,14 +16,17 @@ for each of the four mounts and checks what a client of the guest's SensorManage
 adds the orientation sensor's argument too). It checks:
 
 - the launch state: the property, the sensor service's list (``Host Magnetometer``, type 2, continuous,
-  non-wake-up), ``pm list features`` and the package manager's own answer for ``android.hardware.sensor.compass``,
-  the sub-HAL's log line, and no SELinux denial about the property or the sensors HAL;
+  non-wake-up, and with it the rotation vector and the geomagnetic rotation vector the service makes from the
+  three sensors), ``pm list features`` and the package manager's own answer for
+  ``android.hardware.sensor.compass``, the sub-HAL's log line, and no SELinux denial about the property or the
+  sensors HAL;
 - the demand: the guest's frame is "ANC3" with the magnetometer idle, and nothing holds the sensor on the home
   screen, in Settings, in the camera application or across a screen off and on;
 - the field: a foreground client (the motion probe, ``--probe-apk``, in its ``compass`` mode) registers a
-  listener, the guest says so (bit 3 of "ANC3" and the period it asked for), the application's field reaches
-  the listener unchanged for each of the four mounts with the azimuth the platform computes from it, a turn
-  through north, east, south and west gives those azimuths, and each of the four statuses passes through;
+  listener, the guest says so (bit 3 of "ANC3" and the period it asked for), the rotation vector gets events
+  and settles on one heading for a steady field, the application's field reaches the listener unchanged for
+  each of the four mounts with the azimuth the platform computes from it, a turn through north, east, south and
+  west gives those azimuths, and each of the four statuses passes through;
 - a record the guest refuses (a status above 3) ends the connection and not the guest, and the sensor is in use
   again on the connection that follows; the listener's end says the magnetometer idle.
 
@@ -34,12 +37,16 @@ with ``--with-orientation``) and never "ANC3", lists no magnetic field sensor, d
 ends the connection on a magnetic field record as it always has.
 
 ``--launch-only`` stops each guest once the launch's state is checked: the first thing to run on a new image.
+``--feed SECONDS`` keeps the guest up for that long as a host that sends a steady field, accelerometer and
+gyroscope while the frames ask for them, and prints the adb serial: for a client of the guest that brings no
+field of its own (the Compatibility Test Suite's sensor tests, run from another shell).
 
 Every wait has a deadline. The guest's launcher is stopped through its own process on any exit, and the guest
 is reached through the shared adb server, always named with ``-s``. The runner is opt-in: it needs the
 macos-android17 executable, an installed release, an adb client and, for ``--expect sensor``, the probe
 application (tests/integration/android/motion/build-apk.sh).
 usage: run_android_compass.py --emulator uml-darwin-android17 [--release DIR] --probe-apk APK [--expect sensor|none]
+       run_android_compass.py --emulator uml-darwin-android17 [--release DIR] --feed SECONDS
 """
 
 from __future__ import annotations
@@ -95,8 +102,20 @@ GRAVITY = orient.GRAVITY
 # down, so a device lying face up reads (0, 25, -40) when its y axis points north.
 HORIZONTAL = 25.0
 VERTICAL = -40.0
-AZIMUTH_TOLERANCE = 2.0
+# The sensor service rounds every value to a quarter of the declared resolution (overlay/sensors/motion_protocol.hpp
+# declares 1/8 uT), so the fields sent are multiples of that quantum, which a float holds exactly, and the
+# tolerance of a value stays far under one quantum.
+RESOLUTION = 0.125
+QUANTUM = RESOLUTION / 4
 VALUE_TOLERANCE = 1e-3
+AZIMUTH_TOLERANCE = 2.0
+# Types of the sensors the service makes from the accelerometer, the gyroscope and the magnetometer.
+ROTATION_VECTOR_TYPE = 11
+GEOMAGNETIC_ROTATION_VECTOR_TYPE = 20
+# The rotation vector has settled when its azimuth stays within this many degrees over this many samples.
+SETTLE_SAMPLES = 5
+SETTLE_TOLERANCE = 3.0
+ROTATION_SECONDS = 90
 
 ACCELEROMETER_TYPE = 1
 GYROSCOPE_TYPE = 4
@@ -412,10 +431,22 @@ def launch_state(guest: Guest, compass: bool, with_orientation: bool, argument: 
         if rates is None or abs(float(rates[1]) - 1.0) > 0.01 or abs(float(rates[2]) - 50.0) > 0.01:
             raise Failure(f"{MAGNETOMETER} is not listed at 1 Hz to 50 Hz: {description!r}")
         notes.append("listed (type 2), continuous, non-wakeUp, 1 Hz to 50 Hz")
+        # The service adds these only when all three sensors are listed (the geomagnetic one with two).
+        missing = [name for name, kind in (("rotation vector", ROTATION_VECTOR_TYPE),
+                                           ("geomagnetic rotation vector", GEOMAGNETIC_ROTATION_VECTOR_TYPE))
+                   if kind not in sensors.listed.values()]
+        if missing:
+            raise Failure(f"the sensor service lists no {' and no '.join(missing)} with the magnetometer: "
+                          f"{sensors.listed}")
+        notes.append("rotation vector and geomagnetic rotation vector listed")
     else:
         if MAGNETOMETER in sensors.listed or MAGNETIC_FIELD_TYPE in sensors.listed.values():
             raise Failure(f"the sensor service lists a magnetic field sensor without the argument: {sensors.listed}")
-        notes.append("no magnetic field sensor")
+        fused = {name: kind for name, kind in sensors.listed.items()
+                 if kind in (ROTATION_VECTOR_TYPE, GEOMAGNETIC_ROTATION_VECTOR_TYPE)}
+        if fused:
+            raise Failure(f"the sensor service lists sensors that need a magnetometer without one: {fused}")
+        notes.append("no magnetic field sensor, no rotation vector")
     features = parse_features(guest.shell("pm list features"))
     # The package manager's own answer; it exits 1 and says "false" for a feature the device does not have.
     answer = guest.adb_run("shell", f"cmd package has-feature {COMPASS_FEATURE}", timeout=60).stdout.strip()
@@ -570,6 +601,51 @@ def listener_registers(guest: Guest, host: Host, probe: pathlib.Path) -> str:
     return f"ANC3 mask {frame.mask:#04x}, magnetometer period {frame.magnetometer_us} us"
 
 
+def rotation_vector(guest: Guest, host: Host) -> str:
+    """The rotation vector the service makes from the three sensors gets events and settles on one heading for a
+    steady field (a device lying face up with its y axis to north); the heading itself is the fusion's."""
+    host.stream(field_at_heading(0.0), 3)
+    recent: list[float] = []
+
+    def check() -> str | None:
+        report = probe_report(guest)
+        if report is None:
+            return "no report from the probe"
+        vector = report.get("rotation_vector") or {}
+        found = vector.get("azimuth_deg")
+        if not vector.get("count") or found is None:
+            return "the probe has seen no rotation vector event"
+        recent.append(found)
+        del recent[:-SETTLE_SAMPLES]
+        if len(recent) < SETTLE_SAMPLES:
+            return f"{len(recent)} samples of the azimuth so far"
+        spread = max(angle_difference(value, recent[-1]) for value in recent)
+        if spread > SETTLE_TOLERANCE:
+            return f"the azimuth is still moving: {[round(value, 1) for value in recent]}"
+        return None
+
+    orient.wait_for("the rotation vector", ROTATION_SECONDS, check, guest)
+    vector = (probe_report(guest) or {}).get("rotation_vector", {})
+    found = vector.get("azimuth_deg", recent[-1])
+    note = "" if angle_difference(found, 0.0) <= 10.0 else " (the field points to 0; the fusion's heading is its own)"
+    return f"{vector.get('count')} events, azimuth settled at {found:.1f}{note}"
+
+
+def feed(guest: Guest, host: Host, seconds: float) -> str:
+    """The host, for a client that brings no field: steady field, accelerometer and gyroscope while the frames
+    ask, for ``seconds``."""
+    host.connect()
+    if host.wait_frame(FRAME_SECONDS) is None:
+        raise Failure("the guest sent no frame")
+    host.stream(field_at_heading(0.0), 3)
+    print(f"feeding for {seconds:.0f} s; adb serial {guest.serial}", flush=True)
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        guest.alive()
+        time.sleep(2.0)
+    return f"fed {seconds:.0f} s on {guest.serial}"
+
+
 def four_mounts(guest: Guest, host: Host) -> str:
     """The field of each mount reaches the listener as sent, with the azimuth the platform computes from it."""
     lines = []
@@ -687,12 +763,16 @@ def run(options: argparse.Namespace, adb: str, private: pathlib.Path, report: Re
             guest, compass, options.with_orientation, passes_argument(options)))
         if options.launch_only:
             return
+        if options.feed:
+            report.run("feed", lambda: feed(guest, host, options.feed))
+            return
         if not compass:
             report.run("an image without the sensor", lambda: older_wire(guest, host, options.with_orientation))
             return
         if report.run("first frame", lambda: first_frame(host, True, options.with_orientation)):
             report.run("idle demand", lambda: idle_demand(guest, host))
             if report.run("a listener registers", lambda: listener_registers(guest, host, options.probe_apk)):
+                report.run("the rotation vector", lambda: rotation_vector(guest, host))
                 report.run("the four mounts", lambda: four_mounts(guest, host))
                 report.run("north, east, south and west", lambda: compass_points(guest, host))
                 report.run("each accuracy", lambda: statuses(guest, host))
@@ -721,6 +801,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "required for --expect sensor unless --launch-only")
     parser.add_argument("--launch-only", action="store_true",
                         help="stop the guest once the launch's state is checked (the first thing to run on a new image)")
+    parser.add_argument("--feed", type=int, default=0, metavar="SECONDS",
+                        help="keep the guest up for this long as a host that sends a steady field, accelerometer and "
+                        "gyroscope while the frames ask, and print the adb serial, for a client from another shell; "
+                        "no probe needed")
     parser.add_argument("--adb", default="adb", help="adb client to use")
     parser.add_argument("--adb-port", type=int,
                         default=orient.slot_ports.slot_port(orient.slot_ports.ADB_OFFSET, orient.DEFAULT_ADB_PORT),
@@ -738,7 +822,10 @@ def main() -> int:
     if options.cpus <= 0 or options.boot_timeout <= 0:
         print("counts and timeouts must be positive", file=sys.stderr)
         return 2
-    if options.expect == "sensor" and not options.launch_only and (
+    if options.feed < 0:
+        print("--feed takes a positive number of seconds", file=sys.stderr)
+        return 2
+    if options.expect == "sensor" and not options.launch_only and not options.feed and (
             options.probe_apk is None or not options.probe_apk.is_file()):
         print("--expect sensor needs --probe-apk (tests/integration/android/motion/build-apk.sh)", file=sys.stderr)
         return 2

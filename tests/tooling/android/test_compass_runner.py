@@ -14,6 +14,7 @@ __import__("sys").dont_write_bytecode = True
 
 import importlib.util
 import math
+import re
 import socket
 import struct
 import subprocess
@@ -21,6 +22,7 @@ import sys
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 TESTS = Path(__file__).resolve().parents[2]
 SCRIPT = TESTS / "integration/android/run_android_compass.py"
@@ -53,12 +55,30 @@ Sensor List:
 \tcontinuous | minRate=1.00Hz | maxRate=50.00Hz | no batching | non-wakeUp |
 0x5f676172) Game Rotation Vector Sensor | AOSP            | ver: 3 | type: android.sensor.game_rotation_vector(15) | perm: n/a | flags: 0x00000000
 \tcontinuous | maxDelay=0us | maxRate=100.00Hz | no batching | non-wakeUp |
+0x5f726f74) Rotation Vector Sensor    | AOSP            | ver: 3 | type: android.sensor.rotation_vector(11) | perm: n/a | flags: 0x00000000
+\tcontinuous | maxDelay=0us | maxRate=100.00Hz | no batching | non-wakeUp |
+0x5f676d72) GeoMag Rotation Vector Sensor | AOSP            | ver: 3 | type: android.sensor.geomagnetic_rotation_vector(20) | perm: n/a | flags: 0x00000000
+\tcontinuous | maxDelay=0us | maxRate=100.00Hz | no batching | non-wakeUp |
 Active sensors:
 Socket Buffer size = 39 events
 """
-OLDER_DUMP = "\n".join(
-    line for line in SENSOR_DUMP.splitlines()
-    if "Magnetometer" not in line and "maxRate=50.00Hz" not in line) + "\n"
+
+
+def without(dump: str, *needles: str) -> str:
+    """The dump without the sensors (a line of the list and the line after it) whose first line has a needle."""
+    lines, kept, skip = dump.splitlines(), [], 0
+    for line in lines:
+        if skip:
+            skip -= 1
+        elif line.startswith("0x") and any(needle in line for needle in needles):
+            skip = 1
+        else:
+            kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
+# An older image, or this one without the argument: no magnetometer, and so no sensor made from it.
+OLDER_DUMP = without(SENSOR_DUMP, "Host Magnetometer", "(11)", "(20)")
 HELD_DUMP = SENSOR_DUMP.replace(
     "Active sensors:\n", "Active sensors:\nHost Magnetometer (handle=0x00000004, connections=1)\n")
 FEATURES = "feature:android.hardware.touchscreen\nfeature:android.hardware.sensor.compass\nfeature:reqGlEsVersion=0x30002\n"
@@ -196,6 +216,18 @@ class ParserTests(unittest.TestCase):
         for text in ("", "cat: files/compass.json: No such file or directory", "[1]", '{"mode":"events"}'):
             with self.assertRaises(ValueError, msg=text):
                 runner.parse_probe_report(text)
+
+    def test_the_declared_range_and_resolution_are_the_ones_the_runner_assumes(self) -> None:
+        header = (TESTS.parent / "android/lineage-24/overlay/sensors/motion_protocol.hpp").read_text()
+        declared = re.search(r"magnetometer_attributes\{\s*([\d.]+)f,\s*([\d.]+)f", header)
+        self.assertIsNotNone(declared)
+        self.assertEqual(float(declared[2]), runner.RESOLUTION)
+        # The service rounds each value to a quarter of the resolution: what the runner sends is on that grid
+        # and its tolerance is far under one step of it.
+        for value in (runner.HORIZONTAL, runner.VERTICAL):
+            self.assertEqual(value % runner.QUANTUM, 0.0)
+        self.assertLess(runner.VALUE_TOLERANCE, runner.QUANTUM / 10)
+        self.assertEqual(float(declared[1]) % runner.RESOLUTION, 0.0)
 
     def test_the_sensor_service_lists_the_magnetometer(self) -> None:
         state = runner.orient.parse_sensor_state(SENSOR_DUMP)
@@ -432,6 +464,7 @@ class LaunchStateTests(unittest.TestCase):
         self.assertIn("listed (type 2), continuous, non-wakeUp, 1 Hz to 50 Hz", note)
         self.assertIn("android.hardware.sensor.compass declared", note)
         self.assertIn("3 sensors, compass=1", note)
+        self.assertIn("rotation vector and geomagnetic rotation vector listed", note)
 
     def test_with_the_orientation_sensor_too_the_list_has_four(self) -> None:
         guest = self.sensor_guest(log=LOG_LINE % (1, 4, 1))
@@ -464,6 +497,13 @@ class LaunchStateTests(unittest.TestCase):
             ("the sensor is not 1 Hz to 50 Hz",
              self.sensor_guest(dump=SENSOR_DUMP.replace("maxRate=50.00Hz", "maxRate=100.00Hz")), True,
              "not listed at 1 Hz to 50 Hz"),
+            ("no rotation vector with the magnetometer", self.sensor_guest(dump=without(SENSOR_DUMP, "(11)")), True,
+             "no rotation vector with the magnetometer"),
+            ("no geomagnetic rotation vector with the magnetometer",
+             self.sensor_guest(dump=without(SENSOR_DUMP, "(20)")), True, "no geomagnetic rotation vector"),
+            ("a rotation vector without the magnetometer",
+             self.older_guest(dump=without(SENSOR_DUMP, "Host Magnetometer")), False,
+             "need a magnetometer without one"),
             ("the sensor is on-change", self.sensor_guest(dump=SENSOR_DUMP.replace(
                 "continuous | minRate=1.00Hz | maxRate=50.00Hz", "on-change | maxDelay=0us")), True,
              "not continuous and non-wake-up"),
@@ -484,6 +524,69 @@ class LaunchStateTests(unittest.TestCase):
         for label, guest, compass, message in cases:
             with self.subTest(label), self.assertRaisesRegex(runner.Failure, message):
                 runner.launch_state(guest, compass, False)
+
+
+class ReportGuest:
+    """A guest whose probe reports the rotation vector's azimuth, one value for each look."""
+
+    serial = "127.0.0.1:5586"
+
+    def __init__(self, azimuths: list[float | None], count: int = 40, cycle: bool = False) -> None:
+        self.azimuths, self.count, self.looks, self.cycle = list(azimuths), count, 0, cycle
+
+    def alive(self) -> None:
+        pass
+
+    def adb_run(self, *arguments: str, timeout: float = 0) -> subprocess.CompletedProcess:
+        value = self.azimuths[self.looks % len(self.azimuths) if self.cycle else min(self.looks, len(self.azimuths) - 1)]
+        self.looks += 1
+        report = ('{"mode":"compass","valid":true,"magnetometer":{"count":50},"rotation_vector":{"count":%d,'
+                  '"azimuth_deg":%s}}' % (self.count if value is not None else 0, "null" if value is None else value))
+        return subprocess.CompletedProcess(arguments, 0, stdout=report)
+
+
+class StreamingHost:
+    def __init__(self) -> None:
+        self.streams: list[tuple] = []
+
+    def stream(self, field, status: int = 3, gravity=None) -> None:
+        self.streams.append((field, status))
+
+
+class RotationVectorTests(unittest.TestCase):
+    def run_step(self, azimuths: list[float | None], seconds: float = 90, cycle: bool = False) -> str:
+        host = StreamingHost()
+        with mock.patch.object(runner.orient.time, "sleep"), mock.patch.object(runner, "ROTATION_SECONDS", seconds):
+            note = runner.rotation_vector(ReportGuest(azimuths, cycle=cycle), host)
+        self.assertEqual(host.streams, [(runner.field_at_heading(0.0), 3)])
+        return note
+
+    def test_a_vector_that_settles_passes(self) -> None:
+        self.assertIn("azimuth settled at 1.5", self.run_step([None, 40.0, 20.0, 5.0, 2.0, 1.4, 1.6, 1.5, 1.5, 1.5, 1.5]))
+
+    def test_a_settled_heading_far_from_the_field_is_noted_not_failed(self) -> None:
+        self.assertIn("the fusion's heading is its own", self.run_step([120.0] * 6))
+
+    def test_each_way_it_does_not_settle_or_never_comes(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "still moving"):
+            self.run_step([0.0, 10.0], seconds=0.3, cycle=True)
+        with self.assertRaisesRegex(runner.Failure, "no rotation vector event"):
+            self.run_step([None], seconds=0.3)
+
+    def test_the_azimuth_wraps_at_180_when_it_settles(self) -> None:
+        self.assertIn("settled", self.run_step([179.0, -179.0, 180.0, -180.0, 179.5, -179.5]))
+
+
+class FeedTests(unittest.TestCase):
+    def test_feed_streams_a_steady_field_for_the_time_asked(self) -> None:
+        host = StreamingHost()
+        host.connect = lambda: None
+        host.wait_frame = lambda seconds: object()
+        with mock.patch.object(runner.time, "sleep"), mock.patch.object(
+                runner.time, "monotonic", side_effect=[0.0, 0.0, 1.0, 2.5, 3.5, 5.0]):
+            note = runner.feed(ReportGuest([0.0]), host, 3)
+        self.assertIn("fed 3 s on 127.0.0.1:5586", note)
+        self.assertEqual(host.streams, [(runner.field_at_heading(0.0), 3)])
 
 
 if __name__ == "__main__":
