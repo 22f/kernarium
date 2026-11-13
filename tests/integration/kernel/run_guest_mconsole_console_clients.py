@@ -28,7 +28,9 @@ byte the rest of the image does not hold, and are killed outright, the way iOS
 ends a process that stops running. The one that was not asked to sync must lose
 the file (the control, which proves that the setup keeps it dirty and the
 image shows a loss); the one that asked ``sync`` first must have it in the
-image, and its reply must be a success. ``--request`` names another command
+image, and its reply must be a success. The same guest then follows the host's
+quiesce order (``sync``, ``trim once``, ``suspend``, ``wake``), runs on and
+syncs again. ``--request`` names another command
 for the second guest: a kernel without ``sync`` answers ``Unknown command``,
 and ``sysrq s`` is refused with SysRq off, so the guest loses the file the
 same way and the run says so.
@@ -239,6 +241,39 @@ def run_sysrq_off(emulator: pathlib.Path, rootfs: pathlib.Path, engine: str,
             raise RuntimeError("the guest did not power off")
 
 
+def background_edge(guest: Guest, directory: pathlib.Path, serial: int) -> None:
+    """The requests of the host's quiesce, in its order: sync, a trim, the
+    suspend (asked again while the guest answers busy) and the wake. The guest
+    must answer each, run on, and write back again afterwards."""
+    for command in ("sync", "trim once"):
+        error, text = exchange(guest, directory, serial, command)
+        serial += 1
+        if error:
+            raise RuntimeError(f"{command!r} ended with an error {text!r}")
+    for _ in range(40):
+        error, text = exchange(guest, directory, serial, "suspend")
+        serial += 1
+        if not error or not text.startswith("Suspend failed: -16"):
+            break
+        time.sleep(0.25)
+    if error or "suspended" not in text:
+        raise RuntimeError(f"'suspend' ended with {text!r}")
+    error, text = exchange(guest, directory, serial, "wake")
+    if error:
+        raise RuntimeError(f"'wake' ended with an error {text!r}")
+    guest.check_command("echo alive", 60, expected="alive")
+    require_status_prefix(guest, directory, serial + 1, "sync", "synced in ")
+    check_clean(guest)
+
+
+def require_status_prefix(guest: Guest, directory: pathlib.Path, serial: int,
+                          command: str, prefix: str) -> None:
+    error, text = exchange(guest, directory, serial, command)
+    if error or not text.startswith(prefix):
+        raise RuntimeError(f"{command!r} ended with "
+                           f"{'an error' if error else 'a success'} {text!r}")
+
+
 def dirty_then_kill(emulator: pathlib.Path, rootfs: pathlib.Path,
                     engine: str, private: pathlib.Path, label: str,
                     request: str | None) -> tuple[int, tuple[bool, str] | None]:
@@ -267,6 +302,8 @@ def dirty_then_kill(emulator: pathlib.Path, rootfs: pathlib.Path,
         if request is not None:
             try:
                 answer = exchange(guest, directory, 1, request)
+                if not answer[0]:
+                    background_edge(guest, directory, 2)
             except GuestGone as gone:
                 raise gone_report(guest, gone, 0) from None
         guest.terminate()
