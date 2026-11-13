@@ -279,6 +279,7 @@ SHOTS: list[Shot] = [
     feedback("feedback-boot-details", "feedback-boot-details", "The same sheet with the information block expanded: the Boot line says the step and time of the start."),
     feedback("feedback-boot-removed", "feedback-boot-removed", "The same sheet after the start log was taken out: no row, no total, and the sheet does not attach it again."),
     feedback("feedback-boot-largest-text", "feedback-boot", "The same sheet at the largest accessibility text size: the tip and the log row wrap and the sheet scrolls.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    feedback("feedback-boot-largest-text-end", "feedback-boot-end", "The same sheet at the largest accessibility text size, scrolled to the end of its content: the tip and the start log row above the bar.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL", wait=16.0),
     feedback("feedback-boot-finished", "feedback-boot-finished", "The sheet opened over the boot screen with a typed draft, after the start finished: it is still open, with the draft and the start log, over the running session, where the card now offers the bug report."),
     s("boot-jit", "Boot", "boot-jit", "The debugger preparing the JIT: the System image step says Preparing JIT."),
     s("boot-jit-fallback", "Boot", "boot-jit-fallback", "A boot that ran without the JIT it was asked for: a note under the steps says why."),
