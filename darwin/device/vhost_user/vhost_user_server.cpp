@@ -468,6 +468,24 @@ void VhostUserServer::resetDeviceState() noexcept
     heldCompletions_.clear();
 }
 
+/* The one reset a guest's suspend can cause without a word, and it loses
+ * what the guest holds: say so for the first few, and then each time the
+ * count doubles, so a guest that does it in a loop cannot flood the log. */
+void VhostUserServer::reportDisableReset(std::uint32_t ring) noexcept
+{
+    const auto count = ++disableResets_;
+    if (count > 4 && (count & (count - 1U)) != 0)
+        return;
+    std::fprintf(
+        stderr,
+        "%s: ring %u disabled with %zu deferred request(s) pending: "
+        "resetting the device (reset %u)\n",
+        device_->name(),
+        ring,
+        pendingRequests_.size(),
+        count);
+}
+
 bool VhostUserServer::requestsAreHeld() const noexcept
 {
     if (pendingRequests_.empty() || !device_->keepsDeferredRequestsWhileDisabled())
@@ -1854,6 +1872,7 @@ void VhostUserServer::handleMessage(
          * reset only by a message that changes what they refer to. */
         if (state.value == 0 && !pendingRequests_.empty() &&
             !device_->keepsDeferredRequestsWhileDisabled()) {
+            reportDisableReset(state.index);
             resetDeviceState();
         }
         queues_[state.index].enabled = state.value != 0;

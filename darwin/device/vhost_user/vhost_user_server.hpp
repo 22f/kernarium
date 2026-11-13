@@ -105,6 +105,9 @@ private:
 
     void resetConnection() noexcept;
     void resetDeviceState() noexcept;
+    /* Says on stderr that a ring disable is resetting the device under
+     * deferred requests. */
+    void reportDisableReset(std::uint32_t ring) noexcept;
     /* Whether the device holds deferred requests across a ring disable that
      * has happened: it opts in, a request is pending and a configured ring is
      * disabled. */
@@ -203,6 +206,8 @@ private:
     std::uint64_t negotiatedFeatures_ {};
     std::uint64_t negotiatedProtocolFeatures_ {};
     bool featuresConfigured_ {};
+    /* How many ring disables reset the device under deferred requests. */
+    unsigned disableResets_ {};
     bool stopShutsDownConnection_ {};
     /* The device has a config change pending that it would not claim at the
      * last attempt, or that the last claim left partly pending (the GPU's

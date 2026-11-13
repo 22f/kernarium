@@ -518,6 +518,44 @@ private:
     std::vector<Pipe> retired_;
 };
 
+/* What the process writes to stderr while `run` runs. */
+[[nodiscard]] std::string captureStderr(const std::function<void()>& run)
+{
+    std::fflush(stderr);
+    std::FILE* file = std::tmpfile();
+    require(file != nullptr);
+    const int saved = ::dup(STDERR_FILENO);
+    require(saved >= 0 && ::dup2(::fileno(file), STDERR_FILENO) >= 0);
+    const auto restore = [&] {
+        std::fflush(stderr);
+        require(::dup2(saved, STDERR_FILENO) >= 0);
+        ::close(saved);
+    };
+    try {
+        run();
+    } catch (...) {
+        restore();
+        std::fclose(file);
+        throw;
+    }
+    restore();
+    std::rewind(file);
+    std::string text;
+    std::array<char, 256> chunk {};
+    while (const auto count = std::fread(chunk.data(), 1, chunk.size(), file))
+        text.append(chunk.data(), count);
+    std::fclose(file);
+    return text;
+}
+
+[[nodiscard]] std::size_t countLines(const std::string& text, const std::string& needle)
+{
+    std::size_t lines = 0;
+    for (auto at = text.find(needle); at != std::string::npos; at = text.find(needle, at + 1))
+        ++lines;
+    return lines;
+}
+
 /* The front end's end of the backend channel: it reads each request the
  * server sends there and acknowledges it, once the acknowledgements are not
  * held back, and counts the requests by kind. */
@@ -1033,9 +1071,12 @@ void deviceThatDoesNotOptInIsResetAtTheDisable()
         require(recorder->held() == 1);
         const auto resets = recorder->resets();
 
-        requests.enable(socket, false);
+        const auto said = captureStderr([&] { requests.enable(socket, false); });
         require(recorder->resets() == resets + 1, "the disable did not reset a device that holds a request");
         require(recorder->held() == 0);
+        require(said == "holding: ring 0 disabled with 1 deferred request(s) pending: "
+                        "resetting the device (reset 1)\n",
+                "the reset at the disable was not reported as expected: " + said);
 
         requests.postRequest(2);
         requests.writeKickPipe();
@@ -1044,10 +1085,42 @@ void deviceThatDoesNotOptInIsResetAtTheDisable()
                 "a request on a disabled ring was kept");
         require(recorder->runs(requestQueue) == 1);
 
-        // With nothing held, a disable resets nothing further.
-        events.enable(socket, false);
+        // With nothing held, a disable resets nothing further, and says nothing.
+        const auto quiet = captureStderr([&] { events.enable(socket, false); });
         require(recorder->resets() == resets + 1);
+        require(quiet.empty(), "a disable that reset nothing was reported: " + quiet);
     });
+}
+
+/* A guest that suspends over and over with a request held, to a device that
+ * does not keep it, is told of the first few resets and then of each one whose
+ * count doubles. */
+void theResetAtADisableIsReportedLessOften()
+{
+    auto device = std::make_unique<HoldingDevice>(HoldingDevice::Options {false, false});
+    auto* recorder = device.get();
+    VhostUserServer server {std::move(device)};
+    std::string said;
+    for (unsigned suspend = 1; suspend <= 8; ++suspend) {
+        SplitRing ring;
+        TestQueue requests {ring, requestQueue, requestLayout};
+        TestQueue events {ring, eventQueue, eventLayout};
+        withServerConnection(server, [&](int socket) {
+            negotiateProtocolFeatures(socket, negotiated);
+            configureMemory(socket, ring.descriptor());
+            requests.start(socket, true, true);
+            events.start(socket, true, true);
+            requests.postRequest(1);
+            requests.writeKickPipe();
+            awaitCondition([&] { return recorder->held() == 1; });
+            said += captureStderr([&] { requests.enable(socket, false); });
+        });
+    }
+    const auto lines = countLines(said, "resetting the device");
+    require(lines == 5, "the resets were reported " + std::to_string(lines) + " times, not 5: " + said);
+    require(said.find("(reset 4)") != std::string::npos && said.find("(reset 5)") == std::string::npos &&
+                said.find("(reset 8)") != std::string::npos,
+            "the reports are not the first four and the eighth: " + said);
 }
 
 /* A teardown's GET_FEATURES that arrives while the server waits for the
@@ -1159,6 +1232,7 @@ int main(int argc, char** argv)
         }
     }
     cases.push_back({"no-opt-in", deviceThatDoesNotOptInIsResetAtTheDisable});
+    cases.push_back({"reset-report-rate", theResetAtADisableIsReportedLessOften});
     cases.push_back({"features-in-a-map-wait", getFeaturesInsideAMapWaitIsAnsweredAfterIt});
     try {
         for (const auto& test : cases) {
