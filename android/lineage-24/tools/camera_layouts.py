@@ -37,7 +37,6 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
-import functools
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -141,10 +140,8 @@ def _name(tier: str, flash: bool, manual: bool, raw: bool, concurrent: bool, fro
     return "-".join(parts)
 
 
-@functools.cache
-def _layouts() -> tuple[Layout, ...]:
-    """Every layout, built once: the fallback chains and the verifier look layouts up by name
-    hundreds of thousands of times, and the set never changes (a Layout is frozen)."""
+def all_layouts() -> list[Layout]:
+    """Every layout, in the order of the table: none, the front camera alone, back and front."""
     layouts = [
         Layout("none", "none", ""),
         Layout("front", "front", ""),
@@ -157,21 +154,11 @@ def _layouts() -> tuple[Layout, ...]:
                     for concurrent in (False, True):
                         layouts.append(Layout(_name(tier, flash, manual, raw, concurrent, front2160),
                                               "back+front", tier, flash, manual, raw, concurrent, front2160))
-    return tuple(layouts)
-
-
-@functools.cache
-def _layouts_by_name() -> dict[str, Layout]:
-    return {layout.name: layout for layout in _layouts()}
-
-
-def all_layouts() -> list[Layout]:
-    """Every layout, in the order of the table: none, the front camera alone, back and front."""
-    return list(_layouts())
+    return layouts
 
 
 def by_name() -> dict[str, Layout]:
-    return dict(_layouts_by_name())
+    return {layout.name: layout for layout in all_layouts()}
 
 
 def _drops(layout: Layout) -> list[Layout]:
@@ -195,10 +182,10 @@ def _drops(layout: Layout) -> list[Layout]:
         if current.manual:
             current = _rename(current, manual=False, raw=False)
             steps.append(current)
-        steps.append(_layouts_by_name()["front"])
+        steps.append(by_name()["front"])
     elif layout.name == "front-manual":
-        steps.append(_layouts_by_name()["front"])
-    steps.append(_layouts_by_name()["none"])
+        steps.append(by_name()["front"])
+    steps.append(by_name()["none"])
     return steps
 
 
@@ -210,13 +197,13 @@ def _rename(layout: Layout, **changes) -> Layout:
         fields["front2160"] = False
     if not fields["manual"]:
         fields["raw"] = False
-    return _layouts_by_name()[_name(fields["tier"], fields["flash"], fields["manual"], fields["raw"],
-                                    fields["concurrent"], fields["front2160"])]
+    return by_name()[_name(fields["tier"], fields["flash"], fields["manual"], fields["raw"],
+                           fields["concurrent"], fields["front2160"])]
 
 
 def fallback_chain(name: str) -> list[str]:
     """The layout and then, in order, each layout it falls back to when the image lacks it."""
-    layout = _layouts_by_name()[name]
+    layout = by_name()[name]
     return [layout.name] + [step.name for step in _drops(layout)]
 
 
