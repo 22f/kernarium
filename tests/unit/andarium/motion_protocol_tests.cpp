@@ -422,4 +422,11 @@ int main(int argc, char** argv)
     require(attributes.max_range >= 900.0f && attributes.resolution > 0 && attributes.resolution <= 0.6f);
     require(attributes.min_delay_us == 20'000 && attributes.min_delay_us <= 100'000);
     require(attributes.max_delay_us == 1'000'000 && attributes.power_ma > 0);
+    // The sensor service rewrites a range that is not a multiple of the resolution and rounds every value to a
+    // quarter of it, so both must be exact in a float: a power of two, and the range a whole number of steps.
+    const float step = attributes.resolution;
+    int exponent = 0;
+    require(std::frexp(step, &exponent) == 0.5f);
+    require(std::fmod(attributes.max_range, step) == 0.0f);
+    require(std::fmod(25.0f, step / 4) == 0.0f && std::fmod(40.0f, step / 4) == 0.0f);
 }

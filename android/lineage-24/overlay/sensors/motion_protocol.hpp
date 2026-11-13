@@ -220,12 +220,16 @@ inline ControlFrame control_frame(
 }
 
 // What the sensor service is told about the magnetometer. Core Motion states
-// neither the range nor the resolution of the field it fuses, so these are the
-// figures of the 16-bit magnetometers of the class a phone carries (4912 uT in
-// each direction, 0.15 uT per count), which meet the compatibility definition
-// (section 7.3.2: at least 900 uT, at most 0.6 uT, at least 10 Hz). The delays
-// are the ones a frame brings a period into; the power is not measured, like
-// the other host sensors'.
+// neither the range nor the resolution of the field it fuses, so these are
+// declarations, figures within the compatibility definition (section 7.3.2: a
+// range of at least 900 uT, a resolution of at most 0.6 uT, a rate of at least
+// 10 Hz); whether the hardware behind Core Motion meets its other requirements
+// is Apple's and unmeasured. The resolution is a power of two, 1/8 uT, so that
+// the range (4912 uT, 39296 steps) is an exact multiple of it, which the
+// sensor service checks, and the grid it rounds every value to (a quarter of
+// the resolution) is exactly representable. The delays are the ones a frame
+// brings a period into; the power is not measured, like the other host
+// sensors'.
 struct SensorAttributes {
     float max_range;
     float resolution;
@@ -234,5 +238,5 @@ struct SensorAttributes {
     int32_t max_delay_us;
 };
 constexpr SensorAttributes magnetometer_attributes{
-    4912.0f, 0.15f, 0.5f, int32_t(minimum_magnetometer_period_ns / 1000), int32_t(maximum_period_ns / 1000)};
+    4912.0f, 0.125f, 0.5f, int32_t(minimum_magnetometer_period_ns / 1000), int32_t(maximum_period_ns / 1000)};
 } // namespace andarium::motion
