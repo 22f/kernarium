@@ -47,7 +47,7 @@ struct SideKeysOverlay: View {
     /// The tip's popover is up: while the closed keys are on screen and the
     /// tip wants to show.
     @State private var tipShown = false
-    @Environment(AppModel.self) private var model
+    @Environment(AppModel.self) private var model: AppModel?
 
     /// A sheet the application keeps over the screens is up (Send feedback,
     /// opened from the boot screen's notice): the tip waits, because a popover
@@ -55,7 +55,7 @@ struct SideKeysOverlay: View {
     /// away.
     private var sheetOverScreens: Bool {
         #if FEEDBACK_MAIL
-        model.feedbackFromBoot
+        model?.feedbackFromBoot ?? false
         #else
         false
         #endif
