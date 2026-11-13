@@ -43,6 +43,9 @@ struct GuestRamUsage final {
 	/* The part of it the host holds now: everything the guest has committed
 	 * and not released, and the kernel image, which is never released. */
 	std::uint64_t held_bytes{};
+	/* The pages the host could not wire when it committed them, since the
+	 * guest began (memory/guest_ram_commitment.hpp). */
+	std::uint64_t wire_failures{};
 };
 
 /* The guest's RAM and the part of it the host holds, or nothing before the

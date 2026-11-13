@@ -12,6 +12,7 @@
 namespace uml::runtime {
 class HibernationSteps;
 enum class GuestShutdownKind : int;
+enum class TrimOutcome : std::uint8_t;
 }
 
 namespace uml::emulator::testing {
@@ -92,6 +93,12 @@ struct NativeKernelWindow final {
  * run it does nothing. */
 void report_guest_shutdown(::uml::runtime::GuestShutdownKind kind,
 	const char *command) noexcept;
+
+/* The guest page-cache trim the memory pressure response asks of `emulator`:
+ * what the response's own thread would call when the system reports memory
+ * pressure. A test variant never listens to the system. */
+[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure(
+	uml_emulator *emulator) noexcept;
 
 /* Replaces the steps a hibernation takes, and what a failed restore does, on
  * `emulator`; the quiesce and resume calls then run the same ordering over

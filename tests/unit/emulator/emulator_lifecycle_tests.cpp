@@ -12,6 +12,7 @@
 #include "guest_console_test_support.hpp"
 #include "guest_hibernation.hpp"
 #include "kernel_threads.hpp"
+#include "memory_pressure_response.hpp"
 #include "require.hpp"
 #include "testing.hpp"
 #include "thread_nap.hpp"
@@ -234,6 +235,34 @@ void aRunningGuestIsAskedAtOnce(uml_emulator *emulator,
 	}).empty());
 }
 
+/* The memory pressure response's trim reaches a running guest as the
+ * host's own does, and wakes nothing the host has put to sleep. */
+void theMemoryPressureTrimAsksARunningGuest(uml_emulator *emulator,
+	FakeGuestConsole &console)
+{
+	using ::uml::runtime::TrimOutcome;
+	require(console.requests(1U, [emulator] {
+		require(uml::emulator::testing::trim_for_memory_pressure(emulator) ==
+			TrimOutcome::done);
+	}) == Requests {"trim once"});
+}
+
+void aQuiescedGuestIsNotWokenForThePressureTrim(uml_emulator *emulator,
+	FakeGuestConsole &console)
+{
+	using ::uml::runtime::TrimOutcome;
+	require(console.requests(2U, [emulator] {
+		require(uml_emulator_quiesce(emulator) == 0);
+	}) == Requests {"trim once", "suspend"});
+	require(console.requests(0U, [emulator] {
+		require(uml::emulator::testing::trim_for_memory_pressure(emulator) ==
+			TrimOutcome::skipped);
+	}).empty());
+	require(console.requests(1U, [emulator] {
+		uml_emulator_resume(emulator);
+	}) == Requests {"wake"});
+}
+
 void withoutAConsoleNothingWaits(uml_emulator *emulator)
 {
 	require(uml_emulator_set_page_cache_trimming(emulator, 1) ==
@@ -247,6 +276,8 @@ void withoutAConsoleNothingWaits(uml_emulator *emulator)
 		-UML_EMULATOR_INVALID_ARGUMENT);
 	require(uml_emulator_trim_page_cache(nullptr) ==
 		-UML_EMULATOR_INVALID_ARGUMENT);
+	require(uml::emulator::testing::trim_for_memory_pressure(emulator) ==
+		::uml::runtime::TrimOutcome::skipped);
 	require(uml_emulator_quiesce_resident(nullptr) ==
 		-UML_EMULATOR_INVALID_ARGUMENT);
 }
@@ -1068,6 +1099,12 @@ void aLifecycleCallInProgressIsNotWaitedFor(const std::string &held)
 	const auto started = std::chrono::steady_clock::now();
 	const int result = uml_emulator_get_guest_memory(emulator.get(), &memory);
 	const auto waited = std::chrono::steady_clock::now() - started;
+	/* The pressure response's trim is not waited for either, and sends
+	 * nothing. */
+	const auto trimStarted = std::chrono::steady_clock::now();
+	const auto pressureTrim =
+		uml::emulator::testing::trim_for_memory_pressure(emulator.get());
+	const auto trimWaited = std::chrono::steady_clock::now() - trimStarted;
 	{
 		const std::lock_guard lock {mutex};
 		released = true;
@@ -1078,6 +1115,9 @@ void aLifecycleCallInProgressIsNotWaitedFor(const std::string &held)
 		"a request ran beside a quiesce");
 	require(waited < std::chrono::seconds {2},
 		"a request waited for a quiesce");
+	require(pressureTrim == ::uml::runtime::TrimOutcome::skipped &&
+		trimWaited < std::chrono::seconds {2},
+		"the pressure trim ran beside a quiesce");
 	require(heard == Requests {"trim once", "suspend"},
 		"a request reached the guest beside a quiesce");
 	require(console.requests(1U, [&] { uml_emulator_resume(emulator.get()); })
@@ -1160,6 +1200,8 @@ int main(int argc, char **argv)
 	quiesceTrimsBeforeItSuspends(emulator.get(), console);
 	aQuiescedGuestHearsOnlyTheResume(emulator.get(), console);
 	aRunningGuestIsAskedAtOnce(emulator.get(), console);
+	theMemoryPressureTrimAsksARunningGuest(emulator.get(), console);
+	aQuiescedGuestIsNotWokenForThePressureTrim(emulator.get(), console);
 	theGuestsMemoryIsRead(emulator.get(), console);
 	anAnswerThatIsNotTheFiguresIsNoReading(emulator.get(), console);
 	aHibernatedGuestIsWholeBeforeItIsWoken();

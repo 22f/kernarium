@@ -83,8 +83,19 @@ and releases what it frees (`darwin_uml_physmem_commit`/`_release`,
 footprint. Physical iOS also wires a page while it is committed; the one window
 with a held page unwired is a [hibernation](#hibernation). The kernel trims its
 page cache only at the host's request (`uml_emulator_trim_page_cache()`, every
-quiesce). The host GPU's memory is not carved out of the guest's RAM, and the
-host provides no Virtio balloon device.
+quiesce, and the system's memory warning below). The host GPU's memory is not
+carved out of the guest's RAM, and the host provides no Virtio balloon device.
+
+**Memory pressure.** When the system's memory pressure source reports a warning
+or a critical level (UIKit's memory warning is the same event), the runtime
+frees the host GPU's cached driver allocations and trims the guest's page cache
+once, which unwires those pages (`runtime/memory_pressure_response.hpp`); the
+normal level does nothing, and a guest the host has quiesced is not woken for
+it. A warning starts at most one response per 30 s, a critical level always
+starts one, and none starts while one runs. macOS and iOS, and both applications,
+get it through the runtime. Each level change and each response is one rate
+limited stderr line with the footprint, the bytes each part released, the
+trim's duration and the count of guest RAM pages the host could not wire.
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application

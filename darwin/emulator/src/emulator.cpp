@@ -10,6 +10,7 @@
 #include "guest_hibernation.hpp"
 #include "guest_statistics.hpp"
 #include "kernel_signal_scope.hpp"
+#include "memory_pressure_response.hpp"
 #include "native_kernel_layout.hpp"
 #include "session_record.hpp"
 #include "stall_watch.hpp"
@@ -534,6 +535,10 @@ public:
 		/* Declared after the recorder, so that it ends first and records an
 		 * event in progress before the session ends. */
 		std::unique_ptr<::uml::runtime::StallWatch> stall_watch;
+		/* Ends before the watch: its trim reaches this handle. A test variant
+		 * never listens to the system, whose real events would reach the
+		 * guest consoles the tests count. */
+		std::unique_ptr<::uml::runtime::MemoryPressureWatch> memory_pressure;
 #if UML_EMULATOR_TESTING
 		if (const auto entry = test_kernel_entry(kernel_view_);
 		    entry != nullptr) {
@@ -564,6 +569,10 @@ public:
 				prepared.session_record_path, arguments);
 			run_end_recorder.emplace(*this);
 			stall_watch = ::uml::runtime::start_stall_watch();
+#if !UML_EMULATOR_TESTING
+			memory_pressure = ::uml::runtime::start_memory_pressure_response(
+				&Emulator::trim_for_memory_pressure_of, this);
+#endif
 		}
 		const auto result = uml_elf_run(kernel_view_.data(),
 			kernel_view_.size(), native_layout.load_bias,
@@ -666,6 +675,36 @@ public:
 		::uml::runtime::note_host_wake();
 		return guest_request_result(
 			::uml::device::trim_guest_page_cache(guest_trim_wait_ms));
+	}
+
+	/* The guest's page-cache trim for the memory pressure response, which
+	 * runs when the system says it is short of memory. A lifecycle call in
+	 * progress is not waited for: a quiesce trims the guest itself, and a
+	 * guest it holds suspended is not woken for a trim. */
+	[[nodiscard]] ::uml::runtime::TrimOutcome trim_for_memory_pressure()
+		noexcept
+	{
+		std::unique_lock lock{guest_lifecycle_mutex_, std::try_to_lock};
+		if (!lock.owns_lock() ||
+			guest_suspension_ != ::uml::device::GuestSuspension::none)
+			return ::uml::runtime::TrimOutcome::skipped;
+		::uml::runtime::note_host_wake();
+		switch (::uml::device::trim_guest_page_cache(guest_trim_wait_ms)) {
+		case ::uml::device::GuestRequest::done:
+			return ::uml::runtime::TrimOutcome::done;
+		case ::uml::device::GuestRequest::unanswered:
+			return ::uml::runtime::TrimOutcome::unanswered;
+		case ::uml::device::GuestRequest::unreachable:
+		case ::uml::device::GuestRequest::refused:
+			break;
+		}
+		return ::uml::runtime::TrimOutcome::skipped;
+	}
+
+	static ::uml::runtime::TrimOutcome trim_for_memory_pressure_of(
+		void *emulator) noexcept
+	{
+		return static_cast<Emulator *>(emulator)->trim_for_memory_pressure();
 	}
 
 	/* The figures of this handle's running guest: its route is the one
@@ -1163,6 +1202,12 @@ void use_hibernation(uml_emulator *emulator,
 bool kernel_image_borrowed(const uml_emulator *emulator) noexcept
 {
 	return emulator->implementation.kernel_image_borrowed();
+}
+
+::uml::runtime::TrimOutcome trim_for_memory_pressure(
+	uml_emulator *emulator) noexcept
+{
+	return emulator->implementation.trim_for_memory_pressure();
 }
 
 } // namespace uml::emulator::testing

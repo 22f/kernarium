@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Check the host's response to the system's memory pressure with a guest
+running.
+
+A Linux guest reads enough files to fill its page cache. The runner then
+raises the levels the system's memory pressure source reports through an
+injector inserted into the launcher (a real event needs a privileged tool):
+
+- a warning frees the host GPU's caches and trims the guest's page cache once,
+  and the launcher says so on stderr with the footprint before and after, the
+  bytes each part released, the trim's duration and the guest RAM wire
+  failures; the guest's page cache is smaller afterwards;
+- a second warning inside the interval does nothing;
+- a critical level trims again at once;
+- the way back to the normal level is one line and no action.
+
+The contract is docs/architecture.md (memory and executable code) and
+runtime/memory_pressure_response.hpp.
+"""
+
+from __future__ import annotations
+# Standalone runners must not leave source-adjacent bytecode caches.
+__import__("sys").dont_write_bytecode = True
+
+import argparse
+import os
+import pathlib
+import re
+import shutil
+import sys
+import tempfile
+import time
+
+
+REPOSITORY = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPOSITORY / "tests" / "integration" / "support"))
+
+from guest import Guest  # noqa: E402
+
+
+GUEST_MEMORY = "1G"
+# The least the guest's page cache must grow by to make the trim worth seeing.
+MINIMUM_FILL_KIB = 64 * 1024
+# What a response must release from the guest and from the page cache.
+MINIMUM_RELEASE_MIB = 16
+# A response is written within this long of its level, and a quiet period
+# (a response that must not come) lasts this long.
+RESPONSE_SECONDS = 60
+QUIET_SECONDS = 3
+
+RESPONSE = re.compile(
+    r"uml: memory pressure (?P<level>warn|critical): footprint "
+    r"(?P<before>\d+) -> (?P<after>\d+) MiB; released "
+    r"(?P<graphics>\d+) (?P<graphics_unit>MiB|KiB) graphics "
+    r"\((?P<cached>\d+) cached allocations\), "
+    r"(?P<guest>\d+) (?P<guest_unit>MiB|KiB) guest RAM "
+    r"\(page cache trim (?P<trim>done|unanswered|not sent), "
+    r"(?P<milliseconds>\d+) ms\); (?P<wires>\d+) guest RAM wire failures"
+)
+CHANGE = re.compile(
+    r"uml: memory pressure (?P<level>normal|warn|critical) "
+    r"\(was (?P<was>normal|warn|critical)\): footprint (?P<footprint>\d+) MiB, "
+    r"(?P<wires>\d+) guest RAM wire failures"
+)
+
+
+class Injector:
+    """The directory the runner and the injector inside the launcher talk
+    through."""
+
+    def __init__(self, directory: pathlib.Path) -> None:
+        self.directory = directory
+        self.count = 0
+
+    def raise_level(self, level: str, timeout: float = 60) -> None:
+        self.count += 1
+        label = f"{level}-{self.count}"
+        pending = self.directory / "request.tmp"
+        pending.write_text(f"{level} {label}\n")
+        pending.rename(self.directory / "request")
+        result = self.directory / (label + ".done")
+        deadline = time.monotonic() + timeout
+        while not result.exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"the injector did not answer {label}")
+            time.sleep(0.05)
+        answer = result.read_text().split()
+        if answer[:1] != ["ok"] or int(answer[1]) == 0:
+            raise RuntimeError(
+                f"the injector could not raise {label}: {answer}")
+        print(f"{level}: raised on {answer[1]} sources")
+
+
+def mebibytes(value: str, unit: str) -> float:
+    return int(value) / (1024.0 if unit == "KiB" else 1.0)
+
+
+def responses(guest: Guest) -> list[re.Match[str]]:
+    return list(RESPONSE.finditer(guest.host_output()))
+
+
+def changes(guest: Guest) -> list[re.Match[str]]:
+    return list(CHANGE.finditer(guest.host_output()))
+
+
+def settle(guest: Guest, seconds: int) -> None:
+    """Lets `seconds` pass in the guest. The runner reads the launcher's own
+    output only while it reads the console."""
+    guest.check_command(f"sleep {seconds}", seconds + 30)
+
+
+def wait_for(guest: Guest, what: str, condition, timeout: float):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        guest.check_command("true", 30)
+        found = condition()
+        if found:
+            return found
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"{what} within {timeout:.0f} s; the launcher wrote:\n"
+        f"{guest.host_output()}"
+    )
+
+
+def cached_kib(guest: Guest) -> int:
+    text = guest.check_command("awk '/^Cached:/ {print $2}' /proc/meminfo")
+    return int(text.strip())
+
+
+def fill_page_cache(guest: Guest) -> int:
+    """Reads files until the page cache has grown by enough; returns what it
+    holds."""
+    before = cached_kib(guest)
+    guest.check_command(
+        "find /usr /lib /opt -xdev -type f -size +32k 2>/dev/null "
+        "| head -n 6000 | xargs cat > /dev/null 2>&1; true",
+        300,
+    )
+    after = cached_kib(guest)
+    if after - before < MINIMUM_FILL_KIB:
+        raise RuntimeError(
+            f"reading files grew the guest's page cache by only "
+            f"{(after - before) // 1024} MiB ({before} -> {after} KiB)"
+        )
+    return after
+
+
+def run(arguments: argparse.Namespace) -> None:
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="uml-mp-"))
+    environment = dict(os.environ)
+    environment["DYLD_INSERT_LIBRARIES"] = str(arguments.injector_library)
+    environment["UML_MEMORY_PRESSURE_INJECTOR_DIRECTORY"] = str(directory)
+    guest = Guest(
+        arguments.emulator,
+        arguments.rootfs,
+        GUEST_MEMORY,
+        "tmpfs",
+        ("ncpus=2",),
+        overlay_shell=True,
+        environment=environment,
+        separate_host_output=True,
+    )
+    try:
+        guest.boot_to_shell(300)
+        injector = Injector(directory)
+        filled = fill_page_cache(guest)
+        print(f"the guest's page cache holds {filled // 1024} MiB")
+
+        # A warning: the GPU's caches (none without a GPU) and one trim.
+        injector.raise_level("warn")
+        first = wait_for(
+            guest, "no response to the warning",
+            lambda: responses(guest), RESPONSE_SECONDS)[0]
+        if first["level"] != "warn" or first["trim"] != "done":
+            raise RuntimeError(f"the warning's response: {first.group(0)}")
+        released = mebibytes(first["guest"], first["guest_unit"])
+        if released < MINIMUM_RELEASE_MIB:
+            raise RuntimeError(
+                f"the trim released {released} MiB of guest RAM: "
+                f"{first.group(0)}")
+        after = cached_kib(guest)
+        if filled - after < MINIMUM_RELEASE_MIB * 1024:
+            raise RuntimeError(
+                f"the guest's page cache fell from {filled // 1024} to "
+                f"{after // 1024} MiB")
+        print(f"warn: {first.group(0)}")
+        print(f"the guest's page cache holds {after // 1024} MiB after it")
+        change = changes(guest)
+        if not change or change[0]["level"] != "warn" or change[0]["was"] != "normal":
+            raise RuntimeError(f"no line for the change to warn: {change}")
+
+        # A second warning inside the interval does nothing.
+        injector.raise_level("warn")
+        settle(guest, QUIET_SECONDS)
+        if len(responses(guest)) != 1:
+            raise RuntimeError(
+                "a second warning inside the interval was answered:\n"
+                + guest.host_output())
+
+        # A critical level always acts.
+        injector.raise_level("critical")
+        second = wait_for(
+            guest, "no response to the critical level",
+            lambda: len(responses(guest)) >= 2 and responses(guest)[1],
+            RESPONSE_SECONDS)
+        if second["level"] != "critical" or second["trim"] != "done":
+            raise RuntimeError(f"the critical response: {second.group(0)}")
+        print(f"critical: {second.group(0)}")
+
+        # The way back is one line and no action.
+        injector.raise_level("normal")
+        wait_for(
+            guest, "no line for the way back to normal",
+            lambda: any(c["level"] == "normal" for c in changes(guest)),
+            RESPONSE_SECONDS)
+        settle(guest, QUIET_SECONDS)
+        if len(responses(guest)) != 2:
+            raise RuntimeError(
+                "the normal level was answered:\n" + guest.host_output())
+        lines = [line for line in guest.host_output().splitlines()
+                 if "uml: memory pressure" in line]
+        if len(lines) != 5:
+            raise RuntimeError(
+                "expected a line for each of the three changes and the two "
+                "responses:\n" + "\n".join(lines))
+        if not guest.shutdown(60) or guest.return_code != 0:
+            raise RuntimeError(
+                f"the power-off did not end the process with 0: "
+                f"{guest.return_code}")
+    finally:
+        guest.close()
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--emulator", required=True, type=pathlib.Path)
+    parser.add_argument("--rootfs", required=True, type=pathlib.Path)
+    parser.add_argument("--injector-library", required=True, type=pathlib.Path)
+    arguments = parser.parse_args()
+    for name in ("emulator", "rootfs", "injector_library"):
+        if not getattr(arguments, name).is_file():
+            parser.error(f"--{name.replace('_', '-')} is not a file")
+    run(arguments)
+    print("ok: a warning and a critical level trim the page cache, a second "
+          "warning does not, and the lines say so")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
