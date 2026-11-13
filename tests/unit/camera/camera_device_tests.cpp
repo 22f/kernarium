@@ -8,6 +8,7 @@
 
 #include "camera_controls.hpp"
 #include "camera_device.hpp"
+#include "camera_layout.hpp"
 #include "in_process_service.hpp"
 #include "jpeg_gap.hpp"
 #include "nv12_transform.hpp"
@@ -1412,6 +1413,52 @@ void testCalibrationRawIsACourtesy()
     require((rig.result(raw).base.flags & errorFlag) != 0 && rig.result(raw).base.timestamp == 9, "and the RAW buffer fails alone");
 }
 
+/* A host that cannot take a Bayer still (the Apple session refuses the RAW request when the photo output lists no
+ * Bayer format) never learns a lens's colour data, so nothing RAW is published for it: the camera has no RAW flag, no
+ * Bayer order, size or levels, its stills capability lists JPEG only, and the layout the guest's image is chosen by
+ * has no `-raw`. The guest's half (no RAW capability, no RAW16 configuration) is pinned in andarium-camera-plan. */
+void testAHostThatCannotTakeABayerStillPublishesNoRaw()
+{
+    auto store = std::make_shared<CalibrationStore>();
+    {
+        RigOptions options;
+        options.store = store;
+        Rig learner(options);
+        learner.camera->refuseRaw(true);
+        learner.create(1, 0, stillKind);
+        require(Rig::type(learner.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        learner.attach(1, 1, learner.params(1).plane_formats[0].plane_size);
+        const auto still = learner.queue(1, 1, 555);
+        learner.camera->pump(0, 0);
+        learner.step();
+        require(learner.done(still) && learner.result(still).base.flags == 0, "the person's photo is delivered");
+        require(!store->load(learner.camera->hostModel(), CalibrationStore::lensKey(learner.camera->cameras()[0])),
+                "and nothing was learned");
+    }
+    RigOptions options;
+    options.store = store;
+    Rig rig(options);
+    const auto cameras = rig.device->cameras();
+    require(!cameras.empty(), "the host has cameras");
+    for (const auto& camera : cameras) {
+        const auto& wire = camera.wire;
+        require(!camera.raw() && (wire.flags & VIRTIO_VIDEO_CAMERA_F_RAW) == 0, "no RAW feature");
+        require(wire.bayer_order == VIRTIO_VIDEO_CAMERA_BAYER_NONE && wire.raw_width == 0 && wire.raw_height == 0 &&
+                    wire.black_level == 0 && wire.white_level == 0 && wire.reference_illuminant1 == 0 && wire.reference_illuminant2 == 0,
+                "no Bayer order, RAW size, levels or illuminants");
+        for (const auto value : wire.color_matrix1_q16) require(value == 0, "no colour matrix");
+        const auto stills = rig.send(virtio_video_camera_query_formats {{VIRTIO_VIDEO_CMD_CAMERA_QUERY_FORMATS, 0}, camera.index, stillKind});
+        const auto head = load<virtio_video_query_capability_resp>(stills.response);
+        require(head.num_descs == 1 &&
+                    load<virtio_video_format_desc>(stills.response, sizeof(virtio_video_query_capability_resp)).format ==
+                        VIRTIO_VIDEO_FORMAT_CAMERA_JPEG,
+                "the stills capability lists JPEG alone, no RAW16");
+    }
+    const auto layout = layoutDimensionsOf(cameras, CameraTier::small);
+    require(!layout.raw && layoutName(layout).find("raw") == std::string::npos, "the layout has no RAW feature");
+    require(layoutName(layout) == "bf-small-flash-manual", "the tablet runs the layout without it");
+}
+
 /* The guest asked for a JPEG of one size: a platform picture of another size
  * fails its buffer, and the next still, of the right size, is delivered. */
 void testAStillOfAnotherSizeFails()
@@ -2222,6 +2269,7 @@ int main()
     testFrontCameraChoice();
     testCamerasJoin();
     testCalibrationRawIsACourtesy();
+    testAHostThatCannotTakeABayerStillPublishesNoRaw();
     testAStillOfAnotherSizeFails();
     testInterruptionEndsWithTheSession();
     testSystemPressure();

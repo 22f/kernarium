@@ -138,7 +138,11 @@ application's statements (the sensor orientation, the rotation that
   lens), with the size of the anchor it was learned in; the next guest sees RAW,
   and a lens learned in another format is learned again. A guest keeps seeing what it saw at start. The
   Bayer part is a courtesy: when the platform refuses it or it fails, the JPEG
-  of the same capture is delivered.
+  of the same capture is delivered. A host that cannot take a Bayer still
+  therefore never learns a lens, and publishes no RAW anywhere: no RAW flag,
+  Bayer order, size or levels, no RAW16 in the stills capability, and a layout
+  without `-raw`, so the guest has no RAW capability and no RAW16
+  configuration (`camera-device`, `andarium-camera-plan`).
 - **Controls** belong to the camera, whichever stream carries the command, and a
   set applies every value or none. The table is `camera_controls.cpp`; the
   platform sees one `CameraSettings` per camera.
