@@ -548,18 +548,33 @@ shared-memory map or unmap, a configuration change, a call), that
 `GET_FEATURES` is answered after the wait and behind every message already
 queued, rather than inside it, since a reset sends unmaps of its own; so a
 device with a shared-memory region may keep its requests too. The wait ends with
-the acknowledgement, the end of the backend-request channel, or a service stop;
-it has no deadline of its own, and a front-end that never answers leaves the
-reset waiting. A reset whose unmap is refused or whose channel has ended also
-drops every range the backend published from the host index. That
-`GET_FEATURES` also retires every ring still disabled, which the guest then
-frees: the transport reads it no more until its next `SET_VRING_KICK` or
-in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
+the acknowledgement, the end of the backend-request channel, the end of the main
+socket, which aborts the operation before it writes anything the acknowledgement
+would have released, even while the acknowledgement is being received, or a
+service stop. Once a reply the front-end waits for depends on the wait, because
+a query or a request that asks for an acknowledgement is queued behind it or
+because the connection has ended and a reset's unmaps are all that is left, the
+wait has a budget of ten seconds (`backendAcknowledgementBound`). Its own polls
+spend it, each at most the interval it asked for plus 25 ms, not the clock: an
+interval in which the whole process could not run, as for an application the
+system suspended, costs one poll. An awake front-end that stays silent gets ten
+seconds of charged poll time; real time is longer by the work between polls and
+by an overrun beyond a poll's cap. A frame received during such a wait, from
+either socket, has the same time from its first byte, within the wait's budget
+when it has one; ordinary request reception is not timed. Past that the wait
+fails, says so on stderr, and closes the backend-request channel: nothing a late
+acknowledgement would release is written, the reset or the connection ends
+without the unmaps it can no longer wait for, and the guest's driver drops the
+device. A wait that nothing waits behind, such as a notification a suspended
+guest has not yet read, has no budget. A reset whose unmap is refused or whose
+channel has ended also drops every range the backend published from the host
+index. That `GET_FEATURES` also retires every ring still disabled, which the
+guest then frees: the transport reads it no more until its next `SET_VRING_KICK`
+or in-band `VRING_KICK`, whereas an enabled ring, and a disabled one no teardown
 followed, stay read and are refused when their available flags are reserved. A
-write to the control or backend-request socket that fails because the
-front-end closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the
-connection without a failure report; a write to a queue's call descriptor that
-fails still reports. A
+write to the control or backend-request socket that fails because the front-end
+closed its end (`EPIPE`, `ECONNRESET`, `ENOTCONN`) ends the connection without a
+failure report; a write to a queue's call descriptor that fails still reports. A
 `VRING_KICK` is accepted whatever the state of the rings: a kick on a disabled
 ring is handled as that ring's buffers are, and a kick that asks for no
 acknowledgement gets none.

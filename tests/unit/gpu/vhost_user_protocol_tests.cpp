@@ -765,6 +765,10 @@ void rejectedSharedMemoryActionClosesBackendChannel()
 
         replyToBackend(backendClient, backendMessage.header, 1);
         waitForConnectionClose(backendClient);
+        // The server closes the channel before it completes the rejected
+        // action, so the close does not order the callback's state: the reset's
+        // own reply, which follows its cleanup, does.
+        readAcknowledgement(socket, protocol::VhostRequest::resetOwner);
         require(observed->completedAction() == 77);
         require(!observed->actionSucceeded());
     });

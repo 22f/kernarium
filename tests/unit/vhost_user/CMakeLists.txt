@@ -19,6 +19,18 @@ uml_add_unit_test(NAME vhost-user-held-requests
     COMMAND uml_vhost_user_held_requests_tests
     LABELS vhost-user)
 
+# The server's wait for a backend request's acknowledgement, on the transport
+# built with a clock the test moves.
+add_executable(uml_vhost_user_backend_wait_tests backend_wait_tests.cpp)
+target_include_directories(uml_vhost_user_backend_wait_tests BEFORE PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/unit/gpu
+    ${PROJECT_SOURCE_DIR}/darwin/device/gpu)
+target_link_libraries(uml_vhost_user_backend_wait_tests PRIVATE
+    uml_vhost_user_wait_test_variant)
+uml_add_unit_test(NAME vhost-user-backend-wait
+    COMMAND uml_vhost_user_backend_wait_tests
+    LABELS vhost-user)
+
 # The in-process service around a device that posts work from its own thread:
 # the transport blocks while it is idle, and every kind of work reaches the
 # guest through the device's event descriptor alone.

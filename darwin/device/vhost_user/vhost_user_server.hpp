@@ -10,6 +10,7 @@
 #include "../../memory/shared_backing.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -20,6 +21,27 @@
 #include <vector>
 
 namespace uml::gpu {
+
+/* The time the server waits for the front-end to acknowledge a backend
+ * request once a reply the front-end itself waits for depends on that: a
+ * query, or a request that asks for an acknowledgement, which the server
+ * answers only after the backend request is, or the end of the connection,
+ * when nothing else will. A front-end blocked on such a reply drains the
+ * backend channel meanwhile and answers within microseconds, so this is far
+ * beyond what an answer takes, and it is below one 15 second window of the
+ * GPU's fence timer (DeferredFences::maximumFenceWait), which the thread that
+ * waits here cannot run meanwhile.
+ *
+ * The wait's own polls spend it, each charged at most the interval it asked
+ * for plus a small slack (WaitBudget), not the clock: an interval in which the
+ * whole process could not run costs one poll. An awake front-end that stays
+ * silent therefore gets this much charged poll time; real time is longer by
+ * the work between polls and by an overrun beyond a poll's cap. Only the
+ * frames received during such a wait are timed, from their first byte, and an
+ * armed wait's budget covers them too; ordinary
+ * request reception is not. A wait that nothing waits behind, such as an
+ * acknowledgement a suspended guest has not yet sent, has no budget. */
+inline constexpr std::chrono::seconds backendAcknowledgementBound {10};
 
 class VhostUserServer {
 public:
@@ -173,10 +195,24 @@ private:
      * it awaits without reading the backend channel; other requests are
      * deferred, as is a GET_FEATURES that retires held requests or follows
      * a message already deferred. Throws unless the reply acknowledges
-     * `request` with a zero status. */
+     * `request` with a zero status. It also throws when the front-end closes
+     * the main socket, even while the acknowledgement is being received and
+     * before anything it would have released is done, and, once a reply the
+     * front-end waits for depends on the wait (frontendWaitsForReply()), when
+     * the budget (backendAcknowledgementBound) is spent without the
+     * acknowledgement. A throw other than a stop closes the backend channel:
+     * the request is unanswered, so no later reply on the channel can be paired
+     * with it or may complete anything. */
     void awaitBackendAcknowledgement(
         const protocol::VhostHeader& request,
         const char* channel);
+    void waitForBackendAcknowledgement(
+        const protocol::VhostHeader& request,
+        const char* channel);
+    /* Whether the front-end is blocked on a reply the server has yet to send,
+     * or has no connection left for the server to wait on: a message being
+     * handled or deferred that asks for a reply, a teardown. */
+    [[nodiscard]] bool frontendWaitsForReply() const noexcept;
     void handleDeferredFrontendMessages(int socket);
     void serveConnection(
         int connection,
@@ -223,6 +259,14 @@ private:
     int frontendDescriptor_ {-1};
     /* Front-end requests read during a backend wait, in arrival order. */
     std::deque<VhostUserMessage> deferredFrontendMessages_;
+
+    /* A front-end request being handled, and whether its reply is still owed,
+     * innermost last: a wait inside the handling of it blocks the front-end. */
+    struct HandledMessage {
+        bool replyOwed {};
+        HandledMessage* outer {};
+    };
+    HandledMessage* handling_ {};
 };
 
 } // namespace uml::gpu
