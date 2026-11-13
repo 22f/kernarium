@@ -57,7 +57,10 @@ application that must:
     texts are the String Catalog table Feedback, which the build compiles in
     with the feature and no other: a product without it has no Feedback
     strings table, found by the file name whatever it holds, and a product
-    with it has the table in Japanese and both Chinese; and
+    with it has the table in Japanese and both Chinese. The What's New
+    notes are the one exception: the entry about Send feedback is bundled
+    in every product and hidden by one without it, so the strings of that
+    entry, and no other string of the notes' table, may stay; and
   - carry Follow developer on X (Andarium/README.md#follow-developer-on-x)
     only when the build names a handle, by the same rule: compiled in exactly
     where the ignored local configuration holds a handle and the ignored
@@ -90,6 +93,7 @@ from __future__ import annotations
 __import__("sys").dont_write_bytecode = True
 
 import argparse
+import json
 import os
 import plistlib
 import re
@@ -155,6 +159,14 @@ FEEDBACK_FRAGMENTS = (
     b"SendFeedback", b"MFMailCompose", b"PhotosUI.framework", *FEEDBACK_REQUIRED)
 # Words the feature puts in a String Catalog.
 FEEDBACK_WORDS = ("Send feedback", "Andarium feedback")
+# The What's New notes (Shared/WhatsNew.json, bundled whole in every build) have
+# an entry about Send feedback, marked with the feature it is about. A build
+# without the feature hides the entry at run time (WhatsNewFeature in
+# AndariumCore), so its strings stay in that table, which a String Catalog
+# compiles whole, and are the one place the words may remain.
+NOTES_FILE = "WhatsNew.json"
+NOTES_TABLE = "WhatsNew"
+NOTES_FEATURE = "sendFeedback"
 # The feature's own table (Localization/Feedback.xcstrings), which a String
 # Catalog compiles to Feedback.strings, and to Feedback.stringsdict for a plural,
 # in each language's directory; and the languages that table has besides English.
@@ -695,18 +707,46 @@ def info_source_problems(app: Path, source: Path) -> list[str]:
     return found
 
 
+def hidden_notes(app: Path) -> frozenset[str]:
+    """The strings (title, text and points) of the entries of the bundled What's
+    New notes that are about Send feedback, which the notes' table holds under
+    their English text. Empty if the notes are missing or unreadable, so
+    nothing is then exempt."""
+    try:
+        releases = json.loads((app / NOTES_FILE).read_text(encoding="utf-8"))
+        entries = [entry for release in releases for entry in release["entries"]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+    found: set[str] = set()
+    for entry in entries:
+        requirement = entry.get("requirement") if isinstance(entry, dict) else None
+        if not isinstance(requirement, dict) or requirement.get("feature") != NOTES_FEATURE:
+            continue
+        points = entry.get("points")
+        for note in (entry.get("title"), entry.get("text"), *(points if isinstance(points, list) else ())):
+            if isinstance(note, str):
+                found.add(note)
+    return frozenset(found)
+
+
 def feedback_strings(app: Path) -> list[str]:
-    """The String Catalog tables of the application that mention Send feedback."""
+    """The String Catalog tables of the application that mention Send feedback,
+    leaving out the strings of the notes' entry about it (`hidden_notes`) and
+    nothing else of the notes' table."""
     found = []
+    hidden = hidden_notes(app)
     for path in sorted(app.glob("*.lproj/*.strings")):
         try:
             with path.open("rb") as handle:
                 table = plistlib.load(handle)
         except (OSError, plistlib.InvalidFileException, ValueError):
             continue
-        if isinstance(table, dict) and any(
-                word in text for key, value in table.items() for text in (str(key), str(value))
-                for word in FEEDBACK_WORDS):
+        if not isinstance(table, dict):
+            continue
+        if path.stem == NOTES_TABLE:
+            table = {key: value for key, value in table.items() if str(key) not in hidden}
+        if any(word in text for key, value in table.items() for text in (str(key), str(value))
+               for word in FEEDBACK_WORDS):
             found.append(str(path.relative_to(app)))
     return found
 
