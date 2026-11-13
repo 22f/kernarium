@@ -16,6 +16,7 @@
 #include "KernariumMemoryPressure.hpp"
 #include "KernariumLocation.hpp"
 #include "KernariumRestartLoop.hpp"
+#include "KernariumSettle.hpp"
 #include "KernariumStatistics.hpp"
 #if KERNARIUM_AUTOMATION_HARNESS
 #include "KernariumHarness.hpp"
@@ -176,6 +177,10 @@ std::atomic_bool runtimeActive;
  * kernarium::console::InputRegistry.
  */
 std::mutex emulatorLifecycleMutex;
+/* The emulator that runs, for a sync, which must not wait for the mutex above.
+ * Process lifetime, like the callers it serves: a sync still pinned while the
+ * process exits must not unpin a destroyed mutex. */
+kernarium::settle::Gate& emulatorGate = *new kernarium::settle::Gate;
 /* A held key repeats, so an ordinary key sends the guest one wake edge a second
  * at most. */
 kernarium::input::KeyWakePolicy keyWakePolicy {std::chrono::seconds(1)};
@@ -809,12 +814,17 @@ class ActiveEmulatorRegistration final {
 public:
     explicit ActiveEmulatorRegistration(uml_emulator* emulator)
     {
-        std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
-        activeEmulator = emulator;
+        {
+            std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
+            activeEmulator = emulator;
+        }
+        emulatorGate.open(emulator);
     }
 
     ~ActiveEmulatorRegistration()
     {
+        /* Waits for a sync that is still using the handle. */
+        emulatorGate.close();
         std::scoped_lock lock(emulatorLifecycleMutex, activeEmulatorMutex);
         activeEmulator = nullptr;
     }
@@ -2684,13 +2694,18 @@ void runtimeRequestStop(void)
  * so the guest's writable images have to reach stable storage while the app is
  * still scheduled. This flushes what the guest has already handed to the host;
  * pages still dirty inside the guest are written back by the guest itself.
+ *
+ * A sync does not take the lifecycle mutex, which a quiesce or a resume holds
+ * for seconds: it pins the handle, and the library bounds how long it waits for
+ * its own lifecycle lock, so the call's promise holds whoever else is in the
+ * runtime.
  */
-int runtimeSync(void)
+int runtimeSync(kernarium_runtime_settle* settle)
 {
-    std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr)
-        return 0;
-    return uml_emulator_sync(activeEmulator);
+    return kernarium::settle::sync(emulatorGate, settle,
+        [](uml_emulator* emulator, uml_emulator_settle* report) {
+            return uml_emulator_sync(emulator, report);
+        });
 }
 
 /*
@@ -2699,30 +2714,33 @@ int runtimeSync(void)
  * just written back. Freezing it as well means the disk it leaves behind is
  * the disk that was flushed.
  */
-int quiesceGuest(bool resident)
+int quiesceGuest(bool resident, kernarium_runtime_settle* settle)
 {
+    if (!kernarium::settle::usable(settle))
+        return -EINVAL;
     /* A guest that restarts between the quiesce and the resume waits for the
      * resume before it boots: the library's quiesce of an idle handle only
      * flushes, and a guest booted behind it would run while the application
      * is away. */
     lifecycle.quiesce();
     std::lock_guard lock(emulatorLifecycleMutex);
-    if (activeEmulator == nullptr)
-        return 0;
-    return resident ? uml_emulator_quiesce_resident(activeEmulator)
-                    : uml_emulator_quiesce(activeEmulator);
+    return kernarium::settle::run(settle, activeEmulator,
+        [resident](uml_emulator* emulator, uml_emulator_settle* report) {
+            return resident ? uml_emulator_quiesce_resident(emulator, report)
+                            : uml_emulator_quiesce(emulator, report);
+        });
 }
 
-int runtimeQuiesce(void)
+int runtimeQuiesce(kernarium_runtime_settle* settle)
 {
-    return quiesceGuest(false);
+    return quiesceGuest(false, settle);
 }
 
 /* The quiesce that keeps the guest's RAM in the process, for a host short of
  * the space a hibernation image takes. */
-int runtimeQuiesceResident(void)
+int runtimeQuiesceResident(kernarium_runtime_settle* settle)
 {
-    return quiesceGuest(true);
+    return quiesceGuest(true, settle);
 }
 
 void runtimeResume(void)

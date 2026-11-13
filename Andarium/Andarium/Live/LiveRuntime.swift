@@ -2,6 +2,7 @@
 
 import AndariumCore
 import Foundation
+import GuestHostCore
 import Observation
 import UIKit
 
@@ -1682,9 +1683,9 @@ final class LivePauseEffects: PauseEffects {
     func suspendGuestResident(reason: String, finished: @escaping @MainActor () -> Void) {
         let assertion = PauseTaskAssertion(named: "guest-sync")
         queue.async {
-            let unflushed = kernarium_runtime_loader_quiesce_resident()
+            let settle = GuestSettle.quiesceResident()
             Task { @MainActor in
-                print("Andarium: guest storage settled on \(reason), RAM kept (\(unflushed) unflushed)")
+                print("Andarium: " + settle.logLine(reason: reason, kept: "RAM kept"))
                 assertion.end()
                 finished()
             }
@@ -1705,14 +1706,10 @@ final class LivePauseEffects: PauseEffects {
         let assertion = PauseTaskAssertion(named: "guest-sync")
         let finished = DispatchSemaphore(value: 0)
         queue.async {
-            let unflushed = quiesce ? kernarium_runtime_loader_quiesce() : kernarium_runtime_loader_sync()
+            let settle = quiesce ? GuestSettle.quiesce() : GuestSettle.sync()
             finished.signal()
             Task { @MainActor in
-                if unflushed > 0 {
-                    print("Andarium: \(reason) sync left \(unflushed) guest file(s) unflushed")
-                } else if unflushed == 0 {
-                    print("Andarium: guest storage settled on \(reason)")
-                }
+                print("Andarium: " + settle.logLine(reason: reason))
                 assertion.end()
             }
         }

@@ -421,6 +421,16 @@ it. The bridge fields used below are defined by the comments in
   fit Darwin's 104-byte `sun_path` is refused, never truncated.
 - The console's `mem` replies `total=<n> available=<n> free=<n>` in decimal
   bytes, so it answers where a policy keeps the console from `/proc/meminfo`.
+- The console's `sync` writes every file system and block device back, as
+  `sync(2)` does, and replies `synced in <n> ms` only once that has returned,
+  whatever the SysRq mask is; `sysrq s` only starts a writeback and is refused
+  with the mask off. It runs on a work item of its own, so a sync that has to
+  wait (the host holds a block device while its disk is full) sends no reply
+  and holds up no other request in the console's dispatcher, though a request
+  that needs the same I/O still waits for it; the host bounds its wait. The
+  reply says the pass returned, not that no I/O error occurred. A suspend syncs
+  only while the guest's `sync_on_suspend` is set, so this reply alone confirms
+  a guest's storage (`guest-mconsole-console-clients`).
 - A command that answers with what the kernel prints (`sysrq`, `stack`)
   sends its client what the consoles write while it runs, whichever vCPU
   writes it, and nothing after its final reply. The final reply names the

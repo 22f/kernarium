@@ -19,6 +19,24 @@ exchanges. A second guest boots with SysRq off, as Android's init leaves it,
 and every exchange must end with the error ``sysrq s disabled`` and run
 nothing.
 
+``sync`` is the command the host asks for to have the guest write its storage
+back, and it needs no SysRq: it runs sync(2) in the guest's process context
+and replies ``synced in N ms`` only after the call returned. Two guests boot
+with SysRq off and an ext4 disk whose write-back is held off (no periodic
+write-back, a day's expiry, a journal commit every hour), write a file of a
+byte the rest of the image does not hold, and are killed outright, the way iOS
+ends a process that stops running. The one that was not asked to sync must lose
+the file (the control, which proves that the setup keeps it dirty and the
+image shows a loss); the one that asked ``sync`` first must have it in the
+image right after the reply, before anything else is asked (a suspend syncs
+only while the guest's sync_on_suspend is set, so only the reply may have put
+it there), and its reply must be a success. The same guest then follows the
+host's quiesce order (``sync``, ``trim once``, ``suspend``, ``wake``), runs on and
+syncs again. ``--request`` names another command
+for the second guest: a kernel without ``sync`` answers ``Unknown command``,
+and ``sysrq s`` is refused with SysRq off, so the guest loses the file the
+same way and the run says so.
+
 The contract is the management-console paragraph of kernel/common/README.md.
 """
 
@@ -49,6 +67,23 @@ EXCHANGES = 10000
 DISABLED_EXCHANGES = 50
 EXCHANGE_SECONDS = 30.0
 REPLY_SECONDS = 20.0
+DISK_BYTES = 64 << 20
+PAYLOAD_BYTES = 4 << 20
+# The payload's byte; the rest of a freshly formatted image holds hardly any.
+PAYLOAD_BYTE = 0xA5
+# Held off until the host asks: no periodic write-back, an expiry of a day,
+# a journal commit every hour, and ext4's delayed allocation keeps the data
+# dirty in the page cache.
+DIRTY_SETUP = (
+    "mkfs.ext4 -q -F /dev/ubdb && mkdir -p /mnt/disk && "
+    "mount -t ext4 -o commit=3600 /dev/ubdb /mnt/disk && "
+    "echo 0 > /proc/sys/vm/dirty_writeback_centisecs && "
+    "echo 8640000 > /proc/sys/vm/dirty_expire_centisecs && sync"
+)
+WRITE_PAYLOAD = (
+    f"head -c {PAYLOAD_BYTES} /dev/zero | tr '\\000' '\\{PAYLOAD_BYTE:03o}' "
+    "> /mnt/disk/payload && cat /proc/meminfo | grep ^Dirty"
+)
 MCONSOLE_MAGIC = 0xCAFEBABE
 MCONSOLE_VERSION = 2
 MCONSOLE_DATA = 512
@@ -208,11 +243,147 @@ def run_sysrq_off(emulator: pathlib.Path, rootfs: pathlib.Path, engine: str,
             raise RuntimeError("the guest did not power off")
 
 
+def background_edge(guest: Guest, directory: pathlib.Path, serial: int) -> None:
+    """The requests of the host's quiesce, in its order: sync, a trim, the
+    suspend (asked again while the guest answers busy) and the wake. The guest
+    must answer each, run on, and write back again afterwards."""
+    for command in ("sync", "trim once"):
+        error, text = exchange(guest, directory, serial, command)
+        serial += 1
+        if error:
+            raise RuntimeError(f"{command!r} ended with an error {text!r}")
+    for _ in range(40):
+        error, text = exchange(guest, directory, serial, "suspend")
+        serial += 1
+        if not error or not text.startswith("Suspend failed: -16"):
+            break
+        time.sleep(0.25)
+    if error or "suspended" not in text:
+        raise RuntimeError(f"'suspend' ended with {text!r}")
+    error, text = exchange(guest, directory, serial, "wake")
+    if error:
+        raise RuntimeError(f"'wake' ended with an error {text!r}")
+    guest.check_command("echo alive", 60, expected="alive")
+    require_status_prefix(guest, directory, serial + 1, "sync", "synced in ")
+    check_clean(guest)
+
+
+def require_status_prefix(guest: Guest, directory: pathlib.Path, serial: int,
+                          command: str, prefix: str) -> None:
+    error, text = exchange(guest, directory, serial, command)
+    if error or not text.startswith(prefix):
+        raise RuntimeError(f"{command!r} ended with "
+                           f"{'an error' if error else 'a success'} {text!r}")
+
+
+def payload_bytes(image: pathlib.Path) -> int:
+    """How many of the image's bytes are the payload's byte."""
+    return image.read_bytes().count(bytes([PAYLOAD_BYTE]))
+
+
+def dirty_then_kill(emulator: pathlib.Path, rootfs: pathlib.Path,
+                    engine: str, private: pathlib.Path, label: str,
+                    request: str | None
+                    ) -> tuple[int, tuple[bool, str] | None, int]:
+    """Boots a guest with SysRq off and an ext4 disk, dirties a file that
+    only the guest's page cache holds, asks `request` if there is one, and
+    kills the emulator outright. Returns how many of the image's bytes are the
+    payload's byte after the kill, the reply to the request, and how many were
+    right after that reply, before the host's quiesce order (a suspend syncs
+    only while the guest's sync_on_suspend is set, so only the reply may be
+    what put the payload in the image)."""
+    image = private / f"disk-{label}.img"
+    with open(image, "wb") as handle:
+        handle.truncate(DISK_BYTES)
+    answer = None
+    at_reply = 0
+    with Guest(emulator, rootfs, "1G", "tmpfs",
+               ("ncpus=2", f"ubd1={image}", "sysctl.kernel.sysrq=0"),
+               init_shell=True, engine=engine) as guest:
+        guest.boot_to_shell(180)
+        directory = private / f"uml-kern{guest.process_id}"
+        guest.check_command("cat /proc/sys/kernel/sysrq", 30, expected="0")
+        # Recorded, not required: a suspend syncs only while this is set, so
+        # only the console's sync confirms the storage.
+        print(f"{label}: /sys/power/sync_on_suspend:",
+              guest.check_command("cat /sys/power/sync_on_suspend", 30).strip())
+        guest.check_command(DIRTY_SETUP, 60)
+        output = guest.check_command(WRITE_PAYLOAD, 60)
+        dirty = re.search(r"Dirty:\s+(\d+) kB", output)
+        if dirty is None or int(dirty[1]) < PAYLOAD_BYTES // 1024 // 2:
+            raise RuntimeError(
+                f"{label}: the payload is not dirty in the guest: {output!r}"
+            )
+        # Nothing of it reached the image yet, or the control proves nothing.
+        if request is not None:
+            try:
+                answer = exchange(guest, directory, 1, request)
+                at_reply = payload_bytes(image)
+                if not answer[0]:
+                    background_edge(guest, directory, 2)
+            except GuestGone as gone:
+                raise gone_report(guest, gone, 0) from None
+        guest.terminate()
+        if not guest.wait_for_exit(30):
+            raise RuntimeError(f"{label}: the emulator survived SIGKILL")
+    return payload_bytes(image), answer, at_reply
+
+
+def run_sync_reaches_the_image(emulator: pathlib.Path, rootfs: pathlib.Path,
+                               engine: str, private: pathlib.Path,
+                               request: str) -> None:
+    """The control loses the dirty file at a hard kill; the guest that was
+    asked to write back first has it in the image."""
+    lost, _, _ = dirty_then_kill(emulator, rootfs, engine, private, "control",
+                                 None)
+    if lost >= PAYLOAD_BYTES // 4:
+        raise RuntimeError(
+            f"the control reached the image without a request ({lost} "
+            f"payload bytes of {PAYLOAD_BYTES}): the setup does not hold the "
+            "file back, and the check below proves nothing"
+        )
+    kept, answer, at_reply = dirty_then_kill(emulator, rootfs, engine,
+                                             private, "request", request)
+    assert answer is not None
+    refused, text = answer
+    if refused:
+        raise RuntimeError(
+            f"{request!r} was refused with {text!r}, and after a hard kill "
+            f"the image holds {kept} of the payload's {PAYLOAD_BYTES} bytes "
+            f"(the control held {lost}): the guest's writeback was not "
+            "confirmed and its data was lost"
+        )
+    if request == "sync" and not re.fullmatch(r"synced in \d+ ms", text):
+        raise RuntimeError(f"sync replied {text!r}, not 'synced in N ms'")
+    if request == "sync" and at_reply < PAYLOAD_BYTES:
+        raise RuntimeError(
+            f"sync replied {text!r}, and the image held only {at_reply} of "
+            f"the payload's {PAYLOAD_BYTES} bytes right after the reply "
+            f"(the control held {lost}): the reply confirms a writeback that "
+            "had not reached the host, and the quiesce order that follows "
+            "would have hidden it"
+        )
+    if kept < PAYLOAD_BYTES:
+        raise RuntimeError(
+            f"{request!r} replied {text!r}, and after a hard kill the image "
+            f"holds {kept} of the payload's {PAYLOAD_BYTES} bytes (the "
+            f"control held {lost})"
+        )
+    print(f"{request!r} replied {text!r}; the image held {at_reply} payload "
+          f"bytes right after the reply and {kept} after a hard kill, of "
+          f"{PAYLOAD_BYTES}, the control {lost}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--emulator", required=True, type=pathlib.Path)
     parser.add_argument("--rootfs", required=True, type=pathlib.Path)
     parser.add_argument("--engine", choices=("jit", "gadgets"), default="jit")
+    parser.add_argument("--only-sync", action="store_true",
+                        help="run only the kill-after-request scenario")
+    parser.add_argument("--request", default="sync",
+                        help="the command that must reach the image (default "
+                        "sync); only sync passes on every kernel that has it")
     arguments = parser.parse_args()
 
     # Short, so the management console's directory fits sun_path inside it.
@@ -220,9 +391,13 @@ def main() -> int:
     os.environ["TMPDIR"] = str(private)
     tempfile.tempdir = str(private)
     try:
-        for scenario in (run, run_sysrq_off):
+        for scenario in () if arguments.only_sync else (run, run_sysrq_off):
             scenario(arguments.emulator.resolve(), arguments.rootfs.resolve(),
                      arguments.engine, private)
+        run_sync_reaches_the_image(arguments.emulator.resolve(),
+                                   arguments.rootfs.resolve(),
+                                   arguments.engine, private,
+                                   arguments.request)
     finally:
         shutil.rmtree(private, ignore_errors=True)
     return 0

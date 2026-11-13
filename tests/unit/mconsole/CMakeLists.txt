@@ -32,8 +32,21 @@ uml_add_unit_test(NAME guest-console-run
 uml_add_unit_test(NAME guest-console-wake
     COMMAND uml_guest_console_tests wake
     LABELS console)
+# A writeback is the console's sync, confirmed by its reply; a kernel without
+# the command is asked for SysRq 's', which only starts one.
 uml_add_unit_test(NAME guest-console-writeback
     COMMAND uml_guest_console_tests writeback
+    LABELS console)
+uml_add_unit_test(NAME guest-console-writeback-timeout
+    COMMAND uml_guest_console_tests writeback-timeout
+    LABELS console)
+# Only the whole reply "synced in <n> ms" confirms, and one budget covers the
+# console's lock, every part of a reply, the fallback and its settling period.
+uml_add_unit_test(NAME guest-console-writeback-strict
+    COMMAND uml_guest_console_tests writeback-strict
+    LABELS console)
+uml_add_unit_test(NAME guest-console-writeback-budget
+    COMMAND uml_guest_console_tests writeback-budget
     LABELS console)
 uml_add_unit_test(NAME guest-console-trim
     COMMAND uml_guest_console_tests trim

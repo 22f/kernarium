@@ -8,7 +8,7 @@ import Testing
 /// Every file the application keeps of a session, and everything a bug report
 /// copies of them, has a size it cannot pass whatever the session did.
 ///
-/// The runtime's record is at most 17920 bytes (`session_record_max_bytes`);
+/// The runtime's record is at most 18176 bytes (`session_record_max_bytes`);
 /// the application keeps two of them (the current and the previous), a bug
 /// report copies each once, adds the stalls and the network counts in words,
 /// the guest's counters and at most 30 MetricKit reports of at most 1 MiB.
@@ -27,7 +27,7 @@ struct SessionRecordBoundsTests {
     @Test func aRecordLongerThanTheRuntimeWritesIsNeitherReadNorCopiedWhole() throws {
         let directory = try scratch()
         defer { try? FileManager.default.removeItem(at: directory) }
-        // A header that parses, then far more than 17920 bytes.
+        // A header that parses, then far more than 18176 bytes.
         let text = try StallRecordTests.record(stalls: StallRecordTests.golden())
             + String(repeating: "x", count: 4 << 20)
         try write(text, BugReportAttachments.sessionRecord, in: directory)

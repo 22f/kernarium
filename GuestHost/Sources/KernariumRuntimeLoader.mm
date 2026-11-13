@@ -506,22 +506,37 @@ extern "C" void kernarium_runtime_loader_request_stop(void)
         runtime->request_stop();
 }
 
-extern "C" int kernarium_runtime_loader_sync(void)
+/* With no runtime loaded there is no guest, so nothing to settle: a report that
+ * fits says NO_GUEST, and one that does not is refused as the runtime refuses
+ * it. */
+static int noRuntime(kernarium_runtime_settle* settle)
 {
-    const kernarium_runtime_api* runtime = api();
-    return runtime == nullptr ? -1 : runtime->sync();
+    if (settle != nullptr) {
+        if (settle->struct_size < sizeof(*settle))
+            return -EINVAL;
+        settle->reserved = 0U;
+        settle->guest_storage = KERNARIUM_RUNTIME_GUEST_STORAGE_NO_GUEST;
+        settle->guest_suspension = KERNARIUM_RUNTIME_GUEST_SUSPENSION_NOT_ASKED;
+    }
+    return -1;
 }
 
-extern "C" int kernarium_runtime_loader_quiesce(void)
+extern "C" int kernarium_runtime_loader_sync(kernarium_runtime_settle* settle)
 {
     const kernarium_runtime_api* runtime = api();
-    return runtime == nullptr ? -1 : runtime->quiesce();
+    return runtime == nullptr ? noRuntime(settle) : runtime->sync(settle);
 }
 
-extern "C" int kernarium_runtime_loader_quiesce_resident(void)
+extern "C" int kernarium_runtime_loader_quiesce(kernarium_runtime_settle* settle)
 {
     const kernarium_runtime_api* runtime = api();
-    return runtime == nullptr ? -1 : runtime->quiesce_resident();
+    return runtime == nullptr ? noRuntime(settle) : runtime->quiesce(settle);
+}
+
+extern "C" int kernarium_runtime_loader_quiesce_resident(kernarium_runtime_settle* settle)
+{
+    const kernarium_runtime_api* runtime = api();
+    return runtime == nullptr ? noRuntime(settle) : runtime->quiesce_resident(settle);
 }
 
 extern "C" void kernarium_runtime_loader_resume(void)

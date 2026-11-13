@@ -134,8 +134,9 @@ uml_add_unit_test(NAME kernarium-memory-pressure
 
 # What the application's loader does with the reports: delivery on the main queue
 # in order, one queued block per report that a replaced handler does not cancel,
-# a report forwarded after exit() has destroyed ordinary statics, and which
-# runtime tables the loader takes. The loader's forwarders and its table check
+# a report forwarded after exit() has destroyed ordinary statics, which
+# runtime tables the loader takes, and the settling calls' plumbing. The
+# loader's forwarders and its table check
 # are file-local, so the test compiles the loader's source in one unit with the
 # test's head and tail.
 set(_loader_memory_pressure_source
@@ -158,7 +159,8 @@ add_executable(uml_kernarium_loader_memory_pressure_tests
 target_include_directories(uml_kernarium_loader_memory_pressure_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/GuestHost/Sources
     ${PROJECT_SOURCE_DIR}/Kernarium/Runtime
-    ${PROJECT_SOURCE_DIR}/darwin)
+    ${PROJECT_SOURCE_DIR}/darwin
+    ${PROJECT_SOURCE_DIR}/darwin/api/include)
 target_link_libraries(uml_kernarium_loader_memory_pressure_tests PRIVATE
     "-framework Foundation" "-framework MetalKit")
 uml_add_unit_test(NAME kernarium-loader-memory-pressure
@@ -171,6 +173,13 @@ uml_add_unit_test(NAME kernarium-loader-memory-pressure-exit
     LABELS kernarium)
 uml_add_unit_test(NAME kernarium-loader-api-table
     COMMAND uml_kernarium_loader_memory_pressure_tests --table
+    TIMEOUT 60
+    LABELS kernarium)
+# The calls that write the guest's storage back: the runtime's report envelope
+# and the handle a sync pins (KernariumSettle.hpp, which the runtime compiles),
+# and what the loader forwards of them, with a runtime and without.
+uml_add_unit_test(NAME kernarium-settle-plumbing
+    COMMAND uml_kernarium_loader_memory_pressure_tests --settle
     TIMEOUT 60
     LABELS kernarium)
 
