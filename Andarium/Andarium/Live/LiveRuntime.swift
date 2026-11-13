@@ -612,8 +612,9 @@ final class LiveRuntime: RuntimeDriver {
     /// of the cameras it discovers (which asks iOS for nothing and opens no
     /// session) and the colour data in `calibration`, which the boot reads.
     /// The runtime discovers the cameras for the first budget and keeps them
-    /// for the rest. It is the loader's ceiling, and not exact, where no
-    /// runtime can be loaded or it cannot discover the cameras. Off the main
+    /// for the rest. It is the loader's ceiling (which bounds the system
+    /// cameras), and not exact, where no runtime can be loaded or it cannot
+    /// discover the cameras. Off the main
     /// thread: loading the runtime and discovering the cameras are not quick.
     nonisolated static func cameraReservePlan(for policy: MemoryPolicy, calibration: URL?) -> CameraReservePlan {
         _ = kernarium_runtime_loader_select(androidFlavor)

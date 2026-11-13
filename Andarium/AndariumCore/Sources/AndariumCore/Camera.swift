@@ -45,8 +45,8 @@ public enum CameraAvailability {
 /// with the memory a live camera session holds (`MemoryPolicy.withCameraReserve`),
 /// and whether every figure is the one the layout the runtime would run gives.
 /// It is not where the runtime could not discover the cameras and answered the
-/// most any layout holds, as the policy's own figure is before the runtime is
-/// asked.
+/// tier's ceiling (which bounds the system cameras), as the policy's own figure
+/// is before the runtime is asked.
 public struct CameraReservePlan: Equatable, Sendable {
     public var policy: MemoryPolicy
     public var exact: Bool

@@ -489,9 +489,10 @@ final class AppModel {
     @ObservationIgnored var camera: CameraController?
     /// Asks the runtime what a live camera session of this host holds out of
     /// the GPU's budget, for every budget the memory policy has
-    /// (`MemoryPolicy.withCameraReserve`), and whether that is the layout's own
-    /// figure. The device application has one; a preview has none and keeps the
-    /// policy's own figure, the most any layout holds.
+    /// (`MemoryPolicy.withCameraReserve`). The device application has one, and
+    /// so do the preview states that show a camera reserve; without one the
+    /// model keeps the policy's own figure, the ceiling that bounds the system
+    /// cameras.
     @ObservationIgnored var cameraReservePlanner: (@Sendable (MemoryPolicy) -> CameraReservePlan)?
     /// The policy's camera reserve is what the runtime composes for this host's
     /// cameras, not the ceiling it keeps where it cannot say.
