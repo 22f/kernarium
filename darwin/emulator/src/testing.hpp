@@ -102,6 +102,11 @@ void report_guest_shutdown(::uml::runtime::GuestShutdownKind kind,
 	uml_emulator *emulator,
 	::uml::runtime::TrimKind kind = ::uml::runtime::TrimKind::once) noexcept;
 
+/* What the handle forgets of its guest when the run that boots it again
+ * begins (a restart): a suspension, the wishes for the guest's page-cache
+ * trimmer and what the guest was last told. */
+void reset_guest_state(uml_emulator *emulator) noexcept;
+
 /* The lifecycle calls on `emulator` that are waiting for its lifecycle mutex
  * or hold it. */
 [[nodiscard]] unsigned int lifecycle_calls(const uml_emulator *emulator) noexcept;

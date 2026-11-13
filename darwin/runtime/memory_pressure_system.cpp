@@ -10,12 +10,14 @@
 #include "platform/gpu_cache_reclaim.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <dispatch/dispatch.h>
 #include <mach/mach.h>
 #include <memory>
 #include <mutex>
 #include <new>
+#include <sys/sysctl.h>
 #include <utility>
 #include <time.h>
 #include <unistd.h>
@@ -89,6 +91,25 @@ public:
 	{
 		return trim_ == nullptr ? TrimOutcome::unreachable :
 			trim_(context_, kind);
+	}
+
+	/* The level the kernel holds now (1 normal, 2 warn, 4 critical, the
+	 * source's flags). A sandbox may refuse the question. */
+	SystemLevel system_level() noexcept override
+	{
+		int value = 0;
+		std::size_t size = sizeof(value);
+		if (sysctlbyname("kern.memorystatus_vm_pressure_level", &value, &size,
+			    nullptr, 0) != 0)
+			return {.readable = false, .level = PressureLevel::normal,
+				.error = errno};
+		if (size != sizeof(value))
+			return {.readable = false, .level = PressureLevel::normal,
+				.error = EINVAL};
+		return {.readable = true,
+			.level = pressure_level_from_dispatch(
+				static_cast<std::uint64_t>(value)),
+			.error = 0};
 	}
 
 	void log(std::string_view line) noexcept override
@@ -219,7 +240,7 @@ void level_changed(void *context) noexcept
 	const std::uint64_t flags = dispatch_source_get_data(hub.source);
 	if (hub.current == nullptr)
 		return;
-	(void)hub.current->response.on_level(pressure_level_from_dispatch(flags));
+	(void)hub.current->response.on_delivery(flags);
 	arm_retry(hub, *hub.current);
 }
 
@@ -322,6 +343,7 @@ std::unique_ptr<MemoryPressureWatch> start_memory_pressure_response(
 	if (state == nullptr)
 		return nullptr;
 	bind(*hub, state.get());
+	state->response.announce_start();
 	return std::unique_ptr<MemoryPressureWatch>{
 		new (std::nothrow) MemoryPressureWatch{std::move(state)}};
 }

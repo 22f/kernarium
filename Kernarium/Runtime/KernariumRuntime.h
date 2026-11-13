@@ -927,8 +927,9 @@ typedef int (*kernarium_runtime_plan_camera_reserve_function)(
     kernarium_runtime_camera_reserve* reserve);
 
 /* The level the system's memory pressure source reported to the host (runtime
- * API 41). The host frees what it can get back cheaply at a warning or a
- * critical level (docs/architecture.md, "Memory pressure"). */
+ * API 41). At a warning the host turns on the guest's page-cache trimmer, and
+ * at a critical level it also frees what it can get back at once
+ * (docs/architecture.md, "Memory pressure"). */
 enum {
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_NORMAL = 0,
     KERNARIUM_RUNTIME_MEMORY_PRESSURE_WARNING = 1,
@@ -937,15 +938,16 @@ enum {
 
 /* What the host does about that level. */
 enum {
-    /* The normal level: nothing to do. */
+    /* The normal level: no response starts (the guest's trimmer is turned
+     * off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_NONE = 0,
     /* The host starts a response now. A warning turns on the guest's gradual
      * page-cache trimmer, which asks the guest for one short message; a
      * critical level frees the host's graphics caches and asks the guest to
      * trim all of its page cache, which can take seconds. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_STARTED = 1,
-    /* A warning less than 30 s after the last response began: the host does
-     * nothing for it. */
+    /* A warning less than 30 s after the last response began: no response
+     * starts for it (the guest's trimmer is still turned on if it is off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
     /* A response is already running and covers this level. The system delivers
      * its notifications one at a time, each after the response of the one

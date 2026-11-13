@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -27,7 +28,10 @@
 #include <mutex>
 #include <memory>
 #include <new>
+#include <optional>
+#include <sys/sysctl.h>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -135,12 +139,72 @@ extern "C" dispatch_source_t dispatch_source_create(
 
 namespace {
 
+/* What the system's pressure level reads as, for the tests that need it to be
+ * so: the value the sysctl returns (1 normal, 2 warn, 4 critical), or the error
+ * it fails with. Without one the real sysctl answers. */
+struct SystemLevelOverride final {
+	bool set{};
+	int value{};
+	int error{};
+};
+std::mutex system_level_mutex;
+SystemLevelOverride system_level_override;
+
+} // namespace
+
+extern "C" int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
+	void *newp, size_t newlen)
+{
+	using Sysctl = int (*)(const char *, void *, size_t *, void *, size_t);
+	static const auto real = reinterpret_cast<Sysctl>(
+		dlsym(RTLD_NEXT, "sysctlbyname"));
+	if (std::string_view{name} == "kern.memorystatus_vm_pressure_level") {
+		const std::lock_guard lock{system_level_mutex};
+		if (system_level_override.set) {
+			if (system_level_override.error != 0) {
+				errno = system_level_override.error;
+				return -1;
+			}
+			if (oldp != nullptr && oldlenp != nullptr &&
+			    *oldlenp >= sizeof(int)) {
+				*static_cast<int *>(oldp) = system_level_override.value;
+				*oldlenp = sizeof(int);
+			}
+			return 0;
+		}
+	}
+	return real(name, oldp, oldlenp, newp, newlen);
+}
+
+namespace {
+
+/* While alive, the system's pressure level reads as `value`, or fails with
+ * `error`. */
+class SystemLevelIs final {
+public:
+	explicit SystemLevelIs(int value, int error = 0)
+	{
+		const std::lock_guard lock{system_level_mutex};
+		system_level_override = {true, value, error};
+	}
+
+	~SystemLevelIs()
+	{
+		const std::lock_guard lock{system_level_mutex};
+		system_level_override = {};
+	}
+
+	SystemLevelIs(const SystemLevelIs &) = delete;
+	SystemLevelIs &operator=(const SystemLevelIs &) = delete;
+};
+
 using uml::runtime::MemoryPressureResponse;
 using uml::runtime::PressureActions;
 using uml::runtime::PressureFigures;
 using uml::runtime::PressureLevel;
 using uml::runtime::PressureReaction;
 using uml::runtime::PressureReport;
+using uml::runtime::SystemLevel;
 using uml::runtime::PressureTiming;
 using uml::runtime::TrimKind;
 using uml::runtime::TrimOutcome;
@@ -208,13 +272,25 @@ public:
 		if (inside)
 			inside();
 		const std::lock_guard lock{mutex};
-		if (kind != TrimKind::once)
+		if (kind != TrimKind::once) {
+			/* The scripted answers come first, then the standing ones. */
+			if (script_next < gradual_script.size())
+				return gradual_script[script_next++];
+			if (kind == TrimKind::gradual_off && off_outcome)
+				return *off_outcome;
 			return gradual_outcome;
+		}
 		now += trim_ns;
 		const std::uint64_t released = std::min(trim_bytes, current.guest_held);
 		current.guest_held -= released;
 		current.footprint -= std::min(released, current.footprint);
 		return outcome;
+	}
+
+	SystemLevel system_level() noexcept override
+	{
+		const std::lock_guard lock{mutex};
+		return system;
 	}
 
 	void log(std::string_view line) noexcept override
@@ -299,6 +375,14 @@ public:
 	 * answer. */
 	TrimOutcome outcome = TrimOutcome::done;
 	TrimOutcome gradual_outcome = TrimOutcome::done;
+	/* The answers of the next requests of the gradual trimmer, in order, of
+	 * either kind; and what a request to turn it off answers when it is not
+	 * the same as turning it on. */
+	std::vector<TrimOutcome> gradual_script;
+	std::size_t script_next = 0;
+	std::optional<TrimOutcome> off_outcome;
+	/* What the system reports of its own level. */
+	SystemLevel system{};
 	std::function<void()> inside_trim;
 	std::vector<std::string> calls;
 	std::vector<std::string> lines;
@@ -365,7 +449,7 @@ void aWarningTurnsTheGradualTrimmerOnAndTakesNothingElse()
 		"16 guest RAM wire failures", lines[0]);
 	require(lines[1] ==
 		"uml: memory pressure warn: footprint 2026 -> 2026 MiB; guest page "
-		"cache trimmed gradually (done); 16 guest RAM wire failures",
+		"cache trimmer on (done); 16 guest RAM wire failures",
 		lines[1]);
 	const auto counts = response.counts();
 	require(counts.responses == 1 && counts.limited == 0 && counts.busy == 0);
@@ -379,12 +463,13 @@ void aWarningSaysWhatBecameOfTheGradualTrimmer()
 		TrimOutcome outcome;
 		const char *words;
 	} endings[] = {
-		{TrimOutcome::unreachable, "trimmed gradually (no console)"},
-		{TrimOutcome::quiesced, "trimmed gradually (guest quiesced)"},
-		{TrimOutcome::refused, "trimmed gradually (refused)"},
-		{TrimOutcome::busy, "trimmed gradually (busy)"},
-		{TrimOutcome::unanswered, "trimmed gradually (unanswered)"},
-		{TrimOutcome::done, "trimmed gradually (done)"},
+		{TrimOutcome::unreachable, "trimmer on (no console)"},
+		{TrimOutcome::quiesced, "trimmer on (guest quiesced)"},
+		{TrimOutcome::refused, "trimmer on (refused)"},
+		{TrimOutcome::busy, "trimmer on (busy)"},
+		{TrimOutcome::unanswered, "trimmer on (unanswered)"},
+		{TrimOutcome::sent, "trimmer on (sent)"},
+		{TrimOutcome::done, "trimmer on (done)"},
 	};
 	for (const auto &ending : endings) {
 		FakeActions actions;
@@ -415,11 +500,12 @@ void aCriticalLevelFreesTheGpuCachesTrimsOnceAndLeavesTheGradualTrimmerOn()
 		"(page cache trim done, 80 ms); 16 guest RAM wire failures",
 		lines[1]);
 
-	/* The next one finds the gradual trimmer on and does not ask again. */
+	/* The next one asks the trimmer on again (the guest side answers that it
+	 * already is), so that a request that was lost is not owed for ever. */
 	actions.advance(second);
 	require(response.on_level(PressureLevel::critical) == Outcome::responded);
 	require(actions.calls_named("gpu") == 2 && actions.trims() == 2);
-	require(actions.calls_named("trim-on") == 1);
+	require(actions.calls_named("trim-on") == 2);
 
 	/* And the way back to normal ends it. */
 	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
@@ -516,22 +602,29 @@ void aWarningStartsOneResponsePerInterval()
 		"a warning took more than the gradual trimmer");
 }
 
-void aWarningTheIntervalHoldsBackAsksTheGuestNothing()
+void aWarningTheIntervalHoldsBackStillTurnsTheTrimmerOn()
 {
 	FakeActions actions;
 	MemoryPressureResponse response{actions};
 	require(response.on_level(PressureLevel::warn) == Outcome::responded);
 	actions.advance(second);
-	/* The pressure eases and comes back inside the interval: the warning is
-	 * held back, and the trimmer stays off until the interval has passed. */
+	/* The pressure eases and comes back inside the interval: the response is
+	 * held back, and the trimmer is on again all the same, as it is on exactly
+	 * while the last level is not normal. */
 	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
 	actions.advance(second);
 	require(response.on_level(PressureLevel::warn) == Outcome::limited);
 	require((actions.calls_taken() ==
-		std::vector<std::string>{"trim-on", "trim-off"}));
+		std::vector<std::string>{"trim-on", "trim-off", "trim-on"}));
+	/* Only the request: no response, and none is reported. */
+	require(response.counts().responses == 1 && response.counts().limited == 1);
+	/* A further withheld warning asks nothing: it is on. */
+	actions.advance(second);
+	require(response.on_level(PressureLevel::warn) == Outcome::limited);
+	require(actions.requests() == 3);
 	actions.advance(MemoryPressureResponse::warn_interval_ns);
 	require(response.on_level(PressureLevel::warn) == Outcome::responded);
-	require(actions.calls_named("trim-on") == 2);
+	require(actions.calls_named("trim-on") == 3);
 }
 
 void aCriticalLevelAlwaysStartsOne()
@@ -677,7 +770,7 @@ void aRetryThatIsStillBusyStopsAfterItsAttempts()
 	const auto lines = actions.lines_taken();
 	require(lines.size() == lines_before + 1, "a line for each try");
 	require(contains(lines.back(), "(retry 3 of 3)") &&
-		contains(lines.back(), "trimming gradually on (busy)"),
+		contains(lines.back(), "trimmer on (busy)"),
 		lines.back());
 
 	/* No retries configured, none pending. */
@@ -834,7 +927,7 @@ void aBusyGuestKeepsTheEndOfTheGradualTrimmerPending()
 	require(response.retry_delay_ns() == 0);
 	require(contains(actions.lines_taken().back(),
 		"uml: memory pressure normal (retry 1 of 4): guest page cache "
-		"trimming gradually off (done); 16 guest RAM wire failures"),
+		"trimmer off (done); 16 guest RAM wire failures"),
 		actions.lines_taken().back());
 	require((actions.calls_taken() == std::vector<std::string>{
 		"trim-on", "trim-off", "trim-off"}));
@@ -874,6 +967,253 @@ void aRetryIsNotJoinedToAResponseThatIsRunning()
 	actions.inside_trim = nullptr;
 	require(met == (std::vector<Outcome>{Outcome::busy, Outcome::busy}));
 	require(actions.trims() == 2);
+}
+
+[[nodiscard]] std::vector<PressureReport> reportsOf(FakeActions &actions);
+
+/* ---- The gradual trimmer follows the level; its requests are retried
+ * within a finite allowance. ---- */
+
+void aWarningOrACriticalLevelCancelsAPendingEndOfTheTrimmer()
+{
+	FakeActions actions;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.gradual_outcome = TrimOutcome::busy;
+	actions.advance(second);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(response.retry_delay_ns() == timing.retry_interval_ns,
+		"the end of the trimmer is pending");
+	/* The pressure is back inside the interval: the trimmer is wanted on, and
+	 * the end that was never sent is no longer wanted. */
+	actions.advance(second);
+	require(response.on_level(PressureLevel::warn) == Outcome::limited);
+	require(response.retry_delay_ns() == 0, "the end outlived the pressure");
+	require(response.on_retry() == Outcome::nothing);
+	require((actions.calls_taken() ==
+		std::vector<std::string>{"trim-on", "trim-off"}));
+
+	/* A critical level takes it too, and asks for the trimmer on itself. */
+	actions.advance(second);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(response.retry_delay_ns() != 0);
+	actions.advance(second);
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require(actions.calls_named("trim-off") == 2);
+	actions.gradual_outcome = TrimOutcome::done;
+	/* What is pending now is the trimmer's request to be on, not its end. */
+	require(response.retry_delay_ns() != 0);
+	require(response.on_retry() == Outcome::retried);
+	require(actions.calls_named("trim-off") == 2);
+	require(actions.calls_taken().back() == "trim-on");
+}
+
+void aBusyEndOfTheTrimmerIsTriedAgainAtMostFourTimes()
+{
+	FakeActions actions;
+	const PressureTiming timing;
+	MemoryPressureResponse response{actions, timing};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.gradual_outcome = TrimOutcome::busy;
+	actions.advance(second);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 1);
+	for (unsigned retry = 1; retry <= 4; ++retry) {
+		require(response.retry_delay_ns() == timing.retry_interval_ns,
+			std::to_string(retry));
+		require(response.on_retry() == Outcome::retried);
+		/* One request for each call of the timer, and no second set of
+		 * attempts behind it. */
+		require(actions.calls_named("trim-off") == 1U + retry,
+			std::to_string(retry));
+	}
+	require(response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 5);
+	require(response.counts().retries == 4);
+	require(contains(actions.lines_taken().back(), "(retry 4 of 4)") &&
+		contains(actions.lines_taken().back(), "trimmer off (busy)"),
+		actions.lines_taken().back());
+}
+
+void aCriticalRetryThatTrimmedKeepsABusyTrimmerRequestWithoutTrimmingAgain()
+{
+	FakeActions actions;
+	actions.outcome = TrimOutcome::busy;
+	actions.gradual_outcome = TrimOutcome::busy;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::critical) == Outcome::responded);
+	require((actions.calls_taken() == std::vector<std::string>{"gpu", "trim"}));
+	/* The retry's trim goes through; the trimmer's request behind it finds the
+	 * guest busy and is kept with attempts of its own. */
+	actions.outcome = TrimOutcome::done;
+	require(response.on_retry() == Outcome::retried);
+	require(response.retry_delay_ns() != 0, "the trimmer's request was dropped");
+	require(contains(actions.lines_taken().back(), "page cache trim done"),
+		actions.lines_taken().back());
+	for (unsigned attempt = 1; attempt <= 3; ++attempt)
+		require(response.on_retry() == Outcome::retried);
+	/* The guest is free for the last of them. */
+	actions.gradual_outcome = TrimOutcome::done;
+	require(response.on_retry() == Outcome::retried);
+	require(response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.trims() == 2, "the trim of all the cache was repeated");
+	require(actions.calls_named("trim-on") == 5);
+
+	/* A trimmer that stays busy is asked four times more and no more. */
+	FakeActions busy;
+	busy.outcome = TrimOutcome::busy;
+	busy.gradual_outcome = TrimOutcome::busy;
+	MemoryPressureResponse waiting{busy};
+	require(waiting.on_level(PressureLevel::critical) == Outcome::responded);
+	busy.outcome = TrimOutcome::done;
+	for (unsigned attempt = 0; attempt <= 4; ++attempt)
+		require(waiting.on_retry() == Outcome::retried);
+	require(waiting.retry_delay_ns() == 0);
+	require(waiting.on_retry() == Outcome::nothing);
+	require(busy.trims() == 2 && busy.calls_named("trim-on") == 5);
+}
+
+void aGradualRequestThatCouldNotBeSentIsTriedAgainWithinItsAllowance()
+{
+	FakeActions actions;
+	actions.gradual_outcome = TrimOutcome::unreachable;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	require(response.retry_delay_ns() != 0);
+	for (unsigned retry = 1; retry <= 4; ++retry)
+		require(response.on_retry() == Outcome::retried);
+	require(response.retry_delay_ns() == 0);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-on") == 5);
+
+	/* The trim of all the cache that cannot be sent is not tried again. */
+	FakeActions once;
+	once.outcome = TrimOutcome::unreachable;
+	MemoryPressureResponse single{once};
+	require(single.on_level(PressureLevel::critical) == Outcome::responded);
+	require(single.retry_delay_ns() == 0);
+}
+
+void anEndOfTheTrimmerThatCouldNotBeSentStaysOwedAndARefusedOneDoesNot()
+{
+	FakeActions actions;
+	actions.off_outcome = TrimOutcome::unreachable;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.advance(second);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	for (unsigned retry = 1; retry <= 4; ++retry)
+		require(response.on_retry() == Outcome::retried);
+	require(response.on_retry() == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 5);
+	/* The guest was never told: the next normal level asks again. */
+	actions.off_outcome = TrimOutcome::done;
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 6);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(actions.calls_named("trim-off") == 6, "asked again after it was taken");
+
+	/* A kernel without the command has nothing to turn off. */
+	FakeActions refused;
+	refused.off_outcome = TrimOutcome::refused;
+	MemoryPressureResponse without{refused};
+	require(without.on_level(PressureLevel::warn) == Outcome::responded);
+	refused.advance(second);
+	require(without.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(without.retry_delay_ns() == 0);
+	require(without.on_level(PressureLevel::normal) == Outcome::nothing);
+	require(refused.calls_named("trim-off") == 1);
+}
+
+void aWarningThatMeetsTheRetriedEndOfTheTrimmerTurnsItOnAgain()
+{
+	FakeActions actions;
+	MemoryPressureResponse response{actions};
+	require(response.on_level(PressureLevel::warn) == Outcome::responded);
+	actions.gradual_outcome = TrimOutcome::busy;
+	actions.advance(second);
+	require(response.on_level(PressureLevel::normal) == Outcome::nothing);
+	actions.gradual_outcome = TrimOutcome::done;
+	Outcome met = Outcome::nothing;
+	/* The pressure comes back while the retried end is in the guest's hands:
+	 * the event finds a retry running and starts nothing. */
+	actions.inside_trim = [&] {
+		actions.inside_trim = nullptr;
+		met = response.on_level(PressureLevel::warn);
+	};
+	require(response.on_retry() == Outcome::retried);
+	require(met == Outcome::busy);
+	require((actions.calls_taken() == std::vector<std::string>{
+		"trim-on", "trim-off", "trim-off", "trim-on"}));
+	require(response.retry_delay_ns() == 0);
+}
+
+/* ---- What the host reads of the system's level. ---- */
+
+void aMergedDeliveryIsActedOnAtTheLevelTheSystemReports()
+{
+	const std::uint64_t normal = DISPATCH_MEMORYPRESSURE_NORMAL;
+	const std::uint64_t warn = DISPATCH_MEMORYPRESSURE_WARN;
+	const std::uint64_t critical = DISPATCH_MEMORYPRESSURE_CRITICAL;
+	FakeActions actions;
+	actions.system = {true, PressureLevel::warn, 0};
+	MemoryPressureResponse response{actions};
+	/* The critical level merged with the normal one, and the system is at
+	 * warn now: the warning's response, not the critical level's. */
+	require(response.on_delivery(normal | critical) == Outcome::responded);
+	require((actions.calls_taken() == std::vector<std::string>{"trim-on"}));
+	require(contains(actions.lines_taken().front(),
+		"uml: memory pressure warn (was normal): footprint 2026 MiB, 16 guest "
+		"RAM wire failures; system level warn"), actions.lines_taken().front());
+	/* A delivery with no normal flag is the level it says, whatever the system
+	 * says: the system is only asked when the order of events is lost. */
+	actions.system = {true, PressureLevel::normal, 0};
+	actions.advance(second);
+	require(response.on_delivery(critical) == Outcome::responded);
+	require(actions.trims() == 1 && actions.calls_named("gpu") == 1);
+	/* The pressure eased behind a critical level: the system is at normal, and
+	 * the trimmer is ended. */
+	actions.advance(second);
+	require(response.on_delivery(normal | critical) == Outcome::nothing);
+	require(actions.calls_taken().back() == "trim-off");
+	require(actions.trims() == 1, "a merged delivery was acted on as critical");
+	require(reportsOf(actions).back().level == PressureLevel::normal);
+	/* A system that cannot be read leaves the most serious flag. */
+	actions.system = {false, PressureLevel::normal, 1};
+	actions.advance(MemoryPressureResponse::warn_interval_ns);
+	require(response.on_delivery(normal | warn) == Outcome::responded);
+	require(actions.calls_taken().back() == "trim-on");
+	actions.advance(MemoryPressureResponse::warn_interval_ns);
+	require(response.on_delivery(normal | critical) == Outcome::responded);
+	require(actions.trims() == 2 && actions.calls_named("gpu") == 2);
+	/* The normal level alone is normal, and the system is not asked. */
+	actions.system = {true, PressureLevel::critical, 0};
+	require(response.on_delivery(normal) == Outcome::nothing);
+	require(reportsOf(actions).back().level == PressureLevel::normal);
+}
+
+void theWatchSaysWhatItReadsOfTheSystemLevel()
+{
+	FakeActions actions;
+	actions.system = {true, PressureLevel::critical, 0};
+	MemoryPressureResponse response{actions};
+	response.announce_start();
+	require((actions.lines_taken() == std::vector<std::string>{
+		"uml: memory pressure watch started: system level critical"}));
+	FakeActions unreadable;
+	unreadable.system = {false, PressureLevel::normal, 1};
+	MemoryPressureResponse other{unreadable};
+	other.announce_start();
+	(void)other.on_level(PressureLevel::warn);
+	require(unreadable.lines_taken().front() ==
+		"uml: memory pressure watch started: system level unreadable "
+		"(error 1)", unreadable.lines_taken().front());
+	/* The level line says nothing of a level that cannot be read. */
+	require(!contains(unreadable.lines_taken()[1], "system level"),
+		unreadable.lines_taken()[1]);
 }
 
 /* A clock that holds its first reader, as a thread the scheduler stops between
@@ -1069,7 +1409,7 @@ void aReportComesBeforeTheWorkOfTheResponse()
 	require(both[1].report.level == PressureLevel::critical);
 	require(both[1].report.reaction == PressureReaction::responding);
 	require((actions.calls_taken() ==
-		std::vector<std::string>{"trim-on", "gpu", "trim"}));
+		std::vector<std::string>{"trim-on", "gpu", "trim", "trim-on"}));
 }
 
 void aWarningInsideTheIntervalIsReportedAsWithheld()
@@ -1090,7 +1430,9 @@ void aWarningInsideTheIntervalIsReportedAsWithheld()
 		{PressureLevel::critical, PressureReaction::responding},
 		{PressureLevel::warn, PressureReaction::responding},
 	}));
-	require(actions.trims() == 1 && actions.requests() == 3,
+	/* The warnings' two requests, and the critical level's trim and the
+	 * trimmer: a withheld warning that finds the trimmer on asks nothing. */
+	require(actions.trims() == 1 && actions.requests() == 4,
 		"a withheld warning asked the guest");
 }
 
@@ -1243,10 +1585,15 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 			uml::runtime::start_memory_pressure_response(&countedGuestTrim,
 				&context);
 		require(watch != nullptr);
+		/* The watch says at its start what the host reads of the system's level,
+		 * and nothing else. */
+		const std::string started = capture.take();
+		require(contains(started, "uml: memory pressure watch started: system "
+			"level "), started);
 
 		/* Normal: nothing. */
 		raiseAndWait(DISPATCH_MEMORYPRESSURE_NORMAL);
-		require(capture.take().empty(), capture.take());
+		require(capture.take() == started, capture.take());
 		require(gpu_reclaims == 0 && guest_trims == 0 && gradual_ons == 0 &&
 			gradual_offs == 0);
 
@@ -1265,8 +1612,7 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 		require(footprint != std::string::npos &&
 			std::stoull(text.substr(footprint + 10)) > 0, text);
 		require(contains(text, " -> "), text);
-		require(contains(text, "guest page cache trimmed gradually (done)"),
-			text);
+		require(contains(text, "guest page cache trimmer on (done)"), text);
 		require(!contains(text, "cached allocations"), text);
 		require(contains(text, "guest RAM wire failures"), text);
 
@@ -1276,11 +1622,11 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 			"a second warning inside the interval acted");
 
 		/* A critical level always acts: the GPU's caches, one trim of all
-		 * the cache, and the gradual trimmer is on already. */
+		 * the cache, and the gradual trimmer, asked for again. */
 		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
 		require(gpu_reclaims == 1 && guest_trims == 1 && context == 1,
 			"the critical level did not act");
-		require(gradual_ons == 1);
+		require(gradual_ons == 2);
 		const std::string critical = capture.take();
 		require(contains(critical, "(5 cached allocations)"), critical);
 		require(contains(critical, "page cache trim done"), critical);
@@ -1292,8 +1638,73 @@ void theSystemSourceReachesTheGpuAndTheGuest()
 	/* The watch has ended; the source stays with the process and answers
 	 * nothing. */
 	raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
-	require(gpu_reclaims == 1 && guest_trims == 1 && gradual_ons == 1 &&
+	require(gpu_reclaims == 1 && guest_trims == 1 && gradual_ons == 2 &&
 		gradual_offs == 1, "a source with no watch acted");
+	capture.restore();
+	uml::platform::publishGpuCacheReclaimer(nullptr);
+}
+
+void aMergedDeliveryFromTheSystemSourceIsActedOnAtTheSystemsLevel()
+{
+	gpu_reclaims = 0;
+	guest_trims = 0;
+	gradual_ons = 0;
+	gradual_offs = 0;
+	uml::platform::publishGpuCacheReclaimer(&countedGpuReclaim);
+	int context = 0;
+	StderrCapture capture;
+	{
+		/* The critical level's notification came merged with the normal one
+		 * because the pressure eased while it queued: the system is at
+		 * normal. */
+		const SystemLevelIs system{1};
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&countedGuestTrim, &context);
+		require(watch != nullptr);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_WARN);
+		require(gradual_ons == 1);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_NORMAL |
+			DISPATCH_MEMORYPRESSURE_CRITICAL);
+		require(gradual_offs == 1 && gpu_reclaims == 0 && guest_trims == 0,
+			"the merged delivery was acted on as critical");
+		const std::string text = capture.take();
+		require(contains(text, "watch started: system level normal"), text);
+		require(contains(text, "memory pressure normal (was warn): footprint "),
+			text);
+		require(contains(text, "; system level normal"), text);
+	}
+	{
+		/* Merged the other way round: the system is at critical. */
+		const SystemLevelIs system{4};
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&countedGuestTrim, &context);
+		require(watch != nullptr);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_NORMAL |
+			DISPATCH_MEMORYPRESSURE_WARN);
+		require(gpu_reclaims == 1 && guest_trims == 1,
+			"the merged delivery was acted on as a warning");
+		require(contains(capture.take(), "; system level critical"),
+			capture.take());
+	}
+	{
+		/* A system the sandbox does not let the process ask: the delivery's
+		 * most serious flag. */
+		const SystemLevelIs system{0, EPERM};
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&countedGuestTrim, &context);
+		require(watch != nullptr);
+		const int before = gradual_ons.load();
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_NORMAL |
+			DISPATCH_MEMORYPRESSURE_WARN);
+		require(gradual_ons == before + 1 && gpu_reclaims == 1,
+			"the unreadable system changed the level");
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_NORMAL |
+			DISPATCH_MEMORYPRESSURE_CRITICAL);
+		require(gpu_reclaims == 2 && guest_trims == 2);
+		const std::string text = capture.take();
+		require(contains(text, "watch started: system level unreadable "
+			"(error 1)"), text);
+	}
 	capture.restore();
 	uml::platform::publishGpuCacheReclaimer(nullptr);
 }
@@ -1518,12 +1929,12 @@ void theObserverHearsTheLevelsTheSystemRaises()
 		{PressureLevel::critical, PressureReaction::responding},
 		{PressureLevel::normal, PressureReaction::none},
 	}));
-	/* Each was heard before its own request, and a withheld warning had none:
-	 * the warning's trimmer on, the critical level's one trim, the normal
-	 * level's trimmer off. */
-	require((heard.trims_before == std::vector<int>{0, 1, 1, 2}),
+	/* Each was heard before its own request, and a withheld warning that found
+	 * the trimmer on had none: the warning's trimmer on, the critical level's
+	 * one trim and trimmer on, the normal level's trimmer off. */
+	require((heard.trims_before == std::vector<int>{0, 1, 1, 3}),
 		"a report followed the request it announced");
-	require(observed_trims == 3);
+	require(observed_trims == 4);
 	capture.restore();
 }
 
@@ -1605,6 +2016,9 @@ void aReportNeedsNoAllocation()
 void aLevelRaisedWhileATrimRunsIsReportedWithItsNotification()
 {
 	uml::platform::publishGpuCacheReclaimer(nullptr);
+	/* The levels merged here are the critical and the normal one; the system
+	 * is at critical. */
+	const SystemLevelIs system{4};
 	struct Gate final {
 		std::mutex mutex;
 		std::condition_variable changed;
@@ -1660,7 +2074,8 @@ void aLevelRaisedWhileATrimRunsIsReportedWithItsNotification()
 	require(heard.reports[1].level == PressureLevel::critical
 		&& heard.reports[1].reaction == PressureReaction::responding,
 		"the merged levels were not reported as the most serious, with a response");
-	require(trims.load() == 2);
+	/* The warning's trimmer on, the critical level's trim and trimmer on. */
+	require(trims.load() == 3);
 }
 
 void clearingTheObserverWaitsForACallInProgress()
@@ -1765,8 +2180,30 @@ int main()
 			theNamesOfTheReactionsAreTheLinesWords},
 		{"a-warning-starts-one-response-per-interval",
 			aWarningStartsOneResponsePerInterval},
-		{"a-warning-the-interval-holds-back-asks-the-guest-nothing",
-			aWarningTheIntervalHoldsBackAsksTheGuestNothing},
+		{"a-warning-the-interval-holds-back-still-turns-the-trimmer-on",
+			aWarningTheIntervalHoldsBackStillTurnsTheTrimmerOn},
+		{"a-warning-or-a-critical-level-cancels-a-pending-end-of-the-trimmer",
+			aWarningOrACriticalLevelCancelsAPendingEndOfTheTrimmer},
+		{"a-busy-end-of-the-trimmer-is-tried-again-at-most-four-times",
+			aBusyEndOfTheTrimmerIsTriedAgainAtMostFourTimes},
+		{"a-critical-retry-that-trimmed-keeps-a-busy-trimmer-request-without-"
+			"trimming-again",
+			aCriticalRetryThatTrimmedKeepsABusyTrimmerRequestWithoutTrimmingAgain},
+		{"a-gradual-request-that-could-not-be-sent-is-tried-again-within-its-"
+			"allowance",
+			aGradualRequestThatCouldNotBeSentIsTriedAgainWithinItsAllowance},
+		{"an-end-of-the-trimmer-that-could-not-be-sent-stays-owed-and-a-refused-"
+			"one-does-not",
+			anEndOfTheTrimmerThatCouldNotBeSentStaysOwedAndARefusedOneDoesNot},
+		{"a-warning-that-meets-the-retried-end-of-the-trimmer-turns-it-on-again",
+			aWarningThatMeetsTheRetriedEndOfTheTrimmerTurnsItOnAgain},
+		{"a-merged-delivery-is-acted-on-at-the-level-the-system-reports",
+			aMergedDeliveryIsActedOnAtTheLevelTheSystemReports},
+		{"the-watch-says-what-it-reads-of-the-system-level",
+			theWatchSaysWhatItReadsOfTheSystemLevel},
+		{"a-merged-delivery-from-the-system-source-is-acted-on-at-the-systems-"
+			"level",
+			aMergedDeliveryFromTheSystemSourceIsActedOnAtTheSystemsLevel},
 		{"a-critical-level-always-starts-one",
 			aCriticalLevelAlwaysStartsOne},
 		{"a-response-that-is-running-is-not-joined",

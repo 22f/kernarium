@@ -79,6 +79,9 @@ public:
 	/* A guest that cannot suspend: it refuses "suspend" for a reason that
 	 * waiting does not cure (not busy), and keeps running. */
 	bool refuseSuspend {false};
+	/* A guest that takes "trim on" and "trim off" and never replies to them,
+	 * as one that is busy for longer than a request waits. */
+	bool silentToggles {false};
 	/* A guest whose suspend is held, as by a freezer that cannot finish: it
 	 * never replies to "suspend", answers the wake that aborts it, and then,
 	 * for `lateFailure`, gives the suspend up on the request's own socket. */
@@ -92,6 +95,47 @@ public:
 	Memory memory {Memory::figures};
 	static constexpr std::string_view memoryFigures {
 		"total=2147483648 available=1073741824 free=104857600"};
+
+	/* Answers every request that arrives while `operation` runs, and returns
+	 * them in order. */
+	template<typename Operation>
+	std::vector<std::string> serving(Operation &&operation)
+	{
+		std::vector<std::string> received;
+		std::atomic<bool> finished {false};
+		std::thread guest {[this, &received, &finished] {
+			for (;;) {
+				if (awaitRequest(descriptor_, 20)) {
+					received.push_back(answer());
+					continue;
+				}
+				if (finished.load()) {
+					/* What the operation sent last. */
+					if (!awaitRequest(descriptor_, 100))
+						return;
+				}
+			}
+		}};
+		std::forward<Operation>(operation)();
+		finished = true;
+		guest.join();
+		return received;
+	}
+
+	/* The console's path is gone, as the guest's is while it restarts: the
+	 * requests that follow cannot be sent. */
+	void unlinkConsole() const
+	{
+		(void)::unlink(path_.c_str());
+	}
+
+	/* The console is back, at the same path. The requests it was sent while it
+	 * was gone are lost. */
+	void relinkConsole()
+	{
+		(void)::close(descriptor_);
+		descriptor_ = bindServer(path_);
+	}
 
 	/* Answers `count` requests in another thread while `operation` runs,
 	 * and returns them in the order they arrived. */
@@ -127,6 +171,8 @@ private:
 			onRequest(command);
 		if (command == "trim once" && trimsAnsweredBeforeSilence >= 0 &&
 		    trimsHeard_++ >= trimsAnsweredBeforeSilence)
+			return command;
+		if (silentToggles && (command == "trim on" || command == "trim off"))
 			return command;
 		if (command == "suspend" && holdSuspend != Hold::none) {
 			suspendClient_ = client;
@@ -173,7 +219,11 @@ private:
 			       "released 0 KiB in 1 ms";
 		else if (command.starts_with("trim "))
 			text = std::string_view {command}.substr(5);
-		require(sendReply(descriptor_, client, clientLength, error, text));
+		/* A request that does not wait for its answer has closed its socket. */
+		const bool replied =
+			sendReply(descriptor_, client, clientLength, error, text);
+		require(replied || command == "trim on" || command == "trim off",
+			"the request's socket is still open");
 		if (command == "wake" && holdSuspend == Hold::lateFailure)
 			require(sendReply(descriptor_, suspendClient_,
 				suspendClientLength_, 1U, "Suspend failed: -16"),
@@ -266,10 +316,12 @@ void theGradualPressureTrimmerIsOneMessageAndKeepsWhatTheApplicationAsked(
 	using ::uml::runtime::TrimKind;
 	using ::uml::runtime::TrimOutcome;
 	using uml::emulator::testing::trim_for_memory_pressure;
+	/* A request that sends a message is `sent`, as it does not wait for the
+	 * guest; one that finds the guest as asked sends nothing and is `done`. */
 	const auto ask = [&](TrimKind kind, const Requests &expected) {
 		require(console.requests(expected.size(), [&] {
 			require(trim_for_memory_pressure(emulator, kind) ==
-				TrimOutcome::done);
+				(expected.empty() ? TrimOutcome::done : TrimOutcome::sent));
 		}) == expected);
 	};
 	ask(TrimKind::gradual_on, {"trim on"});
@@ -335,7 +387,230 @@ void aQuiescedGuestHearsTheGradualPressureTrimmerOnlyAtTheResume(
 	/* Ended again, so the handle is as it was. */
 	require(console.requests(1U, [emulator] {
 		require(trim_for_memory_pressure(emulator, TrimKind::gradual_off) ==
+			TrimOutcome::sent);
+	}) == Requests {"trim off"});
+}
+
+/* A trimmer request the console did not take leaves what the guest runs and
+ * what is wanted apart. The next call settles it, whichever call it is, and
+ * compares what is wanted with what the guest took, not with the wish before. */
+void aGradualRequestThatWasNotSentIsOwedUntilAnyCallSettlesIt()
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto turnedOnThenLostOff = [](FakeGuestConsole &console,
+		uml_emulator *emulator) {
+		require(console.requests(1U, [&] {
+			require(trim_for_memory_pressure(emulator, TrimKind::gradual_on) ==
+				TrimOutcome::sent);
+		}) == Requests {"trim on"});
+		/* The console is gone when the response ends the trimmer. */
+		console.unlinkConsole();
+		require(trim_for_memory_pressure(emulator, TrimKind::gradual_off) ==
+			TrimOutcome::unreachable);
+		console.relinkConsole();
+	};
+	{
+		/* The same request, asked again, is sent: it is not taken for done. */
+		const auto emulator = makeEmulator();
+		FakeGuestConsole console;
+		turnedOnThenLostOff(console, emulator.get());
+		require(console.requests(1U, [&] {
+			require(trim_for_memory_pressure(emulator.get(),
+				TrimKind::gradual_off) == TrimOutcome::sent);
+		}) == Requests {"trim off"});
+		require(console.requests(0U, [&] {
+			require(trim_for_memory_pressure(emulator.get(),
+				TrimKind::gradual_off) == TrimOutcome::done);
+		}).empty());
+	}
+	{
+		/* The application's request settles it. */
+		const auto emulator = makeEmulator();
+		FakeGuestConsole console;
+		turnedOnThenLostOff(console, emulator.get());
+		require(console.requests(1U, [&] {
+			require(uml_emulator_set_page_cache_trimming(emulator.get(), 0) ==
+				UML_EMULATOR_OK);
+		}) == Requests {"trim off"});
+		require(console.requests(0U, [&] {
+			require(trim_for_memory_pressure(emulator.get(),
+				TrimKind::gradual_off) == TrimOutcome::done);
+		}).empty());
+	}
+	{
+		/* A request for what the guest still runs sends nothing, whatever was
+		 * wished in between. */
+		const auto emulator = makeEmulator();
+		FakeGuestConsole console;
+		turnedOnThenLostOff(console, emulator.get());
+		require(console.requests(0U, [&] {
+			require(trim_for_memory_pressure(emulator.get(),
+				TrimKind::gradual_on) == TrimOutcome::done);
+		}).empty());
+	}
+}
+
+/* A trimmer change the resume could not carry stays owed: the next request
+ * sends it. */
+void aResumeThatCouldNotReplayTheTrimmerLeavesItOwed()
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	require(console.requests(2U, [&] {
+		require(uml_emulator_quiesce(emulator.get()) == 0);
+	}) == Requests {"trim once", "suspend"});
+	require(console.requests(0U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_on) ==
+			TrimOutcome::quiesced);
+	}).empty());
+	/* The guest hears the wake and is then gone for the replay. */
+	console.onRequest = [&console](const std::string &command) {
+		if (command == "wake")
+			console.unlinkConsole();
+	};
+	require(console.requests(1U, [&] {
+		uml_emulator_resume(emulator.get());
+	}) == Requests {"wake"});
+	console.onRequest = nullptr;
+	console.relinkConsole();
+	require(console.requests(1U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_on) ==
+			TrimOutcome::sent);
+	}) == Requests {"trim on"});
+}
+
+/* The pressure response's trimmer request is not waited for, so a console that
+ * never answers cannot hold the lifecycle mutex; the application's request
+ * keeps its synchronous contract, and what it sent stands as asked. */
+void aSilentConsoleHoldsNeitherThePressureTrimmerNorTheApplicationsRecord()
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	console.silentToggles = true;
+	const auto started = std::chrono::steady_clock::now();
+	require(console.requests(1U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_on) ==
+			TrimOutcome::sent);
+	}) == Requests {"trim on"});
+	/* Real time: the guest's answer window is seconds long. */
+	require(std::chrono::steady_clock::now() - started <
+		std::chrono::milliseconds {1000}, "the pressure trimmer waited");
+	require(console.requests(1U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_off) ==
+			TrimOutcome::sent);
+	}) == Requests {"trim off"});
+
+	/* The application's request waits for its answer, and gets none. */
+	const auto asked = std::chrono::steady_clock::now();
+	require(console.requests(1U, [&] {
+		require(uml_emulator_set_page_cache_trimming(emulator.get(), 1) ==
+			-UML_EMULATOR_RUNTIME_ERROR);
+	}) == Requests {"trim on"});
+	require(std::chrono::steady_clock::now() - asked >=
+		std::chrono::milliseconds {1500}, "the application's request did not wait");
+	/* Sent, the guest may have taken it: it is wanted and counted as applied,
+	 * so the response neither repeats it nor ends it. */
+	require(console.requests(0U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_on) ==
 			TrimOutcome::done);
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_off) ==
+			TrimOutcome::done);
+	}).empty());
+}
+
+/* Whatever order the application's and the response's changes arrive in, what
+ * the guest last took is what either of them wants. */
+void theTrimmerEndsAsEitherOfThemLastWanted()
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto askUntilHeard = [](uml_emulator *emulator, TrimKind kind) {
+		/* A response that meets another call asks again. */
+		const auto until = std::chrono::steady_clock::now() +
+			std::chrono::seconds {20};
+		TrimOutcome outcome = TrimOutcome::busy;
+		while (outcome == TrimOutcome::busy &&
+		       std::chrono::steady_clock::now() < until) {
+			outcome = trim_for_memory_pressure(emulator, kind);
+			if (outcome == TrimOutcome::busy)
+				std::this_thread::yield();
+		}
+		return outcome;
+	};
+	for (const bool application : {false, true}) {
+		for (const bool pressure : {false, true}) {
+			const auto emulator = makeEmulator();
+			FakeGuestConsole console;
+			const auto heard = console.serving([&] {
+				std::thread app {[&] {
+					for (int index = 0; index < 60; ++index)
+						require(uml_emulator_set_page_cache_trimming(
+							emulator.get(), index % 2 == 0) == UML_EMULATOR_OK);
+				}};
+				std::thread response {[&] {
+					for (int index = 0; index < 60; ++index)
+						(void)askUntilHeard(emulator.get(), index % 2 == 0 ?
+							TrimKind::gradual_on : TrimKind::gradual_off);
+				}};
+				app.join();
+				response.join();
+				require(uml_emulator_set_page_cache_trimming(emulator.get(),
+					application ? 1 : 0) == UML_EMULATOR_OK);
+				const auto last = askUntilHeard(emulator.get(), pressure ?
+					TrimKind::gradual_on : TrimKind::gradual_off);
+				require(last == TrimOutcome::sent || last == TrimOutcome::done);
+			});
+			const bool wanted = application || pressure;
+			std::string last = "trim off";
+			for (const auto &command : heard)
+				if (command == "trim on" || command == "trim off")
+					last = command;
+			require(last == (wanted ? "trim on" : "trim off"),
+				"the guest was left as the earlier wish");
+			/* And it is the state the handle holds: asking again sends
+			 * nothing. */
+			require(console.serving([&] {
+				require(askUntilHeard(emulator.get(), pressure ?
+					TrimKind::gradual_on : TrimKind::gradual_off) ==
+					TrimOutcome::done);
+			}).empty());
+		}
+	}
+}
+
+/* The next kernel starts with its trimmer off and nothing wanting it on: a
+ * wish the application or the response had before the restart is not carried
+ * over, and the response's request is sent again. */
+void aRestartedGuestStartsWithTheTrimmerOffAndUnwanted()
+{
+	using ::uml::runtime::TrimKind;
+	using ::uml::runtime::TrimOutcome;
+	using uml::emulator::testing::trim_for_memory_pressure;
+	const auto emulator = makeEmulator();
+	FakeGuestConsole console;
+	require(console.requests(1U, [&] {
+		require(uml_emulator_set_page_cache_trimming(emulator.get(), 1) ==
+			UML_EMULATOR_OK);
+	}) == Requests {"trim on"});
+	uml::emulator::testing::reset_guest_state(emulator.get());
+	/* The application's wish went with the kernel: the response's request
+	 * is the only one now, and the guest is asked. */
+	require(console.requests(1U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_on) ==
+			TrimOutcome::sent);
+	}) == Requests {"trim on"});
+	require(console.requests(1U, [&] {
+		require(trim_for_memory_pressure(emulator.get(), TrimKind::gradual_off) ==
+			TrimOutcome::sent);
 	}) == Requests {"trim off"});
 }
 
@@ -1675,6 +1950,11 @@ int main(int argc, char **argv)
 	theLocksLeaveBetweenTheHoldAndTheWrite();
 	aHibernationThatCannotHoldKeepsTheLocks();
 	aQuiescedGuestIsNotAskedForItsMemory();
+	aGradualRequestThatWasNotSentIsOwedUntilAnyCallSettlesIt();
+	aResumeThatCouldNotReplayTheTrimmerLeavesItOwed();
+	aSilentConsoleHoldsNeitherThePressureTrimmerNorTheApplicationsRecord();
+	theTrimmerEndsAsEitherOfThemLastWanted();
+	aRestartedGuestStartsWithTheTrimmerOffAndUnwanted();
 	aLifecycleCallInProgressIsNotWaitedFor("trim once");
 	aLifecycleCallInProgressIsNotWaitedFor("suspend");
 	aPressureTrimBesideATrimChangeIsBusyThenSent();
