@@ -192,7 +192,7 @@ struct FollowXRowTests {
             return controller.sizeThatFits(in: CGSize(width: 2000, height: 2000)).width
         }
         let small = try await titleWidth(.xSmall)
-        let large = try await titleWidth(.accessibility3)
+        let large = try await titleWidth(.xxxLarge)
         #expect(large > small * 1.5, "\(small) -> \(large)")
     }
 

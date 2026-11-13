@@ -45,8 +45,8 @@ struct BootView: View {
         let current = frozen ?? stage
         VStack(spacing: 0) {
             statusLine(frozen: frozen != nil && !clockRuns)
-            // Centred while it fits; taller than the screen (the notice, at the
-            // largest text size), it scrolls from its top.
+            // Centred while it fits; taller than the screen (with the notice),
+            // it scrolls from its top.
             GeometryReader { proxy in
                 ScrollView {
                     content(guest: guest, system: model.system, steps: steps, current: current)
@@ -168,10 +168,6 @@ struct BootView: View {
             Text(model.slowStart.stopping ? String(localized: "Stopping\u{2026}") : Self.status(kind))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
-                // One word, which shrinks before it would break ("Stop-/ping").
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .layoutPriority(1)
             Spacer()
             TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
                 // The start's own time, which a restart of the guest in place
@@ -184,16 +180,10 @@ struct BootView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .contentTransition(.numericText())
-                    // The time keeps its width; the state beside it is the one
-                    // that wraps or shrinks.
-                    .lineLimit(1)
-                    .fixedSize()
             }
         }
         .padding(.horizontal, 24)
-        // Taller than 44 where the text is large.
-        .padding(.vertical, 6)
-        .frame(minHeight: 44)
+        .frame(height: 44)
         .frame(maxWidth: 640)
         .frame(maxWidth: .infinity)
     }
@@ -389,10 +379,9 @@ struct BootView: View {
     }
 
     /// Stop's label in one of its two states. Side by side, "Stopping\u{2026}"
-    /// has a spinner. Stacked, the button is as wide as the notice and the text
-    /// the largest sizes make is wide: the word keeps the whole width, with no
-    /// spinner beside it (the status line and the disabled button say it), and
-    /// shrinks before it would break.
+    /// has a spinner. Stacked, the button is as wide as the notice: the word
+    /// keeps the whole width, with no spinner beside it (the status line and
+    /// the disabled button say it).
     @ViewBuilder
     private func stopLabel(stopping: Bool, lineLimit: Int?, axis: Axis) -> some View {
         HStack(spacing: 8) {
@@ -403,8 +392,7 @@ struct BootView: View {
             }
             Text(stopping ? "Stopping\u{2026}" : "Stop")
                 .font(.body.weight(.semibold))
-                .lineLimit(axis == .horizontal ? lineLimit : 1)
-                .minimumScaleFactor(axis == .horizontal ? 1 : 0.5)
+                .lineLimit(lineLimit)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: axis == .horizontal, vertical: true)
         }

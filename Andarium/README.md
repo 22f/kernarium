@@ -287,9 +287,9 @@ names what is missing, and the first empty field takes the focus after OK.
 The sheet attaches the bug report, a screenshot, photos and videos from the
 photo library, and any number of files from Files. The bar has three buttons:
 Bug report, Screenshot and Add, a paperclip whose menu offers Photos and Files
-(the system's menu, anchored on the button; the Large Content Viewer reads
-every button of the bar). A file is opened where it is kept (the document
-picker in place, `Shared/Feedback/SendFeedbackFilePicker.swift`), never copied
+(the system's menu, anchored on the button). A file is opened where it is kept
+(the document picker in place,
+`Shared/Feedback/SendFeedbackFilePicker.swift`), never copied
 first: the sheet holds the access the picker gave it from the pick until the
 row is removed or the sheet closes (a file still being looked at keeps its own
 until that ends), each start stopped once, and Send maps the file from there
