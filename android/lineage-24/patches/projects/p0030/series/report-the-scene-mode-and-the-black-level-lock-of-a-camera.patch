@@ -11,16 +11,17 @@ and two keys were listed and never reported:
   reports DISABLED, which is what the camera API documents for it.
 - android.blackLevel.lock was reported only at the FULL level, and
   always as ON. A camera with MANUAL_SENSOR lists the key and now
-  reports it (and the request's own value, which the HAL left unread:
-  the camera does not adjust its black level, so a lock holds whichever
-  the request asks).
+  reports it, and the request's own value, which the HAL left unread.
+  The HAL has no black level stage to adjust, so it reports the lock
+  the request asks for; it does not claim that the black level
+  compensation of the camera behind it stays fixed.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../hwl/EmulatedCameraDeviceInfo.cpp            | 17 ++++++++++++-----
  .../hwl/EmulatedCameraDeviceInfo.h              |  1 +
- .../EmulatedCamera/hwl/EmulatedRequestState.cpp | 11 ++++++++++-
- 3 files changed, 23 insertions(+), 6 deletions(-)
+ .../EmulatedCamera/hwl/EmulatedRequestState.cpp | 12 +++++++++++-
+ 3 files changed, 24 insertions(+), 6 deletions(-)
 
 diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
 index 4b21c5ab4e8f1c8239b35d0f90dcd0891c3848af..4ac0c45bf7792bf538dfdb6d73cecffd9e184e8c 100644
@@ -80,15 +81,16 @@ index 034580e7b3b9df6df146a86b5aa9d7d911e627cc..d77ceabbaea58c4bed49853ad7b77445
    int32_t post_raw_boost_ = 100;
    bool report_post_raw_boost_ = false;
 diff --git a/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp b/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
-index cb182a31dc2081bb53042cefc557d28e3aa227e9..ac6115569fa355811643e68ada31e8adbca8029f 100644
+index cb182a31dc2081bb53042cefc557d28e3aa227e9..3884d28cd14f819fe8dafee44dd6424f1fbc4661 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedRequestState.cpp
-@@ -713,6 +713,15 @@ status_t EmulatedRequestState::InitializeSensorSettings(
+@@ -713,6 +713,16 @@ status_t EmulatedRequestState::InitializeSensorSettings(
      }
    }
  
-+  // The camera does not adjust its black level, so a lock is held whichever it
-+  // is: the result tells the request's state.
++  // The HAL has no black level stage that it could adjust, so it reports the
++  // lock that the request asks for. That says nothing about the black level
++  // compensation of the camera behind it.
 +  if (info.report_black_level_lock_) {
 +    ret = request_settings_->Get(ANDROID_BLACK_LEVEL_LOCK, &entry);
 +    if ((ret == OK) && (entry.count == 1)) {
@@ -99,7 +101,7 @@ index cb182a31dc2081bb53042cefc557d28e3aa227e9..ac6115569fa355811643e68ada31e8ad
    float min_zoom = info.min_zoom_, max_zoom = info.max_zoom_;
    ret = request_settings_->Get(ANDROID_CONTROL_EXTENDED_SCENE_MODE, &entry);
    if ((ret == OK) && (entry.count == 1)) {
-@@ -1089,7 +1098,7 @@ std::unique_ptr<HwlPipelineResult> EmulatedRequestState::InitializeResult(
+@@ -1089,7 +1099,7 @@ std::unique_ptr<HwlPipelineResult> EmulatedRequestState::InitializeResult(
      }
      result->result_metadata->Set(ANDROID_CONTROL_AWB_LOCK, &info.awb_lock_, 1);
    }
