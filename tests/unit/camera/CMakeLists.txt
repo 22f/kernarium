@@ -36,6 +36,15 @@ target_include_directories(uml_camera_still_exposure_tests PRIVATE
 uml_add_unit_test(NAME camera-still-exposure COMMAND uml_camera_still_exposure_tests
     LABELS "device;camera")
 
+# The key-value observer of the pressure watch, on a stand-in object (no camera is
+# opened): the handler outlives a stop that comes while it runs.
+add_executable(uml_camera_key_path_observer_tests camera_key_path_observer_tests.mm)
+target_link_libraries(uml_camera_key_path_observer_tests PRIVATE UML::AppleCamera "-framework Foundation")
+target_include_directories(uml_camera_key_path_observer_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/darwin/platform/apple)
+uml_add_unit_test(NAME camera-key-path-observer COMMAND uml_camera_key_path_observer_tests
+    LABELS "device;camera")
+
 # Which photo size a camera is asked for, on tables of the shape the platform
 # lists per format (no camera is opened).
 add_executable(uml_camera_photo_dimensions_tests camera_photo_dimensions_tests.cpp)

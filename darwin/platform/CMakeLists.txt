@@ -147,6 +147,7 @@ add_library(uml_apple_camera STATIC
     apple/accelerated_nv12.cpp
     apple/camera_authorization.mm
     apple/camera_capture.mm
+    apple/key_path_observer.mm
     apple/photo_metadata.cpp)
 add_library(UML::AppleCamera ALIAS uml_apple_camera)
 uml_declare_architecture_target(uml_apple_camera platform)

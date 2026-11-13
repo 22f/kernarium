@@ -162,7 +162,9 @@ interface to the wire.
   critical), as Apple advises, to the largest rate the camera offers below the
   cap (`throttledRate`), before the session is interrupted; the work a
   pressure notification queues holds what it uses (`PressureWatch`) and does
-  nothing once the stream or the session has ended. A runtime
+  nothing once the stream or the session has ended, and the observer that
+  runs it (`apple/key_path_observer.h`) keeps the handler alive for as long as
+  it runs, so a stop that comes meanwhile frees nothing it is using. A runtime
   error is restarted once, and the restart, like an interruption that ends,
   is a recovery (`recoverAnchors`): every camera the system moved out of its
   anchor is put back, with its outputs and settings, and only then is a
@@ -189,6 +191,7 @@ interface to the wire.
   pumps. App Store runtimes do not build it. It is never a real camera.
 
 Tests: `camera-frame-transform` and `camera-dng-color` need nothing;
+`camera-key-path-observer` runs the key-value observer on a stand-in object;
 `camera-synthetic` exercises the synthetic camera through the interface; and
 `camera-apple-discovery` reads the host's own cameras on any host. The Apple
 backend's sessions are not run by a test, because a test must never capture from

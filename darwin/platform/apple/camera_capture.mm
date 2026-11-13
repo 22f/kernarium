@@ -9,6 +9,7 @@
 #include "accelerated_nv12.hpp"
 #include "camera.hpp"
 #include "dng_color.hpp"
+#include "key_path_observer.h"
 #include "photo_metadata.hpp"
 #include "photo_dimensions.hpp"
 #include "still_exposure.hpp"
@@ -406,14 +407,6 @@ using uml::platform::SessionState;
                          state:(std::shared_ptr<SessionState>)state;
 @end
 
-#if TARGET_OS_IOS
-// Reports the level of a device's system pressure (heat, mostly) as it changes.
-@interface UMLPressureObserver : NSObject
-- (instancetype)initWithDevice:(AVCaptureDevice*)device handler:(void (^)(AVCaptureSystemPressureLevel))handler;
-- (void)invalidate;
-@end
-#endif
-
 namespace uml::platform {
 namespace {
 
@@ -434,7 +427,7 @@ struct RunningCamera {
     AVCaptureConnection* connection {};
     AVCaptureDeviceFormat* format {};
 #if TARGET_OS_IOS
-    UMLPressureObserver* pressure {};
+    UMLKeyPathObserver* pressure {};
 #endif
     // What the system's pressure leaves of a running stream's rate: made when the
     // stream starts, ended when it stops or its session does. The observer's
@@ -1522,8 +1515,13 @@ private:
 #if TARGET_OS_IOS
         AVCaptureDevice* device = entry.device;
         dispatch_queue_t queue = queue_;
-        running.pressure = [[UMLPressureObserver alloc] initWithDevice:device
-                                                               handler:^(AVCaptureSystemPressureLevel level) {
+        // The device's system pressure (heat, mostly) as it changes.
+        running.pressure = [[UMLKeyPathObserver alloc] initWithObject:device
+                                                              keyPath:@"systemPressureState"
+                                                              handler:^(id value) {
+            AVCaptureSystemPressureState* state = value;
+            if (state == nil) return;
+            AVCaptureSystemPressureLevel level = state.level;
             std::uint32_t cap = 0;
             if ([level isEqualToString:AVCaptureSystemPressureLevelSerious]) cap = 20;
             else if ([level isEqualToString:AVCaptureSystemPressureLevelCritical] ||
@@ -1834,50 +1832,3 @@ std::unique_ptr<Camera> makeAppleCamera()
 }
 
 @end
-
-#if TARGET_OS_IOS
-@implementation UMLPressureObserver {
-    AVCaptureDevice* _device;
-    void (^_handler)(AVCaptureSystemPressureLevel);
-    BOOL _observing;
-}
-
-- (instancetype)initWithDevice:(AVCaptureDevice*)device handler:(void (^)(AVCaptureSystemPressureLevel))handler
-{
-    if ((self = [super init])) {
-        _device = device;
-        _handler = [handler copy];
-        [device addObserver:self forKeyPath:@"systemPressureState" options:NSKeyValueObservingOptionNew context:nil];
-        _observing = YES;
-    }
-    return self;
-}
-
-- (void)observeValueForKeyPath:(NSString*)keyPath
-                      ofObject:(id)object
-                        change:(NSDictionary*)change
-                       context:(void*)context
-{
-    (void)change;
-    (void)context;
-    if (![keyPath isEqualToString:@"systemPressureState"]) return;
-    AVCaptureSystemPressureState* state = static_cast<AVCaptureDevice*>(object).systemPressureState;
-    if (state != nil && _handler != nil) _handler(state.level);
-}
-
-- (void)invalidate
-{
-    if (!_observing) return;
-    _observing = NO;
-    [_device removeObserver:self forKeyPath:@"systemPressureState"];
-    _handler = nil;
-    _device = nil;
-}
-
-- (void)dealloc
-{
-    [self invalidate];
-}
-
-@end
-#endif
