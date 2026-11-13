@@ -1114,6 +1114,133 @@ class UpgradeSectionTests(unittest.TestCase):
         self.assertIsNone(runner.check_warning_on_disk(self.settings_guest(dict(runner.CHECK_SETTINGS))))
 
 
+NOT_STORED_LINE = "11-11 09:20:00.000 I kernarium_wifi_network: VirtWifi was not stored: saved again\n"
+EMPTY_LISTING = "Network Id      SSID                         Security type\n"
+ADDRESS = "    inet 192.0.2.16/24 scope global wlan0\n"
+
+
+class QuickGuest(ScriptedGuest):
+    COMMANDS = {**ScriptedGuest.COMMANDS, "address": "ip -4 addr show dev wlan0 2>/dev/null; true"}
+
+
+class QuickStopTests(unittest.TestCase):
+    """The case that stops a guest before the Wi-Fi service stores the network the script saved."""
+
+    def setUp(self) -> None:
+        clock = mock.patch.object(runner, "time", FakeClock())
+        clock.start()
+        self.addCleanup(clock.stop)
+        output = contextlib.redirect_stdout(io.StringIO())
+        output.__enter__()
+        self.addCleanup(output.__exit__, None, None, None)
+
+    def guest(self, **answers: list[str]) -> QuickGuest:
+        defaults = {"script_log": [""], "status": [JOINED], "listing": [LISTING], "script_service": ["stopped"],
+                    "address": [ADDRESS], "log": [""]}
+        return QuickGuest(**{**defaults, **answers})
+
+    def test_both_lines_of_the_script_are_a_repair(self) -> None:
+        self.assertTrue(runner.repair_logged(REPAIR_LINE))
+        self.assertTrue(runner.repair_logged(NOT_STORED_LINE))
+        self.assertTrue(runner.not_stored_logged(NOT_STORED_LINE))
+        self.assertFalse(runner.not_stored_logged(REPAIR_LINE))
+        self.assertFalse(runner.repair_logged("--------- beginning of main\n"))
+
+    def test_the_option_runs_the_case_alone(self) -> None:
+        parser = runner.build_parser()
+        self.assertTrue(parser.parse_args(["--quick-stop-only"]).quick_stop_only)
+        self.assertFalse(parser.parse_args([]).quick_stop_only)
+
+    def test_data_at_marker_one_that_boots_without_its_network_fails(self) -> None:
+        # What a release without the fix does: the script ends at marker 1, the list is empty, nothing joins.
+        guest = self.guest(status=[NOT_JOINED], listing=[EMPTY_LISTING], address=[""])
+        with self.assertRaisesRegex(runner.Failure, r"boots without VirtWifi saved.*service 'stopped'.*not saved "
+                                    r"it again.*has not joined"):
+            runner.check_quick_second_boot(guest, WAITS)
+
+    def test_a_stop_after_the_store_wrote_the_network_shows_nothing(self) -> None:
+        self.assertIsNone(runner.check_quick_second_boot(self.guest(), WAITS))
+
+    def test_a_stored_network_that_never_joins_is_a_lease_failure(self) -> None:
+        guest = self.guest(status=[NOT_JOINED], address=[""])
+        with self.assertRaisesRegex(runner.Failure, r"the station holds an address: the station has not joined"):
+            runner.check_quick_second_boot(guest, WAITS)
+
+    def test_a_network_saved_again_that_joins_with_an_address_passes(self) -> None:
+        note = runner.check_quick_second_boot(self.guest(script_log=[NOT_STORED_LINE]), WAITS)
+        self.assertIn("saved the network again", note or "")
+        self.assertIn("within 60 s", note or "")
+
+    def test_the_line_is_kept_once_seen_and_the_lease_is_waited_for(self) -> None:
+        guest = self.guest(script_log=["", NOT_STORED_LINE, ""], status=[NOT_JOINED, NOT_JOINED, JOINED])
+        self.assertIsNotNone(runner.check_quick_second_boot(guest, WAITS))
+
+    def test_a_network_saved_again_without_a_lease_fails(self) -> None:
+        guest = self.guest(script_log=[NOT_STORED_LINE], address=[""])
+        with self.assertRaisesRegex(runner.Failure, r"saved VirtWifi again, but .*wlan0 holds no IPv4 address"):
+            runner.check_quick_second_boot(guest, WAITS)
+
+    def test_a_script_that_does_not_end_after_the_repair_fails(self) -> None:
+        guest = self.guest(script_log=[NOT_STORED_LINE], script_service=["running"])
+        with self.assertRaisesRegex(runner.Failure, r"service is 'running', not 'stopped'.*after 255 s"):
+            runner.check_quick_second_boot(guest, WAITS)
+
+    def test_a_denial_of_the_scripts_domain_fails(self) -> None:
+        guest = self.guest(script_log=[NOT_STORED_LINE], log=[DENIAL])
+        with self.assertRaisesRegex(runner.Failure, "SELinux denied the boot script's domain"):
+            runner.check_quick_second_boot(guest, WAITS)
+
+    def attempts(self, outcomes: list) -> tuple[mock.Mock, mock.Mock, mock.Mock]:
+        first = mock.Mock()
+        stopped = mock.Mock()
+        second = mock.Mock(side_effect=outcomes)
+        return first, stopped, second
+
+    def run_attempts(self, outcomes: list) -> tuple[str | None, mock.Mock, mock.Mock]:
+        first, stopped, second = self.attempts(outcomes)
+        options = runner.build_parser().parse_args([])
+        with mock.patch.object(runner, "stop_after_save", first), \
+                mock.patch.object(runner, "start_guest", return_value=object()), \
+                mock.patch.object(runner, "stop", stopped), \
+                mock.patch.object(runner, "check_quick_second_boot", second):
+            try:
+                return runner.check_quick_stop(options, "adb", Path(tempfile.gettempdir()), WAITS), first, stopped
+            finally:
+                self.last_calls = (first.call_count, stopped.call_count)
+
+    def test_a_stop_that_shows_nothing_is_tried_again(self) -> None:
+        note, first, stopped = self.run_attempts([None, None, "the script saved it"])
+        self.assertEqual(note, "attempt 3 of 6: the script saved it")
+        self.assertEqual((first.call_count, stopped.call_count), (3, 3))
+
+    def test_no_stop_that_comes_before_the_store_fails_the_case(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "no stop came before the Wi-Fi service stored the network "
+                                    "in 6 attempts"):
+            self.run_attempts([None] * 6)
+        self.assertEqual(self.last_calls, (6, 6))
+
+    def test_a_failure_of_a_judged_boot_ends_the_case_at_once_and_stops_the_guest(self) -> None:
+        with self.assertRaisesRegex(runner.Failure, "boots without VirtWifi"):
+            self.run_attempts([runner.Failure("the data boots without VirtWifi saved")])
+        self.assertEqual(self.last_calls, (1, 1))
+
+    def run_main(self, arguments: list[str]) -> list[str]:
+        calls: list[str] = []
+        with mock.patch.object(sys, "argv", ["run_android_wifi_network.py", *arguments]), \
+                mock.patch.object(runner.boot_android, "resolve_executable", return_value="adb"), \
+                mock.patch.object(runner, "fresh", lambda *a: calls.append("fresh")), \
+                mock.patch.object(runner, "quick_stop", lambda *a: calls.append("quick stop")), \
+                mock.patch.object(runner, "upgrade", lambda *a: calls.append("upgrade")):
+            self.assertEqual(runner.main(), 0)
+        return calls
+
+    def test_the_case_runs_between_the_fresh_disk_and_the_upgrade(self) -> None:
+        self.assertEqual(self.run_main(["--previous-release", "r22"]), ["fresh", "quick stop", "upgrade"])
+
+    def test_the_option_leaves_out_every_other_section(self) -> None:
+        self.assertEqual(self.run_main(["--quick-stop-only", "--previous-release", "r22"]), ["quick stop"])
+
+
 class ContinuityReadingTests(unittest.TestCase):
     """What the runner reads to hold one network, and the logs of its checks, to account."""
 

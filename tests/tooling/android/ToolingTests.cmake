@@ -192,6 +192,17 @@ uml_add_tooling_test(
     LABELS android
     TIMEOUT 60)
 
+# The guest's Wi-Fi network script, the real text under sh, against a fake Wi-Fi
+# framework with a config store, a memory list and a persistent marker: a stop
+# before the store wrote the network, a save before the store is read, and every
+# marker-2 state; mutants of the script must fail a case.
+uml_add_tooling_test(
+    NAME android17-wifi-network-script
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${PROJECT_SOURCE_DIR}/tests/tooling/android/test_wifi_network_script.py
+    LABELS android
+    TIMEOUT 120)
+
 # The video-suspend runner's suspend step against a fake guest: a host GPU reset
 # across the wake fails it by that name, and the shared reader of the launcher's
 # log that the Wi-Fi network runner uses as well.
