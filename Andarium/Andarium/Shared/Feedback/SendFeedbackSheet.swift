@@ -291,7 +291,7 @@ struct SendFeedbackSheet: View {
                     ? Text(verbatim: attachment.displayName ?? attachment.fileName)
                     : Text(Self.title(attachment.kind)))
                     .font(.subheadline.weight(.semibold))
-                    .lineLimit(attachment.kind == .file ? (typeSize.isAccessibilitySize ? 3 : 1) : nil)
+                    .lineLimit(attachment.kind == .file ? 1 : nil)
                     .truncationMode(.middle)
                 Text(Self.detail(attachment))
                     .font(.caption)

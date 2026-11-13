@@ -65,10 +65,17 @@ struct BusyOverlay: View {
 
     @ViewBuilder
     private func running(scrolls: Bool) -> some View {
-        // The share goes under the title where the title would not fit beside it (large text sizes, a long title).
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .firstTextBaseline) { titleAndShare(beside: true) }
-            VStack(alignment: .leading, spacing: 2) { titleAndShare(beside: false) }
+        HStack(alignment: .firstTextBaseline) {
+            Text(state.title.keepingTogether)
+                .font(.title3.weight(.bold))
+            Spacer()
+            if let progress = state.progress {
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.system(.body, design: .rounded).weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
+            }
         }
         ProgressBar(value: state.progress ?? 0)
         detail(scrolls: scrolls)
@@ -77,21 +84,6 @@ struct BusyOverlay: View {
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .transition(.opacity)
-        }
-    }
-
-    @ViewBuilder
-    private func titleAndShare(beside: Bool) -> some View {
-        Text(state.title.keepingTogether)
-            .font(.title3.weight(.bold))
-            .fixedSize(horizontal: false, vertical: true)
-        if beside { Spacer() }
-        if let progress = state.progress {
-            Text("\(Int((progress * 100).rounded()))%")
-                .font(.system(.body, design: .rounded).weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .contentTransition(.numericText())
         }
     }
 

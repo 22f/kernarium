@@ -128,25 +128,13 @@ enum FeedbackPreview {
         case "feedback-file":
             await attachAll(feedback, report: nil, screenshot: false, photo: nil)
             await attachFile(feedback, named: "example-app.apk", megabytes: 12.4)
-        case "feedback-file-short":
-            // Short words, so that the row is on the screen at the largest text size.
-            feedback.form.problem = words.shortProblem
-            feedback.form.details = words.shortDetails
-            await attachFile(feedback, named: "app.apk", megabytes: 12.4)
-            await scrollToTheEnd(feedback)
         case "feedback-file-long":
-            feedback.form.problem = words.shortProblem
-            feedback.form.details = words.shortDetails
             await attachFile(
                 feedback, named: "example-application-release-candidate-build-2026-11-13-arm64-v8a-signed-debuggable.apk",
                 megabytes: 12.4)
-            await scrollToTheEnd(feedback)
         case "feedback-file-names":
-            feedback.form.problem = words.shortProblem
-            feedback.form.details = words.shortDetails
             await attachFile(feedback, named: "\u{6D4B}\u{8BD5}\u{5E94}\u{7528}.apk", megabytes: 12.4)
             await attachFile(feedback, named: "\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk", megabytes: 5.1)
-            await scrollToTheEnd(feedback)
         case "feedback-file-mixed":
             await attachAll(feedback, report: 3.2, photo: 2.4)
             await attachFile(feedback, named: "example-app.apk", megabytes: 6.8)
@@ -190,16 +178,6 @@ enum FeedbackPreview {
         }
     }
 
-    /// Brings the end of the mail into view, as opening the details does, and folds them again: at a large text size
-    /// the attachments are below the fold of the sheet.
-    @MainActor
-    private static func scrollToTheEnd(_ feedback: SendFeedbackModel) async {
-        try? await Task.sleep(for: .milliseconds(600))
-        feedback.showsInformation = true
-        try? await Task.sleep(for: .milliseconds(900))
-        feedback.showsInformation = false
-    }
-
     /// The alert the sheet makes for these refusals, with the model's own words.
     @MainActor
     private static func refusal(_ reasons: [SendFeedbackFileRefusal], _ feedback: SendFeedbackModel) -> SendFeedbackFailure {
@@ -240,8 +218,6 @@ enum FeedbackPreview {
         let suggestion = "Let me keep the keyboard on screen"
         let fileProblem = "The app closes right after it opens"
         let fileDetails = "I installed the attached app with Install APK. It opens, then closes after about a second. The same file works on my other phone."
-        let shortProblem = "The app closes at once"
-        let shortDetails = "It opens, then closes."
         let suggestionDetails = "In games I type a lot, and the keyboard closes after every message. The picture shows where."
     }
 
