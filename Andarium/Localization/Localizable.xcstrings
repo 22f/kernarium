@@ -91,24 +91,46 @@
         }
       }
     },
-    "%@ is installed in the virtual machine, but its data files could not all be copied. The app may not work without them." : {
+    "%@ is installed in the virtual machine, but not all of its data files were copied. The app may not work without them." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@を仮想マシンにインストールしましたが、データファイルをすべてコピーできませんでした。データファイルがないと、アプリが動作しない場合があります。"
+            "value" : "%@を仮想マシンにインストールしましたが、一部のデータファイルはコピーされていません。データファイルがないと、アプリが動作しない場合があります。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@已安装到虚拟机中，但并非所有数据文件都已复制。没有这些文件，应用可能无法运行。"
+            "value" : "%@已安装到虚拟机中，但并非所有数据文件都已拷贝。没有这些文件，应用可能无法运行。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@已安裝到虛擬機器中，但並非所有資料檔案都已複製。沒有這些檔案，應用程式可能無法運作。"
+            "value" : "%@已安裝到虛擬機器中，但並非所有資料檔案都已拷貝。沒有這些檔案，應用程式可能無法運作。"
+          }
+        }
+      }
+    },
+    "%@ is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@を仮想マシンにインストールしましたが、一部のデータファイルはコピーされていません。データファイルがないと、アプリが動作しない場合があります。コピーするには、このファイルをもう一度インストールしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安装到虚拟机中，但并非所有数据文件都已拷贝。没有这些文件，应用可能无法运行。请再次安装此文件以拷贝这些文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已安裝到虛擬機器中，但並非所有資料檔案都已拷貝。沒有這些檔案，應用程式可能無法運作。請再次安裝此檔案以拷貝這些檔案。"
           }
         }
       }
@@ -2619,28 +2641,6 @@
         }
       }
     },
-    "Copying app data %lld of %lld…" : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "アプリのデータをコピー中（%1$lld/%2$lld）…"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在复制应用数据（%1$lld/%2$lld）…"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "正在複製應用程式資料（%1$lld/%2$lld）…"
-          }
-        }
-      }
-    },
     "Copying app data…" : {
       "localizations" : {
         "ja" : {
@@ -2652,13 +2652,35 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在复制应用数据…"
+            "value" : "正在拷贝应用数据…"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "正在複製應用程式資料…"
+            "value" : "正在拷貝應用程式資料…"
+          }
+        }
+      }
+    },
+    "Copying data file %lld of %lld…" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$lld件中%1$lld件目のデータファイルをコピー中…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷贝第%1$lld个数据文件，共%2$lld个…"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在拷貝第%1$lld個資料檔案，共%2$lld個…"
           }
         }
       }
@@ -6511,7 +6533,7 @@
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "パーツ%1$lld/%2$lldを送信中…"
+            "value" : "%2$lld個中%1$lld個目のパーツを送信中…"
           }
         },
         "zh-Hans" : {
@@ -7038,6 +7060,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此快照的部分檔案已遺失，因此無法回復，只能刪除。"
+          }
+        }
+      }
+    },
+    "Some parts of this app are missing. Choose an .apks, .xapk or .apkm file that holds all of them." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このアプリの一部のパーツがありません。すべてのパーツを含む.apks、.xapk、.apkmのいずれかのファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此应用的某些部分缺失。请选择包含所有部分的.apks、.xapk或.apkm文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此應用程式的某些部分缺失。請選擇包含所有部分的.apks、.xapk或.apkm檔案。"
           }
         }
       }
@@ -9046,46 +9090,24 @@
         }
       }
     },
-    "This app comes in several parts. Install its .apks, .xapk or .apkm file, which holds all of them." : {
+    "This app has no code for this device’s processor. Choose a version of the app made for ARM processors." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このアプリは複数のパーツで構成されています。すべてのパーツを含む.apks、.xapk、.apkmファイルからインストールしてください。"
+            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。ARMプロセッサ用のバージョンのアプリを選択してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此应用由多个部分组成。请安装包含全部部分的.apks、.xapk或.apkm文件。"
+            "value" : "此应用没有适用于此设备处理器的代码。请选择适用于ARM处理器的应用版本。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此應用程式由多個部分組成。請安裝包含全部部分的.apks、.xapk或.apkm檔案。"
-          }
-        }
-      }
-    },
-    "This app has no code for this device’s processor." : {
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此应用没有适用于此设备处理器的代码。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。"
+            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。請選擇適用於ARM處理器的應用程式版本。"
           }
         }
       }

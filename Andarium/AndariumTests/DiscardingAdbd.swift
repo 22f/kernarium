@@ -129,6 +129,10 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     /// write instead of reading the whole file, as `createSession` failing
     /// does.
     var failsAtOnce = false
+    /// The peer does not acknowledge the writes of an `install-write`: it answers and closes, as a package manager that is done with the file may.
+    var closeSuccessfulWriteWithoutFinalAck = false
+    /// The API level `getprop ro.build.version.sdk` answers.
+    var sdkLevel = "37"
     /// The free space `df` reports for any path, in kibibytes.
     var guestFreeKiB: UInt64 = 64 << 20
 
@@ -268,7 +272,7 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
         var received: UInt64 = 0
         var hash = SHA256()
         while received < size {
-            guard let piece = try autoreleasepool(invoking: { try stream.receive() }) else { break }
+            guard let piece = try autoreleasepool(invoking: { try stream.receive(acknowledge: !closeSuccessfulWriteWithoutFinalAck) }) else { break }
             received += UInt64(piece.count)
             hash.update(data: piece)
             let hook = lock.withLock { () -> (@Sendable (UInt64) -> Void)? in
@@ -316,8 +320,8 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
     private func serveShell(_ stream: Channel, command: String) throws {
         lock.withLock { commands.append(command) }
         var out = Data()
-        if command == "getprop ro.product.cpu.abilist" {
-            let text = abiList + "\n"
+        if command == "getprop ro.product.cpu.abilist" || command == "getprop ro.build.version.sdk" {
+            let text = (command.hasSuffix("abilist") ? abiList : sdkLevel) + "\n"
             out = Data([1]) + Self.bytes(UInt32(text.utf8.count)) + Data(text.utf8)
         } else if command.hasPrefix("df -Pk") {
             let text = "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
@@ -417,11 +421,11 @@ nonisolated final class DiscardingAdbd: AdbConnector, @unchecked Sendable {
         }
 
         /// The next write of the client, acknowledged; nil when it closed.
-        func receive() throws -> Data? {
+        func receive(acknowledge: Bool = true) throws -> Data? {
             while !closed {
                 let message = try adbd.receive(transport)
                 if message.command == AdbWire.write {
-                    try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: ownId, arg1: peerId))
+                    if acknowledge { try adbd.send(transport, AdbMessage(command: AdbWire.okay, arg0: ownId, arg1: peerId)) }
                     return message.payload
                 }
                 if message.command == AdbWire.close { closed = true }

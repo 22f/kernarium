@@ -66,7 +66,12 @@ struct ContainerInstallTests {
             Case(
                 name: "bundletool.apks",
                 entries: [
-                    ContainerEntry("toc.pb", Data([1, 2, 3])),
+                    ContainerEntry("toc.pb", BundleToc(variants: [BundleToc.Variant(apks: [
+                        .master("splits/base-master.apk"), .split("splits/base-xxhdpi.apk", "config.xxhdpi"),
+                        .split("splits/base-arm64_v8a.apk", "config.arm64_v8a", abi: 3),
+                        .split("splits/base-x86_64.apk", "config.x86_64", abi: 5),
+                        .split("splits/base-armeabi_v7a.apk", "config.armeabi_v7a", abi: 2),
+                    ])]).build()),
                     ContainerEntry("splits/base-master.apk", base),
                     ContainerEntry("splits/base-xxhdpi.apk", density),
                     ContainerEntry("splits/base-arm64_v8a.apk", arm64),
@@ -186,8 +191,10 @@ struct ContainerInstallTests {
         let adbd = DiscardingAdbd()
         defer { adbd.shutdown() }
         let apk = apkData(7, count: 123_457)
+        // It holds APKs as assets, which are not an instruction to install them: it is the app.
         let url = try ContainerFixture.write([
             ContainerEntry("AndroidManifest.xml", Data([1])), ContainerEntry("classes.dex", apk),
+            ContainerEntry("assets/helper.apk", apkData(8)), ContainerEntry("assets/base.apk", apkData(9)),
         ], name: "Plain.apks")
         defer { try? FileManager.default.removeItem(at: url) }
         let size = try #require(try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int)
@@ -203,7 +210,11 @@ struct ContainerInstallTests {
         let hostile: [(String, [ContainerEntry], InstallRefusal)] = [
             ("empty.apks", [ContainerEntry("readme.txt", Data("hi".utf8))], .noApp),
             ("bundle.apks", [ContainerEntry("BundleConfig.pb", Data([1])), ContainerEntry("base/manifest/AndroidManifest.xml", Data([1]))], .appBundle),
-            ("nobase.apks", [ContainerEntry("toc.pb", Data([1])), ContainerEntry("splits/base-xxhdpi.apk", base)], .damaged),
+            ("nobase.apks", [
+                ContainerEntry("toc.pb", BundleToc(variants: [BundleToc.Variant(apks: [.split("splits/base-xxhdpi.apk", "config.xxhdpi")])]).build()),
+                ContainerEntry("splits/base-xxhdpi.apk", base),
+            ], .damaged),
+            ("notable.apks", [ContainerEntry("toc.pb", Data([1])), ContainerEntry("splits/base-xxhdpi.apk", base)], .damaged),
             ("twobases.apkm", [ContainerEntry("info.json", Data("{}".utf8)), ContainerEntry("a.apk", base), ContainerEntry("b.apk", base)], .damaged),
             ("missing.xapk", [
                 ContainerEntry("manifest.json", Data(#"{"package_name":"com.example.a","split_apks":[{"file":"gone.apk","id":"base"}]}"#.utf8)),
@@ -234,7 +245,7 @@ struct ContainerInstallTests {
     @Test func aFileThatIsNotAZipIsTurnedAwayInTheWordsOfItsName() async throws {
         let adbd = DiscardingAdbd()
         defer { adbd.shutdown() }
-        for (name, refusal) in [("junk.apks", InstallRefusal.notApk), ("junk.xapk", .notApk), ("junk.apkm", .encrypted)] {
+        for (name, refusal) in [("junk.apks", InstallRefusal.damaged), ("junk.xapk", .damaged), ("junk.apkm", .damagedOrEncrypted)] {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-\(name)")
             try apkData(1, count: 5000).write(to: url)
             defer { try? FileManager.default.removeItem(at: url) }
@@ -248,13 +259,37 @@ struct ContainerInstallTests {
         #expect(adbd.servicesOpened.filter { $0.hasPrefix("abb_exec:") }.isEmpty)
     }
 
+    @Test func aDownloadThatStoppedEarlyIsDamagedUnderEveryName() async throws {
+        // It starts like a ZIP and has no end: neither an encrypted file nor one that is no app.
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        let whole = try ContainerFixture.write([ContainerEntry("base.apk", apkData(1)), ContainerEntry("split_config.en.apk", apkData(2))], name: "x.apkm")
+        defer { try? FileManager.default.removeItem(at: whole) }
+        let bytes = try Data(contentsOf: whole)
+        for name in ["cut.apks", "cut.xapk", "cut.apkm"] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-\(name)")
+            try bytes.prefix(bytes.count - 40).write(to: url)
+            defer { try? FileManager.default.removeItem(at: url) }
+            let result = await outcome { try await guest(on: adbd).installApk(at: url, update: { _ in }) }
+            guard case let .failure(error) = result else {
+                Issue.record("\(name) installed")
+                continue
+            }
+            #expect((error as? AdbFailure)?.message == InstallRefusal.damaged.message, "\(name)")
+        }
+        #expect(adbd.servicesOpened.filter { $0.hasPrefix("abb_exec:") }.isEmpty)
+    }
+
     @Test func anApkOfFourGibOrMoreInsideAContainerIsRefusedBeforeASessionExists() async throws {
         let adbd = DiscardingAdbd()
         defer { adbd.shutdown() }
         var big = ContainerEntry("splits/base-xxhdpi.apk", zeros: InstallRefusal.singleApkLimit)
         big.crc = 0
         let url = try ContainerFixture.write([
-            ContainerEntry("toc.pb", Data([1])), ContainerEntry("splits/base-master.apk", apkData(1)), big,
+            ContainerEntry("toc.pb", BundleToc(variants: [BundleToc.Variant(apks: [
+                .master("splits/base-master.apk"), .split("splits/base-xxhdpi.apk", "config.xxhdpi"),
+            ])]).build()),
+            ContainerEntry("splits/base-master.apk", apkData(1)), big,
         ], name: "Big.apks")
         defer { try? FileManager.default.removeItem(at: url) }
         let result = await outcome { try await guest(on: adbd).installApk(at: url, update: { _ in }) }
@@ -262,7 +297,7 @@ struct ContainerInstallTests {
             Issue.record("installed")
             return
         }
-        #expect((error as? AdbFailure)?.message == InstallRefusal.tooLarge.message)
+        #expect((error as? AdbFailure)?.message == InstallRefusal.partTooLarge.message)
         #expect(adbd.servicesOpened.filter { $0.hasPrefix("abb_exec:") }.isEmpty)
     }
 
@@ -524,9 +559,11 @@ struct ContainerDataInstallTests {
         #expect(placed.map(\.from) == synced.map(\.path))
         #expect(adbd.shellCommands.filter { $0 == "mkdir -p -- '\(Self.folder)'" }.count == 2)
         // The bar says what is going on, and the Cancel button is back for the copy.
-        #expect(log.details.contains("Copying app data 1 of 2\u{2026}") && log.details.contains("Copying app data 2 of 2\u{2026}"))
+        #expect(log.details.contains("Copying data file 1 of 2\u{2026}") && log.details.contains("Copying data file 2 of 2\u{2026}"))
         #expect(log.all.contains { $0.cancellable == false })
-        #expect(log.all.last { $0.cancellable != nil }?.cancellable == true)
+        // It was back for the copy, and goes again once nothing is left to stop.
+        let flags = log.all.compactMap(\.cancellable)
+        #expect(flags.contains(true) && flags.last == false)
         let progress = log.progress
         #expect(progress == progress.sorted() && (progress.last ?? 0) <= 0.95 + 1e-9)
         // The ledger was told, and is settled.
@@ -540,7 +577,7 @@ struct ContainerDataInstallTests {
         let item = try fixture(obbPackage: "com.example.other")
         defer { try? FileManager.default.removeItem(at: item.url) }
         let result = try await guest(on: adbd).installApk(at: item.url, update: { _ in })
-        #expect(result == .installedWithoutData)
+        #expect(result == .installedDataNotPlaced)
         #expect(adbd.committedSessions.count == 1)
         #expect(adbd.syncedFiles.isEmpty && moves(adbd).isEmpty)
         #expect(!adbd.shellCommands.contains { $0.hasPrefix("mkdir") })
@@ -561,7 +598,7 @@ struct ContainerDataInstallTests {
         defer { try? FileManager.default.removeItem(at: url) }
         let result = try await guest(on: adbd).installApk(at: url, update: { _ in })
         // The OBB file is in place; the file for Android/data is not, so the app may lack it.
-        #expect(result == .installedWithoutData)
+        #expect(result == .installedDataNotPlaced)
         #expect(moves(adbd).map(\.to) == [Self.folder + "/" + Self.mainName])
         #expect(adbd.syncedFiles.map(\.digest) == [digest(main)])
         #expect(!adbd.shellCommands.contains { $0.contains("Android/data") })

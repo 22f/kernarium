@@ -29,14 +29,17 @@ nonisolated enum PackageInstallMessages {
             ["FAILED_DEPRECATED_SDK_VERSION"],
             String(localized: "This app was made for a system version that this virtual machine no longer installs.")
         ),
-        (["FAILED_NO_MATCHING_ABIS"], String(localized: "This app has no code for this device\u{2019}s processor.")),
+        (
+            ["FAILED_NO_MATCHING_ABIS"],
+            String(localized: "This app has no code for this device\u{2019}s processor. Choose a version of the app made for ARM processors.")
+        ),
         (
             ["FAILED_INSUFFICIENT_STORAGE"],
             String(localized: "The virtual machine doesn\u{2019}t have enough free space. Free some up in the virtual machine, or give it more storage with Resize.")
         ),
         (
             ["FAILED_MISSING_SPLIT"],
-            String(localized: "This app comes in several parts. Install its .apks, .xapk or .apkm file, which holds all of them.")
+            String(localized: "Some parts of this app are missing. Choose an .apks, .xapk or .apkm file that holds all of them.")
         ),
         (["FAILED_MISSING_SHARED_LIBRARY"], String(localized: "The app needs a system library this virtual machine doesn\u{2019}t have.")),
         (
@@ -53,17 +56,20 @@ nonisolated enum PackageInstallMessages {
     /// the message for the person. Output with neither word is a failure that
     /// names nothing.
     static func failure(inOutput output: String) -> String? {
-        let lines = output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-        if lines.contains(where: { $0.hasPrefix("Success") }) { return nil }
-        guard let line = lines.last(where: { $0.hasPrefix("Failure") }) else {
+        let generic = String(localized: "The virtual machine couldn\u{2019}t install the app.")
+        switch PackageInstallResponse(output: output) {
+        case .success:
+            return nil
+        case .unrecognized:
             // Session creation can fail on the exception alone, with no line
             // of its own: `IOException: Requested internal only, but not
             // enough space`.
             if isStorageException(output) { return message(forCode: "FAILED_INSUFFICIENT_STORAGE") }
-            return String(localized: "The virtual machine couldn\u{2019}t install the app.")
+            return generic
+        case let .failure(line):
+            guard let code = code(inFailure: line) else { return generic }
+            return message(forCode: code)
         }
-        guard let code = code(inFailure: line) else { return String(localized: "The virtual machine couldn\u{2019}t install the app.") }
-        return message(forCode: code)
     }
 
     /// Whether the output is an exception that says the partition is full.
@@ -93,9 +99,14 @@ nonisolated enum PackageInstallMessages {
 /// How an install that reached the package manager ended.
 nonisolated enum ApkInstallOutcome: Equatable, Sendable {
     case installed
-    /// The app is installed, but the data files its archive carried (an
-    /// .xapk's OBB files) were not all copied.
+    /// The app is installed, but the data files its archive carried (an OBB
+    /// file of an .xapk or .apkm) were not all copied: the copy was stopped
+    /// or failed, and installing the same file again copies them.
     case installedWithoutData
+    /// The app is installed, but some of the archive's data is of a kind that
+    /// is not copied (it names no OBB file of the app, or no package): installing
+    /// the file again would not help.
+    case installedDataNotPlaced
 }
 
 /// The package manager refused an app for the version of Android it was built

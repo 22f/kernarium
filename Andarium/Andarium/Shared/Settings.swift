@@ -95,7 +95,7 @@ struct SessionSettingsSheet: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: InstallRefusal.pickerTypes) { result in
             guard case .success(let url) = result else { return }
             // Settings goes; the install, or the refusal of a file that is not
-            // one .apk, is on the full-screen overlay.
+            // an .apk, .apks, .xapk or .apkm, is on the full-screen overlay.
             model.installPicked(url)
             dismiss()
         }

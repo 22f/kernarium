@@ -26,6 +26,9 @@ nonisolated enum ApkInstallOperation {
     static let sendingShare = 0.8
     static let sendIdleLimit = Duration.seconds(60)
     static let commitLimit = Duration.seconds(15 * 60)
+    /// Reading an archive's directory and manifests is quick; a file that
+    /// takes this long, in the guest's running time, is not one.
+    static let inspectLimit = Duration.seconds(5 * 60)
 
     /// Installs the file at `url`. What the install needs to know of the file
     /// (its size, and with it the room it takes) is read once the coordinated

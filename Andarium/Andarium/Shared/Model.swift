@@ -1035,7 +1035,9 @@ final class AppModel {
     /// alert. `finished` runs once the overlay has gone. With `ending`, the
     /// overlay stays up instead and says how the operation ended (its words
     /// on success; `failure` and the error's on failure) until the person
-    /// closes it; cancelling still takes the overlay away.
+    /// closes it; cancelling takes the overlay away, except that an operation
+    /// which returns its outcome after the cancel (an install whose app was in
+    /// by then) shows that outcome.
     ///
     /// `failed` says how a failure ends instead of the alert, for a task
     /// started from a sheet, where an alert of the screens could not show.
@@ -1291,7 +1293,12 @@ final class AppModel {
                 case .installedWithoutData:
                     (
                         title: String(localized: "App installed"),
-                        detail: String(localized: "\(name) is installed in the virtual machine, but its data files could not all be copied. The app may not work without them.")
+                        detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them.")
+                    )
+                case .installedDataNotPlaced:
+                    (
+                        title: String(localized: "App installed"),
+                        detail: String(localized: "\(name) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them.")
                     )
                 }
             },
@@ -1305,8 +1312,9 @@ final class AppModel {
                         return self.previewInstallOutcome
                     }
                 }
-                // 100% for a moment, then the result.
-                update(BusyUpdate(progress: 1))
+                // 100% for a moment, then the result. Nothing is left to stop, so
+                // the Cancel that came back for an app's data goes.
+                update(BusyUpdate(progress: 1, cancellable: false))
                 try? await Task.sleep(for: .milliseconds(500))
                 return outcome
             }
