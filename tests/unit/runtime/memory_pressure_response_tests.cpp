@@ -1235,9 +1235,9 @@ void aWarningThatMeetsTheRetriedEndOfTheTrimmerTurnsItOnAgain()
 }
 
 /* ---- The level the response holds returns to normal when the source is
- * quiet. The clock is the one the policy reads, the actions' now_ns (the
- * process's awake clock in the host, which does not run while it is
- * suspended). ---- */
+ * quiet. The clock is the one the policy reads, the actions' now_ns (in the
+ * host CLOCK_UPTIME_RAW, which stops while the device sleeps, not while the
+ * process alone is suspended). ---- */
 
 void theLevelReturnsToNormalWhenTheSourceStaysQuiet()
 {
@@ -1330,12 +1330,14 @@ void aHeldGuestIsNotTrimmedBecauseOfAStaleTimer()
 	const PressureTiming timing;
 	MemoryPressureResponse response{actions, timing};
 	require(response.on_level(PressureLevel::warn) == Outcome::responded);
-	/* The process was suspended and resumed: its clock did not run meanwhile,
-	 * so a timer that fires at the resume finds the period not over. */
+	/* A timer that fires before the clock has reached the end of the period
+	 * (the device slept meanwhile, and the clock stopped) finds it not over. */
 	require(response.on_retry() == Outcome::nothing);
 	require(actions.calls_named("trim-off") == 0);
-	/* The period ends with the guest held: the host records the end for the
-	 * resume, and the response keeps nothing pending. */
+	/* The period ends with the guest held, as it does for a process suspended
+	 * for longer than the period when it resumes: the return asks the trimmer
+	 * off, the host records the end for the guest's resume, and the response
+	 * keeps nothing pending. */
 	actions.gradual_outcome = TrimOutcome::quiesced;
 	actions.advance(timing.quiet_period_ns);
 	require(response.on_retry() == Outcome::quiet);

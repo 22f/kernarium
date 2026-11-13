@@ -39,10 +39,12 @@ namespace uml::runtime {
  * delivered the normal level after a critical one). The level the response
  * holds therefore returns to normal by itself when the source has delivered
  * no level other than normal for `PressureTiming::quiet_period_ns`, on the
- * clock of PressureActions::now_ns (which does not run while the process is
- * suspended, as the caller's timer does not): on_retry() makes the return, the
- * same way the normal level does, and says so on its level line. A delivered
- * normal level ends it at once.
+ * clock of PressureActions::now_ns (which stops while the device sleeps, not
+ * while the process alone is suspended): on_retry() makes the return, the same
+ * way the normal level does, and says so on its level line. A process
+ * suspended for longer than the period meets the return at its resume, which
+ * asks the trimmer off and nothing else; a level still present is delivered
+ * again. A delivered normal level ends the period at once.
  *
  * A warning starts at most one response per `warn_interval_ns`, counted from
  * the start of the last response of either level, on the clock of
