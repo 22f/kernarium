@@ -111,14 +111,15 @@ struct WhatsNewRibbon: View {
     }
 
     /// The names on one line: all of them when they fit, else the first few
-    /// and how many more. At the accessibility sizes the line may wrap, and
-    /// names at most three.
+    /// and how many more. At the accessibility sizes the line may wrap, onto
+    /// three lines at most, and names the most titles (three, or two when
+    /// there are more) that leave the count in view; the count alone is what
+    /// is left when not even one name does.
     @ViewBuilder private var summary: some View {
         let titles = entries.map { WhatsNewWords.localized($0.title) }
         if typeSize.isAccessibilitySize {
-            Text(Self.summary(titles, naming: titles.count <= 3 ? titles.count : 2))
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
+            let named = titles.count <= 3 ? titles.count : 2
+            WholeInThreeLines(candidates: (0...named).reversed().map { Self.summary(titles, naming: $0) })
         } else {
             ViewThatFits(in: .horizontal) {
                 ForEach(Array(stride(from: titles.count, through: 1, by: -1)), id: \.self) { named in
@@ -131,12 +132,27 @@ struct WhatsNewRibbon: View {
 
     /// "File browser · More memory", "File browser · More memory · 5 more",
     /// or "7 new features" when none is named.
-    static func summary(_ titles: [String], naming named: Int) -> String {
+    static func summary(_ titles: [String], naming named: Int, language: String = appLanguage) -> String {
         guard named > 0 else {
             return String(localized: "\(titles.count) new features")
         }
         let rest = titles.count - named
-        return (titles.prefix(named) + (rest > 0 ? [String(localized: "\(rest) more")] : [])).joined(separator: " \u{00B7} ")
+        return (titles.prefix(named) + (rest > 0 ? [String(localized: "\(rest) more")] : []))
+            .joined(separator: separator(inLanguage: language))
+    }
+
+    /// The language the application's own words are in.
+    static var appLanguage: String { Bundle.main.preferredLocalizations.first ?? "en" }
+
+    /// What stands between two names: a dot. Where a language breaks lines at
+    /// spaces, a no-break space before the dot keeps it at the end of its line
+    /// and never at the start of the next. Chinese and Japanese break between
+    /// any two characters, so a no-break space there only drags the last
+    /// character of a name onto the next line with the dot; they take plain
+    /// spaces, and a name is cut only where the line is full.
+    static func separator(inLanguage language: String) -> String {
+        let breaksBetweenCharacters = language.hasPrefix("zh") || language.hasPrefix("ja")
+        return (breaksBetweenCharacters ? " " : "\u{00A0}") + "\u{00B7} "
     }
 
     /// A pull down that follows the finger, against some resistance, and
@@ -183,5 +199,39 @@ struct WhatsNewDeck: View {
             IconTile(symbol: symbol)
         }
         .frame(width: 30 + CGFloat(behind) * Self.step, alignment: .leading)
+    }
+}
+
+/// Text whole on at most three lines: the first of `candidates`, fullest
+/// first, that is no taller than three lines at the width and size it is
+/// shown in, and the last, the shortest, when none is. `lineLimit` alone
+/// would cut the fullest one short and lose the end of it, which is the count.
+private struct WholeInThreeLines: View {
+    let candidates: [String]
+
+    var body: some View {
+        ThreeLines {
+            // Three lines of the fullest text set the room: in the font and
+            // language every candidate is shown in. It is never drawn.
+            Text(candidates[0]).lineLimit(3, reservesSpace: true).hidden()
+            ViewThatFits(in: .vertical) {
+                ForEach(candidates, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
+            }
+        }
+    }
+}
+
+/// Lays out a hidden text that is three lines tall, then the content asked to
+/// fit that height, and is as tall as the content turns out to be.
+private struct ThreeLines: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let room = subviews[0].sizeThatFits(ProposedViewSize(width: proposal.width, height: nil)).height
+        return subviews[1].sizeThatFits(ProposedViewSize(width: proposal.width, height: room))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let room = subviews[0].sizeThatFits(ProposedViewSize(width: bounds.width, height: nil)).height
+        subviews[1].place(
+            at: bounds.origin, anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: room))
     }
 }

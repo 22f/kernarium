@@ -108,6 +108,7 @@ struct AppEntry {
         "info-license": .license("mesa"),
         "info-license-gpl": .license("linux"),
         "whatsnew-history": .whatsNew,
+        "whatsnew-history-nofeedback": .whatsNew,
     ]
 
     var hints: ScreenHints {
@@ -154,7 +155,7 @@ struct AppEntry {
         model.jitAvailable = true
         // Only an iPhone has a Taptic Engine for the guest's haptics: an iPad's
         // preview, like the device, has no Haptics row.
-        model.hapticsAvailable = host.name == "iPhone"
+        model.hapticsAvailable = host.hasHaptics
         // The mock device has a camera that iOS has not been asked about; a
         // screen states another access (and `-systemCamera` reads the
         // Simulator's own).
@@ -530,7 +531,7 @@ struct AppEntry {
         case "erase":
             model.confirmingErase = true
         case "info", "info-acknowledgements", "info-license", "info-license-gpl", "whatsnew-info",
-             "whatsnew-history":
+             "whatsnew-history", "whatsnew-history-nofeedback":
             model.sheet = .info
         #if FEEDBACK_MAIL
         case "home-menu", "welcome-menu":

@@ -3,6 +3,7 @@
 #if FEEDBACK_MAIL
 
 import AndariumCore
+import AndariumCoreTestSupport
 import SwiftUI
 import Testing
 import UIKit

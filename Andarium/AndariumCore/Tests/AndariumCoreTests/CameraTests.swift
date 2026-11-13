@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 // The Camera setting's saved choice, the session's mode, and the two
 // statements the screens make about it (the notice and the rotation).
