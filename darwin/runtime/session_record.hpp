@@ -106,7 +106,9 @@ inline constexpr std::size_t session_storage_offset =
 inline constexpr std::size_t session_state_offset =
 	session_storage_offset + session_storage_slot_bytes;
 /* The kernel output the state quotes, and the most the state ever takes: its
- * lines, a message and that output. */
+ * lines, a message and that output. Once the ring has dropped output the state
+ * quotes it from its first complete line, with the guest's serial number
+ * masked. */
 inline constexpr std::size_t session_kernel_output_bytes = 4096;
 inline constexpr std::size_t session_state_max_bytes =
 	session_kernel_output_bytes + 1024;

@@ -7,6 +7,7 @@
 #include "wait_until.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -908,6 +909,52 @@ void trimmingIsSwitchedByOneRequest()
 	(void)::close(server);
 }
 
+/* The request that does not wait returns at once with the guest silent or
+ * gone, leaves a request another thread has in flight alone, and reaches the
+ * guest as the ordinary one does. */
+void aNoWaitTrimRequestReturnsAtOnce()
+{
+	using ::uml::device::GuestRequest;
+	using ::uml::device::set_guest_page_cache_trim;
+	using ::uml::device::set_guest_page_cache_trim_nowait;
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	/* No guest console yet. */
+	require(set_guest_page_cache_trim_nowait(true) ==
+		GuestRequest::unreachable);
+	const int server = bindServer(path);
+	const auto started = std::chrono::steady_clock::now();
+	require(set_guest_page_cache_trim_nowait(true) == GuestRequest::sent);
+	require(set_guest_page_cache_trim_nowait(false) == GuestRequest::sent);
+	/* The guest never answers: nothing waited for it. */
+	require(std::chrono::steady_clock::now() - started <
+		std::chrono::milliseconds {1500});
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	require(awaitRequest(server, 1000));
+	require(receiveRequest(server, client, clientLength) == "trim on");
+	require(awaitRequest(server, 1000));
+	require(receiveRequest(server, client, clientLength) == "trim off");
+	requireOwnerOnly(path);
+
+	/* A request in flight on another thread holds the console: the one that
+	 * does not wait is busy and sends nothing. */
+	std::atomic<bool> inFlight {false};
+	std::thread holder {[&] {
+		inFlight = true;
+		(void)set_guest_page_cache_trim(true);
+	}};
+	require(awaitRequest(server, 5000));
+	const auto command = receiveRequest(server, client, clientLength);
+	require(command == "trim on");
+	require(set_guest_page_cache_trim_nowait(true) == GuestRequest::busy);
+	/* Let the holder's wait end with the reply. */
+	require(sendReply(server, client, clientLength, 0U, "trim on"));
+	holder.join();
+	require(!awaitRequest(server, 200));
+	(void)::close(server);
+}
+
 /* A pass takes longer than an ordinary request may wait, and is waited for
  * up to its own bound and no longer. */
 void aTrimPassIsWaitedForUpToItsBound()
@@ -936,6 +983,108 @@ void aTrimPassIsWaitedForUpToItsBound()
 			0U, 2500,
 			"trim once") == GuestRequest::unanswered);
 	require(waited < std::chrono::milliseconds(1800));
+	(void)::close(server);
+}
+
+/* Sends datagrams to the console, which nothing reads, until its queue has
+ * no room: Darwin then refuses one (ENOBUFS) at once. Returns how many it
+ * took. */
+std::size_t fillTheConsoleQueue(const std::string &path)
+{
+	const int sender = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+	require(sender >= 0);
+	sockaddr_un console {};
+	console.sun_family = AF_UNIX;
+	require(path.size() < sizeof(console.sun_path));
+	std::memcpy(console.sun_path, path.c_str(), path.size() + 1U);
+	uml::testing::ConsoleRequest filler {};
+	filler.length = 4U;
+	std::memcpy(filler.data.data(), "fill", 4U);
+	for (std::size_t sent = 0; sent < 1000U; ++sent) {
+		if (::sendto(sender, &filler, sizeof(filler), MSG_DONTWAIT,
+			    reinterpret_cast<const sockaddr *>(&console),
+			    sizeof(console)) < 0) {
+			require(errno == ENOBUFS || errno == EAGAIN,
+				"the console queue refused for another reason");
+			(void)::close(sender);
+			return sent;
+		}
+	}
+	require(false, "the console queue never filled");
+	return 0;
+}
+
+/* The console's queue holds a few requests and a full one refuses at once
+ * (ENOBUFS, blocking or not), so a request that waits for its reply waits for
+ * room too, within the same wait: it goes through once the guest has read
+ * what is ahead of it, and is not sent when the wait ends first. */
+void aRequestWaitsForRoomInAFullQueueWithinItsWait()
+{
+	using ::uml::device::GuestRequest;
+	using ::uml::device::trim_guest_page_cache;
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	const int server = bindServer(path);
+
+	/* The guest reads again after a while: the request goes through behind
+	 * the full queue, in the wait it was given. */
+	require(fillTheConsoleQueue(path) > 0U);
+	std::thread guest {[&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds {300});
+		sockaddr_un client {};
+		socklen_t clientLength {};
+		while (awaitRequest(server, 5000)) {
+			if (receiveRequest(server, client, clientLength) ==
+			    "trim once") {
+				(void)sendReply(server, client, clientLength, 0U,
+					"trimmed 0 KiB in 0 ms, compacted in 0 ms, "
+					"released 0 KiB in 0 ms");
+				return;
+			}
+		}
+	}};
+	const auto started = std::chrono::steady_clock::now();
+	require(trim_guest_page_cache(5000U) == GuestRequest::done);
+	const auto waited = std::chrono::steady_clock::now() - started;
+	guest.join();
+	require(waited >= std::chrono::milliseconds {250},
+		"the request did not wait for room");
+	require(!awaitRequest(server, 200));
+
+	/* The guest never reads: the request is not sent when its wait ends, and
+	 * the wait is not spent twice. */
+	require(fillTheConsoleQueue(path) > 0U);
+	const auto begun = std::chrono::steady_clock::now();
+	require(trim_guest_page_cache(300U) == GuestRequest::unreachable);
+	const auto spent = std::chrono::steady_clock::now() - begun;
+	require(spent >= std::chrono::milliseconds {250},
+		"the request gave up before its wait ended");
+	require(spent < std::chrono::milliseconds {1500},
+		"the request waited longer than its wait");
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	while (awaitRequest(server, 200))
+		require(receiveRequest(server, client, clientLength) == "fill",
+			"a request that was not sent reached the console");
+
+	/* The guest reads after most of the wait and never answers: the time the
+	 * request spent finding room is part of its wait, not added to it. */
+	require(fillTheConsoleQueue(path) > 0U);
+	std::thread silent {[&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds {600});
+		sockaddr_un from {};
+		socklen_t fromLength {};
+		while (awaitRequest(server, 200))
+			(void)receiveRequest(server, from, fromLength);
+	}};
+	const auto asked = std::chrono::steady_clock::now();
+	require(trim_guest_page_cache(1000U) == GuestRequest::unanswered);
+	const auto total = std::chrono::steady_clock::now() - asked;
+	silent.join();
+	require(total >= std::chrono::milliseconds {900},
+		"the request did not wait for its reply");
+	require(total < std::chrono::milliseconds {1400},
+		"the time spent finding room was waited for again");
 	(void)::close(server);
 }
 
@@ -1067,6 +1216,29 @@ void aSilentGuestIsWaitedForUpToTheBound()
 		GuestMemoryResult::done);
 	require(figures.total_bytes == 8 && figures.available_bytes == 4);
 	observer.join();
+	(void)::close(server);
+}
+
+/* The memory request is sent under the console's lock, which a caller's
+ * lifecycle lock may wait behind: it makes one attempt, so that a console whose
+ * queue is full is answered at once and not after a wait for room. */
+void aMemoryRequestDoesNotWaitForRoomInAFullQueue()
+{
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	const int server = bindServer(path);
+	require(fillTheConsoleQueue(path) > 0U);
+	const auto started = std::chrono::steady_clock::now();
+	auto query = GuestMemoryQuery::start();
+	const auto spent = std::chrono::steady_clock::now() - started;
+	require(!query.has_value(), "a request was sent to a full queue");
+	require(spent < std::chrono::milliseconds {300},
+		"the memory request waited for room in the console's queue");
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	while (awaitRequest(server, 200))
+		require(receiveRequest(server, client, clientLength) == "fill",
+			"a memory request that was not sent reached the console");
 	(void)::close(server);
 }
 
@@ -1352,6 +1524,85 @@ void aRunRemovesOnlyWhatExitedRunsLeft()
 		std::filesystem::remove_all(path);
 }
 
+/* A writeback finds the console's queue full: the retries for room run inside
+ * the request's one deadline, with the reply's wait, not before it. A guest
+ * that reads in time is asked and answers within the budget; one that never
+ * reads leaves nothing sent when the budget ends, and the budget is spent
+ * once; one that reads late and then answers later still is unanswered at the
+ * budget, not after room and a fresh wait. */
+void aWritebackFindingNoRoomStaysInItsBudget()
+{
+	using ::uml::device::GuestWriteback;
+	using ::uml::device::request_guest_writeback;
+	using namespace std::chrono_literals;
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	const int server = bindServer(path);
+	const auto elapsed = [](std::chrono::steady_clock::time_point since) {
+		return std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now() - since);
+	};
+
+	/* Room comes back after 300 ms, and the guest then answers at once. */
+	require(fillTheConsoleQueue(path) > 0U);
+	std::thread reading {[&] {
+		std::this_thread::sleep_for(300ms);
+		sockaddr_un client {};
+		socklen_t clientLength {};
+		while (awaitRequest(server, 5000)) {
+			if (receiveRequest(server, client, clientLength) == "sync") {
+				(void)sendReply(server, client, clientLength, 0U,
+					"synced in 5 ms");
+				return;
+			}
+		}
+	}};
+	auto started = std::chrono::steady_clock::now();
+	require(request_guest_writeback(2000ms, 0U) == GuestWriteback::done);
+	auto took = elapsed(started);
+	reading.join();
+	require(took >= 250ms && took < 1500ms,
+		"the writeback did not wait for room, or waited past its answer");
+	require(!awaitRequest(server, 200));
+
+	/* The guest never reads: nothing is sent, and the budget is spent once. */
+	require(fillTheConsoleQueue(path) > 0U);
+	started = std::chrono::steady_clock::now();
+	require(request_guest_writeback(400ms, 0U) == GuestWriteback::unreachable);
+	took = elapsed(started);
+	require(took >= 350ms && took < 900ms,
+		"a writeback that found no room did not end with its budget");
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	while (awaitRequest(server, 200))
+		require(receiveRequest(server, client, clientLength) == "fill",
+			"a writeback that was not sent reached the console");
+
+	/* Room after 300 ms, the answer only after 900: the budget of 500 ms is
+	 * all there is. */
+	require(fillTheConsoleQueue(path) > 0U);
+	std::thread late {[&] {
+		std::this_thread::sleep_for(300ms);
+		sockaddr_un from {};
+		socklen_t fromLength {};
+		while (awaitRequest(server, 3000)) {
+			if (receiveRequest(server, from, fromLength) == "sync") {
+				std::this_thread::sleep_for(600ms);
+				(void)sendReply(server, from, fromLength, 0U,
+					"synced in 5 ms");
+				return;
+			}
+		}
+	}};
+	started = std::chrono::steady_clock::now();
+	require(request_guest_writeback(500ms, 0U) == GuestWriteback::unanswered);
+	took = elapsed(started);
+	late.join();
+	require(took >= 450ms && took < 800ms,
+		"the time spent finding room was waited for again");
+	(void)::close(server);
+}
+
 /* Runs a group under a private $TMPDIR, which must hold this process's run
  * directory. */
 void runPrivately(void (*group)())
@@ -1393,7 +1644,10 @@ int main(int argc, char **argv)
 	} else if (selected == "writeback-strict") {
 		runPrivately(aWritebackReplyIsValidatedStrictly);
 	} else if (selected == "writeback-budget") {
-		runPrivately(aWritebackWaitsOneBudgetForEverything);
+		runPrivately([] {
+			aWritebackWaitsOneBudgetForEverything();
+			aWritebackFindingNoRoomStaysInItsBudget();
+		});
 	} else if (selected == "suspend-failure") {
 		runPrivately([] {
 			aBusySuspendIsRetriedUntilTheDeadline();
@@ -1404,7 +1658,9 @@ int main(int argc, char **argv)
 	} else if (selected == "trim") {
 		runPrivately([] {
 			trimmingIsSwitchedByOneRequest();
+			aNoWaitTrimRequestReturnsAtOnce();
 			aTrimPassIsWaitedForUpToItsBound();
+			aRequestWaitsForRoomInAFullQueueWithinItsWait();
 		});
 	} else if (selected == "memory") {
 		runPrivately([] {
@@ -1412,6 +1668,7 @@ int main(int argc, char **argv)
 			aMemoryRequestReadsTheGuestsFigures();
 			aSilentGuestIsWaitedForUpToTheBound();
 			aWaitingMemoryRequestDoesNotHoldTheConsole();
+			aMemoryRequestDoesNotWaitForRoomInAFullQueue();
 		});
 	} else if (selected == "suspend-timeout") {
 		runPrivately(aSuspendThatDoesNotReplyIsAborted);

@@ -207,7 +207,11 @@ device-orientation sensor; the compass bit, API 38, becomes
 `androidboot.kernarium.compass=1`, which lists its magnetometer), and ignores
 the others; Kernarium sends none. The
 runtime validates the values (`KernariumAdbChannel.hpp`,
-`KernariumGuestTimeZone.hpp`).
+`KernariumGuestTimeZone.hpp`). An Android guest has its own serial number and
+eth0 address, which the runtime keeps in `identity.json` beside the data disk
+([the identity](../darwin/device/block/README.md#installation-identity)); a
+request states values only for a run that needs fixed ones
+(`android_serial_number` and `android_ethernet_mac`, API 42).
 
 ## Devices and display
 

@@ -293,7 +293,12 @@ struct SnapshotStoreTests {
         let fixture = try await SnapshotFixture.make(marker: 1)
         defer { fixture.cleanUp() }
         let record = try contents(fixture.files.state)
+        // The installation's identity (synthetic here) is not part of a snapshot: a restore goes back in
+        // time on the same installation and keeps the one it has.
+        let identity = Data(#"{"ethernet_mac": "02:aa:bb:cc:dd:ee", "schema": 1, "serialno": "0123456789abcdef"}"#.utf8)
+        try identity.write(to: fixture.files.identity)
         let made = try fixture.storage.createSnapshot(named: "Good state")
+        #expect(!exists(fixture.snapshots.appendingPathComponent(made.id.rawValue).appendingPathComponent(InstanceFiles.identityFile)))
         let newer = try await diverged(fixture)
         #expect(fixture.names().contains("data.img.pre-20261102-los24-r5"))
         #expect(try TestDisk.read(fixture.data, at: 0) == [2])
@@ -303,6 +308,7 @@ struct SnapshotStoreTests {
         #expect(try TestDisk.read(fixture.data, at: 0) == [1])
         #expect(try TestDisk.read(fixture.data, at: 1 << 30) == [1])
         #expect(try contents(fixture.files.state) == record)
+        #expect(try contents(fixture.files.identity) == identity)
         // The unfinished update ended with its copy, and nothing of the replaced state was kept.
         #expect(!fixture.names().contains { $0.hasPrefix("data.img.pre-") })
         #expect(newer.snapshotListing().items.map(\.id) == [made.id])

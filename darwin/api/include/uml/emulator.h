@@ -353,7 +353,9 @@ void uml_emulator_wake(struct uml_emulator *emulator);
  * host every few seconds and pays a host read for each evicted page it reads
  * again, backing off while that happens often. A guest boots with trimming
  * off, which suits a guest in front of its user; turn it on while the guest
- * runs unattended, as in the background, and off again on return. A change
+ * runs unattended, as in the background, and off again on return. The host
+ * also turns it on while the system reports memory pressure, and trimming runs
+ * while either of you asks for it. A change
  * made while uml_emulator_quiesce has the guest suspended reaches the guest
  * when uml_emulator_resume wakes it.
  * Returns 0 once the guest has applied the change, -UML_EMULATOR_UNSUPPORTED
