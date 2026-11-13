@@ -523,6 +523,17 @@ host's test run records no screen video and keeps no attachments (the scheme
 sets it, and `start` refuses a built run file that does not), and its result
 bundle lives under the state directory, not in DerivedData.
 
+A host ends on its own now and then, and a new one started within minutes needs
+no approval at the device while one started hours later does. `watch` keeps one
+device's host serving: it adopts a serving host, starts the next the moment one
+stops serving (with the watch's own options), and fails once, with a state
+`status` reports, when the device asks for approval. Run it in a terminal,
+detached with `watch --detach`, or as a job manager's job
+(`watch --print-launchd-job <label>` prints a launchd job); `stop --force`
+ends the watch before the host. The `kernarium-ipad-automation-watch` and
+`kernarium-ipad-automation-watch-process` tooling tests run the real script
+against fake `xcrun` and `xcodebuild` executables.
+
 ### Edge gestures (device only)
 
 The Simulator shows which edges a run defers (`AndariumPreview -screen
