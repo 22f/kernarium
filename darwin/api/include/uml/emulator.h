@@ -71,6 +71,16 @@ struct uml_emulator_run_end {
 	/* The command the guest passed to its restart, cut to 255 bytes;
 	 * empty when it gave none and for every other kind. */
 	char restart_command[256];
+	/* 1 when the guest's console said, during this run, that the guest
+	 * finished booting: an Android guest's init processed
+	 * sys.boot_completed=1 or started its recovery. 0 otherwise, for a
+	 * guest that restarted or ended before it got there and also for a
+	 * guest whose console never says so, such as a Linux desktop: a caller
+	 * that wants the answer knows which guest it runs. The host reads the
+	 * console as the kernel writes it, so the answer holds for every end
+	 * kind, and for a run that restores a hibernated guest, which prints
+	 * nothing of its earlier boot, it is 0. */
+	uint32_t boot_completed;
 };
 
 /* What the host measures of a running guest, for a host that shows

@@ -731,8 +731,10 @@ A guest reboot restarts the guest in the same host process, so `adb reboot`,
 Every restart reads `misc` again: `boot-recovery` boots recovery, which clears
 it, and no command boots Android. There is no bootloader, so the launcher
 behaves as a bootloader that continues and clears a `bootonce-bootloader`
-command. A guest that restarts within 15 s of booting five times in a row ends
-the launch with exit status 3.
+command. A guest that restarts five times in a row, each within 15 s of booting
+or before its boot had finished (`sys.boot_completed`, or recovery's start, on
+the console), ends the launch with exit status 3; restarts after finished boots
+are not limited.
 
 `build/assemble-image.sh` owns ramdisk composition, system disk assembly and
 verification, and `tools/verify-lineage-recovery.py` checks the recovery image.

@@ -345,6 +345,7 @@ int main(int argc, char *argv[], char *envp[])
 			.default_guest_memory = android_default_guest_memory,
 			.top_byte_ignore = true,
 			.input_mode = uml::app::DisplayInput::touchscreen,
+			.console_reports_boot_completion = true,
 		};
 		if (!information_only) {
 			if (options.release.empty() || options.data_disk.empty())

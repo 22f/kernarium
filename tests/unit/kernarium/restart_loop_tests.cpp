@@ -2,8 +2,8 @@
 /*
  * The run loop of a Kernarium launch, with a recording machine in place of the
  * guest: the order of the steps of a restart, the retry of a refused run, the
- * stop flag, the hold on the next boot, the loop guard and the runtime's
- * restart events.
+ * stop flag, the hold on the next boot, the loop guard (the early window and
+ * the boots that never finished) and the runtime's restart events.
  */
 #include "KernariumRestartLoop.hpp"
 #include "named_tests.hpp"
@@ -47,6 +47,15 @@ Boot powersOff(std::chrono::seconds lasted = 60s)
 Boot restarts(std::string command = "", std::chrono::seconds lasted = 60s)
 {
     return {2, {RunEnd::Kind::restart, std::move(command)}, lasted};
+}
+
+using uml::emulator::BootCompletion;
+
+/* A restart of an Android guest, whose console says whether its boot had
+ * finished. */
+Boot restartsAndroid(BootCompletion completion, std::chrono::seconds lasted)
+{
+    return {2, {RunEnd::Kind::restart, "", completion}, lasted};
 }
 
 /* The machine the loop drives. Every step is recorded in `calls`, in order,
@@ -470,6 +479,70 @@ void aBootThatLastsFifteenSecondsResetsTheCount()
     require(machine.count("enter") == 10U, "the script did not run through");
 }
 
+void aBootThatNeverFinishedCountsHoweverLongItRan()
+{
+    FakeMachine machine;
+    // The loop the 15 s window let through: a restart every 20 s, before the
+    // boot ever finished.
+    machine.script = {restartsAndroid(BootCompletion::unfinished, 20s)};
+    require(kernarium::restart::run(machine, quickly) ==
+                KERNARIUM_RUNTIME_RESULT_RESTART_LOOP,
+            "a guest that never finishes booting did not end with the loop "
+            "result");
+    require(machine.count("enter") == 5U,
+            "the loop guard did not end the late loop at five boots");
+    require(machine.count("began") == 4U,
+            "a restart the guard refused was announced");
+    require(machine.count("stop-services") == 5U &&
+                machine.count("reset-link") == 5U,
+            "the services of the last guest were left running");
+    require(contains(machine.said(),
+                "the guest restarted 5 times in a row, each before it "
+                "finished booting or within 15 s of booting; not booting it "
+                "again"),
+            "the late loop's end was not logged with its reason");
+}
+
+void restartsAfterFinishedBootsAreNeverLimited()
+{
+    FakeMachine machine;
+    // A reboot suite: every boot finished and lasted, twelve times over.
+    machine.script.assign(12, restartsAndroid(BootCompletion::completed, 40s));
+    machine.script.push_back(powersOff(40s));
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "restarts after finished boots ended the loop");
+    require(machine.count("enter") == 13U, "the script did not run through");
+    require(machine.count("began") == 12U, "a restart was not announced");
+}
+
+void aFinishedBootResetsTheCountOfUnfinishedOnes()
+{
+    FakeMachine machine;
+    machine.script = {
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::completed, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s),
+        restartsAndroid(BootCompletion::unfinished, 30s), powersOff(30s)};
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "a finished boot did not reset the count of unfinished ones");
+    require(machine.count("enter") == 10U, "the script did not run through");
+}
+
+void aGuestWhoseConsoleSaysNothingKeepsTheWindowAlone()
+{
+    FakeMachine machine;
+    // A Linux guest: boots of 20 s are no loop, whatever the host can tell.
+    machine.script.assign(12, restarts("", 20s));
+    machine.script.push_back(powersOff(20s));
+    require(kernarium::restart::run(machine, quickly) == 0,
+            "boots of 20 s with no console signal ended the loop");
+}
+
 void aBootThatCannotBeBuiltFailsTheLaunch()
 {
     FakeMachine first;
@@ -670,6 +743,14 @@ const uml::testing::NamedTest tests[] {
         fiveEarlyRestartsInARowEndTheLoopWithItsOwnResult},
     {"a-fifteen-second-boot-resets-the-count",
         aBootThatLastsFifteenSecondsResetsTheCount},
+    {"an-unfinished-boot-counts-however-long-it-ran",
+        aBootThatNeverFinishedCountsHoweverLongItRan},
+    {"restarts-after-finished-boots-are-unlimited",
+        restartsAfterFinishedBootsAreNeverLimited},
+    {"a-finished-boot-resets-the-unfinished-count",
+        aFinishedBootResetsTheCountOfUnfinishedOnes},
+    {"a-guest-with-no-console-signal-keeps-the-window",
+        aGuestWhoseConsoleSaysNothingKeepsTheWindowAlone},
     {"a-boot-that-cannot-be-built", aBootThatCannotBeBuiltFailsTheLaunch},
     {"the-booted-event-follows-the-console",
         theBootedEventFollowsTheNewGuestsConsole},

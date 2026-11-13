@@ -3,7 +3,8 @@
  * A run says how its guest ended. The kernel reports it before its exitcalls
  * run, the host's own stop request wins over the report, a kernel that said
  * nothing failed, and a run that did not run a guest ends nothing. Each run
- * starts from no end, so a later run never repeats an earlier one's.
+ * starts from no end, so a later run never repeats an earlier one's. A run
+ * also says whether its guest's console reported that its boot finished.
  */
 #include "uml/emulator.h"
 #include "context.hpp"
@@ -12,6 +13,7 @@
 #include "testing.hpp"
 #include "uml_darwin_host.h"
 #include "scratch_directory.hpp"
+#include "session_record.hpp"
 #include "wait_until.hpp"
 
 #include <chrono>
@@ -39,6 +41,10 @@ struct Script final {
 	bool request_stop{};
 	int status{};
 	int disk{-1};
+	/* What the kernel writes to the console it names (ssl0=fd:N) before it
+	 * ends. */
+	int console{-1};
+	const char *console_text{};
 	/* What the handle reported while the kernel ran. */
 	int during_result{};
 	uml_emulator_run_end during{};
@@ -65,6 +71,10 @@ int scripted_kernel(int, char *const[], char *const[])
 		uml_emulator_get_run_end(script.emulator, &script.during);
 	if (script.request_stop)
 		uml_emulator_request_stop(script.emulator);
+	if (script.console_text != nullptr)
+		require(::uml::runtime::kernel_write(script.console,
+			script.console_text, std::strlen(script.console_text)) > 0,
+			"the kernel could not write to its console");
 	if (script.report)
 		::uml::emulator::testing::report_guest_shutdown(
 			script.kind, script.command);
@@ -220,6 +230,76 @@ void test_a_run_that_ran_no_guest_ends_nothing()
 	uml_emulator_destroy(bare);
 }
 
+/* Runs the kernel with a console that says `text` and returns the end. */
+uml_emulator_run_end run_saying(uml_emulator *emulator, const char *text,
+	GuestShutdownKind kind)
+{
+	const int console = open("/dev/null", O_WRONLY);
+	require(console >= 0, "open a console");
+	const std::string argument = "ssl0=fd:" + std::to_string(console);
+	script = {.emulator = emulator, .report = true, .kind = kind,
+		.console = console, .console_text = text};
+	require(run(emulator, argument.c_str()) == 0, "the run failed");
+	close(console);
+	return run_end(emulator);
+}
+
+void test_the_console_says_when_the_boot_finished()
+{
+	auto emulator = make_emulator(scripted_kernel);
+	constexpr auto restart = GuestShutdownKind::restart;
+	require(run_end(emulator.get()).boot_completed == 0U,
+		"a handle that never ran reported a finished boot");
+
+	/* Android's init says so, wherever the line sits in the output. */
+	auto end = run_saying(emulator.get(),
+		"[    4.1] init: starting service 'vold'...\n"
+		"init: processing action (sys.boot_completed=1) from (/system/etc/"
+		"init/hw/init.rc:1)\ninit: more\n", restart);
+	require(end.kind == UML_EMULATOR_RUN_END_RESTART &&
+		end.boot_completed == 1U,
+		"a restart after a finished boot did not say so");
+	require(script.during.boot_completed == 0U,
+		"a running guest reported a finished boot");
+
+	/* The next boot starts again from nothing, and so does its end. */
+	end = run_saying(emulator.get(), "Linux version 6.18\n"
+		"init: starting service 'zygote'...\n", restart);
+	require(end.kind == UML_EMULATOR_RUN_END_RESTART &&
+		end.boot_completed == 0U,
+		"a boot that did not finish inherited the one before it");
+
+	/* Recovery is up: that is a finished boot too. */
+	end = run_saying(emulator.get(),
+		"init: starting service 'recovery'...\n", restart);
+	require(end.boot_completed == 1U, "recovery's start was not a finished boot");
+
+	/* Any end reports it, and so does a guest that powers off. */
+	end = run_saying(emulator.get(),
+		"init: processing action (sys.boot_completed=1)\n",
+		GuestShutdownKind::power_off);
+	require(end.kind == UML_EMULATOR_RUN_END_POWER_OFF &&
+		end.boot_completed == 1U, "a power-off did not say the boot finished");
+
+	/* A guest whose console never says so reports no finished boot. */
+	script = {.emulator = emulator.get(), .report = true, .kind = restart};
+	require(run(emulator.get()) == 0, "a silent console run failed");
+	require(run_end(emulator.get()).boot_completed == 0U,
+		"a guest with no console message reported a finished boot");
+
+	/* The line is the console's: the same text on a descriptor no console
+	 * names is not. */
+	const int other = open("/dev/null", O_WRONLY);
+	require(other >= 0, "open another descriptor");
+	script = {.emulator = emulator.get(), .report = true, .kind = restart,
+		.console = other,
+		.console_text = "init: processing action (sys.boot_completed=1)\n"};
+	require(run(emulator.get()) == 0, "the run with another descriptor failed");
+	close(other);
+	require(run_end(emulator.get()).boot_completed == 0U,
+		"output that is no console's counted as a finished boot");
+}
+
 void test_a_finished_run_releases_its_disk_lock()
 {
 	const uml::testing::ScratchSubdirectory directory{"run-end-lock.XXXXXX"};
@@ -257,6 +337,7 @@ int main()
 		test_each_end_is_reported();
 		test_a_stop_wins_over_the_guest();
 		test_a_run_that_ran_no_guest_ends_nothing();
+		test_the_console_says_when_the_boot_finished();
 		test_a_finished_run_releases_its_disk_lock();
 	} catch (const std::exception &error) {
 		std::fprintf(stderr, "run end test failed: %s\n", error.what());

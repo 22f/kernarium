@@ -142,6 +142,46 @@ void test_kept_output()
 	uml::runtime::reset_session_record();
 }
 
+/* The console says an Android guest's boot finished: kernel_write reads it as
+ * it passes, from a console and not from another descriptor, and a new session
+ * forgets it. */
+void test_the_console_says_when_the_boot_finished()
+{
+	uml::runtime::reset_session_record();
+	int console[2];
+	require(pipe(console) == 0);
+	int other[2];
+	require(pipe(other) == 0);
+	const std::vector<std::string> arguments{"ssl0=fd:" +
+		std::to_string(console[1])};
+	require(uml::runtime::begin_session_record({}, arguments));
+	require(!uml::runtime::console_boot_completed(),
+		"a new session was a finished boot");
+	const std::string line =
+		"init: processing action (sys.boot_completed=1) from (x)\n";
+	require(uml::runtime::kernel_write(other[1], line.data(), line.size()) ==
+		static_cast<ssize_t>(line.size()));
+	require(!uml::runtime::console_boot_completed(),
+		"output that is no console's finished the boot");
+	/* Written in two parts by the kernel's console driver. */
+	const std::size_t cut = line.find("boot_");
+	require(uml::runtime::kernel_write(console[1], line.data(), cut) ==
+		static_cast<ssize_t>(cut));
+	require(!uml::runtime::console_boot_completed(),
+		"half a line finished the boot");
+	require(uml::runtime::kernel_write(console[1], line.data() + cut,
+		line.size() - cut) == static_cast<ssize_t>(line.size() - cut));
+	require(uml::runtime::console_boot_completed(),
+		"the console's line did not finish the boot");
+	/* The next session begins from nothing. */
+	require(uml::runtime::begin_session_record({}, arguments));
+	require(!uml::runtime::console_boot_completed(),
+		"a finished boot outlived its session");
+	uml::runtime::reset_session_record();
+	for (const int descriptor : {console[0], console[1], other[0], other[1]})
+		close(descriptor);
+}
+
 void test_record_lifecycle()
 {
 	uml::runtime::reset_session_record();
@@ -1099,6 +1139,7 @@ int main(int argc, char **argv)
 		test_console_descriptors();
 		test_panic_message();
 		test_kept_output();
+		test_the_console_says_when_the_boot_finished();
 		test_record_lifecycle();
 		test_memory_checkpoints();
 		test_network_slot();

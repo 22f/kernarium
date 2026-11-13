@@ -12,11 +12,17 @@ namespace uml::emulator {
  * restarted itself.
  *
  * A restart is early when it comes less than `early_restart_window` after its
- * boot started. A guest that restarts early `early_restart_limit` times in a
- * row is not going to boot: the application ends the loop instead of
- * rebooting it for ever. A boot that lasts `early_restart_window` or more
- * resets the count. These constants are the one place the policy lives; every
- * application that runs the loop uses them.
+ * boot started, or when the boot had not finished: for a guest whose console
+ * says when its boot ends (an Android guest, uml_emulator_run_end), a restart
+ * before that point counts however long the boot ran, so a guest that
+ * restarts itself every 20 s and never gets as far as booting is stopped like
+ * one that restarts at once. A restart after a finished boot that lasted the
+ * window is not early, however often it follows: a reboot test suite restarts
+ * its guest without limit. A guest that restarts early `early_restart_limit`
+ * times in a row is not going to boot: the application ends the loop instead
+ * of rebooting it for ever. A restart that is not early resets the count.
+ * These constants are the one place the policy lives; every application that
+ * runs the loop uses them.
  */
 inline constexpr std::chrono::seconds early_restart_window{15};
 inline constexpr unsigned early_restart_limit = 5;
@@ -60,6 +66,40 @@ inline constexpr std::chrono::milliseconds restart_run_retry_delay{500};
 	return printable;
 }
 
+/* What the application knows of the boot that just ended. */
+enum class BootCompletion {
+	/* The guest's console says nothing of when its boot ends (a Linux
+	 * desktop guest): only the early window counts. */
+	unobserved,
+	/* The console says so, and had not by the restart. */
+	unfinished,
+	/* The console said that the boot finished. */
+	completed,
+};
+
+/* What an application tells the guard of a boot that ended: `observed` is
+ * whether the guest's kind reports its boot's end at all, `completed` whether
+ * it did (uml_emulator_run_end.boot_completed). */
+[[nodiscard]] constexpr BootCompletion boot_completion(bool observed,
+	bool completed) noexcept
+{
+	return !observed ? BootCompletion::unobserved :
+		completed ? BootCompletion::completed : BootCompletion::unfinished;
+}
+
+/* What an application says when the guard ends the loop, after "the guest ":
+ * the restarts in a row, and why they count. */
+[[nodiscard]] inline std::string restart_loop_end_message(unsigned restarts,
+	BootCompletion completion)
+{
+	std::string message = "restarted " + std::to_string(restarts) +
+		" times in a row";
+	message += completion == BootCompletion::unobserved ?
+		" within " : ", each before it finished booting or within ";
+	message += std::to_string(early_restart_window.count()) + " s of booting";
+	return message;
+}
+
 class RestartLoopGuard final {
 public:
 	using Clock = std::chrono::steady_clock;
@@ -67,12 +107,14 @@ public:
 	/* A boot starts at `now`. */
 	void boot_started(Clock::time_point now) noexcept { started_ = now; }
 
-	/* The guest asked to restart at `now`. Whether the application may boot
-	 * it again: false once `early_restart_limit` early restarts followed
-	 * each other. */
-	[[nodiscard]] bool may_restart(Clock::time_point now) noexcept
+	/* The guest asked to restart at `now`, and its boot ended as
+	 * `completion` says. Whether the application may boot it again: false
+	 * once `early_restart_limit` early restarts followed each other. */
+	[[nodiscard]] bool may_restart(Clock::time_point now,
+		BootCompletion completion) noexcept
 	{
-		if (now - started_ < early_restart_window)
+		if (now - started_ < early_restart_window ||
+		    completion == BootCompletion::unfinished)
 			++early_in_a_row_;
 		else
 			early_in_a_row_ = 0;
