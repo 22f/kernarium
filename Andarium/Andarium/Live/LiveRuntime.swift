@@ -732,8 +732,9 @@ final class LiveRuntime: RuntimeDriver {
 
     func installApk(
         at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
-    ) async throws {
-        try await operations.installApk(at: url, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, update: update)
+    ) async throws -> ApkInstallOutcome {
+        try await operations.installApk(
+            at: url, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, partials: partials, update: update)
     }
 
     func usbDebugging() async -> Bool? {
