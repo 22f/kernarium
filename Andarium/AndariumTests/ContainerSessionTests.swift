@@ -432,6 +432,46 @@ struct ContainerSessionTests {
         }
     }
 
+    @Test func anInstallTimeSliceForAnotherProcessorTheGuestHasIsInstalledWithTheAppAndNotDroppedAfterMatching() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        adbd.abiList = "arm64-v8a,armeabi-v7a"
+        // The app has an arm64 split; the install-time slice is for armeabi-v7a, which the guest has as well.
+        let toc = BundleToc(
+            variants: [BundleToc.Variant(apks: [.master("splits/base-master.apk"), .split("splits/base-arm64_v8a.apk", "config.arm64_v8a", abi: 3)])],
+            assetModules: [.installTime("req", [.slice("asset-slices/req-master.apk", "req", master: true, abi: 2)])])
+        let required = bytes(77, count: 12_011)
+        let url = try ContainerFixture.write([
+            ContainerEntry("toc.pb", toc.build()), ContainerEntry("splits/base-master.apk", bytes(71, count: 12_011)),
+            ContainerEntry("splits/base-arm64_v8a.apk", bytes(72, count: 12_011)), ContainerEntry("asset-slices/req-master.apk", required),
+        ], name: "Packs.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await guest(on: adbd).installApk(at: url, update: { _ in }) == .installed)
+        let session = try #require(adbd.committedSessions.first)
+        #expect(session.parts.count == 3 && session.parts.contains { $0.digest == digest(required) })
+    }
+
+    @Test func anInstallTimeSliceForATextureFormatRefusesTheFileBeforeASessionIsMade() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        // Two slices that exclude each other: the install does not know the guest's formats, so it installs neither.
+        let bundle = packBundle([
+            .installTime("textures", [
+                .slice("asset-slices/astc.apk", "textures.astc", texture: (9, 10)), .slice("asset-slices/etc2.apk", "textures.etc2", texture: (10, 9)),
+            ]),
+        ])
+        let url = try ContainerFixture.write(bundle.entries, name: "Packs.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let result = await outcome { try await guest(on: adbd).installApk(at: url, update: { _ in }) }
+        guard case let .failure(error) = result else {
+            Issue.record("installed")
+            return
+        }
+        #expect((error as? AdbFailure)?.message == InstallRefusal.damaged.message)
+        #expect(!adbd.servicesOpened.contains { $0.contains("install-create") })
+        #expect(adbd.committedSessions.isEmpty && adbd.openSessions.isEmpty && adbd.abandonedSessions.isEmpty)
+    }
+
     // MARK: Cancel and the reading of the file
 
     @Test func aCancelPendingWhenTheFileIsFirstReadEndsTheInstallAsTheCancelEvenForAFileThatWouldBeRefused() async throws {

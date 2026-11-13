@@ -806,19 +806,26 @@ is on. `AndariumCore/Adb` speaks the protocol.
   bundletool's matchers do, from the values and the alternatives each lists:
   exactly one variant must fit the guest, and a sibling made for a newer
   Android that the guest has excludes a variant (there is no falling back
-  across it). A processor or any other restriction the reader has no name for
-  never means no restriction: it leaves its variant or APK out, and targeting
-  it does not weigh on an APK that would be installed (a graphics API, a
-  device tier) refuses the file. A variant for several processors together
-  (the standalone builds of old Androids) or for a density is not weighed and
-  is not chosen. Each variant keeps its own description of an APK; a path
-  described twice in one variant is a damaged table. The one variant installed
+  across it; a level a variant does not state is 0). A processor or any other
+  restriction the reader has no name for, in a list of values or of
+  alternatives and whatever its wire type, never means no restriction: it
+  leaves its variant or APK out, and targeting it does not weigh on an APK
+  that would be installed (a graphics API, a device tier) refuses the file. A
+  variant for several processors together (the standalone builds of old
+  Androids) or for a density is not weighed and is not chosen. A table that
+  states a singular field twice, more than one SDK value, or a processor as
+  its own alternative is damaged. Each variant keeps its own description of an
+  APK; a path described twice in one variant is a damaged table. The parts of
+  the chosen variant were each matched to the guest by their own targeting and
+  none is dropped after that. The one variant installed
   has the splits of the processor the guest prefers, and a universal .apks
   installs as one APK; a table that cannot be read, or names no variant for the
   guest, is a damaged file and nothing is guessed from the names. The slices of
   the table's install-time asset packs go in the same session, as `bundletool
-  install-apks` does, when their own targeting fits the guest (a language, a
-  density or a texture format is not weighed: every such slice is sent). A
+  install-apks` does, when their own targeting fits the guest (a language or a
+  density is not weighed: every such slice is sent; a slice with a texture
+  format refuses the file, since the guest's formats are not asked, while an
+  app's own texture splits are sent). A
   fast-follow or on-demand pack, or one the table does not say is install-time,
   is not installed, and the result says the app's data was not all copied.
   The other layouts are

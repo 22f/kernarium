@@ -2,14 +2,16 @@
 
 import Foundation
 
-/// A reader of protocol buffer messages: the wire format only (varints and
-/// length-delimited fields; fixed-width fields are skipped), with every length
+/// A reader of protocol buffer messages: the wire format only (varints,
+/// fixed-width values and length-delimited fields), with every length
 /// checked against the bytes that remain. The input is hostile, so a field it
 /// cannot make sense of ends the read with `BundleTable.Failure` and nothing in
 /// it allocates by what a field says.
 struct ProtoReader {
     enum Value {
         case varint(UInt64)
+        /// A fixed-width value (32 or 64 bits), little-endian.
+        case fixed(UInt64)
         case bytes(Data)
     }
 
@@ -22,7 +24,6 @@ struct ProtoReader {
     }
 
     /// The next field of the message: its number and value; nil at the end.
-    /// Fixed-width fields are read past and returned as zero.
     mutating func next() throws -> (number: Int, value: Value)? {
         guard position < data.endIndex else { return nil }
         let key = try varint()
@@ -32,8 +33,7 @@ struct ProtoReader {
         case 0:
             return (number, .varint(try varint()))
         case 1:
-            try skip(8)
-            return (number, .varint(0))
+            return (number, .fixed(try fixedWidth(8)))
         case 2:
             let length = try varint()
             guard length <= UInt64(data.endIndex - position) else { throw BundleTable.Failure() }
@@ -41,17 +41,19 @@ struct ProtoReader {
             defer { position = end }
             return (number, .bytes(data.subdata(in: position..<end)))
         case 5:
-            try skip(4)
-            return (number, .varint(0))
+            return (number, .fixed(try fixedWidth(4)))
         default:
             // Groups are gone from the format; the rest are not wire types.
             throw BundleTable.Failure()
         }
     }
 
-    private mutating func skip(_ count: Int) throws {
+    private mutating func fixedWidth(_ count: Int) throws -> UInt64 {
         guard count <= data.endIndex - position else { throw BundleTable.Failure() }
+        var value: UInt64 = 0
+        for index in 0..<count { value |= UInt64(data[position + index]) << UInt64(8 * index) }
         position += count
+        return value
     }
 
     private mutating func varint() throws -> UInt64 {
@@ -65,6 +67,18 @@ struct ProtoReader {
             if byte & 0x80 == 0 { return result }
         }
         throw BundleTable.Failure()
+    }
+}
+
+/// The fields of one message that the schema says occur once, seen so far. A
+/// second occurrence is merged or replaced by a protocol buffer parser, so a
+/// restriction the first one carried would be lost to this reader: it ends the
+/// read instead.
+private struct Once {
+    private var seen = Set<Int>()
+
+    mutating func callAsFunction(_ number: Int) throws {
+        guard seen.insert(number).inserted else { throw BundleTable.Failure() }
     }
 }
 
@@ -175,14 +189,17 @@ struct BundleTable: Equatable, Sendable {
 
     private static func variant(_ data: Data, index: Int) throws -> Variant {
         var result = Variant(number: index, apks: [])
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             switch (number, value) {
             case let (1, .bytes(bytes)):
+                try once(1)
                 result.targeting = try variantTargeting(bytes)
             case let (2, .bytes(bytes)):
                 try apkSet(bytes, into: &result)
             case let (3, .varint(raw)):
+                try once(3)
                 result.number = Int(truncatingIfNeeded: min(raw, UInt64(Int32.max)))
             default:
                 continue
@@ -191,13 +208,30 @@ struct BundleTable: Equatable, Sendable {
         return result
     }
 
+    /// Whether a field this reader has no name for holds anything: a restriction
+    /// it cannot weigh.
+    private static func holds(_ value: ProtoReader.Value) -> Bool {
+        switch value {
+        case let .bytes(bytes): !bytes.isEmpty
+        case let .varint(raw), let .fixed(raw): raw != 0
+        }
+    }
+
     /// `VariantTargeting`: the Android (field 1) and the processor (field 2) are
-    /// weighed; any other field makes the variant one for something else.
+    /// weighed; any other field that holds something makes the variant one for
+    /// something else, whatever its wire type. A field of the schema that is not
+    /// a message, or one that comes twice, is a table that cannot be read.
     private static func variantTargeting(_ data: Data) throws -> Targeting {
         var targeting = Targeting()
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
-            guard case let .bytes(bytes) = value else { continue }
+            guard (1...6).contains(number) else {
+                if holds(value) { targeting.other = true }
+                continue
+            }
+            try once(number)
+            guard case let .bytes(bytes) = value else { throw Failure() }
             switch number {
             case 1: try sdkTargeting(bytes, into: &targeting)
             case 2: try abiTargeting(bytes, into: &targeting)
@@ -208,19 +242,27 @@ struct BundleTable: Equatable, Sendable {
     }
 
     /// `ApkTargeting`: the processor (field 1) and the Android (field 5) are
-    /// weighed. The language (3), the screen density (4) and the texture
-    /// format (6) are not: every such split is installed, which the package
-    /// manager takes and picks from by itself. Any other kind of targeting is
-    /// `other`.
+    /// weighed. The language (3) and the screen density (4) are not: every such
+    /// split is installed, which the package manager takes and picks from by
+    /// itself. The texture format (6) is noted, since an asset slice with one is
+    /// not installed (`ApkContainerPlan.selecting`). Any other kind of targeting
+    /// that holds something is `other`.
     private static func apkTargeting(_ data: Data) throws -> Targeting {
         var targeting = Targeting()
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
-            guard case let .bytes(bytes) = value else { continue }
+            guard number == 1 || (3...11).contains(number) else {
+                if holds(value) { targeting.other = true }
+                continue
+            }
+            try once(number)
+            guard case let .bytes(bytes) = value else { throw Failure() }
             switch number {
             case 1: try abiTargeting(bytes, into: &targeting)
             case 5: try sdkTargeting(bytes, into: &targeting)
-            case 3, 4, 6: continue
+            case 3, 4: continue
+            case 6: if !bytes.isEmpty { targeting.texture = true }
             default: if !bytes.isEmpty { targeting.other = true }
             }
         }
@@ -229,15 +271,20 @@ struct BundleTable: Equatable, Sendable {
         return targeting
     }
 
-    /// `SdkVersionTargeting`: the values (field 1) and the alternatives (field
-    /// 2), each an `SdkVersion` whose `min` (field 1) is an `Int32Value`.
+    /// `SdkVersionTargeting`: the value (field 1; at most one) and the
+    /// alternatives (field 2), each an `SdkVersion` whose `min` (field 1) is an
+    /// `Int32Value`. A level that is not stated is 0, as bundletool reads it.
     private static func sdkTargeting(_ data: Data, into targeting: inout Targeting) throws {
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
-            guard number == 1 || number == 2, case let .bytes(version) = value else { continue }
-            let level = max(1, try sdkMinimum(version))
+            guard number == 1 || number == 2 else {
+                if holds(value) { targeting.other = true }
+                continue
+            }
+            guard case let .bytes(version) = value else { throw Failure() }
+            let level = try sdkMinimum(version)
             if number == 1 {
-                guard targeting.sdk.count < maxTargetingValues else { throw Failure() }
+                guard targeting.sdk.isEmpty else { throw Failure() }
                 targeting.sdk.append(level)
             } else {
                 guard targeting.sdkAlternatives.count < maxTargetingValues else { throw Failure() }
@@ -246,57 +293,90 @@ struct BundleTable: Equatable, Sendable {
         }
     }
 
-    /// `SdkVersion.min.value`; 1 when the version names none.
+    /// `SdkVersion.min.value`; 0 when the version names none.
     private static func sdkMinimum(_ data: Data) throws -> Int {
+        var minimum = 0
+        var once = Once()
         var reader = ProtoReader(data)
         while let (field, boxed) = try reader.next() {
-            guard field == 1, case let .bytes(wrapper) = boxed else { continue }
-            var wrapped = ProtoReader(wrapper)
-            while let (leaf, number) = try wrapped.next() {
-                if leaf == 1, case let .varint(raw) = number { return Int(truncatingIfNeeded: min(raw, UInt64(Int32.max))) }
+            // The one field of `SdkVersion` is `min`; anything else that holds something is a restriction unread.
+            guard field == 1 else {
+                if holds(boxed) { throw Failure() }
+                continue
             }
-            return 0
+            try once(1)
+            guard case let .bytes(wrapper) = boxed else { throw Failure() }
+            var wrapped = ProtoReader(wrapper)
+            var inner = Once()
+            while let (leaf, number) = try wrapped.next() {
+                guard leaf == 1 else {
+                    if holds(number) { throw Failure() }
+                    continue
+                }
+                try inner(1)
+                guard case let .varint(raw) = number else { throw Failure() }
+                minimum = Int(truncatingIfNeeded: min(raw, UInt64(Int32.max)))
+            }
         }
-        return 1
+        return minimum
     }
 
     /// `AbiTargeting`: the values (field 1) and the alternatives (field 2), each
-    /// an `Abi` whose `alias` (field 1) names a processor. A value that is no
-    /// processor this reader has a name for makes the targeting `unknownAbi`: it
-    /// is never taken for no restriction. An alternative it cannot name is a
-    /// processor no virtual machine of this app has, which changes nothing.
+    /// an `Abi` whose `alias` (field 1) names a processor. An alias this reader
+    /// has no name for, in either list, makes the targeting `unknownAbi`: what
+    /// has it is never installed, and is never taken for no restriction. A
+    /// processor that is both a value and an alternative contradicts itself.
     private static func abiTargeting(_ data: Data, into targeting: inout Targeting) throws {
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
-            guard number == 1 || number == 2, case let .bytes(abi) = value else { continue }
+            guard number == 1 || number == 2 else {
+                if holds(value) { targeting.other = true }
+                continue
+            }
+            guard case let .bytes(abi) = value else { throw Failure() }
             var alias: UInt64 = 0
+            var once = Once()
             var inner = ProtoReader(abi)
             while let (field, item) = try inner.next() {
-                if field == 1, case let .varint(raw) = item { alias = raw }
+                guard field == 1 else {
+                    if holds(item) { targeting.other = true }
+                    continue
+                }
+                try once(1)
+                guard case let .varint(raw) = item else { throw Failure() }
+                alias = raw
             }
             let name = abiNames[Int(truncatingIfNeeded: min(alias, 1000))]
+            guard targeting.abis.count + targeting.abiAlternatives.count < maxTargetingValues else { throw Failure() }
+            if name == nil { targeting.unknownAbi = true }
             if number == 1 {
-                guard targeting.abis.count < maxTargetingValues else { throw Failure() }
-                if let name { targeting.abis.append(name) } else { targeting.unknownAbi = true }
+                if let name { targeting.abis.append(name) }
             } else if let name {
-                guard targeting.abiAlternatives.count < maxTargetingValues else { throw Failure() }
                 targeting.abiAlternatives.append(name)
             }
         }
+        guard Set(targeting.abis).isDisjoint(with: targeting.abiAlternatives) else { throw Failure() }
     }
 
     /// `AssetSliceSet`: the module's metadata (field 1: its name is field 1 and
     /// its delivery type field 4) and its slices (field 2, `ApkDescription`s).
     private static func assetModule(_ data: Data) throws -> AssetModule {
         var module = AssetModule(name: "", delivery: .unknown, slices: [], hasUnusableSlice: false)
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             guard case let .bytes(bytes) = value else { continue }
             if number == 1 {
+                try once(1)
+                var single = Once()
                 var inner = ProtoReader(bytes)
                 while let (field, item) = try inner.next() {
-                    if field == 1, case let .bytes(text) = item { module.name = String(decoding: text, as: UTF8.self) }
+                    if field == 1, case let .bytes(text) = item {
+                        try single(1)
+                        module.name = String(decoding: text, as: UTF8.self)
+                    }
                     if field == 4, case let .varint(raw) = item {
+                        try single(4)
                         switch raw {
                         case 1: module.delivery = .installTime
                         case 2: module.delivery = .onDemand
@@ -320,20 +400,28 @@ struct BundleTable: Equatable, Sendable {
         var path: String?
         var targeting = Targeting()
         var split: String?
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             guard case let .bytes(bytes) = value else { continue }
             switch number {
             case 1:
+                try once(1)
                 targeting = try apkTargeting(bytes)
             case 2:
+                try once(2)
                 guard let text = String(data: bytes, encoding: .utf8) else { throw Failure() }
                 path = text
             case 7:
+                try once(7)
                 var id = ""
+                var single = Once()
                 var inner = ProtoReader(bytes)
                 while let (field, item) = try inner.next() {
-                    if field == 1, case let .bytes(text) = item { id = String(decoding: text, as: UTF8.self) }
+                    if field == 1, case let .bytes(text) = item {
+                        try single(1)
+                        id = String(decoding: text, as: UTF8.self)
+                    }
                 }
                 split = id
             default:
@@ -349,13 +437,19 @@ struct BundleTable: Equatable, Sendable {
     private static func apkSet(_ data: Data, into variant: inout Variant) throws {
         var module = ""
         var descriptions: [Data] = []
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             guard case let .bytes(bytes) = value else { continue }
             if number == 1 {
+                try once(1)
+                var single = Once()
                 var inner = ProtoReader(bytes)
                 while let (field, name) = try inner.next() {
-                    if field == 1, case let .bytes(text) = name { module = String(decoding: text, as: UTF8.self) }
+                    if field == 1, case let .bytes(text) = name {
+                        try single(1)
+                        module = String(decoding: text, as: UTF8.self)
+                    }
                 }
             } else if number == 2 {
                 guard variant.apks.count + descriptions.count < ApkContainer.maxParts else { throw Failure() }
@@ -367,33 +461,45 @@ struct BundleTable: Equatable, Sendable {
         }
     }
 
-    /// `ApkDescription`: the targeting (field 1), the path (2), and either split metadata (3: the split's id, and
-    /// whether it is the module's master) or standalone metadata (4). An APK
-    /// of any other kind (instant, system) is not installed here.
+    /// `ApkDescription`: the targeting (field 1), the path (2), and either split metadata
+    /// (3: the split's id, and whether it is the module's master) or standalone metadata (4).
+    /// An APK of any other kind (instant, system) is not installed here.
     private static func apkDescription(_ data: Data, module: String) throws -> Apk? {
         var path: String?
         var targeting = Targeting()
         var split: (id: String, master: Bool)?
         var standalone = false
+        var once = Once()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             guard case let .bytes(bytes) = value else { continue }
             switch number {
             case 1:
+                try once(1)
                 targeting = try apkTargeting(bytes)
             case 2:
+                try once(2)
                 guard let text = String(data: bytes, encoding: .utf8) else { throw Failure() }
                 path = text
             case 3:
+                try once(3)
                 var id = ""
                 var master = false
+                var single = Once()
                 var inner = ProtoReader(bytes)
                 while let (field, item) = try inner.next() {
-                    if field == 1, case let .bytes(text) = item { id = String(decoding: text, as: UTF8.self) }
-                    if field == 2, case let .varint(flag) = item { master = flag != 0 }
+                    if field == 1, case let .bytes(text) = item {
+                        try single(1)
+                        id = String(decoding: text, as: UTF8.self)
+                    }
+                    if field == 2, case let .varint(flag) = item {
+                        try single(2)
+                        master = flag != 0
+                    }
                 }
                 split = (id, master)
             case 4:
+                try once(4)
                 standalone = true
             default:
                 continue

@@ -25,13 +25,18 @@ struct BundleTocFixture {
         /// A kind of targeting this reader keeps (a screen density) or does not weigh (a sanitizer).
         var density = false
         var other = false
+        /// A texture compression format (`value`, `alternative`), which is kept on an app's split.
+        var texture: (value: Int, alternative: Int)?
 
         static func master(_ path: String, module: String = "base", sdk: Int? = nil, sdkAlternatives: [Int] = []) -> Apk {
             Apk(path: path, splitID: module == "base" ? "" : module, master: true, module: module, sdk: sdk, sdkAlternatives: sdkAlternatives)
         }
 
-        static func split(_ path: String, _ id: String, abi: Int? = nil, abiAlternatives: [Int]? = nil, module: String = "base") -> Apk {
-            Apk(path: path, splitID: id, master: false, module: module, abi: abi, abiAlternatives: abiAlternatives)
+        static func split(
+            _ path: String, _ id: String, abi: Int? = nil, abiAlternatives: [Int]? = nil, module: String = "base",
+            texture: (value: Int, alternative: Int)? = nil
+        ) -> Apk {
+            Apk(path: path, splitID: id, master: false, module: module, abi: abi, abiAlternatives: abiAlternatives, texture: texture)
         }
 
         static func standalone(_ path: String) -> Apk {
@@ -88,14 +93,16 @@ struct BundleTocFixture {
         var other = false
         /// False for a description that carries no asset slice metadata.
         var metadata = true
+        /// A texture compression format (`value`, `alternative`).
+        var texture: (value: Int, alternative: Int)?
 
         static func slice(
             _ path: String, _ id: String, master: Bool = false, abi: Int? = nil, minSdk: Int? = nil,
-            sdkAlternatives: [Int] = [], abiAlternatives: [Int] = [], other: Bool = false
+            sdkAlternatives: [Int] = [], abiAlternatives: [Int] = [], other: Bool = false, texture: (value: Int, alternative: Int)? = nil
         ) -> AssetSlice {
             AssetSlice(
                 path: path, splitID: id, master: master, abi: abi, minSdk: minSdk, sdkAlternatives: sdkAlternatives,
-                abiAlternatives: abiAlternatives, other: other)
+                abiAlternatives: abiAlternatives, other: other, texture: texture)
         }
     }
 
@@ -135,7 +142,8 @@ struct BundleTocFixture {
 
     /// `ApkTargeting` of a description.
     private static func apkTargeting(
-        abi: Int?, abiAlternatives: [Int], sdk: Int?, sdkAlternatives: [Int], density: Bool, other: Bool
+        abi: Int?, abiAlternatives: [Int], sdk: Int?, sdkAlternatives: [Int], density: Bool, other: Bool,
+        texture: (value: Int, alternative: Int)? = nil
     ) -> Data {
         var targeting = Data()
         if let abi { targeting += message(1, abiTargeting([abi], alternatives: abiAlternatives)) }
@@ -143,6 +151,7 @@ struct BundleTocFixture {
             targeting += message(5, sdkTargeting(sdk.map { [$0] } ?? [], alternatives: sdkAlternatives))
         }
         if density { targeting += message(4, message(1, message(1, int(1, 6)))) }
+        if let texture { targeting += message(6, message(1, int(1, texture.value)) + message(2, int(1, texture.alternative))) }
         if other { targeting += message(8, message(1, int(1, 1))) }
         return targeting
     }
@@ -153,7 +162,7 @@ struct BundleTocFixture {
         let others = Array(Set(siblings.compactMap(\.abi)).subtracting(apk.abi.map { [$0] } ?? [])).sorted()
         let targeting = apkTargeting(
             abi: apk.abi, abiAlternatives: apk.abiAlternatives ?? others, sdk: apk.sdk, sdkAlternatives: apk.sdkAlternatives,
-            density: apk.density, other: apk.other)
+            density: apk.density, other: apk.other, texture: apk.texture)
         if !targeting.isEmpty { body += message(1, targeting) }
         body += string(2, apk.path)
         if apk.standalone {
@@ -175,7 +184,7 @@ struct BundleTocFixture {
             var description = Data()
             let targeting = apkTargeting(
                 abi: slice.abi, abiAlternatives: slice.abiAlternatives, sdk: slice.minSdk, sdkAlternatives: slice.sdkAlternatives,
-                density: false, other: slice.other)
+                density: false, other: slice.other, texture: slice.texture)
             if !targeting.isEmpty { description += message(1, targeting) }
             description += string(2, slice.path)
             if slice.metadata {

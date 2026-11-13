@@ -227,8 +227,8 @@ struct BundleTableTests {
             #expect(throws: InstallRefusal.damaged, "variant \(alias)") { _ = try found.selecting(guestAbis: arm, guestSdk: 37) }
             // Of two variants, the one with the processor it cannot name is the one left out.
             let two = BundleTocFixture(variants: [
-                Variant(minSdk: 21, abis: [alias], apks: [.master("splits/odd-master.apk")]),
-                Variant(minSdk: 21, abis: [3], apks: [.master("splits/arm-master.apk")]),
+                Variant(minSdk: 21, abis: [alias], abiAlternatives: [], apks: [.master("splits/odd-master.apk")]),
+                Variant(minSdk: 21, abis: [3], abiAlternatives: [], apks: [.master("splits/arm-master.apk")]),
             ])
             #expect(try plan(archive(two)).selecting(guestAbis: arm, guestSdk: 37).candidates.map(\.entry) == ["splits/arm-master.apk"], "variant \(alias)")
             // A split for it is not installed either.
@@ -590,5 +590,143 @@ struct BundleTableTests {
         #expect(table.variants.map(\.targeting.sdkAlternatives) == [[23, 31], [21, 31], [21, 23]])
         #expect(table.variants[2].apks.first?.isMaster == true && table.variants[2].apks.first?.module == "base")
         #expect(table.variants[2].apks.contains { $0.path == "splits/base-arm64_v8a_2.apk" && $0.targeting.abis == ["arm64-v8a"] })
+    }
+
+    // MARK: Targeting read strictly, and the parts of a table kept once matched
+
+    private typealias T = BundleTocFixture
+
+    /// `SdkVersion { min { value } }`; no value for nil (the default, 0).
+    private func version(_ level: Int?) -> Data { T.message(1, level.map { T.int(1, $0) } ?? Data()) }
+
+    /// `SdkVersionTargeting` as the field `field` of a targeting message.
+    private func sdkTargeting(_ values: [Int?], alternatives: [Int?] = [], field: Int = 1) -> Data {
+        T.message(field, values.reduce(Data()) { $0 + T.message(1, version($1)) } + alternatives.reduce(Data()) { $0 + T.message(2, version($1)) })
+    }
+
+    /// `AbiTargeting` as the field `field` of a targeting message.
+    private func abiTargeting(_ values: [Int], alternatives: [Int] = [], field: Int = 2) -> Data {
+        T.message(field, values.reduce(Data()) { $0 + T.message(1, T.int(1, $1)) } + alternatives.reduce(Data()) { $0 + T.message(2, T.int(1, $1)) })
+    }
+
+    private func rawApk(_ path: String, id: String = "", master: Bool = false, targeting: Data? = Data(), metadata: Int = 3) -> Data {
+        T.message(2, (targeting.map { T.message(1, $0) } ?? Data()) + T.string(2, path) + T.message(metadata, T.string(1, id) + T.int(2, master ? 1 : 0)))
+    }
+
+    private func rawVariant(_ apks: Data, targeting: Data = Data(), number: Int = 0) -> Data {
+        T.message(1, T.message(1, targeting) + T.message(2, T.message(1, T.string(1, "base")) + apks) + T.int(3, number))
+    }
+
+    private func raw(_ toc: Data, _ names: [String]) -> [ZipFixture.Item] {
+        [.init("toc.pb", toc, method: 8)] + names.map { entry($0) }
+    }
+
+    private func rawPlan(_ toc: Data, _ names: [String]) throws -> ApkContainerPlan { try plan(raw(toc, names)) }
+
+    @Test func anInstallTimeSliceThatMatchedItsOwnTargetingIsNotDroppedAfterwardsByTheProcessorOfTheAppsSplits() throws {
+        // The app has an arm64 split; the install-time slice declares armeabi-v7a, which the guest has too.
+        let app = Variant(minSdk: 21, apks: [.master("splits/base-master.apk"), .split("splits/base-arm64_v8a.apk", "config.arm64_v8a", abi: 3)])
+        let found = try plan(bundle([.installTime("req", [.slice("asset-slices/req-master.apk", "req", master: true, abi: 2)])], variants: [app]))
+        let chosen = try found.selecting(guestAbis: ["arm64-v8a", "armeabi-v7a"], guestSdk: 37)
+        #expect(entries(chosen) == ["splits/base-master.apk", "splits/base-arm64_v8a.apk", "asset-slices/req-master.apk"])
+        #expect(chosen.unplacedData == 0)
+        // A slice for a processor the guest lacks is left out by its own targeting, as before.
+        let x86 = try plan(bundle([.installTime("req", [.slice("asset-slices/req-master.apk", "req", master: true, abi: 4)])], variants: [app]))
+        #expect(!entries(try x86.selecting(guestAbis: ["arm64-v8a", "armeabi-v7a"], guestSdk: 37)).contains("asset-slices/req-master.apk"))
+    }
+
+    @Test func aSliceOfAnInstallTimePackWithATextureFormatRefusesTheFileAndAnOrdinarySplitDoesNot() throws {
+        let slices: [Slice] = [
+            .slice("asset-slices/astc.apk", "textures.astc", texture: (9, 10)), .slice("asset-slices/etc2.apk", "textures.etc2", texture: (10, 9)),
+        ]
+        let found = try plan(bundle([.installTime("textures", slices)]))
+        #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: arm, guestSdk: 37) }
+        // One slice is enough, and an unmatched one (for a newer Android) is not in the way.
+        let one = try plan(bundle([.installTime("textures", [.slice("asset-slices/master.apk", "textures", master: true), .slice("asset-slices/astc.apk", "textures.astc", texture: (9, 10))])]))
+        #expect(throws: InstallRefusal.damaged) { _ = try one.selecting(guestAbis: arm, guestSdk: 37) }
+        let future = try plan(bundle([.installTime("textures", [.slice("asset-slices/master.apk", "textures", master: true), .slice("asset-slices/astc.apk", "textures.astc", minSdk: 99, texture: (9, 10))])]))
+        #expect(entries(try future.selecting(guestAbis: arm, guestSdk: 37)).contains("asset-slices/master.apk"))
+        // A pack that is not install-time is not installed, so its textures do not matter.
+        let later = try plan(bundle([.fastFollow("textures", slices)]))
+        #expect(entries(try later.selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/base-en.apk"])
+        // The app's own splits keep every texture format, as every language and density.
+        let split = Variant(minSdk: 21, apks: [.master("splits/base-master.apk"), .split("splits/base-tcf_astc.apk", "config.tcf_astc", texture: (9, 10))])
+        #expect(entries(try plan(archive(BundleTocFixture(variants: [split]))).selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/base-tcf_astc.apk"])
+    }
+
+    @Test func aSingularFieldThatComesTwiceIsATableThatCannotBeReadAndNoRestrictionIsLostToIt() {
+        // The x86 restriction of a variant, then a second targeting message with an SDK: merged by a protocol buffer parser.
+        let doubled = T.message(1, T.message(1, abiTargeting([4])) + T.message(1, sdkTargeting([21])) + T.message(2, T.message(1, T.string(1, "base")) + rawApk("base.apk", master: true)))
+        #expect(refusal(raw(doubled, ["base.apk"])) == .damaged)
+        // The same at the level of an APK: x86, then an empty targeting message.
+        let apk = T.message(2, T.message(1, abiTargeting([4], field: 1)) + T.message(1, Data()) + T.string(2, "base.apk") + T.message(3, T.int(2, 1)))
+        #expect(refusal(raw(rawVariant(apk), ["base.apk"])) == .damaged)
+        // The minimum of an SDK, twice: 21 and then 99 is 99, not 21.
+        let twice = T.message(1, T.message(1, T.message(1, T.int(1, 21) + T.int(1, 99))))
+        #expect(refusal(raw(rawVariant(rawApk("base.apk", master: true), targeting: twice), ["base.apk"])) == .damaged)
+        // A second path, split metadata, or targeting of an asset slice, and a second module metadata.
+        let slice = T.message(1, Data()) + T.string(2, "asset-slices/a.apk") + T.message(7, T.string(1, "a"))
+        let assets = T.message(3, T.message(1, T.string(1, "a") + T.int(4, 1)) + T.message(2, slice + T.message(1, abiTargeting([4], field: 1))))
+        #expect(refusal(raw(rawVariant(rawApk("base.apk", master: true)) + assets, ["base.apk", "asset-slices/a.apk"])) == .damaged)
+        let metadata = T.message(3, T.message(1, T.string(1, "a") + T.int(4, 1)) + T.message(1, T.string(1, "b")) + T.message(2, slice))
+        #expect(refusal(raw(rawVariant(rawApk("base.apk", master: true)) + metadata, ["base.apk", "asset-slices/a.apk"])) == .damaged)
+        // Each is whole, once: it reads.
+        let once = T.message(3, T.message(1, T.string(1, "a") + T.int(4, 1)) + T.message(2, slice))
+        #expect(refusal(raw(rawVariant(rawApk("base.apk", master: true)) + once, ["base.apk", "asset-slices/a.apk"])) == nil)
+    }
+
+    @Test func aStatedLevelIsTheLevelAndAnUnstatedOneIsZeroSoANewerAlternativeExcludesIt() throws {
+        // No value, and an alternative from 1: bundletool's default 0 is excluded by it on any guest that has 1.
+        let unstated = try rawPlan(rawVariant(rawApk("base.apk", master: true), targeting: sdkTargeting([], alternatives: [1], field: 1)), ["base.apk"])
+        #expect(throws: InstallRefusal.damaged) { _ = try unstated.selecting(guestAbis: arm, guestSdk: 37) }
+        // A level stated as 0 is the same level, not 1.
+        let zero = try rawPlan(rawVariant(rawApk("base.apk", master: true), targeting: sdkTargeting([0], alternatives: [1], field: 1)), ["base.apk"])
+        #expect(throws: InstallRefusal.damaged) { _ = try zero.selecting(guestAbis: arm, guestSdk: 37) }
+        // A guest below the alternative still has the variant, and one with no alternative at all keeps it.
+        #expect(try zero.selecting(guestAbis: arm, guestSdk: 0).candidates.count == 1)
+        let alone = try rawPlan(rawVariant(rawApk("base.apk", master: true), targeting: sdkTargeting([nil], field: 1)), ["base.apk"])
+        #expect(try alone.selecting(guestAbis: arm, guestSdk: 37).candidates.count == 1)
+        // The regular pair from 21 and 23 is as it was.
+        let pair = rawVariant(rawApk("old.apk", master: true), targeting: sdkTargeting([21], alternatives: [23]))
+            + rawVariant(rawApk("new.apk", master: true), targeting: sdkTargeting([23], alternatives: [21]), number: 1)
+        #expect(try rawPlan(pair, ["old.apk", "new.apk"]).selecting(guestAbis: arm, guestSdk: 37).candidates.map(\.entry) == ["new.apk"])
+        #expect(try rawPlan(pair, ["old.apk", "new.apk"]).selecting(guestAbis: arm, guestSdk: 22).candidates.map(\.entry) == ["old.apk"])
+    }
+
+    @Test func anAbiThatIsNamedNowhereIsNeverNoRestrictionNotEvenAsAnAlternative() throws {
+        // No value and an alternative the reader has no name for.
+        for alias in [9, 99, 0] {
+            let variant = rawVariant(rawApk("base.apk", master: true), targeting: abiTargeting([], alternatives: [alias]))
+            #expect(throws: InstallRefusal.damaged) { _ = try rawPlan(variant, ["base.apk"]).selecting(guestAbis: arm, guestSdk: 37) }
+            // As an alternative of an APK, which is left out by it; when it is the only code there is, there is no match.
+            let only = rawVariant(rawApk("base.apk", master: true) + rawApk("odd.apk", id: "config.odd", targeting: abiTargeting([3], alternatives: [alias], field: 1)))
+            #expect(throws: InstallRefusal.noMatchingProcessor) { _ = try rawPlan(only, ["base.apk", "odd.apk"]).selecting(guestAbis: arm, guestSdk: 37) }
+            let beside = rawVariant(
+                rawApk("base.apk", master: true) + rawApk("odd.apk", id: "config.odd", targeting: abiTargeting([3], alternatives: [alias], field: 1))
+                    + rawApk("arm.apk", id: "config.arm64_v8a", targeting: abiTargeting([3], field: 1)))
+            #expect(entries(try rawPlan(beside, ["base.apk", "odd.apk", "arm.apk"]).selecting(guestAbis: arm, guestSdk: 37)) == ["base.apk", "arm.apk"], "alias \(alias)")
+        }
+    }
+
+    @Test func targetingThatContradictsItselfOrHoldsAFieldNobodyNamedIsNotAcceptedAndIsNotInstalled() throws {
+        let base = rawApk("base.apk", master: true)
+        // The same processor as a value and as an alternative; two SDK values.
+        #expect(refusal(raw(rawVariant(base, targeting: abiTargeting([3], alternatives: [3])), ["base.apk"])) == .damaged)
+        let levels = T.message(1, T.message(1, version(21)) + T.message(1, version(30)))
+        #expect(refusal(raw(rawVariant(base, targeting: levels), ["base.apk"])) == .damaged)
+        // A field of the targeting of a variant, of an APK or of an SDK that the schema has no number for: a scalar of any
+        // wire type that holds something is a restriction that cannot be weighed; one that is zero holds nothing.
+        for unknown in [T.int(99, 1), Data([0xcd, 0x06, 1, 2, 3, 4]), Data([0xc9, 0x06, 1, 0, 0, 0, 0, 0, 0, 0])] {
+            let found = try rawPlan(rawVariant(base, targeting: unknown), ["base.apk"])
+            #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: arm, guestSdk: 37) }
+            let split = rawVariant(base + rawApk("odd.apk", id: "config.odd", targeting: unknown))
+            #expect(throws: InstallRefusal.damaged) { _ = try rawPlan(split, ["base.apk", "odd.apk"]).selecting(guestAbis: arm, guestSdk: 37) }
+            let inside = rawVariant(base, targeting: T.message(1, unknown))
+            #expect(throws: InstallRefusal.damaged) { _ = try rawPlan(inside, ["base.apk"]).selecting(guestAbis: arm, guestSdk: 37) }
+        }
+        #expect(try rawPlan(rawVariant(base, targeting: T.int(99, 0)), ["base.apk"]).selecting(guestAbis: arm, guestSdk: 37).candidates.count == 1)
+        // A field the schema has, of the wrong wire type, is a table that cannot be read.
+        #expect(refusal(raw(rawVariant(base, targeting: T.int(2, 1)), ["base.apk"])) == .damaged)
+        #expect(refusal(raw(rawVariant(base + rawApk("a.apk", id: "x", targeting: T.int(1, 1))), ["base.apk", "a.apk"])) == .damaged)
     }
 }

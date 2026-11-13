@@ -511,6 +511,9 @@ public struct ApkContainerPlan: Equatable, Sendable {
         /// together, a graphics API, a device tier, a screen density of a
         /// variant): what has it is not installed.
         public var other = false
+        /// The APK is for a texture compression format. The guest's formats are
+        /// not asked, so an asset slice that has one is refused.
+        public var texture = false
 
         public init() {}
 
@@ -528,7 +531,8 @@ public struct ApkContainerPlan: Equatable, Sendable {
         public func matchesSdk(_ guestSdk: Int?) -> Bool {
             let level = guestSdk ?? Int.max
             guard sdk.allSatisfy({ $0 <= level }) else { return false }
-            let floor = sdk.max() ?? 1
+            // What states no level is for level 0, as bundletool reads it.
+            let floor = sdk.max() ?? 0
             return !sdkAlternatives.contains(where: { $0 > floor && $0 <= level })
         }
 
@@ -635,7 +639,7 @@ public struct ApkContainerPlan: Equatable, Sendable {
             // The install-time asset packs go in the same session as the base and its
             // splits. A standalone APK has them fused into it.
             let slices = variant.standalone ? [] : assetSlices.filter { $0.targeting.matches(guestAbis: guestAbis, guestSdk: guestSdk) }
-            guard !apks.contains(where: { $0.targeting.other }), !slices.contains(where: { $0.targeting.other }) else {
+            guard !apks.contains(where: { $0.targeting.other }), !slices.contains(where: { $0.targeting.other || $0.targeting.texture }) else {
                 throw InstallRefusal.damaged
             }
             plan.candidates = apks.map { apk in
@@ -650,8 +654,10 @@ public struct ApkContainerPlan: Equatable, Sendable {
             plan.assetSlices = []
             plan.candidates = try ApkContainer.arranged(plan.candidates, base: variant.base)
         }
+        // The processor of the splits of a plan that names them only by file name. The parts of a
+        // table were each matched to the guest by their own targeting, and none is dropped after that.
         let present = Set(plan.candidates.compactMap(\.abi))
-        if !present.isEmpty {
+        if variants.isEmpty, !present.isEmpty {
             guard let chosen = guestAbis.first(where: { present.contains($0) }) else { throw InstallRefusal.noMatchingProcessor }
             plan.candidates = plan.candidates.filter { $0.abi == nil || $0.abi == chosen }
         }

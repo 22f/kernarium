@@ -534,6 +534,30 @@ struct ContainerGuestTests {
         await clean(operations)
     }
 
+    @Test(.timeLimit(.minutes(10))) func anInstallTimeSliceForAnotherProcessorOfTheGuestIsInstalledWithTheApp() async throws {
+        guard Self.enabled else { return }
+        let operations = try operations()
+        await clean(operations)
+        // The app has an arm64 split; the install-time slice is for armeabi-v7a, which the guest has too.
+        let toc = BundleToc(
+            variants: [BundleToc.Variant(minSdk: 21, apks: [
+                .master("splits/base-master.apk"), .split("splits/base-arm64_v8a.apk", "config.arm64_v8a", abi: 3),
+            ])],
+            assetModules: [.installTime("levels", [.slice("asset-slices/levels-master.apk", "config.armeabi_v7a", master: true, abi: 2)])])
+        let url = try write([
+            ContainerEntry("toc.pb", toc.build()), ContainerEntry("splits/base-master.apk", try apk("base.apk")),
+            ContainerEntry("splits/base-arm64_v8a.apk", try apk("config.arm64_v8a.apk")),
+            ContainerEntry("asset-slices/levels-master.apk", try apk("config.armeabi_v7a.apk")),
+        ], "slice-processor.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await operations.installApk(at: url, update: { _ in }) == .installed)
+        let files = try await installedFiles(operations)
+        #expect(files.count == 3 && files.contains("base.apk"), "\(files)")
+        #expect(files.contains { $0.contains("armeabi_v7a") } && files.contains { $0.contains("arm64_v8a") }, "\(files)")
+        #expect(try await activeSessions(operations) == 0)
+        await clean(operations)
+    }
+
     // MARK: A container of more than 4 GiB
 
     @Test(.timeLimit(.minutes(30))) func aContainerOfMoreThanFourGibInstallsItsApksFromPastTheFourGibMark() async throws {
