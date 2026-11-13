@@ -181,8 +181,9 @@ void aNotificationThatTookTheHandlerMayRunItAfterInvalidate()
     require(handled == 1, "and no later notification takes it");
 }
 
-// Many changes race a stop. What was in flight at the stop may still call the handler; nothing that is changed after
-// invalidate has returned does.
+// Many changes race a stop. What was in flight at the stop may still call the handler, and reads the value as it is when
+// it gets there, so it may report a later one; nothing that is changed after invalidate has returned and every
+// notification that was in flight is over does.
 void nothingChangedAfterInvalidateReturnsCallsTheHandler()
 {
     for (int round = 0; round < 50; ++round) {
@@ -203,9 +204,10 @@ void nothingChangedAfterInvalidateReturnsCallsTheHandler()
         go = true;
         std::this_thread::yield();
         [observer invalidate];
-        // The writer's notifications that are still running may report their own values; this one is after the stop.
-        subject.value = @(-1);
         writer.join();
+        // The writer's notifications that were in flight at the stop are over (they run in its setter), so a call of
+        // the handler for this change could only be one that took the handler after the stop.
+        subject.value = @(-1);
         require(!sawAfter, "a value changed after invalidate returned never reaches the handler");
     }
 }

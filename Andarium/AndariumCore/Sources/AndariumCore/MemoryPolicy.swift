@@ -20,7 +20,8 @@ import Foundation
 /// - the graphics memory is the host GPU's budget, B, a guest of a size and
 ///   vCPU count would launch with, less the host-side memory a live camera
 ///   session holds out of it while Camera is on (`cameraReserveMiB`, the
-///   runtime's own figure for the tier B gets), as the pool the GPU is given;
+///   runtime's own figure for the cameras this host presents at the tier B
+///   gets; `withCameraReserve` reads it again), as the pool the GPU is given;
 /// - the graphics line is the size above which games may run out of graphics
 ///   memory: the default itself where the runtime lowered the default to keep
 ///   B at `Limits.minimumDefaultGraphicsMemoryMiB` (and where the host gives
@@ -47,14 +48,17 @@ public struct MemoryPolicy: Equatable, Sendable {
     /// runtime's memory steps from the bottom of its range; empty where the
     /// host does not say.
     private let graphics: [[Int]]
+    /// Per count, whether the runtime lowered the default to keep the host GPU
+    /// its budget (a count without an entry says no).
+    private let defaultHoldsGraphics: [Bool]
     /// The memory a live camera session holds out of each of those budgets;
     /// empty, or zeros, where the host states none.
-    private let cameraReserves: [[Int]]
+    private var cameraReserves: [[Int]]
     /// The size above which games may run out of graphics memory, at the same
     /// counts, and the same while a live camera session holds its reserve out
     /// of the budget.
     private let graphicsLines: [Int]
-    private let graphicsLinesWithCamera: [Int]
+    private var graphicsLinesWithCamera: [Int]
 
     /// The bounds, the defaults and the safe sizes as they are: each is taken
     /// down to the runtime's steps and into its range. A count without a
@@ -92,20 +96,48 @@ public struct MemoryPolicy: Equatable, Sendable {
             }
         }
         graphics = table
+        self.defaultHoldsGraphics = defaultHoldsGraphics
         let reserves = table.map { row in row.map { cameraReserveMiB?($0) ?? 0 } }
         cameraReserves = reserves
-        // Where the runtime lowered the default to keep B at a gibibyte, the
-        // default itself is the line, as it was before the range passed
-        // 4 GiB. Elsewhere the largest size a person may choose that still
-        // keeps that much: no lower than the default (a new guest is never
-        // warned about) and no higher than the safe size (above it the
-        // warning is the worse one). The default itself where B falls below
-        // that figure just above it, and where the host gives no estimate.
         // While Camera is on the figure the sheet shows is the pool, the
         // budget less the camera's reserve, so the line follows it too.
-        let line = { (index: Int, reserves: [[Int]]?) -> Int in
-            let atLeast = steppedDefaults[index]
-            guard !table.isEmpty, !(index < defaultHoldsGraphics.count && defaultHoldsGraphics[index]) else {
+        graphicsLines = Self.graphicsLines(
+            bounds: bounds, defaults: steppedDefaults, safes: steppedSafes, holds: defaultHoldsGraphics,
+            table: table, reserves: nil)
+        graphicsLinesWithCamera = Self.graphicsLines(
+            bounds: bounds, defaults: steppedDefaults, safes: steppedSafes, holds: defaultHoldsGraphics,
+            table: table, reserves: reserves)
+    }
+
+    /// The same host with another reserve for a live camera session, asked once
+    /// for every budget as `init` does: the layout the cameras make, and so the
+    /// memory a session holds, follows what the host's cameras and the colour
+    /// data they have learned say, which is read again when Camera is turned on
+    /// and after a run. Nothing else changes.
+    public func withCameraReserve(_ cameraReserveMiB: (_ budgetMiB: Int) -> Int) -> MemoryPolicy {
+        var policy = self
+        let reserves = graphics.map { row in row.map { cameraReserveMiB($0) } }
+        policy.cameraReserves = reserves
+        policy.graphicsLinesWithCamera = Self.graphicsLines(
+            bounds: maximums, defaults: defaults, safes: safes, holds: defaultHoldsGraphics,
+            table: graphics, reserves: reserves)
+        return policy
+    }
+
+    /// Where the runtime lowered the default to keep B at a gibibyte, the
+    /// default itself is the line, as it was before the range passed 4 GiB.
+    /// Elsewhere the largest size a person may choose that still keeps that
+    /// much: no lower than the default (a new guest is never warned about) and
+    /// no higher than the safe size (above it the warning is the worse one).
+    /// The default itself where B falls below that figure just above it, and
+    /// where the host gives no estimate. With `reserves` the figure kept is the
+    /// pool the budget leaves once the camera's reserve is out of it.
+    private static func graphicsLines(
+        bounds: [Int], defaults: [Int], safes: [Int], holds: [Bool], table: [[Int]], reserves: [[Int]]?
+    ) -> [Int] {
+        bounds.indices.map { index in
+            let atLeast = defaults[index]
+            guard !table.isEmpty, !(index < holds.count && holds[index]) else {
                 return atLeast
             }
             let row = table[index]
@@ -116,10 +148,8 @@ public struct MemoryPolicy: Equatable, Sendable {
                 return max(row[column] - reserve, 0) >= Limits.minimumDefaultGraphicsMemoryMiB
             }
             guard let kept else { return atLeast }
-            return min(max(atLeast, first + kept * Limits.runtimeMemoryStepMiB), steppedSafes[index])
+            return min(max(atLeast, first + kept * Limits.runtimeMemoryStepMiB), safes[index])
         }
-        graphicsLines = bounds.indices.map { line($0, nil) }
-        graphicsLinesWithCamera = bounds.indices.map { line($0, reserves) }
     }
 
     /// The bounds alone: every default and safe size is its bound, so nothing
