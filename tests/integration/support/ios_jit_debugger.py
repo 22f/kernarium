@@ -382,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     options.log.mkdir(parents=True, exist_ok=True)
     ios_device_reports.preflight(
-        options, [], options.log, extra_processes=[options.process_name])
+        options, [], extra_processes=[options.process_name])
     console_log = options.log / "console.log"
     serve_log = options.log / "jit-debugger.log"
     # What the device lists before the launch is not the launch's process.

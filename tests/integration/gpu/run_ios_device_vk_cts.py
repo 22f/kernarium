@@ -533,8 +533,7 @@ def main(argv: list[str] | None = None) -> int:
     if options.artifact_root.exists():
         fail(f"artifact directory already exists: {options.artifact_root}")
     options.artifact_root.mkdir(parents=True)
-    ios_device_reports.preflight(
-        options, [kernarium.APPLICATION], options.artifact_root)
+    ios_device_reports.preflight(options, [kernarium.APPLICATION])
 
     if options.app is not None:
         app = options.app.resolve()

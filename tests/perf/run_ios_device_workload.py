@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         "%Y%m%d-%H%M%S"
     )
     artifact.mkdir(parents=True, exist_ok=False)
-    ios_device_reports.preflight(options, [kernarium.APPLICATION], artifact)
+    ios_device_reports.preflight(options, [kernarium.APPLICATION])
     written = build_payload(options).write(
         artifact / "payload.cpio", options.initramfs_tool
     )

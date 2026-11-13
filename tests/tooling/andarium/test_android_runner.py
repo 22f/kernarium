@@ -39,6 +39,8 @@ EXISTING = {"keep.txt": b"the owner's file", "rootfs.erofs": b"x" * 64}
 DEVICECTL_ALLOWED = (
     ["device", "info", "lockState"],
     ["device", "info", "files"],
+    ["device", "info", "details"],
+    ["device", "copy", "from"],
     ["device", "install", "app"],
     ["device", "process", "launch"],
 )
@@ -139,9 +141,12 @@ class Scratch:
         host_port = free_port()
         self.runs += 1
         artifacts = self.root / f"artifacts-{self.runs}"
+        (self.root / "home").mkdir(exist_ok=True)
         variables = {
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "FAKE_STATE": str(self.state),
+            # Reports a run moves go under the user's home.
+            "HOME": str(self.root / "home"),
             **(environment or {}),
         }
         argv = ["--device", DEVICE, "--poll-interval", "0.05",
@@ -201,7 +206,7 @@ class AndroidRunnerTests(unittest.TestCase):
         (self.scratch.state / "crash-logs.txt").write_text(
             "\n".join(names) + "\n")
 
-    def test_a_short_report_store_is_emptied_before_anything_is_installed(
+    def test_a_short_report_store_is_moved_before_anything_is_installed(
         self
     ) -> None:
         self.hold_reports(23)
@@ -213,16 +218,19 @@ class AndroidRunnerTests(unittest.TestCase):
         steps = [
             "devicectl " + " ".join(c["args"][:3]) if c["tool"] == "devicectl"
             else c["tool"] for c in outcome.commands]
-        self.assertLess(steps.index("devicectl device info files"),
-                        steps.index("idevicecrashreport"))
+        copied = [i for i, step in enumerate(steps)
+                  if step == "devicectl device copy from"]
+        self.assertEqual(len(copied), 23)
+        self.assertLess(copied[-1], steps.index("idevicecrashreport"))
         self.assertLess(steps.index("idevicecrashreport"),
                         steps.index("devicectl device install app"))
-        self.assertLess(steps.index("idevicecrashreport"),
-                        steps.index("launch"))
+        self.assertLess(steps.index("idevicecrashreport"), steps.index("launch"))
         (move,) = outcome.tool("idevicecrashreport")
-        self.assertEqual(move["args"][:4], ["-u", DEVICE, "-f", "JetsamEvent-"])
-        self.assertEqual(
-            len(list(outcome.artifacts.glob("*/device-reports/*/*"))), 23)
+        self.assertEqual(move["args"][:2], ["-u", "0000AAAA-0123456789ABCDEF"])
+        self.assertNotIn("-f", move["args"])
+        (folder,) = (self.scratch.root / "home" / "Library" / "Logs"
+                     / "Kernarium" / "device-reports").iterdir()
+        self.assertEqual(len(list((folder / "copy").iterdir())), 23)
         self.assertEqual((self.scratch.state / "crash-logs.txt").read_text().strip(), "")
         self.assertIn("JetsamEvent 23 -> 0", outcome.out)
 
@@ -237,6 +245,20 @@ class AndroidRunnerTests(unittest.TestCase):
         self.assertEqual(outcome.devicectl("device", "install"), [])
         self.assertEqual(outcome.tool("launch"), [])
         self.assertEqual(outcome.tool("adb"), [])
+
+    def test_a_failing_listing_stops_the_run_and_repeats_no_name(self) -> None:
+        self.hold_reports(25)
+        outcome = self.run_android(
+            "--app", str(self.scratch.app(automation=True)),
+            "--script", str(self.scratch.script),
+            environment={"FAKE_REPORT_LIST": "fail"})
+        self.assertEqual(outcome.status, 1)
+        self.assertIn("cannot list the device's diagnostic reports", outcome.err)
+        self.assertEqual(outcome.devicectl("device", "install"), [])
+        self.assertEqual(outcome.tool("launch"), [])
+        written = outcome.out + outcome.err + "".join(
+            path.read_text() for path in outcome.artifacts.rglob("*.json"))
+        self.assertNotIn("Leaky", written)
 
     def test_a_caller_may_leave_the_old_reports_in_place(self) -> None:
         self.hold_reports(25)

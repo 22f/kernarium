@@ -153,7 +153,7 @@ def main() -> int:
         "%Y%m%d-%H%M%S"
     )
     artifact.mkdir(parents=True, exist_ok=False)
-    ios_device_reports.preflight(arguments, [kernarium.APPLICATION], artifact)
+    ios_device_reports.preflight(arguments, [kernarium.APPLICATION])
     ios_device.install_app(arguments.device, app, 300)
     results: dict[str, list[dict[str, int | str]]] = {}
     for mode in MODES:

@@ -44,7 +44,10 @@ The host's test run records no video of the screen and keeps no attachments: a
 host runs for hours, and Xcode's defaults would store a recording of whatever
 the device shows. The KernariumAutomation scheme turns both off, `start`
 refuses a built test run file that does not say so, and the run's result
-bundle lives next to the host log in --state-dir.
+bundle lives next to the host log in --state-dir. `start`, `launch` and
+`activate` first make room for diagnostic reports on the device
+(tests/integration/support/ios_device_reports.py), so a kill during the run
+leaves a report.
 """
 
 import argparse
@@ -85,7 +88,14 @@ import ios_device_reports  # noqa: E402
 
 # The processes whose diagnostic reports a host session needs free slots for:
 # the applications it drives and its own runner.
-REPORT_PROCESSES = ("KernariumAutomation-Runner",)
+REPORT_PROCESSES = (*ios_device_reports.APPLICATION_PROCESSES,
+                    "KernariumAutomation-Runner")
+# The process an application's reports are named for, by bundle identifier;
+# any other bundle is taken to be named like the last part of its identifier.
+BUNDLE_PROCESSES = {"com.imxieyi.Kernarium": "Kernarium",
+                    "com.imxieyi.andarium": "Andarium"}
+# The host operations that start an application on the device.
+STARTING_COMMANDS = ("launch", "activate")
 
 # XCTest types a key from the character it produces. On a device it delivers
 # nothing for the characters of XCUIKeyboardKey.return ("\r"), .delete
@@ -304,41 +314,90 @@ def command_build(options):
 def recording_problems(xctestrun):
     """What in the test run file lets Xcode record the session, as messages.
 
-    Every test target (a dictionary with a TestBundlePath, at any depth: the
-    two file formats nest it differently) must state each setting."""
+    Both run file formats are enumerated target by target, and every target
+    must have a bundle path of its own and state each setting. A target of any
+    other shape, such as one that runs the destination's installed bundle
+    (UseDestinationArtifacts), is refused: this check cannot read its
+    settings."""
     try:
         with open(xctestrun, "rb") as handle:
             plan = plistlib.load(handle)
     except (OSError, ValueError, expat.ExpatError) as error:
         return [f"{xctestrun} cannot be read: {error}"]
+    if not isinstance(plan, dict):
+        return [f"{xctestrun} is not a test run file"]
+    metadata = plan.get("__xctestrun_metadata__")
+    version = metadata.get("FormatVersion") if isinstance(metadata, dict) else None
+    problems = set()
     targets = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            if "TestBundlePath" in node:
-                targets.append(node)
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
-
-    walk(plan)
+    if version == 2:
+        configurations = plan.get("TestConfigurations")
+        if not isinstance(configurations, list):
+            return [f"{xctestrun} has no test configurations"]
+        for configuration in configurations:
+            entries = (configuration.get("TestTargets")
+                       if isinstance(configuration, dict) else None)
+            if not isinstance(entries, list):
+                problems.add("a test configuration lists no targets")
+                continue
+            targets.extend(entries)
+    elif version in (None, 1):
+        targets = [value for key, value in plan.items()
+                   if key != "__xctestrun_metadata__"]
+    else:
+        return [f"{xctestrun} is in a test run file format this check "
+                "does not know"]
     if not targets:
         return [f"{xctestrun} names no test target"]
-    problems = {
-        f"{key} is {target.get(key)!r}, not {wanted!r}"
-        for target in targets
-        for key, wanted in RECORDING_SETTINGS.items()
-        if target.get(key) != wanted}
+    for target in targets:
+        if not isinstance(target, dict) or not isinstance(
+                target.get("TestBundlePath"), str):
+            problems.add("a test target has no bundle path of its own "
+                         "(a destination-artifact or unknown target shape)")
+            continue
+        if target.get("UseDestinationArtifacts"):
+            problems.add("a test target uses the destination's artifacts")
+        for key, wanted in RECORDING_SETTINGS.items():
+            if target.get(key) != wanted:
+                problems.add(f"{key} is {target.get(key)!r}, not {wanted!r}")
     return sorted(problems)
+
+
+def refuse_recording(xctestrun):
+    """True, after saying why, when Xcode would record this run file's
+    session."""
+    problems = recording_problems(xctestrun)
+    if problems:
+        log(f"{xctestrun} does not turn Xcode's recording off "
+            f"({'; '.join(problems)}): it would record the device's screen "
+            "for the whole session and keep attachments; run `build` again "
+            "with the current KernariumAutomation scheme")
+    return bool(problems)
+
+
+def check_report_slots(options, processes):
+    """Makes room for diagnostic reports before something starts an
+    application; False, after saying why, when it cannot."""
+    try:
+        ios_device_reports.preflight(options, [], extra_processes=processes,
+                                     emit=log)
+    except ios_device_reports.DeviceError as error:
+        log(str(error))
+        return False
+    return True
 
 
 def command_supervise(options):
     """Runs xcodebuild for the host's lifetime; started detached by `start`.
 
     The result bundle goes where `start` says, under the state directory,
-    never to the default under the internal disk's DerivedData."""
+    never to the default under the internal disk's DerivedData. This is where
+    xcodebuild starts, so the run file and the report store are checked here,
+    whoever called."""
+    if refuse_recording(options.xctestrun):
+        return EXIT_FAILED
+    if not check_report_slots(options, REPORT_PROCESSES):
+        return EXIT_FAILED
     environment = dict(os.environ,
                        TEST_RUNNER_KERNARIUM_AUTOMATION_HOST="1",
                        TEST_RUNNER_KERNARIUM_AUTOMATION_HOST_SECONDS=str(options.seconds),
@@ -373,34 +432,32 @@ def command_start(options):
     if not runs:
         log(f"no built host under {derived_data(options)}; run `build` first")
         return EXIT_FAILED
-    problems = recording_problems(runs[-1])
-    if problems:
-        log(f"{runs[-1]} does not turn Xcode's recording off ({'; '.join(problems)}): "
-            "it would record the device's screen for the whole session and keep "
-            "attachments; run `build` again with the current KernariumAutomation scheme")
+    # The supervisor checks both again where xcodebuild starts; here the
+    # caller sees a refusal before anything is started.
+    if refuse_recording(runs[-1]):
         return EXIT_FAILED
     seconds = int(options.hours * 3600)
     nonce = uuid.uuid4().hex
     directory = state_dir(options)
-    try:
-        # Before anything starts: a kill during the session must leave a report.
-        ios_device_reports.preflight(
-            options, [], directory,
-            extra_processes=(*ios_device_reports.APPLICATION_PROCESSES,
-                             *REPORT_PROCESSES))
-    except ios_device_reports.DeviceError as error:
-        log(str(error))
+    # Before anything starts: a kill during the session must leave a report.
+    if not check_report_slots(options, REPORT_PROCESSES):
         return EXIT_FAILED
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    log_path = directory / f"host-{stamp}.log"
-    result_bundle = directory / f"host-{stamp}.xcresult"
+    # The nonce keeps two starts in one second apart: xcodebuild refuses a
+    # result bundle that exists.
+    name = f"host-{time.strftime('%Y%m%d-%H%M%S')}-{nonce}"
+    log_path = directory / f"{name}.log"
+    result_bundle = directory / f"{name}.xcresult"
+    reports = (["--device-reports-dir", str(options.device_reports_dir)]
+               if options.device_reports_dir else [])
+    if options.leave_device_reports:
+        reports.append("--leave-device-reports")
     with open(log_path, "w") as output:
         supervisor = subprocess.Popen(
             [sys.executable, str(SCRIPT), "--device", options.device,
              "--runner", options.runner, "--state-dir", options.state_dir,
              "_supervise", "--xctestrun", str(runs[-1]),
              "--result-bundle", str(result_bundle),
-             "--seconds", str(seconds), "--nonce", nonce],
+             "--seconds", str(seconds), "--nonce", nonce, *reports],
             stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
             start_new_session=True)
     (directory / "host.json").write_text(json.dumps({
@@ -523,12 +580,20 @@ def build_command(options):
     return command
 
 
+def bundle_process(bundle):
+    """The process name the reports of an application are filed under."""
+    return BUNDLE_PROCESSES.get(bundle) or bundle.rsplit(".", 1)[-1]
+
+
 def run_op(options):
     op = options.command
     try:
         command = build_command(options)
     except ValueError as error:
         log(str(error))
+        return EXIT_FAILED
+    if op in STARTING_COMMANDS and not check_report_slots(
+            options, [bundle_process(command.get("bundle") or options.bundle)]):
         return EXIT_FAILED
     reply = send(options, command, options.timeout)
     data = reply.pop("data", None)
@@ -572,6 +637,7 @@ def parse(argv):
     supervise.add_argument("--result-bundle", required=True)
     supervise.add_argument("--seconds", type=int, required=True)
     supervise.add_argument("--nonce", required=True)
+    ios_device_reports.add_arguments(supervise)
     commands.add_parser("status", help="report whether the host is serving")
     stop = commands.add_parser(
         "stop", help="end the host session; starting another needs a new approval")
@@ -582,11 +648,14 @@ def parse(argv):
     launch = commands.add_parser("launch", help="launch (or relaunch) the application")
     launch.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
     launch.add_argument("--arg", action="append", default=[])
+    ios_device_reports.add_arguments(launch)
     for name, text in (("activate", "bring the application to the foreground"),
                        ("terminate", "terminate the application"),
                        ("state", "report the application's run state"),
                        ("tree", "print the application's element tree")):
-        commands.add_parser(name, help=text)
+        sub = commands.add_parser(name, help=text)
+        if name == "activate":
+            ios_device_reports.add_arguments(sub)
     for name, text in (("tap", "tap an element or a point in the application"),
                        ("wait", "wait for an element to appear or disappear"),
                        ("exists", "report whether an element exists")):

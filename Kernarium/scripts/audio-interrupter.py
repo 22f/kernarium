@@ -149,8 +149,7 @@ def check_report_slots(args: argparse.Namespace) -> None:
     if args.dry_run:
         return
     try:
-        ios_device_reports.preflight(
-            args, [], getattr(args, "output", DEFAULT_OUTPUT), extra_processes=PROCESSES)
+        ios_device_reports.preflight(args, [], extra_processes=PROCESSES)
     except ios_device_reports.DeviceError as error:
         raise SystemExit(f"audio-interrupter.py {args.command}: {error}")
 

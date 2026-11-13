@@ -643,8 +643,7 @@ class Run:
         """Install, boot, drive, power off; fills the summary."""
         options, plan = self.options, self.plan
         self.check_unlocked()
-        ios_device_reports.preflight(
-            options, [andarium.APPLICATION], self.artifact)
+        ios_device_reports.preflight(options, [andarium.APPLICATION])
         if options.app is not None:
             app = options.app.resolve()
             andarium.require_automation_app(app)
