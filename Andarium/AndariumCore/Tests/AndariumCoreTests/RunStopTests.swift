@@ -72,6 +72,107 @@ struct RunStopTests {
         #expect(endedWith.value, "the run ended with a request still on its way to the runtime")
     }
 
+    // MARK: The guest's write-back before the stop
+
+    /// What a delivery did, in order.
+    private final class Calls: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls: [String] = []
+        func add(_ call: String) { lock.withLock { calls.append(call) } }
+        var all: [String] { lock.withLock { calls } }
+    }
+
+    @Test func theGuestIsAskedToWriteBackOnceBeforeTheFirstStop() {
+        let stop = RunStop()
+        let calls = Calls()
+        #expect(stop.enter())
+        stop.request()
+        for _ in 0..<3 {
+            #expect(stop.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        }
+        // The runtime drops a stop that arrives early, so the stop is made
+        // again and again; the guest is asked once.
+        #expect(calls.all == ["settle", "stop", "stop", "stop"])
+    }
+
+    @Test func nothingIsAskedOfAGuestWhoseRunWasNeverEnteredOrHasEnded() {
+        let calls = Calls()
+        let early = RunStop()
+        early.request()
+        #expect(!early.enter())
+        #expect(early.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        early.end()
+        #expect(!early.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+
+        // Entered but not stopped: nothing yet; stopped and then ended: nothing after.
+        let late = RunStop()
+        #expect(late.enter())
+        #expect(late.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        late.end()
+        late.request()
+        #expect(!late.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(calls.all.isEmpty)
+    }
+
+    @Test func aStopWithoutAWriteBackIsAsBeforeAndDoesNotUseUpTheOne() {
+        let stop = RunStop()
+        let calls = Calls()
+        #expect(stop.enter())
+        stop.request()
+        #expect(stop.deliver { calls.add("stop") })
+        #expect(stop.deliver(settle: { calls.add("settle") }) { calls.add("stop") })
+        #expect(calls.all == ["stop", "settle", "stop"])
+    }
+
+    @Test func endingWaitsForTheWriteBackToo() {
+        let stop = RunStop()
+        #expect(stop.enter())
+        stop.request()
+        let inside = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let ended = DispatchSemaphore(value: 0)
+        let calls = Calls()
+        Thread {
+            _ = stop.deliver(settle: {
+                inside.signal()
+                release.wait()
+                calls.add("settle")
+            }) { calls.add("stop") }
+        }.start()
+        inside.wait()
+        Thread {
+            stop.end()
+            ended.signal()
+        }.start()
+        Thread.sleep(forTimeInterval: 0.1)
+        #expect(ended.wait(timeout: .now()) == .timedOut)
+        release.signal()
+        #expect(ended.wait(timeout: .now() + 10) == .success)
+        #expect(calls.all == ["settle", "stop"], "the run ended inside the stop's own write-back")
+    }
+
+    @Test func theWriteBackIsBoundedByTheEdgeBudget() {
+        #expect(StopSettle.bound == PauseController.edgeBudget)
+    }
+
+    @Test func aWriteBackThatFinishesReturnsAtOnce() {
+        let ran = ResultBox()
+        let before = ContinuousClock.now
+        #expect(StopSettle.run(within: .seconds(30)) { ran.set() })
+        #expect(ran.value)
+        #expect(ContinuousClock.now - before < .seconds(5))
+    }
+
+    @Test func aWriteBackThatNeverReturnsIsLeftAtTheBound() {
+        let release = DispatchSemaphore(value: 0)
+        let before = ContinuousClock.now
+        let finished = StopSettle.run(within: .milliseconds(200)) { release.wait() }
+        let took = ContinuousClock.now - before
+        #expect(!finished)
+        #expect(took >= .milliseconds(150) && took < .seconds(5), "the wait was \(took)")
+        release.signal()
+    }
+
     private final class ResultBox: @unchecked Sendable {
         private let lock = NSLock()
         private var done = false

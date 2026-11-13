@@ -13,6 +13,10 @@ import Foundation
 /// until the run has ended (`deliver`), so one that landed before the runtime
 /// looked is made again after it did.
 ///
+/// The first delivery of a run also carries the guest's write-back (`settle`):
+/// the guest is asked once, before the host stops it, and the host's stop
+/// follows it whatever it came to.
+///
 /// The type holds state and nothing else: whoever owns it runs the delivery,
 /// off the main actor, because the request may wait on the runtime.
 public final class RunStop: @unchecked Sendable {
@@ -21,6 +25,7 @@ public final class RunStop: @unchecked Sendable {
     private var entered = false
     private var ended = false
     private var delivering = false
+    private var settleAsked = false
 
     public init() {}
 
@@ -53,22 +58,40 @@ public final class RunStop: @unchecked Sendable {
     /// runtime and the run has not ended: the delivery of a stop, which the
     /// runtime may wait on. Returns whether to deliver again later (the run
     /// has not ended); a run that has ended is never asked anything.
-    public func deliver(_ request: () -> Void) -> Bool {
-        let wanted: Bool? = condition.withLock {
-            guard !ended else { return nil }
-            guard requested, entered else { return false }
-            delivering = true
-            return true
+    ///
+    /// `settle`, when there is one, runs first and once in the run's whole
+    /// delivery, however many deliveries follow, and only where the thread has
+    /// entered the runtime: a run that never did has no guest to write back.
+    /// It is bounded by whoever supplies it (`StopSettle`), and `end` waits for
+    /// it as for the request.
+    public func deliver(settle: (() -> Void)? = nil, _ request: () -> Void) -> Bool {
+        enum Step {
+            case ended
+            case wait
+            case deliver(settling: Bool)
         }
-        guard let wanted else { return false }
-        if wanted {
+        let step: Step = condition.withLock {
+            guard !ended else { return .ended }
+            guard requested, entered else { return .wait }
+            delivering = true
+            let settling = settle != nil && !settleAsked
+            if settling { settleAsked = true }
+            return .deliver(settling: settling)
+        }
+        switch step {
+        case .ended:
+            return false
+        case .wait:
+            return true
+        case let .deliver(settling):
+            if settling { settle?() }
             request()
             condition.withLock {
                 delivering = false
                 condition.broadcast()
             }
+            return true
         }
-        return true
     }
 
     /// The run's thread is done with the runtime, however it ended. Waits for

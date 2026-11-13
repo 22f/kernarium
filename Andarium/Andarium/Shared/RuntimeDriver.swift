@@ -140,10 +140,11 @@ protocol RuntimeDriver: AnyObject {
     /// size, after the disk is ready.
     func begin(guest: Guest, mode: StartMode, kind: BootKind)
     /// The person stops the start under way, from the boot screen's notice
-    /// for a slow start. A run that is under way is asked to stop and ends
-    /// through the runtime's result, which the model reports as the person's
-    /// (`RunEnd.stoppedByUser`); a start that has not reached the runtime yet
-    /// is ended here, and the model hears it as a run that ended.
+    /// for a slow start. A run that is under way has its guest asked to write
+    /// its storage back (for `StopSettle.bound` at most), then is asked to
+    /// stop, and ends through the runtime's result, which the model reports as
+    /// the person's (`RunEnd.stoppedByUser`); a start that has not reached the
+    /// runtime yet is ended here, and the model hears it as a run that ended.
     func stopGuest()
     /// Puts the data back to what the update that did not finish started
     /// from; the guest does not start. It waits for a snapshot operation under
