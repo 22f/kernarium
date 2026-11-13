@@ -84,9 +84,6 @@ void dropped_text(FixedText &out, std::uint64_t dropped) noexcept
 	       (kind != TrimKind::once && outcome == TrimOutcome::unreachable);
 }
 
-/* DISPATCH_MEMORYPRESSURE_NORMAL, in a source's data word. */
-constexpr std::uint64_t normal_flag = 0x1;
-
 } // namespace
 
 std::string_view pressure_level_name(PressureLevel level) noexcept
@@ -196,42 +193,7 @@ void MemoryPressureResponse::log_level_change(PressureLevel from,
 	footprint_text(line, now.footprint);
 	line.text(", ").number(static_cast<std::int64_t>(now.wire_failures))
 		.text(" guest RAM wire failures");
-	const SystemLevel system = actions_.system_level();
-	if (system.readable)
-		line.text("; system level ").text(pressure_level_name(system.level));
 	dropped_text(line, dropped);
-	actions_.log({buffer, line.size()});
-}
-
-MemoryPressureResponse::Outcome MemoryPressureResponse::on_delivery(
-	std::uint64_t flags) noexcept
-{
-	PressureLevel level = pressure_level_from_dispatch(flags);
-	/* The system merges the levels raised while a notification was handled
-	 * into the next, so the normal flag together with a higher one does not say
-	 * which came last: the system says where it is now. */
-	if ((flags & normal_flag) != 0U && level != PressureLevel::normal) {
-		const SystemLevel system = actions_.system_level();
-		if (system.readable)
-			level = system.level;
-	}
-	return on_level(level);
-}
-
-void MemoryPressureResponse::announce_start() noexcept
-{
-	std::uint64_t dropped = 0;
-	if (!admit_line(level_lines_, dropped))
-		return;
-	const SystemLevel system = actions_.system_level();
-	char buffer[200];
-	FixedText line{buffer, sizeof(buffer)};
-	line.text("uml: memory pressure watch started: system level ");
-	if (system.readable)
-		line.text(pressure_level_name(system.level));
-	else
-		line.text("unreadable (error ")
-			.number(static_cast<std::int64_t>(system.error)).text(")");
 	actions_.log({buffer, line.size()});
 }
 
@@ -271,9 +233,10 @@ MemoryPressureResponse::Outcome MemoryPressureResponse::on_level(
 				++skipped_;
 				outcome = Outcome::limited;
 				/* The interval limits the responses, not the trimmer's
-				 * state: it is turned on when it is off, unless a request
-				 * pending already asks for it. */
-				arm_gradual = !gradual_on_ && !retry_pending_;
+				 * state: the request for it to be on is made again, unless
+				 * one that is pending already asks for it. The guest side
+				 * sends nothing when the guest runs as asked. */
+				arm_gradual = !retry_pending_;
 			} else {
 				running_ = true;
 				started_ = true;

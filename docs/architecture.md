@@ -119,15 +119,15 @@ runtime. Each notification the system delivers is also reported to the
 application (the level, and whether a response starts, is withheld by the 30 s
 or is already running), once and before that notification's work, the normal
 level included (`set_pressure_observer`, and the runtime API's
-`set_memory_pressure_callback`). The system delivers one notification at a time
-and merges the levels raised meanwhile into the next; when that merge holds the
-normal level and a higher one the host reads the level the system reports
-(`kern.memorystatus_vm_pressure_level`) and acts on it, and otherwise on the
-most serious one raised. The observer lives for the process. A watch says on
-stderr what it reads of the system's level when it begins, and each level
-change and each response is one rate-limited line: the footprint, the failed
-guest-RAM wiring operations and, on a response line, the bytes each part
-released and the trim's duration (a warning's, the state of the trimmer).
+`set_memory_pressure_callback`). The source's handler only records the delivery
+and a second serial queue handles the deliveries one at a time, in the order
+they arrived: a level raised during a response is reported and answered after
+it, and a notification the system itself merged reads as its most serious flag.
+At most 64 deliveries wait, and the oldest is dropped beyond that. The observer
+lives for the process. Each level change and each response is one rate-limited
+line: the footprint, the failed guest-RAM wiring operations and, on a response
+line, the bytes each part released and the trim's duration (a warning's, the
+state of the trimmer).
 
 **Budgets.** The process's memory limit, L, is the figure the memory budgets
 derive from. iOS enforces one per application

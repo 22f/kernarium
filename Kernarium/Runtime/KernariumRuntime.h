@@ -953,10 +953,11 @@ enum {
     /* A warning less than 30 s after the last response began: no response
      * starts for it (the guest's trimmer is still turned on if it is off). */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_WITHHELD = 2,
-    /* A response is already running and covers this level. The system delivers
-     * its notifications one at a time, each after the response of the one
-     * before, so this is rare: it is the policy's answer to a level that meets
-     * a running response. */
+    /* A response is already running, and this level starts none: a higher
+     * level that meets it is neither queued nor added to it, and a running
+     * warning's response is not upgraded. The host handles the notifications
+     * one at a time, each after the response of the one before, so this is
+     * rare. */
     KERNARIUM_RUNTIME_MEMORY_RESPONSE_UNDER_WAY = 3,
 };
 
@@ -965,11 +966,10 @@ enum {
  * notification the system delivers while a guest runs, the repeats and the
  * return to NORMAL included, as soon as the host has decided what it does and
  * before it starts the work for that notification (a response can take
- * seconds), in the order delivered. The system delivers one notification at a
- * time and merges the levels raised while it is handled into the next, which
- * reports the most serious of them: a level raised during a response is
- * reported after the response, and one that a more serious level replaced is
- * not reported. It carries no figures. It runs on a runtime thread and must
+ * seconds), in the order delivered. The host handles the notifications one at a
+ * time: a level raised during a response is reported after the response, and
+ * one that the system itself merged with others is reported as the most
+ * serious of them. It carries no figures. It runs on a runtime thread and must
  * return promptly. */
 typedef void (*kernarium_runtime_memory_pressure_callback)(
     void* context,

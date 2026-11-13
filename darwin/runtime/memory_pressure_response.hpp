@@ -31,14 +31,16 @@ namespace uml::runtime {
  *
  * The gradual trimmer is on exactly while the last level is not normal. The
  * interval below limits the responses and their report, not that state: a
- * warning it withholds still turns the trimmer on when it is off, and any level
- * but normal cancels a pending request to turn it off.
+ * warning it withholds still asks for the trimmer to be on (the request is
+ * free where the guest runs as asked), and any level but normal cancels a
+ * pending request to turn it off.
  *
  * A warning starts at most one response per `warn_interval_ns`, counted from
  * the start of the last response of either level, on the clock of
  * PressureActions::now_ns. A critical level always starts one. No response
- * starts while one is running: the event is dropped and counted, since the
- * running response covers it. The translation caches, the guest's RAM and
+ * starts while one is running: the event is dropped and counted, a higher level
+ * is not queued and a running warning's response is not upgraded. The
+ * translation caches, the guest's RAM and
  * every camera or other session are not touched.
  *
  * The guest requests are skipped, with no retry, for a guest the host has
@@ -57,19 +59,20 @@ namespace uml::runtime {
  * Each event the system raises is also reported to the application, once and
  * as soon as the response has decided what it does with it (PressureReport):
  * the level, and whether a response starts, is withheld by the interval or is
- * already running. The report comes before the response's work and the normal
- * level is reported too, so that an application that shows the pressure can
- * show its end. It carries no figures.
+ * already running. The report is made by the call that handles the event,
+ * before that response's work, and the system's watch makes those calls one at
+ * a time in the order the events arrived. The normal level is reported too, so
+ * that an application that shows the pressure can show its end. It carries no
+ * figures.
  *
  * Each change of the level and each response (or its last retry) is one line
- * on stderr (the console of both applications). A level line carries the level,
- * the footprint and the level the system reports when the host can read it; a
- * critical response line the footprint before and after, the bytes each part
- * released and the trim's duration, and a warning's the state of the gradual
- * trimmer. Every line carries the count of guest RAM wiring operations that
- * failed (the first sign of a system that is short). Each kind of line is rate
- * limited, so that a storm of events cannot flood the console; the next line
- * that passes says how many were left out.
+ * on stderr (the console of both applications). A level line carries the level
+ * and the footprint; a critical response line the footprint before and after,
+ * the bytes each part released and the trim's duration, and a warning's the
+ * state of the gradual trimmer. Every line carries the count of guest RAM
+ * wiring operations that failed (the first sign of a system that is short).
+ * Each kind of line is rate limited, so that a storm of events cannot flood the
+ * console; the next line that passes says how many were left out.
  *
  * MemoryPressureResponse is the policy and holds no thread, clock or system
  * call: it reads and acts through PressureActions, so a test drives it with a
@@ -103,8 +106,8 @@ enum class PressureReaction : std::uint8_t {
 	 * its page cache. */
 	responding = 1,
 	/* A warning, and the last response began less than `warn_interval_ns`
-	 * ago: no response starts for it. The gradual trimmer is still turned on
-	 * if it is off. */
+	 * ago: no response starts for it. The gradual trimmer is still asked to
+	 * be on. */
 	withheld = 2,
 	/* A response is running (or being tried again) and this event starts none
 	 * of its own: a critical level that meets a running warning's response is
@@ -173,15 +176,6 @@ struct PressureFigures final {
 	std::uint64_t wire_failures{};
 };
 
-/* The level the system reports now, which is not always readable (a sandbox
- * may refuse the question). */
-struct SystemLevel final {
-	bool readable{};
-	PressureLevel level{PressureLevel::normal};
-	/* errno when it is not readable. */
-	int error{};
-};
-
 /* Everything the policy reads and does. Implementations answer on the thread
  * that calls and never wait on one another. */
 class PressureActions {
@@ -197,8 +191,6 @@ public:
 	/* Asks the guest for `kind` of trim. "Once" waits for the trim, bounded;
 	 * the gradual trimmer's requests wait for nothing. */
 	[[nodiscard]] virtual TrimOutcome trim_page_cache(TrimKind kind) noexcept = 0;
-	/* The level the system reports now. The default says it cannot be read. */
-	[[nodiscard]] virtual SystemLevel system_level() noexcept { return {}; }
 	/* One line, without its newline. */
 	virtual void log(std::string_view line) noexcept = 0;
 	/* Tells the application what the system reported and what the host does
@@ -255,17 +247,6 @@ public:
 	 * the calling thread and returns once it has ended; any thread, and a call
 	 * that meets a response running returns at once. */
 	Outcome on_level(PressureLevel level) noexcept;
-
-	/* The system's source delivered `flags` (the data word). Events that came
-	 * while the last was handled arrive merged, and the normal flag together
-	 * with a higher one does not say which came last: the level the system
-	 * reports now (PressureActions::system_level) is acted on, when it can be
-	 * read. Otherwise the most serious flag is. */
-	Outcome on_delivery(std::uint64_t flags) noexcept;
-
-	/* Says, as one line, what the host reads of the system's level at the start
-	 * of the watch. */
-	void announce_start() noexcept;
 
 	/* How long from now the pending guest trim is due, 0 when none is. The
 	 * caller runs on_retry() that long after each call that may leave one. */

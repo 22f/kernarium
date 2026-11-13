@@ -12,14 +12,17 @@ injector inserted into the launcher (a real event needs a privileged tool):
   so on stderr with the footprint before and after, the trimmer's state and the
   guest RAM wire failures; the guest's page cache then falls eventually, in
   passes;
-- a second warning inside the interval is withheld: it starts no response and
-  sends the guest nothing (the trimmer is on already);
+- the way back to the normal level is one line and turns the trimmer off;
+- a warning inside the first one's interval starts no response, and still
+  turns the trimmer back on (the interval limits responses, not the trimmer:
+  the trimmer is on exactly while the last level is not normal);
+- a second warning, with the trimmer on already, sends the guest nothing;
 - a critical level frees the host GPU's caches and trims the guest's page
   cache once ("trim once", the only one), and the launcher says so with the
   footprint before and after, the bytes each part released, the trim's duration
   and the guest RAM wire failures; the guest's page cache is smaller afterwards
   and the launcher's own footprint fell by about what the trim released;
-- the way back to the normal level is one line and turns the trimmer off.
+- the way back to the normal level at the end turns the trimmer off.
 
 The commands the launcher sends the guest are read from the injector's record,
 not inferred from what the launcher writes.
@@ -50,7 +53,9 @@ from guest import Guest  # noqa: E402
 
 GUEST_MEMORY = "1G"
 # The least the guest's page cache must grow by to make the trim worth seeing.
-MINIMUM_FILL_KIB = 64 * 1024
+# The trimmer is on while the second fill reads, so the growth is what the
+# reads add less what a pass of the trimmer took meanwhile.
+MINIMUM_FILL_KIB = 32 * 1024
 # What a response must release from the guest and from the page cache.
 MINIMUM_RELEASE_MIB = 16
 # The launcher's footprint must fall by at least this share of what the trim
@@ -66,12 +71,6 @@ QUIET_SECONDS = 3
 WARN_INTERVAL_SECONDS = 30
 INSIDE_INTERVAL_SECONDS = 20
 
-# The line a watch writes when it begins: what the host reads of the system's
-# level.
-STARTED = re.compile(
-    r"uml: memory pressure watch started: system level "
-    r"(?P<level>normal|warn|critical|unreadable \(error \d+\))"
-)
 # A warning's response line: the trimmer's state, nothing released.
 WARNING = re.compile(
     r"uml: memory pressure warn: footprint (?P<before>\d+) -> "
@@ -221,12 +220,6 @@ def run(arguments: argparse.Namespace) -> None:
     try:
         guest.boot_to_shell(300)
         injector = Injector(directory)
-        started = STARTED.search(guest.host_output())
-        if started is None:
-            raise RuntimeError(
-                "the watch did not say what it reads of the system's level:\n"
-                + guest.host_output())
-        print(f"start: {started.group(0)}")
         filled = fill_page_cache(guest, 1)
         print(f"the guest's page cache holds {filled // 1024} MiB")
 
@@ -260,8 +253,8 @@ def run(arguments: argparse.Namespace) -> None:
             raise RuntimeError(f"no line for the change to warn: {change}")
 
         # A second warning, still inside the interval of the first one's
-        # response, is withheld: no response and nothing sent. It comes before
-        # the wait for the page cache to fall, which can outlast the interval.
+        # response, is withheld: no response, and nothing sent to a trimmer
+        # that is on already.
         injector.raise_level("warn")
         inside = time.monotonic() - raised
         if inside >= INSIDE_INTERVAL_SECONDS:
@@ -278,6 +271,40 @@ def run(arguments: argparse.Namespace) -> None:
                 f"a withheld warning sent the guest {commands(directory)}")
         print(f"the second warning, {inside:.0f} s after the first, was "
               f"withheld and sent nothing")
+
+        # The way back turns the trimmer off.
+        injector.raise_level("normal")
+        wait_for(
+            guest, "the trimmer stayed on after the normal level",
+            lambda: trimming(guest) == "N", RESPONSE_SECONDS)
+        if commands(directory) != ["trim on", "trim off"]:
+            raise RuntimeError(
+                f"the normal level sent the guest {commands(directory)}")
+
+        # A warning inside the interval of the first one's response starts no
+        # response, and the trimmer is on again: the interval limits the
+        # responses, not the trimmer. It comes before the wait for the page
+        # cache to fall, which can outlast the interval.
+        injector.raise_level("warn")
+        inside = time.monotonic() - raised
+        if inside >= INSIDE_INTERVAL_SECONDS:
+            raise RuntimeError(
+                f"the warning after the normal level came {inside:.0f} s after "
+                f"the first, not inside its {WARN_INTERVAL_SECONDS} s interval")
+        wait_for(
+            guest, "the trimmer stayed off under a warning inside the interval",
+            lambda: trimming(guest) == "Y", RESPONSE_SECONDS)
+        settle(guest, QUIET_SECONDS)
+        if len(warnings(guest)) != 1:
+            raise RuntimeError(
+                "a warning inside the interval was answered:\n"
+                + guest.host_output())
+        if commands(directory) != ["trim on", "trim off", "trim on"]:
+            raise RuntimeError(
+                f"a withheld warning sent the guest {commands(directory)}, "
+                f"not just the trimmer on")
+        print(f"the warning {inside:.0f} s after the first one's response was "
+              f"withheld and turned the trimmer back on")
 
         # The page cache falls on its own, in passes: a fall that eventually
         # comes, not a drop at the warning.
@@ -327,7 +354,8 @@ def run(arguments: argparse.Namespace) -> None:
             raise RuntimeError("the critical level turned the trimmer off")
         # Exactly one trim of all the cache, and the trimmer was on already:
         # the critical level's own request for it finds nothing to send.
-        if commands(directory) != ["trim on", "trim once"]:
+        if commands(directory) != [
+                "trim on", "trim off", "trim on", "trim once"]:
             raise RuntimeError(
                 f"the critical level sent the guest {commands(directory)}")
         print(f"critical: {second.group(0)}")
@@ -337,7 +365,7 @@ def run(arguments: argparse.Namespace) -> None:
         injector.raise_level("normal")
         wait_for(
             guest, "no line for the way back to normal",
-            lambda: any(c["level"] == "normal" for c in changes(guest)),
+            lambda: sum(c["level"] == "normal" for c in changes(guest)) == 2,
             RESPONSE_SECONDS)
         wait_for(
             guest, "the trimmer stayed on after the normal level",
@@ -346,15 +374,17 @@ def run(arguments: argparse.Namespace) -> None:
         if len(warnings(guest)) != 1 or len(responses(guest)) != 1:
             raise RuntimeError(
                 "the normal level was answered:\n" + guest.host_output())
-        if commands(directory) != ["trim on", "trim once", "trim off"]:
+        if commands(directory) != [
+                "trim on", "trim off", "trim on", "trim once", "trim off"]:
             raise RuntimeError(
                 f"the host's requests were {commands(directory)}")
         lines = [line for line in guest.host_output().splitlines()
                  if "uml: memory pressure" in line]
-        if len(lines) != 6:
+        if len(lines) != 7:
             raise RuntimeError(
-                "expected the watch's line, a line for each of the three "
-                "changes and the two responses:\n" + "\n".join(lines))
+                "expected a line for each of the five changes (the second "
+                "warning is no change) and the two responses:\n"
+                + "\n".join(lines))
         if not guest.shutdown(60) or guest.return_code != 0:
             raise RuntimeError(
                 f"the power-off did not end the process with 0: "
@@ -374,10 +404,11 @@ def main() -> int:
         if not getattr(arguments, name).is_file():
             parser.error(f"--{name.replace('_', '-')} is not a file")
     run(arguments)
-    print("ok: a warning turns the guest's trimmer on and a second one inside "
-          "the interval sends nothing, a critical level trims the page cache "
-          "once, the normal level turns the trimmer off, the commands the "
-          "guest was sent are exactly those, and the lines say so")
+    print("ok: a warning turns the guest's trimmer on, the normal level turns "
+          "it off, a warning inside the interval starts no response and turns "
+          "it on again, a critical level trims the page cache once, the "
+          "commands the guest was sent are exactly those, and the lines say "
+          "so")
     return 0
 
 

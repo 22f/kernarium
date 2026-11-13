@@ -10,14 +10,14 @@
 #include "platform/gpu_cache_reclaim.hpp"
 
 #include <algorithm>
-#include <cerrno>
+#include <array>
+#include <atomic>
 #include <cstring>
 #include <dispatch/dispatch.h>
 #include <mach/mach.h>
 #include <memory>
 #include <mutex>
 #include <new>
-#include <sys/sysctl.h>
 #include <utility>
 #include <time.h>
 #include <unistd.h>
@@ -93,25 +93,6 @@ public:
 			trim_(context_, kind);
 	}
 
-	/* The level the kernel holds now (1 normal, 2 warn, 4 critical, the
-	 * source's flags). A sandbox may refuse the question. */
-	SystemLevel system_level() noexcept override
-	{
-		int value = 0;
-		std::size_t size = sizeof(value);
-		if (sysctlbyname("kern.memorystatus_vm_pressure_level", &value, &size,
-			    nullptr, 0) != 0)
-			return {.readable = false, .level = PressureLevel::normal,
-				.error = errno};
-		if (size != sizeof(value))
-			return {.readable = false, .level = PressureLevel::normal,
-				.error = EINVAL};
-		return {.readable = true,
-			.level = pressure_level_from_dispatch(
-				static_cast<std::uint64_t>(value)),
-			.error = 0};
-	}
-
 	void log(std::string_view line) noexcept override
 	{
 		char buffer[line_limit + 1];
@@ -136,16 +117,33 @@ private:
 };
 
 /*
- * The process's memory pressure source and the serial queue that runs its
- * handler and the retries, made on the first watch and kept. A run binds its
- * state to it and unbinds before it returns. They are never cancelled or
- * released: cancelling a source leaves a libdispatch worker thread behind
- * (still there seconds later), and a run that ends leaves no thread of its own.
- * A source that nothing is bound to drops what it delivers.
+ * The process's memory pressure source and the two serial queues that serve it,
+ * made on the first watch and kept. A run binds its state to the hub and
+ * unbinds before it returns. They are never cancelled or released: cancelling a
+ * source leaves a libdispatch worker thread behind (still there seconds later),
+ * and a run that ends leaves no thread of its own. A source that nothing is
+ * bound to drops what it delivers.
+ *
+ * The source's handler runs on the source queue and never waits: it records
+ * the delivery in a ring and signals the policy queue, which handles the
+ * deliveries one at a time in the order they arrived. The policy's work can
+ * take seconds (a trim waits for the guest), and the system merges the events
+ * raised while a handler runs into one, so a handler that did that work would
+ * hide the order of the events raised meanwhile. Recording takes a mutex held
+ * for a few instructions and allocates nothing: it runs when the system is
+ * short of memory.
  */
 struct Hub final {
+	/* The source's queue: the handler that records a delivery. */
 	dispatch_queue_t queue{};
 	dispatch_source_t source{};
+	/* The policy's queue: the deliveries' handling and the retries, one at a
+	 * time. A trim waits for the guest here, and what else a shared queue
+	 * serves must not wait behind it. */
+	dispatch_queue_t policy_queue{};
+	/* Signals the policy queue that the ring holds a delivery; a data source
+	 * so that signalling allocates nothing. */
+	dispatch_source_t deliveries{};
 	/* The timer of the retries, made with the hub so that arming a retry
 	 * allocates nothing of its own: a retry is wanted when the system is
 	 * short of memory. One-shot, set again for each retry and disarmed at
@@ -154,15 +152,61 @@ struct Hub final {
 	 * never needs a retry keeps the one thread of the pressure source. */
 	dispatch_source_t retry_timer{};
 	bool retry_timer_resumed{};
-	/* The run that listens; touched only on the queue. */
+
+	/* The deliveries not yet handled, oldest first. Each carries the epoch it
+	 * arrived in, so that one that arrived before a bind or an unbind is
+	 * dropped. When the ring is full (a policy call held for a long time while
+	 * the system raised many events) the oldest delivery is dropped. */
+	struct Delivery final {
+		std::uint64_t flags{};
+		std::uint64_t epoch{};
+	};
+	static constexpr std::size_t ring_capacity = 64;
+	std::mutex ring_mutex;
+	std::array<Delivery, ring_capacity> ring{};
+	std::size_t ring_first{};
+	std::size_t ring_count{};
+	/* Counts every bind and unbind. */
+	std::atomic<std::uint64_t> epoch{};
+
+	/* The following are touched only on the policy queue. */
+	/* The run that listens. */
 	MemoryPressureWatch::State *current{};
-	/* Counts every bind and unbind, so that a retry that fires after its run
-	 * ended finds it; touched only on the queue. */
-	std::uint64_t generation{};
-	/* The run and the generation the timer was last set for; touched only
-	 * on the queue. */
+	/* The run and the epoch the timer was last set for, so that a retry that
+	 * fires after its run ended finds it. */
 	MemoryPressureWatch::State *retry_state{};
-	std::uint64_t retry_generation{};
+	std::uint64_t retry_epoch{};
+
+	void record(std::uint64_t flags) noexcept
+	{
+		const std::lock_guard lock{ring_mutex};
+		if (ring_count == ring.size()) {
+			ring_first = (ring_first + 1U) % ring.size();
+			--ring_count;
+		}
+		ring[(ring_first + ring_count) % ring.size()] =
+			{flags, epoch.load(std::memory_order_relaxed)};
+		++ring_count;
+	}
+
+	/* The oldest delivery, and whether more follow it. */
+	bool take(Delivery &delivery, bool &more) noexcept
+	{
+		const std::lock_guard lock{ring_mutex};
+		if (ring_count == 0U)
+			return false;
+		delivery = ring[ring_first];
+		ring_first = (ring_first + 1U) % ring.size();
+		--ring_count;
+		more = ring_count != 0U;
+		return true;
+	}
+
+	void clear() noexcept
+	{
+		const std::lock_guard lock{ring_mutex};
+		ring_count = 0;
+	}
 };
 
 } // namespace
@@ -182,7 +226,7 @@ struct MemoryPressureWatch::State final {
 	Hub &hub;
 	SystemActions actions;
 	MemoryPressureResponse response;
-	/* A retry is due on the queue; only the queue touches it. */
+	/* A retry is due on the policy queue; only the queue touches it. */
 	bool retry_armed{};
 };
 
@@ -190,7 +234,8 @@ namespace {
 
 void retry_due(void *context) noexcept;
 
-/* On the queue, after anything that may have left a guest trim pending. */
+/* On the policy queue, after anything that may have left a guest trim
+ * pending. */
 void arm_retry(Hub &hub, MemoryPressureWatch::State &state) noexcept
 {
 	if (state.retry_armed)
@@ -200,7 +245,7 @@ void arm_retry(Hub &hub, MemoryPressureWatch::State &state) noexcept
 		return;
 	state.retry_armed = true;
 	hub.retry_state = &state;
-	hub.retry_generation = hub.generation;
+	hub.retry_epoch = hub.epoch.load();
 	dispatch_source_set_timer(hub.retry_timer,
 		dispatch_time(DISPATCH_TIME_NOW, static_cast<std::int64_t>(delay)),
 		DISPATCH_TIME_FOREVER, delay / 10U);
@@ -218,30 +263,56 @@ void disarm_retry(Hub &hub) noexcept
 			DISPATCH_TIME_FOREVER, 0);
 }
 
-/* On the queue, when the timer fires. A retry that was set for a run that has
- * since ended finds the hub bound elsewhere, or bound again. */
+/* On the policy queue, when the timer fires. A retry that was set for a run
+ * that has since ended finds the hub bound elsewhere, or bound again. */
 void retry_due(void *context) noexcept
 {
 	Hub &hub = *static_cast<Hub *>(context);
 	MemoryPressureWatch::State *const state = hub.current;
 	if (state == nullptr || hub.retry_state != state ||
-	    hub.retry_generation != hub.generation)
+	    hub.retry_epoch != hub.epoch.load())
 		return;
 	state->retry_armed = false;
 	(void)state->response.on_retry();
 	arm_retry(hub, *state);
 }
 
-/* On the queue. The source's data is the status flags the system raised since
- * the last call. */
+/* On the source's queue. The source's data is the status flags the system
+ * raised since the last call: one event, or the events that came closer
+ * together than this handler takes to run (a few instructions, as it only
+ * records), which the system merged. A merged mask is resolved by its most
+ * serious flag (pressure_level_from_dispatch), and that residual is all that is
+ * left of the ambiguity: the normal flag merged with a higher one reads as the
+ * higher level, and the next event corrects it. The delivery is recorded, and
+ * the policy queue handles it in its turn. */
 void level_changed(void *context) noexcept
 {
 	Hub &hub = *static_cast<Hub *>(context);
-	const std::uint64_t flags = dispatch_source_get_data(hub.source);
-	if (hub.current == nullptr)
+	hub.record(dispatch_source_get_data(hub.source));
+	dispatch_source_merge_data(hub.deliveries, 1);
+}
+
+/* On the policy queue, once for each signal: the oldest delivery is handled
+ * (its report comes from the policy, before that delivery's work, here and not
+ * on the source's queue, because the reaction it reports is decided in the
+ * order the deliveries are handled), and the next is signalled for. Handling
+ * one delivery for each run lets a bind or an unbind, which wait on this
+ * queue, go between two deliveries instead of behind all of them. */
+void delivery_due(void *context) noexcept
+{
+	Hub &hub = *static_cast<Hub *>(context);
+	Hub::Delivery delivery;
+	bool more = false;
+	if (!hub.take(delivery, more))
 		return;
-	(void)hub.current->response.on_delivery(flags);
-	arm_retry(hub, *hub.current);
+	MemoryPressureWatch::State *const state = hub.current;
+	if (state != nullptr && delivery.epoch == hub.epoch.load()) {
+		(void)state->response.on_level(
+			pressure_level_from_dispatch(delivery.flags));
+		arm_retry(hub, *state);
+	}
+	if (more)
+		dispatch_source_merge_data(hub.deliveries, 1);
 }
 
 Hub *make_hub() noexcept
@@ -249,12 +320,13 @@ Hub *make_hub() noexcept
 	auto *const hub = new (std::nothrow) Hub;
 	if (hub == nullptr)
 		return nullptr;
-	/* A queue of its own: a trim waits for the guest, and what else a shared
-	 * queue serves must not wait behind it. */
 	hub->queue = dispatch_queue_create("uml.memory-pressure",
 		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
 			QOS_CLASS_USER_INITIATED, 0));
-	if (hub->queue == nullptr)
+	hub->policy_queue = dispatch_queue_create("uml.memory-pressure.policy",
+		dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+			QOS_CLASS_USER_INITIATED, 0));
+	if (hub->queue == nullptr || hub->policy_queue == nullptr)
 		return nullptr;
 	hub->source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
 		DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN |
@@ -262,10 +334,17 @@ Hub *make_hub() noexcept
 		hub->queue);
 	if (hub->source == nullptr)
 		return nullptr;
-	hub->retry_timer =
-		dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, hub->queue);
+	hub->deliveries = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_OR, 0, 0,
+		hub->policy_queue);
+	if (hub->deliveries == nullptr)
+		return nullptr;
+	hub->retry_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+		hub->policy_queue);
 	if (hub->retry_timer == nullptr)
 		return nullptr;
+	dispatch_set_context(hub->deliveries, hub);
+	dispatch_source_set_event_handler_f(hub->deliveries, &delivery_due);
+	dispatch_resume(hub->deliveries);
 	dispatch_set_context(hub->source, hub);
 	dispatch_source_set_event_handler_f(hub->source, &level_changed);
 	dispatch_resume(hub->source);
@@ -285,25 +364,30 @@ struct Binding final {
 	MemoryPressureWatch::State *state;
 };
 
-/* Both wait, on the queue, for a handler or retry that is running. */
+/* Both wait, on the policy queue, for the delivery or retry that is running
+ * (a trim in flight): the policy's calls never wait for the emulator's
+ * lifecycle mutex, so the wait is bounded by the guest's reply. The deliveries
+ * still queued are dropped: the epoch moves on, and the ring is emptied. */
 void bind(Hub &hub, MemoryPressureWatch::State *state) noexcept
 {
 	Binding binding{&hub, state};
-	dispatch_sync_f(hub.queue, &binding, [](void *context) {
+	dispatch_sync_f(hub.policy_queue, &binding, [](void *context) {
 		auto &binding = *static_cast<Binding *>(context);
 		binding.hub->current = binding.state;
-		++binding.hub->generation;
+		binding.hub->epoch.fetch_add(1);
+		binding.hub->clear();
 	});
 }
 
 void unbind(Hub &hub, MemoryPressureWatch::State *state) noexcept
 {
 	Binding binding{&hub, state};
-	dispatch_sync_f(hub.queue, &binding, [](void *context) {
+	dispatch_sync_f(hub.policy_queue, &binding, [](void *context) {
 		auto &binding = *static_cast<Binding *>(context);
 		if (binding.hub->current == binding.state) {
 			binding.hub->current = nullptr;
-			++binding.hub->generation;
+			binding.hub->epoch.fetch_add(1);
+			binding.hub->clear();
 			disarm_retry(*binding.hub);
 		}
 	});
@@ -343,7 +427,6 @@ std::unique_ptr<MemoryPressureWatch> start_memory_pressure_response(
 	if (state == nullptr)
 		return nullptr;
 	bind(*hub, state.get());
-	state->response.announce_start();
 	return std::unique_ptr<MemoryPressureWatch>{
 		new (std::nothrow) MemoryPressureWatch{std::move(state)}};
 }
