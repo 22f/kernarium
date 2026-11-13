@@ -39,7 +39,44 @@ struct BundleTocFixture {
         var apks: [Apk]
     }
 
+    /// An asset module (an asset pack) and its slices: `AssetSliceSet` of bundletool's
+    /// `BuildApksResult`.
+    struct AssetModule {
+        var name: String
+        /// `DeliveryType`: 1 install-time, 2 on-demand, 3 fast-follow; nil for none stated.
+        var delivery: Int?
+        var slices: [AssetSlice]
+
+        static func installTime(_ name: String, _ slices: [AssetSlice]) -> AssetModule {
+            AssetModule(name: name, delivery: 1, slices: slices)
+        }
+
+        static func onDemand(_ name: String, _ slices: [AssetSlice]) -> AssetModule {
+            AssetModule(name: name, delivery: 2, slices: slices)
+        }
+
+        static func fastFollow(_ name: String, _ slices: [AssetSlice]) -> AssetModule {
+            AssetModule(name: name, delivery: 3, slices: slices)
+        }
+    }
+
+    struct AssetSlice {
+        var path: String
+        var splitID: String
+        var master = false
+        var abi: Int?
+        /// The lowest API level, as `ApkTargeting.sdk_version_targeting` states it.
+        var minSdk: Int?
+        /// False for a description that carries no asset slice metadata.
+        var metadata = true
+
+        static func slice(_ path: String, _ id: String, master: Bool = false, abi: Int? = nil, minSdk: Int? = nil) -> AssetSlice {
+            AssetSlice(path: path, splitID: id, master: master, abi: abi, minSdk: minSdk)
+        }
+    }
+
     var variants: [Variant]
+    var assetModules: [AssetModule] = []
     var packageName: String? = "com.example.bundle"
 
     // MARK: Protocol buffers
@@ -82,6 +119,28 @@ struct BundleTocFixture {
         return message(2, body)
     }
 
+    private static func assetSet(_ module: AssetModule) -> Data {
+        var metadata = string(1, module.name)
+        if let delivery = module.delivery { metadata += int(4, delivery) }
+        var body = message(1, metadata)
+        for slice in module.slices {
+            var description = Data()
+            var targeting = Data()
+            if let abi = slice.abi { targeting += message(1, abiTargeting([abi])) }
+            if let sdk = slice.minSdk { targeting += message(5, message(1, message(1, int(1, sdk)))) }
+            if !targeting.isEmpty { description += message(1, targeting) }
+            description += string(2, slice.path)
+            if slice.metadata {
+                var split = Data()
+                if !slice.splitID.isEmpty { split += string(1, slice.splitID) }
+                if slice.master { split += int(2, 1) }
+                description += message(7, split)
+            }
+            body += message(2, description)
+        }
+        return message(3, body)
+    }
+
     private static func variant(_ variant: Variant, index: Int) -> Data {
         var targeting = Data()
         if let sdk = variant.minSdk { targeting += message(1, message(1, message(1, int(1, sdk)))) }
@@ -103,6 +162,7 @@ struct BundleTocFixture {
     func build() -> Data {
         var data = Data()
         for (index, entry) in variants.enumerated() { data += Self.variant(entry, index: index) }
+        for module in assetModules { data += Self.assetSet(module) }
         data += Self.message(2, Self.string(2, "1.17.1"))
         if let packageName { data += Self.string(4, packageName) }
         return data

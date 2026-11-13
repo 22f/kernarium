@@ -170,10 +170,35 @@ public enum ApkContainer {
             }
             variants.append(ApkContainerPlan.Variant(
                 number: variant.number, minSdk: variant.minSdk, abis: variant.abis, otherTargeting: variant.otherTargeting,
-                base: base.path, entries: entries))
+                base: base.path, entries: entries, standalone: base.isStandalone))
         }
         guard !variants.isEmpty, parts.count <= 4096 else { throw InstallRefusal.damaged }
-        return ApkContainerPlan(kind: .bundletool, packageName: nil, candidates: parts, data: [], unplacedData: 0, variants: variants)
+        // The asset packs. What `bundletool install-apks` installs with the app are
+        // the slices of the install-time ones, in the app's own session. A pack
+        // that is delivered later (fast-follow, on demand), or that is not said
+        // to be install-time, is not installed, and is counted as data that is not
+        // placed, so that the app is not reported as installed whole.
+        var assetSlices: [ApkContainerPlan.AssetSlice] = []
+        var notInstalled = 0
+        for module in table.assetModules {
+            guard module.delivery == .installTime else {
+                notInstalled += 1
+                continue
+            }
+            if module.hasUnusableSlice { notInstalled += 1 }
+            for slice in module.slices {
+                guard let entry = archive.entry(named: slice.path), !entry.isDirectory else { throw InstallRefusal.damaged }
+                assetSlices.append(ApkContainerPlan.AssetSlice(
+                    part: ApkContainerPlan.Part(
+                        entry: entry.name, bytes: entry.size, name: "", splitName: slice.splitID.isEmpty ? module.name : slice.splitID,
+                        abi: slice.abi),
+                    minSdk: slice.minSdk))
+            }
+        }
+        guard assetSlices.count <= maxParts else { throw InstallRefusal.damaged }
+        return ApkContainerPlan(
+            kind: .bundletool, packageName: nil, candidates: parts, data: [], unplacedData: notInstalled, variants: variants,
+            assetSlices: assetSlices)
     }
 
     // MARK: Archives with the APKs side by side
@@ -462,6 +487,13 @@ public struct ApkContainerPlan: Equatable, Sendable {
         public var abi: String?
     }
 
+    /// One slice of an install-time asset pack of a bundletool file: an APK sent
+    /// in the app's own session, for an Android no older than `minSdk`.
+    public struct AssetSlice: Equatable, Sendable {
+        public var part: Part
+        public var minSdk: Int
+    }
+
     /// One data file of an .xapk, placed as `folder/name` below the guest's
     /// internal storage.
     public struct DataFile: Equatable, Sendable {
@@ -485,6 +517,8 @@ public struct ApkContainerPlan: Equatable, Sendable {
         public var base: String
         /// The entries of every APK of the variant, the base among them.
         public var entries: [String]
+        /// The variant is one standalone APK, which has the install-time asset packs fused into it.
+        public var standalone = false
     }
 
     public var kind: Kind
@@ -496,13 +530,18 @@ public struct ApkContainerPlan: Equatable, Sendable {
     /// before the processor is chosen; with variants, the APKs of all of them.
     public var candidates: [Part]
     public var data: [DataFile]
-    /// Data the archive carries that is not placed (anything but OBB files).
+    /// Data the archive carries that is not placed: anything but OBB files, and
+    /// the asset packs of a bundletool file that are not installed with the app.
     public var unplacedData: Int
     /// The forms of the app a bundletool file holds; empty for any other.
     public var variants: [Variant]
+    /// The slices of the install-time asset packs of a bundletool file; they join the
+    /// parts of a variant that is made of splits, and are gone once it is chosen.
+    public var assetSlices: [AssetSlice]
 
     public init(
-        kind: Kind, packageName: String?, candidates: [Part], data: [DataFile], unplacedData: Int, variants: [Variant] = []
+        kind: Kind, packageName: String?, candidates: [Part], data: [DataFile], unplacedData: Int, variants: [Variant] = [],
+        assetSlices: [AssetSlice] = []
     ) {
         self.kind = kind
         self.packageName = packageName
@@ -510,6 +549,7 @@ public struct ApkContainerPlan: Equatable, Sendable {
         self.data = data
         self.unplacedData = unplacedData
         self.variants = variants
+        self.assetSlices = assetSlices
     }
 
     /// The parts this virtual machine installs: the variant for its Android
@@ -522,6 +562,7 @@ public struct ApkContainerPlan: Equatable, Sendable {
     /// other processors has no match. The base is always the first part.
     public func selecting(guestAbis: [String], guestSdk: Int? = nil) throws -> ApkContainerPlan {
         var plan = self
+        let level = guestSdk ?? Int.max
         if !variants.isEmpty {
             let variant = try chosenVariant(guestAbis: guestAbis, guestSdk: guestSdk)
             let wanted = Set(variant.entries)
@@ -531,6 +572,16 @@ public struct ApkContainerPlan: Equatable, Sendable {
                 return part
             }
             plan.variants = []
+            // The install-time asset packs go in the same session as the base and its
+            // splits, those for an Android no newer than the guest's. A standalone APK
+            // has them fused into it.
+            if !variant.standalone {
+                plan.candidates += assetSlices.filter { $0.minSdk <= level }.map(\.part)
+                // One split is installed once, from whichever module it comes.
+                let ids = plan.candidates.compactMap(\.splitName)
+                guard Set(ids).count == ids.count else { throw InstallRefusal.damaged }
+            }
+            plan.assetSlices = []
             plan.candidates = try ApkContainer.arranged(plan.candidates, base: variant.base)
         }
         let present = Set(plan.candidates.compactMap(\.abi))

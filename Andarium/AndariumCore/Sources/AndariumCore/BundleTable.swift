@@ -70,8 +70,10 @@ struct ProtoReader {
 
 /// The table of contents of a bundletool `.apks` (`toc.pb`, a `BuildApksResult`
 /// message): the forms of the app the bundle holds (variants), for the version
-/// of Android they are for, and the APKs of each. Only what the choice of one
-/// variant needs is read; the rest of the message is skipped.
+/// of Android they are for, and the APKs of each; and the asset modules (asset
+/// packs) with their delivery and their slices. Only what the choice of one
+/// variant and of the packs installed with it needs is read; the rest of the
+/// message is skipped.
 struct BundleTable: Equatable, Sendable {
     /// The table cannot be read, or holds more than a bundle does.
     struct Failure: Error, Equatable {}
@@ -106,22 +108,68 @@ struct BundleTable: Equatable, Sendable {
         var apks: [Apk]
     }
 
+    /// How an asset module (asset pack) reaches a device (`DeliveryType`).
+    enum Delivery: Equatable, Sendable {
+        /// With the app: `bundletool install-apks` installs it in the same session.
+        case installTime
+        case onDemand
+        case fastFollow
+        /// Not stated: not known to be install-time.
+        case unknown
+    }
+
+    /// One slice of an asset module: an APK of the module that carries its files.
+    struct AssetSlice: Equatable, Sendable {
+        var path: String
+        /// The split's id; empty for none.
+        var splitID: String
+        /// The processor the slice is for, in Android's spelling, when it is for one.
+        var abi: String?
+        /// The lowest API level the slice is for (1 with no restriction).
+        var minSdk: Int
+    }
+
+    struct AssetModule: Equatable, Sendable {
+        var name: String
+        var delivery: Delivery
+        var slices: [AssetSlice]
+        /// Some description of the module is not an APK slice this install can send
+        /// (it names no split metadata, or a path that is not an APK).
+        var hasUnusableSlice: Bool
+    }
+
     var variants: [Variant]
+    var assetModules: [AssetModule] = []
+
+    /// The most asset modules and asset slices a table may name.
+    static let maxAssetModules = 256
 
     /// `AbiAlias` of bundletool's targeting messages, in Android's spelling.
     private static let abiNames: [Int: String] = [
-        1: "armeabi", 2: "armeabi-v7a", 3: "arm64-v8a", 4: "x86", 5: "x86_64", 6: "mips", 7: "mips64",
+        1: "armeabi", 2: "armeabi-v7a", 3: "arm64-v8a", 4: "x86", 5: "x86_64", 6: "mips", 7: "mips64", 8: "riscv64",
     ]
 
     init(_ data: Data) throws {
         var variants: [Variant] = []
+        var modules: [AssetModule] = []
+        var slices = 0
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
-            guard number == 1, case let .bytes(bytes) = value else { continue }
-            guard variants.count < Self.maxVariants else { throw Failure() }
-            variants.append(try Self.variant(bytes, index: variants.count))
+            guard case let .bytes(bytes) = value else { continue }
+            if number == 1 {
+                guard variants.count < Self.maxVariants else { throw Failure() }
+                variants.append(try Self.variant(bytes, index: variants.count))
+            } else if number == 3 {
+                // `asset_slice_set`: one asset module and its slices.
+                guard modules.count < Self.maxAssetModules else { throw Failure() }
+                let module = try Self.assetModule(bytes)
+                slices += module.slices.count
+                guard slices <= ApkContainer.maxParts else { throw Failure() }
+                modules.append(module)
+            }
         }
         self.variants = variants
+        assetModules = modules
     }
 
     // MARK: Messages
@@ -189,6 +237,73 @@ struct BundleTable: Equatable, Sendable {
             }
         }
         return names
+    }
+
+    /// `AssetSliceSet`: the module's metadata (field 1: its name is field 1 and
+    /// its delivery type field 4) and its slices (field 2, `ApkDescription`s).
+    private static func assetModule(_ data: Data) throws -> AssetModule {
+        var module = AssetModule(name: "", delivery: .unknown, slices: [], hasUnusableSlice: false)
+        var reader = ProtoReader(data)
+        while let (number, value) = try reader.next() {
+            guard case let .bytes(bytes) = value else { continue }
+            if number == 1 {
+                var inner = ProtoReader(bytes)
+                while let (field, item) = try inner.next() {
+                    if field == 1, case let .bytes(text) = item { module.name = String(decoding: text, as: UTF8.self) }
+                    if field == 4, case let .varint(raw) = item {
+                        switch raw {
+                        case 1: module.delivery = .installTime
+                        case 2: module.delivery = .onDemand
+                        case 3: module.delivery = .fastFollow
+                        default: module.delivery = .unknown
+                        }
+                    }
+                }
+            } else if number == 2 {
+                guard module.slices.count < ApkContainer.maxParts else { throw Failure() }
+                if let slice = try assetSlice(bytes) { module.slices.append(slice) } else { module.hasUnusableSlice = true }
+            }
+        }
+        return module
+    }
+
+    /// An `ApkDescription` of an asset slice: its path (2), its targeting (1: the
+    /// processor is its field 1 and the lowest API level its field 5) and the
+    /// split metadata that marks it an asset slice (7: the split's id). A
+    /// description of another kind is nil.
+    private static func assetSlice(_ data: Data) throws -> AssetSlice? {
+        var path: String?
+        var abi: String?
+        var minSdk = 1
+        var split: String?
+        var reader = ProtoReader(data)
+        while let (number, value) = try reader.next() {
+            guard case let .bytes(bytes) = value else { continue }
+            switch number {
+            case 1:
+                var targeting = ProtoReader(bytes)
+                while let (field, item) = try targeting.next() {
+                    guard case let .bytes(inner) = item else { continue }
+                    if field == 1 { abi = try abiValues(inner).first }
+                    if field == 5 { minSdk = max(1, try sdkMinimum(inner) ?? 1) }
+                }
+            case 2:
+                guard let text = String(data: bytes, encoding: .utf8) else { throw Failure() }
+                path = text
+            case 7:
+                var id = ""
+                var inner = ProtoReader(bytes)
+                while let (field, item) = try inner.next() {
+                    if field == 1, case let .bytes(text) = item { id = String(decoding: text, as: UTF8.self) }
+                }
+                split = id
+            default:
+                continue
+            }
+        }
+        guard let path else { throw Failure() }
+        guard let split, path.lowercased().hasSuffix(".apk") else { return nil }
+        return AssetSlice(path: path, splitID: split, abi: abi, minSdk: minSdk)
     }
 
     /// `ApkSet`: a module's metadata (field 1, the name its field 1) and its APKs (field 2).
