@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # After boot completes the product saves its virtual Wi-Fi network
-# (tools/kernarium_wifi_network.sh) and, until the station has joined it, saves
-# it again when nothing joined: `cmd wifi add-network` calls the Wi-Fi service.
+# (tools/kernarium_wifi_network.sh) and, until a boot has found it stored and
+# joined, saves it again when nothing joined: `cmd wifi add-network` calls the
+# Wi-Fi service.
 # A vendor domain may neither execute /system/bin/cmd nor be the framework's
 # client, so the script runs in a core domain defined here, the way Cuttlefish's
 # automotive Ethernet setup does.
@@ -31,7 +32,7 @@ allow system_server kernarium_wifi_network:binder call;
 allow system_server kernarium_wifi_network:fd use;
 allow system_server kernarium_wifi_network:fifo_file { getattr read write };
 
-# The marker: 1 once the network is saved, 2 once the station has joined it.
+# The marker: 1 once the script has saved the network, 2 once a boot found it stored and joined.
 system_internal_prop(kernarium_wifi_network_prop)
 set_prop(kernarium_wifi_network, kernarium_wifi_network_prop)
 get_prop(kernarium_wifi_network, kernarium_wifi_network_prop)

@@ -6,62 +6,84 @@
 # turns Wi-Fi on nor connects: the switch, and forgetting the network, stay the
 # user's.
 #
-# The marker is 1 once a boot has saved the network and 2 once the station has
-# joined it. Only 2 ends the script's work: at 2 a forgotten network stays
-# forgotten and the script asks the Wi-Fi service nothing, because saving
-# replaces the network's settings (metered, auto-connect), which the user may
-# have chosen since. Until a join was seen the saved list decides, on every
-# boot: a listed network is left alone and one that is not listed is saved.
-# The marker cannot decide, because the Wi-Fi service writes its config store
-# some time after a save: a guest that stops in between keeps marker 1 and
-# loses the network. Two consequences are accepted. A network the user forgot
-# before it ever joined is saved again, at each boot until it first joins. And
-# data of an earlier release that holds marker 1 and no network (stopped before
-# the store wrote it, or forgotten, where 1 was the only value) gets the network
-# back on its first boot of this release; the script logs it when it does.
+# The marker is 1 once this script has saved the network and 2 once a boot found
+# the network stored and the station joined it. Only 2 ends the script's work: at
+# 2 the script asks the Wi-Fi service nothing, so a forgotten network stays
+# forgotten and a network the user changed keeps its settings. Neither a save nor
+# a join proves that the Wi-Fi service's config store holds the network, because
+# the service writes the store some time after both, and a guest that stops in
+# between keeps the marker and loses the network. So 2 is set only by a boot in
+# which the network was listed at the script's first look, before the script added
+# anything (it was loaded from the store), and the station joined it within the
+# settle. A boot that saved the network leaves 1, and the next boot finds it
+# stored and joined and sets 2. Until then the saved list decides on every boot:
+# a listed network is left alone and a missing one is saved. Two consequences are
+# accepted. A network forgotten before the script reached 2 (in the session that
+# first saved it, or before any boot found it stored and joined) is saved again
+# once at the next boot. And data of an earlier release that holds marker 1 and
+# no network gets the network back on its first boot of this release, which the
+# script logs.
 #
-# A listing that fails (the Wi-Fi service busy) prints the same as an empty one.
-# At marker 1 the network may be stored and the user may have set it metered
-# after a join this script never saw, so such a boot saves it only when
-# $looks looks, five seconds apart, all miss it: saving a stored network again
-# would reset those settings. A boot with no marker has nothing to lose and
-# saves at once; one that cannot save (the Wi-Fi service is not up) leaves the
-# marker unset, and the next boot tries again.
+# A listing the Wi-Fi service did not answer prints "No networks" with status 0,
+# like an empty one (the shell command waits four seconds for the Wi-Fi thread
+# and then gives an empty list). A look therefore finds the network absent only
+# when the command exited 0 and returned in under four seconds; a failed or
+# slower one is unknown. Unknown never saves at marker 1, because saving a stored
+# network again resets its settings (metered, auto-connect). With no marker there
+# is nothing to lose, and an unknown look still leads to the save. What can still
+# pass for absent is an answer within four seconds before the service has loaded
+# the stored networks, which it does before boot_completed; at marker 1 three
+# looks, ten seconds apart in all, must find it absent, and the cost of a miss is
+# that network's metered and auto-connect settings, reset before the marker
+# reached 2.
 #
 # The platform no longer disables the network for lack of internet
 # (rro/KernariumWifiOverlay), but a data disk written by an earlier release can
 # still hold it disabled, and a disabled network is never joined again by
 # itself. So until the marker is 2, a boot gives the station $settle seconds to
-# join. If Wi-Fi is on and nothing has joined by then, saving the network
-# again enables it (or puts it back, if the service dropped it) and the
-# platform's own scan joins it; the script waits up to $rejoin seconds for that
-# join, so the same boot ends at 2. Only a join the script sees sets 2. Wi-Fi
-# that is off leaves the marker alone, so the next boot with Wi-Fi on still
-# repairs.
+# join. If Wi-Fi is on and nothing has joined by then, saving the network again
+# enables it (or puts it back, if this boot saved it and the service dropped it)
+# and the platform's own scan joins it. A network that was listed at the first
+# look and is gone at the settle was removed by the user during this boot: it
+# stays removed, and the marker becomes 2. Wi-Fi that is off leaves the marker
+# alone, so the next boot with Wi-Fi on still repairs. The script sleeps at most
+# 113 s in all, plus the time its commands take.
 
 marker=persist.sys.kernarium.virtwifi_saved
 settle=45
-rejoin=180
 looks=3
+tag=kernarium_wifi_network
 
-# Sets $state: saved when the listing holds VirtWifi (one line: id, name,
-# security type), absent when it does not.
+note() {
+    log -t "$tag" "$1" 2>/dev/null
+}
+
+# Sets $state to saved when the listing holds VirtWifi (one line: id, name,
+# security type), absent when it does not and the Wi-Fi service answered (status
+# 0, in under four seconds), unknown otherwise.
 look() {
-    if cmd wifi list-networks 2>/dev/null | grep -Eq '^[0-9]+ +VirtWifi +open'; then
+    began=$(date +%s)
+    listing=$(cmd wifi list-networks 2>/dev/null)
+    code=$?
+    ended=$(date +%s)
+    if echo "$listing" | grep -Eq '^[0-9]+ +VirtWifi +open'; then
         state=saved
+    elif [ "$code" != 0 ] || [ $((ended - began)) -ge 4 ]; then
+        state=unknown
     else
         state=absent
     fi
 }
 
-# Succeeds when each of $looks looks finds the network absent.
+# Succeeds when, after the absent look in $state, $looks looks in all, five
+# seconds apart, find the network absent.
 missing() {
-    seen=0
+    seen=1
     while [ "$seen" -lt "$looks" ]; do
+        sleep 5
         look
-        [ "$state" = saved ] && return 1
+        [ "$state" = absent ] || return 1
         seen=$((seen + 1))
-        [ "$seen" -lt "$looks" ] && sleep 5
     done
     return 0
 }
@@ -80,12 +102,12 @@ save() {
     return 1
 }
 
-# Waits up to $1 seconds for the station to join; $status keeps the last answer.
+# Waits up to $1 seconds for the station to join; $wifi keeps the last answer.
 wait_joined() {
     waited=0
     while :; do
-        status=$(cmd wifi status 2>/dev/null)
-        case "$status" in
+        wifi=$(cmd wifi status 2>/dev/null)
+        case "$wifi" in
             *"Wifi is connected to"*) return 0 ;;
         esac
         [ "$waited" -ge "$1" ] && return 1
@@ -94,27 +116,52 @@ wait_joined() {
     done
 }
 
+# Records that this script saved the network.
+saved_it() {
+    [ "$current" = 1 ] || setprop "$marker" 1
+}
+
 current=$(getprop $marker)
 [ "$current" = 2 ] && exit 0
 
 look
-if [ "$state" = absent ] && { [ -z "$current" ] || missing; }; then
+first=$state
+listed=0
+added=0
+if [ "$first" = saved ]; then
+    listed=1
+elif [ -z "$current" ] || { [ "$first" = absent ] && missing; }; then
     save || exit 1
-    [ -z "$current" ] || log -t kernarium_wifi_network "VirtWifi was not stored: saved again" 2>/dev/null
+    added=1
+    saved_it
+    [ "$current" = 1 ] && note "VirtWifi was not stored: saved again"
 fi
-[ "$current" = 1 ] || setprop "$marker" 1
 
 if wait_joined "$settle"; then
-    setprop "$marker" 2
+    if [ "$listed" = 1 ]; then
+        setprop "$marker" 2 && note "VirtWifi was stored and joined: marker 2"
+    else
+        note "VirtWifi joined, and is not known to be stored: marker stays 1"
+    fi
     exit 0
 fi
 # Wi-Fi off, or its service not up: nothing to repair on this boot.
-case "$status" in
+case "$wifi" in
     *"Wifi is enabled"*) ;;
     *) exit 0 ;;
 esac
+look
+case "$state" in
+    unknown) exit 0 ;;
+    absent)
+        if [ "$listed" = 1 ]; then
+            setprop "$marker" 2 && note "VirtWifi was removed during this boot: marker 2"
+            exit 0
+        fi
+        [ "$added" = 1 ] || missing || exit 0
+        ;;
+esac
 cmd wifi add-network VirtWifi open >/dev/null 2>&1
-log -t kernarium_wifi_network "VirtWifi saved again: Wi-Fi is on and nothing joined" 2>/dev/null
-wait_joined "$rejoin" || exit 0
-setprop "$marker" 2
+saved_it
+note "VirtWifi saved again: Wi-Fi is on and nothing joined"
 exit 0

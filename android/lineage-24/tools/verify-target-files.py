@@ -771,14 +771,14 @@ NET_SETUP_TRANSITION = re.compile(
 # After boot completes a script saves the virtual Wi-Fi network (VirtWifi, open) once, in a
 # core domain of its own on system_ext (overlay/tools/kernarium_wifi_network.sh,
 # overlay/sepolicy/system_ext/private).
-# Until the station has joined it once (the marker then reads 2) the saved list decides on every
-# boot: a boot saves the network when the list lacks it, and saves it again when it finds Wi-Fi
-# on and nothing joined after a settle time, which enables a network an earlier release left
-# disabled for lack of internet or puts back one the Wi-Fi service never stored. Only marker 2
-# ends the script's work: 1 is set before the service has stored the network, and a guest that
-# stops in between keeps 1 and loses the network. The script never turns Wi-Fi on or connects:
-# the user's switch decides whether the saved network is joined, and a network the user
-# forgets after a join stays forgotten.
+# Until a boot has found the network stored and joined (the marker then reads 2) the saved list
+# decides on every boot: a boot saves the network when the list lacks it, and saves it again when
+# it finds Wi-Fi on and nothing joined after a settle time, which enables a network an earlier
+# release left disabled for lack of internet. The Wi-Fi service writes its store some time after
+# a save or a join, so a boot that saved leaves the marker at 1. The script never turns Wi-Fi on
+# or connects: the user's switch decides whether the saved network is joined. What it decides is
+# tested on the tracked file (tests/tooling/android/test_wifi_network_script.py); the checks here
+# are presence checks of the image's copy.
 WIFI_NETWORK_SERVICE = ("kernarium_wifi_network", "/system_ext/bin/kernarium_wifi_network.sh")
 WIFI_NETWORK_TRIGGER = "property:sys.boot_completed=1"
 WIFI_NETWORK_MARKER = "persist.sys.kernarium.virtwifi_saved"
@@ -4221,11 +4221,6 @@ def check_wifi_network(rc_payload: str, script: bytes) -> None:
     for token in WIFI_NETWORK_SCRIPT_FORBIDDEN:
         if token in code:
             fail(f"{executable} contains '{token}': the user's Wi-Fi switch is not the product's")
-    if re.search(r"\b1\|2\)|\"\$current\" = 1 \] && exit", code):
-        fail(
-            f"{executable} ends at marker 1, which a guest that stops leaves beside a network "
-            "the Wi-Fi service never stored"
-        )
 
 
 def property_type_accepts(type_tokens: list[str], value: str) -> bool:

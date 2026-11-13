@@ -1693,7 +1693,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             "enables-wifi": "cmd wifi set-wifi-enabled enabled\n",
                             "connects": "cmd wifi connect-network VirtWifi open\n",
                             "settings-put": "settings put global wifi_on 1\n",
-                            "stops-at-marker-one": 'case "$current" in 1|2) exit 0 ;; esac\n',
                         }.get(wifi_network_variant or "", "")
                     )
                     archive.writestr("SYSTEM_EXT/bin/kernarium_wifi_network.sh", script)
@@ -3533,7 +3532,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("wifi-network-no-status", {"wifi_network_variant": "no-status"}),
             ("wifi-network-no-marker", {"wifi_network_variant": "no-marker"}),
             ("wifi-network-no-joined-marker", {"wifi_network_variant": "no-joined-marker"}),
-            ("wifi-network-stops-at-marker-one", {"wifi_network_variant": "stops-at-marker-one"}),
             ("wifi-network-enables-wifi", {"wifi_network_variant": "enables-wifi"}),
             ("wifi-network-connects", {"wifi_network_variant": "connects"}),
             ("wifi-network-settings-put", {"wifi_network_variant": "settings-put"}),
@@ -4101,8 +4099,6 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              re.escape("does not contain 'setprop \"$marker\" 1'")),
             ("wifi-network-no-joined-marker-cause", {"wifi_network_variant": "no-joined-marker"},
              re.escape("does not contain 'setprop \"$marker\" 2'")),
-            ("wifi-network-stops-at-marker-one-cause", {"wifi_network_variant": "stops-at-marker-one"},
-             "ends at marker 1"),
             ("wifi-network-enables-wifi-cause", {"wifi_network_variant": "enables-wifi"},
              "contains 'set-wifi-enabled'"),
             ("wifi-network-connects-cause", {"wifi_network_variant": "connects"},
@@ -6212,21 +6208,16 @@ def verify_wifi_network(android_root: Path) -> None:
     ):
         if accepts(tokens, value) is not expected:
             fail(f"the verifier reads {' '.join(tokens)} as {'not ' * expected}accepting {value}")
-    # The script settles and rejoins for bounded times and ends; nothing in it waits for ever.
+    # The script's waits and loops are bounded: nothing in it waits for ever. This is a presence pin of the
+    # structure. What the script decides, and when it sets the marker, is not judged from its text: the
+    # android17-wifi-network-script test runs this tracked file on a fake Wi-Fi framework, and Soong copies
+    # it into the image unchanged (overlay/tools/Android.bp).
     script = (tools / "kernarium_wifi_network.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
-    for needle in ("settle=", "rejoin=", 'wait_joined "$settle"', 'wait_joined "$rejoin"', '"$waited" -ge "$1"'):
+    for needle in ("settle=", "looks=", 'wait_joined "$settle"', '"$waited" -ge "$1"', '"$tries" -lt 30',
+                   '"$seen" -lt "$looks"'):
         if needle not in code:
             fail(f"the Wi-Fi network script no longer bounds its wait: {needle!r} is gone")
-
-    # Only marker 2 ends the script's work. The script's decisions run on a fake Wi-Fi framework in
-    # test_wifi_network_script.py; here the text is pinned so that marker 1, which a stop can leave
-    # beside a network the platform never stored, cannot become final again.
-    for needle in ('[ "$current" = 2 ] && exit 0', 'setprop "$marker" 2'):
-        if needle not in code:
-            fail(f"the Wi-Fi network script no longer ends at marker 2 only: {needle!r} is gone")
-    if re.search(r"\b1\|2\)|\"\$current\" = 1 \] && exit", code):
-        fail("the Wi-Fi network script ends at marker 1, which a guest that stops leaves beside no network")
 
 
 def verify_pinner_overlay(android_root: Path) -> None:

@@ -3,17 +3,22 @@
 """The guest's Wi-Fi network script against a fake Wi-Fi framework.
 
 The real script (android/lineage-24/overlay/tools/kernarium_wifi_network.sh) runs
-under `sh` with stub `cmd`, `getprop`, `setprop`, `sleep` and `log` over a
-fake framework that has what the Wi-Fi service has: a config store that the
-platform writes some time after a save and reads once, a list in memory, a
-station that joins a saved network, and the persistent marker. Each case boots
-that framework once or twice and states what the script did: the saves it
-asked for, the repair lines it logged, the marker and what the store holds
-afterwards. A guest that stops is a script killed right after it wrote the
-marker. The stubs keep time by the seconds the script sleeps, so nothing waits.
+under `sh` with stub `cmd`, `getprop`, `setprop`, `sleep`, `date` and `log` over
+a fake framework that has what the Wi-Fi service has: a config store that the
+platform reads once (a save before the read is rejected) and writes some time
+after a save, a join or a forget (a pending write keeps its deadline), a list in
+memory, a station that joins an enabled network, a user who forgets it, a
+listing that stalls for four seconds and prints what an empty one does, and the
+persistent marker. Each case boots that framework once or more and states what
+the script did: the saves it asked for, the lines it logged, the marker, what
+the store holds afterwards and how long it slept. A guest stops when the script
+is killed right after it wrote the marker, or a set time after it ended. The
+stubs keep time by the seconds the script sleeps and the commands take, so
+nothing waits.
 
-The test checks itself: mutants of the script (marker 1 final, no save of a
-network the platform lost, a single look, no early end at marker 2) must each
+The test checks itself: mutants of the script (marker 1 final, marker 2 set by a
+boot that saved, a stalled listing read as absent, a network removed during the
+boot saved again, a guard of fewer looks, no early end at marker 2) must each
 fail a case.
 
 `test_wifi_network_script.py --script FILE` prints what a script gets wrong.
@@ -54,19 +59,36 @@ def note(state: str, call: str) -> None:
         stream.write(call + "\n")
 
 
+def elapsed(state: str) -> int:
+    """The seconds the script has slept and its commands have taken."""
+    total = 0
+    for name in ("sleeps", "extras"):
+        with open(os.path.join(state, name)) as stream:
+            total += sum(int(seconds) for seconds in stream.read().split())
+    return total
+
+
 def framework(state: str, arguments: list[str]) -> int:
     """One `cmd wifi ...` call against the framework's state; prints what the service prints."""
     path = os.path.join(state, "framework")
     memory = load(path)
-    with open(os.path.join(state, "sleeps")) as stream:
-        now = sum(int(seconds) for seconds in stream.read().split())
+    now = elapsed(state)
     advance(memory, now)
     status = 0
     command = arguments[:2]
     if command == ["wifi", "list-networks"]:
         note(state, "list")
-        if memory["busy_looks"] > 0:
-            memory["busy_looks"] -= 1
+        if memory["failing"] > 0:
+            # The Wi-Fi service is not up: `cmd` says so and exits with its own status.
+            memory["failing"] -= 1
+            print("cmd: Can't find service: wifi", file=sys.stderr)
+            status = 20
+        elif memory["stalled"] > 0:
+            # The Wi-Fi thread does not answer: the service gives an empty list after four seconds, status 0.
+            memory["stalled"] -= 1
+            with open(os.path.join(state, "extras"), "a") as stream:
+                stream.write("4\n")
+            advance(memory, now + 4)
             print("No networks")
         elif memory["listed"]:
             print(HEADER)
@@ -84,55 +106,71 @@ def framework(state: str, arguments: list[str]) -> int:
         note(state, "add")
         if memory["add_fails"]:
             status = 1
+        elif not memory["read_done"]:
+            # The platform rejects a save before it has read its store (WifiConfigManager's pending read).
+            pass
+        elif memory["add_ignored"] > 0:
+            memory["add_ignored"] -= 1
         else:
             if not memory["listed"] or memory["disabled_now"]:
                 memory["since"] = now
             memory["listed"] = True
             memory["disabled_now"] = False
-            # Before the read the platform cannot save: the network lives in memory only.
-            if memory["read_done"]:
-                if memory["store_delay"] <= 0:
-                    memory["stored"], memory["disabled"] = True, False
-                else:
-                    memory["store_due"] = now + memory["store_delay"]
+            schedule(memory, now)
     else:
         status = 2
     save(path, memory)
     return status
 
 
+def schedule(memory: dict, when: int) -> None:
+    """A change that the store must hold: its write is due `store_delay` seconds on, unless one is pending, which
+    keeps its deadline."""
+    if memory["store_due"] is None:
+        memory["store_due"] = when + memory["store_delay"]
+
+
 def advance(memory: dict, end: int) -> None:
-    """Applies what happens by time `end`, in order: the config store's read, its write, the join."""
+    """Applies what happens by time `end`, in order: the config store's read, the user's forget, the join, the
+    store's write."""
     if end > CLOCK_LIMIT:
         raise SystemExit("the script runs past the clock limit: it does not end")
     while True:
         due = []
         if not memory["read_done"] and memory["read_at"] <= end:
-            due.append((memory["read_at"], "read"))
-        if memory["store_due"] is not None and memory["store_due"] <= end:
-            due.append((memory["store_due"], "store"))
+            due.append((memory["read_at"], 0, "read"))
+        if memory["read_done"] and memory["listed"] and memory["forget_at"] is not None and memory["forget_at"] <= end:
+            due.append((max(memory["forget_at"], memory["read_at"]), 1, "forget"))
         if (memory["listed"] and memory["wifi_on"] and not memory["disabled_now"] and not memory["joined"]
                 and memory["join_after"] is not None and memory["since"] + memory["join_after"] <= end):
-            due.append((memory["since"] + memory["join_after"], "join"))
+            due.append((memory["since"] + memory["join_after"], 2, "join"))
+        if memory["store_due"] is not None and memory["store_due"] <= end:
+            due.append((memory["store_due"], 3, "store"))
         if not due:
             return
-        _, what = min(due)
+        when, _, what = min(due)
         if what == "read":
             memory["read_done"] = True
             memory["listed"] = memory["stored"]
             memory["disabled_now"] = memory["disabled"] and memory["stored"]
             memory["since"] = memory["read_at"] if memory["stored"] else None
             memory["joined"] = memory["joined"] and memory["stored"]
+        elif what == "forget":
+            memory["listed"], memory["joined"], memory["disabled_now"] = False, False, False
+            memory["forget_at"] = None
+            schedule(memory, when)
         elif what == "store":
             memory["stored"], memory["disabled"] = memory["listed"], memory["disabled_now"]
             memory["store_due"] = None
         else:
             memory["joined"] = True
+            schedule(memory, when)
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--stub"]:
     raise SystemExit(framework(sys.argv[2], sys.argv[3:]))
 
+import concurrent.futures
 import dataclasses
 import subprocess
 import tempfile
@@ -145,16 +183,23 @@ MARKER = "persist.sys.kernarium.virtwifi_saved"
 
 # ---- A guest the cases boot.
 
+SLEEP_LIMIT = 113     # the script's own bound on its sleeping, which its header states
+
+
 @dataclasses.dataclass(frozen=True)
 class Boot:
     """What the framework does during one boot."""
     read_at: int | None = None       # when the config store is read; None: it was read before the script ran
-    store_delay: int = 0             # seconds from a save to the store's write
-    join_after: int | None = 5       # seconds a saved, enabled network takes to join; None: never
-    busy_looks: int = 0              # listings that print what an empty one does
-    add_fails: bool = False          # the Wi-Fi service is not up: saving does nothing
+    store_delay: int = 10            # seconds from a change to the store's write
+    join_after: int | None = 5       # seconds an enabled network takes to join; None: never
+    stalled_looks: int = 0           # the first listings the Wi-Fi thread does not answer: four seconds, "No networks"
+    failing_looks: int = 0           # the first listings that fail: the Wi-Fi service is not up
+    add_fails: bool = False          # the Wi-Fi service is not up: saving fails
+    add_ignored: int = 0             # the first saves that do nothing (the service is busy)
     wifi_on: bool = True
+    forget_at: int | None = None     # when the user forgets the network
     kill_after_marker: bool = False  # the guest stops right after the script wrote the marker
+    stop_after: int = 30             # seconds the guest runs on after the script ends before it stops
 
 
 @dataclasses.dataclass(frozen=True)
@@ -165,6 +210,7 @@ class Expect:
     marker: str = ""
     stored: bool = False
     asks: int | None = None          # the calls the script made of the Wi-Fi service, when it must be none
+    slept: int | None = None         # the seconds the script slept, when the case pins them
 
 
 @dataclasses.dataclass(frozen=True)
@@ -200,42 +246,49 @@ class Guest:
                 f'if [ -f "{state}/kill" ]; then rm -f "{state}/kill"; kill -9 $PPID; fi\n'
             ),
             "sleep": f'echo "$1" >> "{state}/sleeps"\n',
+            "date": f't=0\nfor s in $(cat "{state}/sleeps" "{state}/extras"); do t=$((t + s)); done\necho $t\n',
             "log": f'echo "log $*" >> "{state}/calls"\n',
         }
         for name, body in bodies.items():
             (self.stubs / name).write_text("#!/bin/sh\n" + body)
             (self.stubs / name).chmod(0o755)
 
-    def run(self, script: Path, boot: Boot) -> tuple[int, list[str], str, bool]:
-        """Boots the framework and runs the script once; returns its status, the calls it made, the marker
-        and whether the config store holds the network afterwards."""
+    def run(self, script: Path, boot: Boot) -> tuple[int, list[str], str, bool, int]:
+        """Boots the framework and runs the script once, then lets the guest run on for `stop_after` seconds;
+        returns the script's status, the calls it made, the marker, whether the config store holds the network
+        when the guest stops, and the seconds the script slept."""
         memory = {
             "read_at": boot.read_at if boot.read_at is not None else 0,
             "read_done": boot.read_at is None, "store_delay": boot.store_delay, "store_due": None,
-            "join_after": boot.join_after, "busy_looks": boot.busy_looks, "add_fails": boot.add_fails,
-            "wifi_on": boot.wifi_on, "stored": self.stored, "disabled": self.disabled,
+            "join_after": boot.join_after, "stalled": boot.stalled_looks, "failing": boot.failing_looks,
+            "add_fails": boot.add_fails, "add_ignored": boot.add_ignored, "wifi_on": boot.wifi_on,
+            "stored": self.stored, "disabled": self.disabled, "forget_at": boot.forget_at,
             "listed": self.stored and boot.read_at is None,
             "disabled_now": self.disabled and self.stored and boot.read_at is None,
             "since": 0 if self.stored and boot.read_at is None else None, "joined": False,
         }
         save(str(self.state / "framework"), memory)
-        (self.state / "sleeps").write_text("")
-        (self.state / "calls").write_text("")
+        for name in ("sleeps", "extras", "calls"):
+            (self.state / name).write_text("")
         if boot.kill_after_marker:
             (self.state / "kill").touch()
         done = subprocess.run(["/bin/sh", str(script)], env={"PATH": f"{self.stubs}:/usr/bin:/bin"},
                               capture_output=True, text=True, timeout=120)
         (self.state / "kill").unlink(missing_ok=True)
+        ended = elapsed(str(self.state))
         after = load(str(self.state / "framework"))
+        advance(after, ended + boot.stop_after)
         self.stored, self.disabled = after["stored"], after["disabled"]
         marker_file = self.state / "properties" / MARKER
         marker = marker_file.read_text().strip() if marker_file.exists() else ""
-        return done.returncode, (self.state / "calls").read_text().splitlines(), marker, self.stored
+        slept = sum(int(seconds) for seconds in (self.state / "sleeps").read_text().split())
+        return done.returncode, (self.state / "calls").read_text().splitlines(), marker, self.stored, slept
 
 
 # ---- The cases.
 
 ONE = Boot()
+SETTLED = Expect(notes=1, marker="2", stored=True)     # a boot that finds the network stored and joined
 CASES = (
     # Marker 2 never asks the service anything, in any state.
     *(Case(f"marker 2, {what}", "2", stored, ((boot, Expect(marker="2", stored=stored, asks=0)),), disabled=disabled)
@@ -246,48 +299,97 @@ CASES = (
           ("a disabled network", True, True, ONE),
           ("Wi-Fi off", True, False, Boot(wifi_on=False)),
           ("Wi-Fi off and an empty list", False, False, Boot(wifi_on=False)),
-          ("a listing that fails", True, False, Boot(busy_looks=5)),
+          ("a listing that fails", True, False, Boot(failing_looks=5)),
+          ("a listing that stalls", True, False, Boot(stalled_looks=5)),
           ("the store read late", False, False, Boot(read_at=3)),
       )),
-    # Two listings print what an empty one does: the third look finds the network.
-    Case("a listing that fails at marker 1", "1", True, (
-        (Boot(busy_looks=2), Expect(marker="2", stored=True)),
+    # A first boot saves the network and leaves 1: a join does not prove the store holds it. The next boot finds
+    # it stored and joined and sets 2.
+    Case("a first boot, then a boot", "", False, (
+        (ONE, Expect(adds=1, notes=1, marker="1", stored=True)),
+        (ONE, SETTLED),
     )),
-    Case("a first boot", "", False, ((ONE, Expect(adds=1, marker="2", stored=True)),)),
     # The guest stops right after the marker is written and before the store is: marker 1 and no network.
-    Case("A: a stop before the store wrote the network, then a boot", "", False, (
-        (Boot(store_delay=10, kill_after_marker=True), Expect(status=-9, adds=1, marker="1", stored=False)),
-        (ONE, Expect(adds=1, notes=1, marker="2", stored=True)),
+    Case("A: a stop before the store wrote the network, then boots", "", False, (
+        (Boot(kill_after_marker=True, stop_after=0), Expect(status=-9, adds=1, marker="1", stored=False)),
+        (ONE, Expect(adds=1, notes=2, marker="1", stored=True)),
+        (ONE, SETTLED),
     )),
-    # The platform has not read its store when the script saves; the read then drops the network.
-    Case("B: a network saved before the store is read", "", False, (
-        (Boot(read_at=3), Expect(adds=2, notes=1, marker="2", stored=True)),
+    # R1: the network joins before the store's write and the guest stops: the join did not make 2, so the next
+    # boot saves again; and the stop right after 2, in the boot that follows, loses nothing, since 2 needs the
+    # network to have been listed from the store.
+    Case("R1: a join before the store wrote the network, a stop, then a stop right after marker 2", "", False, (
+        (Boot(stop_after=0), Expect(adds=1, notes=1, marker="1", stored=False)),
+        (ONE, Expect(adds=1, notes=2, marker="1", stored=True)),
+        (Boot(kill_after_marker=True, stop_after=0), Expect(status=-9, marker="2", stored=True)),
+        (ONE, Expect(marker="2", stored=True, asks=0)),
     )),
     Case("data of an earlier release at marker 1 without the network", "1", False, (
-        (ONE, Expect(adds=1, notes=1, marker="2", stored=True)),
+        (ONE, Expect(adds=1, notes=2, marker="1", stored=True)),
+        (ONE, SETTLED),
     )),
-    Case("E: marker 1 and a stored network that joins", "1", True, ((ONE, Expect(marker="2", stored=True)),)),
-    Case("E: marker 1 and a stored network that joins late", "1", True, (
-        (Boot(join_after=30), Expect(marker="2", stored=True)),
+    # R2: a listing that is not an answer is not an empty list. At marker 1 it never saves.
+    Case("R2: an unanswered listing at marker 1 with the network stored", "1", True, (
+        (Boot(stalled_looks=3), Expect(notes=1, marker="1", stored=True)),
+        (ONE, SETTLED),
     )),
+    Case("R2: a failing listing at marker 1 with the network stored", "1", True, (
+        (Boot(failing_looks=3), Expect(notes=1, marker="1", stored=True)),
+    )),
+    Case("R2: an unanswered listing, Wi-Fi off, marker 1, the network stored", "1", True, (
+        (Boot(wifi_on=False, stalled_looks=9), Expect(marker="1", stored=True)),
+    )),
+    Case("R2: an unanswered listing at marker 1 and an empty store", "1", False, (
+        (Boot(stalled_looks=1), Expect(adds=1, notes=1, marker="1", stored=True)),
+    )),
+    # With no marker there is nothing to lose: an unknown look still leads to the save.
+    Case("R2: an unanswered listing and no marker", "", True, (
+        (Boot(stalled_looks=1), Expect(adds=1, notes=1, marker="1", stored=True)),
+    )),
+    # The stored networks are loaded late (before boot_completed in practice): the third look finds it.
+    Case("the guard: the store read after the first looks", "1", True, (
+        (Boot(read_at=7), Expect(notes=1, marker="1", stored=True)),
+    )),
+    # R3: removed during this boot, after it was listed at the first look: it stays removed.
+    Case("R3: a network forgotten during the boot after it was listed", "1", True, (
+        (Boot(join_after=None, forget_at=20), Expect(notes=1, marker="2", stored=False)),
+        (ONE, Expect(marker="2", stored=False, asks=0)),
+    )),
+    Case("R3: a join the script did not see, and a forget, between two polls", "1", True, (
+        (Boot(join_after=7, forget_at=8), Expect(notes=1, marker="2", stored=False)),
+    )),
+    # The network this boot saved and the user forgot before the settle is saved again (accepted).
+    Case("a network forgotten in the session that saved it", "", False, (
+        (Boot(join_after=None, forget_at=20), Expect(adds=2, notes=1, marker="1", stored=True)),
+    )),
+    Case("E: marker 1 and a stored network that joins", "1", True, ((ONE, SETTLED),)),
+    Case("E: marker 1 and a stored network that joins late", "1", True, ((Boot(join_after=30), SETTLED),)),
     Case("marker 1, Wi-Fi off and an empty list", "1", False, (
         (Boot(wifi_on=False), Expect(adds=1, notes=1, marker="1", stored=True)),
     )),
-    Case("marker 1, Wi-Fi off and a stored network", "1", True, (
-        (Boot(wifi_on=False), Expect(marker="1", stored=True)),
-    )),
-    Case("no marker and a network saved by hand", "", True, ((ONE, Expect(marker="2", stored=True)),)),
+    Case("marker 1, Wi-Fi off and a stored network", "1", True, ((Boot(wifi_on=False), Expect(marker="1", stored=True)),)),
+    Case("no marker and a network saved by hand", "", True, ((ONE, SETTLED),)),
+    # Wi-Fi on, a listed network that is not joined: the disabled network of an earlier release, or one the user
+    # disconnected. It is saved again once and joins; the next boot finds it stored and joined.
     Case("a disabled network", "1", True, (
-        (ONE, Expect(adds=1, notes=1, marker="2", stored=True)),
+        (ONE, Expect(adds=1, notes=1, marker="1", stored=True)),
+        (ONE, SETTLED),
     ), disabled=True),
     Case("a disabled network that does not join once saved again", "1", True, (
         (Boot(join_after=None), Expect(adds=1, notes=1, marker="1", stored=True)),
     ), disabled=True),
+    Case("Wi-Fi on and the user disconnected the network", "1", True, (
+        (Boot(join_after=None), Expect(adds=1, notes=1, marker="1", stored=True)),
+    )),
     Case("a Wi-Fi service that is not up, no marker", "", False, (
         (Boot(add_fails=True), Expect(status=1, adds=30, marker="", stored=False)),
     )),
     Case("a Wi-Fi service that is not up, marker 1", "1", False, (
         (Boot(add_fails=True), Expect(status=1, adds=30, marker="1", stored=False)),
+    )),
+    # The longest run: the guard, 29 saves that do nothing, the settle, the second save.
+    Case("the longest run", "1", False, (
+        (Boot(add_ignored=29, join_after=None), Expect(adds=31, notes=2, marker="1", stored=True, slept=SLEEP_LIMIT)),
     )),
 )
 
@@ -298,19 +400,22 @@ def judge(script: Path, case: Case) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="wifi-network-script-") as directory:
         guest = Guest(Path(directory), case.marker, case.stored, case.disabled)
         for number, (boot, expect) in enumerate(case.boots, 1):
-            status, calls, marker, stored = guest.run(script, boot)
+            status, calls, marker, stored, slept = guest.run(script, boot)
             adds = calls.count("add")
             notes = len([call for call in calls if call.startswith("log ")])
             asks = len([call for call in calls if call in ("add", "list", "status")])
             if (status, adds, notes, marker, stored) != (expect.status, expect.adds, expect.notes, expect.marker,
                                                           expect.stored):
-                problems.append(f"{case.name}, boot {number}: exit {status}, saves {adds}, repair lines {notes}, "
+                problems.append(f"{case.name}, boot {number}: exit {status}, saves {adds}, log lines {notes}, "
                                 f"marker {marker!r}, store holds the network {stored}; expected exit "
-                                f"{expect.status}, saves {expect.adds}, repair lines {expect.notes}, marker "
+                                f"{expect.status}, saves {expect.adds}, log lines {expect.notes}, marker "
                                 f"{expect.marker!r}, store {expect.stored}")
             if expect.asks is not None and asks != expect.asks:
                 problems.append(f"{case.name}, boot {number}: the script made {asks} calls of the Wi-Fi service; "
                                 f"expected {expect.asks}")
+            if slept > SLEEP_LIMIT or (expect.slept is not None and slept != expect.slept):
+                problems.append(f"{case.name}, boot {number}: the script slept {slept} s; its bound is "
+                                f"{SLEEP_LIMIT} s" + (f" and the case pins {expect.slept} s" if expect.slept else ""))
             for call in calls:
                 if call.startswith("setprop ") and call.split()[1:] not in (
                         [MARKER, "1"], [MARKER, "2"]):
@@ -319,14 +424,21 @@ def judge(script: Path, case: Case) -> list[str]:
 
 
 def problems_of(text: str, stop_at_first: bool = False) -> list[str]:
+    """What the script text gets wrong over all the cases (the cases run side by side), or, with
+    `stop_at_first`, over the cases up to the first that fails."""
     with tempfile.TemporaryDirectory(prefix="wifi-network-script-text-") as directory:
         script = Path(directory) / "kernarium_wifi_network.sh"
         script.write_text(text)
         found: list[str] = []
-        for case in CASES:
-            found += judge(script, case)
-            if found and stop_at_first:
-                break
+        if stop_at_first:
+            for case in CASES:
+                found += judge(script, case)
+                if found:
+                    break
+            return found
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            for problems in pool.map(lambda case: judge(script, case), CASES):
+                found += problems
         return found
 
 
@@ -345,16 +457,29 @@ class WifiNetworkScript(unittest.TestCase):
     def test_the_test_bites(self) -> None:
         text = SCRIPT.read_text()
         early = '[ "$current" = 2 ] && exit 0\n'
-        for what, mutant in (
+        settled = 'if [ "$listed" = 1 ]; then\n        setprop "$marker" 2 && note "VirtWifi was stored'
+        removed = 'if [ "$listed" = 1 ]; then\n            setprop "$marker" 2 && note "VirtWifi was removed'
+        mutants = (
             ("marker 1 is final", mutated(text, early, 'case "$current" in 1|2) exit 0 ;; esac\n')),
-            ("a network the platform lost is not saved again after the settle", mutated(
-                text, 'cmd wifi add-network VirtWifi open >/dev/null 2>&1\nlog -t',
-                'look\n[ "$state" = saved ] || exit 0\ncmd wifi add-network VirtWifi open >/dev/null 2>&1\nlog -t')),
-            ("one look decides at marker 1", mutated(text, "looks=3", "looks=1")),
             ("marker 2 asks the Wi-Fi service", mutated(text, early, "")),
-        ):
+            ("a join in a boot that saved sets 2", mutated(text, settled, settled.replace('[ "$listed" = 1 ]', ":"))),
+            ("an unanswered listing reads as absent", mutated(
+                text, 'elif [ "$code" != 0 ] || [ $((ended - began)) -ge 4 ]; then', "elif false; then")),
+            ("a listing of four seconds reads as absent", mutated(text, "-ge 4 ]", "-ge 5 ]")),
+            ("a network removed during the boot is saved again", mutated(
+                text, removed, removed.replace('[ "$listed" = 1 ]', "false"))),
+            ("a guard of two looks", mutated(text, "looks=3", "looks=2")),
+            ("a guard of one look", mutated(text, "looks=3", "looks=1")),
+            ("the saved network is not saved again after the settle", mutated(
+                text, 'cmd wifi add-network VirtWifi open >/dev/null 2>&1\nsaved_it\nnote "VirtWifi saved again',
+                'exit 0\nsaved_it\nnote "VirtWifi saved again')),
+            ("a join is not waited for", mutated(text, 'if wait_joined "$settle"; then', "if :; then")),
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda mutant: problems_of(mutant[1], stop_at_first=True), mutants))
+        for (what, _), found in zip(mutants, results):
             with self.subTest(what):
-                self.assertNotEqual(problems_of(mutant, stop_at_first=True), [], what)
+                self.assertNotEqual(found, [], what)
 
 
 if __name__ == "__main__":
