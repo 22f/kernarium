@@ -28,8 +28,9 @@ enum FeedbackPreview {
         services.address = { "feedback@example.com" }
         services.canSendMail = { screen != "feedback-nomail" }
         services.presentMail = { _, _ in true }
-        // The picker's own screen is the one thing captured as the system draws it.
-        if screen != "feedback-file-picker" { services.pickFiles = { _ in true } }
+        // The picker's own screen is the one thing captured as the system draws it; the menu's screen keeps the
+        // real picker so that a tap on Files in it opens the system's.
+        if !["feedback-file-picker", "feedback-file-menu"].contains(screen) { services.pickFiles = { _ in true } }
         services.captureScreen = { _ in guestPicture() }
         services.runningSeconds = { _ in 2520 }
         services.previewOpensAtLaunch = opensSheet(screen)

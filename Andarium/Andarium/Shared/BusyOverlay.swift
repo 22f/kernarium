@@ -84,6 +84,7 @@ struct BusyOverlay: View {
     private func titleAndShare(beside: Bool) -> some View {
         Text(state.title.keepingTogether)
             .font(.title3.weight(.bold))
+            .fixedSize(horizontal: false, vertical: true)
         if beside { Spacer() }
         if let progress = state.progress {
             Text("\(Int((progress * 100).rounded()))%")
