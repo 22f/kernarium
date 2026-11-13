@@ -517,7 +517,10 @@ carry host-owned choices that bundle command lines may not override:
 - `ro.boot.kernarium.adb_tcp` is 0 when the launch has no host forward, as in
   the iOS release: adbd then listens on `vsock:5555` alone.
 - `ro.boot.kernarium.adb_key` is the adb public key the host application
-  authorizes for the boot; adbd accepts it whatever the user's setting.
+  authorizes for the boot; adbd accepts it whatever the user's setting. Its type
+  is `kernarium_adb_key_prop` (`overlay/sepolicy/system_ext/private`), which only
+  adbd may read: the other two are `bootloader_prop`, readable by every
+  application, and a key that is unique to an installation would identify it.
 
 The user's debugging setting stays meaningful while adbd remains the host's
 channel: route `p0007` records the setting in `persist.sys.usb.config` and
@@ -578,14 +581,14 @@ outcomes are known and not defects of the image:
   set it, and the vendor init script falls back to 5 when a launch passes none.
   The launchers refuse any value of it in a release's command line except the
   `=5` that earlier releases carry, which they drop.
-- The guest has a compressed swap of half its RAM (one zram entry in
-  `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
-  home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached
 - The release's command line carries no serial number: the launchers state the
   installation's own as `androidboot.serialno=`
   ([`../../darwin/device/block/README.md`](../../darwin/device/block/README.md)),
   and drop the `=umlandroid17` that earlier releases carry. A run that states none
   gets Android's own default.
+- The guest has a compressed swap of half its RAM (one zram entry in
+  `fstab.uml`), enabled at `sys.boot_completed`. PinnerService does not lock the
+  home app's files, and `kernarium_reclaim_boot_apps.sh` kills only the cached
   processes of a reviewed list of boot-started apps after boot completes.
 - lmkd ends the cached app that holds the most host graphics memory while the
   kernel reports host GPU pressure in `/sys/class/drm/card0/gpu_memory_report`

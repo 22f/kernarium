@@ -673,13 +673,22 @@ ADB_HOST_PROPERTY_TYPE = "kernarium_adb_host_prop"
 # The host application is the adb host of its guest and reaches adbd over virtio-vsock. adbd's p0011
 # topics read two launch properties themselves: ro.boot.kernarium.adb_key, the public key the
 # application authorizes for the boot, and ro.boot.kernarium.adb_tcp, 0 when the launch has no
-# host forward, which keeps adbd off guest TCP. The launch properties are bootloader_prop, which
-# every domain may read; service.adb.listen_addrs would not do, as it is a system_prop that
-# vendor_init may not set. The adbd binary sits in its APEX, whose payload hints keep it
+# host forward, which keeps adbd off guest TCP. The TCP property is a bootloader_prop, which
+# every domain may read, and the key has a type that only adbd reads; service.adb.listen_addrs
+# would not do, as it is a system_prop that vendor_init may not set. The adbd binary sits in its APEX, whose payload hints keep it
 # uncompressed so that the verifier reads these names in the payload's bytes.
+# adb_tcp is a bootloader_prop. The key is the installation's own, and a bootloader_prop is
+# readable by every application, so the key has a type of its own (overlay/sepolicy/system_ext/
+# private/adb_key_prop.te) that adbd alone may read.
 ADBD_APEX = "SYSTEM/apex/com.android.adbd.apex"
 ADBD_BINARY = "bin/adbd"
-ADBD_LAUNCH_PROPERTIES = ("ro.boot.kernarium.adb_key", "ro.boot.kernarium.adb_tcp")
+ADB_KEY_PROPERTY = "ro.boot.kernarium.adb_key"
+ADB_KEY_PROPERTY_TYPE = "kernarium_adb_key_prop"
+ADBD_LAUNCH_PROPERTIES = (ADB_KEY_PROPERTY, "ro.boot.kernarium.adb_tcp")
+# The domains that run applications, and the attribute that holds them all: none may read the key.
+ADB_KEY_APP_DOMAINS = (
+    "appdomain", "untrusted_app", "isolated_app", "ephemeral_app", "platform_app", "priv_app", "system_app",
+)
 # The key rule of p0011 reads the guest's debugging setting: AdbService records USB debugging in
 # persist.sys.usb.config (route p0007) and wireless debugging is persist.adb.tls_server.enable. adbd
 # offers any key but the host's only while one is on, and logs the refusal line otherwise; the line
@@ -4795,7 +4804,21 @@ def cil_allows_file_read(policies: tuple[bytes, ...], domain: str, label: str) -
 
 
 def check_adbd_launch_policy(contexts: list[str], policies: tuple[bytes, ...]) -> None:
-    """adbd may read the launch properties and the debugging setting it acts on."""
+    """adbd may read the launch properties and the debugging setting it acts on, and no
+    application may read the installation's adb key."""
+    key_label = property_label(ADB_KEY_PROPERTY, contexts) or "default_prop"
+    if key_label != ADB_KEY_PROPERTY_TYPE:
+        fail(
+            f"{ADB_KEY_PROPERTY} is labelled {key_label}, not {ADB_KEY_PROPERTY_TYPE} "
+            "(overlay/sepolicy/system_ext/private/property_contexts): every application could read "
+            "the key that the host makes for the installation"
+        )
+    for domain in ADB_KEY_APP_DOMAINS:
+        if cil_allows_file_read(policies, domain, key_label):
+            fail(
+                f"{domain} may read {ADB_KEY_PROPERTY}, labelled {key_label}: an application could "
+                "read the key that the host makes for the installation"
+            )
     for name in ADBD_LAUNCH_PROPERTIES + ADBD_DEBUGGING_PROPERTIES:
         label = property_label(name, contexts) or "default_prop"
         if not cil_allows_file_read(policies, "adbd", label):

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The adb public key the host application authorizes for a boot reaches the
+# guest as androidboot.kernarium.adb_key, which init turns into
+# ro.boot.kernarium.adb_key. A ro.boot.* property is a bootloader_prop unless
+# a context says otherwise, and every application may read that. The key is
+# the host's own for this installation, an identifier that no other property
+# shows, so only adbd, which reads it itself (route p0011), may read it. init
+# sets it from the kernel command line without a policy check.
+system_internal_prop(kernarium_adb_key_prop)
+get_prop(adbd, kernarium_adb_key_prop)

@@ -1159,6 +1159,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           ota_certificates: str | None = None,
                           signed: bool = False,
                           adbd_launch_unreadable: bool = False,
+                          adb_key_variant: str | None = None,
                           venus_policy_variant: str | None = None,
                           vendor_property_variant: str | None = None,
                           audio_ring_variant: str | None = None,
@@ -1953,6 +1954,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     )
                     + (
                         ""
+                        if adb_key_variant == "bootloader-label"
+                        else "ro.boot.kernarium.adb_key    "
+                        "u:object_r:kernarium_adb_key_prop:s0 exact string\n"
+                    )
+                    + (
+                        ""
                         if wifi_network_variant == "missing-marker-context"
                         else "persist.sys.kernarium.virtwifi_saved    "
                         "u:object_r:kernarium_wifi_network_prop:s0 exact "
@@ -2138,6 +2145,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         if keyboard_default_variant == "sets-another-property"
                         else ""
                     )
+                    + (
+                        ""
+                        if adbd_launch_unreadable or adb_key_variant in ("adbd-unreadable", "bootloader-label")
+                        else "(allow adbd kernarium_adb_key_prop (file (getattr open read map)))\n"
+                    )
+                    + {
+                        "untrusted-app-reads": "(allow untrusted_app kernarium_adb_key_prop (file (getattr open read map)))\n",
+                        "appdomain-reads": "(allow appdomain kernarium_adb_key_prop (file (getattr open read map)))\n",
+                    }.get(adb_key_variant or "", "")
                     + (
                         ""
                         if missing_adb_prop_policy
@@ -3678,6 +3694,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-services-jar", {"services_jar_variant": "missing"}),
             ("missing-network-stack", {"network_stack_variant": "missing"}),
             ("adbd-cannot-read-launch-properties", {"adbd_launch_unreadable": True}),
+            ("adb-key-with-the-bootloader-type", {"adb_key_variant": "bootloader-label"}),
+            ("adb-key-adbd-cannot-read", {"adb_key_variant": "adbd-unreadable"}),
+            ("adb-key-untrusted-app-reads", {"adb_key_variant": "untrusted-app-reads"}),
+            ("adb-key-appdomain-reads", {"adb_key_variant": "appdomain-reads"}),
             ("missing-cas-plugin-64", {"cas_hal_variant": "no-plugin64"}),
             ("missing-cas-plugin-32", {"cas_hal_variant": "no-plugin32"}),
             ("lineage-discrete-ops-list-only", {"discrete_ops_variant": "lineage-list-only"}),
@@ -4434,7 +4454,15 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},
              "SYSTEM/priv-app/NetworkStack/NetworkStack.apk is missing"),
             ("adbd-cannot-read-launch-properties-cause", {"adbd_launch_unreadable": True},
-             "adbd may not read ro.boot.kernarium.adb_key, labelled bootloader_prop"),
+             "adbd may not read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-with-the-bootloader-type-cause", {"adb_key_variant": "bootloader-label"},
+             "ro.boot.kernarium.adb_key is labelled bootloader_prop, not kernarium_adb_key_prop"),
+            ("adb-key-adbd-cannot-read-cause", {"adb_key_variant": "adbd-unreadable"},
+             "adbd may not read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-untrusted-app-reads-cause", {"adb_key_variant": "untrusted-app-reads"},
+             "untrusted_app may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
+            ("adb-key-appdomain-reads-cause", {"adb_key_variant": "appdomain-reads"},
+             "appdomain may read ro.boot.kernarium.adb_key, labelled kernarium_adb_key_prop"),
             ("missing-cas-apex-cause", {"cas_hal_variant": "missing-apex"},
              "com.android.hardware.cas.apex is missing: the product needs the default CAS HAL"),
             ("cas-apex-without-binary-cause", {"cas_hal_variant": "no-binary"},
