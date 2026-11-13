@@ -110,10 +110,13 @@ interface to the wire.
   transaction (`admit`: the input, the anchor and its rate, the video output,
   the photo output, inside one configuration), which, when a step is refused or
   the session's hardware cost goes over its budget, removes exactly what that
-  call added and puts the device's frame durations back as it reported them
-  before (a long manual exposure may have made the maximum longer than the
-  rate asked for; a rate recomputed would not restore that). A change of size
-  or rate on a running stream does the same (`resizeStream`). While another camera is in the session every anchor must be a
+  call added and puts the device back as it reported itself before anything
+  changed, input included (`putBackTiming`: its format, frame durations and
+  custom exposure: a long manual exposure may have made the maximum longer than
+  the rate asked for, a rate recomputed would not restore that, and a shorter
+  maximum shortens the exposure, which the durations alone do not bring back).
+  A change of size or rate on a running stream does the same (`resizeStream`).
+  While another camera is in the session every anchor must be a
   format a multi-camera session takes (`multiCamera`); a camera whose best
   such format offers less than its best format does not run with others (the
   device then publishes it as a conflict). A camera that only takes stills

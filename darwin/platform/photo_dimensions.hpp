@@ -307,14 +307,63 @@ struct AnchorKey {
 [[nodiscard]] bool mayJoin(bool otherInputsInSession, bool ownAnchorMultiCamera,
                            std::span<const bool> otherAnchorsMultiCamera) noexcept;
 
+// What a device holds that a change of its frame durations can move, as the
+// device reports it. A frame duration is a rational number of seconds (the
+// platform's CMTime). A custom exposure longer than a new maximum frame
+// duration is shortened to it by the platform (AVCaptureDevice.h), so a change
+// of the durations that is undone has to put the exposure back with them.
+struct CameraTime {
+    std::int64_t value {};
+    std::int32_t scale {1};
+    [[nodiscard]] double seconds() const noexcept { return scale > 0 ? double(value) / double(scale) : 0.0; }
+    friend bool operator==(const CameraTime&, const CameraTime&) = default;
+};
+struct ManualExposure {
+    bool custom {};  // the exposure mode is custom
+    CameraTime duration;
+    float iso {};
+    friend bool operator==(const ManualExposure&, const ManualExposure&) = default;
+};
+struct DeviceTiming {
+    // The platform's identity of the active format: only compared, and given back
+    // to `setFormat`.
+    std::uint32_t format {};
+    CameraTime minimum;
+    CameraTime maximum;
+    ManualExposure exposure;
+    friend bool operator==(const DeviceTiming&, const DeviceTiming&) = default;
+};
+
+// The calls a restore makes on a device. Each write reports a refusal (an
+// exception included) as false.
+struct TimingSteps {
+    std::function<bool()> lock;  // lockForConfiguration; false: the device would not lock
+    std::function<void()> unlock;
+    std::function<DeviceTiming()> read;
+    std::function<bool(std::uint32_t format)> setFormat;
+    std::function<bool(CameraTime)> setMinimum;
+    std::function<bool(CameraTime)> setMaximum;
+    std::function<bool(CameraTime duration, float iso)> setCustomExposure;
+};
+
+// Puts a device back as `held` (read before anything changed) had it: its
+// format when it has changed (a format has its own durations, so that comes
+// first), then the durations, the one that moves out of the other's way first so
+// that the minimum never exceeds the maximum, and then the custom exposure the
+// new durations may have shortened. False when the device would not lock or any
+// write is refused; nothing after the refused one is written.
+[[nodiscard]] bool putBackTiming(const DeviceTiming& held, const TimingSteps& steps);
+
 // What an input, its outputs and its format need for a camera to run a stream,
 // a still or both, and the platform's calls that do it. The platform's calls
 // report a refusal (an exception included) as false. Anything a call added when
 // it refuses is removed by its `remove` step, which does nothing for what was
-// never added. The device's frame durations, which `activate` changes, are
-// taken before it runs (`snapshotDurations`, the device's own values, not what
-// a rate would program: a long manual exposure lengthens the maximum) and put
-// back by `restoreDurations` when the call refuses.
+// never added. The device's timing (its format, frame durations and manual
+// exposure, which `activate` and the input itself can change) is taken before
+// the call adds anything (`snapshotTiming`, the device's own values, not what a
+// rate would program: a long manual exposure lengthens the maximum) and put back
+// by `restoreTiming` when the call refuses, after the input this call added has
+// gone.
 struct AdmitPlan {
     bool addInput {};  // the camera has no input in the session
     bool activate {};  // the anchor and the rate are set on the device
@@ -325,7 +374,7 @@ struct AdmitSteps {
     std::function<void()> begin;   // beginConfiguration
     std::function<void()> commit;  // commitConfiguration
     std::function<bool()> addInput;
-    std::function<void()> snapshotDurations;  // empty: nothing to take
+    std::function<void()> snapshotTiming;  // empty: nothing to take
     std::function<bool()> activate;
     std::function<bool()> addVideo;
     // Attaches the photo output and sets its maximum (preparePhotoOutput).
@@ -335,7 +384,7 @@ struct AdmitSteps {
     std::function<void()> removeVideo;
     std::function<void()> removePhoto;
     std::function<void()> removeInput;
-    std::function<void()> restoreDurations;  // empty: nothing to put back
+    std::function<void()> restoreTiming;  // empty: nothing to put back
 };
 enum class Admission : std::uint8_t { admitted, inputRefused, formatRefused, videoRefused, photoRefused, overBudget };
 
@@ -347,15 +396,15 @@ enum class Admission : std::uint8_t { admitted, inputRefused, formatRefused, vid
 [[nodiscard]] Admission admit(const AdmitPlan& plan, const AdmitSteps& steps);
 
 // A running stream changes size or rate: the durations first, then the video
-// output's size; a refusal puts the durations back as `snapshotDurations` took
-// them before `setDurations` ran (the device's own values, as for AdmitSteps).
+// output's size; a refusal puts the device's timing back as `snapshotTiming` took
+// it before `setDurations` ran (the device's own values, as for AdmitSteps).
 struct ResizeSteps {
     std::function<void()> begin;
     std::function<void()> commit;
-    std::function<void()> snapshotDurations;  // empty: nothing to take
-    std::function<bool()> setDurations;       // empty: the rate does not change
-    std::function<bool()> setVideoSize;       // empty: the size does not change
-    std::function<void()> restoreDurations;
+    std::function<void()> snapshotTiming;  // empty: nothing to take
+    std::function<bool()> setDurations;  // empty: the rate does not change
+    std::function<bool()> setVideoSize;  // empty: the size does not change
+    std::function<void()> restoreTiming;
 };
 enum class Resizing : std::uint8_t { resized, durationsRefused, sizeRefused };
 [[nodiscard]] Resizing resizeStream(const ResizeSteps& steps);
@@ -391,6 +440,7 @@ enum class Refusal : std::uint8_t {
     stillNotMade,
     rawUnavailable,
     raised,
+    notRestored,
 };
 [[nodiscard]] std::string_view refusalName(Refusal reason) noexcept;
 

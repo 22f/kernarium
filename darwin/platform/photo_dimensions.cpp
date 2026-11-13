@@ -397,33 +397,34 @@ bool mayJoin(bool otherInputsInSession, bool ownAnchorMultiCamera, std::span<con
 
 Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
 {
-    bool inputAdded = false, videoTried = false, photoTried = false, durationsTaken = false;
+    bool inputAdded = false, videoTried = false, photoTried = false, timingTaken = false;
     steps.begin();
-    // What this call added leaves again, and the durations it changed come back,
-    // the newest first. A step that added nothing (it refused before it added)
-    // leaves nothing to remove.
+    // What this call added leaves again, and the device's timing it changed comes
+    // back, the newest first: the outputs, the input (adding it can reset the
+    // device's durations, and a device that is no longer in the session can be set
+    // to the format it was in), and the timing. A step that added nothing (it
+    // refused before it added) leaves nothing to remove.
     const auto undo = [&] {
         if (photoTried) steps.removePhoto();
         if (videoTried) steps.removeVideo();
-        if (durationsTaken && steps.restoreDurations) steps.restoreDurations();
         if (inputAdded) steps.removeInput();
+        if (timingTaken && steps.restoreTiming) steps.restoreTiming();
     };
     const auto refuse = [&](Admission reason) {
         undo();
         steps.commit();
         return reason;
     };
+    // Before anything changes the device: adding the input can reset its durations.
+    if (plan.activate && steps.snapshotTiming) {
+        steps.snapshotTiming();
+        timingTaken = true;
+    }
     if (plan.addInput) {
         if (!steps.addInput()) return refuse(Admission::inputRefused);
         inputAdded = true;
     }
-    if (plan.activate) {
-        if (steps.snapshotDurations) {
-            steps.snapshotDurations();
-            durationsTaken = true;
-        }
-        if (!steps.activate()) return refuse(Admission::formatRefused);
-    }
+    if (plan.activate && !steps.activate()) return refuse(Admission::formatRefused);
     if (plan.addVideo) {
         videoTried = true;
         if (!steps.addVideo()) return refuse(Admission::videoRefused);
@@ -442,17 +443,38 @@ Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
     return Admission::admitted;
 }
 
+bool putBackTiming(const DeviceTiming& held, const TimingSteps& steps)
+{
+    if (!steps.lock()) return false;
+    bool ok = true;
+    DeviceTiming now = steps.read();
+    if (now.format != held.format) {
+        ok = steps.setFormat(held.format);
+        if (ok) now = steps.read();
+    }
+    if (ok) {
+        // The one that moves out of the other's way goes first.
+        if (held.minimum.seconds() > now.maximum.seconds()) ok = steps.setMaximum(held.maximum) && steps.setMinimum(held.minimum);
+        else ok = steps.setMinimum(held.minimum) && steps.setMaximum(held.maximum);
+    }
+    // Shortening the maximum shortened a longer custom exposure with it.
+    if (ok && held.exposure.custom && steps.read().exposure != held.exposure)
+        ok = steps.setCustomExposure(held.exposure.duration, held.exposure.iso);
+    steps.unlock();
+    return ok;
+}
+
 Resizing resizeStream(const ResizeSteps& steps)
 {
     steps.begin();
-    if (steps.setDurations && steps.snapshotDurations) steps.snapshotDurations();
+    if (steps.setDurations && steps.snapshotTiming) steps.snapshotTiming();
     if (steps.setDurations && !steps.setDurations()) {
-        if (steps.restoreDurations) steps.restoreDurations();
+        if (steps.restoreTiming) steps.restoreTiming();
         steps.commit();
         return Resizing::durationsRefused;
     }
     if (steps.setVideoSize && !steps.setVideoSize()) {
-        if (steps.setDurations && steps.restoreDurations) steps.restoreDurations();
+        if (steps.setDurations && steps.restoreTiming) steps.restoreTiming();
         steps.commit();
         return Resizing::sizeRefused;
     }
@@ -486,6 +508,7 @@ std::string_view refusalName(Refusal reason) noexcept
     case Refusal::stillNotMade: return "the anchor makes no such photo";
     case Refusal::rawUnavailable: return "no Bayer RAW format";
     case Refusal::raised: return "the platform raised";
+    case Refusal::notRestored: return "the device could not be put back as it was";
     }
     return "unknown";
 }

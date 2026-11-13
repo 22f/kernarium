@@ -459,45 +459,76 @@ std::uint32_t pressureCapOf(const RunningCamera& running)
     return running.watch ? running.watch->cap() : 0;
 }
 
-// What a device holds of its frame durations and the format they belong to, as
-// the device reports them: a long manual exposure lengthens the maximum beyond
-// what the rate asked for, so a refused change is undone with these, not with a
+// What a device holds of its format, frame durations and manual exposure, as the
+// device reports them (uml::platform::DeviceTiming): a long manual exposure
+// lengthens the maximum beyond what the rate asked for, and a shorter maximum
+// shortens the exposure, so a refused change is undone with these, not with a
 // duration recomputed from a rate.
-struct HeldDurations {
-    AVCaptureDeviceFormat* format {};
-    CMTime minimum {};
-    CMTime maximum {};
-};
-
-HeldDurations durationsHeldBy(AVCaptureDevice* device)
+CameraTime cameraTimeOf(CMTime time)
 {
-    return {device.activeFormat, device.activeVideoMinFrameDuration, device.activeVideoMaxFrameDuration};
+    return {time.value, time.timescale};
 }
 
-// Puts durations back on the device that held them. Another format's durations
-// are not this one's, so a device that has changed format keeps what it has.
-// The one that moves out of the other's way goes first, so the minimum never
-// exceeds the maximum.
-bool putBackDurations(AVCaptureDevice* device, const HeldDurations& held)
+CMTime cmTimeOf(CameraTime time)
 {
-    NSError* error = nil;
-    if (![device lockForConfiguration:&error]) return false;
-    bool ok = true;
-    @try {
-        if (device.activeFormat != held.format) {
-            ok = false;
-        } else if (CMTimeCompare(held.minimum, device.activeVideoMaxFrameDuration) > 0) {
-            device.activeVideoMaxFrameDuration = held.maximum;
-            device.activeVideoMinFrameDuration = held.minimum;
-        } else {
-            device.activeVideoMinFrameDuration = held.minimum;
-            device.activeVideoMaxFrameDuration = held.maximum;
+    return CMTimeMake(time.value, time.scale);
+}
+
+DeviceTiming timingOf(AVCaptureDevice* device)
+{
+    DeviceTiming timing;
+    const NSUInteger format = [device.formats indexOfObject:device.activeFormat];
+    timing.format = format == NSNotFound ? ~0u : std::uint32_t(format);
+    timing.minimum = cameraTimeOf(device.activeVideoMinFrameDuration);
+    timing.maximum = cameraTimeOf(device.activeVideoMaxFrameDuration);
+#if TARGET_OS_IOS
+    timing.exposure.custom = device.exposureMode == AVCaptureExposureModeCustom;
+    timing.exposure.duration = cameraTimeOf(device.exposureDuration);
+    timing.exposure.iso = device.ISO;
+#endif
+    return timing;
+}
+
+// The calls uml::platform::putBackTiming makes on a device.
+TimingSteps timingStepsOf(AVCaptureDevice* device)
+{
+    const auto guarded = [](const std::function<void()>& write) {
+        @try {
+            write();
+            return true;
+        } @catch (NSException*) {
+            return false;
         }
-    } @catch (NSException*) {
-        ok = false;
-    }
-    [device unlockForConfiguration];
-    return ok;
+    };
+    TimingSteps steps;
+    steps.lock = [device] {
+        NSError* error = nil;
+        return [device lockForConfiguration:&error] == YES;
+    };
+    steps.unlock = [device] { [device unlockForConfiguration]; };
+    steps.read = [device] { return timingOf(device); };
+    steps.setFormat = [device, guarded](std::uint32_t format) {
+        return format < device.formats.count && guarded([&] { device.activeFormat = device.formats[format]; });
+    };
+    // A duration the device did not report (a zero scale: an invalid time) is not written back.
+    steps.setMinimum = [device, guarded](CameraTime time) {
+        return time.scale <= 0 || guarded([&] { device.activeVideoMinFrameDuration = cmTimeOf(time); });
+    };
+    steps.setMaximum = [device, guarded](CameraTime time) {
+        return time.scale <= 0 || guarded([&] { device.activeVideoMaxFrameDuration = cmTimeOf(time); });
+    };
+    steps.setCustomExposure = [device, guarded](CameraTime duration, float iso) {
+#if TARGET_OS_IOS
+        return guarded([&] { [device setExposureModeCustomWithDuration:cmTimeOf(duration) ISO:iso completionHandler:nil]; });
+#else
+        (void)device;
+        (void)guarded;
+        (void)duration;
+        (void)iso;
+        return false;
+#endif
+    };
+    return steps;
 }
 
 // Puts a device in its anchor: the format only when it is not the active one
@@ -1079,6 +1110,16 @@ private:
         }
     }
 
+    // Puts a device's timing back as a refused change found it (putBackTiming); a
+    // device that would not be put back is logged, once, and is set again by the
+    // next join.
+    void restoreTiming(std::size_t camera, AVCaptureDevice* device, const std::optional<DeviceTiming>& held)
+    {
+        if (!held) return;
+        const bool ok = guarded(camera, [&] { return putBackTiming(*held, timingStepsOf(device)); });
+        if (!ok) refuse(camera, Refusal::notRestored);
+    }
+
     const Anchor* anchorOf(std::size_t camera) const
     {
         return camera < anchors_.size() ? anchors_[camera].get() : nullptr;
@@ -1129,7 +1170,7 @@ private:
             }
         }
         AVCaptureDeviceFormat* const activeBefore = entry.device.activeFormat;
-        std::optional<HeldDurations> held;
+        std::optional<DeviceTiming> held;
         AVCaptureVideoDataOutput* newVideo = nil;
         UMLCameraOutputDelegate* newDelegate = nil;
         AVCaptureConnection* newConnection = nil;
@@ -1143,10 +1184,8 @@ private:
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] { [session_ commitConfiguration]; };
         steps.addInput = [&] { return guarded(camera, [&] { return addInput(entry, running); }); };
-        steps.snapshotDurations = [&] { held = durationsHeldBy(entry.device); };
-        steps.restoreDurations = [&] {
-            if (held) (void)guarded(camera, [&] { return putBackDurations(entry.device, *held); });
-        };
+        steps.snapshotTiming = [&] { held = timingOf(entry.device); };
+        steps.restoreTiming = [&] { restoreTiming(camera, entry.device, held); };
         steps.activate = [&] { return guarded(camera, [&] { return activate(entry.device, *anchor, rate); }); };
         steps.addVideo = [&] {
             return guarded(camera, [&] {
@@ -1314,11 +1353,11 @@ private:
         }
         const bool rateChanges = frameRate != running.frameRate;
         const bool sizeChanges = width != running.width || height != running.height;
-        std::optional<HeldDurations> held;
+        std::optional<DeviceTiming> held;
         ResizeSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
         steps.commit = [&] { [session_ commitConfiguration]; };
-        steps.snapshotDurations = [&] { held = durationsHeldBy(entry.device); };
+        steps.snapshotTiming = [&] { held = timingOf(entry.device); };
         if (rateChanges)
             steps.setDurations = [&] {
                 return guarded(camera, [&] {
@@ -1333,9 +1372,7 @@ private:
                     return true;
                 });
             };
-        steps.restoreDurations = [&] {
-            if (held) (void)guarded(camera, [&] { return putBackDurations(entry.device, *held); });
-        };
+        steps.restoreTiming = [&] { restoreTiming(camera, entry.device, held); };
         const Resizing result = resizeStream(steps);
         if (result != Resizing::resized) {
             refuse(camera, result == Resizing::durationsRefused ? Refusal::raised : Refusal::outputRefused,
