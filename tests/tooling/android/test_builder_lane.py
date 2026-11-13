@@ -616,6 +616,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
     wifi_permanent, wifi_temporary = tool.WIFI_NO_INTERNET_THRESHOLDS
     statistics_apks = tool.STATISTICS_APKS
+    wifi_tracker_apks = tool.WIFI_TRACKER_APKS
     # The Setup Wizard overlay's artwork, as the build would carry it: the raw animation unchanged and
     # the compiled vector holding its path data as strings.
     wizard_art_root = verifier.parents[1] / "overlay/overlay/packages/apps/SetupWizard/app/src/main/res"
@@ -1107,6 +1108,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                           services_jar_variant: str | None = None,
                           input_flinger_variant: str | None = None,
                           network_stack_variant: str | None = None,
+                          wifi_tracker_variant: str | None = None,
                           ota_certificates: str | None = None,
                           signed: bool = False,
                           adbd_launch_unreadable: bool = False,
@@ -2272,6 +2274,19 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                     '<manifest version="1.0" type="device"/>\n',
                 )
                 def application_payload(apk: str) -> bytes:
+                    # Settings and SystemUI store their dex files uncompressed; the key that the p0033
+                    # WifiTrackerLib topic's predicate reads is in the bytes.
+                    if apk in wifi_tracker_apks:
+                        variant = "settings-no-marker" if "/Settings/" in apk else "systemui-no-marker"
+                        users = io.BytesIO()
+                        with zipfile.ZipFile(users, "w", zipfile.ZIP_STORED) as application:
+                            application.writestr("AndroidManifest.xml", release_manifest)
+                            application.writestr(
+                                "classes.dex",
+                                b"dex\n039\x00"
+                                + (b"" if wifi_tracker_variant == variant else b"networkProbesAttempted\x00"),
+                            )
+                        return users.getvalue()
                     # LineageParts and the Setup Wizard are real archives, so the check that
                     # LineageOS's statistics uploader is gone has members to search; the other
                     # applications stay the placeholder release archive.
@@ -2996,7 +3011,7 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                            else b"      PointerCaptureLed: %s\n\x00"),
                     )
                 # NetworkStack's APK stores its dex file uncompressed; the p0029 NetworkMonitor topic's
-                # validation log line is in the bytes.
+                # validation log lines are in the bytes.
                 if network_stack_variant != "missing":
                     network_stack = io.BytesIO()
                     with zipfile.ZipFile(network_stack, "w", zipfile.ZIP_STORED) as apk:
@@ -3005,7 +3020,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             "classes.dex",
                             b"dex\n039\x00"
                             + (b"" if network_stack_variant == "no-marker"
-                               else b"Wi-Fi is validated without probes\x00"),
+                               else b"Wi-Fi is validated before its internet check\x00")
+                            + (b"" if network_stack_variant in ("no-marker", "no-check-marker")
+                               else b"Wi-Fi internet check failed, the network stays validated\x00"),
                         )
                     archive.writestr("SYSTEM/priv-app/NetworkStack/NetworkStack.apk", network_stack.getvalue())
                 # The OTA certificates, the system's and the recovery's: an unsigned build of either variant holds
@@ -3577,6 +3594,9 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("input-flinger-without-the-pointer-capture-led", {"input_flinger_variant": "no-marker"}),
             ("missing-input-flinger", {"input_flinger_variant": "missing"}),
             ("network-stack-without-the-wifi-topic", {"network_stack_variant": "no-marker"}),
+            ("network-stack-without-the-wifi-check-report", {"network_stack_variant": "no-check-marker"}),
+            ("settings-without-the-wifi-tracker-topic", {"wifi_tracker_variant": "settings-no-marker"}),
+            ("system-ui-without-the-wifi-tracker-topic", {"wifi_tracker_variant": "systemui-no-marker"}),
             ("signed-with-the-test-key", {"signed": True, "ota_certificates": "build"}),
             ("signed-with-the-test-key-path", {"signed": True, "ota_certificates": "test-key-path"}),
             ("signed-with-an-extra-certificate", {"signed": True, "ota_certificates": "extra"}),
@@ -4324,6 +4344,12 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "SYSTEM/lib64/libinputflinger.so is missing"),
             ("network-stack-without-the-wifi-topic-cause", {"network_stack_variant": "no-marker"},
              "lacks the NetworkMonitor topic of route p0029"),
+            ("network-stack-without-the-wifi-check-report-cause", {"network_stack_variant": "no-check-marker"},
+             "'Wi-Fi internet check failed, the network stays validated' is not in its dex files"),
+            ("settings-without-the-wifi-tracker-topic-cause", {"wifi_tracker_variant": "settings-no-marker"},
+             "SYSTEM_EXT/priv-app/Settings/Settings.apk lacks the WifiTrackerLib topic of route p0033"),
+            ("system-ui-without-the-wifi-tracker-topic-cause", {"wifi_tracker_variant": "systemui-no-marker"},
+             "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk lacks the WifiTrackerLib topic of route p0033"),
             ("missing-network-stack-cause", {"network_stack_variant": "missing"},
              "SYSTEM/priv-app/NetworkStack/NetworkStack.apk is missing"),
             ("adbd-cannot-read-launch-properties-cause", {"adbd_launch_unreadable": True},
@@ -7174,10 +7200,12 @@ NETWORK_STACK_PROJECT = "platform/packages/modules/NetworkStack"
 NETWORK_MONITOR_FILE = "src/com/android/server/connectivity/NetworkMonitor.java"
 
 
-def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
-    """What the p0029 patch lacks of the Wi-Fi exemption: it changes NetworkMonitor alone, it holds the
-    name the verifier looks for, it applies to the Wi-Fi transport and to nothing else, and it takes no
-    transition out of the evaluation."""
+def network_stack_topic_problems(patch: str, markers: list[str]) -> list[str]:
+    """What the p0029 patch lacks of the Wi-Fi check: it changes NetworkMonitor alone, it holds the
+    names the verifier looks for, it applies to the Wi-Fi transport and to nothing else (not to a
+    network under the test URLs that CTS sets), it posts the check after validation, it takes the
+    check's result apart from the portal states, it notes the HTTPS probe of a failed check, and it
+    takes no transition out of the evaluation."""
     problems = []
     touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
     if touched != [NETWORK_MONITOR_FILE]:
@@ -7188,15 +7216,42 @@ def network_stack_topic_problems(patch: str, marker: str) -> list[str]:
     removed = "\n".join(
         line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")
     )
-    if f'"{marker}"' not in added:
-        problems.append(f"it does not add the string {marker!r} that the verifier requires")
+    for marker in markers:
+        if f'"{marker}"' not in added:
+            problems.append(f"it does not add the string {marker!r} that the verifier requires")
     for needle, what in (
         ("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "apply to the Wi-Fi transport"),
         ("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "leave a test network alone"),
         ("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "leave a VPN alone"),
+        ("mTestCaptivePortalHttpsUrl == null", "leave a network under the HTTPS test URL alone"),
+        ("mTestCaptivePortalHttpUrl == null", "leave a network under the HTTP test URL alone"),
+        ("mTestCaptivePortalFallbackUrl == null", "leave a network under the fallback test URL alone"),
+        ("sendMessage(CMD_WIFI_CHECK)", "post the check once the network is validated"),
+        ("transitionTo(mProbingState)", "probe the network when a check is due"),
+        ("handleWifiCheckResult(probeResult)", "take a check's result apart from the portal states"),
+        ("noteProbeResult(NETWORK_VALIDATION_PROBE_HTTPS", "note the HTTPS probe of a failed check"),
+        ("&& !isWifiExemptFromValidation()", "keep a Terms and Conditions page from entering the portal state"),
+        ("&& isValidationRequiredByStockRules();", "leave a network that the stock rules do not validate alone"),
+        ("isWifiExemptFromValidation() && getCurrentState() == mValidatedState",
+         "force a check only on a network that is in the validated state"),
+        ("// An evaluation that reaches private DNS is not a check of a validated network.\n"
+         "            mWifiCheckDue = false;",
+         "drop the check that is due when an evaluation reaches private DNS"),
+        ("if (isWifiExemptFromValidation() && mWifiCheckDue) {\n"
+         "                        deferMessage(message);",
+         "defer a request to evaluate private DNS that reaches a check"),
+        ("sendMessageDelayed(CMD_WIFI_CHECK, delayMs)", "retry a failed check after a back-off"),
+        ("if (hasMessages(CMD_WIFI_CHECK)) return;", "keep the time of a check that is waiting"),
+        ('validationLog("Wi-Fi internet check failed, the network stays validated");\n'
+         "        }\n        transitionToPrivateDnsEvaluationSuccessState();",
+         "return from a completed check to the validated state without evaluating private DNS"),
+        ("privateDnsResults != 0);", "keep the last private DNS probe's result in the report of a check"),
     ):
         if needle not in added:
             problems.append(f"it does not {what}")
+    check_result = added.split("private void handleWifiCheckResult", 1)[-1].split("return !isWifiExemptFromValidation()", 1)[0]
+    if "mEvaluatingPrivateDnsState" in check_result:
+        problems.append("a completed check evaluates private DNS again")
     if "transitionTo" in removed:
         problems.append("it removes a transition of the evaluation")
     return problems
@@ -7239,10 +7294,10 @@ def verify_camerax_denylist_assertion(android_root: Path) -> None:
 
 
 def verify_network_stack_topic(android_root: Path) -> None:
-    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi exemption.
+    """The routed NetworkMonitor topic and the verifier agree on the Wi-Fi check.
 
     The target-files fixtures prove what the verifier rejects; this proves that the topic puts in the
-    APK the name the verifier looks for, and that its exemption reaches a Wi-Fi network and no other."""
+    APK the names the verifier looks for, and that its check reaches a Wi-Fi network and no other."""
     verifier = load_tool(android_root / "tools/verify-target-files.py")
     rows = [
         line.split("\t")
@@ -7256,27 +7311,178 @@ def verify_network_stack_topic(android_root: Path) -> None:
     if len(patches) != 1:
         fail(f"p0029 has {len(patches)} patches, not one")
     patch = patches[0].read_text()
-    if len(verifier.NETWORK_STACK_MARKERS) != 1:
-        fail("the verifier no longer names exactly one NetworkMonitor marker")
-    marker = verifier.NETWORK_STACK_MARKERS[0].decode()
-    problems = network_stack_topic_problems(patch, marker)
+    markers = [marker.decode() for marker in verifier.NETWORK_STACK_MARKERS]
+    if len(markers) != 2:
+        fail("the verifier no longer names exactly two NetworkMonitor markers")
+    problems = network_stack_topic_problems(patch, markers)
     if problems:
         fail("the NetworkMonitor topic: " + "; ".join(problems))
-    for label, edited in (
-        ("a topic without the verifier's string", patch.replace(marker, "Wi-Fi is checked")),
+    mutations = [
+        (f"a topic without the verifier's string {marker!r}", patch.replace(marker, "Wi-Fi is checked"))
+        for marker in markers
+    ]
+    mutations += [
         ("a topic that skips every transport",
          patch.replace("hasTransport(NetworkCapabilities.TRANSPORT_WIFI)", "hasTransport(0)")),
         ("a topic that exempts test networks",
          patch.replace("!mNetworkCapabilities.hasTransport(TRANSPORT_TEST)", "true")),
         ("a topic that exempts a VPN",
          patch.replace("hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)", "isEmpty()")),
+        ("a topic that exempts a network under the HTTPS test URL",
+         patch.replace("mTestCaptivePortalHttpsUrl == null", "true")),
+        ("a topic that exempts a network under the HTTP test URL",
+         patch.replace("mTestCaptivePortalHttpUrl == null", "true")),
+        ("a topic that exempts a network under the fallback test URL",
+         patch.replace("mTestCaptivePortalFallbackUrl == null", "true")),
+        ("a topic that never posts the check", patch.replace("sendMessage(CMD_WIFI_CHECK)", "sendMessage(0)")),
+        ("a topic that never probes for a check", patch.replace("transitionTo(mProbingState)", "")),
+        ("a topic that gives the check's result the portal states",
+         patch.replace("handleWifiCheckResult(probeResult)", "probeResult.isPortal()")),
+        ("a topic that leaves a failed check's HTTPS probe unnoted",
+         patch.replace("noteProbeResult(NETWORK_VALIDATION_PROBE_HTTPS",
+                       "noteProbeResult(NETWORK_VALIDATION_PROBE_HTTP")),
+        ("a topic that lets a Terms and Conditions page enter the portal state",
+         patch.replace("&& !isWifiExemptFromValidation()", "")),
+        ("a topic that exempts a network that the stock rules do not validate",
+         patch.replace("&& isValidationRequiredByStockRules();", ";")),
+        ("a topic that checks when an evaluation is forced, in any state",
+         patch.replace("isWifiExemptFromValidation() && getCurrentState() == mValidatedState",
+                       "isWifiExemptFromValidation()")),
+        ("a topic that checks when an evaluation is forced after the first validation, in any state",
+         patch.replace("getCurrentState() == mValidatedState", "mValidations > 0")),
+        ("a topic that checks when an evaluation is forced, with the state condition dropped",
+         patch.replace("isWifiExemptFromValidation() && getCurrentState() == mValidatedState",
+                       "isWifiExemptFromValidation() && true")),
+        ("a topic that keeps a check due when an evaluation reaches private DNS",
+         patch.replace("+            // An evaluation that reaches private DNS is not a check of a validated network.\n"
+                       "+            mWifiCheckDue = false;\n", "")),
+        ("a topic that drops the request to evaluate private DNS that reaches a check",
+         patch.replace("+                        deferMessage(message);\n+                        return HANDLED;\n",
+                       "+                        return HANDLED;\n")),
+        ("a topic that never retries a failed check",
+         patch.replace("sendMessageDelayed(CMD_WIFI_CHECK, delayMs)", "sendMessage(0, delayMs)")),
+        ("a topic that puts a waiting check off",
+         patch.replace("if (hasMessages(CMD_WIFI_CHECK)) return;", "removeMessages(CMD_WIFI_CHECK);")),
+        ("a topic that evaluates private DNS after every check",
+         patch.replace("+        transitionToPrivateDnsEvaluationSuccessState();",
+                       "+        transitionTo(mEvaluatingPrivateDnsState);")),
+        ("a topic that drops the private DNS probe's result from the report of a check",
+         patch.replace("privateDnsResults != 0", "false")),
         ("a topic that also changes another file",
          patch + "diff --git a/src/com/android/networkstack/util/NetworkStackUtils.java b/x\n"),
         ("a topic that removes a transition",
          patch + "-                            transitionTo(mEvaluatingPrivateDnsState);\n"),
-    ):
-        if not network_stack_topic_problems(edited, marker):
+    ]
+    for label, edited in mutations:
+        if not network_stack_topic_problems(edited, markers):
             fail(f"the NetworkMonitor topic check accepted {label}")
+
+
+WIFI_TRACKER_PROJECT = "platform/frameworks/opt/net/wifi"
+WIFI_TRACKER_FILES = [
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/Utils.java",
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiEntry.java",
+    "libs/WifiTrackerLib/src/com/android/wifitrackerlib/WifiPickerTracker.java",
+]
+# What the verifier looks for in Settings and SystemUI, and the constant of the connectivity report that
+# the topic reads, whose value it is (ConnectivityDiagnosticsManager.ConnectivityReport).
+WIFI_TRACKER_MARKER_CONSTANTS = {"networkProbesAttempted": "KEY_NETWORK_PROBES_ATTEMPTED_BITMASK"}
+
+
+def wifi_tracker_topic_problems(patch: str, markers: list[str]) -> list[str]:
+    """What the p0033 patch lacks of the warning: it changes the library's Utils, WifiEntry and
+    WifiPickerTracker alone, it reads the key that the verifier looks for, it reads a report that says
+    valid with the HTTPS probe attempted and not succeeded, leaves a network that is not validated,
+    partial or behind a sign-in page to the stock rules, the icon and the summary both take it, and the
+    picker tracker tells its listeners when a report moves the mark."""
+    problems = []
+    touched = re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
+    if touched != WIFI_TRACKER_FILES:
+        problems.append(f"it changes {touched}, not {WIFI_TRACKER_FILES}")
+    added = "\n".join(
+        line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")
+    )
+    for marker in markers:
+        constant = WIFI_TRACKER_MARKER_CONSTANTS.get(marker)
+        if constant is None or constant not in added:
+            problems.append(f"it does not read the key {marker!r} (by {constant}) that the verifier requires")
+    for needle, what in (
+        ("NET_CAPABILITY_VALIDATED", "require a validated network"),
+        ("NET_CAPABILITY_CAPTIVE_PORTAL", "leave a network behind a sign-in page to the stock rules"),
+        ("NET_CAPABILITY_PARTIAL_CONNECTIVITY", "leave a partial network to the stock rules"),
+        ("NETWORK_VALIDATION_RESULT_VALID", "require a report that says valid, not skipped"),
+        ("KEY_NETWORK_PROBES_ATTEMPTED_BITMASK", "read the probes the report says were attempted"),
+        ("KEY_NETWORK_PROBES_SUCCEEDED_BITMASK", "read the probes the report says succeeded"),
+        ("(attempted & NETWORK_PROBE_HTTPS) != 0 && (succeeded & NETWORK_PROBE_HTTPS) == 0",
+         "ask for the HTTPS probe attempted and not succeeded"),
+        ("|| isInternetCheckFailed() ||", "show the exclamation mark for a failed check"),
+        ("isPartialConnectivity || isInternetCheckFailed", "write the limited connection summary for a failed check"),
+        ("markChanged |= markShown != entry.shouldShowXLevelIcon();", "see whether a report moves the mark"),
+        ("if (markChanged) {\n            notifyOnWifiEntriesChanged(WIFI_ENTRIES_CHANGED_REASON_GENERAL);",
+         "tell the listeners of the tracker when a report moves the mark"),
+    ):
+        if needle not in added:
+            problems.append(f"it does not {what}")
+    return problems
+
+
+def verify_wifi_tracker_topic(android_root: Path) -> None:
+    """The routed WifiTrackerLib topic and the verifier agree on the warning for a failed check.
+
+    The target-files fixtures prove what the verifier rejects; this proves that the topic puts in
+    Settings and SystemUI the name the verifier looks for, and that the predicate holds for the
+    report a failed check leaves and for no other."""
+    verifier = load_tool(android_root / "tools/verify-target-files.py")
+    rows = [
+        line.split("\t")
+        for line in (android_root / "patches/projects.tsv").read_text().splitlines()
+        if line and not line.startswith("#")
+    ][1:]
+    routes = [row for row in rows if row[3] == WIFI_TRACKER_PROJECT]
+    if [(row[1], row[4]) for row in routes] != [("p0033", "frameworks/opt/net/wifi")]:
+        fail("the route table does not route frameworks/opt/net/wifi once, as p0033")
+    patches = sorted((android_root / "patches/projects/p0033/series").glob("*.patch"))
+    if len(patches) != 1:
+        fail(f"p0033 has {len(patches)} patches, not one")
+    patch = patches[0].read_text()
+    markers = [marker.decode() for marker in verifier.WIFI_TRACKER_MARKERS]
+    if markers != ["networkProbesAttempted"]:
+        fail("the verifier no longer looks for the key the WifiTrackerLib predicate reads")
+    if tuple(verifier.WIFI_TRACKER_APKS) != (
+        "SYSTEM_EXT/priv-app/Settings/Settings.apk",
+        "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
+    ):
+        fail("the verifier no longer checks Settings and SystemUI for the WifiTrackerLib topic")
+    problems = wifi_tracker_topic_problems(patch, markers)
+    if problems:
+        fail("the WifiTrackerLib topic: " + "; ".join(problems))
+    for label, edited in (
+        ("a topic that reads no key the verifier looks for",
+         patch.replace("KEY_NETWORK_PROBES_ATTEMPTED_BITMASK", "KEY_NETWORK_PROBES_SUCCEEDED_BITMASK")),
+        ("a topic that shows an unvalidated network",
+         patch.replace("NET_CAPABILITY_VALIDATED", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a sign-in network",
+         patch.replace("NET_CAPABILITY_CAPTIVE_PORTAL", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a partial network",
+         patch.replace("NET_CAPABILITY_PARTIAL_CONNECTIVITY", "NET_CAPABILITY_INTERNET")),
+        ("a topic that shows a skipped report",
+         patch.replace("NETWORK_VALIDATION_RESULT_VALID", "NETWORK_VALIDATION_RESULT_SKIPPED")),
+        ("a topic that ignores the attempted probes",
+         patch.replace("(attempted & NETWORK_PROBE_HTTPS) != 0 &&", "")),
+        ("a topic that shows a network whose HTTPS probe succeeded",
+         patch.replace("(succeeded & NETWORK_PROBE_HTTPS) == 0", "(succeeded & NETWORK_PROBE_HTTPS) != 0")),
+        ("a topic whose icon ignores the check", patch.replace("|| isInternetCheckFailed() ||", "||")),
+        ("a topic whose summary ignores the check",
+         patch.replace("isPartialConnectivity || isInternetCheckFailed", "isPartialConnectivity")),
+        ("a topic whose tracker never tells its listeners",
+         patch.replace("if (markChanged) {", "if (false) {")),
+        ("a topic whose tracker does not see the mark move",
+         patch.replace("markShown != entry.shouldShowXLevelIcon()", "false")),
+        ("a topic that also changes another file",
+         patch + "diff --git a/libs/WifiTrackerLib/src/com/android/wifitrackerlib/SavedNetworkTracker.java b/x\n"),
+    ):
+        if not wifi_tracker_topic_problems(edited, markers):
+            fail(f"the WifiTrackerLib topic check accepted {label}")
 
 
 def verify_media_codecs_overlay(android_root: Path) -> None:
@@ -8680,6 +8886,7 @@ def main() -> None:
     verify_overlay_sepolicy(android_root)
     verify_lmkd_gpu_reclaim(android_root)
     verify_network_stack_topic(android_root)
+    verify_wifi_tracker_topic(android_root)
     verify_camerax_denylist_assertion(android_root)
     verify_media_codecs_overlay(android_root)
     verify_package_assertions(android_root)

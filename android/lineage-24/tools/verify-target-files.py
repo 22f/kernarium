@@ -2676,12 +2676,18 @@ def check_services_jar(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInf
         fail(f"cannot inspect {SERVICES_JAR}: {problem}")
 
 
-# The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi without probes, so a blocked
-# validation server cannot leave the guest's one network unvalidated. NetworkStack is a priv-app of
-# the system partition, and its APK stores the dex file uncompressed, so the topic's validation log
-# line is in the bytes. A build without it would probe through the virtual Wi-Fi.
+# The p0029 topic makes NetworkMonitor validate the virtual Wi-Fi before it checks it, so a blocked
+# validation server cannot leave the guest's one network unvalidated, and report a check that failed,
+# or that a sign-in or block page answered, only as the HTTPS probe attempted and not succeeded.
+# NetworkStack is a priv-app of the system partition, and its APK stores the dex file uncompressed,
+# so the topic's validation log lines are in the bytes. A build without them would probe the virtual
+# Wi-Fi as a network that has to pass its probes (the first line) or leave a failed check unreported
+# (the second).
 NETWORK_STACK_APK = "SYSTEM/priv-app/NetworkStack/NetworkStack.apk"
-NETWORK_STACK_MARKERS = (b"Wi-Fi is validated without probes",)
+NETWORK_STACK_MARKERS = (
+    b"Wi-Fi is validated before its internet check",
+    b"Wi-Fi internet check failed, the network stays validated",
+)
 NETWORK_STACK_LIMIT = 16 << 20
 
 
@@ -2700,11 +2706,49 @@ def check_network_stack(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipIn
                 if not any(marker in apk.read(name) for name in dex):
                     fail(
                         f"{NETWORK_STACK_APK} lacks the NetworkMonitor topic of route p0029 "
-                        f"({marker.decode()!r} is not in its dex files): the guest's Wi-Fi would be "
-                        "probed and could stay unvalidated"
+                        f"({marker.decode()!r} is not in its dex files): the guest's Wi-Fi would not "
+                        "be validated before its check, or a failed check would not be reported"
                     )
     except (OSError, zipfile.BadZipFile) as problem:
         fail(f"cannot inspect {NETWORK_STACK_APK}: {problem}")
+
+
+# The p0033 topic makes WifiTrackerLib show a failed check of a validated network: the Wi-Fi mark in
+# the status bar and in the Wi-Fi list. Settings and SystemUI link the library statically and store
+# their dex files uncompressed. The optimizer inlines a small method away, so the check looks for the
+# key of the connectivity report that the topic's predicate reads (the bitmask of the probes
+# attempted): a string constant of the live code, which no other code of either application holds.
+# A build without the topic would show nothing for a network whose check failed.
+WIFI_TRACKER_APKS = (
+    "SYSTEM_EXT/priv-app/Settings/Settings.apk",
+    "SYSTEM_EXT/priv-app/SystemUI/SystemUI.apk",
+)
+WIFI_TRACKER_MARKERS = (b"networkProbesAttempted",)
+WIFI_TRACKER_LIMIT = 192 << 20
+
+
+def check_wifi_tracker_users(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    for apk_path in WIFI_TRACKER_APKS:
+        info = infos.get(apk_path)
+        if info is None:
+            fail(f"{apk_path} is missing")
+        try:
+            with zipfile.ZipFile(io.BytesIO(read_small(archive, info, WIFI_TRACKER_LIMIT))) as apk:
+                dex = [
+                    name for name in apk.namelist() if re.fullmatch(r"classes[0-9]*\.dex", name)
+                ]
+                if not dex:
+                    fail(f"{apk_path} holds no dex file")
+                contents = [apk.read(name) for name in dex]
+                for marker in WIFI_TRACKER_MARKERS:
+                    if not any(marker in content for content in contents):
+                        fail(
+                            f"{apk_path} lacks the WifiTrackerLib topic of route p0033 "
+                            f"({marker.decode()!r} is not in its dex files): a Wi-Fi network whose "
+                            "internet check failed would show no warning"
+                        )
+        except (OSError, zipfile.BadZipFile) as problem:
+            fail(f"cannot inspect {apk_path}: {problem}")
 
 
 def check_ota_certificates(
@@ -5496,6 +5540,7 @@ def main() -> None:
         check_services_jar(archive, infos)
         check_input_flinger(archive, infos)
         check_network_stack(archive, infos)
+        check_wifi_tracker_users(archive, infos)
         check_audio_policy(archive, infos)
         check_multilib_properties(archive, infos)
         check_video_encoders(archive, infos)
