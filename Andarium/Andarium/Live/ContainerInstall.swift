@@ -204,16 +204,17 @@ nonisolated enum ContainerInstallOperation {
     }
 
     /// Sends `install-commit` and returns what the package manager printed.
-    /// The session is the trail's to abandon until the command goes out; from
-    /// the open below it is the package manager's, committed or being
-    /// committed, and an abandon could only undo an install in progress or
-    /// meet a session that is gone. A command that may or may not have gone
-    /// out (the open failed) therefore leaves the session alone: it is reported
-    /// as the failure it is and left to Android, which discards a session
-    /// whose caller has gone.
+    /// The session is the trail's to abandon until the command has been written
+    /// to the connection: a session nobody commits or abandons stays in the
+    /// package manager, even when its caller is gone, so an install that stops
+    /// before the command went out must still remove it. From the moment the
+    /// command is written the session is the package manager's, committed or
+    /// being committed, and an abandon could only undo an install in progress
+    /// or meet a session that is gone. A command that was written and whose
+    /// answer was lost therefore leaves the session alone: it is reported as
+    /// the failure it is.
     private static func commit(_ id: String, on connection: AdbConnection, trail: ApkInstallTrail) throws -> String {
-        trail.openSession = nil
-        return try runService(PackageInstallCommand.commitSession(id), on: connection)
+        try runService(PackageInstallCommand.commitSession(id), on: connection, sent: { trail.openSession = nil })
     }
 
     // MARK: The data
@@ -304,8 +305,8 @@ nonisolated enum ContainerInstallOperation {
     }
 
     /// Runs a service that prints a short answer and returns what it printed.
-    private static func runService(_ service: String, on connection: AdbConnection) throws -> String {
-        let stream = try connection.open(service)
+    private static func runService(_ service: String, on connection: AdbConnection, sent: (() -> Void)? = nil) throws -> String {
+        let stream = try connection.open(service, sent: sent)
         return String(decoding: try stream.readToEnd(limit: 64 * 1024), as: UTF8.self)
     }
 

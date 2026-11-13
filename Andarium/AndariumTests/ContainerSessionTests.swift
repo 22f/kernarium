@@ -191,6 +191,33 @@ struct ContainerSessionTests {
         #expect(adbd.abandonedSessions.count == 1)
     }
 
+    @Test func aCancelAsTheCommitIsAboutToBeWrittenLeavesTheSessionToBeAbandoned() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        let url = try ContainerFixture.write([ContainerEntry("base.apk", bytes(1)), ContainerEntry("split_config.xxhdpi.apk", bytes(2))], name: "Parts.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let box = TaskBox()
+        // The Cancel lands as the commit's request reaches the connection, after the install's own last look
+        // for one and before a byte of the request is written: the package manager is never told to commit.
+        let connector = InterceptingAdbConnector(base: adbd) { request in
+            if request.contains("install-commit") { box.cancel() }
+        }
+        let operations = AdbGuestOperations(
+            identity: try throwawayIdentity(), clock: GuestRunClock(), device: "iPad", connector: connector,
+            hostFree: { .max }, run: GuestRunMark.random())
+        let task = Task { try await operations.installApk(at: url, update: { _ in }) }
+        box.task = task
+        let result = await task.result
+        guard case let .failure(error) = result, error is CancellationError else {
+            Issue.record("expected the cancel, got \(result)")
+            return
+        }
+        #expect(adbd.committedSessions.isEmpty)
+        // The session is the install's to remove: it was abandoned, once, and none is left in the package manager.
+        #expect(adbd.abandonedSessions.count == 1)
+        #expect(adbd.openSessions.isEmpty)
+    }
+
     @Test func aCancelBeforeTheFileIsReadEndsThereWithNothingOpened() async throws {
         let adbd = DiscardingAdbd()
         defer { adbd.shutdown() }
@@ -423,4 +450,35 @@ struct ContainerSessionTests {
         for name in ["a.apk", "a.apks", "a.xapk", "a.apkm", "A.APKM"] { #expect(GuestFileKind(name: name) == .app, "\(name)") }
         #expect(GuestFileKind(name: "a.zip") == .archive && GuestFileKind(name: "a.aab") == .other)
     }
+}
+
+/// Reaches the fake adbd as it does and tells `onRequest` the text of each message the client writes, as it
+/// reaches the transport and before any of it is written.
+private nonisolated struct InterceptingAdbConnector: AdbConnector {
+    let base: DiscardingAdbd
+    let onRequest: @Sendable (String) -> Void
+
+    func connect() throws -> any AdbTransport {
+        InterceptingAdbTransport(base: try base.connect(), onRequest: onRequest)
+    }
+}
+
+private nonisolated final class InterceptingAdbTransport: AdbTransport, @unchecked Sendable {
+    private let base: any AdbTransport
+    private let onRequest: @Sendable (String) -> Void
+
+    init(base: any AdbTransport, onRequest: @escaping @Sendable (String) -> Void) {
+        self.base = base
+        self.onRequest = onRequest
+    }
+
+    func readExactly(_ count: Int) throws -> Data { try base.readExactly(count) }
+
+    func writeAll(_ data: Data) throws {
+        // An open request: the header's binary bytes in front of the service string.
+        if data.count < 4096 { onRequest(String(decoding: data, as: UTF8.self)) }
+        try base.writeAll(data)
+    }
+
+    func shutdown() { base.shutdown() }
 }
