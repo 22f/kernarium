@@ -2644,6 +2644,8 @@ def check_payload_regular_file(payload: bytes, path: str, apex_name: str, what: 
 # without it would forget the user's choice at every boot and stop the host's channel.
 # The display topic of the same route lets a display without a refresh rate throttling map use the
 # default configuration's; without it the thermal HAL's SEVERE status holds no frame rate back.
+# The SystemConfig topic reads the compass feature's directory when the launch says the host has a
+# magnetometer; without it a host that has one would run an image with a sensor and no feature.
 SERVICES_JAR = "SYSTEM/framework/services.jar"
 SERVICES_JAR_MARKERS = (
     (b"kernarium: USB debugging is now ", "the AdbService topics"),
@@ -2651,6 +2653,11 @@ SERVICES_JAR_MARKERS = (
         b"RefreshRateThrottling: using the map of the default configuration",
         "the display topic that reads the default configuration's refresh rate throttling map",
     ),
+    (
+        b"ro.boot.kernarium.compass",
+        "the SystemConfig topic that reads the compass feature for a host with a magnetometer",
+    ),
+    (b"kernarium_compass", "the directory that SystemConfig topic reads"),
 )
 SERVICES_JAR_LIMIT = 48 << 20
 
@@ -2887,6 +2894,20 @@ MOTION_SUB_HAL_LIMIT = 16 << 20
 # set it would list the sensor for a host that does not feed it, and the window manager would follow a
 # sensor that nothing drives.
 MOTION_ORIENTATION_PROPERTY = "ro.boot.kernarium.orientation"
+# The same sub-HAL lists a magnetometer when the launch passes androidboot.kernarium.compass=1, which the
+# guest reads as ro.boot.kernarium.compass; its log line names the property and the sensor's name is in
+# the bytes. The compass feature is declared for that launch alone: the file below is read by SystemConfig
+# (the p0007 topic) only when the property is true, and nothing else may declare the feature, since a host
+# without a magnetometer would then claim a compass no application can use. The directory holds that file
+# alone for the same reason, and no build.prop sets the property, as for the orientation sensor.
+MOTION_SUB_HAL_COMPASS_MARKERS = (
+    (b"ro.boot.kernarium.compass=", "the property that decides whether it lists the magnetometer"),
+    (b"Host Magnetometer", "the magnetometer"),
+)
+MOTION_COMPASS_PROPERTY = "ro.boot.kernarium.compass"
+COMPASS_FEATURE = "android.hardware.sensor.compass"
+COMPASS_PERMISSION_DIRECTORY = "VENDOR/etc/permissions/kernarium_compass"
+COMPASS_FEATURE_FILE = f"{COMPASS_PERMISSION_DIRECTORY}/{COMPASS_FEATURE}.xml"
 
 
 def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
@@ -2915,11 +2936,151 @@ def check_motion_sensors(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipI
     if elf_type != ET_DYN or machine != android_image.EM_AARCH64:
         fail(f"{MOTION_SUB_HAL} is not an AArch64 shared library")
     check_target_elf(info, prefix)
-    if MOTION_SUB_HAL_MARKER not in read_small(archive, info, MOTION_SUB_HAL_LIMIT):
+    library = read_small(archive, info, MOTION_SUB_HAL_LIMIT)
+    if MOTION_SUB_HAL_MARKER not in library:
         fail(
             f"{MOTION_SUB_HAL} lacks the device-orientation sensor ({MOTION_SUB_HAL_MARKER.decode()!r} "
             "is not in it): a launch that asks for the sensor would find none"
         )
+    for marker, what in MOTION_SUB_HAL_COMPASS_MARKERS:
+        if marker not in library:
+            fail(
+                f"{MOTION_SUB_HAL} lacks {what} ({marker.decode()!r} is not in it): "
+                "a launch that says the host has a magnetometer would find none"
+            )
+    check_compass_feature(archive, infos)
+
+
+def check_compass_feature(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The compass feature is one file in a directory of its own, which only a launch that says the
+    host has a magnetometer makes SystemConfig read."""
+    info = infos.get(COMPASS_FEATURE_FILE)
+    if info is None or info.is_dir():
+        fail(f"{COMPASS_FEATURE_FILE} is missing: a host with a magnetometer would have no compass feature")
+    try:
+        root = ET.fromstring(read_small(archive, info))
+    except ET.ParseError as error:
+        fail(f"cannot parse {COMPASS_FEATURE_FILE}: {error}")
+    features = [
+        element.attrib.get("name") for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "feature"
+    ]
+    if features != [COMPASS_FEATURE]:
+        fail(f"{COMPASS_FEATURE_FILE} declares {features}, not {COMPASS_FEATURE} alone")
+    # SystemConfig reads <permissions> files; the file is that root with the one feature and nothing that
+    # takes a feature away again.
+    if root.tag != "permissions":
+        fail(f"{COMPASS_FEATURE_FILE} has the root element <{root.tag}>, not <permissions>")
+    if any(element.tag.rsplit("}", 1)[-1] == "unavailable-feature" for element in root.iter()):
+        fail(f"{COMPASS_FEATURE_FILE} holds an unavailable-feature element: it declares the compass feature alone")
+    children = list(root)
+    if len(children) != 1 or children[0].tag != "feature" or set(children[0].attrib) != {"name"}:
+        fail(f"{COMPASS_FEATURE_FILE} is not one <feature name=...> in <permissions>: {[c.tag for c in children]}")
+    for name in sorted(infos):
+        if name.startswith(f"{COMPASS_PERMISSION_DIRECTORY}/") and name != COMPASS_FEATURE_FILE:
+            fail(f"{name} is in {COMPASS_PERMISSION_DIRECTORY}, which holds the compass feature alone")
+        # SystemConfig reads etc/sysconfig of every partition with the flags that allow features, as it
+        # reads etc/permissions: a declaration there would be read for every launch.
+        path = PurePosixPath(name)
+        if infos[name].is_dir() or path.suffix != ".xml" or "sysconfig" not in path.parts:
+            continue
+        try:
+            other = ET.fromstring(read_small(archive, infos[name]))
+        except ET.ParseError:
+            continue
+        if any(
+            element.tag.rsplit("}", 1)[-1] == "feature" and element.attrib.get("name") == COMPASS_FEATURE
+            for element in other.iter()
+        ):
+            fail(
+                f"the compass feature is declared in the sysconfig file {name}: only a host with a "
+                f"magnetometer has a compass, and SystemConfig reads {COMPASS_PERMISSION_DIRECTORY} for "
+                "such a host alone"
+            )
+    check_motion_properties_in_init(archive, infos)
+
+
+def init_commands(text: str) -> list[list[str]]:
+    """The logical commands of an init script as init's tokenizer reads them: words split at blanks, double
+    quotes group (and are dropped), a backslash continues the line at a newline and escapes inside a word, and a
+    # that starts a word comments out the rest of the line. A newline outside a quote ends the command."""
+    commands: list[list[str]] = []
+    words: list[str] = []
+    word: list[str] = []
+    in_word = in_quote = False
+    index, length = 0, len(text)
+
+    def end_word() -> None:
+        nonlocal in_word
+        if in_word:
+            words.append("".join(word))
+            word.clear()
+        in_word = False
+
+    def end_command() -> None:
+        nonlocal in_quote
+        end_word()
+        in_quote = False
+        if words:
+            commands.append(list(words))
+        words.clear()
+
+    while index < length:
+        character = text[index]
+        if character == "\\":
+            following = text[index + 1] if index + 1 < length else ""
+            if following in ("\n", "\r"):
+                # A continued line: the newline and the blanks after it are not part of the command.
+                index += 2 if following == "\n" or text[index + 1:index + 3] != "\r\n" else 3
+                while index < length and text[index] in " \t":
+                    index += 1
+                if not in_quote:
+                    end_word()
+                continue
+            word.append({"n": "\n", "r": "\r", "t": "\t"}.get(following, following))
+            in_word = True
+            index += 2
+            continue
+        if in_quote:
+            if character == '"':
+                in_quote = False
+            elif character == "\n":
+                end_command()
+            else:
+                word.append(character)
+            index += 1
+            continue
+        if character == '"':
+            in_quote = in_word = True
+        elif character == "\n":
+            end_command()
+        elif character in " \t\r":
+            end_word()
+        elif character == "#" and not in_word:
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+        else:
+            word.append(character)
+            in_word = True
+        index += 1
+    end_command()
+    return commands
+
+
+def check_motion_properties_in_init(archive: zipfile.ZipFile, infos: dict[str, zipfile.ZipInfo]) -> None:
+    """The launch alone states what the host feeds: no init script of the image sets the properties the
+    sensors' list and the compass feature follow (build.prop is checked with every property file). A command
+    is read as init reads it, so a quoted word or a continued line is the command it is."""
+    for name in sorted(infos):
+        if infos[name].is_dir() or not name.endswith(".rc"):
+            continue
+        for command in init_commands(read_small(archive, infos[name]).decode("utf-8", errors="replace")):
+            if len(command) >= 2 and command[0] == "setprop" and command[1] in (
+                    MOTION_ORIENTATION_PROPERTY, MOTION_COMPASS_PROPERTY):
+                fail(
+                    f"{name} sets {command[1]}: the launch alone states whether the host feeds the "
+                    "device-orientation sensor and has a magnetometer"
+                )
 
 
 # The vibrator HAL exists only on a device with haptics. The host passes the "haptics" ODM SKU for
@@ -3637,6 +3798,12 @@ def check_hardware_features(
                 fail(
                     f"a camera feature is declared outside the camera layouts in {name}: {feature}; "
                     "the host's cameras decide it, through the permission directory of the layout"
+                )
+            if feature == COMPASS_FEATURE and name != COMPASS_FEATURE_FILE:
+                fail(
+                    f"the compass feature is declared outside {COMPASS_PERMISSION_DIRECTORY} in {name}: "
+                    "only a host with a magnetometer has a compass, and SystemConfig reads that directory "
+                    "for such a host alone"
                 )
             if feature == "android.software.vulkan.deqp.level":
                 fail(f"a Vulkan dEQP level is declared in {name}: the Vulkan lists are not qualified")
@@ -4836,6 +5003,11 @@ def check_property_file(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> None
             fail(
                 f"{info.filename} sets {key}={value}: the launch alone states whether the host feeds the "
                 "device-orientation sensor"
+            )
+        if key == MOTION_COMPASS_PROPERTY:
+            fail(
+                f"{info.filename} sets {key}={value}: the launch alone states whether the host has a "
+                "magnetometer, which lists the sensor and declares the compass feature"
             )
         if key == "persist.sys.usb.config":
             fail(

@@ -250,6 +250,43 @@ if(UML_ANDROID_ORIENTATION_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The magnetometer (android/lineage-24/overlay/sensors) and the compass feature:
+# the runner plays the host application over a vsock forward to the motion port
+# with the androidboot.kernarium.compass=1 argument, and a foreground client (the
+# motion probe, tests/integration/android/motion/build-apk.sh) registers a
+# listener for the field the runner sends for each mount. A second boot without
+# the argument checks that the image lists no sensor and declares no feature. It
+# boots Android with the macOS launcher, so it is opt-in: name the release under
+# test and the probe application's APK.
+set(UML_ANDROID_COMPASS_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-compass test boots")
+set(UML_ANDROID_COMPASS_PROBE_APK "" CACHE FILEPATH
+    "AndariumMotionProbe.apk built by tests/integration/android/motion/build-apk.sh")
+if(UML_ANDROID_COMPASS_RELEASE AND UML_ANDROID_COMPASS_PROBE_APK AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-compass
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_compass.py
+            --release ${UML_ANDROID_COMPASS_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --probe-apk ${UML_ANDROID_COMPASS_PROBE_APK}
+        LABELS guest;boot;android
+        TIMEOUT 2400
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+    uml_add_integration_test(
+        NAME android-compass-absent
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_compass.py
+            --release ${UML_ANDROID_COMPASS_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+            --expect none
+        LABELS guest;boot;android
+        TIMEOUT 1800
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The gamepad relay, a vendor daemon of the image's overlay
 # (android/lineage-24/overlay/gamepad): the runner plays the host application
 # over a vsock forward to the relay's port, creates a controller of each driver

@@ -167,10 +167,21 @@ manager follows the host's orientation as a rotation proposal that Android's own
 policy (auto-rotate, the foreground application's requested orientation) still
 decides on; the sub-HAL gives the framework the host's last orientation when it
 enables the sensor, and Android keeps its rotation until the host has said one.
-Without the argument the sub-HAL lists the accelerometer and the gyroscope alone
-and Android judges the accelerometer, as before. The host sends its current
+Without the argument the sub-HAL does not list the sensor and Android judges the
+accelerometer, as before. The host sends its current
 orientation at the start of each connection whose control frames say the guest
 has the sensor (`overlay/sensors/motion_protocol.hpp` has the frames).
+
+When the launch passes `androidboot.kernarium.compass=1` (a host with a
+magnetometer), the sub-HAL also lists a continuous `TYPE_MAGNETIC_FIELD` sensor
+(20 ms to 1 s) fed with the host's field in the device's frame, with the host's
+accuracy as the event's status, and says so in a 20-byte "ANC3" control frame;
+the framework declares `android.hardware.sensor.compass` from the same property
+(the `SystemConfig` topic of route p0007 reads the vendor's `kernarium_compass`
+permission directory only then). The property is supplied only by an application
+that speaks the 20-byte request, and forcing it for an older application is
+unsupported. Without the argument the image lists no magnetometer, declares no
+compass and ends the connection on a magnetic field record, as before.
 
 ### Haptics
 

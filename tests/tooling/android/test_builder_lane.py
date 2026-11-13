@@ -611,6 +611,20 @@ def verify_target_files_fixtures(verifier: Path) -> None:
     import camera_layouts
 
     tool = load_tool(verifier)
+    # Init's tokens: what the motion-property guard compares, and what it must not mistake for a command.
+    for text, commands in (
+        ('on boot\n    setprop ro.boot.kernarium.compass 1  # a host\n',
+         [["on", "boot"], ["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ('setprop "ro.boot.kernarium.compass" 1\n', [["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ('"setprop" ro.boot.kernarium.orientation 1\n', [["setprop", "ro.boot.kernarium.orientation", "1"]]),
+        ("setprop \\\n    ro.boot.kernarium.compass \\\n 1\n", [["setprop", "ro.boot.kernarium.compass", "1"]]),
+        ("# setprop ro.boot.kernarium.compass 1\n", []),
+        ('setprop persist.x "a b" #c\n', [["setprop", "persist.x", "a b"]]),
+        ('setprop "$marker" 1\n', [["setprop", "$marker", "1"]]),
+        ("setprop\r\n  ro.x 1\r\n", [["setprop"], ["ro.x", "1"]]),
+    ):
+        if tool.init_commands(text) != commands:
+            fail(f"init_commands({text!r}) is {tool.init_commands(text)}, not {commands}")
     pinner_overlay_entry = tool.PINNER_OVERLAY
     wifi_overlay_entry = tool.WIFI_OVERLAY
     wifi_never = tool.WIFI_NEVER_DISABLED_THRESHOLD
@@ -925,6 +939,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             "<name>android.hardware.vibrator</name><version>4</version>"
             "<fqname>IVibrator/default</fqname></hal></manifest>"
         )
+        # What the motion sub-HAL's bytes hold: the log line that names both properties (its prefix is the
+        # one the older runner reads) and the magnetometer's name.
+        good_motion_orientation_text = b"Andarium motion: ro.boot.kernarium.orientation=%d, %zu sensors"
+        good_motion_sub_hal_text = (
+            good_motion_orientation_text + b", ro.boot.kernarium.compass=%d\0Host Magnetometer\0")
         good_vibrator_rc = (
             "service vendor.vibrator-andarium /vendor/bin/hw/android.hardware.vibrator-service.andarium\n"
             "    interface aidl android.hardware.vibrator.IVibrator/default\n"
@@ -2614,7 +2633,10 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                         archive.writestr(f"{artifact}.vdex", b"vdex")
                 archive.writestr("VENDOR/bin/hw/android.hardware.sensors-service.multihal", synthetic_aarch64_elf())
                 archive.writestr("VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so",
-                                 synthetic_aarch64_elf() + b"Andarium motion: ro.boot.kernarium.orientation=%d\0")
+                                 synthetic_aarch64_elf() + good_motion_sub_hal_text)
+                # The compass feature, in the directory SystemConfig reads for a host with a magnetometer.
+                archive.writestr("VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml",
+                                 '<permissions><feature name="android.hardware.sensor.compass"/></permissions>')
                 archive.writestr("VENDOR/etc/sensors/hals.conf",
                                  "/vendor/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so\n")
                 archive.writestr("VENDOR/etc/init/android.hardware.sensors-service-multihal.rc",
@@ -2999,7 +3021,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
                             + (b"" if services_jar_variant == "no-marker"
                                else b"kernarium: USB debugging is now \x00")
                             + (b"" if services_jar_variant == "no-display-marker"
-                               else b"RefreshRateThrottling: using the map of the default configuration\x00"),
+                               else b"RefreshRateThrottling: using the map of the default configuration\x00")
+                            + (b"" if services_jar_variant == "no-compass-marker"
+                               else b"ro.boot.kernarium.compass\x00")
+                            + (b"" if services_jar_variant == "no-compass-directory-marker"
+                               else b"kernarium_compass\x00")
                         )
                     archive.writestr("SYSTEM/framework/services.jar", services_jar.getvalue())
                 # libinputflinger.so holds the p0022 pointer capture LED topic's dump line.
@@ -5510,12 +5536,11 @@ def verify_target_files_fixtures(verifier: Path) -> None:
              "lacks the device-orientation sensor"),
             # The marker counts only inside a library the image can load.
             ("motion-backend-marker-only", {"entries": {
-                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
-                    b"Andarium motion: ro.boot.kernarium.orientation=%d\0"}},
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so": good_motion_sub_hal_text}},
              "is not an ELF file"),
             ("motion-backend-32-bit", {"entries": {
                 "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
-                    synthetic_arm_elf() + b"Andarium motion: ro.boot.kernarium.orientation=%d\0"}},
+                    synthetic_arm_elf() + good_motion_sub_hal_text}},
              "32-bit ELF outside the 32-bit library and runtime paths"),
             ("motion-backend-corrupt", {
                 "corrupt_member": "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so"},
@@ -5524,6 +5549,98 @@ def verify_target_files_fixtures(verifier: Path) -> None:
             ("image-sets-the-orientation-property", {"entries": {
                 "SYSTEM_EXT/etc/build.prop": b"ro.boot.kernarium.orientation=1\n"}},
              "the launch alone states whether the host feeds the device-orientation sensor"),
+            # The magnetometer and the compass feature are the host's to state: the launch passes
+            # androidboot.kernarium.compass=1, and an image of the older kind lists neither.
+            ("motion-backend-without-compass", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
+                    synthetic_aarch64_elf() + good_motion_orientation_text + b"\0"}},
+             "lacks the property that decides whether it lists the magnetometer"),
+            ("motion-backend-without-magnetometer", {"entries": {
+                "VENDOR/lib64/hw/android.hardware.sensors@2.1-impl.andarium.so":
+                    synthetic_aarch64_elf() + good_motion_orientation_text + b", ro.boot.kernarium.compass=%d\0"}},
+             "lacks the magnetometer"),
+            ("image-sets-the-compass-property", {"entries": {
+                "SYSTEM_EXT/etc/build.prop": b"ro.boot.kernarium.compass=1\n"}},
+             "the launch alone states whether the host has a magnetometer"),
+            ("image-sets-the-compass-property-false", {"entries": {
+                "ODM/etc/build.prop": b"ro.boot.kernarium.compass=0\n"}},
+             "the launch alone states whether the host has a magnetometer"),
+            ("missing-compass-feature", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml": None}},
+             "android.hardware.sensor.compass.xml is missing: a host with a magnetometer would have no compass"),
+            ("compass-feature-declares-another", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/>'
+                    b'<feature name="android.hardware.sensor.barometer"/></permissions>'}},
+             "declares .* not android.hardware.sensor.compass alone"),
+            ("compass-feature-file-declares-nothing", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b"<permissions/>"}},
+             "declares \\[\\], not android.hardware.sensor.compass alone"),
+            ("compass-directory-holds-another-file", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/other.xml": b"<permissions/>"}},
+             "holds the compass feature alone"),
+            # Declared anywhere else, every launch would claim a compass, including a host with none.
+            ("compass-feature-in-the-vendor-permissions", {"entries": {
+                "VENDOR/etc/permissions/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            ("compass-feature-in-the-product-permissions", {"entries": {
+                "PRODUCT/etc/permissions/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            ("compass-feature-in-a-vendor-sku-directory", {"entries": {
+                "VENDOR/etc/permissions/sku_haptics/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared outside VENDOR/etc/permissions/kernarium_compass"),
+            # SystemConfig reads etc/sysconfig of every partition with the flags that allow features as well.
+            ("compass-feature-in-the-system-sysconfig", {"entries": {
+                "SYSTEM/etc/sysconfig/extra-compass.xml":
+                    b'<config><feature name="android.hardware.sensor.compass"/></config>'}},
+             "the compass feature is declared in the sysconfig file SYSTEM/etc/sysconfig/extra-compass.xml"),
+            ("compass-feature-in-the-vendor-sysconfig", {"entries": {
+                "VENDOR/etc/sysconfig/extra-compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/></permissions>'}},
+             "the compass feature is declared in the sysconfig file VENDOR/etc/sysconfig/extra-compass.xml"),
+            # The one file is the permissions root with the one feature, and nothing that takes a feature away.
+            ("compass-feature-file-with-another-root", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<config><feature name="android.hardware.sensor.compass"/></config>'}},
+             "has the root element <config>, not <permissions>"),
+            ("compass-feature-file-with-an-unavailable-feature", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass"/>'
+                    b'<unavailable-feature name="android.hardware.sensor.light"/></permissions>'}},
+             "holds an unavailable-feature element"),
+            ("compass-feature-with-another-attribute", {"entries": {
+                "VENDOR/etc/permissions/kernarium_compass/android.hardware.sensor.compass.xml":
+                    b'<permissions><feature name="android.hardware.sensor.compass" notLowRam="true"/></permissions>'}},
+             "is not one <feature name=...> in <permissions>"),
+            ("init-sets-the-compass-property", {"entries": {
+                "SYSTEM/etc/init/early-compass.rc":
+                    b"on early-init\n    setprop ro.boot.kernarium.compass 1  # a host with a magnetometer\n"}},
+             "early-compass.rc sets ro.boot.kernarium.compass"),
+            ("init-sets-the-orientation-property", {"entries": {
+                "SYSTEM/etc/init/early-orientation.rc":
+                    b"on early-init\n    setprop ro.boot.kernarium.orientation 1\n"}},
+             "early-orientation.rc sets ro.boot.kernarium.orientation"),
+            # Init reads a command by its tokens: a quoted word and a continued line are the command they are.
+            ("init-sets-the-quoted-compass-property", {"entries": {
+                "SYSTEM/etc/init/quoted-property.rc":
+                    b'on early-init\n    setprop "ro.boot.kernarium.compass" 1\n'}},
+             "quoted-property.rc sets ro.boot.kernarium.compass"),
+            ("init-quotes-setprop-itself", {"entries": {
+                "SYSTEM/etc/init/quoted-command.rc":
+                    b'on early-init\n    "setprop" ro.boot.kernarium.orientation 1\n'}},
+             "quoted-command.rc sets ro.boot.kernarium.orientation"),
+            ("init-continues-the-setprop-line", {"entries": {
+                "SYSTEM/etc/init/continued.rc":
+                    b"on early-init\n    setprop \\\n        ro.boot.kernarium.compass \\\n        1\n"}},
+             "continued.rc sets ro.boot.kernarium.compass"),
+            ("services-jar-without-the-compass-property", {"services_jar_variant": "no-compass-marker"},
+             "lacks the SystemConfig topic that reads the compass feature for a host with a magnetometer"),
+            ("services-jar-without-the-compass-directory", {"services_jar_variant": "no-compass-directory-marker"},
+             "lacks the directory that SystemConfig topic reads"),
             ("camera-aux-cameras-off", {"camera_variant": "aux-off"}, "must set config_enableAuxCameras to true"),
             ("camera-aux-cameras-missing", {"camera_variant": "aux-missing"},
              "must set config_enableAuxCameras to true"),
