@@ -171,9 +171,11 @@ enum {
  * own: the runtime keeps a random serial number and a random eth0 address in
  * identity.json beside the data disk, made at the first start of a data disk
  * (and of an installation that has none), and gives them to the guest. A
- * request that states either value gets that one value, the other stays what
- * the release and the user network have without an identity, and the file is
- * neither read nor written. The serial is 6 through 20 characters of A-Z a-z
+ * request that states either value gets that one value, and the file is
+ * neither read nor written. The other stays what the release and the user
+ * network have without an identity: a request that states only the address
+ * gets the release's own fallback serial number, and one that states only the
+ * serial number gets the user network's default eth0 address. The serial is 6 through 20 characters of A-Z a-z
  * 0-9 other than "unknown"; the address is the text aa:bb:cc:dd:ee:ff of a
  * unicast address that is locally administered and none of 02:00:00:00:00:00,
  * 52:54:00:12:34:56 or 02:15:b2:00:00:00. A value that is anything else fails

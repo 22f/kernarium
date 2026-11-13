@@ -126,6 +126,40 @@ bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;
 }
 
+bool photoMaximumNeedsFullResolution(CameraStillSize maximum) noexcept
+{
+    return std::uint64_t(maximum.width) * maximum.height > binnedSensorStillPixels;
+}
+
+std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, std::uint64_t now) noexcept
+{
+    return maximum && photoMaximumNeedsFullResolution(*maximum) ? now : 0;
+}
+
+std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t now) noexcept
+{
+    if (committedAt == 0) return 0;
+    const std::uint64_t elapsed = now > committedAt ? now - committedAt : 0;
+    return elapsed >= photoOutputSettleNanoseconds ? 0 : photoOutputSettleNanoseconds - elapsed;
+}
+
+ScheduledStill scheduledStillStep(bool sessionEnded, bool requestKnown, std::uint64_t committedAt, std::uint64_t now,
+                                  std::uint64_t waitedNanoseconds) noexcept
+{
+    if (sessionEnded || !requestKnown) return {ScheduledStillStep::drop, 0, waitedNanoseconds};
+    const std::uint64_t wait = stillSettleNanoseconds(committedAt, now);
+    if (wait == 0) return {ScheduledStillStep::fire, 0, waitedNanoseconds};
+    if (waitedNanoseconds >= stillWaitBudgetNanoseconds || wait > stillWaitBudgetNanoseconds - waitedNanoseconds)
+        return {ScheduledStillStep::fail, 0, waitedNanoseconds};
+    return {ScheduledStillStep::wait, wait, waitedNanoseconds + wait};
+}
+
+StillSizeOutcome stillSizeOutcome(CameraStillSize resolved, CameraStillSize requested, unsigned attempt) noexcept
+{
+    if (resolvedSizeIsRequested(resolved, requested)) return StillSizeOutcome::deliver;
+    return attempt < stillAttemptLimit ? StillSizeOutcome::retry : StillSizeOutcome::fail;
+}
+
 bool takeJpegFile(std::span<const std::uint8_t> file, std::uint64_t maximumBytes, bool wanted, std::vector<std::uint8_t>& out)
 {
     if (!wanted || (maximumBytes != 0 && file.size() > maximumBytes)) return false;

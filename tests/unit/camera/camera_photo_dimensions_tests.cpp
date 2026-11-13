@@ -88,6 +88,229 @@ void theResolvedSizeIsTheRequestOrItIsRefused()
     require(!resolvedSizeIsRequested({4032, 0}, {4032, 3024}), "half a size is a size that differs");
 }
 
+// The captures a still takes, as the backend runs them: one more for each
+// outcome of `retry`, and the last outcome is the capture's end. `served` is
+// the size each capture was made at, in order; the last one repeats.
+StillSizeOutcome runStill(const std::vector<CameraStillSize>& served, CameraStillSize requested, unsigned& captures)
+{
+    captures = 0;
+    for (;;) {
+        const CameraStillSize resolved = served[std::min<std::size_t>(captures, served.size() - 1)];
+        ++captures;
+        const StillSizeOutcome outcome = stillSizeOutcome(resolved, requested, captures);
+        if (outcome != StillSizeOutcome::retry) return outcome;
+    }
+}
+
+void aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails()
+{
+    constexpr CameraStillSize full {8064, 6048};
+    constexpr CameraStillSize served {4032, 3024};
+    require(stillSizeOutcome(full, full, 1) == StillSizeOutcome::deliver, "the size asked for is delivered at once");
+    require(stillSizeOutcome(full, full, stillAttemptLimit) == StillSizeOutcome::deliver, "and on the last attempt");
+    require(stillSizeOutcome(served, full, 1) == StillSizeOutcome::retry, "a photo served at the size from before is made again");
+    require(stillSizeOutcome(served, full, stillAttemptLimit) == StillSizeOutcome::fail, "and on the last attempt it fails");
+    require(stillSizeOutcome({0, 0}, full, 1) == StillSizeOutcome::deliver, "no size stated (a Bayer still alone) is not a different size");
+    require(stillSizeOutcome({8064, 0}, full, 1) == StillSizeOutcome::retry, "half a size differs");
+
+    unsigned captures = 0;
+    require(runStill({full}, full, captures) == StillSizeOutcome::deliver && captures == 1, "a pipeline that has the size: one capture");
+    // The first capture after the output's maximum was raised is served at the old size.
+    require(runStill({served, full}, full, captures) == StillSizeOutcome::deliver && captures == 2,
+            "a first capture at the old size: the second is the photo");
+    // A configuration that cannot make the size fails the capture after the attempts, never by waiting for it.
+    require(runStill({served}, full, captures) == StillSizeOutcome::fail && captures == stillAttemptLimit,
+            "a size that is never made fails after the attempt limit");
+    require(stillAttemptLimit >= 2, "one retry at least");
+}
+
+void aFullResolutionMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill()
+{
+    require(photoMaximumNeedsFullResolution({8064, 6048}), "48 MP needs the sensor's full-resolution mode");
+    require(photoMaximumNeedsFullResolution({5712, 4284}), "so does 24 MP");
+    require(!photoMaximumNeedsFullResolution({4032, 3024}), "the binned 12 MP is served from the first capture, as at the small tier");
+    require(!photoMaximumNeedsFullResolution({1920, 1440}), "so is a smaller one");
+    require(!photoMaximumNeedsFullResolution({0, 0}), "no size needs nothing");
+    // A product that does not overflow 32 bits.
+    require(photoMaximumNeedsFullResolution({65535, 65536}), "wide sizes compare in 64 bits");
+
+    constexpr std::uint64_t settle = photoOutputSettleNanoseconds;
+    constexpr std::uint64_t raisedAt = 5'000'000'000;
+    require(stillSettleNanoseconds(0, raisedAt) == 0, "a maximum that was not raised waits for nothing");
+    require(stillSettleNanoseconds(raisedAt, raisedAt) == settle, "a still at the commit waits the whole time");
+    require(stillSettleNanoseconds(raisedAt, raisedAt + settle / 3) == settle - settle / 3, "and the rest of it after a part");
+    require(stillSettleNanoseconds(raisedAt, raisedAt + settle) == 0, "none once it has passed");
+    require(stillSettleNanoseconds(raisedAt, raisedAt + 10 * settle) == 0, "nor long after");
+    require(stillSettleNanoseconds(raisedAt, raisedAt - 1) == settle, "a clock that reads before the commit waits the whole time");
+    require(settle > 0 && settle < 1'000'000'000, "a wait the guest does not notice as a stall");
+
+    // What a camera records at admission and at the repair of its anchor, by the same function.
+    require(photoMaximumCommittedAt(CameraStillSize {8064, 6048}, 7) == 7, "a full-resolution maximum is stamped with the time");
+    require(photoMaximumCommittedAt(CameraStillSize {4032, 3024}, 7) == 0, "the binned size records nothing to wait for");
+    require(photoMaximumCommittedAt(std::nullopt, 7) == 0, "a format that lists no size records none");
+    // A repair commits again: the stamp moves forward, and the wait with it.
+    const std::uint64_t admitted = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, raisedAt);
+    const std::uint64_t repaired = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, raisedAt + 5 * settle);
+    require(stillSettleNanoseconds(admitted, raisedAt + 5 * settle) == 0, "the admission's time has passed");
+    require(stillSettleNanoseconds(repaired, raisedAt + 5 * settle) == settle, "a still right after the repair waits the whole time again");
+}
+
+void aScheduledStillFiresWaitsFailsOrIsDropped()
+{
+    constexpr std::uint64_t committed = 5'000'000'000;
+    constexpr std::uint64_t settle = photoOutputSettleNanoseconds;
+    using Step = ScheduledStillStep;
+    auto step = [](bool ended, bool known, std::uint64_t committedAt, std::uint64_t now, std::uint64_t waited = 0) {
+        return scheduledStillStep(ended, known, committedAt, now, waited);
+    };
+    require(step(false, true, committed, committed + settle).step == Step::fire, "its time has come: it starts");
+    require(step(false, true, committed, committed + settle + 1).step == Step::fire, "and after");
+    const auto again = step(false, true, committed + 2 * settle, committed + settle);
+    require(again.step == Step::wait && again.waitNanoseconds == settle && again.waitedNanoseconds == settle,
+            "a commit since: it waits the rest of that, and counts it");
+    require(step(true, true, committed, committed + settle).step == Step::drop, "a stop inside the settle time drops it");
+    require(step(true, true, committed, committed).step == Step::drop, "also at once");
+    require(step(false, false, committed, committed + settle).step == Step::drop, "a request that is gone is not started");
+    require(step(true, false, committed, committed + settle).step == Step::drop, "nor when the session ended and it is gone");
+    require(step(false, true, 0, committed).step == Step::fire, "a camera with nothing to wait for starts it");
+    // What it has waited is kept by every step that waits no more, and by none that ends it differently.
+    for (const bool ended : {false, true}) {
+        const auto kept = step(ended, true, 0, committed, 123);
+        require(kept.waitedNanoseconds == 123 && kept.waitNanoseconds == 0, "a step that does not wait leaves what was waited");
+    }
+}
+
+// The chain of one scheduled still, as the backend runs it: the decision when the still is accepted, and one at the end
+// of each wait, until a step that is not a wait. `commits` are the times the session committed its configuration (a
+// photo output admitted, a stream started or resized, another camera's change), the first of them the admission; each
+// restarts the settle time. The session ends at `stopAt` (zero: never).
+struct ScheduledRun {
+    unsigned waits {}, fires {}, fails {}, drops {};
+    std::uint64_t endedAt {};
+    std::uint64_t waited {};
+    unsigned completions() const { return fires + fails; }
+};
+
+ScheduledRun runScheduled(std::uint64_t accepted, const std::vector<std::uint64_t>& commits, std::uint64_t stopAt,
+                          std::uint64_t waitedBefore = 0)
+{
+    constexpr std::uint64_t horizon = 100'000'000'000;  // a chain that has not ended by then does not end
+    ScheduledRun run;
+    run.waited = waitedBefore;
+    std::uint64_t now = accepted;
+    while (now <= accepted + horizon) {
+        std::uint64_t committedAt = 0;
+        for (const auto commit : commits)
+            if (commit <= now) committedAt = commit;
+        const auto decision = scheduledStillStep(stopAt != 0 && now >= stopAt, true, committedAt, now, run.waited);
+        run.waited = decision.waitedNanoseconds;
+        run.endedAt = now;
+        switch (decision.step) {
+        case ScheduledStillStep::fire:
+            ++run.fires;
+            return run;
+        case ScheduledStillStep::fail:
+            ++run.fails;
+            return run;
+        case ScheduledStillStep::drop:
+            ++run.drops;
+            return run;
+        case ScheduledStillStep::wait:
+            ++run.waits;
+            now += decision.waitNanoseconds;
+            break;
+        }
+    }
+    return run;
+}
+
+std::vector<std::uint64_t> commitsEvery(std::uint64_t first, std::uint64_t period, std::uint64_t until)
+{
+    std::vector<std::uint64_t> commits;
+    for (std::uint64_t time = first; time <= until; time += period) commits.push_back(time);
+    return commits;
+}
+
+void aStillThatKeepsBeingPostponedFailsOnceWithinItsBudget()
+{
+    constexpr std::uint64_t ms = 1'000'000, begin = 1'000 * ms;
+    // The device's capture timeout, which starts when the still is handed over: the wait ends before it, by far.
+    constexpr std::uint64_t deviceCaptureTimeout = 10'000 * ms;
+    static_assert(stillWaitBudgetNanoseconds * 4 < deviceCaptureTimeout);
+
+    // The ordinary case: the admission's commit and nothing since: one wait, then it starts.
+    auto run = runScheduled(begin, {begin}, 0);
+    require(run.waits == 1 && run.fires == 1 && run.fails == 0 && run.drops == 0, "a settled output starts the still after one wait");
+    require(run.endedAt == begin + photoOutputSettleNanoseconds && run.waited == photoOutputSettleNanoseconds, "after the settle time");
+
+    // A short chain of ordinary commits (a stream starts, is resized, another camera joins): it starts after the last.
+    run = runScheduled(begin, {begin, begin + 250 * ms, begin + 450 * ms, begin + 650 * ms}, 0);
+    require(run.fires == 1 && run.fails == 0 && run.completions() == 1, "a few commits only delay it");
+    require(run.endedAt == begin + 650 * ms + photoOutputSettleNanoseconds && run.waited <= stillWaitBudgetNanoseconds,
+            "it starts 300 ms after the last, within its budget");
+
+    // The reviewer's case: a stream's rate changes and commits every 200 ms, for as long as the still is pending (once
+    // that never ended: 204 deferrals over 41 simulated seconds).
+    for (const std::uint64_t period : {100 * ms, 200 * ms, 250 * ms, 299 * ms}) {
+        run = runScheduled(begin, commitsEvery(begin, period, begin + 20'000 * ms), 0);
+        require(run.fails == 1 && run.fires == 0 && run.drops == 0 && run.completions() == 1,
+                "commits that do not stop end in one failure, never a start");
+        require(run.waits >= 1, "it waited first");
+        require(run.waited <= stillWaitBudgetNanoseconds, "it waited no more than its budget");
+        require(run.endedAt - begin <= stillWaitBudgetNanoseconds, "and failed within it");
+        require(run.endedAt - begin < deviceCaptureTimeout / 4, "well before the device's capture timeout");
+    }
+
+    // Commits as often as the settle time never let it start, either.
+    run = runScheduled(begin, commitsEvery(begin, photoOutputSettleNanoseconds, begin + 20'000 * ms), 0);
+    require(run.fails == 1 && run.fires == 0 && run.endedAt - begin <= stillWaitBudgetNanoseconds, "also at the settle time's own period");
+
+    // The commits end in time: it starts, even late in its budget.
+    run = runScheduled(begin, commitsEvery(begin, 200 * ms, begin + 1'400 * ms), 0);
+    require(run.fires == 1 && run.fails == 0, "a chain that ends within the budget starts the still");
+    require(run.endedAt == begin + 1'400 * ms + photoOutputSettleNanoseconds, "300 ms after its last commit");
+}
+
+void aRetryHasWhatIsLeftOfTheWaitBudget()
+{
+    constexpr std::uint64_t ms = 1'000'000, begin = 1'000 * ms;
+    constexpr std::uint64_t budget = stillWaitBudgetNanoseconds;
+    // The first attempt waited 1.5 s, and the retry's own commit needs 300 ms: 1.8 s is within the budget.
+    auto run = runScheduled(begin, {begin}, 0, budget - 500 * ms);
+    require(run.fires == 1 && run.waited == budget - 200 * ms, "the retry waits what is left and starts");
+    // Only 200 ms are left and 300 ms are needed: the retry fails at once, without waiting at all.
+    run = runScheduled(begin, {begin}, 0, budget - 200 * ms);
+    require(run.fails == 1 && run.waits == 0 && run.fires == 0 && run.endedAt == begin, "a wait past the budget fails the still at once");
+    require(run.waited == budget - 200 * ms, "and counts nothing for the wait it did not make");
+    // The budget used up does not stop a retry that has nothing to wait for.
+    run = runScheduled(begin + 10 * photoOutputSettleNanoseconds, {begin}, 0, budget);
+    require(run.fires == 1 && run.waits == 0 && run.fails == 0, "a settled output starts the retry whatever it waited");
+    // Waits are counted across the attempts: a first attempt that waited 1.2 s and a retry that needs 1.2 s again do not
+    // fit in 2 s, though each of them would alone.
+    const auto first = runScheduled(begin, commitsEvery(begin, 100 * ms, begin + 900 * ms), 0);
+    require(first.fires == 1 && first.waited == 1'200 * ms, "the first attempt starts after its commits");
+    const auto commits = commitsEvery(begin + 5'000 * ms, 100 * ms, begin + 5'900 * ms);
+    require(runScheduled(begin + 5'000 * ms, commits, 0).fires == 1, "the same commits alone leave a still its start");
+    run = runScheduled(begin + 5'000 * ms, commits, 0, first.waited);
+    require(run.fails == 1 && run.fires == 0 && run.waited == 1'800 * ms && run.waited <= budget,
+            "with the first attempt's waits counted, the retry runs out of what is left");
+}
+
+void aStopDuringTheWaitDropsTheStillAndCompletesNothing()
+{
+    constexpr std::uint64_t ms = 1'000'000, begin = 1'000 * ms;
+    // The session ends while commits keep postponing the still: the next step drops it, and nothing more happens.
+    auto run = runScheduled(begin, commitsEvery(begin, 200 * ms, begin + 20'000 * ms), begin + 700 * ms);
+    require(run.drops == 1 && run.fires == 0 && run.fails == 0 && run.completions() == 0, "a stop drops it: no start, no failure");
+    require(run.endedAt >= begin + 700 * ms && run.endedAt - begin < stillWaitBudgetNanoseconds, "at the first step after the stop");
+    // A stop before the first step.
+    run = runScheduled(begin, {begin}, begin);
+    require(run.drops == 1 && run.waits == 0 && run.completions() == 0, "also at once");
+    // A stop after the budget has run out is no longer a stop of a pending still: it was failed once, before.
+    run = runScheduled(begin, commitsEvery(begin, 200 * ms, begin + 20'000 * ms), begin + 30'000 * ms);
+    require(run.fails == 1 && run.drops == 0 && run.completions() == 1, "a late stop finds the still already failed");
+}
+
 // A photo output as AVFoundation treats it: its maximum is refused (it raises)
 // unless the output is attached to the session with a source whose active
 // format lists the size.
@@ -254,6 +477,12 @@ int main()
     anEmptyOrZeroSizedTableAsksForNothing();
     aCaptureWithoutAJpegTakesTheSmallestSize();
     theResolvedSizeIsTheRequestOrItIsRefused();
+    aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails();
+    aFullResolutionMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill();
+    aScheduledStillFiresWaitsFailsOrIsDropped();
+    aStillThatKeepsBeingPostponedFailsOnceWithinItsBudget();
+    aRetryHasWhatIsLeftOfTheWaitBudget();
+    aStopDuringTheWaitDropsTheStillAndCompletesNothing();
     theOutputIsAttachedBeforeItsMaximumIsSet();
     aMaximumTheSourceRefusesDetachesTheOutput();
     anOutputThatCannotBeAttachedGetsNoMaximum();

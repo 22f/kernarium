@@ -181,8 +181,11 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable, and `gpu-device-suspend-held-fence` the Virtio-GPU device's fenced
-command across one, on a renderer the test controls. A driver path that only a
+disable, `vhost-user-backend-wait` the budget of the wait for a backend
+request's acknowledgement and the end of the main socket during it, in time the
+test moves, and
+`gpu-device-suspend-held-fence` the Virtio-GPU device's fenced command across
+one, on a renderer the test controls. A driver path that only a
 misbehaving device reaches, such as a device that was reset during a suspend
 (`guest-video-camera-reset`) or is late to stop a stream
 (`guest-video-camera-slow-clear`, `guest-video-camera-slow-stop`), is reached by
@@ -413,8 +416,10 @@ checks the file calls the guest's snapshots use (clone, private size, extent
 map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
-screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`
-and `HomeMenuTests` (Home's toolbar menu) exist only in a build with
+screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
+`SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
+that cannot be used there, the access held and stopped once) and
+`HomeMenuTests` (Home's toolbar menu) exist only in a build with
 `FEEDBACK_ADDRESS=feedback@example.com` on the command line, as the command
 above has it ([Send feedback](../Andarium/README.md#send-feedback)), and
 `HomePlainInfoTests` (the plain Info button) only in a build without it;
@@ -553,8 +558,11 @@ host's test run records no screen video and keeps no attachments (the scheme
 sets it, and `start` refuses a built run file that does not), and its result
 bundle lives under the state directory, not in DerivedData.
 
-A host ends on its own now and then, and a new one started within minutes needs
-no approval at the device while one started hours later does. `watch` keeps one
+A host ends on its own now and then. A new one needs the owner at the device
+only when the system lost the last approval, however soon it starts: when
+xcodebuild's relaunch of the runner initialized (its log says so) nothing is
+asked and the watch replaces the host at once; when it failed to initialize, or
+the log does not say, the owner may be needed and the watch ends. `watch` keeps one
 device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
@@ -819,7 +827,16 @@ instances and check the setup wizard's flow and end state, the product's adb
 defaults, that the command Andarium's bug report sends for the guest's
 `/proc` counters (`GuestProcFiles`, its one source) reads each file or says why
 not, and that each instance's guest reports its own serial number and eth0
-address, kept across a reboot and a new launch;
+address, kept across a reboot and a new launch
+(`android-installation-identity-image` registers when
+`UML_ANDROID_INSTALLATION_IDENTITY_IMAGE_RELEASE` names a release built with the
+overlay and also checks wlan0's derived address, the Wi-Fi lease, that eth0 and
+the macvlan carry no IPv6 link-local address, and that a probe application in an
+ordinary application process cannot read `ro.boot.kernarium.adb_key`; that
+the guest's adbd reads the key is proven on a Kernarium runtime guest by
+`AndariumTests/AdbOverVsockTests` (the application's own adb client; the macOS
+launcher fixes ADB authorization off, and `run_android_adb_debugging.py` cannot
+be authorized by a runtime guest, which accepts only the key its application made);
 `tests/integration/android/run_guest_android_adb_vsock.py` is the
 opt-in ADB-over-vsock counterpart of `guest-vsock-stream`.
 `android-microg-spoofing` (integration) additionally needs
