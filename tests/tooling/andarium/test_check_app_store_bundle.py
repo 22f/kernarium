@@ -75,6 +75,8 @@ DEBUG_SUPPORT = (
     ("launch harness", "int _s8Andarium15ThermalOverrideO6stated2inAA010HostThermalE0OSgSDyS2SG_tFZ(void) { return 1; }\n"),
     # The Simulator preview's denied-network notice.
     ("network notice preview", "int _s8Andarium8AppModelC20previewNetworkNoticeyyAA0C6DenialOF(void) { return 1; }\n"),
+    # The Simulator preview's play of the legacy install.
+    ("legacy install preview", "int _s8Andarium8AppModelC21previewInstallAttemptySb_yAA10BusyUpdateVXEtYaKcSgvg(void) { return 1; }\n"),
     # The Simulator preview's hooks into the Send feedback sheet.
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV20previewOpensAtLaunchSbvg(void) { return 1; }\n"),
     ("send feedback preview", "int _s8Andarium20SendFeedbackServicesV14previewPrepareyyAA0aD5ModelCYaYbcvg(void) { return 1; }\n"),
@@ -99,6 +101,8 @@ DEBUG_SUPPORT = (
     ("input probe", 'const char *fixture(void) { return "inputProbeField"; }\n'),
     # The fold reader's test hook, which replaces the system's reading.
     ("fold reader stub", "int _s8Andarium15FoldSceneReaderC4stubSo9FoldReadingVSgyYbcSgvg(void) { return 1; }\n"),
+    # The picked file's access a hosted test puts in place of the real one.
+    ("picked file access stub", "int _s8Andarium8AppModelC20accessPickedFileStubyyc10Foundation3URLVcSgvg(void) { return 1; }\n"),
     # The synthetic camera: its class, its entries and its profiles' names.
     ("synthetic camera", "int _ZN3uml8platform15SyntheticCamera13sessionsOpenedEv(void) { return 1; }\n"),
     ("synthetic camera", "int _ZN3uml8platform19makeSyntheticCameraERKNS0_22SyntheticCameraOptionsE(void) { return 1; }\n"),

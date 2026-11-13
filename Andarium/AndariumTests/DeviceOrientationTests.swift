@@ -191,15 +191,28 @@ struct DeviceOrientationTests {
         return condition()
     }
 
+    /// A device with no accelerometer or gyroscope, as a Mac and the Simulator are: the guest is
+    /// given the orientation without it (it does not depend on the sensors), and a device's own
+    /// readings do not mix with the records read here.
+    private final class NoSensors: MotionDevice, @unchecked Sendable {
+        let hasAccelerometer = false
+        let hasGyroscope = false
+        func start(
+            _ sensor: MotionSample.Sensor, interval: TimeInterval,
+            handler: @escaping @Sendable (Double, Double, Double) -> Void, failure: @escaping @Sendable () -> Void
+        ) {}
+        func stop(_ sensor: MotionSample.Sensor) {}
+    }
+
     /// The application's path, from the device's notification to the bytes the guest reads: the
-    /// observer the runtime owns, the motion sensors it feeds and the session behind them, with the
-    /// Gyroscope switch off (the orientation does not depend on it).
-    @Test func aTurnReachesTheGuestAsTheRecordWithTheSwitchOff() async throws {
+    /// observer the runtime owns, the motion sensors it feeds and the session behind them, on a
+    /// device without sensors (the orientation does not depend on them).
+    @Test func aTurnReachesTheGuestAsTheRecordOnADeviceWithoutSensors() async throws {
         let guest = Guest()
-        let sensors = MotionSensors(opener: guest)
+        let sensors = MotionSensors(opener: guest, device: NoSensors())
         let device = Device()
         let observer = DeviceOrientationObserver(source: device.source) { sensors.setOrientation($0) }
-        sensors.update(enabled: false, foreground: true, axes: .portrait, followsOrientation: true)
+        sensors.update(foreground: true, axes: .portrait, followsOrientation: true)
         observer.observe(true)
         #expect(await eventually { guest.connections == 1 })
         // Nothing before the guest says it takes orientations.
@@ -219,9 +232,31 @@ struct DeviceOrientationTests {
         #expect(guest.records(timeout: .milliseconds(150)).isEmpty)
         // The session leaves the foreground: the observation ends and so does the connection.
         observer.observe(false)
-        sensors.update(enabled: false, foreground: false, axes: .portrait, followsOrientation: true)
+        sensors.update(foreground: false, axes: .portrait, followsOrientation: true)
         sensors.stop()
         #expect(!device.generating)
+    }
+
+    /// The Simulator and an iPad app on a Mac have no accelerometer or gyroscope, and a device that
+    /// has them is offered them to the guest without being asked: the session connects to the
+    /// guest's service for the sensors alone, and a device that has none holds no connection for
+    /// them (a connection for the orientation is the other test's).
+    @Test func theSensorsAreOfferedWhereTheDeviceHasThemAndNowhereElse() async throws {
+        let guest = Guest()
+        let sensors = MotionSensors(opener: guest)
+        #if targetEnvironment(simulator)
+        #expect(!sensors.available, "The Simulator has no motion sensors")
+        #else
+        if ProcessInfo.processInfo.isiOSAppOnMac { #expect(!sensors.available, "A Mac has no motion sensors") }
+        #endif
+        sensors.update(foreground: true, axes: .portrait)
+        if sensors.available {
+            #expect(await eventually { guest.connections == 1 })
+        } else {
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(guest.connections == 0)
+        }
+        sensors.stop()
     }
 
     @Test func beginAndEndStayBalancedAcrossManySessions() {

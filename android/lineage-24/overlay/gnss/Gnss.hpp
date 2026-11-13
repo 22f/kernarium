@@ -17,11 +17,11 @@
 
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <vector>
 
 #include "gnss_engine.hpp"
+#include "gnss_hal.hpp"
 
 namespace aidl::android::hardware::gnss {
 
@@ -98,16 +98,10 @@ public:
 
 private:
     andarium::gnss::Sink sink_for(const std::shared_ptr<IGnssCallback>& callback) const;
-    std::optional<andarium::gnss::DebugFix> last_fix();
 
     const andarium::gnss::Env env_;
-    // Guards the members below. The session's thread never takes it.
-    std::mutex mutex_;
-    std::shared_ptr<IGnssCallback> callback_;
-    std::unique_ptr<andarium::gnss::Engine> engine_;
-    int interval_ms_ = andarium::gnss::Engine::kDefaultIntervalMs;
-    bool nmea_ = false;
-    bool sv_status_ = false;
+    // The state behind the interface and the locks that guard it.
+    andarium::gnss::Hal hal_;
 };
 
 }  // namespace aidl::android::hardware::gnss

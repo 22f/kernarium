@@ -14,6 +14,8 @@ constexpr std::uint8_t protocol_udp = 17;
 constexpr std::uint8_t icmp_destination_unreachable = 3;
 constexpr std::uint8_t icmp_port_unreachable = 3;
 constexpr std::uint16_t dns_port = 53;
+/* The BOOTP server port, which SLiRP serves at the gateway's address. */
+constexpr std::uint16_t dhcp_server_port = 67;
 constexpr std::uint8_t tcp_fin = 0x01;
 constexpr std::uint8_t tcp_syn = 0x02;
 constexpr std::uint8_t tcp_rst = 0x04;
@@ -73,13 +75,33 @@ std::uint16_t fold(std::uint32_t sum)
 	return static_cast<std::uint16_t>(~sum);
 }
 
-bool within(const Subnet &network, const Ipv4Address &address)
+/* Whether an IPv4 packet is a service that SLiRP or the provider gives at the
+ * gateway's or the name server's own address without a host socket: ICMP
+ * (SLiRP answers an echo itself and drops every other type, so none reaches a
+ * host socket), DNS (the provider's, or SLiRP's guest forward for TCP), and
+ * DHCP at the gateway (SLiRP's bootp). Any other flow to those addresses is no
+ * service: SLiRP would connect it to the literal address
+ * on the host's network, as for any address of the virtual network but the
+ * gateway (which it refuses), so the table judges it like any other. A
+ * fragment shows no port, so only an ICMP one is a service. `ip` starts at the
+ * IPv4 header. */
+bool is_ipv4_service(const Servers &servers, std::span<const std::uint8_t> ip)
 {
-	for (std::size_t index = 0; index < address.size(); ++index)
-		if (((address[index] ^ network.address[index]) &
-		     network.mask[index]) != 0)
-			return false;
-	return true;
+	const Ipv4Address destination{ip[16], ip[17], ip[18], ip[19]};
+	const bool gateway = destination == servers.gateway;
+	if (!gateway && destination != servers.name_server)
+		return false;
+	const std::uint8_t protocol = ip[9];
+	if (protocol == protocol_icmp)
+		return true;
+	const std::size_t header = (ip[0] & 0x0f) * 4U;
+	if ((protocol != protocol_udp && protocol != protocol_tcp) ||
+	    header < 20 || ip.size() < header + 4 ||
+	    (read16(ip, 6) & 0x3fff) != 0)
+		return false;
+	const std::uint16_t port = read16(ip, header + 2);
+	return port == dns_port ||
+		(gateway && protocol == protocol_udp && port == dhcp_server_port);
 }
 
 /* The transport checksum over the IPv4 pseudo-header and `segment`. */
@@ -235,7 +257,7 @@ Classified classify_guest_frame(std::span<const std::uint8_t> frame,
 
 Classified classify_host_bound_frame(std::span<const std::uint8_t> frame,
 				     const HostAddresses &host,
-				     const Subnet &network)
+				     const Servers &servers)
 {
 	Classified result;
 	if (host.empty() || frame.size() < ethernet_header + 20 ||
@@ -245,7 +267,7 @@ Classified classify_host_bound_frame(std::span<const std::uint8_t> frame,
 	if ((ip[0] >> 4) != 4)
 		return result;
 	const Ipv4Address destination{ip[16], ip[17], ip[18], ip[19]};
-	if (!host.contains(destination) || within(network, destination))
+	if (!host.contains(destination) || is_ipv4_service(servers, ip))
 		return result;
 	/* From here the packet is for the host and SLiRP never sees it: what is
 	 * not refused below is dropped. */
@@ -297,7 +319,7 @@ Classified classify_host_bound_frame(std::span<const std::uint8_t> frame,
 }
 
 bool needs_host_check(std::span<const std::uint8_t> frame,
-		      const Subnet &network)
+		      const Servers &servers)
 {
 	if (frame.size() < ethernet_header + 20 ||
 	    read16(frame, 12) != ethertype_ipv4)
@@ -306,8 +328,7 @@ bool needs_host_check(std::span<const std::uint8_t> frame,
 	if ((ip[0] >> 4) != 4)
 		return false;
 	const std::size_t header = (ip[0] & 0x0f) * 4U;
-	if (header < 20 || header > ip.size() ||
-	    within(network, {ip[16], ip[17], ip[18], ip[19]}))
+	if (header < 20 || header > ip.size() || is_ipv4_service(servers, ip))
 		return false;
 	/* The one frame the table never changes the fate of is an unfragmented
 	 * TCP segment that is not a connect attempt, which is passed whatever

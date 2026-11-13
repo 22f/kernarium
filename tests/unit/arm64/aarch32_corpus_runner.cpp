@@ -9,7 +9,9 @@
  * event; the instruction under test is the form the case names; the event
  * is one the instruction's kind can raise; the retired count, the fault
  * position and address, the state changes and the memory runs are consistent
- * with that; and a case is stored once. Every case of the 4 KiB profile runs.
+ * with that; a store-exclusive that succeeded has its range checked, which the
+ * engine lanes' retry of a lost reservation relies on; and a case is stored
+ * once. Every case of the 4 KiB profile runs.
  *
  *   uml_arm64_aarch32_corpus_tests PACK [--record NAME]
  */
@@ -128,7 +130,103 @@ void check_program_walk()
 struct Totals final {
 	std::size_t records = 0, cases = 0, events = 0;
 	std::map<std::string, std::size_t> per_oracle;
+	/* The forms of the store-exclusives whose bytes were checked, and how many
+	 * cases that took. */
+	std::set<std::string> exclusive_forms;
+	std::size_t exclusive_stores = 0;
 };
+
+/* A store-exclusive that succeeded: its range, which the engine lanes take
+ * from exclusive_store() to tell a lost reservation from a wrong byte, is the
+ * place the pack's own data shows the store at, and lost_exclusive_data()
+ * accepts the data such a loss leaves and nothing else. */
+void check_exclusive_store(const std::string &context, const Case &test, Totals &totals)
+{
+	const auto fail = [&](const char *what) {
+		std::fprintf(stderr, "%s: %s\n", context.c_str(), what);
+		std::abort();
+	};
+	const auto store = exclusive_store(test);
+	if (!store)
+		fail("a store-exclusive that succeeded has a range the pack does not name");
+	const auto &operands = store->instruction.operands;
+	const auto initial = data_before(test);
+	const auto expected = data_after(test, initial);
+	const auto in_range = [&](std::uint32_t byte) {
+		return byte >= store->offset && byte - store->offset < store->size;
+	};
+
+	/* What the store writes: its register or registers, in memory order. */
+	const bool pair = store->size == 8;
+	if (test.initial.r[operands.t] == test.final.r[operands.t] &&
+	    (!pair || test.initial.r[operands.t2] == test.final.r[operands.t2])) {
+		std::uint8_t bytes[8] = {};
+		std::memcpy(bytes, &test.final.r[operands.t], std::min<std::uint32_t>(store->size, 4));
+		if (pair)
+			std::memcpy(bytes + 4, &test.final.r[operands.t2], 4);
+		if (std::memcmp(expected.data() + store->offset, bytes, store->size) != 0)
+			fail("a store-exclusive's range does not hold what it stores");
+		totals.exclusive_forms.insert(test.form);
+		++totals.exclusive_stores;
+	}
+
+	/* The data a lost reservation leaves is accepted... */
+	auto lost = expected;
+	std::copy_n(initial.begin() + store->offset, store->size, lost.begin() + store->offset);
+	const auto accepts = [&](const std::vector<std::uint8_t> &actual) {
+		return lost_exclusive_data(test, initial, expected, actual);
+	};
+	if (!accepts(lost))
+		fail("the data a lost reservation leaves is not accepted");
+	/* ...and nothing else is: not a wrong byte beside it, before it or in what
+	 * else the case wrote, one in its own range, a store that was made whole or
+	 * in part, or a case whose address the pack no longer names. */
+	const auto refuses = [&](std::vector<std::uint8_t> actual, std::uint32_t byte, const char *what) {
+		actual[byte] ^= 0x80;
+		if (accepts(actual))
+			fail(what);
+	};
+	std::vector<std::uint32_t> elsewhere = {0, kDataSize - 1, store->offset - 1, store->offset + store->size};
+	for (const auto &patch : test.memory_patches)
+		elsewhere.push_back(patch.offset);
+	for (const std::uint32_t byte : elsewhere)
+		if (byte < kDataSize && !in_range(byte))
+			refuses(lost, byte, "a wrong byte outside the store-exclusive's range is accepted");
+	for (std::uint32_t byte = store->offset; byte < store->offset + store->size; ++byte) {
+		refuses(lost, byte, "a wrong byte inside the store-exclusive's range is accepted");
+		if (expected[byte] != initial[byte]) {
+			auto partial = lost;
+			partial[byte] = expected[byte];
+			if (accepts(partial))
+				fail("a store that was made in part is accepted");
+			if (accepts(expected))
+				fail("a store that was made is accepted");
+		}
+	}
+	/* The range ends where the store does: a byte next to it that the case wrote, which
+	 * these cases leave alone, is the pack's and not what the case started with. */
+	for (const std::uint32_t neighbour : {store->offset - 1, store->offset + store->size}) {
+		if (neighbour >= kDataSize)
+			continue;
+		auto wrote = expected;
+		wrote[neighbour] = static_cast<std::uint8_t>(initial[neighbour] ^ 0x5A);
+		auto after = wrote;
+		std::copy_n(initial.begin() + store->offset, store->size, after.begin() + store->offset);
+		if (!lost_exclusive_data(test, initial, wrote, after))
+			fail("a byte next to a store-exclusive's range is taken for part of it");
+		after[neighbour] = initial[neighbour];
+		if (lost_exclusive_data(test, initial, wrote, after))
+			fail("a byte that the case wrote next to a store-exclusive's range is accepted as the start's");
+	}
+	Case moved = test;
+	moved.final.r[operands.n] ^= 0x40;
+	if (lost_exclusive_data(moved, initial, expected, lost))
+		fail("a store-exclusive whose base register changed is accepted");
+	Case other = test;
+	other.form = "LDREX_A1";
+	if (lost_exclusive_data(other, initial, expected, lost))
+		fail("a case that is not a store-exclusive is accepted");
+}
 
 void check_case(const Record &record, const Case &test, const Profile &profile, Totals &totals)
 {
@@ -219,8 +317,31 @@ void check_case(const Record &record, const Case &test, const Profile &profile, 
 	}
 	if ((test.final.apsr & ~0xF80F0000U) != 0 || (test.initial.apsr & ~0xF80F0000U) != 0)
 		fail("an APSR holds bits other than N, Z, C, V, Q and GE");
+	/* A store-exclusive that succeeded: not one that failed on purpose, one that raised an
+	 * event or one a condition skipped. */
+	if (std::string_view(test.form).starts_with("STREX") || std::string_view(test.form).starts_with("STLEX")) {
+		const auto &operands = target.operands;
+		if (test.event == 0 && target.cond == 14 && operands.d >= 0 && operands.d < static_cast<int>(kRegisters) &&
+		    test.final.r[operands.d] == 0)
+			check_exclusive_store(context, test, totals);
+	}
 	++totals.cases;
 	++totals.per_oracle[record.oracle];
+}
+
+/* Every form of store-exclusive has had its range checked: the byte, halfword, word and
+ * doubleword ones, STREX and STLEX, in A32 and T32. */
+void check_exclusive_forms(const Totals &totals)
+{
+	for (const char *mnemonic : {"STREX", "STLEX"})
+		for (const char *width : {"", "B", "H", "D"})
+			for (const char *state : {"A1", "T1"}) {
+				const std::string form = std::string(mnemonic) + width + "_" + state;
+				if (!totals.exclusive_forms.contains(form)) {
+					std::fprintf(stderr, "no case checks the range of %s\n", form.c_str());
+					std::abort();
+				}
+			}
 }
 
 } // namespace
@@ -258,8 +379,12 @@ int main(int argc, char **argv)
 		}
 	}
 	require(totals.records != 0, "no record applies to the 4 KiB profile");
+	if (only.empty())
+		check_exclusive_forms(totals);
 	std::printf("AArch32 corpus: %zu cases in %zu records (%zu raise an event)\n",
 		totals.cases, totals.records, totals.events);
+	std::printf("  store-exclusives with a checked range: %zu in %zu forms\n", totals.exclusive_stores,
+		totals.exclusive_forms.size());
 	for (const auto &[oracle, count] : totals.per_oracle)
 		std::printf("  %s: %zu\n", oracle.c_str(), count);
 	return 0;

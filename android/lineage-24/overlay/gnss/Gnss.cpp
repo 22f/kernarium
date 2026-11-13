@@ -103,12 +103,23 @@ ndk::ScopedAStatus GnssDebug::getDebugData(DebugData* debug_data) {
     return ndk::ScopedAStatus::ok();
 }
 
-Gnss::Gnss(andarium::gnss::Env env) : env_(std::move(env)) {}
+Gnss::Gnss(andarium::gnss::Env env) : env_(env), hal_(std::move(env)) {}
 
 Gnss::~Gnss() = default;
 
+// The HAL's reporter thread makes these calls, one at a time and in order, with
+// no lock of the HAL held (gnss_reporter.hpp); no entry point of Gnss does.
 andarium::gnss::Sink Gnss::sink_for(const std::shared_ptr<IGnssCallback>& callback) const {
     andarium::gnss::Sink sink;
+    // Positions only: no scheduling, no measurements, no geofencing, nothing
+    // that needs a satellite.
+    sink.ready = [callback] {
+        check(callback->gnssSetCapabilitiesCb(0), "gnssSetCapabilitiesCb");
+        IGnssCallback::GnssSystemInfo info;
+        info.yearOfHw = kYearOfHardware;
+        info.name = kHardwareName;
+        check(callback->gnssSetSystemInfoCb(info), "gnssSetSystemInfoCb");
+    };
     sink.status = [callback](Status status) {
         check(callback->gnssStatusCb(static_cast<IGnssCallback::GnssStatusValue>(status)), "gnssStatusCb");
     };
@@ -127,44 +138,31 @@ ndk::ScopedAStatus Gnss::setCallback(const std::shared_ptr<IGnssCallback>& callb
         ALOGE("setCallback: null callback");
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
     }
-    std::lock_guard lock(mutex_);
     // A setCallback that follows another without a close replaces its session.
-    engine_.reset();
-    callback_ = callback;
-    engine_ = std::make_unique<Engine>(env_, sink_for(callback));
-    engine_->set_min_interval_ms(interval_ms_);
-    engine_->set_nmea(nmea_);
-    engine_->set_sv_status(sv_status_);
-    // Positions only: no scheduling, no measurements, no geofencing, nothing
-    // that needs a satellite.
-    check(callback->gnssSetCapabilitiesCb(0), "gnssSetCapabilitiesCb");
-    IGnssCallback::GnssSystemInfo info;
-    info.yearOfHw = kYearOfHardware;
-    info.name = kHardwareName;
-    check(callback->gnssSetSystemInfoCb(info), "gnssSetSystemInfoCb");
+    hal_.set_callback(sink_for(callback));
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Gnss::start() {
-    std::lock_guard lock(mutex_);
-    if (!engine_) {
-        ALOGE("start before setCallback");
-        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
+    switch (hal_.start()) {
+        case andarium::gnss::Hal::StartResult::started:
+            return ndk::ScopedAStatus::ok();
+        case andarium::gnss::Hal::StartResult::no_callback:
+            ALOGE("start before setCallback");
+            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
+        case andarium::gnss::Hal::StartResult::no_receiver:
+            break;
     }
-    if (!engine_->start()) return ndk::ScopedAStatus::fromServiceSpecificError(ERROR_GENERIC);
-    return ndk::ScopedAStatus::ok();
+    return ndk::ScopedAStatus::fromServiceSpecificError(ERROR_GENERIC);
 }
 
 ndk::ScopedAStatus Gnss::stop() {
-    std::lock_guard lock(mutex_);
-    if (engine_) engine_->stop();
+    hal_.stop();
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Gnss::close() {
-    std::lock_guard lock(mutex_);
-    engine_.reset();
-    callback_.reset();
+    hal_.close();
     return ndk::ScopedAStatus::ok();
 }
 
@@ -177,45 +175,30 @@ ndk::ScopedAStatus Gnss::injectBestLocation(const GnssLocation&) { return ndk::S
 ndk::ScopedAStatus Gnss::deleteAidingData(GnssAidingData) { return ndk::ScopedAStatus::ok(); }
 
 ndk::ScopedAStatus Gnss::setPositionMode(const PositionModeOptions& options) {
-    if (options.minIntervalMs <= 0) return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
-    std::lock_guard lock(mutex_);
-    interval_ms_ = options.minIntervalMs;
-    if (engine_) engine_->set_min_interval_ms(interval_ms_);
+    if (!hal_.set_position_mode(options.minIntervalMs)) {
+        return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
+    }
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Gnss::startSvStatus() {
-    std::lock_guard lock(mutex_);
-    sv_status_ = true;
-    if (engine_) engine_->set_sv_status(true);
+    hal_.set_sv_status(true);
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Gnss::stopSvStatus() {
-    std::lock_guard lock(mutex_);
-    sv_status_ = false;
-    if (engine_) engine_->set_sv_status(false);
+    hal_.set_sv_status(false);
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Gnss::startNmea() {
-    std::lock_guard lock(mutex_);
-    nmea_ = true;
-    if (engine_) engine_->set_nmea(true);
+    hal_.set_nmea(true);
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus Gnss::stopNmea() {
-    std::lock_guard lock(mutex_);
-    nmea_ = false;
-    if (engine_) engine_->set_nmea(false);
+    hal_.set_nmea(false);
     return ndk::ScopedAStatus::ok();
-}
-
-std::optional<andarium::gnss::DebugFix> Gnss::last_fix() {
-    std::lock_guard lock(mutex_);
-    if (!engine_) return std::nullopt;
-    return engine_->last_fix();
 }
 
 ndk::ScopedAStatus Gnss::getExtensionGnssConfiguration(std::shared_ptr<IGnssConfiguration>* result) {
@@ -224,7 +207,7 @@ ndk::ScopedAStatus Gnss::getExtensionGnssConfiguration(std::shared_ptr<IGnssConf
 }
 
 ndk::ScopedAStatus Gnss::getExtensionGnssDebug(std::shared_ptr<IGnssDebug>* result) {
-    *result = ndk::SharedRefBase::make<GnssDebug>([this] { return last_fix(); }, env_.realtime_ns,
+    *result = ndk::SharedRefBase::make<GnssDebug>([this] { return hal_.last_fix(); }, env_.realtime_ns,
                                                   env_.boottime_ns);
     return ndk::ScopedAStatus::ok();
 }

@@ -336,7 +336,15 @@ the watcher's start and stop on a fake path source);
 `andarium-capture-screens` and `andarium-localization` (tooling) cover the
 motion wire format (its device-orientation records and control frames against
 the golden frames in `tests/unit/andarium/fixtures`, which `andarium-core` reads
-too) and what the orientation sensor reports and when, the vibrator
+too) and what the orientation sensor reports and when (`andarium-core` also
+covers the magnetometer: its records, the control frame that asks for them, the
+status mapping, the failure it keeps for the run, the field's source (its
+watchdog, movement notice and stale callbacks, on a fake Core Motion and timer)
+and the final check that a reading or failure already on its way is dropped once
+the guest no longer asks for the field, on fake devices and guests; the hosted
+`CompassHostTests` cover the availability decision and the boot request's
+compass bit, and read the real manager's availability (a Simulator and a Mac
+have no magnetometer) without starting a sensor), the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the
@@ -403,8 +411,9 @@ folder, so a device can load it; the application never does (the App Store
 bundle check refuses a build that does).
 `DeviceOrientationTests` checks UIKit's orientation numbers against the
 application's readings, the mapping to Android's rotation, the observer's begin
-and end of the device's notifications, and the path from a turn to the record a
-fake guest reads with the Gyroscope switch off. The Simulator cannot turn an
+and end of the device's notifications, the path from a turn to the record a
+fake guest reads on a device without sensors, and that the Simulator and a Mac,
+which have none, hold no connection for them. The Simulator cannot turn an
 iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
 interface only), so the device is injected there; the real turns are checked on
 an iPhone.
@@ -583,10 +592,16 @@ blocker in every one of them.
   opt-in with the pinned LLVM MC.
 - `arm64-aarch32-decoder`, `arm64-a32-encoding-table`, `arm64-aarch32-corpus`,
   `arm64-a32-corpus` and `arm64-aarch32-semantics*` check the AArch32 decoder,
-  generated tables, corpus and semantic library without an engine. The
-  corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
-  case that differs only by a spurious store-exclusive failure, and the
-  `-interrupted` tests provoke that failure on purpose.
+  generated tables, corpus and semantic library without an engine;
+  `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
+  compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
+  case that differs only by a spurious store-exclusive failure (its own bytes
+  unwritten, the case's other stores in the data), and the `-interrupted`
+  tests provoke that failure on purpose. Only the gadget one runs the spill
+  suite, whose cases store between the pair: the JIT does not lose a
+  reservation there. The `-injected` tests make an attempt end as a lost
+  reservation with another register or a thread register wrong, and as other
+  faults, and require that only a plain loss is retried.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 
@@ -627,11 +642,13 @@ library and launcher over the storage layout
 ([storage](../android/lineage-24/README.md#static-disk-and-boot-contract),
 [block device](../darwin/device/block/README.md)). `guest-android-disks`
 (integration) boots the Linux test guest on a release and a data disk the
-library created. `gnss-hal-nmea`, `gnss-hal-policy` and `gnss-hal-engine`
-(unit) compile the guest GNSS HAL's headers
-([Location](../android/lineage-24/README.md#location)) against the host
-writer's own epochs: the reading of the stream, the reporting rules and the
-session, with a pipe for the receiver and a counting wakelock.
+library created. `gnss-hal-nmea`, `gnss-hal-policy`, `gnss-hal-engine`,
+`gnss-hal-entry` and `gnss-hal-callbacks` (unit) compile the guest GNSS HAL's
+headers ([Location](../android/lineage-24/README.md#location)) against the host
+writer's own epochs: the reading of the stream, the reporting rules, the
+session and the AIDL entry points, with a pipe for the receiver and a counting
+wakelock, and with a framework callback that does not answer, so that no entry
+point waits for one and what the framework hears is the delivery contract's.
 
 A release candidate is qualified on its image, opt-in, on every engine that
 runs Android (the Mac gadgets and JIT engines, the iPad gadgets). A `SIGILL`
@@ -686,7 +703,8 @@ anywhere is a blocker. The candidate must show:
   `CtsCameraApi25TestCases`, `CtsMediaRecorderTestCases`, the camera parts of
   `CtsAppOpsTestCases` and `CtsPermissionTestCases`, and
   `CtsSensorPrivacyTestCases` in a blocked session and in a live one. The
-  provider process exists only while a camera is open, no denial of
+  provider process runs from cameraserver's start until cameraserver holds no
+  camera, and again while an application holds one, no denial of
   `hal_camera_default` appears in the log, and the verifier's check that
   `libgooglecamerahwl_impl.so` holds the names of route `p0030` is not
   vacuous: it runs on the candidate's built library (a source tree has none)

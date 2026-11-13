@@ -100,3 +100,12 @@ target_include_directories(uml_andarium_camera_controls_tests PRIVATE
     ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
 uml_add_unit_test(NAME andarium-camera-controls
     COMMAND uml_andarium_camera_controls_tests LABELS andarium)
+
+# How a request ends: the one deadline of its buffers, and a failed request
+# (ERROR_REQUEST, so that the application hears of it) against a request that
+# lost some of its outputs (ERROR_BUFFER).
+add_executable(uml_andarium_camera_request_tests camera_request_tests.cpp)
+target_include_directories(uml_andarium_camera_request_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/android/lineage-24/overlay/camera/hal)
+uml_add_unit_test(NAME andarium-camera-request
+    COMMAND uml_andarium_camera_request_tests LABELS andarium)

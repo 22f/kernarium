@@ -211,9 +211,7 @@ final class LiveRuntime: RuntimeDriver {
         kernarium_runtime_loader_set_location_receiver_handler { @Sendable [weak self] powered in
             MainActor.assumeIsolated { self?.location.receiverPower(powered) }
         }
-        model.motionSensorsAvailable = motion.available
         model.hapticsAvailable = hapticsAvailable
-        motion.problem = { [weak model] in model?.motionSensorsProblem = $0 }
         self.keyboardMouse.setPointerAsTouch(model.pointerAsTouch)
         observeLifecycle()
         observeRotationPolicy()
@@ -467,7 +465,8 @@ final class LiveRuntime: RuntimeDriver {
         inputRunReady = false
         updateKeyboardMouse()
         let hostFeatures = Self.hostFeatures(
-            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true)
+            hapticsAvailable: hapticsAvailable, followsDeviceOrientation: model?.followsDeviceOrientation == true,
+            compassAvailable: motion.compassAvailable)
         let bootMode: UInt32 = run.mode == .recovery ? 2 : 1
         let memoryMiB = UInt32(run.guest.memoryMiB)
         let processorCount = UInt32(run.guest.cores)
@@ -552,11 +551,15 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     /// What the boot request tells the guest the host has
-    /// (`android_host_features`): a vibrator, on a device with haptics, and a
-    /// device orientation to follow, where the guest follows it.
-    nonisolated static func hostFeatures(hapticsAvailable: Bool, followsDeviceOrientation: Bool = false) -> UInt32 {
+    /// (`android_host_features`): a vibrator, on a device with haptics, a
+    /// device orientation to follow, where the guest follows it, and a
+    /// magnetic field, on a device that can give one.
+    nonisolated static func hostFeatures(
+        hapticsAvailable: Bool, followsDeviceOrientation: Bool = false, compassAvailable: Bool = false
+    ) -> UInt32 {
         (hapticsAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) : 0)
             | (followsDeviceOrientation ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) : 0)
+            | (compassAvailable ? UInt32(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) : 0)
     }
 
     // MARK: Android operations
@@ -611,8 +614,10 @@ final class LiveRuntime: RuntimeDriver {
         await operations.guestProcFiles()
     }
 
-    func installApk(at url: URL, update: @escaping @Sendable (BusyUpdate) -> Void) async throws {
-        try await operations.installApk(at: url, update: update)
+    func installApk(
+        at url: URL, bypassLowTargetSdkBlock: Bool, update: @escaping @Sendable (BusyUpdate) -> Void
+    ) async throws {
+        try await operations.installApk(at: url, bypassLowTargetSdkBlock: bypassLowTargetSdkBlock, update: update)
     }
 
     func usbDebugging() async -> Bool? {
@@ -815,21 +820,19 @@ final class LiveRuntime: RuntimeDriver {
         }
     }
 
-    func setMotionSensors(_ on: Bool) {
-        model?.motionSensorsProblem = nil
-        updateMotionSensors()
-    }
-
+    /// The sensors are the guest's wherever the device has them, while the
+    /// guest is in front; a sensor is read only while an application in the
+    /// guest uses it (`MotionSession`).
     private func updateMotionSensors() {
         let foreground = normalRun && reachedBootCompleted && active && !holdsGuestStill
             && rotation.applied == rotationPolicy
         // Where the interface does not turn and the guest owns rotation, Android
         // follows the device's orientation as iOS reports it, which already
-        // includes the person's Portrait Orientation Lock. The Gyroscope switch
-        // is about the readings applications take, so it does not decide this.
+        // includes the person's Portrait Orientation Lock. That is the display's
+        // own behaviour, not a reading an application takes, so the sensors do
+        // not decide it.
         let follows = model?.followsDeviceOrientation == true && rotationPolicy == .guest
         motion.update(
-            enabled: model?.motionSensorsOn == true,
             foreground: foreground,
             axes: motionMount.axes,
             followsOrientation: follows
