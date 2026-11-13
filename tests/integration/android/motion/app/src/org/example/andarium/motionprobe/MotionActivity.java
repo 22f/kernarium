@@ -35,6 +35,9 @@ public final class MotionActivity extends Activity implements SensorEventListene
     private final float[] geomagnetic = new float[3];
     private final float[] vector = new float[4];
     private int fieldAccuracy = -1, rotationVectorCount;
+    // The magnetometer as the sensor service lists it, and the accuracies onAccuracyChanged was called with.
+    private Sensor magnetometer;
+    private final java.util.ArrayList<Integer> accuracyCalls = new java.util.ArrayList<>();
     private double fieldAzimuth = Double.NaN, vectorAzimuth = Double.NaN;
     private String mode;
     private String runId;
@@ -112,6 +115,8 @@ public final class MotionActivity extends Activity implements SensorEventListene
         field = new Samples();
         fieldAccuracy = -1;
         rotationVectorCount = 0;
+        magnetometer = null;
+        accuracyCalls.clear();
         fieldAzimuth = vectorAzimuth = Double.NaN;
         seconds = Math.max(1, Math.min(240, intent.getIntExtra("seconds", 5)));
         started = SystemClock.elapsedRealtimeNanos();
@@ -124,7 +129,7 @@ public final class MotionActivity extends Activity implements SensorEventListene
         if (valid) valid = manager.registerListener(this, accel, 20_000)
             && manager.registerListener(this, gyro, 20_000);
         if (compass) {
-            Sensor magnetometer = manager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+            magnetometer = manager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
             valid &= magnetometer != null && "Host Magnetometer".equals(magnetometer.getName());
             if (valid) valid = manager.registerListener(this, magnetometer, intent.getIntExtra("mag_us", 20_000));
             // The framework makes the rotation vector from the three sensors, when all three are listed.
@@ -181,6 +186,9 @@ public final class MotionActivity extends Activity implements SensorEventListene
                 .put("started_ns", started)
                 .put("accelerometer", acceleration.json()).put("gyroscope", rotation.json())
                 .put("magnetometer", field.json().put("accuracy", fieldAccuracy)
+                    .put("resolution", magnetometer == null ? JSONObject.NULL : (Object) (double) magnetometer.getResolution())
+                    .put("max_range", magnetometer == null ? JSONObject.NULL : (Object) (double) magnetometer.getMaximumRange())
+                    .put("accuracy_calls", new org.json.JSONArray(accuracyCalls))
                     .put("latest", new org.json.JSONArray().put(field.latest[0]).put(field.latest[1]).put(field.latest[2]))
                     .put("azimuth_deg", Double.isNaN(fieldAzimuth) ? JSONObject.NULL : fieldAzimuth))
                 .put("rotation_vector", new JSONObject().put("count", rotationVectorCount)
@@ -222,7 +230,12 @@ public final class MotionActivity extends Activity implements SensorEventListene
             vectorAzimuth = azimuth(matrix);
         }
     }
-    @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+    @Override public void onAccuracyChanged(Sensor sensor, int accuracy) {
+        if (compass && sensor.getType() == Sensor.TYPE_MAGNETIC_FIELD) {
+            accuracyCalls.add(accuracy);
+            if (accuracyCalls.size() > 64) accuracyCalls.remove(0);
+        }
+    }
     @Override protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
         manager.unregisterListener(this);
