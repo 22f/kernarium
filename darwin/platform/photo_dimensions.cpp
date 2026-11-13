@@ -443,6 +443,11 @@ Admission admit(const AdmitPlan& plan, const AdmitSteps& steps)
     return Admission::admitted;
 }
 
+bool maximumFirst(CameraTime currentMaximum, CameraTime target) noexcept
+{
+    return target.seconds() > currentMaximum.seconds();
+}
+
 bool putBackTiming(const DeviceTiming& held, const TimingSteps& steps)
 {
     if (!steps.lock()) return false;
@@ -454,7 +459,7 @@ bool putBackTiming(const DeviceTiming& held, const TimingSteps& steps)
     }
     if (ok) {
         // The one that moves out of the other's way goes first.
-        if (held.minimum.seconds() > now.maximum.seconds()) ok = steps.setMaximum(held.maximum) && steps.setMinimum(held.minimum);
+        if (maximumFirst(now.maximum, held.minimum)) ok = steps.setMaximum(held.maximum) && steps.setMinimum(held.minimum);
         else ok = steps.setMinimum(held.minimum) && steps.setMaximum(held.maximum);
     }
     // Shortening the maximum shortened a longer custom exposure with it.
@@ -480,6 +485,35 @@ Resizing resizeStream(const ResizeSteps& steps)
     }
     steps.commit();
     return Resizing::resized;
+}
+
+StreamCache::Path StreamCache::pathFor(std::uint32_t askedWidth, std::uint32_t askedHeight, std::uint32_t askedRate) const noexcept
+{
+    if (!video) return Path::admit;
+    if (!unrestored && askedWidth == width && askedHeight == height && askedRate == frameRate) return Path::cached;
+    return Path::resize;
+}
+
+bool StreamCache::rateChanges(std::uint32_t askedRate) const noexcept
+{
+    return unrestored || askedRate != frameRate;
+}
+
+bool StreamCache::sizeChanges(std::uint32_t askedWidth, std::uint32_t askedHeight) const noexcept
+{
+    return unrestored || askedWidth != width || askedHeight != height;
+}
+
+bool StreamCache::mayLeaveSettings(bool force, bool unchanged) const noexcept
+{
+    return !force && !unrestored && unchanged;
+}
+
+bool StreamCache::timingWritten() noexcept
+{
+    const bool was = unrestored;
+    unrestored = false;
+    return was;
 }
 
 Recovery recoverAnchors(std::span<const std::size_t> cameras, const RecoverySteps& steps)

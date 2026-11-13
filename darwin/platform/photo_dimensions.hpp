@@ -346,6 +346,13 @@ struct TimingSteps {
     std::function<bool(CameraTime duration, float iso)> setCustomExposure;
 };
 
+// Which of the minimum and the maximum duration is written first when one of
+// them moves to `target`: the maximum when the target is longer than the
+// current maximum, so that the minimum is never set past it; the minimum
+// otherwise, so that the maximum is never set short of it. (Setting both to one
+// duration, as a rate does, and putting back a pair that was held.)
+[[nodiscard]] bool maximumFirst(CameraTime currentMaximum, CameraTime target) noexcept;
+
 // Puts a device back as `held` (read before anything changed) had it: its
 // format when it has changed (a format has its own durations, so that comes
 // first), then the durations, the one that moves out of the other's way first so
@@ -408,6 +415,35 @@ struct ResizeSteps {
 };
 enum class Resizing : std::uint8_t { resized, durationsRefused, sizeRefused };
 [[nodiscard]] Resizing resizeStream(const ResizeSteps& steps);
+
+// What the backend believes a camera's stream and device hold: the stream's
+// size and rate, which an identical request finds already made and answers
+// without touching the device. A change the device refused is undone with
+// `restoreTiming`, and when that is refused too (the device would not lock, a
+// setter raised) the device holds something between the old and the new:
+// nothing the backend remembers of it is known any longer. Until a change has
+// written the format, the durations and the size again (`timingWritten`), an
+// identical request is not answered from the cache, the rate and the size are
+// both written, and the settings written before (a manual exposure the shorter
+// durations may have cut) are written again whatever they were last found to be.
+struct StreamCache {
+    bool video {};
+    std::uint32_t width {}, height {}, frameRate {};
+    bool unrestored {};
+
+    enum class Path : std::uint8_t { cached, resize, admit };
+    // How a request for a stream is met.
+    [[nodiscard]] Path pathFor(std::uint32_t askedWidth, std::uint32_t askedHeight, std::uint32_t askedRate) const noexcept;
+    [[nodiscard]] bool rateChanges(std::uint32_t askedRate) const noexcept;
+    [[nodiscard]] bool sizeChanges(std::uint32_t askedWidth, std::uint32_t askedHeight) const noexcept;
+    // Whether applying settings may be skipped: they are the ones already applied, no write is forced, and the
+    // device's state is known.
+    [[nodiscard]] bool mayLeaveSettings(bool force, bool unchanged) const noexcept;
+    void restoreRefused() noexcept { unrestored = true; }
+    // The format and the durations are written again: what the cache says is what the device holds. True when
+    // they were not known, and the settings written before are to be written again.
+    bool timingWritten() noexcept;
+};
 
 // An interruption has ended, or the session restarted after an error, and the
 // system may have moved a device to another format meanwhile. Every camera that

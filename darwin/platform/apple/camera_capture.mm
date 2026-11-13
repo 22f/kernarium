@@ -419,7 +419,9 @@ struct Anchor {
     std::vector<WholeRates> rates;
 };
 
-struct RunningCamera {
+// The stream's size and rate (StreamCache) are what the stream was asked for, which the anchor covers, and what the
+// backend believes the device holds of them.
+struct RunningCamera : StreamCache {
     AVCaptureDeviceInput* input {};
     AVCaptureVideoDataOutput* videoOutput {};
     AVCapturePhotoOutput* photoOutput {};
@@ -433,12 +435,7 @@ struct RunningCamera {
     // stream starts, ended when it stops or its session does. The observer's
     // handler and the work it queues hold it themselves.
     std::shared_ptr<PressureWatch> watch;
-    bool video {};
     CameraSettings settings;
-    // What the stream was asked for, which the anchor covers.
-    std::uint32_t width {};
-    std::uint32_t height {};
-    std::uint32_t frameRate {};
     std::uint32_t focusSerial {};
     std::uint32_t focusDistanceSerial {};
     // Settings have been applied to the device at least once, so that a format
@@ -551,8 +548,15 @@ bool activate(AVCaptureDevice* device, const Anchor& anchor, const std::optional
                 AVFrameRateRange* span = anchor.format.videoSupportedFrameRateRanges[rate->setting.span];
                 duration = rate->setting.duration == FrameDuration::spanShortest ? span.minFrameDuration : span.maxFrameDuration;
             }
-            device.activeVideoMinFrameDuration = duration;
-            device.activeVideoMaxFrameDuration = duration;
+            // The one that moves out of the other's way goes first (maximumFirst): the device may be where a refused
+            // change left it, at the durations of a faster stream.
+            if (maximumFirst(cameraTimeOf(device.activeVideoMaxFrameDuration), cameraTimeOf(duration))) {
+                device.activeVideoMaxFrameDuration = duration;
+                device.activeVideoMinFrameDuration = duration;
+            } else {
+                device.activeVideoMinFrameDuration = duration;
+                device.activeVideoMaxFrameDuration = duration;
+            }
         }
     } @catch (NSException*) {
         ok = false;
@@ -730,7 +734,9 @@ public:
     void applyOnQueue(std::size_t camera, const CameraSettings& settings, bool force)
     {
         auto& running = cameras_[camera];
-        if (!force && running.settings == settings && running.focusSerial == settings.focusTriggerSerial) return;
+        if (running.mayLeaveSettings(force, running.settings == settings && running.focusSerial == settings.focusTriggerSerial)) return;
+        // What the device holds is not known (a restore was refused): everything is written.
+        force = force || running.unrestored;
         const Entry& entry = entries_[camera];
         AVCaptureDevice* device = entry.device;
         NSError* error = nil;
@@ -1114,14 +1120,18 @@ private:
         }
     }
 
-    // Puts a device's timing back as a refused change found it (putBackTiming); a
-    // device that would not be put back is logged, once, and is set again by the
-    // next join.
+    // Puts a device's timing back as a refused change found it (putBackTiming). A
+    // device that would not be put back is logged, once, and what the camera's
+    // stream and settings are believed to hold is no longer known: the next
+    // request for the stream writes the format, the durations and the size again,
+    // and the settings with them, or fails (StreamCache).
     void restoreTiming(std::size_t camera, AVCaptureDevice* device, const std::optional<DeviceTiming>& held)
     {
         if (!held) return;
         const bool ok = guarded(camera, [&] { return putBackTiming(*held, timingStepsOf(device)); });
-        if (!ok) refuse(camera, Refusal::notRestored);
+        if (ok) return;
+        cameras_[camera].restoreRefused();
+        refuse(camera, Refusal::notRestored);
     }
 
     const Anchor* anchorOf(std::size_t camera) const
@@ -1329,6 +1339,8 @@ private:
         }
         if (newPhoto != nil) running.photoOutput = newPhoto;
         running.format = anchor->format;
+        // The timing written again is known; what was applied before is written again after it.
+        const bool settingsStale = plan.activate && running.timingWritten();
         if (video) {
             running.video = true;
             running.width = width;
@@ -1338,7 +1350,7 @@ private:
         }
         refusals_.reset(camera);
         // A format change reverts some settings of the device: put them back.
-        if (activeBefore != anchor->format && running.applied) applyOnQueue(camera, running.settings, true);
+        if ((activeBefore != anchor->format || settingsStale) && running.applied) applyOnQueue(camera, running.settings, true);
         logJoin(camera);
         startSession();
         return true;
@@ -1355,8 +1367,8 @@ private:
             refuse(camera, Refusal::noAnchor);
             return false;
         }
-        const bool rateChanges = frameRate != running.frameRate;
-        const bool sizeChanges = width != running.width || height != running.height;
+        const bool rateChanges = running.rateChanges(frameRate);
+        const bool sizeChanges = running.sizeChanges(width, height);
         std::optional<DeviceTiming> held;
         ResizeSteps steps;
         steps.begin = [&] { [session_ beginConfiguration]; };
@@ -1388,16 +1400,19 @@ private:
         running.frameRate = frameRate;
         if (running.watch) running.watch->request(frameRate);
         refusals_.reset(camera);
+        // Durations that were not known are written again, so are the settings the shorter ones may have cut.
+        if (running.timingWritten() && running.applied) applyOnQueue(camera, running.settings, true);
         return true;
     }
 
     bool startVideoOnQueue(std::size_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t frameRate)
     {
-        auto& running = cameras_[camera];
-        if (running.video && running.width == width && running.height == height && running.frameRate == frameRate)
-            return true;
-        return running.video ? resizeCamera(camera, width, height, frameRate)
-                             : admitCamera(camera, true, false, width, height, frameRate);
+        switch (cameras_[camera].pathFor(width, height, frameRate)) {
+        case StreamCache::Path::cached: return true;
+        case StreamCache::Path::resize: return resizeCamera(camera, width, height, frameRate);
+        case StreamCache::Path::admit: return admitCamera(camera, true, false, width, height, frameRate);
+        }
+        return false;
     }
 
     // After an interruption or a restart (uml::platform::recoverAnchors): an
@@ -1457,6 +1472,8 @@ private:
             return true;
         });
         [session_ commitConfiguration];
+        // A stream's durations are written with its anchor; a still-only camera's are written when it streams.
+        if (ok && running.video) running.timingWritten();
         if (ok && running.applied) applyOnQueue(camera, running.settings, true);
         return ok;
     }

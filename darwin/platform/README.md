@@ -116,6 +116,12 @@ interface to the wire.
   the rate asked for, a rate recomputed would not restore that, and a shorter
   maximum shortens the exposure, which the durations alone do not bring back).
   A change of size or rate on a running stream does the same (`resizeStream`).
+  When that restore is itself refused, the device holds something between the
+  old and the new: the camera's cached stream and settings are no longer known
+  (`StreamCache`), so the next request for the stream writes the format, the
+  durations and the size again (it is not answered from the cache), the
+  settings are written whatever they last were, and a request the device still
+  cannot take fails.
   While another camera is in the session every anchor must be a
   format a multi-camera session takes (`multiCamera`); a camera whose best
   such format offers less than its best format does not run with others (the

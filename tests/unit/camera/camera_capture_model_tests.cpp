@@ -949,6 +949,229 @@ void aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldTimingOnARefusal()
     require(resizeStream(rateOnly.steps(true, false)) == Resizing::resized && rateOnly.size == 640, "a rate alone");
 }
 
+// R4 (recheck7): what the backend remembers of a camera's stream and settings. A change the device refused is undone
+// with restoreTiming, and when that is refused too the device holds something between the old and the new: an
+// identical request must not be answered from the cache, and the settings must not be skipped as unchanged. The fake
+// backend mirrors the glue's start, resize and apply around the same StreamCache and the same transactions.
+struct FakeBackend {
+    FakeSession session;
+    FakeDevice& device = session.device;
+    StreamCache cache;
+    // The settings: the manual exposure the guest asked for, and the one last written to the device.
+    CameraTime asked {1, 10};
+    CameraTime appliedExposure {1, 10};
+    bool applied {};
+    bool refuseSize {};
+    DeviceTiming saved;
+    FakeBackend()
+    {
+        // 640x480 at 15 fps running, a 1/10 s manual exposure having made the maximum duration 1/10 s.
+        device.timing.format = 1;
+        device.durations(FakeDevice::fps(15), FakeDevice::fps(10));
+        device.customExposure(FakeDevice::fps(10), 100.0f);
+        cache.video = true;
+        cache.width = 640;
+        cache.height = 480;
+        cache.frameRate = 15;
+        applied = true;
+    }
+    void apply(CameraTime exposure, bool force)
+    {
+        asked = exposure;
+        if (cache.mayLeaveSettings(force, applied && appliedExposure == exposure)) return;
+        auto steps = device.steps();
+        if (!steps.lock()) return;
+        (void)steps.setCustomExposure(exposure, 100.0f);
+        steps.unlock();
+        appliedExposure = exposure;
+        applied = true;
+    }
+    // A lock the device refuses fails the write, as the platform's activate does.
+    bool activateRate(std::uint32_t rate)
+    {
+        auto steps = device.steps();
+        if (!steps.lock()) return false;
+        device.writes.push_back("durations");
+        const bool ok = device.program(1, FakeDevice::fps(std::int32_t(rate)), true);
+        steps.unlock();
+        return ok;
+    }
+    bool resize(std::uint32_t width, std::uint32_t height, std::uint32_t rate)
+    {
+        const bool rateChanges = cache.rateChanges(rate), sizeChanges = cache.sizeChanges(width, height);
+        ResizeSteps s;
+        s.begin = [] {};
+        s.commit = [] {};
+        s.snapshotTiming = [this] { saved = device.timing; };
+        if (rateChanges) s.setDurations = [&] { return activateRate(rate); };
+        if (sizeChanges)
+            s.setVideoSize = [&] {
+                // The device that took the larger stream's durations will not be locked again.
+                if (refuseSize) device.refuseLock = true;
+                return !refuseSize;
+            };
+        s.restoreTiming = [this] {
+            if (!putBackTiming(saved, device.steps())) cache.restoreRefused();
+        };
+        if (resizeStream(s) != Resizing::resized) return false;
+        cache.width = width;
+        cache.height = height;
+        cache.frameRate = rate;
+        if (cache.timingWritten() && applied) apply(appliedExposure, true);
+        return true;
+    }
+    bool admitStream(std::uint32_t width, std::uint32_t height, std::uint32_t rate)
+    {
+        const AdmitPlan plan {.addInput = true, .activate = true, .addVideo = true, .addPhoto = false};
+        auto steps = session.steps(plan);
+        const auto base = steps.restoreTiming;
+        steps.restoreTiming = [&] {
+            base();
+            if (!session.restored) cache.restoreRefused();
+        };
+        if (admit(plan, steps) != Admission::admitted) return false;
+        const bool stale = plan.activate && cache.timingWritten();
+        cache.video = true;
+        cache.width = width;
+        cache.height = height;
+        cache.frameRate = rate;
+        if (stale && applied) apply(appliedExposure, true);
+        return true;
+    }
+    bool start(std::uint32_t width, std::uint32_t height, std::uint32_t rate)
+    {
+        switch (cache.pathFor(width, height, rate)) {
+        case StreamCache::Path::cached: return true;
+        case StreamCache::Path::resize: return resize(width, height, rate);
+        case StreamCache::Path::admit: return admitStream(width, height, rate);
+        }
+        return false;
+    }
+    [[nodiscard]] int written(const std::string& what) const
+    {
+        return int(std::count(device.writes.begin(), device.writes.end(), what));
+    }
+};
+
+// Setting both durations to the rate's: after a refused change the device may hold the durations of a faster stream
+// (a maximum of 1/30 s), and the minimum set to 1/15 s first would exceed it.
+void theDurationThatMovesOutOfTheOthersWayIsWrittenFirst()
+{
+    const CameraTime fast {1, 30}, slow {1, 15};
+    require(maximumFirst(fast, slow), "a longer duration than the maximum: the maximum goes first");
+    require(!maximumFirst(slow, fast) && !maximumFirst(fast, fast), "a shorter or equal one: the minimum goes first");
+    // Replayed on the device model, which refuses a minimum above the maximum.
+    FakeDevice device;
+    device.durations(fast, fast);
+    auto steps = device.steps();
+    const auto setBoth = [&](CameraTime duration) {
+        if (maximumFirst(device.timing.maximum, duration)) return steps.setMaximum(duration) && steps.setMinimum(duration);
+        return steps.setMinimum(duration) && steps.setMaximum(duration);
+    };
+    require(setBoth(slow) && device.timing.minimum == slow && device.timing.maximum == slow, "30 fps to 15 fps");
+    require(setBoth(fast) && device.timing.minimum == fast && device.timing.maximum == fast, "and back");
+}
+
+void aRestoreThatIsRefusedLeavesNothingInTheCacheTrue()
+{
+    // The reviewer's sequence: a 640x480/15 stream with a 1/10 s manual exposure; a 1280x720/30 stream whose output
+    // refuses the size, and whose restore cannot take the device's lock; the larger stream is withdrawn.
+    FakeBackend backend;
+    backend.refuseSize = true;
+    require(!backend.start(1280, 720, 30), "the larger stream is refused");
+    require(backend.cache.unrestored, "the restore was refused: the cache says so");
+    require(backend.device.timing.maximum == FakeDevice::fps(30) && backend.device.timing.exposure.duration == FakeDevice::fps(30),
+            "the device holds the larger stream's durations, and its exposure was shortened with them");
+    backend.refuseSize = false;
+    backend.device.refuseLock = false;
+    backend.device.writes.clear();
+    require(backend.cache.pathFor(640, 480, 15) == StreamCache::Path::resize,
+            "the old request is not answered from the cache: its fields match but the device does not");
+    require(backend.start(640, 480, 15), "the old request goes through");
+    require(backend.written("durations") == 1 && backend.device.timing.minimum == FakeDevice::fps(15) &&
+                backend.device.timing.maximum == FakeDevice::fps(15),
+            "the durations are written again");
+    require(backend.written("exposure") == 1 && backend.device.timing.exposure == (ManualExposure {true, FakeDevice::fps(10), 100.0f}),
+            "and the manual exposure, which the unchanged settings would not have written");
+    require(!backend.cache.unrestored && backend.cache.pathFor(640, 480, 15) == StreamCache::Path::cached,
+            "after it, the cache stands for what the device holds");
+    backend.device.writes.clear();
+    require(backend.start(640, 480, 15) && backend.device.writes.empty(), "and an identical request writes nothing");
+}
+
+void aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten()
+{
+    FakeBackend backend;
+    backend.refuseSize = true;
+    require(!backend.start(1280, 720, 30), "refused");
+    backend.refuseSize = false;
+    // The device still will not lock: no cached success, and nothing is claimed.
+    backend.device.writes.clear();
+    require(!backend.start(640, 480, 15), "the old request fails, it is not answered from the cache");
+    require(!backend.start(640, 480, 15) && backend.cache.unrestored, "and again");
+    require(backend.device.writes.empty(), "no write reached the device");
+    backend.device.refuseLock = false;
+    require(backend.start(640, 480, 15) && !backend.cache.unrestored, "once the device can be written it is");
+}
+
+void settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged()
+{
+    FakeBackend backend;
+    backend.refuseSize = true;
+    require(!backend.start(1280, 720, 30), "refused");
+    backend.device.refuseLock = false;
+    backend.device.writes.clear();
+    // The device's caller applies the settings it has always had.
+    backend.apply({1, 10}, false);
+    require(backend.written("exposure") == 1 && backend.device.timing.exposure.duration == FakeDevice::fps(10),
+            "unchanged settings are not skipped when what the device holds is not known");
+    FakeBackend known;
+    known.apply({1, 10}, false);
+    require(known.written("exposure") == 0, "and are, when it is");
+    known.apply({1, 10}, true);
+    require(known.written("exposure") == 1, "a forced apply always writes");
+}
+
+void aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin()
+{
+    FakeBackend backend;
+    backend.cache = StreamCache {};
+    backend.session.refuseVideo = true;
+    backend.session.meanwhile = [](FakeDevice& device) { device.refuseLock = true; };
+    require(!backend.start(640, 480, 15) && backend.cache.unrestored && !backend.session.restored,
+            "the join is refused, and the device was not put back");
+    require(!backend.cache.video, "no stream is remembered");
+    backend.session.refuseVideo = false;
+    backend.session.meanwhile = nullptr;
+    backend.device.refuseLock = false;
+    backend.device.writes.clear();
+    require(backend.start(640, 480, 15) && !backend.cache.unrestored, "the next join succeeds");
+    require(backend.written("exposure") == 1, "and writes the settings again, the format not having changed");
+}
+
+void theStreamCacheSaysWhatIsKnown()
+{
+    StreamCache cache;
+    require(cache.pathFor(640, 480, 15) == StreamCache::Path::admit, "no stream: it is made");
+    cache.video = true;
+    cache.width = 640;
+    cache.height = 480;
+    cache.frameRate = 15;
+    require(cache.pathFor(640, 480, 15) == StreamCache::Path::cached && !cache.rateChanges(15) && !cache.sizeChanges(640, 480),
+            "the same request is answered from the cache");
+    require(cache.pathFor(640, 480, 30) == StreamCache::Path::resize && cache.rateChanges(30) && !cache.sizeChanges(640, 480), "a rate");
+    require(cache.pathFor(1280, 720, 15) == StreamCache::Path::resize && !cache.rateChanges(15) && cache.sizeChanges(1280, 720), "a size");
+    require(cache.mayLeaveSettings(false, true) && !cache.mayLeaveSettings(true, true) && !cache.mayLeaveSettings(false, false),
+            "settings are left when unchanged and not forced");
+    require(!cache.timingWritten(), "nothing was unknown");
+    cache.restoreRefused();
+    require(cache.pathFor(640, 480, 15) == StreamCache::Path::resize && cache.rateChanges(15) && cache.sizeChanges(640, 480) &&
+                !cache.mayLeaveSettings(false, true),
+            "a refused restore makes everything written again");
+    require(cache.timingWritten() && !cache.unrestored && cache.pathFor(640, 480, 15) == StreamCache::Path::cached, "until it has been");
+    require(!cache.timingWritten(), "reported once");
+}
+
 // ---------------------------------------------------------------------------
 // Recovery
 // ---------------------------------------------------------------------------
@@ -1467,6 +1690,12 @@ void everyGeneratedTableHoldsTheInvariants()
 
 int main()
 {
+    theDurationThatMovesOutOfTheOthersWayIsWrittenFirst();
+    aRestoreThatIsRefusedLeavesNothingInTheCacheTrue();
+    aRequestAfterARefusedRestoreFailsWhileTheDeviceCannotBeWritten();
+    settingsAreWrittenAgainAfterARefusedRestoreEvenWhenUnchanged();
+    aRefusedFirstJoinWithARefusedRestoreIsWrittenAgainByTheNextJoin();
+    theStreamCacheSaysWhatIsKnown();
     aSpansWholeRatesSnapToTheNearWholeNumber();
     aRateAHairOutsideASpanIsProgrammedFromTheSpansOwnDuration();
     theOfferedRatesAreWholeRatesUpToTheCap();
