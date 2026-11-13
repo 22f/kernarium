@@ -52,6 +52,22 @@ SCALED = {
     "WATCH_UNKNOWN_LIMIT": 4.0,
 }
 SECONDS = 3 * 3600
+# A `start` that is killed between spawning the supervisor and publishing its
+# pid, as the reviewer's probe makes one: it pauses there, and the test kills it.
+CRASH_STARTER = """
+import importlib.util, os, pathlib, sys, time
+spec = importlib.util.spec_from_file_location("ipad_automation", sys.argv[1])
+a = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a)
+real = a.write_json
+def gated(path, data):
+    if pathlib.Path(path).name == "host.json" and data.get("supervisor"):
+        (pathlib.Path(os.environ["FAKE_ROOT"]) / "before-pid-publication").write_text("x")
+        time.sleep(60)
+    return real(path, data)
+a.write_json = gated
+a.launch_host(a.parse(sys.argv[2:]))
+"""
 PROMPT = (
     "2026-11-13 16:04:14.424136+0900 KernariumAutomation-Runner[11111:2222222] "
     "[Default] Failed to initialize for UI testing: Error Domain="
@@ -1317,10 +1333,10 @@ class SettleTests(WatchTestCase):
         self.device.scenarios([{"kind": "up-silent"}])
         real_end = automation.end_host
 
-        def end(record, process=None, wait=None, remainder=None):
+        def end(record, process=None, wait=None, remainder=None, directory=None):
             with open(record["log"], "a") as handle:
                 handle.write(PROMPT + "\n")
-            return real_end(record, process, 2, remainder)
+            return real_end(record, process, 2, remainder, directory)
         self.patch(automation, "end_host", end)
         self.tune(WATCH_RUNNER_WAIT=1.0)
         launch = self.launched()
@@ -1755,7 +1771,7 @@ class CleanupTests(WatchTestCase):
                 first = self.watch_over_host()
                 watch = self.last_watch
 
-                def end(record, process=None, wait=None, remainder=None, result=result):
+                def end(record, process=None, wait=None, remainder=None, directory=None, result=result):
                     if remainder is not None:
                         remainder.append((4242, "a helper of the host"))
                     return result
@@ -1815,6 +1831,143 @@ class CleanupTests(WatchTestCase):
             self.assertEqual(automation.end_host(record, wait=1, remainder=left),
                              automation.FOREIGN)
         self.assertEqual(left, member)
+
+    def orphaned_after_a_starter_crash(self):
+        """The real sequence of the reviewer's probe: a starter that has
+        spawned the supervisor and is killed (SIGKILL) before it publishes the
+        supervisor's pid; the host serves; later the supervisor and xcodebuild
+        die and a helper of theirs stays in the group. Returns the host's
+        invocation and the helper's pid."""
+        self.device.scenarios([{"kind": "serve", "child": True}, {"kind": "serve"}])
+        starter = subprocess.Popen(
+            [sys.executable, "-I", "-c", CRASH_STARTER, str(SCRIPT),
+             "--device", self.device.udid, "--state-dir", str(self.device.state_dir),
+             "--derived-data", str(self.device.derived), "start", *self.reports()],
+            env=self.device.environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        self.addCleanup(lambda: (starter.kill(), starter.wait()))
+        self.device.wait(lambda: (self.device.root / "before-pid-publication").exists(),
+                         30, "the starter has spawned the supervisor")
+        self.device.wait(lambda: self.device.invocations() and self.device.serving(
+            self.device.invocations()[0]["nonce"]), 30, "the host serves")
+        old = self.device.invocations()[0]
+        helper = old["child"]
+
+        def end_helper() -> None:
+            try:
+                os.kill(helper, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.addCleanup(end_helper)
+        self.assertIsNone(automation.local_record(self.options("status"))["supervisor"])
+        starter.kill()
+        starter.wait(timeout=10)
+        os.kill(old["ppid"], signal.SIGKILL)
+        os.kill(old["pid"], signal.SIGKILL)
+        self.device.wait(lambda: not self.device.alive(old["ppid"])
+                         and not self.device.alive(old["pid"]), 10,
+                         "the supervisor and xcodebuild ended")
+        self.assertTrue(self.device.alive(helper))
+        return old, helper
+
+    def test_a_group_whose_identity_was_lost_with_its_starter_is_not_launched_beside(self) -> None:
+        # Rule (R5, the reviewer's final probe): the record has no supervisor pid
+        # and nothing that carries the nonce is left, but a helper is. That the
+        # watch finds no nonce-bearing process proves nothing about the group:
+        # it stops with the remainder status and starts no host beside the
+        # helper. The supervisor's own published identity names the group; what
+        # carries no nonce is not shown to be the host's, so it is left alone.
+        old, helper = self.orphaned_after_a_starter_crash()
+        watch = self.run_watch()
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_REMAINDER, self.messages)
+        self.assertEqual(self.record()["state"], automation.REMAINDER)
+        self.assertIn(str(helper), self.record()["detail"])
+        self.invoked(1)
+        self.assertTrue(self.device.alive(helper))
+
+    def test_a_group_that_nothing_names_is_unknown_not_empty(self) -> None:
+        # Rule (R5): with the supervisor's identity file gone too, nothing names
+        # the group at all: UNKNOWN, status 8, no launch, the helper untouched.
+        old, helper = self.orphaned_after_a_starter_crash()
+        (self.device.state_dir / self.device.udid
+         / f"supervisor-{old['nonce']}.json").unlink(missing_ok=True)
+        watch = self.run_watch()
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_REMAINDER, self.messages)
+        self.assertIn(automation.UNKNOWN, self.record()["detail"])
+        self.invoked(1)
+        self.assertTrue(self.device.alive(helper))
+
+    def test_the_group_of_a_host_is_found_by_what_names_it(self) -> None:
+        directory = self.device.state_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        rows = [(10, 10, "S", "python3 xcodebuild -resultBundlePath a/host-" + "n" * 32
+                 + ".xcresult"), (11, 12, "S", "sleep 3600")]
+        with mock.patch.object(automation, "process_table", return_value=rows):
+            # Nothing names a host: nothing to end.
+            self.assertEqual(automation.host_group({}, None), (None, True))
+            # A pid in the record, or a process that carries the nonce.
+            self.assertEqual(automation.host_group(
+                {"nonce": "n" * 32, "supervisor": 77}, None), (77, True))
+            self.assertEqual(automation.host_group({"nonce": "n" * 32}, None), (10, True))
+            # A zombie that carries it is the remains of a process, not a group.
+            with mock.patch.object(automation, "process_table", return_value=[
+                    (13, 13, "Z", "python3 xcodebuild -resultBundlePath a/host-"
+                     + "w" * 32 + ".xcresult")]):
+                self.assertEqual(automation.host_group({"nonce": "w" * 32}, None),
+                                 (None, False))
+            # Nothing carries it, and no identity was published: not empty, not
+            # known.
+            self.assertEqual(automation.host_group({"nonce": "m" * 32}, None),
+                             (None, False))
+            self.assertEqual(automation.host_group({"nonce": "m" * 32}, None, directory),
+                             (None, False))
+            # The supervisor published its own.
+            automation.write_json(automation.supervisor_identity_path(directory, "m" * 32),
+                                  {"pid": 40, "pgid": 40, "nonce": "m" * 32})
+            self.assertEqual(automation.host_group({"nonce": "m" * 32}, None, directory),
+                             (40, True))
+        with mock.patch.object(automation, "process_table", return_value=None):
+            self.assertEqual(automation.host_group({"nonce": "k" * 32}, None),
+                             (None, False))
+            self.assertEqual(automation.end_host({"nonce": "k" * 32}), automation.UNKNOWN)
+        with mock.patch.object(automation, "process_table", return_value=rows):
+            self.assertEqual(automation.end_host({"nonce": "z" * 32}), automation.UNKNOWN)
+
+    def test_a_record_naming_launchds_pid_names_no_host(self) -> None:
+        # Only a record that has no pid at all can stand for a host spawned and
+        # not yet recorded; pid 1 was never a started supervisor's.
+        with mock.patch.object(automation, "process_table", return_value=[]):
+            self.assertEqual(automation.host_group(
+                {"nonce": "n" * 32, "supervisor": 1}, None), (None, True))
+            self.assertEqual(automation.end_host({"nonce": "n" * 32, "supervisor": 1}),
+                             automation.ENDED)
+            self.assertEqual(automation.end_host({"nonce": "n" * 32}),
+                             automation.UNKNOWN)
+
+    def test_a_launch_keeps_the_identity_of_the_last_host_and_drops_older_ones(self) -> None:
+        directory = self.device.state_dir / self.device.udid
+        directory.mkdir(parents=True, exist_ok=True)
+        for nonce in ("a" * 32, "b" * 32, "c" * 32):
+            automation.write_json(automation.supervisor_identity_path(directory, nonce),
+                                  {"pgid": 5, "nonce": nonce})
+        automation.write_json(directory / "host.json", {"nonce": "b" * 32, "supervisor": 5})
+        launch = automation.launch_host(self.options("start", "--hours", "1", *self.reports()))
+        self.launches.append(launch)
+        self.device.wait(lambda: self.device.serving(launch.nonce), 30, "the host serves")
+        names = sorted(path.name for path in directory.glob("supervisor-*.json"))
+        self.assertEqual(names, sorted(f"supervisor-{nonce}.json"
+                                       for nonce in ("b" * 32, launch.nonce)))
+
+    def test_a_supervisor_publishes_its_identity_before_it_spawns_anything(self) -> None:
+        host = self.start_host()
+        published = automation.read_json(automation.supervisor_identity_path(
+            self.device.state_dir / self.device.udid, host.nonce))
+        self.assertEqual(published["pid"], host.process.pid)
+        self.assertEqual(published["pgid"], host.process.pid)
+        self.assertEqual(published["nonce"], host.nonce)
+        # Before the supervisor spawned xcodebuild.
+        self.assertLessEqual(published["started"], self.device.invocations()[0]["time"])
 
     def test_a_group_that_cannot_be_listed_is_not_an_empty_one(self) -> None:
         # Rule (R5): a failed listing is not a group with nothing in it.
@@ -1995,6 +2148,21 @@ class StopTests(WatchTestCase):
             self.device.invocations()[0]["pid"]), 15, "the host ended")
         self.assertFalse(self.device.serving())
         self.assertEqual(self.nonces(), [first])
+
+    def test_a_stop_that_cannot_name_the_hosts_group_fails(self) -> None:
+        # Rule (R5): a record that names no supervisor and a nonce nothing
+        # carries does not show the host gone; `stop --force` says so, and
+        # fails, rather than reporting a host stopped that may still run.
+        directory = self.device.state_dir / self.device.udid
+        directory.mkdir(parents=True, exist_ok=True)
+        automation.write_json(directory / "host.json", {
+            "supervisor": None, "nonce": "e" * 32, "log": str(directory / "x.log"),
+            "started": time.time() - 60, "seconds": 3600, "wait": 20})
+        self.patch(automation, "send", mock.Mock(side_effect=automation.NoHost("no host")))
+        with mock.patch.object(automation, "process_table", return_value=[]):
+            self.assertEqual(automation.command_stop(self.options("stop", "--force")),
+                             automation.EXIT_FAILED)
+        self.assertTrue(any("could not be listed" in line for line in self.messages))
 
     def test_a_stop_without_force_is_refused_and_the_watch_runs_on(self) -> None:
         self.tune(HEARTBEAT_STALE=30)

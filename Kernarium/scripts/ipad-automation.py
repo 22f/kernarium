@@ -82,8 +82,9 @@ what it could not establish and ends with a status of its own.
   changed: it looks again), until the new host is published. The old host's
   whole process group (supervisor, xcodebuild and what else is in it) must
   be listed and empty before anything starts; what the watch cannot show is the
-  host's, or cannot list, stops it with status 8 and the state remainder,
-  naming the pids, and nothing starts beside it. A group is signalled only
+  host's, cannot list, or cannot name at all (the supervisor records its own
+  identity before it spawns anything) stops it with status 8 and the state
+  remainder, naming the pids, and nothing starts beside it. A group is signalled only
   while the watch holds the supervisor it started, or while a member's command
   line carries the host's nonce, and then all of it, with SIGKILL for what
   ignores SIGTERM.
@@ -588,32 +589,58 @@ def carries(nonce, command):
         word.endswith(f"{nonce}.xcresult") for word in words)
 
 
-def host_group(record, process):
+def supervisor_identity_path(directory, nonce):
+    return pathlib.Path(directory) / f"supervisor-{nonce}.json"
+
+
+def publish_supervisor_identity(options):
+    """The supervisor says who it is before it spawns anything, in a file of
+    its own for this host: the starter that records the supervisor's pid can
+    die between spawning it and writing the pid, and a later launch replaces
+    the record. The group the supervisor leads is the host's."""
+    write_json(supervisor_identity_path(state_dir(options), options.nonce), {
+        "pid": os.getpid(), "pgid": os.getpgrp(), "nonce": options.nonce,
+        "started": time.time()})
+
+
+def host_group(record, process, directory=None):
     """(pgid, known): the process group of the host the record names. It is
-    the supervisor's (`start_new_session` made its pid the group id). With no
-    pid, the group of what carries the record's nonce; (None, True) when
-    nothing does and (None, False) when the processes cannot be listed."""
+    the supervisor's (`start_new_session` made its pid the group id): the pid
+    in the record, or the one the supervisor published itself in `directory`.
+    A host whose group cannot be recovered that way is (None, False): what
+    carries its nonce shows the group only while some process still does, and
+    that nothing does proves nothing, as a helper that carries no nonce can
+    stay. (None, True) is only for a record that names no host at all, or a
+    pid that cannot be a supervisor's."""
     nonce = record.get("nonce")
     pid = process.pid if process is not None else record.get("supervisor")
     if isinstance(pid, int) and pid > 1:
         return pid, True
     if not nonce:
         return None, True
+    # A pid that cannot be a host's supervisor (launchd's, or none) was not
+    # written by a start that spawned one: only a record with no pid at all
+    # may stand for a host that was spawned and not yet recorded.
+    spawned = pid is None
+    if directory is not None:
+        published = read_json(supervisor_identity_path(directory, nonce)).get("pgid")
+        if isinstance(published, int) and published > 1:
+            return published, True
     table = process_table()
     if table is None:
         return None, False
-    groups = [group for _, group, stat, command in table
-              if not stat.startswith("Z") and carries(nonce, command)]
-    return (groups[0] if groups else None), True
+    for _, group, stat, command in table:
+        if not stat.startswith("Z") and carries(nonce, command):
+            return group, True
+    return None, not spawned
 
 
-def pid_reused(pid, record):
-    """Whether the process that has `pid` now started after the host did: then
-    the host's group, which the supervisor's pid named, is gone and this is
-    another one. A group whose leader is gone, or older than the host, is not
-    shown to be another."""
+def pid_reused(pid, started):
+    """Whether the process that has `pid` now started after the host did
+    (`started`, epoch seconds): then the host's group, which the supervisor's
+    pid named, is gone and this is another one. A group whose leader is gone,
+    or older than the host, is not shown to be another."""
     instance = process_instance(pid)
-    started = record.get("started")
     if instance is None or not isinstance(started, (int, float)):
         return False
     try:
@@ -623,11 +650,13 @@ def pid_reused(pid, record):
     return began >= started - 2
 
 
-def end_host(record, process=None, wait=None, remainder=None):
+def end_host(record, process=None, wait=None, remainder=None, directory=None):
     """Ends the whole of a host: its supervisor, xcodebuild and what else is
     in their process group, with SIGTERM and then SIGKILL, and returns ENDED
     only once the group was listed and is empty. Anything else (see above)
-    appends what is left, as (pid, command), to `remainder`.
+    appends what is left, as (pid, command), to `remainder`. A host whose
+    group cannot be identified (no pid in the record, none published by its
+    supervisor in `directory`, nothing that carries its nonce) is UNKNOWN.
 
     A group is signalled only while `process`, the supervisor this process
     started and has not reaped, holds the pid, or while a member's command
@@ -637,7 +666,7 @@ def end_host(record, process=None, wait=None, remainder=None):
     ignores SIGTERM) are ended with SIGKILL. A group that never showed it is
     left alone."""
     nonce = record.get("nonce")
-    pid, known = host_group(record, process)
+    pid, known = host_group(record, process, directory)
     if not known:
         return UNKNOWN
     if pid is None:
@@ -668,7 +697,10 @@ def end_host(record, process=None, wait=None, remainder=None):
                 owned = bool(nonce) and any(
                     carries(nonce, command) for _, command in members)
         if not owned:
-            if pid_reused(pid, record):
+            started = record.get("started")
+            if started is None and directory is not None and nonce:
+                started = read_json(supervisor_identity_path(directory, nonce)).get("started")
+            if pid_reused(pid, started):
                 return ENDED
             if remainder is not None:
                 remainder.extend(members)
@@ -1180,6 +1212,7 @@ def command_supervise(options):
     left: SIGTERM (what ends a host) ends xcodebuild, with SIGKILL for one
     that ignores it, and then whatever else xcodebuild left in the group; it
     exits last."""
+    publish_supervisor_identity(options)
     if refuse_recording(options.xctestrun):
         return EXIT_FAILED
     if not check_report_slots(options, REPORT_PROCESSES):
@@ -1371,6 +1404,16 @@ def launch_host(options, cancelled=None, guard=None, record=None, locked=False):
         host = {"supervisor": None, "log": str(log_path),
                 "result_bundle": str(result_bundle), "nonce": nonce,
                 "started": time.time(), "seconds": seconds, "wait": options.wait}
+        # The identity files of hosts older than the one this replaces name
+        # groups that were ended (or that no later step asks about).
+        keep = {supervisor_identity_path(directory, each).name
+                for each in (nonce, local_record(options).get("nonce")) if each}
+        for stale in directory.glob("supervisor-*.json"):
+            if stale.name not in keep:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
         write_json(directory / "host.json", host)
         with open(log_path, "w") as output:
             supervisor = subprocess.Popen(
@@ -1501,7 +1544,7 @@ def command_stop(options):
             time.sleep(1)
         if recorded_supervisor(record) is not None:
             log(f"terminating supervisor {record.get('supervisor')}")
-    if end_host(record) in (STUCK, UNKNOWN):
+    if end_host(record, directory=state_dir(options)) in (STUCK, UNKNOWN):
         log("part of the host would not end, or its processes could not be "
             "listed; see `ps` for its process group")
         return EXIT_FAILED
@@ -2077,7 +2120,8 @@ class Watch:
                 targets.append((record, None))
         status = ENDED
         for target, process in targets:
-            result = end_host(target, process, remainder=remainder)
+            result = end_host(target, process, remainder=remainder,
+                              directory=state_dir(self.options))
             if result != ENDED and status == ENDED:
                 status = result
         return status
@@ -2136,7 +2180,7 @@ class Watch:
             self.latch.set(risk[0], risk[1], launch.log_path, risk[2])
         remainder = []
         status = end_host(local_record(self.options), launch.process,
-                          remainder=remainder)
+                          remainder=remainder, directory=state_dir(self.options))
         after = self.approval_risk(scans)
         if after and (not risk or after[0] != risk[0]):
             self.latch.set(after[0], after[1], launch.log_path, after[2])
