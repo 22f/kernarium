@@ -32,15 +32,25 @@ namespace uml::cpu::gadget_cache {
  * code in an address space, or switches to it, tells its account
  * (Account::ran()), which keeps one bit for each of the last 64 epochs (about
  * 2.7 ms each, 175 ms in all) in which that happened: its activity. Relief asks
- * first any account that holds more than the target by itself, which no other
- * account's shedding could spare. Then it asks the accounts the guest is least
- * likely to run again at once, only while the open ones are above the target:
- * those no executor entered in the window, the one idle longest first, then
- * the others by activity band, a quarter of the window each, the least active
- * band first and the smallest account first within a band, so the address space
- * the guest is running most is asked last. Activity, not the epoch of the last
- * entry, orders the running accounts: a stamp trails a run by more than the gap
- * between running accounts.
+ * first any account that holds more than the line by itself, fifteen sixteenths
+ * of the budget, which leaves the others less than a sixteenth to run in and
+ * which no other account's shedding could spare, and any idle one that holds
+ * more than the target. Then it asks the accounts the
+ * guest is least likely to run again at once, only while the open ones are above
+ * the target: those no executor entered in the window, the one idle longest
+ * first, then the others by activity band, a quarter of the window each, the
+ * least active band first and the smallest account first within a band, so the
+ * address space the guest is running most is asked last. Activity, not the epoch
+ * of the last entry, orders the running accounts: a stamp trails a run by more
+ * than the gap between running accounts. A running account between the target
+ * and the line, a program that alone holds most of the cache, is spared while
+ * there are others to ask, and relief then stops at the line instead of the
+ * target, so that the others keep at least a sixteenth of the budget between
+ * one relief and the next; it is asked only when the open accounts are above
+ * the budget with nothing else left. A program that grows past the line is
+ * asked whole and stalls while its threads translate its working set again;
+ * shedding only the cold part of a running address space, which the cache
+ * cannot do, would spare that.
  *
  * An account asked to shed tells its engine (Notify), and every executor
  * holding that address space lets go of it at its next entry into translated
@@ -121,6 +131,13 @@ inline constexpr std::size_t minimum_budget = std::size_t{128} << 20;
 inline constexpr std::size_t limit_divisor = 8;
 /* The share of guest memory a budget takes, as a divisor. */
 inline constexpr std::size_t guest_memory_divisor = 4;
+
+/* The share of the budget relief leaves the others to run in when one program
+ * holds most of the cache, as a divisor: an account larger than the budget less
+ * this share is asked to shed whole. At an eighth it is the target's, and no
+ * account is spared. */
+inline constexpr std::size_t target_divisor = 8;
+inline constexpr std::size_t reserve_divisor = 16;
 
 /* The clock accounts are told their runs by: the host's counter (CNTVCT_EL0,
  * 24 MHz on Apple silicon) with its low bits dropped, so an epoch is about
@@ -388,14 +405,23 @@ struct Candidate final {
  * the budget (the target), when they hold more than all of it, as epoch `now`
  * sees them.
  *
- * What cannot be avoided comes first: an account holding more than the target
- * by itself stays above it however many others shed, so it is asked, the
+ * What cannot be avoided comes first: an account holding more than the line
+ * (fifteen sixteenths of the budget, reserve_divisor) by itself leaves the
+ * others less than the reserve however many of them shed, so it is asked, the
  * largest first, before any account that might have been enough instead. Then
  * the others are asked in the order of detail::shed_before(), which puts the
  * accounts the guest is running last, only while the open ones are above the
- * target. An account holding nothing is never asked, and a budget smaller than
- * one address space still holds. Of accounts equal in every respect, the one
- * opened last is asked first.
+ * target. An account the guest runs between the target and the line is spared
+ * while any other is left to ask: the others go until the open ones hold at most
+ * the line, which is as far as they can bring the open ones, and a spared
+ * account is asked only when they are still above the budget with nothing else
+ * left. One that is idle is asked as soon as it holds more than the target. A
+ * relief so
+ * leaves the open accounts at most a reserve under the budget, and the next
+ * comes after the stores have taken that, never at every store. An account
+ * holding nothing is never asked, and a budget smaller than one address space
+ * still holds. Of accounts equal in every respect, the one opened last is asked
+ * first.
  *
  * Every caller takes its turn, however the lock is held: one that went on
  * storing while another held it, for an account opening or going, a census or
@@ -420,14 +446,18 @@ inline void relieve_at(std::uint64_t now) noexcept
 		book.peak_open.store(open, std::memory_order_relaxed);
 	if (open <= budget)
 		return;
-	const auto target = budget - budget / 8;
+	const auto target = budget - budget / target_divisor;
+	const auto line = budget - budget / reserve_divisor;
 	bool relieved = false;
-	while (open > target) {
-		detail::Candidate chosen;
-		/* The largest account over the target by itself, if any. Each
-		 * pass scans the ledger again: reliefs are rare, and nothing is
-		 * allocated under the lock. */
+	for (;;) {
+		/* Each pass scans the ledger again: reliefs are rare, and nothing
+		 * is allocated under the lock. The largest account over the line
+		 * by itself, or over the target and idle, if any; the first of the
+		 * others to ask, and of the running ones between the target and
+		 * the line, which are spared. */
 		detail::Candidate unavoidable;
+		detail::Candidate chosen;
+		detail::Candidate spared;
 		for (auto *account = book.first; account != nullptr;
 		     account = account->next_) {
 			const auto bytes = account->bytes();
@@ -437,16 +467,25 @@ inline void relieve_at(std::uint64_t now) noexcept
 				(account->activity(now) + band_epochs - 1) /
 					band_epochs,
 				account->last_run(), bytes};
-			if (bytes > target && bytes > unavoidable.bytes)
-				unavoidable = candidate;
-			if (chosen.account == nullptr ||
-			    detail::shed_before(candidate, chosen))
-				chosen = candidate;
+			if (bytes > line || (bytes > target && candidate.band == 0)) {
+				if (bytes > unavoidable.bytes)
+					unavoidable = candidate;
+				continue;
+			}
+			auto &pool = bytes > target ? spared : chosen;
+			if (pool.account == nullptr ||
+			    detail::shed_before(candidate, pool))
+				pool = candidate;
 		}
+		if (open <= (spared.account != nullptr ? line : target))
+			break;
 		if (unavoidable.account != nullptr)
 			chosen = unavoidable;
-		if (chosen.account == nullptr)
-			break;
+		else if (chosen.account == nullptr) {
+			if (spared.account == nullptr || open <= budget)
+				break;
+			chosen = spared;
+		}
 		const auto shed = chosen.account->start_shedding();
 		open = open > shed ? open - shed : 0;
 		book.shed_accounts.fetch_add(1, std::memory_order_relaxed);

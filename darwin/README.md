@@ -111,10 +111,15 @@ share:
   oldest destroyed or idle one (nobody entered it in those 175 ms) goes instead,
   and when none is, the one the executor names the fewest slots of. An address
   space only this executor holds is never spared. Past the budget, an address
-  space that alone holds more than seven eighths of the budget is asked to shed,
-  and then, only while the cache is above that, the others: those no executor
-  entered for the last 175 ms first, then the less active by band and the
-  smaller first, so the address space the guest runs most goes last. The
+  space that alone holds more than fifteen sixteenths of the budget (the line),
+  or more than seven eighths of it (the target) while no executor enters it, is
+  asked to shed, and then, only while the cache is above the target, the others:
+  those no executor entered for the last 175 ms first, then the less active by
+  band and the smaller first, so the address space the guest runs most goes
+  last. A running one between the target and the line is spared while others
+  are left, and they stop at the line, so they keep a sixteenth of the budget
+  between reliefs; past the line it is asked whole, and its program stalls
+  while its threads translate it again. The
   emulator sets the budget before the first executor, from guest memory and the
   process memory limit or `--gadget-cache-budget=`; it is also the gadget-cache
   term of the host GPU's budget

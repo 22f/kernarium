@@ -255,7 +255,7 @@ void a_shed_account_that_shrinks_leaves_the_open_ones_exact()
 /* The accounts that have not been entered for a window are idle and go first,
  * the one idle longest first; the one that is running is not asked while they
  * hold enough to bring the open ones down to the target, however large it is
- * (short of holding more than the target by itself) and however many of them
+ * (short of holding more than the line by itself) and however many of them
  * there are. */
 void idle_accounts_go_before_the_one_running()
 {
@@ -312,12 +312,13 @@ void run_in(Holder &holder, std::uint64_t now, unsigned count)
 	require(holder.account.activity(now) == count);
 }
 
-/* An account that holds more than the target by itself stays above it however
- * many others shed, so it is asked first and the others are left alone when
- * that brings the open ones down: the neighbours of a program that must be shed
- * anyway keep their translations, whether they are idle or running, in any
- * activity band. */
-void an_account_over_the_target_is_asked_alone()
+/* An account that holds more than the line (fifteen sixteenths of the budget)
+ * by itself leaves the others less than the reserve however many shed, so it is
+ * asked first and the others are left alone when that brings the open ones
+ * down: the neighbours of a program that must be shed anyway keep their
+ * translations, whether they are idle or running, in any activity band. Here
+ * the budget is 100 KiB, the target 87.5 and the line 93.75. */
+void an_account_over_the_line_is_asked_alone()
 {
 	const auto now = t0 + 4 * window;
 	cache::set_budget(100 * kib);
@@ -394,8 +395,8 @@ void an_account_over_the_target_is_asked_alone()
 	{
 		Holder first;
 		Holder second;
-		first.account.charge(90 * kib);
-		second.account.charge(92 * kib);
+		first.account.charge(95 * kib);
+		second.account.charge(96 * kib);
 		first.ran(t0 + 1, now);
 		second.ran(t0 + 1, now);
 		Holder idle;
@@ -408,7 +409,7 @@ void an_account_over_the_target_is_asked_alone()
 	 * goes, and then the idle account before the running one. */
 	{
 		Holder game;
-		game.account.charge(90 * kib);
+		game.account.charge(95 * kib);
 		game.ran(t0 + 1, now);
 		Holder idle;
 		idle.account.charge(40 * kib);
@@ -429,6 +430,173 @@ void an_account_over_the_target_is_asked_alone()
 		cache::relieve_at(now);
 		require(!holds.asked() &&
 			cache::ledger_state().reliefs == base.reliefs);
+	}
+	cache::set_budget(cache::fallback_budget);
+}
+
+/* A program that holds most of the cache, between the target and the line, is
+ * spared while the others can be asked, which is the Asphalt launch: its
+ * address space held 213 MiB of a 240 MiB budget (target 210, line 225) beside
+ * small ones, and was asked whole where its neighbours would have done. The
+ * others go as far as the line, not the target, and the next relief comes only
+ * after the stores have taken what that left; the program is asked when it
+ * passes the line, or when the open ones are above the budget and nothing else
+ * is left. */
+void a_program_that_holds_most_of_the_cache_is_spared_up_to_the_line()
+{
+	const auto now = t0 + 4 * window;
+	cache::set_budget(240 * mib);
+	require(cache::budget() - cache::budget() / cache::reserve_divisor ==
+		225 * mib && cache::budget() - cache::budget() / cache::target_divisor ==
+		210 * mib);
+	const auto charge = [](Holder &holder, std::size_t bytes) {
+		holder.account.charge(static_cast<std::ptrdiff_t>(bytes));
+	};
+	/* The game 213 MiB, running, and 34 of neighbours: the idle ones go, the
+	 * one idle longest first, then the less active, until the open ones are
+	 * at the line, 225. The running neighbour stays, though the open ones
+	 * are above the target. */
+	{
+		Holder game;
+		Holder idle_long;
+		Holder idle;
+		Holder less;
+		Holder running;
+		charge(game, 213 * mib);
+		charge(idle_long, 12 * mib);
+		charge(idle, 9 * mib);
+		charge(less, 8 * mib);
+		charge(running, 5 * mib);
+		game.ran(t0 + 1, now);
+		idle_long.ran(t0 + 1, t0 + 2);
+		idle.ran(t0 + 1, t0 + 9);
+		run_in(less, now, 10);
+		running.ran(t0 + 1, now);
+		require(cache::over_budget());
+		const auto base = cache::ledger_state();
+		cache::relieve_at(now);
+		require(!game.asked() && !running.asked());
+		require(idle_long.asked() && idle.asked() && less.asked());
+		const auto state = cache::ledger_state();
+		require(state.reliefs == base.reliefs + 1 &&
+			state.shed_accounts == base.shed_accounts + 3);
+		require(state.shedding == 29 * mib && figures_agree());
+		require(cache::ledger().open.load() == 218 * mib);
+		/* The stores of the others now have 22 MiB before the budget, and no
+		 * relief runs before they pass it, however many stores that takes. */
+		charge(running, 22 * mib);
+		require(!cache::over_budget());
+		cache::relieve_at(now);
+		require(cache::ledger_state().reliefs == state.reliefs &&
+			!running.asked());
+		charge(running, 1);
+		require(cache::over_budget());
+		cache::relieve_at(now);
+		require(running.asked() && !game.asked());
+		require(cache::ledger_state().reliefs == state.reliefs + 1);
+		require(cache::ledger().open.load() == 213 * mib && figures_agree());
+	}
+	/* One byte over the line, it is asked first and alone: the neighbours that
+	 * could not have spared it keep what they have. The line itself is spared. */
+	{
+		Holder game;
+		Holder idle;
+		Holder running;
+		charge(game, 225 * mib + 1);
+		charge(idle, 10 * mib);
+		charge(running, 5 * mib);
+		game.ran(t0 + 1, now);
+		idle.ran(t0 + 1, t0 + 2);
+		running.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(game.asked() && !idle.asked() && !running.asked());
+		require(figures_agree());
+	}
+	{
+		Holder game;
+		Holder idle;
+		charge(game, 225 * mib);
+		charge(idle, 16 * mib);
+		game.ran(t0 + 1, now);
+		idle.ran(t0 + 1, t0 + 2);
+		cache::relieve_at(now);
+		require(!game.asked() && idle.asked() && figures_agree());
+	}
+	/* The line is as far as the neighbours bring the open ones: the running one
+	 * stays when the idle one takes them to it. */
+	{
+		Holder game;
+		Holder idle;
+		Holder running;
+		charge(game, 220 * mib);
+		charge(idle, 16 * mib);
+		charge(running, 5 * mib);
+		game.ran(t0 + 1, now);
+		idle.ran(t0 + 1, t0 + 2);
+		running.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(!game.asked() && idle.asked() && !running.asked());
+		require(cache::ledger().open.load() == 225 * mib && figures_agree());
+	}
+	/* Alone over the budget it is asked: nothing could make room. Alone at the
+	 * budget the open ones do not pass it, and nothing is asked. */
+	{
+		Holder game;
+		charge(game, 240 * mib);
+		game.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(!game.asked());
+		charge(game, 1);
+		cache::relieve_at(now);
+		require(game.asked() && figures_agree());
+	}
+	/* Two between the target and the line, with nothing else to ask: the open
+	 * ones are above the budget, so the one the order puts first goes (of one
+	 * band, the smaller), and the other, now within the line, stays. */
+	{
+		Holder first;
+		Holder second;
+		charge(first, 213 * mib);
+		charge(second, 212 * mib);
+		first.ran(t0 + 1, now);
+		second.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(second.asked() && !first.asked() && figures_agree());
+	}
+	/* One that nobody runs is not spared: an idle program of 213 MiB is asked
+	 * first and alone, as it is above the target, and the running neighbours
+	 * keep what they have. */
+	{
+		Holder idle_big;
+		Holder running;
+		Holder other;
+		charge(idle_big, 213 * mib);
+		charge(running, 20 * mib);
+		charge(other, 9 * mib);
+		idle_big.ran(t0 + 1, t0 + 2);
+		running.ran(t0 + 1, now);
+		other.ran(t0 + 1, now);
+		require(idle_big.account.activity(now) == 0);
+		cache::relieve_at(now);
+		require(idle_big.asked() && !running.asked() && !other.asked());
+		require(figures_agree());
+	}
+	/* Spared accounts are asked only after every other: an idle one and a
+	 * running one go first, and a running program of 224 MiB, within the line,
+	 * stays however little room that leaves. */
+	{
+		Holder game;
+		Holder idle;
+		Holder running;
+		charge(game, 224 * mib);
+		charge(idle, 9 * mib);
+		charge(running, 8 * mib);
+		game.ran(t0 + 1, now);
+		idle.ran(t0 + 1, t0 + 2);
+		running.ran(t0 + 1, now);
+		cache::relieve_at(now);
+		require(!game.asked() && idle.asked() && running.asked());
+		require(cache::ledger().open.load() == 224 * mib && figures_agree());
 	}
 	cache::set_budget(cache::fallback_budget);
 }
@@ -705,7 +873,8 @@ int main()
 	relief_accounting();
 	a_shed_account_that_shrinks_leaves_the_open_ones_exact();
 	idle_accounts_go_before_the_one_running();
-	an_account_over_the_target_is_asked_alone();
+	an_account_over_the_line_is_asked_alone();
+	a_program_that_holds_most_of_the_cache_is_spared_up_to_the_line();
 	running_accounts_go_by_activity_band_then_size();
 	ties_and_empty_accounts();
 	relief_waits_for_the_lock();
