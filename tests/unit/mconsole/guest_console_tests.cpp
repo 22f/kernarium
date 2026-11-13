@@ -7,9 +7,11 @@
 #include "wait_until.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <functional>
@@ -594,6 +596,108 @@ void aTrimPassIsWaitedForUpToItsBound()
 	(void)::close(server);
 }
 
+/* Sends datagrams to the console, which nothing reads, until its queue has
+ * no room: Darwin then refuses one (ENOBUFS) at once. Returns how many it
+ * took. */
+std::size_t fillTheConsoleQueue(const std::string &path)
+{
+	const int sender = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+	require(sender >= 0);
+	sockaddr_un console {};
+	console.sun_family = AF_UNIX;
+	require(path.size() < sizeof(console.sun_path));
+	std::memcpy(console.sun_path, path.c_str(), path.size() + 1U);
+	uml::testing::ConsoleRequest filler {};
+	filler.length = 4U;
+	std::memcpy(filler.data.data(), "fill", 4U);
+	for (std::size_t sent = 0; sent < 1000U; ++sent) {
+		if (::sendto(sender, &filler, sizeof(filler), MSG_DONTWAIT,
+			    reinterpret_cast<const sockaddr *>(&console),
+			    sizeof(console)) < 0) {
+			require(errno == ENOBUFS || errno == EAGAIN,
+				"the console queue refused for another reason");
+			(void)::close(sender);
+			return sent;
+		}
+	}
+	require(false, "the console queue never filled");
+	return 0;
+}
+
+/* The console's queue holds a few requests and a full one refuses at once
+ * (ENOBUFS, blocking or not), so a request that waits for its reply waits for
+ * room too, within the same wait: it goes through once the guest has read
+ * what is ahead of it, and is not sent when the wait ends first. */
+void aRequestWaitsForRoomInAFullQueueWithinItsWait()
+{
+	using ::uml::device::GuestRequest;
+	using ::uml::device::trim_guest_page_cache;
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	const int server = bindServer(path);
+
+	/* The guest reads again after a while: the request goes through behind
+	 * the full queue, in the wait it was given. */
+	require(fillTheConsoleQueue(path) > 0U);
+	std::thread guest {[&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds {300});
+		sockaddr_un client {};
+		socklen_t clientLength {};
+		while (awaitRequest(server, 5000)) {
+			if (receiveRequest(server, client, clientLength) ==
+			    "trim once") {
+				(void)sendReply(server, client, clientLength, 0U,
+					"trimmed 0 KiB in 0 ms, compacted in 0 ms, "
+					"released 0 KiB in 0 ms");
+				return;
+			}
+		}
+	}};
+	const auto started = std::chrono::steady_clock::now();
+	require(trim_guest_page_cache(5000U) == GuestRequest::done);
+	const auto waited = std::chrono::steady_clock::now() - started;
+	guest.join();
+	require(waited >= std::chrono::milliseconds {250},
+		"the request did not wait for room");
+	require(!awaitRequest(server, 200));
+
+	/* The guest never reads: the request is not sent when its wait ends, and
+	 * the wait is not spent twice. */
+	require(fillTheConsoleQueue(path) > 0U);
+	const auto begun = std::chrono::steady_clock::now();
+	require(trim_guest_page_cache(300U) == GuestRequest::unreachable);
+	const auto spent = std::chrono::steady_clock::now() - begun;
+	require(spent >= std::chrono::milliseconds {250},
+		"the request gave up before its wait ended");
+	require(spent < std::chrono::milliseconds {1500},
+		"the request waited longer than its wait");
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	while (awaitRequest(server, 200))
+		require(receiveRequest(server, client, clientLength) == "fill",
+			"a request that was not sent reached the console");
+
+	/* The guest reads after most of the wait and never answers: the time the
+	 * request spent finding room is part of its wait, not added to it. */
+	require(fillTheConsoleQueue(path) > 0U);
+	std::thread silent {[&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds {600});
+		sockaddr_un from {};
+		socklen_t fromLength {};
+		while (awaitRequest(server, 200))
+			(void)receiveRequest(server, from, fromLength);
+	}};
+	const auto asked = std::chrono::steady_clock::now();
+	require(trim_guest_page_cache(1000U) == GuestRequest::unanswered);
+	const auto total = std::chrono::steady_clock::now() - asked;
+	silent.join();
+	require(total >= std::chrono::milliseconds {900},
+		"the request did not wait for its reply");
+	require(total < std::chrono::milliseconds {1400},
+		"the time spent finding room was waited for again");
+	(void)::close(server);
+}
+
 /* ---- The guest's memory figures: "mem". ---- */
 
 using ::uml::device::GuestMemoryFigures;
@@ -1055,6 +1159,7 @@ int main(int argc, char **argv)
 			trimmingIsSwitchedByOneRequest();
 			aNoWaitTrimRequestReturnsAtOnce();
 			aTrimPassIsWaitedForUpToItsBound();
+			aRequestWaitsForRoomInAFullQueueWithinItsWait();
 		});
 	} else if (selected == "memory") {
 		runPrivately([] {

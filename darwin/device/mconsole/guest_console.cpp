@@ -89,6 +89,9 @@ constexpr std::chrono::milliseconds suspendDeadline {std::chrono::seconds {10}};
 /* A busy retry whose reply could not arrive before the deadline is not sent. */
 constexpr std::chrono::milliseconds suspendRetryGuard {
 	std::chrono::seconds {1}};
+/* A request that finds no room in the console's queue tries again at this
+ * interval, within its own reply wait. */
+constexpr std::chrono::milliseconds sendRetryPause {2};
 
 /* A reply socket's identifier is this many hexadecimal digits, so the widest
  * reply path is known before any request is sent. */
@@ -285,21 +288,49 @@ public:
 
 	[[nodiscard]] bool usable() const noexcept { return descriptor_ >= 0; }
 
-	/* False when nothing was sent. `wait` false does not wait for room in the
-	 * console's queue. */
-	[[nodiscard]] bool send(std::string_view command,
-		bool wait = true) const noexcept
+	/* One attempt, which does not wait for room in the console's queue. The
+	 * queue holds a few requests, and Darwin refuses a datagram that does not
+	 * fit at once (ENOBUFS), whether the send blocks or not, instead of
+	 * waiting for room as Linux does. False when nothing was sent; `full` then
+	 * says whether the reason was the lack of room. */
+	[[nodiscard]] bool trySend(std::string_view command,
+		bool *full = nullptr) const noexcept
 	{
 		Request request {consoleMagic, consoleVersion,
 			static_cast<std::uint32_t>(command.size()), {}};
+		if (full != nullptr)
+			*full = false;
 		if (!usable() || command.size() >= request.data.size())
 			return false;
 		std::memcpy(request.data.data(), command.data(), command.size());
 		const auto sent = ::sendto(descriptor_, &request, sizeof(request),
-			wait ? 0 : MSG_DONTWAIT,
-			reinterpret_cast<const sockaddr *>(&console_),
+			MSG_DONTWAIT, reinterpret_cast<const sockaddr *>(&console_),
 			sizeof(console_));
-		return sent == static_cast<ssize_t>(sizeof(request));
+		if (sent == static_cast<ssize_t>(sizeof(request)))
+			return true;
+		if (full != nullptr && sent < 0)
+			*full = errno == ENOBUFS || errno == EAGAIN;
+		return false;
+	}
+
+	/* Sends the request, and while the console's queue has no room tries
+	 * again a short while apart, until `deadline`, the request's own reply
+	 * deadline. False when nothing was sent, which a lack of room still is
+	 * at the deadline. */
+	[[nodiscard]] bool send(std::string_view command,
+		std::chrono::steady_clock::time_point deadline) const noexcept
+	{
+		for (;;) {
+			bool full = false;
+			if (trySend(command, &full))
+				return true;
+			const auto now = std::chrono::steady_clock::now();
+			if (!full || now >= deadline)
+				return false;
+			std::this_thread::sleep_for(
+				std::min<std::chrono::steady_clock::duration>(
+					sendRetryPause, deadline - now));
+		}
 	}
 
 	/* Collects the reply to the request, waiting up to `wait` for each part
@@ -380,10 +411,19 @@ void adoptConsolePath(const std::string &path)
 	std::string &response,
 	std::chrono::milliseconds wait = replyWait)
 {
+	/* The wait is the request's whole: the time it spent finding room in the
+	 * console's queue is not waited for again. */
+	const auto deadline = std::chrono::steady_clock::now() +
+		std::max(wait, std::chrono::milliseconds {0});
 	const Client client {location};
-	if (!client.send(command))
+	if (!client.send(command, deadline))
 		return ExchangeResult::notSent;
-	return client.receive(response, wait);
+	auto remaining = wait;
+	if (wait.count() > 0)
+		remaining = std::max(std::chrono::milliseconds {1},
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				deadline - std::chrono::steady_clock::now()));
+	return client.receive(response, remaining);
 }
 
 [[nodiscard]] bool requestWriteback(const GuestConsoleLocation &location,
@@ -590,7 +630,7 @@ GuestSuspension suspend_guest(unsigned int writebackSettleMs) noexcept
 		const auto ask = [&] {
 			response.clear();
 			request = std::make_unique<Client>(*location);
-			if (!request->send("suspend")) {
+			if (!request->send("suspend", deadline)) {
 				result = ExchangeResult::notSent;
 				return;
 			}
@@ -701,7 +741,7 @@ GuestRequest set_guest_page_cache_trim_nowait(bool enabled) noexcept
 			return GuestRequest::unreachable;
 		adoptConsolePath(location->console);
 		const Client client {*location};
-		return client.send(enabled ? "trim on" : "trim off", false) ?
+		return client.trySend(enabled ? "trim on" : "trim off") ?
 			GuestRequest::sent : GuestRequest::unreachable;
 	} catch (...) {
 		return GuestRequest::unreachable;
@@ -853,7 +893,9 @@ std::optional<GuestMemoryQuery> GuestMemoryQuery::start() noexcept
 			return std::nullopt;
 		adoptConsolePath(location->console);
 		auto state = std::make_unique<State>(*location);
-		if (!state->client.send("mem"))
+		/* The console's usual reply wait is also the wait for room. */
+		if (!state->client.send("mem",
+			    std::chrono::steady_clock::now() + replyWait))
 			return std::nullopt;
 		return GuestMemoryQuery(std::move(state));
 	} catch (...) {
