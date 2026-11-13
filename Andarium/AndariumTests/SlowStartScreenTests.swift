@@ -248,7 +248,7 @@ struct SlowStartScreenTests {
         fixture.model.updateSlowStart()
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let (_, found) = try await screen(fixture, in: lease, finding: ["Stop"])
+        let (controller, found) = try await screen(fixture, in: lease, finding: ["Stop"])
         guard let stop = found["Stop"] else {
             Issue.record("Stop was not found: is application accessibility on in this Simulator?")
             return
@@ -257,6 +257,20 @@ struct SlowStartScreenTests {
         #expect(stop.accessibilityActivate())
         #expect(fixture.model.confirmingStop)
         #expect(fixture.driver.guestStops == 0)
+        // The dialog is an alert that offers Stop and Cancel, with the sentence
+        // that says how to start again: a popover would show no Cancel.
+        var alert: UIAlertController?
+        let deadline = ContinuousClock.now + .seconds(5)
+        while alert == nil, ContinuousClock.now < deadline {
+            alert = controller.presentedViewController as? UIAlertController
+            if alert == nil { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        let shown = try #require(alert, "Stop did not present an alert")
+        #expect(shown.preferredStyle == .alert)
+        #expect(shown.title == "Stop the virtual machine?")
+        #expect(shown.message == "To start it again, close Andarium in the App Switcher and open it again.")
+        #expect(shown.actions.map(\.title) == ["Stop", "Cancel"])
+        #expect(shown.actions.map(\.style) == [.destructive, .cancel])
         // Cancel leaves the start as it was.
         fixture.model.confirmingStop = false
         #expect(fixture.driver.guestStops == 0 && !fixture.model.slowStart.stopping)

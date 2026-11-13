@@ -8,7 +8,7 @@ import SwiftUI
 /// title; and the steps in one panel, with no bar or percentage of the whole
 /// (only the disk write, which knows its length, says one). First start,
 /// update, recovery and restart are variants of the same screen. A launch
-/// has one run, so there is no Cancel.
+/// has one run, so the boot has no Cancel; the notice's Stop asks first.
 ///
 /// A start that has run for three minutes (`SlowStart`; eight for a first
 /// start and the first after an update) without reaching Android puts a notice
@@ -312,10 +312,11 @@ struct BootView: View {
             .controlSize(.large)
             .disabled(model.slowStart.stopping)
             .accessibilityIdentifier("boot-stop")
-            .confirmationDialog(
+            // An alert, not a confirmation dialog: on iPhone and iPad that is a
+            // popover that shows no Cancel.
+            .alert(
                 "Stop the virtual machine?",
-                isPresented: Binding(get: { model.confirmingStop }, set: { model.confirmingStop = $0 }),
-                titleVisibility: .visible
+                isPresented: Binding(get: { model.confirmingStop }, set: { model.confirmingStop = $0 })
             ) {
                 Button("Stop", role: .destructive) { model.stopStart() }
                 Button("Cancel", role: .cancel) {}
