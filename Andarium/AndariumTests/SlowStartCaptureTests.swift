@@ -49,19 +49,16 @@ struct SlowStartCaptureTests {
         return own + view.subviews.flatMap { scrollViews(in: $0) }
     }
 
-    /// The accessibility element the application named by `identifier`.
-    private func element(identified identifier: String, in node: NSObject, depth: Int = 0) -> NSObject? {
+    /// The accessibility element the application named by `identifier`; failing
+    /// that, the button of the label the application's own words give it.
+    private func element(identified identifier: String, labelled label: String, in node: NSObject, depth: Int = 0) -> NSObject? {
         if (node as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier { return node }
-        guard depth < 32 else { return nil }
-        let count = node.accessibilityElementCount()
-        if count != NSNotFound, count > 0 {
-            for index in 0..<count {
-                if let child = node.accessibilityElement(at: index) as? NSObject,
-                    let found = element(identified: identifier, in: child, depth: depth + 1) { return found }
-            }
-        }
-        for child in (node as? UIView)?.subviews ?? [] {
-            if let found = element(identified: identifier, in: child, depth: depth + 1) { return found }
+        if node.accessibilityLabel == label, node.accessibilityTraits.contains(.button) { return node }
+        guard depth < 64 else { return nil }
+        var children = (node.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+        if let view = node as? UIView { children += view.subviews }
+        for child in children {
+            if let found = element(identified: identifier, labelled: label, in: child, depth: depth + 1) { return found }
         }
         return nil
     }
@@ -124,7 +121,16 @@ struct SlowStartCaptureTests {
         if shape.largestText {
             // The notice is taller than the screen here: scroll until the Stop
             // button is the last thing on it, as a finger would.
-            let button = try #require(element(identified: "boot-stop", in: controller.view), "no Stop button")
+            let label = shape.stopping
+                ? NSLocalizedString("Stopping\u{2026}", bundle: Bundle(for: AppModel.self), comment: "")
+                : NSLocalizedString("Stop", bundle: Bundle(for: AppModel.self), comment: "")
+            var found: NSObject?
+            let deadline = ContinuousClock.now + .seconds(5)
+            while found == nil, ContinuousClock.now < deadline {
+                found = element(identified: "boot-stop", labelled: label, in: controller.view)
+                if found == nil { try await Task.sleep(for: .milliseconds(100)) }
+            }
+            let button = try #require(found, "no Stop button")
             let scroll = try #require(
                 scrollViews(in: controller.view).max { $0.contentSize.height < $1.contentSize.height }, "no scroll view")
             let screen = try #require(holder.window?.screen)
