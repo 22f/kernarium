@@ -116,13 +116,15 @@ enum PreviewData {
     )
 
     /// B for a mock: L less A (64), E_rest (320), S (149), the gadget cache at
-    /// its cap of the vCPU count and 4 MiB of slot tags per vCPU and the
-    /// guest, and at least 384 MiB. The cap is the table in
-    /// `runtime/guest_memory_budget.hpp`, which holds for the guests the sheet
-    /// offers (1.5 GiB and up).
+    /// its cap of the vCPU count, the burst allowance over it and 4 MiB of
+    /// slot tags per vCPU and the guest, and at least 384 MiB. The cap and the
+    /// allowance are the tables in `runtime/guest_memory_budget.hpp`, which
+    /// hold for the guests the sheet offers (1.5 GiB and up).
     private static func budget(limitMiB: Int, memoryMiB: Int, vCPUs: Int) -> Int {
         let caps = [128, 160, 192, 224, 240, 240, 272, 272]
-        let engine = 320 + caps[min(max(vCPUs, 1), caps.count) - 1] + 4 * max(vCPUs, 1)
+        let bursts = [1, 1, 1, 1, 1, 1, 1, 2]
+        let index = min(max(vCPUs, 1), caps.count) - 1
+        let engine = 320 + caps[index] + bursts[index] + 4 * max(vCPUs, 1)
         let available = limitMiB - 64 - memoryMiB - engine - 149
         return max(available, 384)
     }

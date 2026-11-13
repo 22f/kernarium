@@ -287,7 +287,7 @@ struct MemoryPolicyTests {
         // 2560 where the safe size is 3584 at one and two and 3072 after.
         (4700, [4160, 4096, 4096, 4032, 4032, 4032, 3968, 3968], Array(repeating: 2560, count: 8),
             [3584, 3584, 3072, 3072, 3072, 3072, 3072, 3072]),
-        // A limit that offers more than 4096 everywhere: 3584 MiB would leave the GPU 699 to 871 MiB, so a new guest
+        // A limit that offers more than 4096 everywhere: 3584 MiB would leave the GPU 697 to 870 MiB, so a new guest
         // gets 3072 and the safe size stays at 3584.
         (5120, [4544, 4544, 4480, 4480, 4416, 4416, 4416, 4416], Array(repeating: 3072, count: 8),
             Array(repeating: 3584, count: 8)),
@@ -717,12 +717,14 @@ struct MemoryPolicyTests {
     }
 
     /// B as the runtime's formula gives it under a process limit, the launch
-    /// set's terms and the gadget cache at its cap per vCPU count
-    /// (`runtime/guest_memory_budget.hpp`; the `LiveTests` hold it to the
-    /// loader).
+    /// set's terms, the gadget cache at its cap per vCPU count and the burst
+    /// allowance over it (`runtime/guest_memory_budget.hpp`; the `LiveTests`
+    /// hold it to the loader).
     private static func runtimeB(limit: Int, memory: Int, count: Int) -> Int {
         let caps = [128, 160, 192, 224, 240, 240, 272, 272]
-        let engine = 320 + caps[min(max(count, 1), caps.count) - 1] + 4 * count
+        let bursts = [1, 1, 1, 1, 1, 1, 1, 2]
+        let index = min(max(count, 1), caps.count) - 1
+        let engine = 320 + caps[index] + bursts[index] + 4 * count
         return max(limit - 64 - memory - engine - 149, 384)
     }
 
