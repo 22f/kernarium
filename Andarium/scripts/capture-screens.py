@@ -326,6 +326,8 @@ SHOTS: list[Shot] = [
     s("overlay-install-damaged", "Operations", "install-damaged", "A file that is damaged, cut short, or whose parts do not fit together, refused once it is read."),
     s("overlay-install-missing-split", "Operations", "install-missing-split", "The package manager's refusal of an app that lacks parts it requires."),
     s("overlay-install-part-too-large", "Operations", "install-part-too-large", "An app with a part of 4 GiB or more, which Android cannot install, refused once the file is read."),
+    s("overlay-install-done-without-data-largest-text", "Operations", "install-done-without-data", "The result of an install whose data copy was stopped or failed, at the largest accessibility text size: the whole text and OK reachable on the screen.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
+    s("overlay-install-damaged-largest-text", "Operations", "install-damaged", "The refusal of a damaged file or parts that do not fit together, at the largest accessibility text size: the whole text and OK reachable on the screen.", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
     # Send feedback: needs a Preview built with FEEDBACK_ADDRESS=feedback@example.com (see --help)
     feedback("feedback-menu-home", "home-menu", "Home's toolbar menu open on a configured guest: Info, then Send feedback after a separator.", dark=True, wait=3.0),
     feedback("feedback-menu-welcome", "welcome-menu", "The same menu open on the welcome screen, before any guest exists: Send feedback is reachable from the first screen.", dark=True, wait=3.0),
