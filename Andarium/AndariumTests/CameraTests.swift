@@ -293,7 +293,7 @@ struct CameraFlowTests {
 
     @Test func theLoaderStatesTheCamerasCeilingThatNoSystemCameraExceeds() {
         // The most any use of a system camera holds, which the application plans with: every host is given the
-        // small tier for now, so it is the same at any budget: 172.2 MiB, the worst case of the capture pools
+        // small tier for now, so it is the same at any budget: 172.09 MiB, the worst case of the capture pools
         // (six held buffers of the aligned 4:3 frame a 1080p stream is delivered, for each of two cameras), the
         // staging, the transformer's scratch and the stills the device admits at once, a 12 MP JPEG with a RAW.
         for budget: UInt32 in [384, 534, 1249, 2048, 4096, 9152] {

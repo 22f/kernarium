@@ -228,10 +228,25 @@ void aStreamTheFormatJustCoversIsDeliveredAsItIs()
     require(deliveredFrameSize(0, 0, 640, 480) == FrameSize({0, 0}), "a format of no size has none");
 }
 
+// The file the platform made is copied only if it is wanted and within the bound the guest's buffer sets: a refused file
+// allocates nothing.
+void aJpegFileBeyondTheGuestsBufferIsNotCopied()
+{
+    const std::vector<std::uint8_t> file(1000, 0x5a);
+    std::vector<std::uint8_t> taken, unbounded, over, unwanted;
+    require(takeJpegFile(file, 1000, true, taken) && taken == file, "a file of the bound's size is taken");
+    require(takeJpegFile(file, 0, true, unbounded) && unbounded == file, "no bound takes any file");
+    require(!takeJpegFile(file, 999, true, over) && over.capacity() == 0, "a byte over the bound is refused and not copied");
+    require(!takeJpegFile(file, 1000, false, unwanted) && unwanted.capacity() == 0, "a file nobody asked for is not copied");
+    std::vector<std::uint8_t> kept(3, 7);
+    require(!takeJpegFile(file, 10, true, kept) && kept == std::vector<std::uint8_t>(3, 7), "a refusal leaves the result as it was");
+}
+
 } // namespace
 
 int main()
 {
+    aJpegFileBeyondTheGuestsBufferIsNotCopied();
     anExactSizeTheFormatListsIsAsked();
     aSizeAnotherFormatListsIsNotAsked();
     aLargerSizeThatCoversIsNotTheRequest();

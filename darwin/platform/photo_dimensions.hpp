@@ -95,6 +95,12 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // alone has no processed photo), which is not a different size.
 [[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
 
+// Takes a photo's JPEG file into `out` if one is wanted and the file is no
+// larger than `maximumBytes` (zero: no bound). A file that is refused is not
+// copied: nothing of it is allocated, and `out` is left as it was.
+[[nodiscard]] bool takeJpegFile(std::span<const std::uint8_t> file, std::uint64_t maximumBytes, bool wanted,
+                                std::vector<std::uint8_t>& out);
+
 // ---------------------------------------------------------------------------
 // Video sizes
 // ---------------------------------------------------------------------------

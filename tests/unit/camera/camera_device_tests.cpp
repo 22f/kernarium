@@ -24,14 +24,20 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <set>
+#include <thread>
 #include <vector>
 
 using namespace uml::camera;
@@ -41,6 +47,63 @@ using uml::testing::append;
 using uml::testing::load;
 using uml::testing::require;
 using uml::video::rawPitch;
+
+// The memory of the payloads a test follows (a still result's JPEG and RAW vectors), by address: the global deallocation
+// functions below tell when a vector's memory is really given back, which clearing its size would not.
+namespace payload_watch {
+std::atomic<const void*> pointers[32] {};
+std::atomic<std::size_t> sizes[32] {};
+
+void track(const void* pointer, std::size_t size)
+{
+    if (pointer == nullptr || size == 0) return;
+    for (unsigned index = 0; index < 32; ++index) {
+        const void* expected = nullptr;
+        if (pointers[index].compare_exchange_strong(expected, pointer)) {
+            sizes[index] = size;
+            return;
+        }
+    }
+    std::abort();
+}
+
+void freed(void* pointer) noexcept
+{
+    for (auto& tracked : pointers) {
+        const void* expected = pointer;
+        tracked.compare_exchange_strong(expected, nullptr);
+    }
+}
+
+std::size_t bytes()
+{
+    std::size_t total = 0;
+    for (unsigned index = 0; index < 32; ++index)
+        if (pointers[index].load() != nullptr) total += sizes[index].load();
+    return total;
+}
+} // namespace payload_watch
+
+void operator delete(void* pointer) noexcept
+{
+    payload_watch::freed(pointer);
+    std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept
+{
+    payload_watch::freed(pointer);
+    std::free(pointer);
+}
+void operator delete[](void* pointer) noexcept
+{
+    payload_watch::freed(pointer);
+    std::free(pointer);
+}
+void operator delete[](void* pointer, std::size_t) noexcept
+{
+    payload_watch::freed(pointer);
+    std::free(pointer);
+}
 
 namespace {
 
@@ -64,6 +127,9 @@ struct RigOptions {
     std::shared_ptr<CalibrationStore> store;
     /* What the device is given (`CameraDeviceOptions::use`): the ceiling unless a test says. */
     CameraUse use;
+    /* The working storage a source holds for each pixel of a still it makes, where a test is to state it (the synthetic
+     * source's is 11 bytes). */
+    std::optional<std::uint32_t> workingBytes;
 };
 
 class Recorder final : public CameraSessionDelegate {
@@ -72,6 +138,119 @@ public:
     void cameraStill(std::size_t, CameraStillResult) override {}
     void cameraEvent(CameraEvent) override {}
     std::vector<CameraFrame> frames;
+};
+
+/* The host the device is given: the synthetic camera, watched and faulted. It sees what the platform holds, can refuse the
+ * start of a video that is to replace a running one (the platform's rollback keeps the old capture), and can hold a frame
+ * callback while the device acts. */
+class WatchedCamera final : public Camera, public CameraSessionDelegate {
+public:
+    explicit WatchedCamera(std::shared_ptr<SyntheticCamera> synthetic) : host(std::move(synthetic)) {}
+
+    std::shared_ptr<SyntheticCamera> host;
+    CameraSessionDelegate* sink {};
+    /* The next startVideo is refused, and the capture it was to replace keeps running. */
+    bool refuseNextStart {};
+    /* The stills the platform holds, by token. */
+    std::set<std::uint64_t> holding;
+    /* The most the delivered results' payloads held when a capture was started. */
+    std::size_t payloadWhenStarting {};
+
+    std::mutex pauseMutex;
+    std::condition_variable pauseCondition;
+    bool pauseFrame {}, frameEntered {}, releaseFrame {};
+    void pauseNextFrame()
+    {
+        std::lock_guard lock(pauseMutex);
+        pauseFrame = true;
+        frameEntered = releaseFrame = false;
+    }
+    void awaitFrame()
+    {
+        std::unique_lock lock(pauseMutex);
+        require(pauseCondition.wait_for(lock, std::chrono::seconds(2), [&] { return frameEntered; }), "a frame callback is held");
+    }
+    void releaseHeldFrame()
+    {
+        std::lock_guard lock(pauseMutex);
+        releaseFrame = true;
+        pauseCondition.notify_all();
+    }
+
+    std::vector<CameraInfo> cameras() const override { return host->cameras(); }
+    std::vector<std::vector<std::size_t>> concurrentSets() const override { return host->concurrentSets(); }
+    std::string hostModel() const override { return host->hostModel(); }
+    std::uint64_t now() const noexcept override { return host->now(); }
+    std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return host->makeFrameTransformer(); }
+    std::optional<std::uint32_t> workingBytes;
+    std::uint32_t stillWorkingBytesPerPixel() const noexcept override
+    {
+        return workingBytes ? *workingBytes : host->stillWorkingBytesPerPixel();
+    }
+
+    class Session final : public CameraSession {
+    public:
+        Session(WatchedCamera& owner, std::unique_ptr<CameraSession> session) : camera(owner), inner(std::move(session)) {}
+        bool startVideo(std::size_t index, std::uint32_t width, std::uint32_t height, std::uint32_t rate) override
+        {
+            if (camera.refuseNextStart) {
+                camera.refuseNextStart = false;
+                return false;
+            }
+            return inner->startVideo(index, width, height, rate);
+        }
+        void stopVideo(std::size_t index) override { inner->stopVideo(index); }
+        void apply(std::size_t index, const CameraSettings& settings) override { inner->apply(index, settings); }
+        bool takeStill(std::size_t index, const CameraStillRequest& request) override
+        {
+            camera.payloadWhenStarting = std::max(camera.payloadWhenStarting, payload_watch::bytes());
+            const bool taken = inner->takeStill(index, request);
+            if (taken) camera.holding.insert(request.token);
+            return taken;
+        }
+        void setAnchors(std::span<const std::optional<std::size_t>> formats, const CameraLimits& limits) override
+        {
+            inner->setAnchors(formats, limits);
+        }
+        void stop() override
+        {
+            inner->stop();
+            camera.holding.clear();
+        }
+
+    private:
+        WatchedCamera& camera;
+        std::unique_ptr<CameraSession> inner;
+    };
+
+    std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
+    {
+        sink = &delegate;
+        auto inner = host->openSession(*this);
+        if (!inner) return nullptr;
+        return std::make_unique<Session>(*this, std::move(inner));
+    }
+    void cameraFrame(std::size_t index, CameraFrame frame) override
+    {
+        {
+            std::unique_lock lock(pauseMutex);
+            if (pauseFrame) {
+                pauseFrame = false;
+                frameEntered = true;
+                pauseCondition.notify_all();
+                require(pauseCondition.wait_for(lock, std::chrono::seconds(2), [&] { return releaseFrame; }), "the held frame is released");
+            }
+        }
+        sink->cameraFrame(index, std::move(frame));
+    }
+    void cameraStill(std::size_t index, CameraStillResult result) override
+    {
+        payload_watch::track(result.jpeg.data(), result.jpeg.capacity());
+        payload_watch::track(result.raw.data(), result.raw.capacity() * sizeof(std::uint16_t));
+        holding.erase(result.token);
+        sink->cameraStill(index, std::move(result));
+    }
+    void cameraEvent(CameraEvent event) override { sink->cameraEvent(event); }
 };
 
 struct Rig final {
@@ -97,7 +276,9 @@ struct Rig final {
         options.onRotateAndCrop = [this](std::uint32_t camera, std::uint32_t setting, std::uint32_t degrees) {
             rotations.push_back({camera, setting, degrees});
         };
-        device = std::make_unique<VirtioCameraDevice>(camera, std::move(options));
+        watched = std::make_shared<WatchedCamera>(camera);
+        watched->workingBytes = rigOptions.workingBytes;
+        device = std::make_unique<VirtioCameraDevice>(watched, std::move(options));
         device->setGuestMapper([this](std::uint64_t offset, std::size_t size) {
             if (offset > memory.size() || size > memory.size() - offset) return std::span<std::uint8_t> {};
             return std::span(memory).subspan(offset, size);
@@ -110,6 +291,7 @@ struct Rig final {
     ~Rig() { device.reset(); }
 
     std::shared_ptr<SyntheticCamera> camera;
+    std::shared_ptr<WatchedCamera> watched;
     std::shared_ptr<CalibrationStore> store;
     std::unique_ptr<VirtioCameraDevice> device;
     std::vector<CameraState> states;
@@ -1766,12 +1948,13 @@ void testStillDeadlines()
     rig.step();
     require(rig.done(slow) && rig.result(slow).base.flags == errorFlag && rig.result(slow).base.timestamp == 31,
             "but its buffer fails when ten seconds have passed");
-    require(rig.camera->sessionsOpen() == 0, "and the session is released");
+    require(rig.camera->sessionsOpen() == 1, "the session stays open while the platform holds the capture");
     // A result that comes after that is dropped.
     const auto next = rig.queue(1, 2, 32);
     rig.camera->pump(0, 0);
     rig.step();
     require(rig.done(next) && rig.result(next).base.flags == 0, "and the next still is taken");
+    require(rig.camera->sessionsOpen() == 0, "the platform's end of the late capture releases the session");
 }
 
 /* The platform holds at most a pipeline's worth of captures for a camera. */
@@ -2207,7 +2390,7 @@ void testAnOversizedStillFailsItsCapture()
 }
 
 // A photo the host took before keeps working: a file larger than a byte a pixel, the bound it once had, and a file of
-// exactly the guest's buffer for the size are taken; only a file past the buffer fails.
+// exactly the largest that always fits the guest's buffer once the Exif gap is put in it are taken.
 void testAFileWithinTheGuestsBufferIsTaken()
 {
     constexpr std::uint32_t width = 1008, height = 756;
@@ -2218,13 +2401,183 @@ void testAFileWithinTheGuestsBufferIsTaken()
         rig.create(1, 0, stillKind);
         require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, width, height)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
         const auto size = rig.params(1).plane_formats[0].plane_size;
-        require(size == bound, "the buffer the device states is the bound");
+        require(size == jpegBufferBytes(std::uint64_t(width) * height) && bound + exifGapLength + 4 == size,
+                "the buffer the device states holds the bound and the gap");
         rig.attach(1, 1, size);
         const auto still = rig.queue(1, 1, 410);
         rig.camera->pump(0, 0);
         rig.step();
         require(rig.done(still) && rig.result(still).base.flags == 0, "a file of this size is taken");
     }
+}
+
+void stillStream(Rig& rig, std::uint32_t stream, std::uint32_t camera, std::uint32_t width, std::uint32_t height, std::uint32_t buffers)
+{
+    rig.create(stream, camera, stillKind);
+    require(Rig::type(rig.setParams(stream, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, width, height)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    const auto size = rig.params(stream).plane_formats[0].plane_size;
+    for (std::uint32_t resource = 1; resource <= buffers; ++resource) {
+        rig.bump = 16 * page;  // The buffers alias: the tests read none of the pictures.
+        rig.attach(stream, resource, size);
+    }
+}
+
+// A change of a running video that the platform refuses leaves the capture it was to replace running (the platform's
+// rollback keeps it): the camera still holds it, so a second camera is not admitted under a use of one, and the stream's
+// end stops it.
+void testARefusedChangeLeavesTheCaptureChargedUntilItStops()
+{
+    RigOptions options;
+    options.use = {1, true, 0};
+    Rig rig(options);
+    videoStream(rig, 1, 0, 1920, 1080, 1);
+    (void)rig.queue(1, 1);
+    require(rig.camera->videoRunning(0), "the first camera runs");
+    rig.watched->refuseNextStart = true;
+    require(Rig::type(rig.setInterval(1, 1, 15)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a change of the rate");
+    require(rig.camera->videoRunning(0), "the platform refused it and its capture runs on");
+    videoStream(rig, 2, 1, 1920, 1080, 1);
+    (void)rig.queue(2, 1);
+    require(!rig.camera->videoRunning(1), "the capture the refused change left is still the camera's: no second camera");
+    rig.destroy(1);
+    require(!rig.camera->videoRunning(0), "and the stream's end stops it, whatever the last change did");
+}
+
+// A platform callback that is in progress when a camera's video stops reaches the device after the stop: it keeps no frame,
+// for the camera is no longer counted and the frame holds the capture's buffer.
+void testALateFrameOfAStoppedCameraIsNotKept()
+{
+    RigOptions options;
+    options.use = {1, true, 0};
+    Rig rig(options);
+    videoStream(rig, 1, 0, 640, 480, 3);
+    (void)rig.queue(1, 1);
+    // The torch keeps the session open when the video stops, as a still on its way would.
+    rig.setOk(1, {{UML_V4L2_CID_FLASH_LED_MODE, UML_V4L2_FLASH_LED_MODE_TORCH, {}}});
+    rig.watched->pauseNextFrame();
+    std::thread worker([&] { rig.camera->pump(0, 1); });
+    rig.watched->awaitFrame();
+    rig.destroy(1);
+    require(!rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 1, "the camera stopped, the session stays");
+    rig.watched->releaseHeldFrame();
+    worker.join();
+    require(rig.camera->framesAlive() == 0, "the callback that was in progress kept no frame of the stopped camera");
+    // A camera that runs again keeps its frames.
+    videoStream(rig, 2, 0, 640, 480, 3);
+    (void)rig.queue(2, 1);
+    rig.camera->pump(0, 1);
+    require(rig.camera->framesAlive() == 1, "the camera that runs again keeps its frame");
+    rig.step();
+}
+
+// The guest's deadline for a capture runs from its request, whether it waits or has started. A capture the guest gave up
+// on is still with the platform: its charge stays until the platform ends it, so no second capture starts on top of it, and
+// one the platform never ends is taken as lost with the session.
+void testAnExpiredCaptureStaysChargedUntilThePlatformEndsIt()
+{
+    Rig rig;
+    stillStream(rig, 1, 0, 4032, 3024, 4);
+    const auto first = rig.queue(1, 1, 101);
+    const auto second = rig.queue(1, 2, 102);
+    const auto third = rig.queue(1, 3, 103);
+    require(rig.camera->stillsTaken() == 1 && rig.watched->holding.size() == 1, "one 12 MP capture is with the platform, two wait");
+    rig.camera->advanceClock(10'100'000'000);
+    rig.step();
+    require(rig.done(first) && (rig.result(first).base.flags & errorFlag), "the capture's buffer fails at its deadline");
+    require(rig.done(second) && (rig.result(second).base.flags & errorFlag) && rig.done(third) && (rig.result(third).base.flags & errorFlag),
+            "and so do the waiting ones, whose time runs from their request");
+    require(rig.camera->stillsTaken() == 1 && rig.watched->holding.size() == 1, "the platform still holds the first capture and gets no other");
+    require(rig.camera->sessionsOpen() == 1, "the session stays open for it");
+    const auto fourth = rig.queue(1, 4, 104);
+    require(rig.camera->stillsTaken() == 1 && !rig.done(fourth), "a new capture waits for what the platform holds");
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.camera->stillsTaken() == 2, "the platform's end of the first capture makes room");
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(fourth) && rig.result(fourth).base.flags == 0, "and the new capture is delivered");
+
+    Rig lost;
+    stillStream(lost, 1, 0, 4032, 3024, 2);
+    const auto gone = lost.queue(1, 1, 201);
+    lost.camera->advanceClock(10'100'000'000);
+    lost.step();
+    require(lost.done(gone) && lost.camera->sessionsOpen() == 1, "a capture the guest gave up on keeps the session");
+    lost.camera->advanceClock(30'100'000'000);
+    lost.step();
+    require(lost.camera->sessionsOpen() == 0 && lost.watched->holding.empty(), "one the platform never ends is lost with the session");
+    const auto again = lost.queue(1, 2, 202);
+    require(lost.camera->stillsTaken() == 2, "and the next capture starts at once");
+    lost.camera->pump(0, 0);
+    lost.step();
+    require(lost.done(again) && lost.result(again).base.flags == 0, "and is delivered");
+}
+
+// The guest's deadline runs from the request for a capture that waited: when the capture that was ahead of it ends late, the
+// one that then starts has only what is left.
+void testAWaitingCapturesTimeRunsFromItsRequest()
+{
+    Rig rig;
+    stillStream(rig, 1, 0, 4032, 3024, 2);
+    const auto first = rig.queue(1, 1, 101);
+    const auto second = rig.queue(1, 2, 102);
+    rig.camera->advanceClock(6'000'000'000);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(first) && rig.result(first).base.flags == 0, "the first capture is delivered in its time");
+    require(rig.camera->stillsTaken() == 2 && !rig.done(second), "and the capture that waited starts");
+    rig.camera->advanceClock(4'100'000'000);
+    rig.step();
+    require(rig.done(second) && (rig.result(second).base.flags & errorFlag), "its buffer fails ten seconds after its request");
+}
+
+// A delivered result's payload is given back (the memory, not only its size) before the capture that waited for it
+// starts: the charge of a capture covers its payload.
+void testAResultsPayloadIsFreedBeforeTheNextCaptureStarts()
+{
+    Rig rig;
+    stillStream(rig, 1, 0, 4032, 3024, 2);
+    const auto first = rig.queue(1, 1, 101);
+    (void)rig.queue(1, 2, 102);
+    require(rig.camera->stillsTaken() == 1, "the second capture waits");
+    rig.camera->pump(0, 0);
+    require(payload_watch::bytes() > 0, "the delivered result holds its JPEG and RAW");
+    rig.step();
+    require(rig.done(first) && rig.camera->stillsTaken() == 2, "the first is delivered and the second starts");
+    require(rig.watched->payloadWhenStarting == 0, "the delivered payload was freed before the second capture started");
+}
+
+// Captures start in the order they were asked for: a small one that would fit does not pass a large one that waits.
+void testStillsAreAdmittedInTheOrderTheyAsked()
+{
+    Rig rig;
+    stillStream(rig, 1, 0, 4032, 3024, 2);
+    stillStream(rig, 2, 0, 2016, 1512, 1);
+    const auto first = rig.queue(1, 1, 101);
+    const auto second = rig.queue(1, 2, 102);
+    const auto third = rig.queue(2, 1, 103);
+    require(rig.camera->stillsTaken() == 1, "the small request does not start ahead of the large one that waits");
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(first) && !rig.done(second) && !rig.done(third) && rig.camera->stillsTaken() == 3,
+            "the large one starts first, and the small one with it as it fits");
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(second) && rig.done(third) && rig.result(second).base.flags == 0 && rig.result(third).base.flags == 0, "all are delivered");
+}
+
+// A capture that costs more than the device admits at all is refused before it starts, and is not admitted as the first.
+void testACaptureBeyondTheWholeBudgetIsRefusedBeforeItStarts()
+{
+    RigOptions options;
+    options.use = {2, false, 0};
+    options.workingBytes = 0;
+    Rig rig(options);
+    // A 12 MP JPEG, and the colour data the first still of an uncalibrated lens also asks for: more than a JPEG of that size.
+    stillStream(rig, 1, 0, 4032, 3024, 1);
+    const auto still = rig.queue(1, 1, 301);
+    require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "the capture fails");
+    require(rig.camera->stillsTaken() == 0 && rig.camera->sessionsOpen() == 0, "without reaching the platform");
 }
 
 // Black pictures hold nothing of their own, however many streams are black and however large their pictures are: twenty
@@ -2485,6 +2838,13 @@ int main()
     testStillsAreAdmittedByTheBytesTheyCost();
     testAnOversizedStillFailsItsCapture();
     testAFileWithinTheGuestsBufferIsTaken();
+    testARefusedChangeLeavesTheCaptureChargedUntilItStops();
+    testALateFrameOfAStoppedCameraIsNotKept();
+    testAnExpiredCaptureStaysChargedUntilThePlatformEndsIt();
+    testAWaitingCapturesTimeRunsFromItsRequest();
+    testAResultsPayloadIsFreedBeforeTheNextCaptureStarts();
+    testStillsAreAdmittedInTheOrderTheyAsked();
+    testACaptureBeyondTheWholeBudgetIsRefusedBeforeItStarts();
     testBlackPicturesHoldNothingOfTheirOwn();
     testService();
     return 0;

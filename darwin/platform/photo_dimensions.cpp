@@ -126,6 +126,13 @@ bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;
 }
 
+bool takeJpegFile(std::span<const std::uint8_t> file, std::uint64_t maximumBytes, bool wanted, std::vector<std::uint8_t>& out)
+{
+    if (!wanted || (maximumBytes != 0 && file.size() > maximumBytes)) return false;
+    out.assign(file.begin(), file.end());
+    return true;
+}
+
 FrameSize deliveredFrameSize(std::uint32_t formatWidth, std::uint32_t formatHeight, std::uint32_t width,
                              std::uint32_t height) noexcept
 {

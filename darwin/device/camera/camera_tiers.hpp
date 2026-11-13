@@ -106,16 +106,24 @@ struct CameraUse {
     friend bool operator==(const CameraUse&, const CameraUse&) = default;
 };
 
-/* The largest encoded file the host takes for a still of `pixels` pixels, in
- * bytes: the guest's JPEG buffer for that size, a byte and a half a pixel (a
- * YUV 4:2:0 picture) and the Exif gap, the size the device states for the
- * stream (the guest allocates its JPEG buffer from it). A larger file fails its
- * capture before it is copied, and the device could not copy it into the
- * guest's buffer in any case. It is the platform's file and the device's copy
- * that the cost of a capture holds. */
-[[nodiscard]] constexpr std::uint64_t maximumJpegBytes(std::uint64_t pixels) noexcept
+/* The guest's JPEG buffer for a still of `pixels` pixels, in bytes: a byte and
+ * a half a pixel (a YUV 4:2:0 picture) and the Exif gap the device reserves in
+ * the file. The device states it as the stream's plane size, and the guest
+ * allocates its buffer from it. */
+[[nodiscard]] constexpr std::uint64_t jpegBufferBytes(std::uint64_t pixels) noexcept
 {
     return pixels * 3 / 2 + exifGapLength;
+}
+
+/* The largest file the host takes from the platform for a still of `pixels`
+ * pixels, in bytes: the largest that always fits the guest's buffer
+ * (`jpegBufferBytes`) once the Exif gap is put in it, which adds the gap's
+ * payload and the four bytes of its segment header to a file that has no Exif
+ * of its own to drop. A larger file fails its capture before it is copied. It
+ * is the platform's file and the device's copy that the cost of a capture holds. */
+[[nodiscard]] constexpr std::uint64_t maximumJpegBytes(std::uint64_t pixels) noexcept
+{
+    return pixels * 3 / 2 > 4 ? pixels * 3 / 2 - 4 : 0;
 }
 
 /* What one capture holds while it is with the host, in bytes. A JPEG still of

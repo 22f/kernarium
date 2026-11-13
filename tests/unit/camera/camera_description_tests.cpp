@@ -479,15 +479,17 @@ void testHostMemoryReserve()
     // The stills are what the device admits at once (`stillAdmissionBytes`): a JPEG capture holds the file twice, a RAW
     // capture its pixels three times (the platform's, the copy, the DNG).
     const auto pixels = limitsOf(CameraTier::small).maximumStillPixels;
-    require(pixels == 12'700'000ull && maximumJpegBytes(pixels) == pixels * 3 / 2 + 65'000,
-            "a file larger than the guest's buffer for the size (a byte and a half a pixel and the Exif gap) fails its capture");
-    require(maximumJpegBytes(1008ull * 756) == 1008ull * 756 * 3 / 2 + exifGapLength, "which is the plane size the device states for the stream");
+    require(pixels == 12'700'000ull && jpegBufferBytes(pixels) == pixels * 3 / 2 + 65'000,
+            "the guest's JPEG buffer holds a byte and a half a pixel and the Exif gap");
+    require(jpegBufferBytes(1008ull * 756) == 1008ull * 756 * 3 / 2 + exifGapLength, "which is the plane size the device states for the stream");
+    require(maximumJpegBytes(pixels) == pixels * 3 / 2 - 4 && maximumJpegBytes(pixels) + exifGapLength + 4 == jpegBufferBytes(pixels),
+            "a file larger than the buffer less the gap fails its capture before it is copied: the gap's payload and header fit with it");
     require(jpegCaptureBytes(pixels) == maximumJpegBytes(pixels) * 2 && rawCaptureBytes(pixels) == pixels * 2 * 3, "the costs of one capture of each kind");
     require(jpegCaptureBytes(pixels, 11) == maximumJpegBytes(pixels) * 2 + pixels * 11,
             "a source that holds working storage for each pixel adds it to its JPEG capture");
     require(small.stills == jpegCaptureBytes(pixels) + rawCaptureBytes(pixels), "the fullest capture: a JPEG with a RAW");
     require(small.total() == 53'084'160ull + 3'110'400ull + 9'953'280ull + small.stills, "the parts add up");
-    require(cameraHostMemoryReserveMiB(CameraTier::small) == 173, "172.2 MiB, rounded up");
+    require(cameraHostMemoryReserveMiB(CameraTier::small) == 173, "172.09 MiB, rounded up");
     // The ceiling is the fullest use: both cameras streaming together and a RAW still. A use that holds less is less.
     require(CameraUse {}.streams == concurrentCameras && CameraUse {}.rawStill, "the default use is the fullest");
     require(cameraHostMemory(CameraTier::small, {2, true, 0}).total() == small.total(), "which is the ceiling");

@@ -1882,7 +1882,8 @@ std::unique_ptr<Camera> makeAppleCamera()
         // A file larger than the host takes for the size the guest configured (its JPEG buffer) is not
         // copied: the capture fails with those bytes still the system's alone (the host's cost of a
         // capture counts this file).
-        if (!_wantJpeg || (_maximumBytes != 0 && data.length > _maximumBytes)) {
+        const std::span<const std::uint8_t> file(static_cast<const std::uint8_t*>(data.bytes), data.length);
+        if (!uml::platform::takeJpegFile(file, _maximumBytes, _wantJpeg, _result.jpeg)) {
             if (_wantJpeg)
                 std::fprintf(stderr, "Camera: the photo's file is %lu bytes, more than the %llu a %ux%u photo may take\n",
                              static_cast<unsigned long>(data.length), static_cast<unsigned long long>(_maximumBytes), _jpegSize.width,
@@ -1890,8 +1891,6 @@ std::unique_ptr<Camera> makeAppleCamera()
             return;
         }
         _jpegReadings = readings;
-        const auto* bytes = static_cast<const std::uint8_t*>(data.bytes);
-        _result.jpeg.assign(bytes, bytes + data.length);
     }
 }
 
