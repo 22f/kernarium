@@ -218,6 +218,28 @@
         }
       }
     },
+    "Android can’t install an app with a part of %@ or more." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Androidでは、%@以上のパーツを含むアプリをインストールできません。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android无法安装包含大小为%@或以上部分的应用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Android無法安裝包含大小為%@或以上部分的應用程式。"
+          }
+        }
+      }
+    },
     "Android could not resume" : {
       "comment" : "Title of Home's card after a start that could not bring back the memory Android saved when it was paused.",
       "localizations" : {
@@ -908,24 +930,24 @@
         }
       }
     },
-    "This app has no code for this device’s processor." : {
+    "This app has no code for this device’s processor. Choose a version of the app made for ARM processors." : {
       "localizations" : {
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。"
+            "value" : "このアプリには、このデバイスのプロセッサ用のコードがありません。ARMプロセッサ用のバージョンのアプリを選択してください。"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此应用没有适用于此设备处理器的代码。"
+            "value" : "此应用没有适用于此设备处理器的代码。请选择适用于ARM处理器的应用版本。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。"
+            "value" : "此應用程式沒有適用於此裝置處理器的程式碼。請選擇適用於ARM處理器的應用程式版本。"
           }
         }
       }
@@ -970,6 +992,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此Andarium拷貝不含系統。"
+          }
+        }
+      }
+    },
+    "This file is damaged or encrypted, so it can’t be installed. Download it again, or choose another file." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このファイルは破損しているか暗号化されているため、インストールできません。もう一度ダウンロードするか、別のファイルを選択してください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此文件已损坏或已加密，因此无法安装。请重新下载，或选择其他文件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此檔案已損毀或已加密，因此無法安裝。請重新下載，或選擇其他檔案。"
           }
         }
       }

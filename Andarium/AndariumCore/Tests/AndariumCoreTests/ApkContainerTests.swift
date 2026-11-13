@@ -61,36 +61,29 @@ struct ApkContainerTests {
         }
     }
 
+    @Test func anApkThatHoldsApksAsAssetsIsStillTheApkItLooksLike() throws {
+        // The outer file is an app, and what it carries as assets is not an instruction to install it.
+        let items = [
+            item("AndroidManifest.xml"), item("classes.dex"), item("assets/helper.apk", apk("inner", size: 500)),
+            item("assets/base.apk"), item("assets/split_config.en.apk"),
+        ]
+        for name in ["app.apks", "app.xapk", "app.apkm"] {
+            #expect(try inspect(items, fileName: name) == .singleApk, "\(name)")
+        }
+        // Even with the files a container has beside it.
+        #expect(try inspect(items + [item("info.json", Data("{}".utf8))], fileName: "app.apkm") == .singleApk)
+        #expect(try inspect(items + [item("manifest.json", Data("{}".utf8))], fileName: "app.xapk") == .singleApk)
+    }
+
     // MARK: bundletool
 
-    private func bundletool(extra: [ZipFixture.Item] = []) -> [ZipFixture.Item] {
-        [
-            item("toc.pb"), item("splits/base-master.apk", apk("master", size: 5000)),
-            item("splits/base-arm64_v8a.apk"), item("splits/base-armeabi_v7a.apk"), item("splits/base-x86.apk"),
-            item("splits/base-x86_64.apk"), item("splits/base-xhdpi.apk"), item("splits/base-xxhdpi.apk"),
-            item("splits/base-en.apk"), item("splits/base-zh.apk"), item("splits/base-tcf_astc.apk"),
-            item("splits/feature-master.apk"), item("splits/feature-arm64_v8a.apk"), item("splits/feature-x86.apk"),
-            item("asset-slices/pack-master.apk"),
-            item("standalones/standalone-arm64_v8a_xxhdpi.apk"), item("universal.apk"), item("instant/base-master.apk"),
-        ] + extra
+    @Test func aBundletoolFileWithNoTableIsReadAsTheArchiveItIs() throws {
+        // `toc.pb` is what makes it bundletool's; without it the APKs are side by side.
+        let plan = try plan([item("base.apk"), item("split_config.en.apk"), item("splits/")])
+        #expect(plan.kind == .archive && plan.variants.isEmpty)
     }
 
-    @Test func abundletoolFileInstallsItsSplitsAndNeverTheStandalonesBesideThem() throws {
-        let plan = try plan(bundletool()).selecting(guestAbis: ApkContainer.defaultGuestAbis)
-        #expect(plan.kind == .bundletool)
-        #expect(plan.candidates.first?.entry == "splits/base-master.apk" && plan.candidates.first?.splitName == nil)
-        #expect(plan.candidates.first?.name == "base.apk")
-        let kept = Set(entries(plan))
-        #expect(kept == [
-            "splits/base-master.apk", "splits/base-arm64_v8a.apk", "splits/base-xhdpi.apk", "splits/base-xxhdpi.apk",
-            "splits/base-en.apk", "splits/base-zh.apk", "splits/base-tcf_astc.apk", "splits/feature-master.apk",
-            "splits/feature-arm64_v8a.apk", "asset-slices/pack-master.apk",
-        ])
-        #expect(plan.apkBytes == plan.candidates.reduce(0) { $0 + $1.bytes })
-        #expect(plan.dataBytes == 0 && plan.data.isEmpty)
-    }
-
-    @Test func abundletoolFileWithoutItsBaseSplitIsDamagedNotAStandalone() {
+    @Test func aBundletoolFileWithAnUnreadableTableIsDamagedNotAStandalone() {
         #expect(refusal([item("toc.pb"), item("splits/base-arm64_v8a.apk"), item("standalones/standalone.apk")]) == .damaged)
         #expect(refusal([item("toc.pb"), item("universal.apk")]) == .damaged)
     }
@@ -124,6 +117,24 @@ struct ApkContainerTests {
     @Test func anAppWithCodeOnlyForOtherProcessorsHasNoMatch() throws {
         let plan = try flatSplits(["x86", "x86_64"])
         #expect(throws: InstallRefusal.noMatchingProcessor) { _ = try plan.selecting(guestAbis: ApkContainer.defaultGuestAbis) }
+    }
+
+    @Test func theBaseIsKeptWhateverItsFileIsCalled() throws {
+        // A base that looks like a processor split is still the base: it has no processor of its own.
+        for name in ["armeabi-v7a.apk", "arm64_v8a.apk", "x86.apk", "x86_64.apk"] {
+            let found = try plan([item(name), item("split_config.arm64_v8a.apk")], fileName: "app.apkm")
+            let chosen = try found.selecting(guestAbis: ["arm64-v8a", "armeabi-v7a"])
+            #expect(chosen.candidates.first?.entry == name, "\(name)")
+            #expect(chosen.candidates.first?.splitName == nil && chosen.candidates.first?.abi == nil, "\(name)")
+            #expect(chosen.candidates.count == 2, "\(name)")
+        }
+        // Nor can a plan built by hand lose it to the filter.
+        var forged = try flatSplits(["arm64_v8a", "x86"])
+        forged.candidates[0].abi = "x86"
+        #expect(throws: InstallRefusal.damaged) { _ = try forged.selecting(guestAbis: ["arm64-v8a"]) }
+        var headless = try flatSplits(["arm64_v8a"])
+        headless.candidates.removeFirst()
+        #expect(throws: InstallRefusal.damaged) { _ = try headless.selecting(guestAbis: ["arm64-v8a"]) }
     }
 
     @Test func anAppWithNoProcessorSplitsKeepsEverything() throws {
@@ -165,6 +176,59 @@ struct ApkContainerTests {
         #expect(plan.kind == .apkm)
         #expect(plan.candidates.first?.entry == "base.apk")
         #expect(Set(plan.candidates.compactMap(\.splitName)) == ["config.arm64_v8a", "config.xhdpi", "feature_extra"])
+    }
+
+    @Test func anApkmFilesDataIsPlacedLikeAnXapks() throws {
+        let obb = "main.184.com.example.app.obb"
+        let found = try plan([
+            item("info.json", Data(#"{"apkm_version":5,"pname":"com.example.app","obb_files":["main.184.com.example.app.obb"]}"#.utf8)),
+            item("base.apk", apk("base", size: 400)), item("split_config.en.apk"), item(obb, apk("obb", size: 70_000)),
+        ], fileName: "App.apkm")
+        #expect(found.kind == .apkm && found.packageName == "com.example.app")
+        #expect(found.data == [ApkContainerPlan.DataFile(entry: obb, bytes: 70_000, folder: "Android/obb/com.example.app", name: obb)])
+        #expect(found.dataBytes == 70_000 && found.unplacedData == 0)
+        let place = try #require(found.guestLocation(of: found.data[0]))
+        #expect(place.path == "/storage/emulated/0/Android/obb/com.example.app/" + obb)
+        // An OBB the info does not list is not data.
+        let unlisted = try plan([
+            item("info.json", Data(#"{"pname":"com.example.app"}"#.utf8)), item("base.apk"), item("x.obb", apk("obb")),
+        ], fileName: "App.apkm")
+        #expect(unlisted.data.isEmpty && unlisted.unplacedData == 0)
+    }
+
+    @Test func anApkmFilesDataThatCannotBePlacedIsCounted() throws {
+        func found(_ info: String, _ extra: [ZipFixture.Item] = []) throws -> ApkContainerPlan {
+            try plan([item("info.json", Data(info.utf8)), item("base.apk")] + extra, fileName: "App.apkm")
+        }
+        // No package, a name that is not an OBB file's, a folder: nothing is placed, and it is said.
+        let noPackage = try found(#"{"obb_files":["a.obb"]}"#, [item("a.obb")])
+        #expect(noPackage.data.isEmpty && noPackage.unplacedData == 1 && noPackage.packageName == nil)
+        for name in ["a.txt", ".a.obb", "a b.obb", "sub/a.obb", "a'b.obb", ".obb"] {
+            let odd = try found(#"{"pname":"com.example.app","obb_files":[\#(try jsonString(name))]}"#, [item(name)])
+            #expect(odd.data.isEmpty && odd.unplacedData == 1, "\(name.debugDescription)")
+        }
+    }
+
+    private func jsonString(_ text: String) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: [text]), as: UTF8.self).dropFirst().dropLast().description
+    }
+
+    @Test func anApkmInfoThatCannotBeTrustedIsDamaged() throws {
+        func refused(_ info: Data) -> InstallRefusal? {
+            refusal([item("info.json", info), item("base.apk"), item("a.obb")], fileName: "App.apkm")
+        }
+        #expect(refused(Data("not json".utf8)) == .damaged)
+        #expect(refused(Data("[1]".utf8)) == .damaged)
+        #expect(refused(Data(#"{"pname":"../x","obb_files":["a.obb"]}"#.utf8)) == .damaged)
+        #expect(refused(Data(#"{"pname":"com.example.app","obb_files":"a.obb"}"#.utf8)) == .damaged)
+        #expect(refused(Data(#"{"pname":"com.example.app","obb_files":[1]}"#.utf8)) == .damaged)
+        #expect(refused(Data(#"{"pname":"com.example.app","obb_files":["gone.obb"]}"#.utf8)) == .damaged)
+        #expect(refused(Data(#"{"pname":"com.example.app","obb_files":["a.obb","a.obb"]}"#.utf8)) == .damaged)
+        #expect(refused(Data(#"{"pname":"com.example.app","obb_files":["a.obb"]}"#.utf8)) == nil)
+        let manyNames = String(repeating: #""a.obb","#, count: ApkContainer.maxParts + 1) + #""a.obb""#
+        #expect(refused(Data(#"{"pname":"com.example.app","obb_files":[\#(manyNames)]}"#.utf8)) == .damaged)
+        // Over the cap, like an .xapk's manifest.
+        #expect(refused(Data(String(repeating: " ", count: ApkContainer.maxManifestBytes + 1).utf8)) == .damaged)
     }
 
     @Test func aFolderOfApksIsReadWhenItIsTheOnlyOne() throws {
@@ -314,23 +378,57 @@ struct ApkContainerTests {
         #expect(refusal([item("readme.txt")], fileName: "x.xapk") == .noApp)
     }
 
-    @Test func anEncryptedArchiveOrFileIsRefused() throws {
+    @Test func anEncryptedArchiveIsRefused() throws {
         var secret = ZipFixture.Item("base.apk", apk("base"), method: 0)
         secret.flags = 0x0001
         #expect(refusal([secret, item("split_config.en.apk")]) == .encrypted)
         var aes = ZipFixture.Item("base.apk", apk("base"), method: 99)
         aes.flags = 0x0001
         #expect(refusal([aes]) == .encrypted)
-        // Not a ZIP at all: the encrypted kind of an .apkm; anything else is no app.
-        let noise = incompressible(5000)
-        for (name, expected) in [("a.apkm", InstallRefusal.encrypted), ("A.APKM", .encrypted), ("a.apks", .notApk), ("a.xapk", .notApk)] {
-            do {
-                _ = try ApkContainer.inspect(ZipDataSource(noise), fileName: name)
-                Issue.record("\(name): no error")
-            } catch {
-                #expect(error as? InstallRefusal == expected, "\(name)")
+    }
+
+    @Test func aFileThatIsNotAZipIsWordedByWhatItCouldBe() throws {
+        // Not a ZIP at all: the encrypted kind of an .apkm may be that; any other
+        // name an app in parts has is damaged. A saved web page is no more an app than noise is.
+        for noise in [incompressible(5000), Data("<html><body>Please sign in</body></html>".utf8) + Data(repeating: 0x20, count: 200)] {
+            for (name, expected) in [
+                ("a.apkm", InstallRefusal.damagedOrEncrypted), ("A.APKM", .damagedOrEncrypted), ("a.apks", .damaged),
+                ("a.xapk", .damaged), ("a.XAPK", .damaged), ("a.zip", .notApk),
+            ] {
+                do {
+                    _ = try ApkContainer.inspect(ZipDataSource(noise), fileName: name)
+                    Issue.record("\(name): no error")
+                } catch {
+                    #expect(error as? InstallRefusal == expected, "\(name)")
+                }
             }
         }
+        // A file too short to be an archive at all.
+        for name in ["a.apkm", "a.apks", "a.xapk"] {
+            do {
+                _ = try ApkContainer.inspect(ZipDataSource(Data()), fileName: name)
+                Issue.record("\(name): no error")
+            } catch {
+                #expect(error as? InstallRefusal == (name == "a.apkm" ? .damagedOrEncrypted : .damaged), "\(name)")
+            }
+        }
+    }
+
+    @Test func aDownloadThatStoppedEarlyIsDamagedUnderEveryName() throws {
+        // It starts like a ZIP and has no end: the cut-off file, not an encrypted one.
+        let whole = ZipFixture([item("base.apk", apk("base", size: 20_000)), item("split_config.en.apk", apk("en", size: 20_000))]).build()
+        for cut in [4, 30, 1000, whole.count / 2, whole.count - 30, whole.count - 1] {
+            for name in ["a.apks", "a.xapk", "a.apkm", "a.APKM"] {
+                do {
+                    _ = try ApkContainer.inspect(ZipDataSource(whole.prefix(cut)), fileName: name)
+                    Issue.record("\(name) at \(cut): no error")
+                } catch {
+                    #expect(error as? InstallRefusal == .damaged, "\(name) at \(cut)")
+                }
+            }
+        }
+        // The whole of it reads.
+        #expect(refusal([item("base.apk"), item("split_config.en.apk")], fileName: "a.apkm") == nil)
     }
 
     @Test func aDamagedArchiveIsRefusedWithItsOwnWords() {
@@ -346,13 +444,13 @@ struct ApkContainerTests {
         var big = ZipFixture.Item("base.apk", apk("base"), method: 8)
         big.zip64 = true
         big.declaredSize = InstallRefusal.singleApkLimit
-        #expect(refusal([big, item("split_config.en.apk")]) == .tooLarge)
+        #expect(refusal([big, item("split_config.en.apk")]) == .partTooLarge)
         big.declaredSize = InstallRefusal.singleApkLimit - 1
         #expect(refusal([big, item("split_config.en.apk")]) == nil)
         var splitBig = ZipFixture.Item("split_config.en.apk", apk("en"), method: 8)
         splitBig.zip64 = true
         splitBig.declaredSize = 5 * Bytes.gib
-        #expect(refusal([item("base.apk"), splitBig]) == .tooLarge)
+        #expect(refusal([item("base.apk"), splitBig]) == .partTooLarge)
     }
 
     @Test func aContainerOfManyApksIsLimitedInTheParts() throws {

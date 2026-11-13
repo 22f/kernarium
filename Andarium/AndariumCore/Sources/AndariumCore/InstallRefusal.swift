@@ -20,6 +20,11 @@ public enum InstallRefusal: Error, Equatable, Sendable {
     case damaged
     /// The app has code for no processor this virtual machine has.
     case noMatchingProcessor
+    /// The file is not a ZIP and is named as one kind of app file that can be
+    /// encrypted (.apkm): it is damaged, or it is the encrypted kind.
+    case damagedOrEncrypted
+    /// One APK of an app in parts is `singleApkLimit` bytes or more.
+    case partTooLarge
 
     /// From this size a single .apk is a ZIP64 archive, which Android's
     /// package parser cannot read.
@@ -73,7 +78,17 @@ public enum InstallRefusal: Error, Equatable, Sendable {
                 localized: "This file is damaged, or the parts of the app don\u{2019}t fit together. Download it again, or choose another file.",
                 bundle: .module)
         case .noMatchingProcessor:
-            String(localized: "This app has no code for this device\u{2019}s processor.", bundle: .module)
+            String(
+                localized: "This app has no code for this device\u{2019}s processor. Choose a version of the app made for ARM processors.",
+                bundle: .module)
+        case .damagedOrEncrypted:
+            String(
+                localized: "This file is damaged or encrypted, so it can\u{2019}t be installed. Download it again, or choose another file.",
+                bundle: .module)
+        case .partTooLarge:
+            String(
+                localized: "Android can\u{2019}t install an app with a part of \(Formats.size(bytes: Self.singleApkLimit)) or more.",
+                bundle: .module)
         }
     }
 }
@@ -87,6 +102,8 @@ extension InstallRefusal {
     /// the picker and the files always agree. Other extensions (.zip, none)
     /// are dimmed, and `init(fileName:)` still refuses a mislabelled file.
     public static var pickerTypes: [UTType] {
-        acceptedExtensions.map { UTType(filenameExtension: $0, conformingTo: .data) ?? .data }
+        // A type the system cannot make is left out: `.data` in its place would
+        // let every file through the picker.
+        acceptedExtensions.compactMap { UTType(filenameExtension: $0, conformingTo: .data) }
     }
 }

@@ -35,28 +35,45 @@ public enum ApkContainer {
             throw refusal
         } catch let error as ZipError {
             throw refusal(for: error)
+        } catch is BundleTable.Failure {
+            throw InstallRefusal.damaged
         }
     }
 
-    /// Opens `source` as an archive and inspects it. `fileName` only words a
-    /// refusal: a file that is not a ZIP at all is, for an `.apkm`, the
-    /// encrypted kind of that file.
-    public static func inspect(_ source: any ZipSource, fileName: String) throws -> Inspection {
+    /// Opens `source` as an archive. A file that is not one is worded by what
+    /// it is: a file that starts like a ZIP and stops short is a download cut
+    /// off, and any other file named as an app in parts is damaged, but for an
+    /// `.apkm`, which may be the encrypted kind of that file, that does not
+    /// start like a ZIP at all. `checkpoint` is asked while the directory is read.
+    public static func open(_ source: any ZipSource, fileName: String, checkpoint: ZipCheckpoint? = nil) throws -> ZipArchive {
         do {
-            return try inspect(ZipArchive(source: source))
+            return try ZipArchive(source: source, checkpoint: checkpoint)
         } catch ZipError.notAnArchive {
-            throw fileName.lowercased().hasSuffix(".apkm") ? InstallRefusal.encrypted : InstallRefusal.notApk
+            throw notAnArchive(source, fileName: fileName)
         } catch let error as ZipError {
             throw refusal(for: error)
         }
+    }
+
+    /// Opens `source` as an archive and inspects it.
+    public static func inspect(_ source: any ZipSource, fileName: String, checkpoint: ZipCheckpoint? = nil) throws -> Inspection {
+        try inspect(open(source, fileName: fileName, checkpoint: checkpoint))
+    }
+
+    private static func notAnArchive(_ source: any ZipSource, fileName: String) -> InstallRefusal {
+        var start = [UInt8](repeating: 0, count: 2)
+        let got = (try? start.withUnsafeMutableBytes { try source.read(at: 0, into: $0) }) ?? 0
+        if got == 2, start == [0x50, 0x4B] { return .damaged }
+        let name = fileName.lowercased()
+        if name.hasSuffix(".apkm") { return .damagedOrEncrypted }
+        return name.hasSuffix(".apks") || name.hasSuffix(".xapk") ? .damaged : .notApk
     }
 
     /// The words an archive's failure gets.
     public static func refusal(for error: ZipError) -> InstallRefusal {
         switch error {
         case .encrypted: .encrypted
-        case .notAnArchive: .notApk
-        case .unsupported, .malformed, .tooLarge, .corrupt: .damaged
+        case .notAnArchive, .unsupported, .malformed, .tooLarge, .corrupt: .damaged
         }
     }
 
@@ -74,22 +91,22 @@ public enum ApkContainer {
         if names.contains("BundleConfig.pb") || names.contains("base/manifest/AndroidManifest.xml") {
             throw InstallRefusal.appBundle
         }
+        // An APK itself: its manifest is at the root. None of the containers
+        // has one there, so a file that does is the APK it looks like, whatever
+        // it is named and whatever APKs it holds as assets.
+        if names.contains("AndroidManifest.xml") { return .singleApk }
         let apks = live.filter { $0.name.lowercased().hasSuffix(".apk") }
-        if apks.isEmpty {
-            // An APK itself: its manifest is at the root, and it holds no APK.
-            if names.contains("AndroidManifest.xml") { return .singleApk }
-            throw InstallRefusal.noApp
-        }
         let layout: Layout =
             names.contains("toc.pb") ? .bundletool
             : names.contains("manifest.json") ? .xapk
             : names.contains("meta.sai_v2.json") || names.contains("meta.sai_v1.json") ? .sai
             : names.contains("info.json") ? .apkm : .generic
+        if apks.isEmpty { throw InstallRefusal.noApp }
         switch layout {
-        case .bundletool: return .parts(try bundletool(apks, archive: archive))
+        case .bundletool: return .parts(try bundletool(archive: archive))
         case .xapk: return .parts(try xapk(archive, apks: apks, live: live))
         case .sai: return .parts(try flat(apks, kind: .sai))
-        case .apkm: return .parts(try flat(apks, kind: .apkm))
+        case .apkm: return .parts(try apkm(archive, apks: apks, live: live))
         case .generic: return .parts(try flat(apks, kind: .archive))
         }
     }
@@ -110,22 +127,53 @@ public enum ApkContainer {
 
     // MARK: bundletool's .apks
 
-    /// `splits/<module>-<config>.apk`, with `base-master.apk` the base. The
-    /// `standalones/`, `instant/` and `universal.apk` of the same file are
-    /// other forms of the app (never installed together with the splits).
-    private static func bundletool(_ apks: [ZipEntry], archive: ZipArchive) throws -> ApkContainerPlan {
-        let wanted = apks.filter { $0.name.hasPrefix("splits/") || $0.name.hasPrefix("asset-slices/") }
-        guard let base = wanted.first(where: { $0.name == "splits/base-master.apk" }) else { throw InstallRefusal.damaged }
+    /// The table of contents (`toc.pb`) names the variants of the app, each
+    /// with the APKs it is made of; the variant for the virtual machine is
+    /// chosen when its Android is known (`ApkContainerPlan.selecting`), and
+    /// only that variant's APKs are installed, never the standalones or the
+    /// splits of another variant beside them. A table that cannot be read, or
+    /// names an APK the file does not hold, is a damaged file: no variant is
+    /// guessed from the names.
+    private static func bundletool(archive: ZipArchive) throws -> ApkContainerPlan {
+        guard let tocEntry = archive.entry(named: "toc.pb"), !tocEntry.isDirectory else { throw InstallRefusal.damaged }
+        guard tocEntry.size <= UInt64(maxManifestBytes) else { throw InstallRefusal.damaged }
+        let table = try BundleTable(archive.data(of: tocEntry, limit: maxManifestBytes))
+        guard !table.variants.isEmpty else { throw InstallRefusal.damaged }
         var parts: [ApkContainerPlan.Part] = []
-        for entry in wanted {
-            let id = stem(entry.name)
-            let isBase = entry.name == base.name
-            let config = id.firstIndex(of: "-").map { String(id[id.index(after: $0)...]) }
-            parts.append(ApkContainerPlan.Part(
-                entry: entry.name, bytes: entry.size, name: "", splitName: isBase ? nil : id,
-                abi: config.flatMap(abi(ofConfig:))))
+        var known = Set<String>()
+        var variants: [ApkContainerPlan.Variant] = []
+        for variant in table.variants {
+            guard variant.apks.count <= maxParts else { throw InstallRefusal.damaged }
+            // The base is the one APK that is the app itself: the base module's
+            // master split, or the whole app of a standalone build.
+            let bases = variant.apks.filter { ($0.isMaster && $0.module == "base") || $0.isStandalone }
+            guard bases.count == 1, let base = bases.first else {
+                // A variant that is not made of the base and its splits: not for this install.
+                if variant.apks.isEmpty { continue }
+                throw InstallRefusal.damaged
+            }
+            if base.isStandalone, variant.apks.count != 1 { throw InstallRefusal.damaged }
+            var entries: [String] = []
+            var ids = Set<String>()
+            for apk in variant.apks {
+                guard let entry = archive.entry(named: apk.path), !entry.isDirectory, entries.count < maxParts else { throw InstallRefusal.damaged }
+                // A split is installed once: the same id twice in a variant is a table that contradicts itself.
+                if apk.path != base.path {
+                    guard ids.insert(apk.splitID.isEmpty ? apk.path : apk.splitID).inserted else { throw InstallRefusal.damaged }
+                }
+                entries.append(entry.name)
+                if known.insert(entry.name).inserted {
+                    parts.append(ApkContainerPlan.Part(
+                        entry: entry.name, bytes: entry.size, name: "", splitName: apk.path == base.path ? nil : apk.splitID,
+                        abi: apk.path == base.path ? nil : apk.abi))
+                }
+            }
+            variants.append(ApkContainerPlan.Variant(
+                number: variant.number, minSdk: variant.minSdk, abis: variant.abis, otherTargeting: variant.otherTargeting,
+                base: base.path, entries: entries))
         }
-        return try finish(ApkContainerPlan(kind: .bundletool, packageName: nil, candidates: parts, data: [], unplacedData: 0), base: base.name)
+        guard !variants.isEmpty, parts.count <= 4096 else { throw InstallRefusal.damaged }
+        return ApkContainerPlan(kind: .bundletool, packageName: nil, candidates: parts, data: [], unplacedData: 0, variants: variants)
     }
 
     // MARK: Archives with the APKs side by side
@@ -151,11 +199,12 @@ public enum ApkContainer {
             guard plain.count == 1, let only = plain.first else { throw InstallRefusal.damaged }
             base = only
         }
+        // The base has no processor of its own, whatever its file is called.
         let parts = group.map { entry -> ApkContainerPlan.Part in
             let id = splitID(fromFileStem: stem(entry.name))
             let isBase = entry.name == base.name
             return ApkContainerPlan.Part(
-                entry: entry.name, bytes: entry.size, name: "", splitName: isBase ? nil : id, abi: abi(ofConfig: id))
+                entry: entry.name, bytes: entry.size, name: "", splitName: isBase ? nil : id, abi: isBase ? nil : abi(ofConfig: id))
         }
         return try finish(ApkContainerPlan(kind: kind, packageName: nil, candidates: parts, data: [], unplacedData: 0), base: base.name)
     }
@@ -190,7 +239,7 @@ public enum ApkContainer {
                     baseName = entry.name
                 }
                 parts.append(ApkContainerPlan.Part(
-                    entry: entry.name, bytes: entry.size, name: "", splitName: isBase ? nil : id, abi: abi(ofConfig: id)))
+                    entry: entry.name, bytes: entry.size, name: "", splitName: isBase ? nil : id, abi: isBase ? nil : abi(ofConfig: id)))
             }
         } else {
             // Version 1: the one APK of the file, which is the app.
@@ -213,6 +262,49 @@ public enum ApkContainer {
         return try finish(
             ApkContainerPlan(kind: .xapk, packageName: package, candidates: parts, data: data.files, unplacedData: data.unplaced),
             base: baseName)
+    }
+
+    // MARK: .apkm
+
+    /// An .apkm holds the APKs side by side and an `info.json`. Of that file
+    /// only the package (`pname`) and the data files (`obb_files`, names of
+    /// OBB files at the archive's root) are read, to place the data of an app
+    /// the same way an .xapk's is placed.
+    private static func apkm(_ archive: ZipArchive, apks: [ZipEntry], live: [ZipEntry]) throws -> ApkContainerPlan {
+        var plan = try flat(apks, kind: .apkm)
+        guard let infoEntry = archive.entry(named: "info.json") else { throw InstallRefusal.damaged }
+        let info = try readManifest(archive, infoEntry)
+        let package = info["pname"] as? String
+        if let package, !isPackageName(package) { throw InstallRefusal.damaged }
+        plan.packageName = package
+        if let listed = info["obb_files"] {
+            guard let names = listed as? [String], names.count <= maxParts else { throw InstallRefusal.damaged }
+            let placed = try dataFiles(names, package: package, archive: archive) { name in "Android/obb/\(package ?? "")/\(name)" }
+            plan.data = placed.files
+            plan.unplacedData = placed.unplaced
+        }
+        return plan
+    }
+
+    /// The data files an archive names, each an entry of the archive; a file
+    /// is placed where `destination` says if that is the package's own OBB
+    /// folder (`obbFolder`), and counted as data not placed if it is not.
+    private static func dataFiles(
+        _ names: [String], package: String?, archive: ZipArchive, destination: (String) -> String
+    ) throws -> (files: [ApkContainerPlan.DataFile], unplaced: Int) {
+        var files: [ApkContainerPlan.DataFile] = []
+        var unplaced = 0
+        var seen = Set<String>()
+        for name in names {
+            guard let entry = archive.entry(named: name), !entry.isDirectory else { throw InstallRefusal.damaged }
+            guard let package, let folder = obbFolder(for: destination(name), package: package) else {
+                unplaced += 1
+                continue
+            }
+            guard seen.insert(folder.name).inserted else { throw InstallRefusal.damaged }
+            files.append(ApkContainerPlan.DataFile(entry: entry.name, bytes: entry.size, folder: folder.folder, name: folder.name))
+        }
+        return (files, unplaced)
     }
 
     private static func readManifest(_ archive: ZipArchive, _ entry: ZipEntry) throws -> [String: Any] {
@@ -306,12 +398,19 @@ public enum ApkContainer {
 
     private static func finish(_ plan: ApkContainerPlan, base: String) throws -> ApkContainerPlan {
         var plan = plan
-        guard plan.candidates.count <= maxParts, plan.candidates.contains(where: { $0.splitName == nil && $0.entry == base }) else {
+        plan.candidates = try arranged(plan.candidates, base: base)
+        return plan
+    }
+
+    /// The parts of one install: the base first as `base.apk`, the others
+    /// after it, each with a name of its own in the session. A part must be
+    /// there once, hold bytes, and be one Android reads (under 4 GiB).
+    static func arranged(_ parts: [ApkContainerPlan.Part], base: String) throws -> [ApkContainerPlan.Part] {
+        guard parts.count <= maxParts, parts.contains(where: { $0.splitName == nil && $0.entry == base }) else {
             throw InstallRefusal.damaged
         }
-        // One part is the base, first; names in the session are unique.
-        var ordered = plan.candidates.filter { $0.entry == base }
-        ordered += plan.candidates.filter { $0.entry != base }
+        var ordered = parts.filter { $0.entry == base }
+        ordered += parts.filter { $0.entry != base }
         var names = Set<String>()
         for index in ordered.indices {
             guard names.insert(ordered[index].entry).inserted else { throw InstallRefusal.damaged }
@@ -320,10 +419,9 @@ public enum ApkContainer {
             guard PackageInstallCommand.isValidPartName(ordered[index].name) else { throw InstallRefusal.damaged }
             // Each APK is Android's to parse, which reads none of 4 GiB or more.
             if ordered[index].bytes == 0 { throw InstallRefusal.damaged }
-            if InstallRefusal(sizeBytes: ordered[index].bytes) != nil { throw InstallRefusal.tooLarge }
+            if InstallRefusal(sizeBytes: ordered[index].bytes) != nil { throw InstallRefusal.partTooLarge }
         }
-        plan.candidates = ordered
-        return plan
+        return ordered
     }
 
     private static func sanitized(_ stem: String) -> String {
@@ -373,27 +471,97 @@ public struct ApkContainerPlan: Equatable, Sendable {
         public var name: String
     }
 
+    /// One form of the app a bundletool file holds: the APKs it is made of and
+    /// the Android it is for.
+    public struct Variant: Equatable, Sendable {
+        public var number: Int
+        /// The lowest API level the variant is for.
+        public var minSdk: Int
+        /// The processors the variant is for, when it is one build per processor.
+        public var abis: [String]
+        /// The variant is for something the table names and this install does not weigh.
+        public var otherTargeting: Bool
+        /// The entry of the variant's base.
+        public var base: String
+        /// The entries of every APK of the variant, the base among them.
+        public var entries: [String]
+    }
+
     public var kind: Kind
+    /// The app's package where the container says it. It is the container's
+    /// own word until the package manager has checked it against the base APK
+    /// (`PackageInstallCommand.createSession(packageName:)`).
     public var packageName: String?
-    /// Every APK of the app, the base first, before the processor is chosen.
+    /// Every APK of the app. For a plan without variants the base is first,
+    /// before the processor is chosen; with variants, the APKs of all of them.
     public var candidates: [Part]
     public var data: [DataFile]
     /// Data the archive carries that is not placed (anything but OBB files).
     public var unplacedData: Int
+    /// The forms of the app a bundletool file holds; empty for any other.
+    public var variants: [Variant]
 
-    /// The parts this virtual machine installs: the base, the feature,
-    /// density and language splits, and the splits of the one processor of
-    /// `guestAbis` (its own list, most preferred first) that the app has
-    /// code for, so that no unused code takes room and an app with a choice
-    /// of 32 and 64 bits runs in 64. An app whose only code is for other
-    /// processors has no match.
-    public func selecting(guestAbis: [String]) throws -> ApkContainerPlan {
-        let present = Set(candidates.compactMap(\.abi))
+    public init(
+        kind: Kind, packageName: String?, candidates: [Part], data: [DataFile], unplacedData: Int, variants: [Variant] = []
+    ) {
+        self.kind = kind
+        self.packageName = packageName
+        self.candidates = candidates
+        self.data = data
+        self.unplacedData = unplacedData
+        self.variants = variants
+    }
+
+    /// The parts this virtual machine installs: the variant for its Android
+    /// (the one with the highest minimum API level that is not above
+    /// `guestSdk`; the newest when the level is not known), then the base, the
+    /// feature, density and language splits, and the splits of the one
+    /// processor of `guestAbis` (its own list, most preferred first) that the
+    /// app has code for, so that no unused code takes room and an app with a
+    /// choice of 32 and 64 bits runs in 64. An app whose only code is for
+    /// other processors has no match. The base is always the first part.
+    public func selecting(guestAbis: [String], guestSdk: Int? = nil) throws -> ApkContainerPlan {
         var plan = self
-        if present.isEmpty { return plan }
-        guard let chosen = guestAbis.first(where: { present.contains($0) }) else { throw InstallRefusal.noMatchingProcessor }
-        plan.candidates = candidates.filter { $0.abi == nil || $0.abi == chosen }
+        if !variants.isEmpty {
+            let variant = try chosenVariant(guestAbis: guestAbis, guestSdk: guestSdk)
+            let wanted = Set(variant.entries)
+            plan.candidates = candidates.filter { wanted.contains($0.entry) }.map { part in
+                var part = part
+                if part.entry == variant.base { part.splitName = nil; part.abi = nil }
+                return part
+            }
+            plan.variants = []
+            plan.candidates = try ApkContainer.arranged(plan.candidates, base: variant.base)
+        }
+        let present = Set(plan.candidates.compactMap(\.abi))
+        if !present.isEmpty {
+            guard let chosen = guestAbis.first(where: { present.contains($0) }) else { throw InstallRefusal.noMatchingProcessor }
+            plan.candidates = plan.candidates.filter { $0.abi == nil || $0.abi == chosen }
+        }
+        // The base is kept, first, whatever was filtered.
+        guard let first = plan.candidates.first, first.splitName == nil, first.name == "base.apk", first.abi == nil,
+              plan.candidates.filter({ $0.splitName == nil }).count == 1
+        else { throw InstallRefusal.damaged }
         return plan
+    }
+
+    /// The variant to install: not one for another kind of device, for an
+    /// Android no newer than the guest's, the newest of those, and among
+    /// equals the one whose processor the guest prefers. None is a file whose
+    /// parts do not fit this virtual machine.
+    private func chosenVariant(guestAbis: [String], guestSdk: Int?) throws -> Variant {
+        let level = guestSdk ?? Int.max
+        func rank(_ variant: Variant) -> Int {
+            if variant.abis.isEmpty { return guestAbis.count }
+            return variant.abis.compactMap { guestAbis.firstIndex(of: $0) }.min() ?? Int.max
+        }
+        let fitting = variants.filter { !$0.otherTargeting && $0.minSdk <= level && rank($0) != Int.max }
+        guard let best = fitting.min(by: { lhs, rhs in
+            if lhs.minSdk != rhs.minSdk { return lhs.minSdk > rhs.minSdk }
+            if rank(lhs) != rank(rhs) { return rank(lhs) < rank(rhs) }
+            return lhs.number < rhs.number
+        }) else { throw InstallRefusal.damaged }
+        return best
     }
 
     /// Where `file` goes in the guest: its folder and its full path, both

@@ -30,8 +30,14 @@ struct InstallRefusalTests {
             == "There\u{2019}s no app in this file. Choose an .apk, .apks, .xapk or .apkm file that holds an app.")
         #expect(InstallRefusal.damaged.message
             == "This file is damaged, or the parts of the app don\u{2019}t fit together. Download it again, or choose another file.")
-        #expect(InstallRefusal.noMatchingProcessor.message == "This app has no code for this device\u{2019}s processor.")
-        let all: [InstallRefusal] = [.notApk, .tooLarge, .encrypted, .appBundle, .noApp, .damaged, .noMatchingProcessor]
+        #expect(InstallRefusal.noMatchingProcessor.message
+            == "This app has no code for this device\u{2019}s processor. Choose a version of the app made for ARM processors.")
+        #expect(InstallRefusal.damagedOrEncrypted.message
+            == "This file is damaged or encrypted, so it can\u{2019}t be installed. Download it again, or choose another file.")
+        #expect(InstallRefusal.partTooLarge.message == "Android can\u{2019}t install an app with a part of 4 GiB or more.")
+        let all: [InstallRefusal] = [
+            .notApk, .tooLarge, .encrypted, .appBundle, .noApp, .damaged, .noMatchingProcessor, .damagedOrEncrypted, .partTooLarge,
+        ]
         #expect(Set(all.map(\.message)).count == all.count)
     }
 
@@ -63,6 +69,9 @@ struct InstallRefusalTests {
 
     @Test func thePickerOffersTheTypesOfTheFourForms() {
         let pickers = InstallRefusal.pickerTypes
+        // One type for each extension: a type the system cannot make is not
+        // replaced by `.data`, which would let every file through.
+        #expect(pickers.count == InstallRefusal.acceptedExtensions.count)
         #expect(pickers.count == 4)
         // Not everything: an unfiltered picker is what these types replace.
         for picker in pickers { #expect(picker != .item && picker != .data && picker != .archive && picker != .zip) }
@@ -71,7 +80,11 @@ struct InstallRefusalTests {
         }
         // The system or an application that declares an extension changes
         // the identifier, never the agreement between the picker and the files.
-        #expect(pickers == InstallRefusal.acceptedExtensions.map { UTType(filenameExtension: $0, conformingTo: .data) ?? .data })
+        #expect(pickers == InstallRefusal.acceptedExtensions.map { UTType(filenameExtension: $0, conformingTo: .data) })
+        for (type, ext) in zip(pickers, InstallRefusal.acceptedExtensions) {
+            #expect(type.conforms(to: .data) && type != .data, "\(ext)")
+            #expect(UTType(filenameExtension: ext, conformingTo: .data) == type, "\(ext)")
+        }
     }
 
     @Test func thePickerDimsEveryOtherKindOfFile() {
