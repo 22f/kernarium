@@ -369,29 +369,6 @@
         }
       }
     },
-    "Install an app built for a much older version of Android with Install APK. Andarium warns you first that it may not work properly." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "“APKをインストール”で、はるかに古いバージョンのAndroid向けに作られたアプリをインストールできます。インストールの前に、正しく動作しない場合があることをAndariumがお知らせします。"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "通过“安装APK”安装为非常旧的Android版本开发的应用。安装前，Andarium会先发出警告，说明它可能无法正常运行。"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "透過「安裝APK」安裝為非常舊的Android版本所開發的應用程式。安裝前，Andarium會先發出警告，說明它可能無法正常運作。"
-          }
-        }
-      }
-    },
     "Install older Android apps" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -779,6 +756,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "穩定性修正"
+          }
+        }
+      }
+    },
+    "Use Install APK to install an app built for a much older version of Android. Andarium warns you first that the app may not work properly." : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“APKをインストール”で、はるかに古いバージョンのAndroid向けに作られたアプリをインストールできます。インストールの前に、正しく動作しない場合があることをAndariumがお知らせします。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通过“安装APK”安装为非常旧的Android版本开发的应用。安装前，Andarium会提醒你该应用可能无法正常运行。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "透過「安裝APK」安裝為非常舊的Android版本所開發的應用程式。安裝前，Andarium會提醒你該應用程式可能無法正常運作。"
           }
         }
       }

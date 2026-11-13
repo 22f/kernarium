@@ -57,7 +57,7 @@
       {
         "id": "legacy-apk",
         "title": "Install older Android apps",
-        "text": "Install an app built for a much older version of Android with Install APK. Andarium warns you first that it may not work properly.",
+        "text": "Use Install APK to install an app built for a much older version of Android. Andarium warns you first that the app may not work properly.",
         "symbol": "square.and.arrow.down.fill",
         "place": "sessionSettings"
       },
