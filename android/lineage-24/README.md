@@ -370,7 +370,8 @@ largest video mode, which is the recording size of the large tier, the YUV sizes
 of every smaller JPEG, 1920x1440 and 1280x720 for a concurrent camera) are cut
 from the smallest native video mode that covers them, scaled in the HAL and, for
 a JPEG, encoded there; the 3840x2160 one is cut from the mode of that size, so
-it asks the host for nothing a stream of that mode does not. A request whose
+it asks the host for nothing a stream of that mode does not, and it is listed
+only when the camera's stills reach that size. A request whose
 outputs the host refuses or does not deliver within the HAL's deadline (3 s,
 15 s for a request with a still) is a failed request (`ERROR_REQUEST`, which
 Camera2 and CameraX report as a failed capture); a request that loses only some

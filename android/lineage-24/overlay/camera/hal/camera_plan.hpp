@@ -336,7 +336,11 @@ inline StreamSizes derive_sizes(const Formats& formats)
         add_cut(result.jpeg, size_1440p);
         add_cut(result.jpeg, size_720p);
     }
-    if (largest(natives) == size_2160p && size_2160p.pixels() <= most(result.jpeg)) add_cut(result.jpeg, size_2160p);
+    // The recording size is 3840x2160 when no mode has more pixels and that mode exists (a mode of as many pixels in another
+    // shape does not make the choice depend on the order the host lists them in).
+    const bool records_2160p = std::find(natives.begin(), natives.end(), size_2160p) != natives.end() &&
+                               largest(natives).pixels() == size_2160p.pixels();
+    if (records_2160p && size_2160p.pixels() <= most(result.jpeg)) add_cut(result.jpeg, size_2160p);
 
     for (const auto& size : natives) result.yuv.push_back(host_entry(size));
     const std::uint64_t largest_video = most(result.yuv);

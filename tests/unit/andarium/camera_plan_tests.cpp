@@ -470,6 +470,13 @@ void check_record_jpeg()
         require(!find(sizes.jpeg, uhd) && !find(sizes.yuv, uhd), "no 2160p on a camera that stops at 1080p");
     }
 
+    // The choice does not depend on the order the host lists its modes in, also with a mode of as many pixels.
+    const auto wide_first = vectors::formats_of({{1920, 1080, 1, 30}, {4320, 1920, 1, 30}, {3840, 2160, 1, 30}}, {{4032, 3024}});
+    const auto wide_last = vectors::formats_of({{1920, 1080, 1, 30}, {3840, 2160, 1, 30}, {4320, 1920, 1, 30}}, {{4032, 3024}});
+    for (const auto* formats : {&wide_first, &wide_last}) {
+        const auto sizes = derive_sizes(*formats);
+        require(find(sizes.jpeg, uhd) && !find(sizes.jpeg, uhd)->host, "the 2160p JPEG does not depend on the order of equal-area modes");
+    }
     // Never larger than the camera's largest JPEG: video of 2160p over stills of 3 MP adds no 2160p picture, and the edge is
     // exact: stills of as many pixels as the video frame (a different shape) allow it, one row fewer do not.
     const auto small_stills = derive_sizes(vectors::formats_of({{1920, 1080, 1, 30}, {3840, 2160, 1, 30}}, {{2016, 1512}}));
