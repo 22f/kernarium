@@ -52,10 +52,12 @@ uml_add_tooling_test(
     LABELS kernarium
     TIMEOUT 30)
 
-# `watch` keeps the host serving: it adopts a serving host, replaces one that
-# stops serving at once, and fails once when the device asks for approval. The
-# tests run the real script and its supervisor against fake `xcrun` and
-# `xcodebuild` executables in a scratch folder.
+# `watch` keeps the host serving: it adopts a serving host and replaces one that
+# is shown to be dead, and where it cannot tell (a heartbeat it cannot read, an
+# approval the device may have asked for, what is left of the old host) it
+# replaces nothing and ends with a status of its own. The tests run the real
+# script and its supervisor against fake `xcrun` and `xcodebuild` executables
+# in a scratch folder.
 uml_add_tooling_test(
     NAME kernarium-ipad-automation-watch
     COMMAND ${Python3_EXECUTABLE}
@@ -68,7 +70,7 @@ uml_add_tooling_test(
     COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/tooling/kernarium/test_ipad_automation_watch_process.py
     LABELS kernarium
-    TIMEOUT 300)
+    TIMEOUT 600)
 
 uml_add_tooling_test(
     NAME kernarium-audio-interrupter

@@ -48,8 +48,8 @@ SCALED = {
     "WATCH_GONE_AGE": 1.0, "WATCH_RUNNER_WAIT": 4.0, "WATCH_BUSY_LIMIT": 1000,
     "WATCH_ATTEMPTS": 4, "WATCH_BACKOFF": (0.05, 0.05, 0.05),
     "WATCH_COMMAND_WAIT": 30, "WATCH_ALIVE_FRESH": 2.0, "WATCH_END_WAIT": 20,
-    "SUPERVISOR_TERM_WAIT": 5, "CHILD_TERM_WAIT": 1, "SEND_LIVENESS_EVERY": 0.5,
-    "WATCH_ADOPT_GAP": 0.3, "WATCH_APPROVAL_WINDOW": 4.0,
+    "SUPERVISOR_TERM_WAIT": 5, "CHILD_TERM_WAIT": 1, "FOREIGN_SETTLE": 0.6, "SEND_LIVENESS_EVERY": 0.5,
+    "WATCH_UNKNOWN_LIMIT": 4.0,
 }
 SECONDS = 3 * 3600
 PROMPT = (
@@ -184,6 +184,15 @@ class WatchTestCase(unittest.TestCase):
                          "the first host serves")
         return launch
 
+    def watch_over_host(self, *extra: str) -> str:
+        """A host the way `start` makes one, and a watch that follows it: the
+        watch replaces a host it has seen serve. Returns the host's nonce; the
+        watch is `self.last_watch`."""
+        host = self.start_host(hours=3)
+        self.last_watch = self.run_watch(*extra)
+        self.wait_record(state=automation.WATCHING)
+        return host.nonce
+
     def record(self) -> dict:
         return automation.read_watch_record(self.options("status"))
 
@@ -285,6 +294,19 @@ class AdoptionTests(WatchTestCase):
         self.invoked(1)
         self.assertEqual(watch.end(), 0)
 
+    def test_a_device_with_nothing_to_read_is_not_a_device_without_a_host(self) -> None:
+        # Rule (R3): the watch starts a host only for one it has seen. A device
+        # whose heartbeat cannot be read (a host that never was, or a read that
+        # fails) is a device it cannot tell about: it says so after the bound,
+        # replaced nothing, and ends with its own status.
+        watch = self.run_watch()
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_CANNOT_OBSERVE,
+                         self.messages)
+        record = self.record()
+        self.assertEqual(record["state"], automation.CANNOT_OBSERVE)
+        self.assertIn("nothing was replaced", record["detail"])
+        self.assertEqual(self.device.invocations(), [])
+
 
 class ReplacementTests(WatchTestCase):
     def test_a_host_that_ends_is_replaced_with_the_watchs_options(self) -> None:
@@ -314,42 +336,23 @@ class ReplacementTests(WatchTestCase):
                          "the first host's supervisor has ended")
 
     def test_the_host_the_watch_starts_is_watched_too(self) -> None:
-        # Rule: with no host serving the watch starts one, and watches it.
-        self.run_watch()
-        first = self.watching(restarts=1)
+        # Rule: the replacement is watched like the host before it.
+        first = self.watch_over_host()
         self.device.control(first, "die")
-        second = self.watching(restarts=2)
-        self.assertNotEqual(first, second)
-        self.assertEqual(self.nonces(), [first, second])
-
-    def test_a_runner_started_again_under_a_live_xcodebuild_is_replaced(self) -> None:
-        # Rule: xcodebuild starting the runner again (the old runner died; the
-        # new one serves nothing) is read from its log. The watch waits the
-        # approval window for what the new runner says (nothing here), then
-        # replaces the host and ends the live xcodebuild. The heartbeat's own
-        # bound is far away, so only the log signal can pass.
-        self.tune(HEARTBEAT_STALE=60)
-        self.run_watch()
-        first = self.watching(restarts=1)
-        self.device.control(first, "relaunch")
-        second = self.watching(restarts=2)
-        old = self.device.invocations()[0]
-        self.device.wait(lambda: not self.device.alive(old["pid"])
-                         and not self.device.alive(old["ppid"]), 15,
-                         "the old xcodebuild and its supervisor end")
-        self.assertIn("started the runner again",
-                      self.record()["last_end"]["reason"])
-        self.assertTrue(self.device.serving(second))
+        second = self.watching(restarts=1)
+        self.device.control(second, "die")
+        third = self.watching(restarts=2)
+        self.assertEqual(len({first, second, third}), 3)
+        self.assertEqual(self.nonces(), [first, second, third])
 
     def test_a_silent_host_is_replaced_when_its_heartbeat_goes_stale(self) -> None:
         # Rule: with the processes alive and nothing logged, a host whose
         # heartbeat stops is replaced after HEARTBEAT_STALE, and ended.
         self.tune(HEARTBEAT_STALE=2.0)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "silent")
         began = time.monotonic()
-        second = self.watching(restarts=2)
+        second = self.watching(restarts=1)
         self.assertGreater(time.monotonic() - began, 1.0)
         old = self.device.invocations()[0]
         self.device.wait(lambda: not self.device.alive(old["pid"]), 15,
@@ -361,8 +364,7 @@ class ReplacementTests(WatchTestCase):
         # Rule: the processes only hurry the verdict. A runner that keeps
         # beating serves, whatever happened to its supervisor.
         self.tune(HEARTBEAT_STALE=30)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         supervisor = self.device.invocations()[0]["ppid"]
         os.kill(supervisor, 9)
         self.device.wait(lambda: not self.device.alive(supervisor), 10,
@@ -371,7 +373,7 @@ class ReplacementTests(WatchTestCase):
         # end makes quick, and none of them may end the host.
         self.progress(10)
         self.assertTrue(self.device.serving(first))
-        self.assertEqual(self.record()["restarts"], 1)
+        self.assertEqual(self.record()["restarts"], 0)
         self.invoked(1)
 
     def test_a_busy_host_is_not_a_dead_one(self) -> None:
@@ -379,8 +381,7 @@ class ReplacementTests(WatchTestCase):
         # the host beats from a queue no command blocks, and the host is left
         # alone; only a command past WATCH_BUSY_LIMIT is a hung host.
         self.tune(WATCH_BUSY_LIMIT=1000, HEARTBEAT_STALE=2.0)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "busy")
         self.device.wait(lambda: (self.device.heartbeat() or {}).get("command"),
                          10, "the heartbeat shows the command")
@@ -390,26 +391,24 @@ class ReplacementTests(WatchTestCase):
 
     def test_a_host_stuck_in_one_command_is_replaced(self) -> None:
         self.tune(WATCH_BUSY_LIMIT=1.5)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "busy")
-        second = self.watching(restarts=2)
+        second = self.watching(restarts=1)
         self.assertNotEqual(first, second)
         self.assertIn("hung", self.record()["last_end"]["reason"])
 
     def test_a_host_that_reaches_its_lifetime_is_replaced(self) -> None:
         # Rule: a host whose own lifetime (--hours) ended is replaced too.
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "lifetime")
-        self.watching(restarts=2)
+        self.watching(restarts=1)
         self.assertIn("lifetime", self.record()["last_end"]["reason"])
 
     def test_a_failed_read_does_not_end_a_serving_host(self) -> None:
         # Rule (R3): a heartbeat that cannot be read is not a heartbeat that
         # stopped. The fake host beats on while every read fails for far longer
         # than HEARTBEAT_STALE, and the watch leaves it alone.
-        self.tune(HEARTBEAT_STALE=1.0, WATCH_GONE_AGE=0.5)
+        self.tune(HEARTBEAT_STALE=1.0, WATCH_GONE_AGE=0.5, WATCH_UNKNOWN_LIMIT=1000)
         host = self.start_host()
         self.run_watch()
         self.wait_record(state=automation.WATCHING)
@@ -433,6 +432,27 @@ class ReplacementTests(WatchTestCase):
         self.assertTrue(self.device.serving(host.nonce))
         self.assertEqual(self.record()["restarts"], 0)
 
+    def test_a_watch_that_cannot_read_a_serving_host_leaves_it_alone(self) -> None:
+        # Rule (R3, the startup case): a watch that starts over a host that has
+        # served for an hour, and whose every read fails, is a watch that does
+        # not know the host is gone. It replaces nothing and ends with the
+        # status that says so; the host beats on.
+        host = self.start_host()
+        record = automation.local_record(self.options("status"))
+        record["started"] = time.time() - 3600
+        automation.write_json(self.device.state_dir / self.device.udid / "host.json",
+                              record)
+        self.device.unreachable(True)
+        watch = self.run_watch()
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_CANNOT_OBSERVE,
+                         self.messages)
+        self.device.unreachable(False)
+        self.assertEqual(self.record()["state"], automation.CANNOT_OBSERVE)
+        self.assertIsNone(host.process.poll())
+        self.assertTrue(self.device.serving(host.nonce))
+        self.assertLess(self.device.silent_for(), 2)
+        self.invoked(1)
+
 
 class FailureTests(WatchTestCase):
     def test_the_approval_prompt_fails_the_watch_once(self) -> None:
@@ -441,10 +461,10 @@ class FailureTests(WatchTestCase):
         # XCTest's own line; a new watch starts nothing until a `start` served.
         self.tune(HEARTBEAT_STALE=3.0)
         self.device.scenarios([{"kind": "serve"}, {"kind": "approval"}])
-        watch = self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
+        watch = self.last_watch
         self.device.control(first, "die")
-        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL)
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
         invocations = self.device.invocations()
         self.assertEqual(len(invocations), 2)
         record = self.record()
@@ -482,8 +502,8 @@ class FailureTests(WatchTestCase):
         self.tune(HEARTBEAT_STALE=3.0)
         self.device.scenarios([{"kind": "serve"},
                                {"kind": "approval", "signal": "authentication"}])
-        watch = self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
+        watch = self.last_watch
         self.device.control(first, "die")
         self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL)
         self.invoked(2)
@@ -504,114 +524,189 @@ class FailureTests(WatchTestCase):
 
     def test_a_relaunched_runner_the_device_would_not_approve_ends_the_watch(self) -> None:
         # Rule (R1): a host served, its runner died, and xcodebuild started the
-        # runner again; that runner asks the device for its approval and the
-        # failure arrives within a minute. The watch waits for it, instead of
-        # ending the runner mid-prompt and starting a host that would put the
-        # same prompt up again: it exits 4, with the latch, having started
-        # nothing.
-        for failure in ("authentication", "authentication-localized", "timeout"):
+        # runner again; that runner may ask the device for its approval. The
+        # watch does not start a host that would put the same prompt up
+        # again: it exits 4, with the latch, having started nothing. Whether
+        # the failure line came before it looked (observed) or not (possible)
+        # makes no difference to what it does.
+        for failure, kind in (("authentication", "observed"),
+                              ("authentication-localized", "observed"),
+                              ("timeout", "observed"), ("quiet", "possible")):
             with self.subTest(failure):
                 self.setUp()
                 self.device.scenarios([{"kind": "serve"}])
-                watch = self.run_watch()
-                first = self.watching(restarts=1)
+                first = self.watch_over_host()
+                watch = self.last_watch
                 self.device.control(first, f"relaunch-{failure}")
                 self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL,
                                  self.messages)
                 self.invoked(1)
                 self.assertEqual(self.record()["state"], automation.NEEDS_APPROVAL)
                 latch = automation.ApprovalLatch(self.options("status")).read()
-                self.assertEqual(latch["kind"], "observed")
-                self.assertEqual(self.record()["restarts"], 1)
+                self.assertEqual(latch["kind"], kind)
+                self.assertEqual(self.record()["restarts"], 0)
                 self.assertEqual(self.run_watch().join(), automation.EXIT_NEEDS_APPROVAL)
                 self.invoked(1)
 
-    def test_a_relaunched_runner_that_asks_nothing_is_replaced_at_once(self) -> None:
-        # The runner started again needs no approval (the device still holds the
-        # last one) and ends: nothing was asked, so the host is replaced.
-        self.tune(WATCH_APPROVAL_WINDOW=60)
-        self.run_watch()
-        first = self.watching(restarts=1)
-        self.device.control(first, "relaunch-quiet")
-        second = self.watching(restarts=2)
-        self.assertNotEqual(first, second)
-        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+    def test_a_relaunched_runner_whose_outcome_comes_late_is_not_retired_unrecorded(self) -> None:
+        # Rule (R1, sequence 1): the relaunched runner's approval outcome
+        # arrives long after the watch has decided (here 8 s after the runner
+        # came up, and the watch ends it in about a second). The watch records
+        # that the device may have been asked BEFORE it ends the runner, and
+        # starts no second host that would put a second prompt up.
+        self.device.scenarios([{"kind": "serve", "relaunch_after": 8}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "relaunch-authentication")
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(1)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "possible")
+        self.assertEqual(latch["nonce"], first)
+        self.assertFalse(self.device.alive(self.device.invocations()[0]["ppid"]))
 
-    def test_a_runner_that_never_serves_is_not_the_approval_prompt(self) -> None:
-        # Rule: a runner that is up and silent is an ordinary failure, retried
-        # a bounded number of times: only XCTest's line means approval.
-        self.tune(WATCH_ATTEMPTS=2, WATCH_RUNNER_WAIT=1.0)
-        self.device.scenarios([{"kind": "up-silent"}])
+    def test_a_takeover_reads_what_a_relaunched_runner_said_not_an_old_heartbeat(self) -> None:
+        # Rule (R1, sequence 2): the old test left a heartbeat, the relaunched
+        # runner logged the failed authentication and exited, and a new watch
+        # takes over. The heartbeat that stands still is not a host that serves,
+        # and the log's failure is not suppressed by it: nothing is started.
+        host = self.start_host()
+        self.device.control(host.nonce, "relaunch-authentication")
+        self.device.wait(lambda: host.process.poll() is not None, 20,
+                         "the relaunch fails and the supervisor ends")
+        self.assertIn("LocalAuthentication", host.log_path.read_text())
         watch = self.run_watch()
-        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP)
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(1)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "observed")
+        self.assertEqual(latch["nonce"], host.nonce)
+
+    def test_a_producer_killed_before_it_says_how_initialization_went_is_not_retried(self) -> None:
+        # Rule (R1, sequence 3): the replacement's runner came up and xcodebuild
+        # was killed before the device's outcome reached the log. The watch does
+        # not take that for an ordinary failure: it records that the device may
+        # have been asked, exits 4 and starts no second host.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "early-death"},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
         self.invoked(2)
-        record = self.record()
-        self.assertEqual(record["state"], automation.START_FAILED)
-        self.assertIn("did not serve", record["detail"])
-        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "possible")
+        self.assertEqual(latch["nonce"], self.device.invocations()[1]["nonce"])
+        self.assertEqual(self.run_watch().join(), automation.EXIT_NEEDS_APPROVAL)
+        self.invoked(2)
+
+    def test_a_runner_that_comes_up_and_never_serves_may_have_asked_for_approval(self) -> None:
+        # Rule (R1): a runner that is up and silent for WATCH_RUNNER_WAIT is
+        # not shown to have asked for nothing, and is not retried: the
+        # watch ends it, records "possible" and exits 4.
+        self.tune(WATCH_RUNNER_WAIT=1.0)
+        self.device.scenarios([{"kind": "serve"}, {"kind": "up-silent"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(2)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "possible")
         for item in self.device.invocations():
             self.assertFalse(self.device.alive(item["ppid"]))
 
-    def test_a_missing_device_is_retried_a_bounded_number_of_times(self) -> None:
-        # Rule: other failures get a few attempts with a short backoff, then a
-        # state of their own; never an endless loop.
-        self.device.scenarios([{"kind": "exit", "status": 70}])
-        watch = self.run_watch()
-        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP)
-        self.invoked(automation.WATCH_ATTEMPTS)
+    def test_a_start_that_fails_before_any_runner_is_not_tried_again(self) -> None:
+        # Rule: a launch whose runner never came up (xcodebuild ended with an
+        # error, no device) asked nothing of the device; it ends the watch with
+        # its own state and no latch, and no second host is started after one
+        # death.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "exit", "status": 70}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP, self.messages)
+        self.invoked(2)
         record = self.record()
         self.assertEqual(record["state"], automation.START_FAILED)
         self.assertIn("status 70", record["detail"])
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
 
-    def test_a_report_store_without_free_slots_starts_nothing(self) -> None:
-        # Rule: the device's report store is made room for before anything
-        # starts, so nothing starts while it is short; the refusal is retried
-        # within the same bound.
+    def test_a_runner_that_does_not_come_up_in_time_asked_nothing(self) -> None:
+        # The runner is the first thing that can ask for an approval; one that
+        # never came up cannot have.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "no-runner"}])
+        self.tune(WATCH_RUNNER_WAIT=1.0)
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
+        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP, self.messages)
+        self.invoked(2)
+        self.assertIn("did not come up", self.record()["detail"])
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+
+    def test_a_missing_device_is_retried_a_bounded_number_of_times(self) -> None:
+        # Rule: a start that is refused before anything starts is tried a few
+        # times with a short backoff, then ends the watch; never an endless loop.
         calls = []
-        self.patch(automation, "check_report_slots",
-                   lambda options, processes: calls.append(1) and False)
-        watch = self.run_watch()
+        real = automation.check_report_slots
+
+        def refuse(options, processes):
+            if options.command == "watch":
+                calls.append(1)
+                return False
+            return real(options, processes)
+        self.patch(automation, "check_report_slots", refuse)
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "die")
         self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP)
         self.assertEqual(len(calls), automation.WATCH_ATTEMPTS)
-        self.assertEqual(self.device.invocations(), [])
+        self.invoked(1)
         record = self.record()
         self.assertEqual(record["state"], automation.START_FAILED)
         self.assertIn("report store", record["detail"])
 
     def test_no_built_host_ends_the_watch_at_once(self) -> None:
         # Rule: a failure that trying again cannot change is not retried.
+        first = self.watch_over_host()
+        watch = self.last_watch
         for run in (self.device.derived / "Build/Products").glob("*.xctestrun"):
             run.unlink()
-        watch = self.run_watch()
+        self.device.control(first, "die")
         self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP)
         self.assertEqual(self.record()["state"], automation.CANNOT_START)
         self.assertIn("run `build` first", self.record()["detail"])
-        self.assertEqual(self.device.invocations(), [])
+        self.invoked(1)
 
     def test_too_many_restarts_in_an_hour_end_the_watch(self) -> None:
         # Rule: more than --max-restarts replacements in an hour end the watch
         # with a state of its own, and a new watch inside that hour does too.
         self.tune(HEARTBEAT_STALE=2.0)
-        watch = self.run_watch("--max-restarts", "2")
-        first = self.watching(restarts=1)
+        first = self.watch_over_host("--max-restarts", "2")
+        watch = self.last_watch
         self.device.control(first, "die")
-        second = self.watching(restarts=2)
+        second = self.watching(restarts=1)
         self.device.control(second, "die")
+        third = self.watching(restarts=2)
+        self.device.control(third, "die")
         self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP)
         record = self.record()
         self.assertEqual(record["state"], automation.RESTART_STORM)
         self.assertIn("bound is 2", record["detail"])
-        self.invoked(2)
+        self.invoked(3)
         again = self.run_watch("--max-restarts", "2")
         self.assertEqual(again.join(), automation.EXIT_WATCH_GAVE_UP)
-        self.invoked(2)
+        self.invoked(3)
         self.assertEqual(self.record()["state"], automation.RESTART_STORM)
 
     def test_restarts_older_than_an_hour_do_not_count(self) -> None:
         # Rule: only replacements inside the window count. Two old ones, with
         # a bound of two, would end the watch before it starts a host.
+        host = self.start_host()
+        self.device.control(host.nonce, "die")
+        self.device.wait(lambda: host.process.poll() is not None, 15, "the host ended")
         directory = self.device.state_dir / self.device.udid
-        directory.mkdir(parents=True)
         old = time.time() - 2 * automation.WATCH_STORM_WINDOW
         (directory / "watch.json").write_text(json.dumps(
             {"state": automation.STOPPED, "restart_times": [old, old + 1]}))
@@ -657,8 +752,7 @@ class CommandTests(WatchTestCase):
         # Rule: a command sent while the watch is starting a host waits for it
         # and is answered by it.
         self.device.scenarios([{"kind": "serve"}, {"kind": "serve", "hold": True}])
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "die")
         self.wait_record(state=automation.RESTARTING)
         self.device.wait(lambda: len(self.device.invocations()) == 2, 15,
@@ -680,8 +774,7 @@ class CommandTests(WatchTestCase):
         # yet; a command is sent only while the watch has seen the heartbeat
         # advance lately, and is answered by the successor.
         self.tune(HEARTBEAT_STALE=3.0, WATCH_ALIVE_FRESH=1.0)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "silent")
         # The command goes only when the watch has seen a beat lately, in its
         # own record: wait until that is no longer so, and the watch has not
@@ -732,8 +825,7 @@ class CommandTests(WatchTestCase):
         # Rule: the wait is bounded. The replacement never serves here.
         self.tune(WATCH_COMMAND_WAIT=2, WATCH_RUNNER_WAIT=30)
         self.device.scenarios([{"kind": "serve"}, {"kind": "up-silent"}])
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "die")
         self.wait_record(state=automation.RESTARTING)
         self.device.wait(lambda: len(self.device.invocations()) == 2, 15,
@@ -753,8 +845,7 @@ class CommandTests(WatchTestCase):
         # pass, as when the watch has not yet noticed.
         self.tune(HEARTBEAT_STALE=3600, SEND_LIVENESS_EVERY=2.0)
         self.patch(automation, "wait_for_replacement", lambda options, clock=None: None)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "die")
         self.device.wait(lambda: not self.device.serving(first), 10,
                          "the host ended")
@@ -807,6 +898,54 @@ class ClockBoundTests(unittest.TestCase):
         waited = self.clock.monotonic() - began
         self.assertGreaterEqual(waited, automation.WATCH_COMMAND_WAIT)
         self.assertLessEqual(waited, automation.WATCH_COMMAND_WAIT + 2)
+
+    def test_questions_about_processes_never_carry_the_wait_past_its_bound(self) -> None:
+        # Rule (R9, the reviewer's probe): each lookup of the watch's identity
+        # can block, and the deadline starts before the first. Every one is
+        # given what is left of it, an expired deadline fails the command even
+        # when the record has just turned ready, and nothing outlasts the bound
+        # by more than the 0.1 s a lookup is always given.
+        options = self.options("ping")
+        clock = self.clock
+        asked = []
+
+        def watcher(_):
+            allowed = automation.query_timeout(10)
+            asked.append(allowed)
+            clock.advance(allowed)     # a lookup that takes as long as it may
+            return 77
+
+        def record(_):
+            if clock.monotonic() - began >= 176:
+                return {"state": automation.WATCHING, "alive_at": clock.time()}
+            return {"state": automation.STARTING, "alive_at": 0}
+        began = clock.monotonic()
+        with mock.patch.object(automation, "watcher_pid", watcher), \
+                mock.patch.object(automation, "read_watch_record", record):
+            with self.assertRaises(automation.NoHost):
+                automation.wait_for_replacement(options, clock)
+        self.assertLessEqual(clock.monotonic() - began, automation.WATCH_COMMAND_WAIT + 0.2)
+        self.assertLess(min(asked), 10)
+        # A record that is ready in time is accepted.
+        began = clock.monotonic()
+        with mock.patch.object(automation, "watcher_pid", lambda options: 77), \
+                mock.patch.object(automation, "read_watch_record", lambda options: {
+                    "state": automation.WATCHING, "alive_at": clock.time()}):
+            automation.wait_for_replacement(options, clock)
+        self.assertEqual(clock.monotonic() - began, 0)
+
+    def test_a_budget_gives_a_process_question_what_is_left(self) -> None:
+        self.assertEqual(automation.query_timeout(10), 10)
+        left = [3.0]
+        with automation.Budget(lambda: left[0]):
+            self.assertEqual(automation.query_timeout(10), 3.0)
+            left[0] = -5
+            self.assertEqual(automation.query_timeout(10), 0.1)
+            with mock.patch.object(automation.subprocess, "run") as run:
+                run.return_value = mock.Mock(returncode=1, stdout="")
+                automation.process_instance(1)
+            self.assertEqual(run.call_args.kwargs["timeout"], 0.1)
+        self.assertEqual(automation.query_timeout(10), 10)
 
     def test_the_reads_of_a_command_never_outlast_its_own_wait(self) -> None:
         # Rule (R9): each device read of `send` is given what is left of the
@@ -1007,7 +1146,7 @@ class ObserverTests(unittest.TestCase):
         # run that long, is not waiting on a hung host at 1800 s.
         self.run_for(10)
         self.command = self.device_clock
-        with automation.Inflight(self.options, "mine", 4000):
+        with automation.Inflight(self.options, "wait", 4000):
             reason, after = self.run_for(automation.WATCH_BUSY_LIMIT + 1000, 10)
             self.assertIsNone(reason)
             reason, after = self.run_for(2000, 10)
@@ -1020,10 +1159,106 @@ class ObserverTests(unittest.TestCase):
             {"pid": os.getpid(), "start": "Mon Jan  1 00:00:00 2001", "limit": 9000}))
         (directory / "dead.json").write_text(json.dumps(
             {"pid": 2 ** 22 + 12345, "start": "x", "limit": 9000}))
-        self.assertEqual(automation.inflight_limit(self.options), 0)
+        for command in ("gone", "dead", "live", "../live"):
+            self.assertEqual(automation.inflight_limit(self.options, command), 0)
         with automation.Inflight(self.options, "live", 4000):
-            self.assertEqual(automation.inflight_limit(self.options), 4000)
-        self.assertEqual(automation.inflight_limit(self.options), 0)
+            self.assertEqual(automation.inflight_limit(self.options, "live"), 4000)
+            self.assertEqual(automation.inflight_limit(self.options, "../live"), 0)
+        self.assertEqual(automation.inflight_limit(self.options, "live"), 0)
+
+    def test_a_late_delivery_of_the_last_beat_is_not_silence(self) -> None:
+        # Rule (R3, the reviewer's probe): the supervisor has just ended, and a
+        # quick read samples the last beat before the next one and delivers it 30
+        # s later, in which time the host beat on. A read counts from the moment
+        # it started: the transfer is not silence, and no verdict follows.
+        self.run_for(30)
+        self.gone = True
+        delivered = []
+
+        def delayed(options, timeout=60):
+            # The sample is the beat the watch already has: the next one has
+            # not been written yet when it is taken.
+            snapshot = dict(self.state(), time=self.observer.beat)
+            self.clock.advance(30)
+            self.device_clock += 30
+            delivered.append(1)
+            return snapshot
+        with mock.patch.object(automation, "host_state", delayed):
+            self.assertIsNone(self.observer.check())
+        self.assertTrue(delivered)
+        # The next read shows the beats that came meanwhile.
+        self.clock.advance(2)
+        self.assertEqual(self.run_for(60), (None, 60))
+
+    def test_death_needs_three_reads_in_a_row_that_all_showed_the_same_beat(self) -> None:
+        # Rule (R3): one read, or two, however long after the first they come,
+        # is not evidence that no beat came between them.
+        self.run_for(30)
+        self.beating = False
+        self.observer.pull()
+        self.clock.advance(100)
+        self.assertIsNone(self.observer.check())      # the second read
+        self.clock.advance(automation.WATCH_PULL_EVERY)
+        self.assertIn("has not advanced", self.observer.check())   # the third
+
+    def test_a_read_that_fails_starts_the_count_again(self) -> None:
+        # Rule (R3): unknown resets the count, however many reads showed the
+        # same beat before it.
+        self.run_for(30)
+        self.beating = False
+        for _ in range(2):
+            self.observer.pull()
+            self.clock.advance(60)
+        self.readable = False
+        self.observer.pull()
+        self.clock.advance(60)
+        self.readable = True
+        self.observer.pull()
+        self.clock.advance(60)
+        # The read that worked after the failure and this one are two reads, not
+        # three (the ones before the failure do not count).
+        self.assertIsNone(self.observer.check())
+        self.clock.advance(automation.WATCH_PULL_EVERY)
+        self.assertIn("has not advanced", self.observer.check())
+
+    def test_a_watch_that_has_just_started_reasons_like_one_that_has_run_a_day(self) -> None:
+        # Rule (R3): before it follows any host, a read that fails is unknown
+        # and the count never starts: nothing is concluded, however long it
+        # lasts, and the time it has been blind is told.
+        fresh = automation.HostObserver(self.options, None, None, None, None, self.clock)
+        self.readable = False
+        for _ in range(500):
+            self.assertIsNone(fresh.check())
+            self.clock.advance(2)
+        self.assertGreater(fresh.blind_for(), 900)
+        self.assertIsNone(fresh.nonce)
+        self.readable = True
+        self.assertIsNone(fresh.check())
+        self.assertEqual(fresh.nonce, self.nonce)
+        self.assertEqual(fresh.blind_for(), 0)
+        # It follows the host it can read, and needs the same evidence of its end.
+        self.beating = False
+        reason = None
+        for _ in range(100):
+            self.clock.advance(2)
+            reason = fresh.check()
+            if reason:
+                break
+        self.assertIn("has not advanced", reason)
+
+    def test_another_senders_wait_does_not_extend_the_running_commands_deadline(self) -> None:
+        # Rule (C, the reviewer's probe): a short command hangs and its sender
+        # has given up; another command with a 4000 s wait queues behind it. The
+        # hung command runs under its own sender's deadline, which is gone.
+        self.run_for(10)
+        self.command = self.device_clock - 2500
+        self.clock.advance(automation.WATCH_PULL_EVERY)
+        with automation.Inflight(self.options, "unrelated-long", 4000):
+            self.assertIn("hung", self.observer.check())
+        # The sender of the command the heartbeat names does extend it.
+        self.clock.advance(automation.WATCH_PULL_EVERY)
+        with automation.Inflight(self.options, "wait", 4000):
+            self.assertIsNone(self.observer.check())
 
     def test_another_host_is_followed_only_once_it_advances(self) -> None:
         # What an earlier host left behind does not move; a new host does.
@@ -1038,10 +1273,18 @@ class ObserverTests(unittest.TestCase):
 
 
 class SettleTests(WatchTestCase):
+    """What the watch makes of a launch's log, and when."""
+
+    def launched(self, *extra: str):
+        launch = automation.launch_host(self.options(
+            "start", "--hours", "1", *extra, *self.reports()))
+        self.launches.append(launch)
+        return launch
+
     def test_an_approval_line_that_arrives_during_a_slow_read_is_not_lost(self) -> None:
         # Rule (R1): a read that takes its whole allowed time carries the
         # attempt past the runner's deadline, and XCTest's line arrives in it;
-        # the attempt rereads the log before it calls the failure retryable.
+        # the attempt rereads the log before it says what happened.
         clock = ManualClock()
         self.device.scenarios([{"kind": "up-silent"}])
         real = automation.host_state
@@ -1060,34 +1303,50 @@ class SettleTests(WatchTestCase):
                     clock.advance(100)
             return real(options, timeout)
         self.patch(automation, "host_state", slow)
+        launch = self.launched()
         outcome = automation.Watch(self.watch_options(), threading.Event(),
-                                   clock).attempt(False)
+                                   clock).await_launch(launch)
         self.assertEqual(outcome[0], "approval", outcome)
         latch = automation.ApprovalLatch(self.options("status")).read()
         self.assertEqual(latch["kind"], "observed")
 
     def test_an_approval_line_that_arrives_as_the_host_is_ended_is_not_lost(self) -> None:
         # Rule (R1): the host's last words come while it is ended; the attempt
-        # that ended it rereads the log after.
+        # that ended it rereads the log after, and the latch says what it read.
         clock = ManualClock()
         self.device.scenarios([{"kind": "up-silent"}])
         real_end = automation.end_host
 
-        def end(record, process=None, wait=None):
+        def end(record, process=None, wait=None, remainder=None):
             with open(record["log"], "a") as handle:
                 handle.write(PROMPT + "\n")
-            return real_end(record, process, 2)
+            return real_end(record, process, 2, remainder)
         self.patch(automation, "end_host", end)
         self.tune(WATCH_RUNNER_WAIT=1.0)
+        launch = self.launched()
         outcome = automation.Watch(self.watch_options(), threading.Event(),
-                                   clock).attempt(False)
+                                   clock).await_launch(launch)
         self.assertEqual(outcome[0], "approval", outcome)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "observed")
+
+    def dead_host_then(self, scenario: dict, **launch_options):
+        """A host that ended (so that the heartbeat the watch reads is the stale
+        one of a host that served), and then a launch of `scenario` that a watch
+        that is gone began: its record is the last launch's."""
+        self.tune(HEARTBEAT_STALE=2.0)
+        old = self.start_host()
+        self.device.control(old.nonce, "die")
+        self.device.wait(lambda: old.process.poll() is not None, 15,
+                         "the old host ended")
+        self.device.scenarios([scenario])
+        return old
 
     def test_a_previous_attempts_approval_survives_a_watch_that_ended_mid_attempt(self) -> None:
         # Rule (R1): a watch killed during an attempt leaves its state
         # "starting"; that attempt's own log already says the device asked. The
         # next watch reads it before it launches anything.
-        self.device.scenarios([{"kind": "approval", "after": 0.1}])
+        self.dead_host_then({"kind": "approval", "after": 0.1})
         launch = automation.launch_host(self.options(
             "start", "--hours", "1", *self.reports()), record=lambda nonce, path: (
             automation.WatchRecord(self.options("status")).update(
@@ -1100,8 +1359,8 @@ class SettleTests(WatchTestCase):
         self.device.wait(lambda: launch.process.poll() is not None, 30,
                          "the supervisor ended")
         watch = self.run_watch()
-        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL)
-        self.invoked(1)
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(2)
         latch = automation.ApprovalLatch(self.options("status")).read()
         self.assertEqual(latch["kind"], "observed")
 
@@ -1109,19 +1368,16 @@ class SettleTests(WatchTestCase):
         # Rule (R1): a watch killed while its runner was up and silent, and its
         # supervisor with it, left no line and no exit status. The device may
         # be asking: the next watch does not start another host.
-        self.tune(WATCH_APPROVAL_WINDOW=60)
-        self.device.scenarios([{"kind": "up-silent"}])
-        launch = automation.launch_host(self.options(
-            "start", "--hours", "1", "--wait", "30", *self.reports()))
-        self.launches.append(launch)
+        self.dead_host_then({"kind": "up-silent"})
+        launch = self.launched("--wait", "30")
         self.device.wait(lambda: automation.RUNNER_UP_LINE in
                          launch.log_path.read_text(), 30, "the runner is up")
         os.killpg(launch.process.pid, signal.SIGKILL)
         self.device.wait(lambda: launch.process.poll() is not None, 10,
                          "the supervisor ended")
         watch = self.run_watch()
-        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL)
-        self.invoked(1)
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(2)
         latch = automation.ApprovalLatch(self.options("status")).read()
         self.assertEqual(latch["kind"], "possible")
 
@@ -1139,9 +1395,9 @@ class SettleTests(WatchTestCase):
                 stop.set()
             return None
         self.patch(automation, "host_state", read)
-        return watch.attempt(False)
+        return watch.await_launch(self.launched())
 
-    def test_a_host_stopped_in_the_approval_window_counts(self) -> None:
+    def test_a_host_stopped_once_its_runner_was_up_counts(self) -> None:
         # Rule (R1): `stop` during an attempt ends the producer before it could
         # print; once the runner was up that may have been the prompt.
         self.device.scenarios([{"kind": "up-silent"}])
@@ -1191,10 +1447,10 @@ class ApprovalLatchTests(WatchTestCase):
     def fail_for_approval(self) -> None:
         self.tune(HEARTBEAT_STALE=2.0)
         self.device.scenarios([{"kind": "serve"}, {"kind": "approval"}])
-        watch = self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
+        watch = self.last_watch
         self.device.control(first, "die")
-        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL)
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
         self.invoked(2)
         # The host's own log, which a later watch could read the refusal from
         # again, is no longer what the record points at: only the latch is left.
@@ -1249,11 +1505,20 @@ class ApprovalLatchTests(WatchTestCase):
 
 
 class LaunchTests(WatchTestCase):
-    def test_start_and_watch_never_launch_side_by_side(self) -> None:
-        # Rule (R4): a `start` that has checked that no watch runs and is in
-        # the report preflight, which can take minutes, holds the launch lock;
-        # a watch that begins then cannot launch until the `start` has recorded
-        # its host, and then waits for that host instead of starting another.
+    def test_a_watch_does_not_retire_under_a_start_that_is_bringing_up_a_host(self) -> None:
+        # Rule (R4, the reviewer's gated probe): a `start` that has checked that
+        # no watch runs and is in the report preflight, which can take minutes,
+        # holds the launch lock. A watch that reaches its verdict on the old
+        # host then waits for the lock, and once the `start` has published its
+        # host it drops the verdict: it neither ends the `start`'s host nor
+        # starts another beside it. (The old host's death is what the watch
+        # judged.)
+        old = self.start_host()
+        self.device.control(old.nonce, "die")
+        self.device.wait(lambda: old.process.poll() is not None, 15,
+                         "the old host ended")
+        self.device.wait(lambda: self.device.silent_for() > automation.HEARTBEAT_STALE,
+                         30, "the old host's last beat is stale")
         self.device.scenarios([{"kind": "serve", "hold": True}])
         inside = threading.Event()
         release = threading.Event()
@@ -1274,29 +1539,37 @@ class LaunchTests(WatchTestCase):
             daemon=True)
         thread.start()
         self.assertTrue(inside.wait(30))
-        self.run_watch()
+        self.tune(HEARTBEAT_STALE=1.5)
+        watch = self.run_watch()
         self.device.wait(lambda: any("another launch" in message
                                      for message in self.messages), 30,
                          "the watch waits for the `start`'s launch")
-        self.assertEqual(self.device.invocations(), [])
-        release.set()
-        self.device.wait(lambda: len(self.device.invocations()) == 1, 30,
-                         "the `start`'s host runs")
-        self.device.wait(lambda: any("waiting for it" in message
-                                     for message in self.messages), 30,
-                         "the watch waits for the host the `start` made")
         self.invoked(1)
-        nonce = self.device.invocations()[0]["nonce"]
+        release.set()
+        self.device.wait(lambda: len(self.device.invocations()) == 2, 30,
+                         "the `start`'s host runs")
+        self.device.wait(lambda: any("a start was published meanwhile" in message
+                                     for message in self.messages), 30,
+                         "the watch drops its verdict")
+        nonce = self.device.invocations()[1]["nonce"]
+        self.assertTrue(self.device.alive(self.device.invocations()[1]["ppid"]))
+        self.invoked(2)
         self.device.control(nonce, "go")
         thread.join(60)
         self.assertEqual(started, [0], self.messages)
         record = self.wait_record(state=automation.WATCHING)
         self.assertEqual(record["host"], nonce)
-        self.invoked(1)
+        self.invoked(2)
+        self.assertTrue(self.device.serving(nonce))
+        self.assertEqual(watch.end(), 0)
 
     def test_a_stop_during_the_report_preflight_starts_nothing(self) -> None:
         # Rule (R4): cancellation is checked again after the preflight and
         # before the supervisor is spawned.
+        old = self.start_host()
+        self.device.control(old.nonce, "die")
+        self.device.wait(lambda: old.process.poll() is not None, 15,
+                         "the old host ended")
         stop = threading.Event()
         real = automation.check_report_slots
 
@@ -1307,10 +1580,10 @@ class LaunchTests(WatchTestCase):
         self.patch(automation, "check_report_slots", preflight)
         watch = Running(self.watch_options(), stop)
         self.watches.append(watch)
-        self.assertEqual(watch.join(), 0)
-        self.assertEqual(self.device.invocations(), [])
+        self.assertEqual(watch.join(), 0, self.messages)
+        self.invoked(1)
         self.assertEqual(self.record()["state"], automation.STOPPED)
-        self.assertFalse(list((self.device.state_dir / self.device.udid).glob("host-*.log")))
+        self.assertEqual(len(list((self.device.state_dir / self.device.udid).glob("host-*.log"))), 1)
 
     def test_the_host_record_is_whole_before_the_supervisor_starts(self) -> None:
         # Rule (R4): host.json is written atomically, and before the
@@ -1415,11 +1688,10 @@ class CleanupTests(WatchTestCase):
         # to be ended, and nothing of the first host is left beside the second.
         self.tune(HEARTBEAT_STALE=2.0)
         self.device.scenarios([{"kind": "serve", "stubborn": True}, {"kind": "serve"}])
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         old = self.device.invocations()[0]
         self.device.control(first, "silent")
-        second = self.watching(restarts=2)
+        second = self.watching(restarts=1)
         self.assertNotEqual(first, second)
         self.assertFalse(self.device.alive(old["pid"]))
         self.assertFalse(self.device.alive(old["ppid"]))
@@ -1454,19 +1726,108 @@ class CleanupTests(WatchTestCase):
             automation.FOREIGN)
         self.assertIsNone(decoy.poll())
 
-    def test_a_host_that_will_not_end_stops_the_watch(self) -> None:
+    def test_a_group_whose_leader_began_after_the_host_is_another_group(self) -> None:
+        # Rule (R5): the supervisor's pid was reused by a process that leads a
+        # group of its own and started after the host did; the host's group, which
+        # that pid named, is gone, so nothing of the host remains. A leader older
+        # than the host is not shown to be another.
+        decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(lambda: (decoy.kill(), decoy.wait()))
+        self.assertEqual(automation.end_host(
+            {"supervisor": decoy.pid, "nonce": "f" * 32,
+             "started": time.time() - 3600}), automation.ENDED)
+        self.assertIsNone(decoy.poll())
+        self.assertEqual(automation.end_host(
+            {"supervisor": decoy.pid, "nonce": "f" * 32,
+             "started": time.time() + 3600}), automation.FOREIGN)
+        self.assertIsNone(decoy.poll())
+
+    def test_what_cannot_be_shown_gone_stops_the_watch_with_the_remainder(self) -> None:
         # Rule (R5): fail closed. Nothing starts beside a host that cannot be
-        # ended.
-        self.tune(HEARTBEAT_STALE=2.0)
-        self.run_watch()
-        first = self.watching(restarts=1)
-        self.patch(automation, "end_host", lambda *a, **k: automation.STUCK)
-        self.device.control(first, "silent")
-        watch = self.watches[0]
-        self.assertEqual(watch.join(), automation.EXIT_WATCH_GAVE_UP)
-        self.assertEqual(self.record()["state"], automation.CANNOT_START)
-        self.assertIn("would not end", self.record()["detail"])
-        self.invoked(1)
+        # ended, one whose remainder is not shown to be the host's, or one whose
+        # processes cannot be listed: each ends the watch with the remainder
+        # status, naming what is left.
+        for result in (automation.STUCK, automation.FOREIGN, automation.UNKNOWN):
+            with self.subTest(result):
+                self.setUp()
+                self.tune(HEARTBEAT_STALE=2.0)
+                first = self.watch_over_host()
+                watch = self.last_watch
+
+                def end(record, process=None, wait=None, remainder=None, result=result):
+                    if remainder is not None:
+                        remainder.append((4242, "a helper of the host"))
+                    return result
+                self.patch(automation, "end_host", end)
+                self.device.control(first, "silent")
+                self.assertEqual(watch.join(), automation.EXIT_WATCH_REMAINDER,
+                                 self.messages)
+                self.assertEqual(self.record()["state"], automation.REMAINDER)
+                self.assertIn("4242", self.record()["detail"])
+                self.assertIn(result, self.record()["detail"])
+                self.invoked(1)
+
+    def test_a_helper_that_survives_its_hosts_end_is_ended_with_the_host(self) -> None:
+        # Rule (R5, the reviewer's orphan probe): the supervisor was killed, and
+        # a helper in the group that carries no nonce ignores SIGTERM. The
+        # nonce-bearing xcodebuild shows the group is the host's; that is held
+        # through the call, so the helper is ended with SIGKILL, and the result
+        # is ENDED only because the group was listed and is empty.
+        fake = self.device.bin / "xcodebuild"
+        source = fake.read_text()
+        needle = '    child = subprocess.Popen(["sleep", "3600"]).pid'
+        self.assertIn(needle, source)
+        helper = ("import signal,time,pathlib,sys; "
+                  "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                  "pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(120)")
+        fake.write_text(source.replace(
+            needle, "    child = subprocess.Popen([sys.executable, '-c', "
+            + repr(helper) + ", os.path.join(root, 'helper-ready')]).pid"))
+        self.device.scenarios([{"kind": "serve", "child": True}])
+        host = self.start_host()
+        helper_pid = self.device.invocations()[0]["child"]
+        self.device.wait(lambda: (self.device.root / "helper-ready").exists(), 10,
+                         "the helper is up")
+        os.kill(host.process.pid, signal.SIGKILL)
+        host.process.wait(timeout=10)
+        result = automation.end_host(automation.local_record(self.options("status")),
+                                     wait=1)
+        self.assertEqual(result, automation.ENDED)
+        self.assertFalse(self.device.alive(helper_pid))
+        self.assertEqual(automation.group_members(host.process.pid), [])
+
+    def test_a_member_that_has_just_exited_does_not_make_its_group_foreign(self) -> None:
+        # macOS refuses a signal to a process that has exited and is not reaped
+        # yet: that is a group about to be empty, not one the watch may not
+        # signal. A group that stays, and refuses, is FOREIGN.
+        record = {"supervisor": 123456, "nonce": "owned"}
+        member = [(123456, "_supervise --nonce owned")]
+        with mock.patch.object(automation, "group_members",
+                               side_effect=[member, member, []]), \
+                mock.patch.object(automation.os, "killpg",
+                                  side_effect=PermissionError):
+            self.assertEqual(automation.end_host(record, wait=1), automation.ENDED)
+        left: list = []
+        with mock.patch.object(automation, "group_members", return_value=member), \
+                mock.patch.object(automation.os, "killpg",
+                                  side_effect=PermissionError):
+            self.assertEqual(automation.end_host(record, wait=1, remainder=left),
+                             automation.FOREIGN)
+        self.assertEqual(left, member)
+
+    def test_a_group_that_cannot_be_listed_is_not_an_empty_one(self) -> None:
+        # Rule (R5): a failed listing is not a group with nothing in it.
+        record = {"supervisor": 123456, "nonce": "owned"}
+        with mock.patch.object(automation, "group_members",
+                               side_effect=[[(123456, "_supervise --nonce owned")], None]), \
+                mock.patch.object(automation.os, "killpg") as kill:
+            self.assertEqual(automation.end_host(record, wait=1), automation.UNKNOWN)
+        self.assertEqual(kill.call_count, 1)
+        with mock.patch.object(automation, "group_members", return_value=None):
+            self.assertEqual(automation.end_host(record, wait=1), automation.UNKNOWN)
+        with mock.patch.object(automation, "process_table", return_value=None):
+            self.assertEqual(automation.end_host({"nonce": "owned"}), automation.UNKNOWN)
 
 
 class CountingTests(WatchTestCase):
@@ -1506,13 +1867,14 @@ class CountingTests(WatchTestCase):
                 seen.append((arguments[arguments.index("--nonce") + 1],
                              self.record().get("pending")))
             return real(arguments, *positional, **keywords)
+        first = self.watch_over_host()
         self.patch(automation.subprocess, "Popen", popen)
-        self.run_watch()
-        first = self.watching(restarts=1)
+        self.device.control(first, "die")
+        second = self.watching(restarts=1)
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0][0], first)
-        self.assertEqual(seen[0][1]["nonce"], first)
-        self.assertEqual(seen[0][1]["replacement"], False)
+        self.assertEqual(seen[0][0], second)
+        self.assertEqual(seen[0][1]["nonce"], second)
+        self.assertEqual(seen[0][1]["replacement"], True)
         self.assertIsNone(self.record()["pending"])
 
     def test_a_pending_replacement_of_another_host_is_not_counted(self) -> None:
@@ -1613,9 +1975,8 @@ class StopTests(WatchTestCase):
         # Rule: `stop --force` ends the watch before the host, so the watch
         # does not start the host again: the host is told to stop only once the
         # watch has been signalled and has ended.
-        self.run_watch()
-        first = self.watching(restarts=1)
-        watch = self.watches[0]
+        first = self.watch_over_host()
+        watch = self.last_watch
         self.end_by_event(watch)
         order = []
         real = automation.send
@@ -1674,15 +2035,14 @@ class StopTests(WatchTestCase):
 
 class StatusTests(WatchTestCase):
     def test_status_shows_the_watch_and_its_last_end(self) -> None:
-        self.run_watch()
-        first = self.watching(restarts=1)
+        first = self.watch_over_host()
         self.device.control(first, "die")
-        self.watching(restarts=2)
+        self.watching(restarts=1)
         status = automation.watch_summary(self.options("status"))
         self.assertTrue(status["running"])
         self.assertEqual(status["pid"], os.getpid())
         self.assertEqual(status["state"], automation.WATCHING)
-        self.assertEqual(status["restarts"], 2)
+        self.assertEqual(status["restarts"], 1)
         self.assertIn("reason", status["last_end"])
         self.assertGreater(status["last_end"]["time"], 0)
 

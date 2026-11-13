@@ -6,8 +6,9 @@ The same `watch` runs in a terminal, detached by the script, or as a job
 manager's job, and must behave the same in each: it ends on SIGTERM and leaves
 a serving host running, `stop --force` ends it through a real signal before
 the host, and the job description the script prints is all a job manager needs
-(no login shell, no `KeepAlive` that would bring back a watch that failed for
-approval). Each test runs the real script as a subprocess against
+(no login shell, and no `KeepAlive`: a watch that ended is not brought back by
+launchd, whatever the reason, and a watch that failed for approval must stay
+ended). Each test runs the real script as a subprocess against
 `automation_fakes.FakeDevice`, files that stand in for the device and Xcode.
 The watch runs with its real bounds here; the logic tests scale them.
 """
@@ -20,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import shutil
 import signal
 import subprocess
@@ -129,18 +131,20 @@ class WatchProcessTests(ProcessTestCase):
         # one watch per device; `start` and a plain `stop` are refused while it
         # runs; `stop --force` ends the watch (a real SIGTERM) before the host,
         # so that the watch does not start the host again.
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
         done = self.run_script("watch", "--detach", "--hours", "3", "--wait", "30",
                                *self.reports())
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("watching under pid", done.stderr)
-        self.device.wait(lambda: self.device.serving(), 90, "the watch's host serves")
         self.wait_state("watching")
         code, status = self.status()
         self.assertEqual(code, 0)
         self.assertTrue(status["watch"]["running"])
         pid = status["watch"]["pid"]
         self.assertEqual(status["watch"]["state"], "watching")
-        self.assertEqual(status["watch"]["restarts"], 1)
+        self.assertEqual(status["watch"]["restarts"], 0)
         # A session of its own: not this process's group.
         self.assertNotEqual(os.getpgid(pid), os.getpgrp())
         again = self.run_script("watch", "--hours", "3", *self.reports())
@@ -188,6 +192,9 @@ class WatchProcessTests(ProcessTestCase):
         # in `status`, exits 4, and a watch started again (by a job manager, a
         # loop) starts nothing until a `start` served.
         self.device.scenarios([{"kind": "serve"}, {"kind": "approval"}])
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
         child = self.spawn("watch", "--hours", "3", *self.reports())
         record = self.wait_state("watching")
         self.device.control(record["host"], "die")
@@ -239,13 +246,21 @@ class WatchProcessTests(ProcessTestCase):
         self.assertIn("xcodebuild exited with status", next(iter(log)).read_text())
 
     def test_a_failed_start_has_a_status_of_its_own(self) -> None:
-        self.device.scenarios([{"kind": "exit", "status": 70}])
+        # A host that served and died, and a replacement whose xcodebuild ends
+        # before any runner comes up: one try, its own status, and no latch.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "exit", "status": 70}])
+        started = self.run_script("start", "--hours", "3", "--wait", "60",
+                                  *self.reports())
+        self.assertEqual(started.returncode, 0, started.stderr)
         child = self.spawn("watch", "--hours", "3", *self.reports())
-        # Three pauses of 5, 10 and 20 s between four attempts.
+        record = self.wait_state("watching")
+        self.device.control(record["host"], "die")
         self.assertEqual(child.wait(timeout=150), 5, self.text(child))
-        self.assertEqual(len(self.device.invocations()), 4)
+        self.assertEqual(len(self.device.invocations()), 2)
         self.assertEqual(self.record()["state"], "start-failed")
         self.assertIn("could not start a host", self.text(child))
+        self.assertFalse((self.device.state_dir / self.device.udid
+                          / "approval.json").exists())
 
 
 class LaunchdJobTests(ProcessTestCase):
@@ -334,18 +349,38 @@ class LaunchdJobTests(ProcessTestCase):
         self.assertEqual(directory, self.device.state_dir / self.device.udid)
         self.assertFalse(self.device.state_dir.exists())
         self.assertIn(f"mkdir -p {directory}", done.stderr)
+        # A state directory with a space in its name: the printed command makes
+        # that directory, not two.
+        spaced = subprocess.run(
+            [sys.executable, str(SCRIPT), "--device", self.device.udid,
+             "--state-dir", str(self.device.root / "state with spaces"),
+             "watch", "--print-launchd-job", LABEL],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=60)
+        self.assertEqual(spaced.returncode, 0, spaced.stderr)
+        command = spaced.stderr.split("`")[1]
+        self.assertEqual(shlex.split(command),
+                         ["mkdir", "-p", str(self.device.root / "state with spaces"
+                                             / self.device.udid)])
         helped = subprocess.run(
             [sys.executable, str(SCRIPT), "--device", "X", "watch", "--help"],
             stdout=subprocess.PIPE, text=True, timeout=60).stdout
         self.assertIn("mkdir -p", helped.replace("\n", " ").replace("  ", " "))
 
-    def test_the_job_is_not_brought_back_after_the_watch_fails(self) -> None:
-        # Rule: no KeepAlive that restarts the watch after an approval failure
-        # (or any exit status): launchd restarts it only after a crash.
+    def test_the_job_is_not_brought_back_after_the_watch_ends(self) -> None:
+        # Rule (E): no KeepAlive. launchd starts the watch once and never
+        # again, so that no end the watch reports (approval, giving up, not
+        # being able to tell) can be undone by a restart that puts another
+        # prompt on the device. A watch that crashes stays gone, and `status`
+        # shows it; the usage text says so.
+        helped = subprocess.run(
+            [sys.executable, str(SCRIPT), "--device", "X", "watch", "--help"],
+            stdout=subprocess.PIPE, text=True, timeout=60).stdout
+        self.assertIn("never restarts the job", " ".join(helped.split()))
         job = self.job()
         self.assertTrue(job["RunAtLoad"])
-        self.assertEqual(job["KeepAlive"], {"Crashed": True})
-        self.assertGreaterEqual(job["ThrottleInterval"], 10)
+        self.assertNotIn("KeepAlive", job)
+        self.assertNotIn("ThrottleInterval", job)
         # What the watch started stays up when the watch ends.
         self.assertTrue(job["AbandonProcessGroup"])
 

@@ -20,7 +20,8 @@ Scenario kinds:
   of the device), `relaunch-timeout`, `relaunch-authentication` and
   `relaunch-authentication-localized` (the same, and the device's approval
   was not given: XCTest's timeout line, or the authentication cancelled with
-  an English or a localized description), `silent` (the runner stops
+  an English or a localized description, `relaunch_after` seconds after the
+  runner came up, 0.3 by default), `silent` (the runner stops
   beating and xcodebuild stays) or `busy` (a command that never ends shows in
   the heartbeat, which keeps beating).
 - `approval`: the runner comes up, and 0.3 s later XCTest gives up on the
@@ -30,6 +31,9 @@ Scenario kinds:
 - `exit`: xcodebuild exits at once with `status`, as with no device.
 - `no-runner`: xcodebuild hangs and the runner never comes up.
 - `up-silent`: the runner comes up and neither serves nor says why.
+- `early-death`: the runner comes up and xcodebuild is killed (SIGKILL) 0.3 s
+  later (`after` sets the delay) before it says anything, as when whatever
+  started it is killed first.
 
 Any scenario with `stubborn` set makes xcodebuild ignore SIGTERM, as a hung
 one does: only SIGKILL ends it. With `child` set it also starts a helper
@@ -214,6 +218,9 @@ if kind == "no-runner":
 runner_up()
 if kind == "up-silent":
     time.sleep(3600)
+if kind == "early-death":
+    time.sleep(scenario.get("after", 0.3))
+    os.kill(os.getpid(), signal.SIGKILL)
 if kind == "approval":
     time.sleep(scenario.get("after", 0.3))
     approval_failure(scenario.get("signal", "timeout"))
@@ -244,7 +251,7 @@ while True:
         if now == "relaunch-quiet":
             say("Test Suite 'Selected tests' passed at 2026-11-13 23:59:35.792.")
             sys.exit(65)
-        time.sleep(0.3)
+        time.sleep(scenario.get("relaunch_after", 0.3))
         approval_failure(now[len("relaunch-"):])
         sys.exit(65)
     if now == "silent":

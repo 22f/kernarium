@@ -53,43 +53,65 @@ one started hours later does. `watch` keeps one device's host serving:
 The same `watch` runs in a terminal's foreground, detached by `--detach` (its
 log is watch-<time>.log in the state directory), or as a job manager's job
 (`--print-launchd-job` prints a launchd job with absolute paths and its own
-PATH, which runs once and comes back only after a crash; printing creates
-nothing, so the `mkdir` above, for the job's log directory, comes before the
-job loads, and the job's registration is the owner's). It adopts a host that
-serves (its heartbeat advances between two reads) and never stops or restarts
-one that does. A host stops serving when the watch has read the same heartbeat
-for 20 s (a busy host keeps beating: its heartbeat comes from a queue no
-command blocks), or for 5 s once its supervisor ended or xcodebuild started
-the runner again, when its lifetime ended, or when one command has run longer
-than 30 minutes and than the process that sent it waits for. A read that fails
-or comes late, and a sleep of the Mac, are not a host's end: only reads that
-worked count, and a host that cannot be seen is left alone. The next host
-starts at once with the watch's own options, after ending the whole of the old
-one (its supervisor, xcodebuild and what else is in their process group; one
-that will not end stops the watch with the state cannot-start); detection takes
-25 s at most, plus the time of the device reads.
+PATH, which runs once and is never restarted by launchd: a watch that crashes
+stays gone, its host keeps serving, and `status` shows the watch missing;
+printing creates nothing, so the `mkdir` above, for the job's log directory,
+comes before the job loads, and the job's registration is the owner's).
 
-A replacement that the device wants approved is not retried: xcodebuild's line
-"Timed out while enabling automation mode" (XCTest's own 60 s give-up), or the
-same "Failed to initialize for UI testing" line with a LocalAuthentication
-error of code -4 or -2 (the owner's authentication cancelled, by the system or
-the owner), ends the watch with status 4 and the state needs-approval, which
-`status` reports. So does that line from the runner xcodebuild starts again
-after a host's runner died, which the watch waits for before it replaces the
-host. A host's heartbeat is written by the test that runs only after XCTest
-initialized the runner for UI testing, so a serving host has its approval; the
-next runner after it dies may not.
-A host the watch ended before its log could say whether the device asked, in
-the 60 s after the runner came up, counts the same. The refusal is the file
-approval.json in the state directory, which another watch starting, stopping
-or failing leaves as it is: a new `watch` starts nothing until a host serves,
-as after a `start` with the owner at the device. Any other failure to start
-(device not connected or locked, report slots short, a runner that does not
-serve within 90 s of coming up) is retried three times after 5, 10 and 20 s,
-then ends the watch with status 5 and the state start-failed. No built host, or
-a run file that lets Xcode record the screen, ends it at once with the state
-cannot-start; more than 6 replacements (--max-restarts) in an hour, counted
-across a watch that ended mid-replacement too, end it with restart-storm.
+The watch acts only on evidence. A wrong restart ends a host that works, or
+puts an approval prompt on the device that nobody answers; a missed one costs
+the next look at `status`. Where it cannot tell, it replaces nothing, says
+what it could not establish and ends with a status of its own.
+
+- A host serves when its heartbeat advances between two reads, and a serving
+  host is never stopped or restarted. A host is dead when its heartbeat says
+  it finished, or when 3 reads in a row all worked and all showed the same
+  beat, the last one started 20 s after the first one ended (5 s once its
+  supervisor ended or xcodebuild started the runner again), or when one
+  command has run longer than 30 minutes and than the process that sent it
+  waits for. A read's time is when it started, so a late delivery of an old
+  beat is not silence; a read that fails or shows another host's beat is
+  unknown and starts the count again, whether the watch has run for a day or
+  has just started, and a sleep of the Mac does the same. A host's heartbeat
+  cannot be read for 15 minutes: the watch ends with status 7 and the state
+  cannot-observe, having replaced nothing. A device that never had a host
+  (nothing to read) is one it cannot tell: `start` makes the first.
+- Retiring the old host and starting the next run under the launch lock that
+  `start` takes, from before the watch checks again that the heartbeat is still
+  the one it judged, and that no start was published meanwhile (either one
+  changed: it looks again), until the new host is published. The old host's
+  whole process group (supervisor, xcodebuild and what else is in it) must
+  be listed and empty before anything starts; what the watch cannot show is the
+  host's, or cannot list, stops it with status 8 and the state remainder,
+  naming the pids, and nothing starts beside it. A group is signalled only
+  while the watch holds the supervisor it started, or while a member's command
+  line carries the host's nonce, and then all of it, with SIGKILL for what
+  ignores SIGTERM.
+- The device may have asked for an approval that nobody gave whenever that
+  cannot be excluded: the log shows XCTest's line "Timed out while enabling
+  automation mode", or the "Failed to initialize for UI testing" line with a
+  LocalAuthentication error of code -4 or -2 (the owner's authentication
+  cancelled, by the system or the owner), or a runner came up that the log does
+  not show initialized: one that xcodebuild started again after the host's
+  runner died, or one of a launch that never served. That is recorded (the
+  file approval.json in the state directory) before anything is ended and read
+  again after, and the watch ends with status 4 and the state needs-approval,
+  which `status` reports. It starts nothing again until a host serves: a
+  `start` with the owner at the device that serves, or a heartbeat that
+  advances. A host's heartbeat is written by the test that runs only after
+  XCTest initialized the runner for UI testing, so a serving host has its
+  approval; the next runner after it dies may not.
+- A replacement serves when a heartbeat with its own new nonce advances. One
+  that was started and does not serve ends the watch; the watch never starts a
+  second host after one death. A launch whose runner never came up (xcodebuild
+  ended, or the runner did not come up in --wait) ends it with status 5 and
+  start-failed, and no latch. Only a start that was refused before anything
+  started (device not connected, report slots short) is retried, 3 times after
+  5, 10 and 20 s. No built host, or a run file that lets Xcode record the
+  screen, ends it at once with the state cannot-start; more than 6 replacements
+  (--max-restarts) in an hour, counted across a watch that ended
+  mid-replacement too, end it with restart-storm.
+
 Status 6: another watch holds this device's lock. `status` shows the watch and
 its last end. A watch also waits for a host that a `start` is still bringing up,
 for as long as that `start` waits, and `start` and `watch` launch one at a time.
@@ -115,12 +137,14 @@ leaves a report.
 """
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
 import pathlib
 import plistlib
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -140,11 +164,15 @@ HEARTBEAT_STALE = 20
 EXIT_FAILED = 1
 EXIT_NO_HOST = 3
 # `watch` ends with one of these when it gave up: the owner is needed at the
-# device, or it stopped trying for a reason its record names; or when another
-# watch for the same device and state directory already runs.
+# device, or it stopped trying for a reason its record names; when another
+# watch for the same device and state directory already runs; or when it could
+# not establish what it needs to act (it acts only on evidence, and otherwise
+# says what it could not establish and ends).
 EXIT_NEEDS_APPROVAL = 4
 EXIT_WATCH_GAVE_UP = 5
 EXIT_WATCH_LOCKED = 6
+EXIT_WATCH_CANNOT_OBSERVE = 7
+EXIT_WATCH_REMAINDER = 8
 # How long `stop` lets the supervisor end on its own before signalling it.
 SUPERVISOR_EXIT_WAIT = 60
 
@@ -156,10 +184,16 @@ SUPERVISOR_EXIT_WAIT = 60
 WATCH_POLL = 2
 WATCH_PULL_EVERY = 5
 # The host beats every 2 s from a queue its commands never block. A host is
-# dead when the watch has read the same beat for this long: WATCH_GONE_AGE once
-# its supervisor ended or xcodebuild started the runner again, HEARTBEAT_STALE
-# otherwise. Only reads that succeed count: a read that fails says nothing.
+# dead only on evidence: WATCH_DEAD_PULLS consecutive reads that all worked
+# and all showed the same beat, the last started this long after the first
+# ended: WATCH_GONE_AGE once its supervisor ended or xcodebuild started the
+# runner again, HEARTBEAT_STALE otherwise. A read that fails or shows another
+# host's beat says nothing, and starts the count again.
 WATCH_GONE_AGE = 5
+WATCH_DEAD_PULLS = 3
+# The heartbeat cannot be read for this long: the watch ends without having
+# replaced anything, as it does not know the host is gone.
+WATCH_UNKNOWN_LIMIT = 900
 # One command that has run longer than this, and longer than the process that
 # sent it waits for it, is a host whose main thread is hung.
 WATCH_BUSY_LIMIT = 1800
@@ -167,19 +201,13 @@ WATCH_BUSY_LIMIT = 1800
 # Mac sleeps) is a sleep or a clock change: what the watch saw before it says
 # nothing about the host now.
 WATCH_CLOCK_GAP = 10
-# A host is adopted when its beat advances between two of this many reads,
-# this far apart: the last beat of a host that just ended stands still.
-WATCH_ADOPT_PULLS = 3
-WATCH_ADOPT_GAP = 2.5
-# After "Running tests..." XCTest gives the device's approval prompt 60 s; a
-# runner that has neither served nor timed out by then is not waiting for one.
+# After "Running tests..." XCTest gives the device's approval prompt 60 s: a
+# runner that is up and neither serves nor says why within this is ended, and
+# what it may have asked of the device is not known.
 WATCH_RUNNER_WAIT = 90
-# How long after the runner came up a host that ends before it says anything
-# may still have been waiting for an approval: XCTest's 60 s and a margin.
-WATCH_APPROVAL_WINDOW = 75
-# Attempts at one replacement, and the pauses after each failed one. The
-# approval prompt is skipped when the previous host ended minutes earlier, so
-# the pauses stay short.
+# Attempts to start a host that is refused before anything starts (the device
+# is not connected, the report store has no room), and the pauses between
+# them. Nothing started means nothing was asked of the device.
 WATCH_ATTEMPTS = 4
 WATCH_BACKOFF = (5, 10, 20)
 # More replacements than this in WATCH_STORM_WINDOW end the watch.
@@ -203,6 +231,9 @@ LAUNCH_LOCK_WAIT = 300
 # waits for it to be done (its two waits, with room).
 CHILD_TERM_WAIT = 10
 SUPERVISOR_TERM_WAIT = 30
+# How long a process group that shows nothing of being the host's is looked at
+# again before it is called another group's.
+FOREIGN_SETTLE = 2.0
 # xcodebuild's own lines: the runner is up, and XCTest gave up on the prompt.
 RUNNER_UP_LINE = "Running tests..."
 APPROVAL_TIMEOUT_LINE = "Timed out while enabling automation mode"
@@ -219,6 +250,7 @@ EXIT_STATUS_LINE = "ipad-automation: xcodebuild exited with status"
 WATCHING, RESTARTING, STARTING = "watching", "restarting", "starting"
 NEEDS_APPROVAL, START_FAILED = "needs-approval", "start-failed"
 RESTART_STORM, CANNOT_START = "restart-storm", "cannot-start"
+CANNOT_OBSERVE, REMAINDER = "cannot-observe", "remainder"
 STOPPED, WATCH_ERROR = "stopped", "error"
 ACTIVE_STATES = (WATCHING, RESTARTING, STARTING)
 # What the watch's record says for each ended state.
@@ -227,6 +259,8 @@ STATE_TEXT = {
     START_FAILED: "could not start a host",
     RESTART_STORM: "gave up: too many restarts",
     CANNOT_START: "cannot start a host here",
+    CANNOT_OBSERVE: "could not observe the host, and replaced nothing",
+    REMAINDER: "a remainder of the old host is still there: nothing was started",
     STOPPED: "ended on request",
     WATCH_ERROR: "ended on an error",
 }
@@ -438,10 +472,39 @@ def group_members(pgid):
         words = command.split()
         if group != pgid or stat.startswith("Z"):
             continue
+        if command.startswith("(") and command.endswith(")"):
+            # A process that is exiting: the kernel shows its name alone.
+            continue
         if len(words) > 1 and os.path.basename(words[0]) == "ps" and words[1] == "-ax":
             continue
         members.append((pid, command))
     return members
+
+
+_budget = threading.local()
+
+
+class Budget:
+    """Inside it, a blocking question about a process waits no longer than
+    `remaining()` says is left of the caller's own bound."""
+
+    def __init__(self, remaining):
+        self.remaining = remaining
+
+    def __enter__(self):
+        self.outer = getattr(_budget, "remaining", None)
+        _budget.remaining = self.remaining
+        return self
+
+    def __exit__(self, *exception):
+        _budget.remaining = self.outer
+
+
+def query_timeout(default):
+    """How long one question about a process may take: `default`, or what is
+    left of the enclosing Budget when that is less (never less than 0.1 s)."""
+    remaining = getattr(_budget, "remaining", None)
+    return default if remaining is None else max(0.1, min(default, remaining()))
 
 
 def process_instance(pid):
@@ -452,7 +515,7 @@ def process_instance(pid):
             ["ps", "-o", "lstart=", "-o", "command=", "-p", str(pid)],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, errors="replace",
-            env=dict(os.environ, LC_ALL="C"), timeout=10)
+            env=dict(os.environ, LC_ALL="C"), timeout=query_timeout(10))
     except (OSError, subprocess.TimeoutExpired):
         return None
     line = done.stdout.rstrip("\n")
@@ -493,7 +556,7 @@ def recorded_supervisor(record):
         done = subprocess.run(
             ["ps", "-o", "command=", "-p", str(pid)], stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            timeout=10)
+            timeout=query_timeout(10))
     except (OSError, subprocess.TimeoutExpired):
         return None
     words = done.stdout.split()
@@ -505,60 +568,147 @@ def recorded_supervisor(record):
     return None
 
 
-# What end_host found: nothing of the host remains; a process group the
-# record names holds nothing that shows it is the host's, and is left alone;
-# or something that is the host's would not end.
-ENDED, FOREIGN, STUCK = "ended", "foreign", "stuck"
+# What end_host found. ENDED: the host's process group was listed and is
+# empty (or is another group under a reused pid), so nothing of the host
+# remains. Everything else says it is not known to be gone: FOREIGN, a group
+# the record names holds nothing that shows it is the host's; STUCK, something
+# that is the host's would not end; UNKNOWN, the processes could not be listed.
+ENDED, FOREIGN, STUCK, UNKNOWN = "ended", "foreign", "stuck", "unknown"
 
 
-def end_host(record, process=None, wait=None):
-    """Ends the whole of a host: its supervisor, xcodebuild and what else is
-    in their process group, with SIGTERM and then SIGKILL, and returns once
-    the group is empty.
+def carries(nonce, command):
+    """Whether a command line is the host's own: the supervisor's `--nonce`
+    or xcodebuild's result bundle, which is named for the nonce."""
+    words = command.split()
+    if "_supervise" in words:
+        return any(word == "--nonce" and words[index + 1] == nonce
+                   for index, word in enumerate(words[:-1]))
+    # (a script run by its interpreter shows the interpreter first)
+    return any(os.path.basename(word) == "xcodebuild" for word in words[:2]) and any(
+        word.endswith(f"{nonce}.xcresult") for word in words)
 
-    The group is the supervisor's: `start_new_session` made its pid the group
-    id, and no pid is reused while a group of that id has members. A group is
-    signalled only while `process`, the supervisor this process started and
-    has not reaped, holds the pid, or while a member's command line carries
-    the record's nonce (the supervisor's `--nonce` and xcodebuild's result
-    bundle name): that is ownership an orphaned remainder can still show. A
-    group with no such member is left alone (FOREIGN)."""
+
+def host_group(record, process):
+    """(pgid, known): the process group of the host the record names. It is
+    the supervisor's (`start_new_session` made its pid the group id). With no
+    pid, the group of what carries the record's nonce; (None, True) when
+    nothing does and (None, False) when the processes cannot be listed."""
     nonce = record.get("nonce")
-    pid = (process.pid if process is not None
-           else record.get("supervisor") or (nonce and find_supervisor(nonce)))
-    if not isinstance(pid, int) or pid <= 1:
+    pid = process.pid if process is not None else record.get("supervisor")
+    if isinstance(pid, int) and pid > 1:
+        return pid, True
+    if not nonce:
+        return None, True
+    table = process_table()
+    if table is None:
+        return None, False
+    groups = [group for _, group, stat, command in table
+              if not stat.startswith("Z") and carries(nonce, command)]
+    return (groups[0] if groups else None), True
+
+
+def pid_reused(pid, record):
+    """Whether the process that has `pid` now started after the host did: then
+    the host's group, which the supervisor's pid named, is gone and this is
+    another one. A group whose leader is gone, or older than the host, is not
+    shown to be another."""
+    instance = process_instance(pid)
+    started = record.get("started")
+    if instance is None or not isinstance(started, (int, float)):
+        return False
+    try:
+        began = time.mktime(time.strptime(instance[0], "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return False
+    return began >= started - 2
+
+
+def end_host(record, process=None, wait=None, remainder=None):
+    """Ends the whole of a host: its supervisor, xcodebuild and what else is
+    in their process group, with SIGTERM and then SIGKILL, and returns ENDED
+    only once the group was listed and is empty. Anything else (see above)
+    appends what is left, as (pid, command), to `remainder`.
+
+    A group is signalled only while `process`, the supervisor this process
+    started and has not reaped, holds the pid, or while a member's command
+    line carries the record's nonce. Ownership shown once holds through the
+    two signals of this call: the group was not empty at any look between
+    them, so it is the one that was shown, and its remains (a helper that
+    ignores SIGTERM) are ended with SIGKILL. A group that never showed it is
+    left alone."""
+    nonce = record.get("nonce")
+    pid, known = host_group(record, process)
+    if not known:
+        return UNKNOWN
+    if pid is None:
         return ENDED
-    signalled = False
+    owned = False
     for sig, limit in ((signal.SIGTERM, wait or SUPERVISOR_TERM_WAIT),
                        (signal.SIGKILL, 10)):
         if process is not None:
             process.poll()
         members = group_members(pid)
         if members is None:
-            return STUCK
+            return UNKNOWN
         if not members:
             return ENDED
-        ours = (process is not None and process.returncode is None) or (
-            bool(nonce) and any(nonce in command for _, command in members))
-        if not ours:
-            return ENDED if signalled else FOREIGN
+        owned = owned or (process is not None and process.returncode is None) or (
+            bool(nonce) and any(carries(nonce, command) for _, command in members))
+        if not owned:
+            # What ended a moment ago is still being torn down: look again
+            # for a little before calling the rest another group's.
+            settle = time.monotonic() + FOREIGN_SETTLE
+            while not owned and time.monotonic() < settle:
+                time.sleep(0.2)
+                members = group_members(pid)
+                if members is None:
+                    return UNKNOWN
+                if not members:
+                    return ENDED
+                owned = bool(nonce) and any(
+                    carries(nonce, command) for _, command in members)
+        if not owned:
+            if pid_reused(pid, record):
+                return ENDED
+            if remainder is not None:
+                remainder.extend(members)
+            return FOREIGN
         try:
             os.killpg(pid, sig)
         except ProcessLookupError:
             pass
         except PermissionError:
+            # A process that has just exited and is not reaped yet refuses
+            # signals too (macOS): give the group a moment to empty before
+            # calling it one that may not be signalled.
+            settle = time.monotonic() + FOREIGN_SETTLE
+            while time.monotonic() < settle:
+                if process is not None:
+                    process.poll()
+                members = group_members(pid)
+                if members is None:
+                    return UNKNOWN
+                if not members:
+                    return ENDED
+                time.sleep(0.2)
+            if remainder is not None:
+                remainder.extend(members)
             return FOREIGN
-        signalled = True
         deadline = time.monotonic() + limit
-        while time.monotonic() < deadline:
+        while True:
             if process is not None:
                 process.poll()
-            if not group_members(pid):
+            members = group_members(pid)
+            if members is None:
+                return UNKNOWN
+            if not members:
                 return ENDED
+            if time.monotonic() >= deadline:
+                break
             time.sleep(0.2)
-    if process is not None:
-        process.poll()
-    return ENDED if not group_members(pid) else STUCK
+    if remainder is not None:
+        remainder.extend(members)
+    return STUCK
 
 
 class WatchLock:
@@ -742,29 +892,31 @@ def wait_for_replacement(options, clock=None):
     starting a host, or has not seen the host's heartbeat advance lately (the
     watch may not have noticed a death yet), until it has, or the watch ends;
     it returns at once, and fails as it always did, when no watch runs. The
-    wait is a hard bound, and makes no device read: it reads only the watch's
-    own record, whose times are the Mac's."""
+    wait is a hard bound: its deadline starts before the first question about
+    a process, each of those gets what is left of it, and an expired deadline
+    fails the command even when the record just turned ready. It makes no
+    device read, and reads only the watch's own record, whose times are the
+    Mac's."""
     clock = clock or CLOCK
-    if watcher_pid(options) is None:
-        return
     deadline = clock.monotonic() + WATCH_COMMAND_WAIT
     announced = False
-    while True:
-        record = read_watch_record(options)
-        if (watcher_pid(options) is None
-                or record.get("state") not in ACTIVE_STATES):
-            return
-        if (record.get("state") == WATCHING
-                and clock.time() - record.get("alive_at", 0) <= WATCH_ALIVE_FRESH):
-            return
-        if clock.monotonic() >= deadline:
-            raise NoHost(f"the host was still being replaced after "
-                         f"{WATCH_COMMAND_WAIT} s")
-        if not announced:
-            log("the host is not serving and its watch is starting another; "
-                f"waiting up to {WATCH_COMMAND_WAIT} s")
-            announced = True
-        clock.sleep(1)
+    with Budget(lambda: deadline - clock.monotonic()):
+        while True:
+            record = read_watch_record(options)
+            if (watcher_pid(options) is None
+                    or record.get("state") not in ACTIVE_STATES):
+                return
+            if clock.monotonic() >= deadline:
+                raise NoHost(f"the host was still being replaced after "
+                             f"{WATCH_COMMAND_WAIT} s")
+            if (record.get("state") == WATCHING
+                    and clock.time() - record.get("alive_at", 0) <= WATCH_ALIVE_FRESH):
+                return
+            if not announced:
+                log("the host is not serving and its watch is starting another; "
+                    f"waiting up to {WATCH_COMMAND_WAIT} s")
+                announced = True
+            clock.sleep(1)
 
 
 def inflight_directory(options):
@@ -797,24 +949,20 @@ class Inflight:
             pass
 
 
-def inflight_limit(options):
-    """The longest wait, in seconds, of the senders that still wait for a
-    command's result; 0 when none does."""
-    longest = 0
-    try:
-        paths = list(inflight_directory(options).iterdir())
-    except OSError:
+def inflight_limit(options, command):
+    """The wait, in seconds, of the sender of `command` (the id the heartbeat
+    names) while it still waits for that command's result; 0 when the command
+    has no such sender. Another command's sender says nothing of this one."""
+    if (not isinstance(command, str) or command.startswith(".")
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", command)):
         return 0
-    for path in paths:
-        entry = read_json(path)
-        pid, limit = entry.get("pid"), entry.get("limit")
-        if (not isinstance(pid, int) or not entry.get("start")
-                or not isinstance(limit, (int, float))):
-            continue
-        instance = process_instance(pid)
-        if instance is not None and instance[0] == entry["start"]:
-            longest = max(longest, limit)
-    return longest
+    entry = read_json(inflight_directory(options) / f"{command}.json")
+    pid, limit = entry.get("pid"), entry.get("limit")
+    if (not isinstance(pid, int) or not entry.get("start")
+            or not isinstance(limit, (int, float))):
+        return 0
+    instance = process_instance(pid)
+    return limit if instance is not None and instance[0] == entry["start"] else 0
 
 
 def send(options, command, timeout, clock=None):
@@ -1170,17 +1318,18 @@ def collection_options(options, label):
     return fresh
 
 
-def launch_host(options, cancelled=None, guard=None, record=None):
+def launch_host(options, cancelled=None, guard=None, record=None, locked=False):
     """Starts a supervisor, and with it xcodebuild and a new host, and records
     it in `host.json`. Raises LaunchRefused, before anything starts, when the
     host cannot be started.
 
-    The transition is made under the device's launch lock: `guard()` there
-    returns a LaunchRefused to raise (or None), `cancelled()` is checked
-    again after the report preflight, which can take minutes, and `record`
-    is told the host's nonce and log before the host starts. A record that
-    exists before the supervisor does is written whole, and a crash between
-    the two leaves it findable by its nonce."""
+    The transition is made under the device's launch lock (the caller holds it
+    already when `locked`): `guard()` there returns a LaunchRefused to raise
+    (or None), `cancelled()` is checked again after the report preflight,
+    which can take minutes, and `record` is told the host's nonce and log
+    before the host starts. A record that exists before the supervisor does is
+    written whole, and a crash between the two leaves it findable by its
+    nonce."""
     runs = sorted(derived_data(options).glob("Build/Products/KernariumAutomation_*.xctestrun"))
     if not runs:
         raise LaunchRefused(
@@ -1199,7 +1348,7 @@ def launch_host(options, cancelled=None, guard=None, record=None):
     name = f"host-{time.strftime('%Y%m%d-%H%M%S')}-{nonce}"
     log_path = directory / f"{name}.log"
     result_bundle = directory / f"{name}.xcresult"
-    with LaunchLock(options, cancelled):
+    with contextlib.nullcontext() if locked else LaunchLock(options, cancelled):
         refusal = guard() if guard is not None else None
         if refusal is not None:
             raise refusal
@@ -1352,8 +1501,9 @@ def command_stop(options):
             time.sleep(1)
         if recorded_supervisor(record) is not None:
             log(f"terminating supervisor {record.get('supervisor')}")
-    if end_host(record) == STUCK:
-        log("part of the host would not end; see `ps` for its process group")
+    if end_host(record) in (STUCK, UNKNOWN):
+        log("part of the host would not end, or its processes could not be "
+            "listed; see `ps` for its process group")
         return EXIT_FAILED
     return 0
 
@@ -1415,36 +1565,54 @@ class LogScan:
 
 
 class HostObserver:
-    """Tells, from what a host and its processes show, whether it still serves.
+    """Tells, from what a host and its processes show, whether it is dead. It
+    says so only on evidence.
 
     The host writes its heartbeat every 2 s from a queue that no command
     blocks, so a busy host keeps beating, and only a beat that stops advancing
-    ends a host. The watch measures that silence itself: the time between the
-    read that first showed a beat and the last read that still showed it,
-    counting only reads that worked, on its own monotonic clock. It never
-    subtracts the device's clock from the Mac's, a read that fails or is late
-    is no evidence (the host may beat on, unseen), and a gap between the wall
-    clock and the monotonic one (the Mac slept) starts the measuring again.
+    ends a host. The watch measures that itself, on its own monotonic clock,
+    and never subtracts the device's clock from the Mac's: a host is dead when
+    WATCH_DEAD_PULLS reads in a row all worked and all showed the same beat,
+    and the last one started at least the silence bound after the first one
+    ended. A read's time is when it started (a late delivery of an old beat
+    is not silence). A read that fails, or shows another host's heartbeat, is
+    unknown: it says nothing, the count starts again, and so does a sleep of
+    the Mac (a gap between the wall clock and the monotonic one). The same
+    reads serve a watch that has just started (it follows the first host it
+    can read) and one that has watched for a day.
     The processes only hurry the verdict: a runner that still beats serves,
     whatever happened to the process that started it."""
 
     def __init__(self, options, nonce, state, process=None, scan=None,
-                 clock=CLOCK, on_progress=None):
+                 clock=CLOCK, on_progress=None, seen=None):
         self.options = options
         self.nonce = nonce
-        self.state = state
+        self.state = state or {}
         self.process = process
         self.scan = scan or LogScan(None)
         self.runners = self.scan.runner_up
         self.clock = clock
         self.on_progress = on_progress
         now = clock.monotonic()
-        self.beat = state.get("time", 0)
-        self.changed = self.observed = self.last_pull = now
         self.last_mono, self.last_wall = now, clock.time()
-        self.blind_since = None
+        self.last_pull = now
+        # When the first read of the current stretch of reads that did not
+        # work started.
+        self.unknown_since = None
         self.candidate = None
         self.relaunched = False
+        # The beat advanced since the watch began to look; the host it
+        # follows changed.
+        self.advanced = False
+        self.switched = False
+        self.beat = None
+        # (end of the first read of this beat, start of the latest, count).
+        self.run = None
+        # What the last death verdict was about.
+        self.verdict = None
+        if state:
+            started, ended = seen or (now, now)
+            self.note(state, started, ended)
 
     def supervisor_gone(self):
         if self.process is not None:
@@ -1457,27 +1625,59 @@ class HostObserver:
         if self.on_progress is not None:
             self.on_progress()
 
-    def pull(self):
-        """One read of the heartbeat. A read that fails observes nothing."""
-        self.last_pull = self.clock.monotonic()
-        state = host_state(self.options)
-        now = self.clock.monotonic()
-        if state is None:
-            if self.blind_since is None:
-                self.blind_since = now
-            return
-        self.blind_since = None
-        if state.get("nonce") != self.nonce:
-            self.consider(state, now)
-            return
-        self.state = state
-        self.observed = now
-        if state.get("time", 0) != self.beat:
-            self.beat = state.get("time", 0)
-            self.changed = now
-            self.progressed()
+    def reset(self):
+        """A verdict that did not stand: count again."""
+        self.run = None
 
-    def consider(self, state, now):
+    def note(self, state, started, ended):
+        """A read of this host's heartbeat that worked."""
+        beat = state.get("time", 0)
+        self.state = state
+        self.unknown_since = None
+        if self.run is not None and beat == self.beat:
+            first_end, _, count = self.run
+            self.run = (first_end, started, count + 1)
+            return
+        if self.beat is not None and beat != self.beat:
+            self.advanced = True
+            self.progressed()
+        self.beat = beat
+        self.run = (ended, started, 1)
+
+    def lose(self, started):
+        """A read that said nothing about this host."""
+        self.run = None
+        if self.unknown_since is None:
+            self.unknown_since = started
+
+    def pull(self):
+        """One read of the heartbeat."""
+        started = self.clock.monotonic()
+        self.last_pull = started
+        state = host_state(self.options)
+        ended = self.clock.monotonic()
+        if state is None:
+            self.lose(started)
+        elif self.nonce is None:
+            self.follow(state, started, ended)
+        elif state.get("nonce") != self.nonce:
+            self.lose(started)
+            self.consider(state, started, ended)
+        else:
+            self.note(state, started, ended)
+
+    def follow(self, state, started, ended):
+        """Observes the host this heartbeat is of, from now on."""
+        nonce = state.get("nonce")
+        record = local_record(self.options)
+        self.nonce, self.process = nonce, None
+        self.scan = LogScan(record.get("log") if record.get("nonce") == nonce else None)
+        self.scan.read()
+        self.runners = self.scan.runner_up
+        self.beat = self.run = self.candidate = self.unknown_since = None
+        self.note(state, started, ended)
+
+    def consider(self, state, started, ended):
         """The heartbeat of another host: it is followed once its beat
         advances between two reads. What an earlier host left behind does not."""
         nonce = state.get("nonce")
@@ -1488,63 +1688,81 @@ class HostObserver:
         self.candidate = (nonce, state.get("time", 0))
         if seen is None or seen[0] != nonce or seen[1] == state.get("time", 0):
             return
-        record = local_record(self.options)
-        self.nonce, self.process = nonce, None
-        self.scan = LogScan(record.get("log") if record.get("nonce") == nonce else None)
-        self.scan.read()
-        self.runners = self.scan.runner_up
-        self.state = state
-        self.beat = state.get("time", 0)
-        self.changed = self.observed = now
-        self.candidate = None
+        self.follow(state, started, ended)
+        self.switched = True
         self.progressed()
 
     def check(self):
-        """None while the host serves, else why it does not."""
+        """None while the host is not shown to be dead, else why it is."""
         clock = self.clock
         now = clock.monotonic()
         wall = clock.time()
         slept = abs((wall - self.last_wall) - (now - self.last_mono)) > WATCH_CLOCK_GAP
         self.last_mono, self.last_wall = now, wall
         if slept:
-            # The silence measured so far is not the host's: measure again,
-            # from a fresh read.
-            self.changed = self.observed = now
+            # What was read before says nothing of the host now.
+            self.run = None
         gone = self.supervisor_gone()
         self.scan.read()
         relaunched = self.scan.runner_up > self.runners
         self.relaunched = relaunched
         quick = gone or relaunched
-        if slept or quick or now - self.last_pull >= WATCH_PULL_EVERY:
+        if (self.nonce is None or slept or quick
+                or now - self.last_pull >= WATCH_PULL_EVERY):
             self.pull()
+        self.verdict = None
+        if self.nonce is None:
+            return None
         state = self.state
+        reason = None
+        extra = {}
         if state.get("finished"):
             if state.get("time", 0) >= state.get("deadline", 0) - WATCH_GONE_AGE:
-                return "the host reached its lifetime"
-            return "the host reported that it finished"
-        silent = self.observed - self.changed
-        if silent >= (WATCH_GONE_AGE if quick else HEARTBEAT_STALE):
-            if gone:
-                return (f"the supervisor ended ({self.scan.describe()}) and "
-                        f"the heartbeat has not advanced for {silent:.0f} s")
-            if relaunched:
-                return ("xcodebuild started the runner again, so the host's "
-                        f"runner ended; the heartbeat has not advanced for {silent:.0f} s")
-            return f"the heartbeat has not advanced for {silent:.0f} s"
-        if state.get("command"):
+                reason = "the host reached its lifetime"
+            else:
+                reason = "the host reported that it finished"
+            extra = {"finished": True}
+        elif self.run is not None:
+            first_end, last_start, count = self.run
+            silent = last_start - first_end
+            if count >= WATCH_DEAD_PULLS and silent >= (
+                    WATCH_GONE_AGE if quick else HEARTBEAT_STALE):
+                if gone:
+                    reason = (f"the supervisor ended ({self.scan.describe()}) and "
+                              f"the heartbeat has not advanced for {silent:.0f} s")
+                elif relaunched:
+                    reason = ("xcodebuild started the runner again, so the host's "
+                              "runner ended; the heartbeat has not advanced for "
+                              f"{silent:.0f} s")
+                else:
+                    reason = f"the heartbeat has not advanced for {silent:.0f} s"
+        if reason is None and state.get("command") and self.unknown_since is None:
             # The device's own clock, both times: how long it has run.
             running = state.get("time", 0) - state.get("commandStarted", state.get("time", 0))
-            if running > WATCH_BUSY_LIMIT and running > inflight_limit(self.options):
-                return f"one command has run for {running:.0f} s: the host is hung"
-        return None
+            if (running > WATCH_BUSY_LIMIT
+                    and running > inflight_limit(self.options, state["command"])):
+                reason = f"one command has run for {running:.0f} s: the host is hung"
+                extra = {"hung": True, "command": state["command"]}
+        if reason is not None:
+            self.verdict = dict(
+                extra, nonce=self.nonce, beat=self.beat, relaunched=relaunched,
+                record_nonce=local_record(self.options).get("nonce"))
+        return reason
 
     def blind_for(self):
-        """How long the heartbeat could not be read, in seconds."""
-        return 0 if self.blind_since is None else self.clock.monotonic() - self.blind_since
+        """How long no read of the heartbeat has worked, in seconds."""
+        return 0 if self.unknown_since is None else self.clock.monotonic() - self.unknown_since
+
+
+# What Watch.replace returns when the verdict it was given did not stand and
+# the watch looks again.
+AGAIN = "again"
 
 
 class Watch:
-    """Keeps one device's host serving; see `watch` in the module's help.
+    """Keeps one device's host serving; see `watch` in the module's help. It
+    acts only on evidence: where it cannot tell, it replaces nothing and ends
+    with a status that says what it could not establish.
 
     `stop` is set to end it; the watch then leaves a serving host as it is."""
 
@@ -1555,6 +1773,7 @@ class Watch:
         self.record = WatchRecord(options)
         self.latch = ApprovalLatch(options)
         self.observer = None
+        self.adopted = False
         self.pending = None
         self.blind_said = False
         self.restarts = 0
@@ -1572,79 +1791,52 @@ class Watch:
         self.record.update(state=STARTING, detail="", pid=os.getpid(),
                            started=self.clock.time(), restarts=0,
                            restart_times=self.restart_times)
-        # What the last launch left (a `start`'s host still coming up, or the
-        # host a watch that ended was starting) comes before anything else: it
-        # may have been the one the device asked to approve, and the beat of
-        # the host before it can still look alive.
+        # A host another launch is still bringing up is that launch's to
+        # finish: the owner may be approving it now.
         self.settle_last_launch()
-        state = None
-        for _ in range(WATCH_ADOPT_PULLS):
-            if self.stop.is_set():
-                break
-            state, observed = self.survey()
-            if (state is not None or observed
-                    or recorded_supervisor(local_record(self.options)) is None):
-                break
-            self.say("the host's heartbeat cannot be read; looking again before "
-                     "taking its place")
-        if self.stop.is_set():
-            return self.stopped()
-        if state is not None:
-            self.adopt(state)
-        elif self.latch.read():
-            return self.refuse_after_approval_failure()
-        else:
-            code = self.replace("no host was serving when the watch started",
-                                ended=False)
-            if code is not None:
-                return code
+        self.observer = HostObserver(self.options, None, None, clock=self.clock,
+                                     on_progress=self.progress)
         while not self.stop.is_set():
             reason = self.observer.check()
+            if self.observer.switched or (self.observer.advanced and not self.adopted):
+                self.observer.switched = False
+                self.adopt()
             if reason is None:
-                self.report_blind()
+                code = self.watch_blind()
+                if code is not None:
+                    return code
                 self.clock.wait(self.stop, WATCH_POLL)
                 continue
             code = self.replace(reason)
-            if code is not None:
+            if code is AGAIN:
+                self.clock.wait(self.stop, WATCH_POLL)
+            elif code is not None:
                 return code
         return self.stopped()
 
-    def report_blind(self):
+    def watch_blind(self):
+        """Says so when the heartbeat cannot be read, and ends the watch, with
+        nothing replaced, when that lasts too long."""
         blind = self.observer.blind_for()
+        if blind >= WATCH_UNKNOWN_LIMIT:
+            return self.give_up(
+                CANNOT_OBSERVE,
+                f"the host's heartbeat could not be read for {blind:.0f} s, so "
+                "it is not known whether a host serves; nothing was replaced",
+                EXIT_WATCH_CANNOT_OBSERVE)
         if blind >= 60 and not self.blind_said:
             self.say(f"the host's heartbeat cannot be read for {blind:.0f} s; "
                      "a host that cannot be seen is left alone")
             self.blind_said = True
         elif blind == 0:
             self.blind_said = False
-
-    def survey(self):
-        """(state, observed): the heartbeat of a host that serves, which a
-        beat that advances between two reads shows (the last beat of a host
-        that just ended stands still), and whether any read worked."""
-        previous = None
-        observed = False
-        for number in range(WATCH_ADOPT_PULLS):
-            if number and self.clock.wait(self.stop, WATCH_ADOPT_GAP):
-                break
-            state = host_state(self.options)
-            if state is None:
-                continue
-            observed = True
-            if state.get("finished"):
-                break
-            if (previous is not None and state.get("nonce") == previous.get("nonce")
-                    and state.get("time", 0) > previous.get("time", 0)):
-                return state, True
-            previous = state
-        return None, observed
+        return None
 
     def settle_last_launch(self):
-        """Before the watch adopts or launches anything: what the last launch
-        left. A host still coming up is its starter's to finish, the owner
-        may be approving it now, and it is waited for as long as the wait its
-        starter recorded; its own log says whether the device asked for an
-        approval nobody gave, which is then recorded for good."""
+        """Before the watch looks at anything: a host another launch is still
+        bringing up is waited for, for as long as the wait its starter
+        recorded, and no longer once it beats (the observation then decides)
+        or its supervisor ended."""
         options = self.options
         record = local_record(options)
         nonce = record.get("nonce")
@@ -1652,48 +1844,28 @@ class Watch:
             return
         coming = record.get("started", 0) + (record.get("wait") or options.wait) \
             + WATCH_RUNNER_WAIT
-        scan = LogScan(record.get("log"))
         announced = False
         while not self.stop.is_set():
-            scan.read()
+            if recorded_supervisor(record) is None or self.clock.time() >= coming:
+                return
             state = host_state(options)
-            scan.read()
-            now = self.clock.time()
-            served = bool(state and state.get("nonce") == nonce)
-            if served and not state.get("finished") and liveness(state) is None:
-                return
-            if scan.approval_failure and not served:
-                self.latch.set("observed", nonce, record.get("log"), scan.describe())
-                end_host(record)
-                return
-            if recorded_supervisor(record) is None:
-                if (not served and not scan.exit_status and scan.runner_up
-                        and now < coming + WATCH_APPROVAL_WINDOW):
-                    # It ended without saying why, while it could have been
-                    # waiting for an approval.
-                    self.latch.set("possible", nonce, record.get("log"),
-                                   "a host ended before it served and before "
-                                   "its log could say whether the device asked "
-                                   "for approval")
-                return
-            if now >= coming:
+            if state and state.get("nonce") == nonce:
                 return
             if not announced:
-                self.say(f"a host that started {now - record.get('started', now):.0f} s "
+                self.say(f"a host that started "
+                         f"{self.clock.time() - record.get('started', 0):.0f} s "
                          "ago does not serve yet; waiting for it")
                 announced = True
             self.clock.wait(self.stop, WATCH_POLL)
 
-    def adopt(self, state):
-        """Takes over watching a host that already serves, touching nothing."""
-        nonce = state.get("nonce")
-        record = local_record(self.options)
-        scan = LogScan(record.get("log") if record.get("nonce") == nonce else None)
-        scan.read()
-        self.observer = HostObserver(self.options, nonce, state, None, scan,
-                                     self.clock, self.progress)
+    def adopt(self):
+        """The host the observer follows serves (its beat advanced): it is
+        taken over, touching nothing."""
+        observer = self.observer
+        state = observer.state
+        nonce = observer.nonce
         now = self.clock.time()
-        self.say(f"adopting the host that serves (up {now - state.get('started', now):.0f} s, "
+        self.say(f"following the host that serves (up {now - state.get('started', now):.0f} s, "
                  f"{state.get('deadline', now) - now:.0f} s left); it is not touched")
         counted = {}
         pending = self.record.data.get("pending")
@@ -1707,42 +1879,10 @@ class Watch:
             counted = {"restart_times": self.restart_times, "restarts": self.restarts}
         # A host serves, so whatever the device was asked is answered.
         self.latch.clear()
+        self.adopted = True
         self.pending = None
         self.record.update(state=WATCHING, detail="adopted a serving host",
                            host=nonce, pending=None, alive_at=now, **counted)
-
-    def await_relaunched_runner(self):
-        """xcodebuild started the runner again after the host's runner ended.
-        That runner runs no test (the one that was running is not run again),
-        but the device can ask for an approval for it, and its log says within
-        a minute whether it did. The host started next would put the same
-        prompt up again, and ending this runner now would end it before it
-        could say: wait, for as long as XCTest gives the prompt. True when its
-        log shows the approval was not given."""
-        observer = self.observer
-        deadline = self.clock.monotonic() + WATCH_APPROVAL_WINDOW
-        self.say("xcodebuild started the runner again; waiting for it to say "
-                 "whether the device asks for an approval")
-        while not self.stop.is_set():
-            observer.scan.read()
-            if observer.scan.approval_failure:
-                return True
-            if observer.supervisor_gone():
-                observer.scan.read()
-                return bool(observer.scan.approval_failure)
-            if self.clock.monotonic() >= deadline:
-                return False
-            self.clock.wait(self.stop, WATCH_POLL)
-        return False
-
-    def guard(self):
-        """Under the launch lock: a host another launch is bringing up is not
-        raced."""
-        if host_unsettled(local_record(self.options), self.options.wait):
-            return LaunchRefused(
-                "a host that another launch started is still coming up",
-                settle=True)
-        return None
 
     def note_pending(self, nonce, log_path, replacement):
         """Recorded before the host starts: a watch that ends in between
@@ -1751,199 +1891,293 @@ class Watch:
                         "time": self.clock.time(), "replacement": replacement}
         self.record.update(pending=self.pending)
 
-    def retire(self):
-        """Ends what is left of the host that stopped serving, so that no
-        second session or prompt piles up beside its successor. Why that
-        cannot be done, or None."""
-        process = self.observer.process if self.observer is not None else None
-        if end_host(local_record(self.options), process) == STUCK:
-            return ("part of the host that stopped serving would not end, even "
-                    "after SIGKILL: no second host starts beside it")
+    def recent_restarts(self):
+        now = self.clock.time()
+        return [t for t in self.restart_times if now - t < WATCH_STORM_WINDOW]
+
+    def recheck(self, verdict):
+        """Under the launch lock, before anything is signalled: why the
+        verdict no longer stands, or None. It was about one host, and a
+        start published since (its record, or a host it is still bringing up)
+        is another."""
+        options = self.options
+        record = local_record(options)
+        if record.get("nonce") != verdict.get("record_nonce"):
+            return "a start was published meanwhile"
+        if record.get("nonce") != verdict["nonce"] and host_unsettled(record, options.wait):
+            return "a host another launch started is still coming up"
+        state = host_state(options)
+        if state is None:
+            return "the heartbeat cannot be read now"
+        if state.get("nonce") != verdict["nonce"]:
+            return "the heartbeat is another host's now"
+        if verdict.get("hung"):
+            if state.get("command") != verdict["command"]:
+                return "the command that kept the host busy has ended"
+        elif verdict.get("finished"):
+            if not state.get("finished"):
+                return "the host does not say it finished now"
+        elif state.get("time", 0) != verdict["beat"]:
+            return "the heartbeat advanced"
         return None
 
-    def replace(self, reason, ended=True):
-        """Starts the host that replaces one that stopped serving (`ended`
-        is False for the first host, when none served). Returns the status
-        the watch ends with, or None once the new host serves."""
+    def approval_scans(self, verdict):
+        """The logs that say what the device may have been asked: the host the
+        verdict is about (which served, so its first runner needed nothing
+        more) and, when the last launch was another one, that launch (which
+        never served: the heartbeat is not its)."""
+        scans = [(verdict["nonce"], self.observer.scan, True)]
+        record = local_record(self.options)
+        if record.get("nonce") and record["nonce"] != verdict["nonce"]:
+            last = LogScan(record.get("log"))
+            scans.append((record["nonce"], last, False))
+        return scans
+
+    @staticmethod
+    def approval_risk(scans):
+        """(kind, nonce, detail) of what a device may have been asked, or
+        None. Observed: a log says the approval was not given. Possible: a
+        runner came up that is not known to have gone through
+        initialization: one started again after the host served, or one of a
+        launch that never served."""
+        found = None
+        for nonce, scan, served in scans:
+            scan.read()
+            if scan.approval_failure:
+                return "observed", nonce, scan.describe(), scan.path
+            if found is None and scan.runner_up >= (2 if served else 1):
+                found = ("possible", nonce,
+                         "a runner came up that is not known to have been "
+                         "initialized for UI testing, so the device may have "
+                         "asked for an approval nobody gave", scan.path)
+        return found
+
+    def replace(self, reason):
+        """The host the observer follows is dead. Returns the status the watch
+        ends with, None once its replacement serves, or AGAIN when what the
+        verdict was about changed and the watch looks again.
+
+        Everything that touches the device's host happens under the launch
+        lock a `start` takes: recheck the verdict, record what the device may
+        have been asked, end what is left of the host, start the next one. A
+        started host that does not serve ends the watch: it is not tried
+        again."""
         options = self.options
-        now = self.clock.time()
-        if ended:
-            self.say(f"the host stopped serving: {reason}")
-            self.record.update(state=RESTARTING, detail=reason,
-                               last_end={"reason": reason, "time": now})
-        else:
-            self.say(reason)
-            self.record.update(state=STARTING, detail=reason)
-        if ended and self.observer is not None and self.observer.relaunched:
-            asked = self.await_relaunched_runner()
-            if self.stop.is_set():
+        verdict = dict(self.observer.verdict or {})
+        self.say(f"the host stopped serving: {reason}")
+        self.record.update(state=RESTARTING, detail=reason,
+                           last_end={"reason": reason, "time": self.clock.time()})
+        try:
+            with LaunchLock(options, self.stop.is_set):
+                launch = self.transition(verdict)
+        except LaunchRefused as refusal:
+            if refusal.cancelled:
                 return self.stopped()
-            if asked:
-                self.retire()
-                self.latch.set("observed", self.observer.nonce, self.observer.scan.path,
-                               self.observer.scan.describe())
-                return self.give_up(
-                    NEEDS_APPROVAL,
-                    "the host's runner ended and the one xcodebuild started in "
-                    "its place could not be approved at the device "
-                    f"({self.observer.scan.approval_failure}); run `start` with "
-                    "the owner at the device, then `watch` again",
-                    EXIT_NEEDS_APPROVAL)
-        problem = self.retire()
-        if problem:
-            return self.give_up(CANNOT_START, problem, EXIT_WATCH_GAVE_UP)
-        recent = [t for t in self.restart_times if now - t < WATCH_STORM_WINDOW]
+            self.say(f"{refusal}; looking again")
+            self.observer.reset()
+            return AGAIN
+        if not isinstance(launch, Launch):
+            return launch
+        outcome = self.await_launch(launch)
+        launched = (self.pending or {}).get("time", self.clock.time())
+        self.pending = None
+        self.record.update(pending=None)
+        kind = outcome[0]
+        if kind == "served":
+            self.observer = outcome[1]
+            self.adopted = True
+            self.restarts += 1
+            self.restart_times = self.recent_restarts() + [launched]
+            self.say(f"the replacement serves (restart {self.restarts})")
+            self.record.update(
+                state=WATCHING, detail="", host=launch.nonce, restarts=self.restarts,
+                restart_times=self.restart_times, alive_at=self.clock.time())
+            return None
+        if kind == "stopped":
+            return self.stopped()
+        if kind == "approval":
+            return self.give_up(NEEDS_APPROVAL, outcome[1], EXIT_NEEDS_APPROVAL)
+        if kind == "remainder":
+            return self.give_up(REMAINDER, outcome[1], EXIT_WATCH_REMAINDER)
+        return self.give_up(START_FAILED, outcome[1], EXIT_WATCH_GAVE_UP)
+
+    def transition(self, verdict):
+        """Under the launch lock: a Launch, or what `replace` returns."""
+        options = self.options
+        observer = self.observer
+        why = self.recheck(verdict)
+        if why:
+            self.say(f"not replacing it: {why}; looking again")
+            observer.reset()
+            return AGAIN
+        if self.latch.read():
+            return self.refuse_after_approval_failure()
+        scans = self.approval_scans(verdict)
+        risk = self.approval_risk(scans)
+        if risk:
+            # Before anything is ended: a crash from here on leaves it.
+            self.latch.set(risk[0], risk[1], risk[3], risk[2])
+        remainder = []
+        status = self.end_all(verdict, remainder)
+        # What the ended processes printed last counts.
+        after = self.approval_risk(scans)
+        if after and (not risk or after[0] != risk[0]):
+            self.latch.set(after[0], after[1], after[3], after[2])
+        if status != ENDED:
+            pids = ", ".join(f"{pid} ({command[:120]})" for pid, command in remainder)
+            return self.give_up(
+                REMAINDER,
+                f"what is left of the host that stopped serving is not known to "
+                f"be gone ({status}{': ' + pids if pids else ''}); nothing was "
+                "started beside it", EXIT_WATCH_REMAINDER)
+        if after:
+            return self.refuse_after_approval_failure(
+                f"{after[2]} (the host that ended: {reason_of(verdict)})")
+        recent = self.recent_restarts()
         if len(recent) >= options.max_restarts:
             return self.give_up(
                 RESTART_STORM,
                 f"{len(recent)} replacements in the last {WATCH_STORM_WINDOW // 60} "
                 f"minutes, and the bound is {options.max_restarts}; the host ended "
-                f"again: {reason}", EXIT_WATCH_GAVE_UP)
+                "again", EXIT_WATCH_GAVE_UP)
         detail = ""
         for number in range(1, WATCH_ATTEMPTS + 1):
-            outcome = self.attempt(ended)
-            kind = outcome[0]
-            if kind == "served":
-                self.observer = outcome[1]
-                self.restarts += 1
-                launched = (self.pending or {}).get("time", self.clock.time())
-                self.restart_times = recent + [launched]
-                self.pending = None
-                self.say(f"the replacement serves (restart {self.restarts})")
-                self.record.update(
-                    state=WATCHING, detail="", host=self.observer.nonce,
-                    restarts=self.restarts, restart_times=self.restart_times,
-                    pending=None, alive_at=self.clock.time())
-                return None
-            self.pending = None
-            self.record.update(pending=None)
-            if kind == "stopped":
-                return self.stopped()
-            if kind == "approval":
-                return self.give_up(
-                    NEEDS_APPROVAL,
-                    "the device asked for approval and XCTest gave up after its "
-                    "60 s: nobody answered; run `start` with the owner at the "
-                    "device, then `watch` again", EXIT_NEEDS_APPROVAL)
-            if kind == "stuck":
-                return self.give_up(CANNOT_START, outcome[1], EXIT_WATCH_GAVE_UP)
-            if kind == "settle":
-                self.settle_last_launch()
-                if self.stop.is_set():
+            try:
+                return launch_host(
+                    options, cancelled=self.stop.is_set, locked=True,
+                    record=lambda nonce, path: self.note_pending(nonce, path, True))
+            except LaunchRefused as refusal:
+                if refusal.cancelled:
                     return self.stopped()
-                state, _ = self.survey()
-                if state is not None:
-                    self.adopt(state)
-                    return None
-                if self.latch.read():
-                    return self.refuse_after_approval_failure()
-                detail = "a host that another launch started did not serve"
-            else:
-                _, detail, permanent = outcome
-                if permanent:
-                    return self.give_up(CANNOT_START, detail, EXIT_WATCH_GAVE_UP)
-            self.say(f"attempt {number} of {WATCH_ATTEMPTS} failed: {detail}")
-            self.record.update(detail=f"attempt {number} failed: {detail}")
+                if refusal.permanent:
+                    return self.give_up(CANNOT_START, str(refusal), EXIT_WATCH_GAVE_UP)
+                detail = str(refusal)
+            # Nothing was started, so nothing was asked of the device: this
+            # is the one failure that is tried again.
+            self.say(f"attempt {number} of {WATCH_ATTEMPTS} was refused: {detail}")
+            self.record.update(detail=f"attempt {number} refused: {detail}")
             if number < WATCH_ATTEMPTS and self.clock.wait(
                     self.stop, WATCH_BACKOFF[number - 1]):
                 return self.stopped()
         return self.give_up(
-            START_FAILED, f"{WATCH_ATTEMPTS} attempts failed; the last: {detail}",
-            EXIT_WATCH_GAVE_UP)
+            START_FAILED, f"{WATCH_ATTEMPTS} attempts to start a host were "
+            f"refused; the last: {detail}", EXIT_WATCH_GAVE_UP)
 
-    def attempt(self, replacement):
-        """One start of a host: ("served", observer), ("approval",),
-        ("stopped",), ("settle",), ("stuck", why) or ("failed", why,
-        permanent).
+    def end_all(self, verdict, remainder):
+        """Ends what is left of the host the verdict names and of the last
+        launch when that was another; ENDED only when each group was listed
+        and is empty."""
+        nonce = verdict["nonce"]
+        record = local_record(self.options)
+        if record.get("nonce") == nonce:
+            targets = [(record, self.observer.process)]
+        else:
+            targets = [({"nonce": nonce}, self.observer.process)]
+            if record.get("nonce"):
+                targets.append((record, None))
+        status = ENDED
+        for target, process in targets:
+            result = end_host(target, process, remainder=remainder)
+            if result != ENDED and status == ENDED:
+                status = result
+        return status
 
-        The approval prompt is told from every other failure by xcodebuild's
-        own line, "Timed out while enabling automation mode": XCTest prints it
-        when the prompt stayed unanswered for its 60 s, so it means the device
-        asked. The log is read again after every wait that can take long and
-        after the host's processes are ended, so that a line that arrives
-        meanwhile is not lost; a host ended before it could print one, within
-        the 60 s, may have been waiting for an approval, and is not started
-        again (the approval latch). A runner that is up and has neither served
-        nor printed the line within WATCH_RUNNER_WAIT is not waiting for a
-        prompt; that, a runner that never comes up and an xcodebuild that ends
-        first are ordinary failures, which are retried."""
+    def await_launch(self, launch):
+        """Waits for the host just started to serve: ("served", observer), or
+        ("stopped",), ("approval", why), ("remainder", why) or ("failed", why)
+        once it ended.
+
+        Served is a heartbeat of this launch's nonce that advances between two
+        reads (the nonce is new, so nothing older can show it). The log is
+        read again after every wait that can take long."""
         options = self.options
-        try:
-            launch = launch_host(
-                options, cancelled=self.stop.is_set, guard=self.guard,
-                record=lambda nonce, path: self.note_pending(nonce, path, replacement))
-        except LaunchRefused as refusal:
-            if refusal.cancelled:
-                return ("stopped",)
-            if refusal.settle:
-                return ("settle",)
-            return ("failed", str(refusal), refusal.permanent)
-        self.say(f"started host {launch.nonce[:8]} under supervisor "
-                 f"{launch.process.pid}; log {launch.log_path}")
         scan = LogScan(launch.log_path)
         deadline = self.clock.monotonic() + options.wait
         runner_up_at = None
+        first = None
         while True:
             if self.stop.is_set():
-                return self.finish(launch, scan, runner_up_at, "stopped")
+                return self.finish(launch, scan, "stopped")
             scan.read()
+            started = self.clock.monotonic()
             state = host_state(options)
+            ended = self.clock.monotonic()
             scan.read()
             if scan.approval_failure:
-                return self.finish(launch, scan, runner_up_at, "approval")
+                return self.finish(launch, scan, "approval")
             if (state and state.get("nonce") == launch.nonce
-                    and liveness(state) is None):
-                return ("served", HostObserver(
-                    options, launch.nonce, state, launch.process, scan,
-                    self.clock, self.progress))
+                    and not state.get("finished")):
+                beat = state.get("time", 0)
+                if first is None:
+                    first = beat
+                elif beat != first:
+                    return ("served", HostObserver(
+                        options, launch.nonce, state, launch.process, scan,
+                        self.clock, self.progress, seen=(started, ended)))
             if launch.process.poll() is not None:
-                return self.finish(launch, scan, runner_up_at, "exited")
+                return self.finish(launch, scan, "exited")
             now = self.clock.monotonic()
             if scan.runner_up and runner_up_at is None:
                 runner_up_at = now
                 deadline = now + WATCH_RUNNER_WAIT
             if now > deadline:
-                return self.finish(launch, scan, runner_up_at, "overdue")
+                return self.finish(launch, scan, "overdue")
             self.clock.wait(self.stop, WATCH_POLL)
 
-    def finish(self, launch, scan, runner_up_at, why):
-        """An attempt ends without a serving host: ends whatever is left of
-        it, then reads its log once more and says what kind of end it was."""
-        stuck = end_host(local_record(self.options), launch.process) == STUCK
+    def finish(self, launch, scan, why):
+        """A launch ended without a serving host. What it may have asked of
+        the device is recorded first (a runner that came up and said nothing
+        counts), then what is left of it is ended, then its log is read once
+        more. Only a launch whose runner never came up is a plain failure."""
         scan.read()
-        if scan.approval_failure:
-            self.latch.set("observed", launch.nonce, launch.log_path, scan.describe())
-            return ("stopped",) if why == "stopped" else ("approval",)
+        scans = [(launch.nonce, scan, False)]
+        risk = self.approval_risk(scans)
+        if risk:
+            self.latch.set(risk[0], risk[1], launch.log_path, risk[2])
+        remainder = []
+        status = end_host(local_record(self.options), launch.process,
+                          remainder=remainder)
+        after = self.approval_risk(scans)
+        if after and (not risk or after[0] != risk[0]):
+            self.latch.set(after[0], after[1], launch.log_path, after[2])
+        if status != ENDED:
+            pids = ", ".join(f"{pid} ({command[:120]})" for pid, command in remainder)
+            return ("remainder", f"what is left of the host that was starting is "
+                    f"not known to be gone ({status}{': ' + pids if pids else ''}); "
+                    "nothing else was started")
         if why == "stopped":
-            if scan.runner_up and (runner_up_at is None or self.clock.monotonic()
-                                   - runner_up_at < WATCH_APPROVAL_WINDOW):
-                self.latch.set("possible", launch.nonce, launch.log_path,
-                               "the host was ended before its log could say "
-                               "whether the device asked for approval")
             return ("stopped",)
-        if stuck:
-            return ("stuck", "part of the host that was starting would not end, "
-                    "even after SIGKILL: no second host starts beside it")
+        if after:
+            return ("approval", self.approval_text(after, launch))
         if why == "exited":
-            return ("failed", f"xcodebuild ended before the host served "
-                    f"({scan.describe()}); log {launch.log_path}", False)
-        explanation = (f"the runner was up but did not serve within "
-                       f"{WATCH_RUNNER_WAIT} s" if scan.runner_up else
-                       f"the runner did not come up within {self.options.wait} s")
-        return ("failed", f"{explanation}; log {launch.log_path}", False)
+            return ("failed", "xcodebuild ended before the runner came up "
+                    f"({scan.describe()}); log {launch.log_path}")
+        return ("failed", f"the runner did not come up within {self.options.wait} s; "
+                f"log {launch.log_path}")
+
+    @staticmethod
+    def approval_text(risk, launch):
+        kind, _, detail, _ = risk
+        if kind == "observed":
+            return ("the device asked for an approval and it was not given "
+                    f"({detail}); run `start` with the owner at the device, "
+                    "then `watch` again")
+        return (f"{detail}: the host started for the replacement ended before "
+                f"it served (log {launch.log_path}); run `start` with the owner "
+                "at the device, then `watch` again")
 
     def give_up(self, state, detail, code):
         self.say(f"{STATE_TEXT[state]}: {detail}")
         self.record.update(state=state, detail=detail)
         return code
 
-    def refuse_after_approval_failure(self):
+    def refuse_after_approval_failure(self, detail=None):
         """A watch is not run again after an approval failure by whatever
         starts it again (a job manager, a loop): each try would put another
         prompt on the device. The latch on disk, not this watch's memory, is
         what refuses, and only a host that serves clears it."""
         latch = self.latch.read() or {}
-        detail = latch.get("detail", "")
+        detail = detail or latch.get("detail", "")
         self.say("a host started for this device may have needed an approval "
                  f"nobody gave ({latch.get('kind')}), and no host serves: run "
                  "`start` with the owner at the device, then `watch` again; "
@@ -1956,6 +2190,12 @@ class Watch:
         self.say("ending on request; a serving host is left as it is")
         self.record.update(state=STOPPED, detail="ended on request")
         return 0
+
+
+def reason_of(verdict):
+    """A few words on what the verdict was about, for the record."""
+    return "finished" if verdict.get("finished") else (
+        "hung" if verdict.get("hung") else "its heartbeat stopped")
 
 
 def launchd_path():
@@ -1978,10 +2218,12 @@ def launchd_job(options, label):
     The job runs the same foreground `watch` and relies on nothing of the
     environment it is made in: absolute interpreter, script, state directory
     and derived data, and a PATH built for it. launchd starts it once and
-    restarts it only after a crash, a signal the process did not handle:
-    every failure the watch itself reports (approval, giving up) exits with a
-    status, and a job that came back after those would put a new prompt on the
-    device. Processes the watch started are left running when it ends."""
+    never restarts it (no KeepAlive): every end the watch reports (approval,
+    giving up, not being able to tell) is a status, and a job that came back
+    after those would put a new prompt on the device. The price is that a
+    watch that crashes is not replaced by launchd: its host is left serving,
+    and the next poll of `status` shows the watch gone. Processes the watch
+    started are left running when it ends."""
     state = pathlib.Path(options.state_dir).resolve()
     arguments = [sys.executable, str(SCRIPT), "--device", options.device,
                  "--state-dir", str(state),
@@ -2008,8 +2250,6 @@ def launchd_job(options, label):
         "ProgramArguments": arguments,
         "EnvironmentVariables": environment,
         "RunAtLoad": True,
-        "KeepAlive": {"Crashed": True},
-        "ThrottleInterval": 30,
         "AbandonProcessGroup": True,
         "LimitLoadToSessionType": "Aqua",
         "StandardOutPath": log_path,
@@ -2051,7 +2291,7 @@ def command_watch(options, stop=None):
         # Printing creates nothing, and launchd will not create the directory
         # its log goes to.
         log(f"the job logs to {job['StandardOutPath']}: before loading it, run "
-            f"`mkdir -p {pathlib.Path(job['StandardOutPath']).parent}`")
+            f"`mkdir -p {shlex.quote(str(pathlib.Path(job['StandardOutPath']).parent))}`")
         sys.stdout.write(plistlib.dumps(job).decode())
         return 0
     if options.detach:
@@ -2213,7 +2453,8 @@ def parse(argv):
                            help=argparse.SUPPRESS)
     ios_device_reports.add_arguments(supervise)
     watch = commands.add_parser(
-        "watch", help="keep the host serving: start the next one the moment it ends")
+        "watch", help="keep the host serving: start the next one once the old one "
+                      "is shown to be dead, and say so when that cannot be shown")
     watch.add_argument("--hours", type=float, default=8,
                        help="lifetime of each host the watch starts (default: 8)")
     watch.add_argument("--wait", type=int, default=240,
@@ -2228,7 +2469,10 @@ def parse(argv):
                        help="print the launchd job that runs this watch, and "
                             "exit; it creates nothing, and the job's log "
                             "directory, STATE_DIR/UDID, must exist when it "
-                            "loads: `mkdir -p` it first")
+                            "loads: `mkdir -p` it first. launchd never "
+                            "restarts the job (it has no KeepAlive): a watch "
+                            "that crashes stays gone, its host keeps serving, "
+                            "and `status` shows the watch missing")
     ios_device_reports.add_arguments(watch)
     collections_help(watch)
     commands.add_parser("status", help="report whether the host is serving")
