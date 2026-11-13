@@ -46,14 +46,33 @@ struct GraphicsNoticeBanner: View {
 /// memory, one below the other in that order, below the statistics capsule when
 /// that is up. The stack is one column at the top, each banner as wide as its
 /// words, clear of the side keys and the capsule.
+///
+/// The column is plain while it fits the room it is given, so a tap beside the
+/// banners reaches the guest. When the notices are together taller than the
+/// room (the accessibility text sizes, a short window), it scrolls instead, no
+/// wider than the banners and no taller than the room, so every Dismiss can be
+/// reached and the side keys stay tappable.
 struct SessionNoticesOverlay: View {
     @Environment(AppModel.self) private var model
+
+    /// The side padding every banner draws itself with.
+    private static let bannerInset: CGFloat = 24
 
     var body: some View {
         let denial = model.networkDenialShowing
         let showing = denial != nil || model.graphicsNotice.isShowing || model.thermalNotice.isShowing
             || model.cameraNoticeShowing || model.memoryNoticeShowing
-        column(denial: denial)
+        ViewThatFits(in: .vertical) {
+            column(denial: denial)
+            ScrollView(.vertical) {
+                // The scroll view is as wide as the glass, and not the
+                // padding around it, which would take touches too.
+                column(denial: denial)
+                    .padding(.horizontal, -Self.bannerInset)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .padding(.horizontal, Self.bannerInset)
+        }
         .padding(.top, showing ? StatsPlacement.noticeTop(statsShowing: model.session.showStats) : 0)
         .animation(.easeInOut(duration: 0.2), value: denial)
         .animation(.easeInOut(duration: 0.2), value: model.graphicsNotice.isShowing)

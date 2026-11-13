@@ -740,7 +740,8 @@ requires reopening Andarium.
   (`MemoryPressureNoticeState` decides; every configuration has it). It appears
   when the level reaches critical and stays while it lasts and a little after;
   a dismissal holds until the level has left critical and reached it again, and
-  a restart or the end of a run clears it.
+  a restart or the end of a run clears it. The notices of a session share one
+  column, which scrolls when they are together taller than its room.
 - **Session ends.** The runtime records how each session ended
   ([`docs/architecture.md`](../docs/architecture.md)). The next launch keeps
   that record as the previous session's (`PreviousSession`) and, after an end
