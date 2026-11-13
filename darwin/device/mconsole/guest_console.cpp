@@ -358,7 +358,8 @@ public:
 	 *
 	 * The error flag of any part makes the reply rejected, though the guest
 	 * sets it on the first part only. A datagram that is shorter than the
-	 * reply header, or advertises more text than it carries, is malformed. */
+	 * reply header, longer than a reply can be, or advertises more text than
+	 * it carries, is malformed. */
 	[[nodiscard]] ExchangeResult receive(std::string &response,
 		Deadline deadline) const
 	{
@@ -381,16 +382,23 @@ public:
 				(void)::setsockopt(descriptor_, SOL_SOCKET, SO_RCVTIMEO,
 					&timeout, sizeof(timeout));
 			}
-			Reply reply {};
-			const auto received = ::recv(descriptor_, &reply, sizeof(reply),
-				flags);
+			/* One byte more than any reply is long, so that a datagram
+			 * that is longer, which recv would cut to fit, shows. */
+			std::array<char, sizeof(Reply) + 1U> datagram {};
+			const auto received = ::recv(descriptor_, datagram.data(),
+				datagram.size(), flags);
 			if (received < 0) {
 				if (errno == EINTR)
 					continue;
 				return ExchangeResult::pending;
 			}
 			if (received < header ||
-			    reply.length > maximumConsoleData ||
+			    received > static_cast<ssize_t>(sizeof(Reply)))
+				return ExchangeResult::malformed;
+			Reply reply {};
+			std::memcpy(&reply, datagram.data(),
+				static_cast<std::size_t>(received));
+			if (reply.length > maximumConsoleData ||
 			    reply.length > static_cast<std::size_t>(received - header))
 				return ExchangeResult::malformed;
 			auto length = static_cast<std::size_t>(reply.length);

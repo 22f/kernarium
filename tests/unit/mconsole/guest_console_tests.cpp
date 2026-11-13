@@ -671,10 +671,25 @@ void sendRawReply(int descriptor, const sockaddr_un &client,
 		static_cast<ssize_t>(bytes));
 }
 
+/* A datagram longer than a reply can be, whose header advertises `text`: a
+ * receive that cuts it to the size of a reply would find it whole. */
+void sendOversizedReply(int descriptor, const sockaddr_un &client,
+	socklen_t clientLength, std::string_view text, std::size_t extra)
+{
+	std::vector<char> datagram(sizeof(uml::testing::ConsoleReply) + extra, '\0');
+	uml::testing::ConsoleReply reply {0U, 0U,
+		static_cast<std::uint32_t>(text.size() + 1U), {}};
+	std::memcpy(reply.data.data(), text.data(), text.size());
+	std::memcpy(datagram.data(), &reply, sizeof(reply));
+	require(::sendto(descriptor, datagram.data(), datagram.size(), 0,
+		reinterpret_cast<const sockaddr *>(&client), clientLength) ==
+		static_cast<ssize_t>(datagram.size()));
+}
+
 /* Only the guest's whole reply, "synced in <n> ms", is a confirmation: text
  * that merely starts alike, a count that is no number, a datagram that carries
- * less than it advertises, one shorter than a header, and an error flagged in
- * any part of the reply are not, and none of them starts the SysRq fallback,
+ * less than it advertises, one shorter than a header, one longer than a reply
+ * can be, and an error flagged in any part of the reply are not, and none of them starts the SysRq fallback,
  * which only a reply that says "Unknown command" and nothing more does. */
 void aWritebackReplyIsValidatedStrictly()
 {
@@ -755,6 +770,17 @@ void aWritebackReplyIsValidatedStrictly()
 				sizeof(uml::testing::ConsoleReply));
 		});
 		require(one.result == GuestWriteback::refused);
+	}
+	for (const std::size_t extra : {std::size_t {1U}, std::size_t {64U}}) {
+		/* One longer than a reply can be, whose first 524 bytes are the
+		 * guest's whole reply: only what fits would be read. */
+		const auto one = sync([extra](int fd, const sockaddr_un &to,
+					    socklen_t n) {
+			sendOversizedReply(fd, to, n, "synced in 3 ms", extra);
+		});
+		require(one.result == GuestWriteback::refused,
+			"an oversized datagram is no confirmation");
+		require(one.heard == onlySync);
 	}
 	{
 		/* One shorter than the header. */
