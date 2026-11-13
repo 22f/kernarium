@@ -416,12 +416,11 @@ struct Candidate final {
  * the line, which is as far as they can bring the open ones, and a spared
  * account is asked only when they are still above the budget with nothing else
  * left. One that is idle is asked as soon as it holds more than the target. A
- * relief so
- * leaves the open accounts at most a reserve under the budget, and the next
- * comes after the stores have taken that, never at every store. An account
- * holding nothing is never asked, and a budget smaller than one address space
- * still holds. Of accounts equal in every respect, the one opened last is asked
- * first.
+ * relief so leaves the open accounts at most a reserve under the budget, and
+ * the next comes after the stores have taken that, never at every store. An
+ * account holding nothing is never asked, and a budget smaller than one address
+ * space still holds. Of accounts equal in every respect, the one opened last is
+ * asked first.
  *
  * Every caller takes its turn, however the lock is held: one that went on
  * storing while another held it, for an account opening or going, a census or
