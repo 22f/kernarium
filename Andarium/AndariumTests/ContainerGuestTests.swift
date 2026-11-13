@@ -610,14 +610,16 @@ struct ContainerGuestTests {
                 case .singleApk:
                     row += " layout=single-apk"
                 case let .parts(plan):
-                    row += " layout=\(plan.kind) parts-in-file=\(plan.candidates.count) apk-bytes=\(plan.apkBytes)"
-                    row += " variants=\(plan.variants.map { "n\($0.number):sdk\($0.minSdk)\($0.abis.isEmpty ? "" : ":\($0.abis)")\($0.otherTargeting ? ":other" : "")" })"
+                    let listed = plan.variants.isEmpty ? plan.candidates : plan.variants.flatMap { $0.apks.map(\.part) }
+                    let sizes = Dictionary(listed.map { ($0.entry, $0.bytes) }, uniquingKeysWith: { first, _ in first })
+                    row += " layout=\(plan.kind) parts-in-file=\(sizes.count) apk-bytes=\(sizes.values.reduce(0, +))"
+                    row += " variants=\(plan.variants.map { "n\($0.number):sdk\($0.targeting.sdk)alt\($0.targeting.sdkAlternatives):abi\($0.targeting.abis)alt\($0.targeting.abiAlternatives)\($0.targeting.other || $0.targeting.unknownAbi ? ":other" : "")" })"
                     row += " data-files=\(plan.data.count) unplaced-data=\(plan.unplacedData) package-from-container=\(plan.packageName != nil)"
                     if let selected = try? plan.selecting(guestAbis: abis, guestSdk: sdk) {
                         chosen = selected
                         let kinds = selected.candidates.compactMap(\.abi)
                         row += " parts-chosen=\(selected.candidates.count) chosen-bytes=\(selected.apkBytes) chosen-processor-splits=\(kinds)"
-                        row += " processor-splits-in-file=\(Set(plan.candidates.compactMap(\.abi)).sorted())"
+                        row += " processor-splits-in-file=\(Set(listed.compactMap(\.abi)).sorted())"
                     } else {
                         row += " chosen=none"
                     }

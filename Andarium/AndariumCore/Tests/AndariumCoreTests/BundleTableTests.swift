@@ -201,6 +201,166 @@ struct BundleTableTests {
         #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: ApkContainer.defaultGuestAbis, guestSdk: 37) }
     }
 
+    // MARK: Targeting
+
+    private let arm = ["arm64-v8a", "armeabi-v7a", "armeabi"]
+
+    @Test func anAlternativeForANewerAndroidThatTheGuestHasExcludesTheVariantWithNoFallingBackAcrossIt() throws {
+        // The variant from 21 has a sibling from 23; the one from 23 is for a processor the guest lacks.
+        let toc = BundleTocFixture(variants: [
+            Variant(minSdk: 21, apks: [.master("splits/old-master.apk")]),
+            Variant(minSdk: 23, abis: [4], apks: [.master("splits/new-master.apk")]),
+        ])
+        let found = try plan(archive(toc))
+        #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: arm, guestSdk: 37) }
+        // Below 23 the older variant is the one that fits.
+        #expect(try found.selecting(guestAbis: arm, guestSdk: 22).candidates.map(\.entry) == ["splits/old-master.apk"])
+        // A guest with the processor takes the newer one.
+        #expect(try found.selecting(guestAbis: ["x86"], guestSdk: 37).candidates.map(\.entry) == ["splits/new-master.apk"])
+    }
+
+    @Test func aProcessorValueTheReaderCannotNameRefusesItsVariantOrApkAndIsNeverNoRestriction() throws {
+        // 9 is no processor this reader has a name for; 0 is none stated; 8 is RISC-V.
+        for alias in [9, 0, 8, 1000] {
+            let variant = BundleTocFixture(variants: [Variant(minSdk: 21, abis: [alias], apks: [.master("splits/base-master.apk")])])
+            let found = try plan(archive(variant))
+            #expect(throws: InstallRefusal.damaged, "variant \(alias)") { _ = try found.selecting(guestAbis: arm, guestSdk: 37) }
+            // Of two variants, the one with the processor it cannot name is the one left out.
+            let two = BundleTocFixture(variants: [
+                Variant(minSdk: 21, abis: [alias], apks: [.master("splits/odd-master.apk")]),
+                Variant(minSdk: 21, abis: [3], apks: [.master("splits/arm-master.apk")]),
+            ])
+            #expect(try plan(archive(two)).selecting(guestAbis: arm, guestSdk: 37).candidates.map(\.entry) == ["splits/arm-master.apk"], "variant \(alias)")
+            // A split for it is not installed either.
+            let split = BundleTocFixture(variants: [Variant(apks: [
+                .master("splits/base-master.apk"), .split("splits/odd.apk", "config.odd", abi: alias, abiAlternatives: []),
+                .split("splits/arm.apk", "config.arm64_v8a", abi: 3, abiAlternatives: []),
+            ])])
+            #expect(entries(try plan(archive(split)).selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/arm.apk"], "split \(alias)")
+        }
+    }
+
+    @Test func twoVariantsThatFitAreRefusedAndNotChosenByTheirNumber() throws {
+        let toc = BundleTocFixture(variants: [
+            Variant(minSdk: 21, sdkAlternatives: [], number: 0, apks: [.master("splits/a-master.apk")]),
+            Variant(minSdk: 23, sdkAlternatives: [], number: 1, apks: [.master("splits/b-master.apk")]),
+        ])
+        let found = try plan(archive(toc))
+        #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: arm, guestSdk: 37) }
+        // With the alternatives bundletool writes, the same two are told apart.
+        var told = toc
+        told.variants[0].sdkAlternatives = nil
+        told.variants[1].sdkAlternatives = nil
+        #expect(try plan(archive(told)).selecting(guestAbis: arm, guestSdk: 37).candidates.map(\.entry) == ["splits/b-master.apk"])
+        // The same processor twice is no better.
+        let abis = BundleTocFixture(variants: [
+            Variant(minSdk: 1, abis: [3], abiAlternatives: [], apks: [.standalone("standalones/a.apk")]),
+            Variant(minSdk: 1, abis: [3], abiAlternatives: [], apks: [.standalone("standalones/b.apk")]),
+        ])
+        #expect(throws: InstallRefusal.damaged) { _ = try plan(archive(abis)).selecting(guestAbis: arm, guestSdk: 37) }
+    }
+
+    @Test func theProcessorOfAVariantIsTheGuestsMostPreferredOneTheBundleHasCodeFor() throws {
+        // Written as bundletool writes them: each variant lists the others' processors as its alternatives.
+        let toc = BundleTocFixture(variants: [
+            Variant(minSdk: 1, abis: [3], apks: [.standalone("standalones/arm64.apk")]),
+            Variant(minSdk: 1, abis: [2], apks: [.standalone("standalones/v7a.apk")]),
+            Variant(minSdk: 1, abis: [4], apks: [.standalone("standalones/x86.apk")]),
+        ])
+        let found = try plan(archive(toc))
+        #expect(try found.selecting(guestAbis: ["arm64-v8a", "armeabi-v7a"], guestSdk: 37).candidates.map(\.entry) == ["standalones/arm64.apk"])
+        #expect(try found.selecting(guestAbis: ["armeabi-v7a", "arm64-v8a"], guestSdk: 37).candidates.map(\.entry) == ["standalones/v7a.apk"])
+        #expect(try found.selecting(guestAbis: ["x86_64", "x86"], guestSdk: 37).candidates.map(\.entry) == ["standalones/x86.apk"])
+        #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: ["riscv64"], guestSdk: 37) }
+    }
+
+    @Test func anApkIsForTheGuestsAndroidByItsOwnTargetingToo() throws {
+        let toc = BundleTocFixture(variants: [Variant(apks: [
+            .master("splits/base-master.apk"), Apk(path: "splits/new.apk", splitID: "config.new", sdk: 31),
+            Apk(path: "splits/future.apk", splitID: "config.future", sdk: 99),
+            // A sibling for a newer Android that the guest has makes this one the wrong fit.
+            Apk(path: "splits/old.apk", splitID: "config.old", sdk: 1, sdkAlternatives: [28]),
+        ])])
+        let found = try plan(archive(toc))
+        #expect(entries(try found.selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/new.apk"])
+        #expect(entries(try found.selecting(guestAbis: arm, guestSdk: 27)) == ["splits/base-master.apk", "splits/old.apk"])
+        // A base for a newer Android than the guest's leaves no base.
+        let future = BundleTocFixture(variants: [Variant(apks: [.master("splits/base-master.apk", sdk: 99)])])
+        #expect(throws: InstallRefusal.damaged) { _ = try plan(archive(future)).selecting(guestAbis: arm, guestSdk: 37) }
+    }
+
+    @Test func targetingThatIsNotWeighedRefusesTheFileOnlyWhereItsApkWouldBeInstalled() throws {
+        let toc = BundleTocFixture(variants: [Variant(apks: [
+            .master("splits/base-master.apk"),
+            // A density is kept; a sanitizer is not weighed.
+            Apk(path: "splits/hdpi.apk", splitID: "config.hdpi", density: true),
+            Apk(path: "splits/odd.apk", splitID: "config.odd", sdk: 99, other: true),
+        ])])
+        let found = try plan(archive(toc))
+        // Out of reach of this guest, so never installed, so no matter.
+        #expect(entries(try found.selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/hdpi.apk"])
+        let reachable = BundleTocFixture(variants: [Variant(apks: [
+            .master("splits/base-master.apk"), Apk(path: "splits/odd.apk", splitID: "config.odd", other: true),
+        ])])
+        #expect(throws: InstallRefusal.damaged) { _ = try plan(archive(reachable)).selecting(guestAbis: arm, guestSdk: 37) }
+        // A variant for several processors together is not chosen; one for a density neither.
+        let multi = BundleTocFixture(variants: [Variant(minSdk: 1, multiAbi: true, apks: [.standalone("standalones/multi.apk")])])
+        #expect(throws: InstallRefusal.damaged) { _ = try plan(archive(multi)).selecting(guestAbis: arm, guestSdk: 37) }
+    }
+
+    @Test func aBundleWithSplitsAndAMultiAbiStandaloneInstallsThroughTheSplits() throws {
+        // The standalone build for old Androids is for the processors together (not weighed here) and
+        // from level 1; the split variant is from 21. Android 17 takes the splits.
+        let toc = BundleTocFixture(variants: [
+            Variant(minSdk: 1, multiAbi: true, apks: [.standalone("standalones/multi.apk")]),
+            Variant(minSdk: 21, apks: [.master("splits/base-master.apk"), .split("splits/base-en.apk", "config.en")]),
+        ])
+        let found = try plan(archive(toc))
+        #expect(entries(try found.selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/base-en.apk"])
+        // Below 21 only the standalone is for the guest, and it is not weighed: refused.
+        #expect(throws: InstallRefusal.damaged) { _ = try found.selecting(guestAbis: arm, guestSdk: 19) }
+    }
+
+    @Test func aSplitOnlyForProcessorsTheGuestLacksIsNoMatchingProcessorNotLeftOutQuietly() throws {
+        let toc = BundleTocFixture(variants: [Variant(apks: [
+            .master("splits/base-master.apk"), .split("splits/x86.apk", "config.x86", abi: 4), .split("splits/x64.apk", "config.x86_64", abi: 5),
+        ])])
+        #expect(throws: InstallRefusal.noMatchingProcessor) { _ = try plan(archive(toc)).selecting(guestAbis: arm, guestSdk: 37) }
+        // A split with the sibling the guest prefers listed as an alternative is the wrong fit too.
+        let preferred = BundleTocFixture(variants: [Variant(apks: [
+            .master("splits/base-master.apk"), .split("splits/v7a.apk", "config.armeabi_v7a", abi: 2, abiAlternatives: [3]),
+            .split("splits/arm64.apk", "config.arm64_v8a", abi: 3, abiAlternatives: [2]),
+        ])])
+        #expect(entries(try plan(archive(preferred)).selecting(guestAbis: arm, guestSdk: 37)) == ["splits/base-master.apk", "splits/arm64.apk"])
+    }
+
+    // MARK: Descriptions of a path
+
+    @Test func aPathTwoVariantsShareTakesTheDescriptionOfTheVariantThatIsChosen() throws {
+        // The first variant describes the shared APK as the x86 one; the chosen one, as the ARM64 one.
+        let toc = BundleTocFixture(variants: [
+            Variant(minSdk: 21, apks: [.master("splits/old-master.apk"), .split("splits/shared.apk", "config.x86", abi: 4, abiAlternatives: [])]),
+            Variant(minSdk: 23, apks: [.master("splits/new-master.apk"), .split("splits/shared.apk", "config.arm64_v8a", abi: 3, abiAlternatives: [])]),
+        ])
+        let found = try plan(archive(toc))
+        let chosen = try found.selecting(guestAbis: arm, guestSdk: 37)
+        #expect(entries(chosen) == ["splits/new-master.apk", "splits/shared.apk"])
+        #expect(chosen.candidates.last?.splitName == "config.arm64_v8a" && chosen.candidates.last?.abi == "arm64-v8a")
+        // The older one, on its own guest, sees its own description of the path.
+        #expect(throws: InstallRefusal.noMatchingProcessor) { _ = try found.selecting(guestAbis: arm, guestSdk: 22) }
+        #expect(try found.selecting(guestAbis: ["x86"], guestSdk: 22).candidates.last?.splitName == "config.x86")
+    }
+
+    @Test func aPathDescribedTwiceInOneVariantIsDamaged() {
+        let twice = BundleTocFixture(variants: [Variant(apks: [
+            .master("splits/base-master.apk"), .split("splits/a.apk", "config.en"), .split("splits/a.apk", "config.fr"),
+        ])])
+        #expect(refusal(archive(twice)) == .damaged)
+        // The base twice, as a split as well.
+        let base = BundleTocFixture(variants: [Variant(apks: [.master("splits/base-master.apk"), .split("splits/base-master.apk", "config.en")])])
+        #expect(refusal(archive(base)) == .damaged)
+    }
+
     // MARK: Asset packs
 
     @Test func theSlicesOfAnInstallTimePackAreInstalledWithTheBase() throws {
@@ -255,6 +415,34 @@ struct BundleTableTests {
         #expect(entries(x86).contains("asset-slices/levels-x86.apk") && !entries(x86).contains("asset-slices/levels-arm64.apk"))
         // Dimensions the guest cannot be asked about (a language, a texture format) keep their slice.
         #expect(entries(try found.selecting(guestAbis: ["arm64-v8a"], guestSdk: 37)).contains("asset-slices/levels-master.apk"))
+    }
+
+    @Test func aSliceIsMatchedByTheSameRulesAsAnApkAndUnweighedTargetingRefusesIt() throws {
+        // The reviewer's shape: a base variant and an install-time asset set.
+        let base = [Variant(minSdk: 21, apks: [.master("splits/base-master.apk")])]
+        let found = try plan(bundle([.installTime("levels", pack)], variants: base))
+        #expect(entries(try found.selecting(guestAbis: arm, guestSdk: 37)) == [
+            "splits/base-master.apk", "asset-slices/levels-master.apk", "asset-slices/levels-config.tcf_astc.apk",
+        ])
+        // An alternative above the slice and at or below the guest's level leaves it out.
+        let layered: [Slice] = [
+            .slice("asset-slices/levels-master.apk", "levels", master: true),
+            .slice("asset-slices/levels-v1.apk", "levels.config.v1", minSdk: 1, sdkAlternatives: [28]),
+            .slice("asset-slices/levels-v28.apk", "levels.config.v28", minSdk: 28, sdkAlternatives: [1]),
+        ]
+        let sets = try plan(bundle([.installTime("levels", layered)], variants: base))
+        #expect(entries(try sets.selecting(guestAbis: arm, guestSdk: 37)).contains("asset-slices/levels-v28.apk"))
+        #expect(!entries(try sets.selecting(guestAbis: arm, guestSdk: 37)).contains("asset-slices/levels-v1.apk"))
+        #expect(entries(try sets.selecting(guestAbis: arm, guestSdk: 27)).contains("asset-slices/levels-v1.apk"))
+        // A slice for a processor this reader cannot name is left out; one with targeting it does not weigh is refused when it would be sent.
+        let odd = try plan(bundle([.installTime("levels", [
+            .slice("asset-slices/levels-master.apk", "levels", master: true), .slice("asset-slices/levels-odd.apk", "levels.config.odd", abi: 9),
+        ])], variants: base))
+        #expect(!entries(try odd.selecting(guestAbis: arm, guestSdk: 37)).contains("asset-slices/levels-odd.apk"))
+        let other = try plan(bundle([.installTime("levels", [
+            .slice("asset-slices/levels-master.apk", "levels", master: true), .slice("asset-slices/levels-tier.apk", "levels.config.tier", other: true),
+        ])], variants: base))
+        #expect(throws: InstallRefusal.damaged) { _ = try other.selecting(guestAbis: arm, guestSdk: 37) }
     }
 
     @Test func aStandaloneApkHasItsInstallTimePacksFusedInAndKeepsOnlyTheCount() throws {
@@ -390,14 +578,17 @@ struct BundleTableTests {
         let packs = try BundleTable(withPacks.build()).assetModules
         #expect(packs.map(\.name) == ["levels", "later", "none"] && packs.map(\.delivery) == [.installTime, .fastFollow, .unknown])
         #expect(packs[0].slices.map(\.path) == ["asset-slices/levels-master.apk", "asset-slices/l.apk"])
-        #expect(packs[0].slices[1].abi == "arm64-v8a" && packs[0].slices[1].minSdk == 28 && packs[0].slices[0].minSdk == 1)
+        #expect(packs[0].slices[1].targeting.abis == ["arm64-v8a"] && packs[0].slices[1].targeting.sdk == [28])
+        #expect(packs[0].slices[0].targeting.sdk.isEmpty && packs[0].slices[0].targeting.abis.isEmpty)
         #expect(!packs[0].hasUnusableSlice)
         // A table with no asset sets has none.
         #expect(try BundleTable(release().build()).assetModules.isEmpty)
         // A whole table reads.
         let table = try BundleTable(release().build())
-        #expect(table.variants.map(\.minSdk) == [21, 23, 31])
+        #expect(table.variants.map(\.targeting.sdk) == [[21], [23], [31]])
+        // Each variant lists the levels of the others as its alternatives.
+        #expect(table.variants.map(\.targeting.sdkAlternatives) == [[23, 31], [21, 31], [21, 23]])
         #expect(table.variants[2].apks.first?.isMaster == true && table.variants[2].apks.first?.module == "base")
-        #expect(table.variants[2].apks.contains { $0.path == "splits/base-arm64_v8a_2.apk" && $0.abi == "arm64-v8a" })
+        #expect(table.variants[2].apks.contains { $0.path == "splits/base-arm64_v8a_2.apk" && $0.targeting.abis == ["arm64-v8a"] })
     }
 }

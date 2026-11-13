@@ -78,9 +78,14 @@ struct BundleTable: Equatable, Sendable {
     /// The table cannot be read, or holds more than a bundle does.
     struct Failure: Error, Equatable {}
 
-    /// The limits of a table: the message itself is bounded by the caller.
+    /// The limits of a table: the message itself is bounded by the caller, and
+    /// the parser descends no further than the messages it knows (it skips an
+    /// unknown field as bytes), so it has no depth to limit.
     static let maxVariants = 64
-    static let maxDepth = 8
+    /// The most values and alternatives one dimension of targeting may list.
+    static let maxTargetingValues = 64
+
+    typealias Targeting = ApkContainerPlan.Targeting
 
     struct Apk: Equatable, Sendable {
         var path: String
@@ -91,20 +96,16 @@ struct BundleTable: Equatable, Sendable {
         var module: String
         /// A standalone APK holds the whole app (`universal.apk`).
         var isStandalone: Bool
-        /// The processor the APK is the code of, in Android's spelling.
-        var abi: String?
+        /// The Android and the processor the APK is for, with the siblings'.
+        var targeting: Targeting
     }
 
     struct Variant: Equatable, Sendable {
         var number: Int
-        /// The lowest API level the variant is for (1 with no restriction).
-        var minSdk: Int
-        /// The processors the variant itself is for (a standalone build of
-        /// one processor); empty for no restriction.
-        var abis: [String]
-        /// The variant is targeted at something this reader does not weigh
-        /// (a screen density, a texture format, a runtime): not chosen.
-        var otherTargeting: Bool
+        /// What the variant is for, as a whole. A kind of targeting this reader
+        /// does not weigh (a screen density, a texture format, several
+        /// processors together, a runtime) is `other`: the variant is not chosen.
+        var targeting = Targeting()
         var apks: [Apk]
     }
 
@@ -123,10 +124,8 @@ struct BundleTable: Equatable, Sendable {
         var path: String
         /// The split's id; empty for none.
         var splitID: String
-        /// The processor the slice is for, in Android's spelling, when it is for one.
-        var abi: String?
-        /// The lowest API level the slice is for (1 with no restriction).
-        var minSdk: Int
+        /// The Android and the processor the slice is for, with the siblings'.
+        var targeting: Targeting
     }
 
     struct AssetModule: Equatable, Sendable {
@@ -175,12 +174,12 @@ struct BundleTable: Equatable, Sendable {
     // MARK: Messages
 
     private static func variant(_ data: Data, index: Int) throws -> Variant {
-        var result = Variant(number: index, minSdk: 1, abis: [], otherTargeting: false, apks: [])
+        var result = Variant(number: index, apks: [])
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             switch (number, value) {
             case let (1, .bytes(bytes)):
-                try variantTargeting(bytes, into: &result)
+                result.targeting = try variantTargeting(bytes)
             case let (2, .bytes(bytes)):
                 try apkSet(bytes, into: &result)
             case let (3, .varint(raw)):
@@ -192,51 +191,98 @@ struct BundleTable: Equatable, Sendable {
         return result
     }
 
-    /// `VariantTargeting`: the SDK (field 1) and the processor (field 2) are
+    /// `VariantTargeting`: the Android (field 1) and the processor (field 2) are
     /// weighed; any other field makes the variant one for something else.
-    private static func variantTargeting(_ data: Data, into variant: inout Variant) throws {
+    private static func variantTargeting(_ data: Data) throws -> Targeting {
+        var targeting = Targeting()
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             guard case let .bytes(bytes) = value else { continue }
             switch number {
-            case 1: variant.minSdk = max(1, try sdkMinimum(bytes) ?? 1)
-            case 2: variant.abis = try abiValues(bytes)
-            default: if !bytes.isEmpty { variant.otherTargeting = true }
+            case 1: try sdkTargeting(bytes, into: &targeting)
+            case 2: try abiTargeting(bytes, into: &targeting)
+            default: if !bytes.isEmpty { targeting.other = true }
+            }
+        }
+        return targeting
+    }
+
+    /// `ApkTargeting`: the processor (field 1) and the Android (field 5) are
+    /// weighed. The language (3), the screen density (4) and the texture
+    /// format (6) are not: every such split is installed, which the package
+    /// manager takes and picks from by itself. Any other kind of targeting is
+    /// `other`.
+    private static func apkTargeting(_ data: Data) throws -> Targeting {
+        var targeting = Targeting()
+        var reader = ProtoReader(data)
+        while let (number, value) = try reader.next() {
+            guard case let .bytes(bytes) = value else { continue }
+            switch number {
+            case 1: try abiTargeting(bytes, into: &targeting)
+            case 5: try sdkTargeting(bytes, into: &targeting)
+            case 3, 4, 6: continue
+            default: if !bytes.isEmpty { targeting.other = true }
+            }
+        }
+        // A split holds the code of one processor.
+        if targeting.abis.count > 1 { targeting.other = true }
+        return targeting
+    }
+
+    /// `SdkVersionTargeting`: the values (field 1) and the alternatives (field
+    /// 2), each an `SdkVersion` whose `min` (field 1) is an `Int32Value`.
+    private static func sdkTargeting(_ data: Data, into targeting: inout Targeting) throws {
+        var reader = ProtoReader(data)
+        while let (number, value) = try reader.next() {
+            guard number == 1 || number == 2, case let .bytes(version) = value else { continue }
+            let level = max(1, try sdkMinimum(version))
+            if number == 1 {
+                guard targeting.sdk.count < maxTargetingValues else { throw Failure() }
+                targeting.sdk.append(level)
+            } else {
+                guard targeting.sdkAlternatives.count < maxTargetingValues else { throw Failure() }
+                targeting.sdkAlternatives.append(level)
             }
         }
     }
 
-    /// `SdkVersionTargeting.value[0].min.value`.
-    private static func sdkMinimum(_ data: Data) throws -> Int? {
+    /// `SdkVersion.min.value`; 1 when the version names none.
+    private static func sdkMinimum(_ data: Data) throws -> Int {
         var reader = ProtoReader(data)
-        while let (number, value) = try reader.next() {
-            guard number == 1, case let .bytes(version) = value else { continue }
-            var inner = ProtoReader(version)
-            while let (field, boxed) = try inner.next() {
-                guard field == 1, case let .bytes(wrapper) = boxed else { continue }
-                var wrapped = ProtoReader(wrapper)
-                while let (leaf, number) = try wrapped.next() {
-                    if leaf == 1, case let .varint(raw) = number { return Int(truncatingIfNeeded: min(raw, UInt64(Int32.max))) }
-                }
-                return 0
+        while let (field, boxed) = try reader.next() {
+            guard field == 1, case let .bytes(wrapper) = boxed else { continue }
+            var wrapped = ProtoReader(wrapper)
+            while let (leaf, number) = try wrapped.next() {
+                if leaf == 1, case let .varint(raw) = number { return Int(truncatingIfNeeded: min(raw, UInt64(Int32.max))) }
             }
             return 0
         }
-        return nil
+        return 1
     }
 
-    /// `AbiTargeting.value[].alias`.
-    private static func abiValues(_ data: Data) throws -> [String] {
-        var names: [String] = []
+    /// `AbiTargeting`: the values (field 1) and the alternatives (field 2), each
+    /// an `Abi` whose `alias` (field 1) names a processor. A value that is no
+    /// processor this reader has a name for makes the targeting `unknownAbi`: it
+    /// is never taken for no restriction. An alternative it cannot name is a
+    /// processor no virtual machine of this app has, which changes nothing.
+    private static func abiTargeting(_ data: Data, into targeting: inout Targeting) throws {
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
-            guard number == 1, case let .bytes(abi) = value else { continue }
+            guard number == 1 || number == 2, case let .bytes(abi) = value else { continue }
+            var alias: UInt64 = 0
             var inner = ProtoReader(abi)
-            while let (field, alias) = try inner.next() {
-                if field == 1, case let .varint(raw) = alias, let name = abiNames[Int(truncatingIfNeeded: min(raw, 1000))] { names.append(name) }
+            while let (field, item) = try inner.next() {
+                if field == 1, case let .varint(raw) = item { alias = raw }
+            }
+            let name = abiNames[Int(truncatingIfNeeded: min(alias, 1000))]
+            if number == 1 {
+                guard targeting.abis.count < maxTargetingValues else { throw Failure() }
+                if let name { targeting.abis.append(name) } else { targeting.unknownAbi = true }
+            } else if let name {
+                guard targeting.abiAlternatives.count < maxTargetingValues else { throw Failure() }
+                targeting.abiAlternatives.append(name)
             }
         }
-        return names
     }
 
     /// `AssetSliceSet`: the module's metadata (field 1: its name is field 1 and
@@ -267,26 +313,19 @@ struct BundleTable: Equatable, Sendable {
         return module
     }
 
-    /// An `ApkDescription` of an asset slice: its path (2), its targeting (1: the
-    /// processor is its field 1 and the lowest API level its field 5) and the
-    /// split metadata that marks it an asset slice (7: the split's id). A
+    /// An `ApkDescription` of an asset slice: its path (2), its targeting (1) and
+    /// the split metadata that marks it an asset slice (7: the split's id). A
     /// description of another kind is nil.
     private static func assetSlice(_ data: Data) throws -> AssetSlice? {
         var path: String?
-        var abi: String?
-        var minSdk = 1
+        var targeting = Targeting()
         var split: String?
         var reader = ProtoReader(data)
         while let (number, value) = try reader.next() {
             guard case let .bytes(bytes) = value else { continue }
             switch number {
             case 1:
-                var targeting = ProtoReader(bytes)
-                while let (field, item) = try targeting.next() {
-                    guard case let .bytes(inner) = item else { continue }
-                    if field == 1 { abi = try abiValues(inner).first }
-                    if field == 5 { minSdk = max(1, try sdkMinimum(inner) ?? 1) }
-                }
+                targeting = try apkTargeting(bytes)
             case 2:
                 guard let text = String(data: bytes, encoding: .utf8) else { throw Failure() }
                 path = text
@@ -303,7 +342,7 @@ struct BundleTable: Equatable, Sendable {
         }
         guard let path else { throw Failure() }
         guard let split, path.lowercased().hasSuffix(".apk") else { return nil }
-        return AssetSlice(path: path, splitID: split, abi: abi, minSdk: minSdk)
+        return AssetSlice(path: path, splitID: split, targeting: targeting)
     }
 
     /// `ApkSet`: a module's metadata (field 1, the name its field 1) and its APKs (field 2).
@@ -328,13 +367,12 @@ struct BundleTable: Equatable, Sendable {
         }
     }
 
-    /// `ApkDescription`: the targeting (field 1: the processor is its field 1),
-    /// the path (2), and either split metadata (3: the split's id, and
+    /// `ApkDescription`: the targeting (field 1), the path (2), and either split metadata (3: the split's id, and
     /// whether it is the module's master) or standalone metadata (4). An APK
     /// of any other kind (instant, system) is not installed here.
     private static func apkDescription(_ data: Data, module: String) throws -> Apk? {
         var path: String?
-        var abi: String?
+        var targeting = Targeting()
         var split: (id: String, master: Bool)?
         var standalone = false
         var reader = ProtoReader(data)
@@ -342,10 +380,7 @@ struct BundleTable: Equatable, Sendable {
             guard case let .bytes(bytes) = value else { continue }
             switch number {
             case 1:
-                var targeting = ProtoReader(bytes)
-                while let (field, abis) = try targeting.next() {
-                    if field == 1, case let .bytes(inner) = abis { abi = try abiValues(inner).first }
-                }
+                targeting = try apkTargeting(bytes)
             case 2:
                 guard let text = String(data: bytes, encoding: .utf8) else { throw Failure() }
                 path = text
@@ -368,6 +403,6 @@ struct BundleTable: Equatable, Sendable {
         guard split != nil || standalone else { return nil }
         return Apk(
             path: path, splitID: split?.id ?? "", isMaster: split?.master ?? false, module: module, isStandalone: standalone,
-            abi: standalone ? nil : abi)
+            targeting: targeting)
     }
 }

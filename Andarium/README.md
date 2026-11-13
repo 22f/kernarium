@@ -801,13 +801,23 @@ is on. `AndariumCore/Adb` speaks the protocol.
   not a ZIP, or is cut short, is damaged. It is read in place, never unpacked
   or copied, under bounds on what a hostile file can ask for (the entry count,
   the sizes, and the time, which a cancel ends; `ZipArchive`). The APKs inside
-  are never opened. A bundletool .apks is read through its table of contents:
-  the one variant made for the guest's Android is installed, with the splits
-  of the processor the guest prefers, and a universal .apks installs as one
-  APK; a table that cannot be read, or names no variant for the guest, is a
-  damaged file and nothing is guessed from the names. The slices of the
-  table's install-time asset packs go in the same session, as `bundletool
-  install-apks` does, for the guest's Android and processor (a language, a
+  are never opened. A bundletool .apks is read through its table of contents,
+  and the Android and the processor of each variant and APK are matched as
+  bundletool's matchers do, from the values and the alternatives each lists:
+  exactly one variant must fit the guest, and a sibling made for a newer
+  Android that the guest has excludes a variant (there is no falling back
+  across it). A processor or any other restriction the reader has no name for
+  never means no restriction: it leaves its variant or APK out, and targeting
+  it does not weigh on an APK that would be installed (a graphics API, a
+  device tier) refuses the file. A variant for several processors together
+  (the standalone builds of old Androids) or for a density is not weighed and
+  is not chosen. Each variant keeps its own description of an APK; a path
+  described twice in one variant is a damaged table. The one variant installed
+  has the splits of the processor the guest prefers, and a universal .apks
+  installs as one APK; a table that cannot be read, or names no variant for the
+  guest, is a damaged file and nothing is guessed from the names. The slices of
+  the table's install-time asset packs go in the same session, as `bundletool
+  install-apks` does, when their own targeting fits the guest (a language, a
   density or a texture format is not weighed: every such slice is sent). A
   fast-follow or on-demand pack, or one the table does not say is install-time,
   is not installed, and the result says the app's data was not all copied.

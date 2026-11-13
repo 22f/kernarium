@@ -336,6 +336,26 @@ struct ContainerSessionTests {
         #expect(session.parts.map(\.name) == ["base.apk"] && session.parts.map(\.digest) == [digest(universal)])
     }
 
+    @Test func aBundleWithSplitsAndAMultiAbiStandaloneInstallsThroughTheSplitsOnTheGuestsAndroid() async throws {
+        let adbd = DiscardingAdbd()
+        defer { adbd.shutdown() }
+        // The standalone build for old Androids is for several processors together, which the install does not weigh
+        // and refuses; the guest's Android (API 37) is a split variant's, so it never comes to that.
+        let master = bytes(5, count: 20_011)
+        let toc = BundleToc(variants: [
+            BundleToc.Variant(minSdk: 1, multiAbi: true, apks: [.standalone("standalones/multi.apk")]),
+            BundleToc.Variant(minSdk: 21, apks: [.master("splits/base-master.apk"), .split("splits/base-en.apk", "config.en")]),
+        ])
+        let url = try ContainerFixture.write([
+            ContainerEntry("toc.pb", toc.build()), ContainerEntry("standalones/multi.apk", bytes(6, count: 30_011)),
+            ContainerEntry("splits/base-master.apk", master), ContainerEntry("splits/base-en.apk", bytes(7, count: 9_011)),
+        ], name: "Both.apks")
+        defer { try? FileManager.default.removeItem(at: url) }
+        #expect(try await guest(on: adbd).installApk(at: url, update: { _ in }) == .installed)
+        let session = try #require(adbd.committedSessions.first)
+        #expect(session.parts.count == 2 && session.parts.first?.digest == digest(master))
+    }
+
     @Test func aBundleWhoseTableNamesNoVariantForTheGuestIsDamagedAndNothingIsSent() async throws {
         let adbd = DiscardingAdbd()
         defer { adbd.shutdown() }

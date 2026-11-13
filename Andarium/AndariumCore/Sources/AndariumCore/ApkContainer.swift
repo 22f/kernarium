@@ -128,20 +128,22 @@ public enum ApkContainer {
     // MARK: bundletool's .apks
 
     /// The table of contents (`toc.pb`) names the variants of the app, each
-    /// with the APKs it is made of; the variant for the virtual machine is
-    /// chosen when its Android is known (`ApkContainerPlan.selecting`), and
-    /// only that variant's APKs are installed, never the standalones or the
-    /// splits of another variant beside them. A table that cannot be read, or
-    /// names an APK the file does not hold, is a damaged file: no variant is
-    /// guessed from the names.
+    /// with the APKs it is made of and the Android and processor it is for; the
+    /// one variant that fits the virtual machine is chosen when its Android is
+    /// known (`ApkContainerPlan.selecting`), and only that variant's APKs are
+    /// installed, never the standalones or the splits of another variant
+    /// beside them. Each variant keeps the descriptions of its own APKs: a
+    /// path that two variants share is described by each. A table that cannot be
+    /// read, that names an APK the file does not hold, or that describes a path
+    /// twice in one variant, is a damaged file: no variant is guessed from the
+    /// names.
     private static func bundletool(archive: ZipArchive) throws -> ApkContainerPlan {
         guard let tocEntry = archive.entry(named: "toc.pb"), !tocEntry.isDirectory else { throw InstallRefusal.damaged }
         guard tocEntry.size <= UInt64(maxManifestBytes) else { throw InstallRefusal.damaged }
         let table = try BundleTable(archive.data(of: tocEntry, limit: maxManifestBytes))
         guard !table.variants.isEmpty else { throw InstallRefusal.damaged }
-        var parts: [ApkContainerPlan.Part] = []
-        var known = Set<String>()
         var variants: [ApkContainerPlan.Variant] = []
+        var paths = Set<String>()
         for variant in table.variants {
             guard variant.apks.count <= maxParts else { throw InstallRefusal.damaged }
             // The base is the one APK that is the app itself: the base module's
@@ -153,26 +155,29 @@ public enum ApkContainer {
                 throw InstallRefusal.damaged
             }
             if base.isStandalone, variant.apks.count != 1 { throw InstallRefusal.damaged }
-            var entries: [String] = []
+            var seen = Set<String>()
             var ids = Set<String>()
+            var apks: [ApkContainerPlan.VariantApk] = []
             for apk in variant.apks {
-                guard let entry = archive.entry(named: apk.path), !entry.isDirectory, entries.count < maxParts else { throw InstallRefusal.damaged }
-                // A split is installed once: the same id twice in a variant is a table that contradicts itself.
-                if apk.path != base.path {
+                guard let entry = archive.entry(named: apk.path), !entry.isDirectory else { throw InstallRefusal.damaged }
+                // An APK is described once in a variant, and a split is installed once:
+                // the same path or id twice is a table that contradicts itself.
+                guard seen.insert(entry.name).inserted else { throw InstallRefusal.damaged }
+                let isBase = apk.path == base.path
+                if !isBase {
                     guard ids.insert(apk.splitID.isEmpty ? apk.path : apk.splitID).inserted else { throw InstallRefusal.damaged }
                 }
-                entries.append(entry.name)
-                if known.insert(entry.name).inserted {
-                    parts.append(ApkContainerPlan.Part(
-                        entry: entry.name, bytes: entry.size, name: "", splitName: apk.path == base.path ? nil : apk.splitID,
-                        abi: apk.path == base.path ? nil : apk.abi))
-                }
+                apks.append(ApkContainerPlan.VariantApk(
+                    part: ApkContainerPlan.Part(
+                        entry: entry.name, bytes: entry.size, name: "", splitName: isBase ? nil : apk.splitID,
+                        abi: isBase ? nil : apk.targeting.abis.first),
+                    targeting: apk.targeting))
+                paths.insert(entry.name)
             }
             variants.append(ApkContainerPlan.Variant(
-                number: variant.number, minSdk: variant.minSdk, abis: variant.abis, otherTargeting: variant.otherTargeting,
-                base: base.path, entries: entries, standalone: base.isStandalone))
+                number: variant.number, targeting: variant.targeting, base: base.path, apks: apks, standalone: base.isStandalone))
         }
-        guard !variants.isEmpty, parts.count <= 4096 else { throw InstallRefusal.damaged }
+        guard !variants.isEmpty, paths.count <= 4096 else { throw InstallRefusal.damaged }
         // The asset packs. What `bundletool install-apks` installs with the app are
         // the slices of the install-time ones, in the app's own session. A pack
         // that is delivered later (fast-follow, on demand), or that is not said
@@ -191,13 +196,13 @@ public enum ApkContainer {
                 assetSlices.append(ApkContainerPlan.AssetSlice(
                     part: ApkContainerPlan.Part(
                         entry: entry.name, bytes: entry.size, name: "", splitName: slice.splitID.isEmpty ? module.name : slice.splitID,
-                        abi: slice.abi),
-                    minSdk: slice.minSdk))
+                        abi: slice.targeting.abis.first),
+                    targeting: slice.targeting))
             }
         }
         guard assetSlices.count <= maxParts else { throw InstallRefusal.damaged }
         return ApkContainerPlan(
-            kind: .bundletool, packageName: nil, candidates: parts, data: [], unplacedData: notInstalled, variants: variants,
+            kind: .bundletool, packageName: nil, candidates: [], data: [], unplacedData: notInstalled, variants: variants,
             assetSlices: assetSlices)
     }
 
@@ -487,11 +492,68 @@ public struct ApkContainerPlan: Equatable, Sendable {
         public var abi: String?
     }
 
+    /// What bundletool's targeting says an APK, a variant or an asset slice is
+    /// for: the Android (`SdkVersionTargeting`) and the processor
+    /// (`AbiTargeting`). Each is the values the thing is for, and the
+    /// alternatives, which are what its siblings in the bundle are for; the
+    /// thing fits a device by the same rules bundletool's matchers use.
+    public struct Targeting: Equatable, Sendable {
+        /// The lowest API levels the values name; empty for no restriction.
+        public var sdk: [Int] = []
+        public var sdkAlternatives: [Int] = []
+        /// The processors the values name, in Android's spelling; empty for no restriction.
+        public var abis: [String] = []
+        public var abiAlternatives: [String] = []
+        /// A processor value this reader has no name for: it is for a processor
+        /// no virtual machine here has, never for any.
+        public var unknownAbi = false
+        /// Targeting of a kind this reader does not weigh (several processors
+        /// together, a graphics API, a device tier, a screen density of a
+        /// variant): what has it is not installed.
+        public var other = false
+
+        public init() {}
+
+        /// Whether the thing is for a guest of this Android level (nil when it
+        /// cannot say: the newest) and these processors (its own list, most
+        /// preferred first), by the rules bundletool's matchers use.
+        public func matches(guestAbis: [String], guestSdk: Int?) -> Bool {
+            matchesSdk(guestSdk) && matchesAbi(guestAbis)
+        }
+
+        /// Every value is at or below the guest's level, and no sibling for a newer
+        /// Android that is above the value and still at or below the guest's level
+        /// exists, since that one is the better fit and the interval ends there: there
+        /// is no falling back across it.
+        public func matchesSdk(_ guestSdk: Int?) -> Bool {
+            let level = guestSdk ?? Int.max
+            guard sdk.allSatisfy({ $0 <= level }) else { return false }
+            let floor = sdk.max() ?? 1
+            return !sdkAlternatives.contains(where: { $0 > floor && $0 <= level })
+        }
+
+        /// The most preferred processor of the guest that the thing or its siblings are
+        /// for is one of the thing's own; a thing with no processor value is for a guest
+        /// none of them fit.
+        public func matchesAbi(_ guestAbis: [String]) -> Bool {
+            if unknownAbi { return false }
+            if abis.isEmpty, abiAlternatives.isEmpty { return true }
+            guard let best = guestAbis.first(where: { abis.contains($0) || abiAlternatives.contains($0) }) else { return abis.isEmpty }
+            return abis.contains(best)
+        }
+    }
+
     /// One slice of an install-time asset pack of a bundletool file: an APK sent
-    /// in the app's own session, for an Android no older than `minSdk`.
+    /// in the app's own session when its targeting fits.
     public struct AssetSlice: Equatable, Sendable {
         public var part: Part
-        public var minSdk: Int
+        public var targeting: Targeting
+    }
+
+    /// One APK of a variant, with the targeting the variant describes it with.
+    public struct VariantApk: Equatable, Sendable {
+        public var part: Part
+        public var targeting: Targeting
     }
 
     /// One data file of an .xapk, placed as `folder/name` below the guest's
@@ -503,20 +565,15 @@ public struct ApkContainerPlan: Equatable, Sendable {
         public var name: String
     }
 
-    /// One form of the app a bundletool file holds: the APKs it is made of and
-    /// the Android it is for.
+    /// One form of the app a bundletool file holds: the APKs it is made of, as it
+    /// describes them, and the Android and processor it is for.
     public struct Variant: Equatable, Sendable {
         public var number: Int
-        /// The lowest API level the variant is for.
-        public var minSdk: Int
-        /// The processors the variant is for, when it is one build per processor.
-        public var abis: [String]
-        /// The variant is for something the table names and this install does not weigh.
-        public var otherTargeting: Bool
+        public var targeting: Targeting
         /// The entry of the variant's base.
         public var base: String
-        /// The entries of every APK of the variant, the base among them.
-        public var entries: [String]
+        /// Every APK of the variant, the base among them.
+        public var apks: [VariantApk]
         /// The variant is one standalone APK, which has the install-time asset packs fused into it.
         public var standalone = false
     }
@@ -527,7 +584,8 @@ public struct ApkContainerPlan: Equatable, Sendable {
     /// (`PackageInstallCommand.createSession(packageName:)`).
     public var packageName: String?
     /// Every APK of the app. For a plan without variants the base is first,
-    /// before the processor is chosen; with variants, the APKs of all of them.
+    /// before the processor is chosen; with variants it is empty until one is
+    /// chosen, since each variant describes its own APKs (`Variant.apks`).
     public var candidates: [Part]
     public var data: [DataFile]
     /// Data the archive carries that is not placed: anything but OBB files, and
@@ -552,35 +610,43 @@ public struct ApkContainerPlan: Equatable, Sendable {
         self.assetSlices = assetSlices
     }
 
-    /// The parts this virtual machine installs: the variant for its Android
-    /// (the one with the highest minimum API level that is not above
-    /// `guestSdk`; the newest when the level is not known), then the base, the
-    /// feature, density and language splits, and the splits of the one
-    /// processor of `guestAbis` (its own list, most preferred first) that the
-    /// app has code for, so that no unused code takes room and an app with a
-    /// choice of 32 and 64 bits runs in 64. An app whose only code is for
-    /// other processors has no match. The base is always the first part.
+    /// The parts this virtual machine installs: the one variant that fits its
+    /// Android and processors (`Targeting.matches`; none, or more than one, is
+    /// a file that does not fit), the APKs of that variant that fit, the
+    /// install-time asset slices that fit, and, of those with code for a
+    /// processor, the splits of the one processor of `guestAbis` (its own list,
+    /// most preferred first) that the app has code for, so that no unused code
+    /// takes room and an app with a choice of 32 and 64 bits runs in 64. An app
+    /// whose only code is for other processors has no match. A part of a kind
+    /// of targeting this reader does not weigh is a file it cannot install. The
+    /// base is always the first part. Language, density and texture splits are
+    /// all kept.
     public func selecting(guestAbis: [String], guestSdk: Int? = nil) throws -> ApkContainerPlan {
         var plan = self
-        let level = guestSdk ?? Int.max
         if !variants.isEmpty {
             let variant = try chosenVariant(guestAbis: guestAbis, guestSdk: guestSdk)
-            let wanted = Set(variant.entries)
-            plan.candidates = candidates.filter { wanted.contains($0.entry) }.map { part in
-                var part = part
+            let forAndroid = variant.apks.filter { $0.targeting.matchesSdk(guestSdk) }
+            let apks = forAndroid.filter { $0.targeting.matchesAbi(guestAbis) }
+            // Code for processors the guest has none of is not left out quietly.
+            if forAndroid.contains(where: { $0.targeting.unknownAbi || !$0.targeting.abis.isEmpty }),
+               !apks.contains(where: { !$0.targeting.abis.isEmpty }) {
+                throw InstallRefusal.noMatchingProcessor
+            }
+            // The install-time asset packs go in the same session as the base and its
+            // splits. A standalone APK has them fused into it.
+            let slices = variant.standalone ? [] : assetSlices.filter { $0.targeting.matches(guestAbis: guestAbis, guestSdk: guestSdk) }
+            guard !apks.contains(where: { $0.targeting.other }), !slices.contains(where: { $0.targeting.other }) else {
+                throw InstallRefusal.damaged
+            }
+            plan.candidates = apks.map { apk in
+                var part = apk.part
                 if part.entry == variant.base { part.splitName = nil; part.abi = nil }
                 return part
-            }
+            } + slices.map(\.part)
+            // One split is installed once, from whichever module it comes.
+            let ids = plan.candidates.compactMap(\.splitName)
+            guard Set(ids).count == ids.count else { throw InstallRefusal.damaged }
             plan.variants = []
-            // The install-time asset packs go in the same session as the base and its
-            // splits, those for an Android no newer than the guest's. A standalone APK
-            // has them fused into it.
-            if !variant.standalone {
-                plan.candidates += assetSlices.filter { $0.minSdk <= level }.map(\.part)
-                // One split is installed once, from whichever module it comes.
-                let ids = plan.candidates.compactMap(\.splitName)
-                guard Set(ids).count == ids.count else { throw InstallRefusal.damaged }
-            }
             plan.assetSlices = []
             plan.candidates = try ApkContainer.arranged(plan.candidates, base: variant.base)
         }
@@ -596,23 +662,18 @@ public struct ApkContainerPlan: Equatable, Sendable {
         return plan
     }
 
-    /// The variant to install: not one for another kind of device, for an
-    /// Android no newer than the guest's, the newest of those, and among
-    /// equals the one whose processor the guest prefers. None is a file whose
-    /// parts do not fit this virtual machine.
+    /// The variant to install: the one whose targeting fits the guest. A variant
+    /// made for something this reader does not weigh is not a candidate. None
+    /// that fits is a file whose parts do not fit this virtual machine; so are
+    /// two, which bundletool itself refuses to choose between: the number of a
+    /// variant says nothing about which is meant. The standalone variants for
+    /// several processors together (`MultiAbiTargeting`) serve Androids below 21
+    /// and are refused; the guest's Android always fits a split variant when
+    /// the file has one, and then they are never in the way.
     private func chosenVariant(guestAbis: [String], guestSdk: Int?) throws -> Variant {
-        let level = guestSdk ?? Int.max
-        func rank(_ variant: Variant) -> Int {
-            if variant.abis.isEmpty { return guestAbis.count }
-            return variant.abis.compactMap { guestAbis.firstIndex(of: $0) }.min() ?? Int.max
-        }
-        let fitting = variants.filter { !$0.otherTargeting && $0.minSdk <= level && rank($0) != Int.max }
-        guard let best = fitting.min(by: { lhs, rhs in
-            if lhs.minSdk != rhs.minSdk { return lhs.minSdk > rhs.minSdk }
-            if rank(lhs) != rank(rhs) { return rank(lhs) < rank(rhs) }
-            return lhs.number < rhs.number
-        }) else { throw InstallRefusal.damaged }
-        return best
+        let fitting = variants.filter { !$0.targeting.other && $0.targeting.matches(guestAbis: guestAbis, guestSdk: guestSdk) }
+        guard fitting.count == 1, let only = fitting.first else { throw InstallRefusal.damaged }
+        return only
     }
 
     /// Where `file` goes in the guest: its folder and its full path, both
