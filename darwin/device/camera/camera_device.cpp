@@ -157,6 +157,10 @@ public:
         std::vector<Member> members;
         std::uint64_t deadline {};
         std::uint64_t token {};
+        /* The platform events there were when the capture was asked for (the
+         * inbox's serial): a result that comes after a later boundary of its
+         * camera (an interruption, a recovery) is from a capture that spans it. */
+        std::uint64_t fireSerial {};
         bool fired {};
     };
     enum class Interruption : std::uint8_t { none, interrupted, multitasking, pressure };
@@ -173,6 +177,12 @@ public:
         std::uint64_t sequence {};
         std::optional<CameraExposure> latest;
         Interruption interruption {Interruption::none};
+        /* The inbox serial of the last platform event handled for this camera that
+         * began or ended an interruption, or ended a session. A frame the platform
+         * handed over before it (a lower serial) was captured before the
+         * recovery it announces, whatever the camera's state is by the time the
+         * frame is taken. */
+        std::uint64_t boundary {};
         /* The capture is starting and has not delivered a frame yet. */
         bool resuming {};
         bool videoRunning {};
@@ -194,13 +204,21 @@ public:
         std::uint32_t reportedSetting {~0u};
         std::uint32_t reportedTurn {~0u};
     };
+    /* Everything the platform hands over is stamped with the serial of the
+     * last event it had handed over (`inboxSerial`): a frame or a result of
+     * serial n came after event n and before event n + 1. */
     struct InboxFrame {
         std::size_t camera {};
         CameraFrame frame;
+        std::uint64_t serial {};
     };
     struct InboxStill {
         std::size_t camera {};
         CameraStillResult result;
+    };
+    struct InboxEvent {
+        CameraEvent event;
+        std::uint64_t serial {};
     };
 
     std::shared_ptr<uml::platform::Camera> host;
@@ -230,7 +248,8 @@ public:
     std::mutex inboxMutex;
     std::deque<InboxFrame> inboxFrames;
     std::deque<InboxStill> inboxStills;
-    std::deque<CameraEvent> inboxEvents;
+    std::deque<InboxEvent> inboxEvents;
+    std::uint64_t inboxSerial {};
     // Last: it is destroyed first, and no callback outlives it.
     std::unique_ptr<uml::platform::CameraSession> session;
 
@@ -589,7 +608,7 @@ public:
                                                  [camera](const auto& entry) { return entry.camera == camera; });
                 inboxFrames.erase(oldest);
             }
-            inboxFrames.push_back({camera, std::move(frame)});
+            inboxFrames.push_back({camera, std::move(frame), inboxSerial});
         }
         wake();
     }
@@ -605,7 +624,7 @@ public:
     {
         {
             std::lock_guard lock(inboxMutex);
-            inboxEvents.push_back(platformEvent);
+            inboxEvents.push_back({platformEvent, ++inboxSerial});
         }
         wake();
     }
@@ -966,6 +985,10 @@ public:
         if (refusal == 0 && !ensureSession()) refusal = 1;
         group.token = request.token = nextToken++;
         group.fired = true;
+        {
+            std::lock_guard lock(inboxMutex);
+            group.fireSerial = inboxSerial;
+        }
         if (refusal == 0) {
             applySettings(runtime, false);
             bool taken = session->takeStill(runtime.description.platformIndex, request);
@@ -995,7 +1018,13 @@ public:
         const auto wire = wireOfPlatform.find(platformCamera);
         if (!group || wire == wireOfPlatform.end()) return;
         auto& runtime = runtimes[wire->second];
-        if (!result.ok) {
+        // A capture that was asked for before an interruption or recovery of its
+        // camera that has been handled since spans it, and one that completes while
+        // the camera is interrupted was not taken in a repaired camera: neither is
+        // delivered, whatever the platform says of it. They fail as a capture that
+        // went wrong does, for the guest to ask again.
+        const bool spansBoundary = group->fireSerial < runtime.boundary;
+        if (!result.ok || spansBoundary || runtime.interruption != Interruption::none) {
             failGroup(*group, runtime.interruption != Interruption::none ? std::uint32_t(VIRTIO_VIDEO_DEQUEUE_FLAG_CAMERA_INTERRUPTED) : 0u);
             eraseGroup(result.token);
             checkpoint(CameraCheckpoint::stillDelivered);
@@ -1099,13 +1128,19 @@ public:
     // Platform events
     // ------------------------------------------------------------------------
 
-    void handlePlatformEvent(const CameraEvent& platformEvent)
+    void handlePlatformEvent(const InboxEvent& inboxEvent)
     {
+        const CameraEvent& platformEvent = inboxEvent.event;
         const auto each = [&](auto&& body) {
+            const auto bounded = [&](Runtime& runtime) {
+                // Whatever the platform handed over before this event is from before it.
+                runtime.boundary = inboxEvent.serial;
+                body(runtime);
+            };
             if (platformEvent.camera == uml::platform::allCameras) {
-                for (auto& runtime : runtimes) body(runtime);
+                for (auto& runtime : runtimes) bounded(runtime);
             } else if (const auto wire = wireOfPlatform.find(platformEvent.camera); wire != wireOfPlatform.end()) {
-                body(runtimes[wire->second]);
+                bounded(runtimes[wire->second]);
             }
         };
         switch (platformEvent.kind) {
@@ -1161,7 +1196,7 @@ public:
     {
         std::vector<InboxFrame> newest;
         std::deque<InboxStill> stills;
-        std::deque<CameraEvent> platformEvents;
+        std::deque<InboxEvent> platformEvents;
         {
             std::lock_guard lock(inboxMutex);
             // Only the newest frame of a camera is kept, and the older ones are
@@ -1184,6 +1219,14 @@ public:
             const auto wire = wireOfPlatform.find(entry.camera);
             if (wire == wireOfPlatform.end()) continue;
             auto& runtime = runtimes[wire->second];
+            // A frame the platform handed over before the last interruption or
+            // recovery of its camera was captured before the repair, however the
+            // pump came by it (it waited in the inbox, or in this batch, while the
+            // event was handled): it is not the camera's picture now.
+            if (entry.serial < runtime.boundary) {
+                entry.frame = CameraFrame {};
+                continue;
+            }
             if (runtime.resuming && runtime.interruption == Interruption::none) {
                 runtime.resuming = false;
                 settle(runtime);

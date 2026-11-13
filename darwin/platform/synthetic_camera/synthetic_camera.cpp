@@ -645,10 +645,13 @@ public:
             if (outcome == Recovery::resumed) core_.movedOutOfAnchor = false;
             deliver({allCameras, outcome == Recovery::resumed ? CameraEventKind::resumed : CameraEventKind::failed});
         };
-        recoverAnchors(running, steps);
+        // A failed recovery is final for this session, as the Apple session's is.
+        (void)latch_.recover(running, steps);
     }
 
 private:
+    RecoveryLatch latch_;
+
     // The format a camera was told to run in, when it was told one.
     std::optional<std::size_t> anchorOf(std::size_t camera) const
     {

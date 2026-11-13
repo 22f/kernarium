@@ -988,6 +988,12 @@ public:
     void deliverFrame(std::size_t camera, CMSampleBufferRef sample)
     {
         if (camera >= entries_.size()) return;
+        const CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
+        const std::uint64_t capturedAt = CMTIME_IS_VALID(presentation) ? std::uint64_t(CMTimeGetSeconds(presentation) * 1e9) : hostNow();
+        // A buffer the capture had in flight when the cameras were put back in their
+        // anchors was made before it; it can reach this callback after the session
+        // has said it is back.
+        if (framePredatesRepair(capturedAt, repairedAt_.load())) return;
         CVPixelBufferRef pixels = CMSampleBufferGetImageBuffer(sample);
         if (pixels == nullptr || CVPixelBufferGetPlaneCount(pixels) != 2) return;
         if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
@@ -1006,9 +1012,7 @@ public:
             CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
             CFRelease(held);
         });
-        const CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
-        frame.timestampNanoseconds = CMTIME_IS_VALID(presentation)
-            ? std::uint64_t(CMTimeGetSeconds(presentation) * 1e9) : hostNow();
+        frame.timestampNanoseconds = capturedAt;
         frame.exposure = exposureOf(camera, sample);
         delegate_.cameraFrame(camera, std::move(frame));
     }
@@ -1415,13 +1419,23 @@ private:
             const Anchor* anchor = anchorOf(camera);
             return anchor != nullptr && entries_[camera].device.activeFormat != anchor->format;
         };
-        steps.repair = [&](std::size_t camera) { return repairAnchor(camera); };
+        bool repaired = false;
+        steps.repair = [&](std::size_t camera) {
+            const bool ok = repairAnchor(camera);
+            repaired = repaired || ok;
+            return ok;
+        };
         steps.announce = [&](Recovery outcome) {
             if (outcome == Recovery::failed) std::fprintf(stderr, "Camera: the cameras could not be put back in their anchors\n");
+            // What the capture made before this moment is from before the repair.
+            if (outcome == Recovery::resumed && repaired) repairedAt_ = hostNow();
             std::lock_guard lock(state_->mutex);
             if (state_->session) deliver({allCameras, outcome == Recovery::resumed ? CameraEventKind::resumed : CameraEventKind::failed});
         };
-        (void)recoverAnchors(inputs, steps);
+        // A failed recovery is final for the session: a second notification (the end
+        // of the interruption and the restart both arrive) repairs and announces
+        // nothing more, whatever state the first left the cameras in.
+        (void)recovery_.recover(inputs, steps);
     }
 
     // Puts a camera whose device was moved out of its anchor back: the format
@@ -1627,6 +1641,11 @@ private:
     RefusalLog refusals_;
     std::set<std::size_t> joinsLogged_;
     std::atomic_bool stopped_ {};
+    // The recoveries of this session: a failure stays until the session is torn
+    // down. And when the cameras were last put back in their anchors (the host's
+    // clock, zero before any was): frames captured before it are not delivered.
+    RecoveryLatch recovery_;
+    std::atomic<std::uint64_t> repairedAt_ {0};
     std::map<std::size_t, RunningCamera> cameras_;
 };
 

@@ -426,6 +426,35 @@ struct RecoverySteps {
 };
 Recovery recoverAnchors(std::span<const std::size_t> cameras, const RecoverySteps& steps);
 
+// A recovery is asked for by two notifications that may both come (the end of an
+// interruption and the restart after an error), and a second one finds the
+// cameras where the first left them: a repair that changed a device's format and
+// then failed leaves it in its anchor, so the second would skip the repair and
+// announce the session back with an output still unrepaired. A failed recovery
+// is therefore final for its session, which the client closes on it: the latch
+// keeps the failure until the session is torn down, and a later recovery
+// repairs nothing and announces nothing (the failure has been announced).
+class RecoveryLatch {
+public:
+    Recovery recover(std::span<const std::size_t> cameras, const RecoverySteps& steps);
+    [[nodiscard]] bool failed() const noexcept { return failed_.load(); }
+
+private:
+    std::atomic<bool> failed_ {false};
+};
+
+// Frames the platform's capture handed over after a recovery began can still be
+// from before it: a buffer in flight when a device was moved back into its
+// anchor reaches the client's callback afterwards. Capture times and `repairedAt`
+// are on one clock (the host's); a frame captured before the repair is
+// discarded, within `repairWindowNanoseconds` of it (a frame older than that
+// cannot be in flight, and a clock that disagrees must not discard every frame).
+inline constexpr std::uint64_t repairWindowNanoseconds = 2'000'000'000;
+[[nodiscard]] constexpr bool framePredatesRepair(std::uint64_t capturedAt, std::uint64_t repairedAt) noexcept
+{
+    return repairedAt != 0 && capturedAt < repairedAt && repairedAt - capturedAt <= repairWindowNanoseconds;
+}
+
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------

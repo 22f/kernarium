@@ -642,6 +642,40 @@ void interruptions()
     require(recorder.frames.size() == 2);
 }
 
+// R5 (recheck6): the end of an interruption and a restart both ask for a recovery, so a session may be asked twice. A
+// failed recovery is final for its session (the client closes it on the failure): a second one repairs nothing and
+// announces nothing, and a new session recovers as usual.
+void aFailedRecoveryIsFinalForItsSession()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    const auto count = [](const Recorder& recorder, CameraEventKind kind) {
+        return std::count_if(recorder.events.begin(), recorder.events.end(), [kind](const CameraEvent& event) { return event.kind == kind; });
+    };
+    Recorder first;
+    auto session = camera->openSession(first);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->interrupt();
+    camera->moveOutOfAnchor(true);
+    camera->refuseRepair(true);
+    camera->resume();
+    require(count(first, CameraEventKind::failed) == 1 && count(first, CameraEventKind::resumed) == 0 && camera->repairs() == 0,
+            "the repair is refused: the session failed");
+    camera->resume();
+    camera->refuseRepair(false);
+    camera->resume();
+    require(count(first, CameraEventKind::failed) == 1 && count(first, CameraEventKind::resumed) == 0 && camera->repairs() == 0,
+            "a second and a third notification, even with the device willing, repair and announce nothing");
+    session->stop();
+    Recorder second;
+    session = camera->openSession(second);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->interrupt();
+    camera->moveOutOfAnchor(true);
+    camera->resume();
+    require(count(second, CameraEventKind::resumed) == 1 && count(second, CameraEventKind::failed) == 0 && camera->repairs() == 1,
+            "a new session recovers: repaired, then resumed");
+}
+
 void threaded()
 {
     auto options = manual(SyntheticCameraProfile::tablet);
@@ -687,6 +721,7 @@ int main()
     interruptionOutlivesSession();
     stills();
     interruptions();
+    aFailedRecoveryIsFinalForItsSession();
     threaded();
     return 0;
 }

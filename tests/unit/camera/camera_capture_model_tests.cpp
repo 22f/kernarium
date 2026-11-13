@@ -958,12 +958,18 @@ struct FakeRecovery {
     std::vector<std::string> log;
     std::set<std::size_t> moved;    // the cameras the system moved out of their anchors
     std::set<std::size_t> refused;  // the cameras whose repair the device refuses
+    // The cameras whose repair puts the format back and then fails an output: they are in their anchor afterwards.
+    std::set<std::size_t> partial;
     RecoverySteps steps()
     {
         RecoverySteps s;
         s.outOfAnchor = [this](std::size_t camera) { return moved.contains(camera); };
         s.repair = [this](std::size_t camera) {
             log.push_back("repair " + std::to_string(camera));
+            if (partial.contains(camera)) {
+                moved.erase(camera);
+                return false;
+            }
             if (refused.contains(camera)) return false;
             moved.erase(camera);
             return true;
@@ -1005,6 +1011,58 @@ void aRefusedRepairIsAFailureAndNothingIsAnnouncedAsBack()
             "a refusal after a success is a failure too, and no camera is announced as back");
     for (const auto& entry : {first.log, later.log})
         require(std::find(entry.begin(), entry.end(), "resumed") == entry.end(), "never resumed");
+}
+
+// R5 (recheck6): the end of an interruption and the restart after an error are both recoveries and both may be asked
+// for. A repair that puts a device's format back and then fails an output leaves it in its anchor, so a second recovery
+// finds nothing out of anchor on that camera and, run again, announces the session back with the output unrepaired. The
+// latch keeps the failure for the session: nothing is repaired or announced after it.
+void aFailedRecoveryIsFinalForItsSession()
+{
+    const std::size_t cameras[] {0, 1};
+    FakeRecovery fake;
+    fake.moved = {0, 1};
+    fake.partial = {0};
+    RecoveryLatch latch;
+    require(!latch.failed(), "nothing has failed yet");
+    require(latch.recover(cameras, fake.steps()) == Recovery::failed && fake.log == std::vector<std::string> {"repair 0", "failed"} && latch.failed(),
+            "the first recovery fails after a partial repair");
+    require(!fake.moved.contains(0) && fake.moved.contains(1), "camera 0 is in its anchor again, camera 1 is not");
+    fake.log.clear();
+    require(latch.recover(cameras, fake.steps()) == Recovery::failed && fake.log.empty(),
+            "a second notification repairs nothing and announces nothing, so no `resumed` follows the failure");
+    // What it prevents: the same two calls without the latch announce the session back.
+    FakeRecovery unlatched;
+    unlatched.moved = {0, 1};
+    unlatched.partial = {0};
+    (void)recoverAnchors(cameras, unlatched.steps());
+    unlatched.log.clear();
+    require(recoverAnchors(cameras, unlatched.steps()) == Recovery::resumed && unlatched.log == std::vector<std::string> {"repair 1", "resumed"},
+            "without it the second recovery announces resumed with camera 0's output unrepaired");
+    // A recovery that succeeds is not latched, and a new session has its own latch.
+    FakeRecovery good;
+    good.moved = {1};
+    RecoveryLatch fresh;
+    require(fresh.recover(cameras, good.steps()) == Recovery::resumed && !fresh.failed() &&
+                fresh.recover(cameras, good.steps()) == Recovery::resumed,
+            "a recovery that succeeds leaves the session free to recover again");
+    RecoveryLatch next;
+    FakeRecovery again;
+    again.moved = {0};
+    require(next.recover(cameras, again.steps()) == Recovery::resumed, "a new session's latch is open");
+}
+
+// R5 (recheck6): the capture's frames carry their capture time; one made before the repair is discarded when it reaches
+// the callback after it, within a window that a disagreeing clock cannot stretch into every frame.
+void aFrameCapturedBeforeTheRepairIsDiscarded()
+{
+    constexpr std::uint64_t repaired = 5'000'000'000ull;
+    require(!framePredatesRepair(repaired - 1, 0), "no repair, no discard");
+    require(framePredatesRepair(repaired - 1, repaired), "captured just before the repair: discarded");
+    require(!framePredatesRepair(repaired, repaired) && !framePredatesRepair(repaired + 1, repaired), "at or after it: kept");
+    require(framePredatesRepair(repaired - repairWindowNanoseconds, repaired), "at the edge of the window: discarded");
+    require(!framePredatesRepair(repaired - repairWindowNanoseconds - 1, repaired),
+            "beyond the window, which no buffer in flight can be: kept, so that a clock that disagrees discards nothing for good");
 }
 
 // ---------------------------------------------------------------------------
@@ -1446,6 +1504,8 @@ int main()
     aResizeSetsTheDurationsThenTheSizeAndRestoresTheOldTimingOnARefusal();
     everyCameraIsRepairedBeforeTheSessionIsToldItIsBack();
     aRefusedRepairIsAFailureAndNothingIsAnnouncedAsBack();
+    aFailedRecoveryIsFinalForItsSession();
+    aFrameCapturedBeforeTheRepairIsDiscarded();
     aPressureNotificationIsAppliedWhileTheStreamRunsAndNeverAfterIt();
     aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges();
     everyGeneratedTableHoldsTheInvariants();

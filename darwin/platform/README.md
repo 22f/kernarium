@@ -173,8 +173,12 @@ interface to the wire.
   anchor is put back, with its outputs and settings, and only then is a
   `resumed` event sent. A repair that is refused, and an error before the
   restart, end the episode with `failed`, so that the client closes the
-  session and tries again later; the client delivers nothing from a camera
-  it has been told is interrupted.
+  session and tries again later, and a failure stays for the session
+  (`RecoveryLatch`: a second notification repairs and announces nothing); the
+  client delivers nothing from a camera it has been told is interrupted, nor
+  anything captured before the repair: the session discards a buffer the
+  capture had in flight when the cameras were put back (`framePredatesRepair`)
+  and the client what it had already been handed.
 - `nv12_transform.hpp` crops, rotates and scales NV12 pictures: the portable
   `transformNv12()` is the reference, and `Camera::makeFrameTransformer()` gives
   the host's fastest. The Apple camera's (`apple/accelerated_nv12.hpp`) scales a

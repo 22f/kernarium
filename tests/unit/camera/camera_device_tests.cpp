@@ -2093,6 +2093,102 @@ void testARecoveryThatFailsIsAFailureAndNeverResumes()
     require(resumed() == 1, "now it is back");
 }
 
+/* R5 (recheck6): the worker had not drained its inbox when the recovery completed, so one batch holds the interruption,
+ * a frame the capture made outside the anchor, and the resumed event. The events are handled first and clear the
+ * interruption, so a frame that was only stamped by the state of the camera when the pump took it would be delivered
+ * live. It was captured before the repair: it is never delivered, and the next frame, made in the anchor, is. */
+void testAFrameCapturedBeforeTheRepairIsNeverDeliveredAfterIt()
+{
+    Rig rig;
+    EventQueue events(rig, 8);
+    videoStream(rig, 1, 0, 640, 480, 6);
+    const auto live = rig.queue(1, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(live) && rig.result(live).base.flags == 0, "frames flow");
+    const auto waiting = rig.queue(1, 2);
+    rig.camera->interrupt();
+    rig.camera->moveOutOfAnchor(true);
+    rig.camera->pump(0, 1);
+    require(rig.camera->framesOutsideAnchor() == 1, "the capture made a frame outside the anchor, which waits in the inbox");
+    rig.camera->resume();
+    require(rig.camera->repairs() == 1, "the camera is put back before the worker has run");
+    rig.step();
+    const bool done = rig.done(waiting);
+    require(!done || rig.result(waiting).base.flags != 0, "the frame from before the repair is not delivered as a live one");
+    if (!done) {
+        rig.camera->pump(0, 1);
+        rig.step();
+        require(rig.done(waiting) && rig.result(waiting).base.flags == 0, "the next frame is live");
+        const auto marker = decodeChartMarker(rig.bytes(1, 2, nv12Size(640, 480)).data(), 640, 640, 480);
+        require(marker.valid && marker.counter == 3, "and it is the frame made after the repair, not the one before it");
+    }
+    require(events.arrived().size() >= 4 && events.arrived()[2].first == VIRTIO_VIDEO_EVENT_CAMERA_RESUMED,
+            "the guest is told the camera is back");
+}
+
+/* R5 (recheck6): a capture that completes successfully on the platform's side while the camera is interrupted, or that
+ * was asked for before an interruption that has since been handled, is not delivered as a photo: it fails as a capture
+ * that went wrong does (flagged interrupted while the interruption lasts), for the guest to ask again. */
+void testAStillThatSpansAnInterruptionFails()
+{
+    for (const bool resumed : {false, true}) {
+        Rig rig;
+        rig.create(1, 0, stillKind);
+        require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        rig.attach(1, 1, rig.params(1).plane_formats[0].plane_size);
+        const auto still = rig.queue(1, 1, 555);
+        require(!rig.done(still) && rig.camera->sessionsOpened() == 1, "the capture is asked for");
+        rig.camera->pump(0, 0);  // the platform completes it with a good picture
+        rig.camera->interrupt();
+        if (resumed) rig.camera->resume();
+        rig.step();
+        require(rig.done(still), "the buffer completes");
+        const auto flags = rig.result(still).base.flags;
+        require((flags & errorFlag) != 0 && rig.result(still).base.data_sizes[0] == 0, "with an error, and no picture");
+        require(((flags & interruptedFlag) != 0) == !resumed, "flagged interrupted while the interruption lasts, not after it");
+    }
+    // The interruption event waits in the inbox when the capture is asked for, so the camera is not yet known to be
+    // interrupted: the capture that the platform then completes is handled after the event, and fails with the camera.
+    {
+        Rig early;
+        early.create(1, 0, stillKind);
+        require(Rig::type(early.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+        early.attach(1, 1, early.params(1).plane_formats[0].plane_size);
+        // A stream that runs keeps the session open, so that the event reaches it.
+        videoStream(early, 2, 0, 640, 480, 2);
+        const auto running = early.queue(2, 1);
+        early.camera->pump(0, 1);
+        early.step();
+        require(early.done(running) && early.result(running).base.flags == 0, "the camera streams");
+        early.camera->post({uml::platform::allCameras, CameraEventKind::interrupted});
+        const auto still = early.queue(1, 1, 557);
+        early.camera->pump(0, 0);
+        early.step();
+        require(early.done(still) && (early.result(still).base.flags & (errorFlag | interruptedFlag)) == (errorFlag | interruptedFlag) &&
+                    early.result(still).base.data_sizes[0] == 0,
+                "a capture asked for as the interruption begins fails with it");
+    }
+    // A capture asked for after the recovery is delivered as before.
+    Rig rig;
+    rig.create(1, 0, stillKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    rig.attach(1, 1, rig.params(1).plane_formats[0].plane_size);
+    videoStream(rig, 2, 0, 640, 480, 2);
+    const auto running = rig.queue(2, 1);
+    rig.camera->pump(0, 1);
+    rig.step();
+    require(rig.done(running), "the camera streams, which keeps the session open");
+    rig.camera->interrupt();
+    rig.camera->resume();
+    rig.step();
+    const auto still = rig.queue(1, 1, 556);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(still) && rig.result(still).base.flags == 0 && rig.result(still).base.data_sizes[0] > 4000,
+            "a capture asked for after the recovery is delivered");
+}
+
 void testService()
 {
     SyntheticCameraOptions options;
@@ -2142,6 +2238,8 @@ int main()
     testABurstOfFramesIsTheNewestFrame();
     testARecoveryRepairsTheCameraBeforeItIsToldItIsBack();
     testARecoveryThatFailsIsAFailureAndNeverResumes();
+    testAFrameCapturedBeforeTheRepairIsNeverDeliveredAfterIt();
+    testAStillThatSpansAnInterruptionFails();
     testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
     testService();
     return 0;

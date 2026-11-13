@@ -68,7 +68,9 @@ application's statements (the sensor orientation, the rotation that
   as a tier has buffers are with the platform for one camera; one more fails
   its buffers. A still in a blocked or interrupted session, or one the platform
   refuses, completes with the error flag (and the interrupted flag when the
-  session failed or was interrupted). The JPEG ends at the first picture's end
+  session failed or was interrupted), and so does one that completes while its
+  camera is interrupted or that was asked for before an interruption or
+  recovery of its camera that has since been handled. The JPEG ends at the first picture's end
   of image, without a multi-picture index or any picture behind it. A JPEG is
   the size of its stream or its buffer completes with the error flag: the frame
   header the device reads is compared with the configured size, and the
@@ -110,7 +112,12 @@ application's statements (the sensor orientation, the rotation that
   `CAMERA_AVAILABLE`): a second interruption says nothing new, a session that
   fails marks the cameras that have a stream, and a capture that failed is told
   to be back when it delivers a frame, so a start that fails round after round
-  tells the guest once.
+  tells the guest once. Everything the platform hands over carries the serial
+  of the last platform event the inbox held when it arrived, and a camera
+  remembers the serial of the last interruption, recovery or failure handled
+  for it: a frame of a lower serial was captured before that boundary (it waited
+  in the inbox or in the pump's batch while the event was handled) and is
+  dropped, never delivered as a live picture after the repair.
 - **Events and reset.** The event queue never holds a buffer: with no event
   pending it returns retry, so the guest's buffer stays in its ring, and an
   event raised later signals the device's event descriptor so the server runs

@@ -496,6 +496,14 @@ Recovery recoverAnchors(std::span<const std::size_t> cameras, const RecoveryStep
     return outcome;
 }
 
+Recovery RecoveryLatch::recover(std::span<const std::size_t> cameras, const RecoverySteps& steps)
+{
+    if (failed_.load()) return Recovery::failed;
+    const Recovery outcome = recoverAnchors(cameras, steps);
+    if (outcome == Recovery::failed) failed_ = true;
+    return outcome;
+}
+
 std::string_view refusalName(Refusal reason) noexcept
 {
     switch (reason) {
