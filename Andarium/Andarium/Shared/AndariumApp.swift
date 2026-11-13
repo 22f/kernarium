@@ -42,6 +42,7 @@ final class AndariumProcess {
         // sweep the folder a running test stages its files in.
         BugReportStaging.sweep()
         GuestFileStaging.sweep()
+        PickedFolder.sweep()
         #if FEEDBACK_MAIL
         SendFeedbackStaging().sweep()
         #endif

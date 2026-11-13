@@ -203,6 +203,13 @@ everything that exists for automation or only pretends:
   no debugging or automation support (the `kernarium-ios-device-android-app-store`
   preset, packaged with `package-ios-frameworks.sh --app-store --runtimes
   android`; [`Kernarium/README.md`](../Kernarium/README.md#automation-runs)).
+- It opens the files of Install APK and of the file browser's Import in place
+  (SwiftUI's `fileImporter`); every other configuration presents the document
+  picker in copy mode (`Shared/CopyDocumentPicker.swift`, compiled out by
+  `APP_STORE`), moves each copy at once into a folder of its own under
+  `tmp/PickedFiles/` and removes it when the install or import that uses it is
+  over (Install anyway and Try Again still find it) and at the next launch. A
+  picker that fails shows an alert in every configuration.
 - Its Archive action uses it, and the archive is the build TestFlight and the
   App Store offer to Macs.
 - It refuses an embedded artifact that is behind the archived commit: a build
