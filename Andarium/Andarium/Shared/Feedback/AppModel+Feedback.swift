@@ -54,8 +54,9 @@ extension AppModel {
     /// record last quoted it: at most 4 KiB, from a checkpoint a few seconds
     /// old. Only the running record of the boot under way counts
     /// (`BootRecordBinding`): the record of a session that ended, of another
-    /// process or of an earlier boot says nothing of this one. nil where there
-    /// is no such record or it has no output yet.
+    /// process, of an earlier boot or left in the file as the run began says
+    /// nothing of this one. nil where there is no such record or it has no
+    /// output yet.
     func startOutput() -> String? {
         guard let diagnosticsDirectory, let bootRecord else { return nil }
         let record = SessionRecord.read(at: diagnosticsDirectory.appendingPathComponent(BugReportAttachments.sessionRecord))

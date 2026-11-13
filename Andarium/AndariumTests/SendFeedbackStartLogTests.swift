@@ -92,9 +92,8 @@ struct SendFeedbackStartLogTests {
         let diagnostics = root.appendingPathComponent("diagnostics", isDirectory: true)
         try FileManager.default.createDirectory(at: diagnostics, withIntermediateDirectories: true)
         app.diagnosticsDirectory = diagnostics
-        // The run the record of this boot belongs to began with the start.
-        app.bootRecord = BootRecordBinding(
-            processID: Int(getpid()), runStarted: Self.moment.addingTimeInterval(-197))
+        // This process's run, which began with the start, when the file held no record.
+        app.bootRecord = BootRecordBinding(processID: Int(getpid()))
         let composer = Composer()
         var services = SendFeedbackServices()
         services.address = { "feedback@example.com" }
@@ -186,18 +185,30 @@ struct SendFeedbackStartLogTests {
             ("an ended record", { try fixture.writeRecord(output: Self.output, state: "ended", end: "stopped") }),
             ("a restart's end", { try fixture.writeRecord(output: Self.output, state: "ended", end: "restarted") }),
             ("another process", { try fixture.writeRecord(output: Self.output, pid: getpid() + 1) }),
-            (
-                "an earlier run",
-                { try fixture.writeRecord(output: Self.output, started: Int(Self.moment.timeIntervalSince1970) - 4000) }
-            ),
             ("an earlier boot", { try fixture.writeRecord(output: Self.output, restarts: 3) }),
         ] as [(String, () throws -> Void)] {
             try write()
             let text = try logText(fixture)
             #expect(!text.contains(quote) && text.hasSuffix("(nothing yet)\n"), "\(name)")
         }
-        // The record of this boot is quoted.
-        try fixture.writeRecord(output: Self.output)
+        // The record of this boot is quoted, whatever second it says: the clock may have stepped back.
+        for started in [Int(Self.moment.timeIntervalSince1970) - 190, 1_000_000, 0] {
+            try fixture.writeRecord(output: Self.output, started: started)
+            #expect(try logText(fixture).contains(quote), "started \(started)")
+        }
+    }
+
+    /// A running record the file held as the run began is not the run's, and the
+    /// run's own record, whatever second it says, is.
+    @Test func aRunningRecordThatWasInTheFileAsTheRunBeganIsNotQuoted() throws {
+        let fixture = try fixture()
+        let quote = "[  102.9] init: starting service 'netd'..."
+        let started = Int(Self.moment.timeIntervalSince1970) - 4000
+        try fixture.writeRecord(output: Self.output, started: started)
+        fixture.app.bootRecord = BootRecordBinding(
+            processID: Int(getpid()), recordAtStart: SessionRecord.read(at: fixture.record))
+        #expect(!(try logText(fixture)).contains(quote))
+        try fixture.writeRecord(output: Self.output, started: started - 600)
         #expect(try logText(fixture).contains(quote))
     }
 
@@ -218,12 +229,16 @@ struct SendFeedbackStartLogTests {
     /// A start binds the record to its own run, of this process, and counts the restarts again from none.
     @Test func aStartMakesTheBindingOfItsRun() throws {
         let fixture = try fixture(phase: .home)
+        // The file holds a running record of an earlier run as the start begins.
+        let started = Int(Self.moment.timeIntervalSince1970) - 4000
+        try fixture.writeRecord(output: Self.output, started: started)
         fixture.app.bootRecord = nil
-        let before = Date()
         fixture.app.start(.normal)
         let binding = try #require(fixture.app.bootRecord)
         #expect(binding.processID == Int(getpid()) && binding.restarts == 0)
-        #expect(binding.runStarted >= before && binding.runStarted <= Date())
+        #expect(fixture.app.startOutput() == nil, "the record that was there is not the run's")
+        try fixture.writeRecord(output: Self.output, started: started + 1)
+        #expect(fixture.app.startOutput() != nil)
         fixture.app.guestRestartsCounted(2)
         #expect(fixture.app.bootRecord?.restarts == 2)
     }

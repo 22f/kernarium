@@ -8,13 +8,14 @@ import Testing
 /// Which session record is the boot under way's: the start log quotes the
 /// record's kernel output only for it.
 struct BootRecordBindingTests {
-    /// 2026-11-08 05:04:50 UTC, and the process the application runs as.
-    private static let begun = Date(timeIntervalSince1970: 1_794_114_290)
+    /// The process the application runs as, and the second the run's record
+    /// began in (2026-11-08 05:04:51 UTC).
     private static let pid = 4242
+    private static let began = 1_794_114_291
 
     /// A record as the runtime writes it, with the lines the binding reads.
     private func record(
-        state: String = "running", end: String = "running", pid: Int = pid, started: Int = 1_794_114_291,
+        state: String = "running", end: String = "running", pid: Int = pid, started: Int = began,
         restarts: Int? = 0, output: String = "init: starting service 'netd'\n"
     ) -> SessionRecord? {
         var text = "uml-session 7\nstate \(state)\nend \(end)\nstatus 0\npid \(pid)\nstarted \(started)\n"
@@ -25,14 +26,24 @@ struct BootRecordBindingTests {
         return SessionRecord(text: text)
     }
 
-    private let binding = BootRecordBinding(processID: pid, runStarted: begun)
+    private let binding = BootRecordBinding(processID: pid)
 
     @Test func theRunningRecordOfTheBootUnderWayIsAccepted() {
         #expect(binding.output(of: record()) == "init: starting service 'netd'\n")
-        // The run began within the second the record's `started` is in.
-        #expect(binding.output(of: record(started: 1_794_114_290)) != nil)
-        #expect(BootRecordBinding(processID: Self.pid, runStarted: Self.begun.addingTimeInterval(0.9))
-            .output(of: record(started: 1_794_114_290)) != nil)
+    }
+
+    /// The runtime stamps its record with the system clock as it reads it when the
+    /// record begins, which may be earlier than the clock was when the run was
+    /// asked for (the clock stepped back while the disk and the key were
+    /// prepared): the boot's own record is accepted whatever second it says.
+    @Test func aClockThatSteppedBackDoesNotMakeTheBootsOwnRecordStale() {
+        for started in [Self.began - 1, Self.began - 600, Self.began - 86_400, 0, Self.began + 600] {
+            #expect(binding.output(of: record(started: started)) != nil, "started \(started)")
+        }
+        // Also when the file held an earlier run's leftover at the start.
+        let leftover = BootRecordBinding(
+            processID: Self.pid, recordAtStart: record(started: Self.began + 7_200, output: "init: leftover\n"))
+        #expect(leftover.output(of: record(started: Self.began - 3_600)) != nil)
     }
 
     @Test func aRecordThatEndedIsNotTheBootUnderWays() {
@@ -46,10 +57,36 @@ struct BootRecordBindingTests {
         #expect(binding.output(of: record(pid: 1)) == nil)
     }
 
-    @Test func aRecordThatBeganBeforeTheRunIsNot() {
-        // The run's own process, whose earlier run ended without writing its end; or a process id that came round.
-        #expect(binding.output(of: record(started: 1_794_114_289)) == nil)
-        #expect(binding.output(of: record(started: 1_700_000_000)) == nil)
+    /// A running record that the file held as the run began, of this process
+    /// (an earlier run whose end was never written) or of one whose process id
+    /// came round: it is that record, and no other, that is refused.
+    @Test func aRunningLeftoverOfAnEarlierRunPresentAtTheStartIsNot() {
+        for leftoverStarted in [Self.began - 3_600, Self.began, Self.began + 3_600] {
+            let leftover = record(started: leftoverStarted, output: "init: from the run before\n")
+            let bound = BootRecordBinding(processID: Self.pid, recordAtStart: leftover)
+            #expect(bound.output(of: leftover) == nil, "leftover started \(leftoverStarted)")
+            // The run's own record is another: it began after, and says so.
+            #expect(bound.output(of: record(started: leftoverStarted + 1, output: "init: this run\n")) != nil)
+            #expect(bound.output(of: record(started: leftoverStarted - 1, output: "init: this run\n")) != nil)
+        }
+        // A leftover of this boot's count only: a boot after a restart is not that record.
+        var restarted = BootRecordBinding(processID: Self.pid, recordAtStart: record(restarts: 0))
+        restarted.restarts = 1
+        #expect(restarted.output(of: record(restarts: 1, output: "init: next boot\n")) != nil)
+        // The leftover of another process is refused anyway, and not noted for another.
+        #expect(BootRecordBinding(processID: Self.pid, recordAtStart: record(pid: Self.pid + 1))
+            .output(of: record()) != nil)
+    }
+
+    /// An ended record was refused for it already; noting it would refuse the
+    /// record of a run that began in the second the earlier one did.
+    @Test func anEndedRecordAtTheStartIsNotNotedAsALeftover() {
+        let ended = record(state: "ended", end: "stopped")
+        let bound = BootRecordBinding(processID: Self.pid, recordAtStart: ended)
+        #expect(bound.output(of: ended) == nil)
+        #expect(bound.output(of: record()) != nil)
+        // Neither is no record at all.
+        #expect(BootRecordBinding(processID: Self.pid, recordAtStart: nil).output(of: record()) != nil)
     }
 
     @Test func aRunningRecordOfAnEarlierBootOfThisProcessIsNot() {

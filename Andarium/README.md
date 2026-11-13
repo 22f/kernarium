@@ -470,12 +470,13 @@ requires reopening Andarium.
   and that the start log is attached, and the sheet attaches the log
   once, when it opens: the step, the time on the notice's clock, the kind of
   start and this boot's printed output, from the session record's last 4 KiB.
-  Only the running record of the boot under way counts (this process, begun in
-  this run, with the run's count of the guest's restarts: `BootRecordBinding`);
-  an ended record, another process's or an earlier boot's gives "(nothing
-  yet)". What identifies the installation is masked: the serial, the adb key,
-  the hardware address and the time zone the application knows, wherever they
-  stand, and by shape every `adb_key=`, `serialno=` and `timezone=` value,
+  Only the running record of the boot under way counts (this process, with the
+  run's count of the guest's restarts, and not the record the file held as the
+  run began: `BootRecordBinding`, which compares no clock); an ended record,
+  another process's or an earlier boot's gives "(nothing yet)". What
+  identifies the installation is masked: the serial, the adb key, the hardware
+  address and the time zone the application knows, wherever they stand, and by
+  shape every `adb_key=`, `serialno=` and `timezone=` value,
   init's `Init cannot set 'NAME' to 'VALUE'`, any UUID, any IPv6 address
   (`::1` stays), any colon hardware address and the application's folders. Its
   name in the mail is

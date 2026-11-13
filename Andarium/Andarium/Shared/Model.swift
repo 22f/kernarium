@@ -1555,8 +1555,12 @@ final class AppModel {
             frozenBootStage = nil
             bootTracker = BootTracker()
             slowStart.begin(at: clock(), kind: kind, firstBootPending: driver?.firstBootPending() ?? false)
+            // The record the file holds now is not the run's: the runtime rewrites it for the run, after this.
             bootRecord = BootRecordBinding(
-                processID: Int(ProcessInfo.processInfo.processIdentifier), runStarted: Date())
+                processID: Int(ProcessInfo.processInfo.processIdentifier),
+                recordAtStart: diagnosticsDirectory.flatMap {
+                    SessionRecord.read(at: $0.appendingPathComponent(BugReportAttachments.sessionRecord))
+                })
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE
