@@ -491,6 +491,14 @@ final class AppModel {
     /// whether the person put the notice it raised away.
     private(set) var cameraNotice = CameraNoticeState()
     var cameraCapture: CameraCapture { cameraNotice.capture }
+    /// Waits out the time the Camera-is-off notice stays after the guest closed
+    /// its camera; a test paces it by hand.
+    @ObservationIgnored var cameraNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    /// The moment a report is taken at; a test sets its own.
+    @ObservationIgnored var cameraNoticeClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var cameraNoticeExpiry: Task<Void, Never>?
     /// The question about a permission the person is being asked, if any.
     var permissionPrompt: PermissionPrompt?
     /// The person went to Settings to allow the microphone: when Andarium is
@@ -1487,7 +1495,9 @@ final class AppModel {
         graphicsReclaim.reset()
         thermalCapWaiting = false
         dismissThermalNotice()
-        cameraCaptureChanged(.idle)
+        cameraNoticeExpiry?.cancel()
+        cameraNoticeExpiry = nil
+        cameraNotice.runEnded()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1788,16 +1798,37 @@ final class AppModel {
 
     /// The runtime reports what the host is doing for the guest's cameras.
     func cameraCaptureChanged(_ capture: CameraCapture) {
-        cameraNotice.captureChanged(capture)
+        var next = cameraNotice
+        next.captureChanged(capture, at: cameraNoticeClock())
+        guard next != cameraNotice else { return }
+        cameraNotice = next
+        cameraNoticeExpiry?.cancel()
+        cameraNoticeExpiry = nil
+        guard next.lingers else { return }
+        cameraNoticeExpiry = Task { [weak self] in
+            await self?.cameraNoticeSleep(CameraNoticeState.lingerFor)
+            guard !Task.isCancelled else { return }
+            self?.expireCameraNotice()
+        }
+    }
+
+    /// The guest closed its camera `lingerFor` ago and has not opened one
+    /// since: the notice goes.
+    private func expireCameraNotice() {
+        cameraNoticeExpiry = nil
+        var next = cameraNotice
+        next.expire(at: cameraNoticeClock())
+        if next != cameraNotice { cameraNotice = next }
     }
 
     /// The notice the session shows about the camera: that it is paused
     /// because other apps share the screen, or that a guest app opened a
-    /// camera while Camera is off. Either goes when its cause ends (the
-    /// interruption ends, or the guest closes the camera) or the person
-    /// dismisses it, and the next one raises it again. Camera off is said only
-    /// where the row can be turned on: not on a device with no camera to share,
-    /// and not when the switch is on.
+    /// camera while Camera is off. The paused notice goes when the
+    /// interruption ends; Camera off goes a moment after the guest closes its
+    /// camera and returns at a later open. A dismissed Camera-is-off notice
+    /// stays away for the rest of the run. Camera off is said only where the
+    /// row can be turned on: not on a device with no camera to share, and not
+    /// when the switch is on.
     var cameraNoticeKind: CameraNotice? {
         cameraNotice.showing(canTurnOn: cameraAccess.offered && !cameraShownOn)
     }
@@ -1813,7 +1844,7 @@ final class AppModel {
     /// interrupt, and its guest has no camera to open. The App Store
     /// configuration leaves this out.
     func previewCameraNotice(_ capture: CameraCapture = .interruptedByMultitasking) {
-        cameraNotice.captureChanged(capture)
+        cameraCaptureChanged(capture)
     }
     #endif
 

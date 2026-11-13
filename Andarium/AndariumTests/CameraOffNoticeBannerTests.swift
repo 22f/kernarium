@@ -86,28 +86,62 @@ struct CameraOffNoticeBannerTests {
             return
         }
         #expect(found.title.accessibilityLabel == "Camera is off")
-        #expect(found.detail.accessibilityLabel == "Turn on Camera in Capabilities, then start the virtual machine again.")
+        #expect(found.detail.accessibilityLabel == "Shut down the virtual machine, then turn on Camera in Capabilities.")
         #expect(found.dismiss.accessibilityActivate())
         #expect(model.cameraNoticeKind == nil, "dismissing it puts it away")
         #expect(model.cameraCapture == .blockedInUse, "the guest still has the camera open")
-        // A new open raises it again, and the guest closing the camera takes it away.
+        // The dismissal holds for the run: the guest closing the camera and opening it again does not bring it back.
         model.cameraCaptureChanged(.idle)
         model.cameraCaptureChanged(.blockedInUse)
-        #expect(model.cameraNoticeKind == .cameraOff)
-        model.cameraCaptureChanged(.idle)
         #expect(model.cameraNoticeKind == nil)
+        #expect(await titleGone(in: controller), "the notice is off the screen")
     }
 
-    @Test func theNoticeShowsNothingForADeviceWithoutACamera() async throws {
+    /// An undismissed notice stays on the screen for the stay after the
+    /// guest's close and goes when it ends, off the screen and not only out of
+    /// the model.
+    @Test func theNoticeLeavesTheScreenWhenItsStayAfterTheGuestClosesTheCameraEnds() async throws {
         let model = model()
-        model.cameraAccess = .unavailable
+        let pace = CameraNoticePace()
+        pace.attach(to: model)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = hosted(model, width: 390, size: .large, in: lease)
-        try await Task.sleep(for: .milliseconds(400))
+        let shown = try #require(await parts(in: controller), "The notice was not found: is application accessibility on in this Simulator?")
+        #expect(shown.title.accessibilityLabel == "Camera is off")
+        model.cameraCaptureChanged(.idle)
+        #expect(await CameraNoticePace.until { pace.isWaiting })
+        try await Task.sleep(for: .milliseconds(300))
         controller.view.layoutIfNeeded()
-        let title = find(in: controller.view) { $0.accessibilityLabel == CameraWords.offTitle }
-        #expect(title == nil)
+        #expect(find(in: controller.view) { $0.accessibilityLabel == CameraWords.offTitle } != nil, "still up during the stay")
+        pace.release()
+        #expect(await titleGone(in: controller), "gone when the stay ends")
+        #expect(model.cameraNoticeKind == nil)
+    }
+
+    /// Waits for the notice's title to leave the hosted screen, for at most five seconds.
+    private func titleGone(in controller: UIViewController) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            controller.view.layoutIfNeeded()
+            if find(in: controller.view, { $0.accessibilityLabel == CameraWords.offTitle }) == nil { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
+    /// The test that reads an empty screen as success proves nothing when
+    /// accessibility is off, so the same hosted notice is found first, with a
+    /// device that has a camera, and then the device loses it.
+    @Test func theNoticeShowsNothingForADeviceWithoutACamera() async throws {
+        let model = model()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = hosted(model, width: 390, size: .large, in: lease)
+        _ = try #require(await parts(in: controller), "The notice was not found: is application accessibility on in this Simulator?")
+        model.cameraAccess = .unavailable
+        #expect(await titleGone(in: controller), "the notice goes with the camera")
+        #expect(model.cameraNoticeKind == nil)
     }
 
     /// At the largest accessibility size the words keep the width and the
@@ -127,8 +161,15 @@ struct CameraOffNoticeBannerTests {
         let title = found.title.accessibilityFrame
         let detail = found.detail.accessibilityFrame
         let dismiss = found.dismiss.accessibilityFrame
+        // The column the notice is laid out in, in the window's coordinates: the hosted view is
+        // centred in the window, so the frames sit inside it and not only no wider than it.
+        let column = controller.view.convert(controller.view.bounds, to: nil)
+            .insetBy(dx: (controller.view.bounds.width - width) / 2, dy: 0)
         for frame in [title, detail, dismiss] {
             #expect(frame.width > 0 && frame.width <= width, "inside the width: \(frame)")
+            #expect(
+                frame.minX >= column.minX - 0.5 && frame.maxX <= column.maxX + 0.5,
+                "inside the column \(column): \(frame)")
         }
         #expect(detail.minY >= title.maxY - 1, "the detail is under the title")
         if size.isAccessibilitySize {

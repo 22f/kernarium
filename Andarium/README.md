@@ -502,15 +502,14 @@ requires reopening Andarium.
   guest's layout follows, and the iPad app running on a Mac has none
   (`CameraAvailability`). On an iPad, a session that other apps
   share the screen with pauses the camera (black frames) and shows a notice
-  that goes with the interruption. When the guest opens a camera while the
-  session is blocked, the runtime says so once for each open
+  that goes with the interruption. When a guest app opens a camera while the
+  session is blocked, the runtime reports it
   (`KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE`, runtime API 39) and the
-  session shows a notice over the guest that Camera is off, with how to turn it
-  on: the row only changes on Home, so it says to turn Camera on in
-  Capabilities and start the virtual machine again. It goes when the guest
-  closes the camera or the person dismisses it, a dismissed one stays away
-  for that open, and a device with no camera to share, or a switch that is
-  on, shows none. Camera apps in the guest save a photo taken
+  session shows a notice that Camera is off and can be turned on only from
+  Home, for the next start. A dismissal holds for the run; an undismissed
+  notice goes shortly after the guest closes the camera and returns at a
+  later open; it is not shown on a device with no camera to share. Camera apps
+  in the guest save a photo taken
   sideways the right way up from the guest's accelerometer, which the guest has
   wherever the device has sensors (see Motion below); an iPad app on a Mac and
   the Simulator have none. Where the

@@ -59,9 +59,9 @@ enum CameraWords {
     static let noCamera = String(localized: "This device has no camera to share.")
     static let pausedTitle = String(localized: "Camera paused while other apps are on screen")
     static let offTitle = String(localized: "Camera is off")
-    /// The row only changes on Home, so the notice says what is true: turn it
-    /// on there and start the virtual machine again.
-    static let offDetail = String(localized: "Turn on Camera in Capabilities, then start the virtual machine again.")
+    /// The row only changes on Home, so the notice says to shut the guest down
+    /// and turn it on there.
+    static let offDetail = String(localized: "Shut down the virtual machine, then turn on Camera in Capabilities.")
 
     /// The notice over the session: its one line, and the line under it where
     /// it has one.
