@@ -124,14 +124,15 @@ void aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails()
     require(stillAttemptLimit >= 2, "one retry at least");
 }
 
-void aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill()
+void aFullResolutionMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill()
 {
-    require(photoMaximumExceedsFormat({4032, 3024}, {8064, 6048}), "a 48 MP maximum on a 12 MP format needs the sensor's other mode");
-    require(!photoMaximumExceedsFormat({4032, 3024}, {4032, 3024}), "the format's own size is served from the first capture");
-    require(!photoMaximumExceedsFormat({4032, 3024}, {2016, 1512}), "so is a smaller one");
-    require(!photoMaximumExceedsFormat({0, 0}, {0, 0}), "no size is not beyond anything");
+    require(photoMaximumNeedsFullResolution({8064, 6048}), "48 MP needs the sensor's full-resolution mode");
+    require(photoMaximumNeedsFullResolution({5712, 4284}), "so does 24 MP");
+    require(!photoMaximumNeedsFullResolution({4032, 3024}), "the binned 12 MP is served from the first capture, as at the small tier");
+    require(!photoMaximumNeedsFullResolution({1920, 1440}), "so is a smaller one");
+    require(!photoMaximumNeedsFullResolution({0, 0}), "no size needs nothing");
     // A product that does not overflow 32 bits.
-    require(photoMaximumExceedsFormat({65535, 65535}, {65535, 65536}), "wide sizes compare in 64 bits");
+    require(photoMaximumNeedsFullResolution({65535, 65536}), "wide sizes compare in 64 bits");
 
     constexpr std::uint64_t settle = photoOutputSettleNanoseconds;
     constexpr std::uint64_t raisedAt = 5'000'000'000;
@@ -144,13 +145,12 @@ void aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill()
     require(settle > 0 && settle < 1'000'000'000, "a wait the guest does not notice as a stall");
 
     // What a camera records at admission and at the repair of its anchor, by the same function.
-    constexpr CameraStillSize format {4032, 3024};
-    require(photoMaximumCommittedAt(CameraStillSize {8064, 6048}, format, 7) == 7, "a maximum beyond the format is stamped with the time");
-    require(photoMaximumCommittedAt(CameraStillSize {4032, 3024}, format, 7) == 0, "one within the format records nothing to wait for");
-    require(photoMaximumCommittedAt(std::nullopt, format, 7) == 0, "a format that lists no size records none");
+    require(photoMaximumCommittedAt(CameraStillSize {8064, 6048}, 7) == 7, "a full-resolution maximum is stamped with the time");
+    require(photoMaximumCommittedAt(CameraStillSize {4032, 3024}, 7) == 0, "the binned size records nothing to wait for");
+    require(photoMaximumCommittedAt(std::nullopt, 7) == 0, "a format that lists no size records none");
     // A repair commits again: the stamp moves forward, and the wait with it.
-    const std::uint64_t admitted = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, format, raisedAt);
-    const std::uint64_t repaired = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, format, raisedAt + 5 * settle);
+    const std::uint64_t admitted = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, raisedAt);
+    const std::uint64_t repaired = photoMaximumCommittedAt(CameraStillSize {8064, 6048}, raisedAt + 5 * settle);
     require(stillSettleNanoseconds(admitted, raisedAt + 5 * settle) == 0, "the admission's time has passed");
     require(stillSettleNanoseconds(repaired, raisedAt + 5 * settle) == settle, "a still right after the repair waits the whole time again");
 }
@@ -338,7 +338,7 @@ int main()
     aCaptureWithoutAJpegTakesTheSmallestSize();
     theResolvedSizeIsTheRequestOrItIsRefused();
     aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails();
-    aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill();
+    aFullResolutionMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill();
     aScheduledStillFiresWaitsAgainOrIsDropped();
     theOutputIsAttachedBeforeItsMaximumIsSet();
     aMaximumTheSourceRefusesDetachesTheOutput();

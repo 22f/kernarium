@@ -95,23 +95,24 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // alone has no processed photo), which is not a different size.
 [[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
 
-// Whether a photo output's maximum is larger than the size its format makes
-// (the format's own width and height): the sensor then changes mode for the
-// photo, and the pipeline is reconfigured after the session commits. A
-// maximum within the format's size (12 MP on a 12 MP format) is served from
-// the first capture.
-[[nodiscard]] bool photoMaximumExceedsFormat(CameraStillSize format, CameraStillSize maximum) noexcept;
+// The photos a 48 MP sensor makes by binning, 12 MP (4032x3024): the default
+// pipeline serves them from the first capture. A photo output whose maximum is
+// larger needs the sensor's full-resolution mode, which the pipeline takes its
+// time to apply after the session commits the maximum.
+inline constexpr std::uint64_t binnedSensorStillPixels = 4032ull * 3024ull;
 
-// The pipeline takes this long after a maximum that exceeds its format is
-// committed before a capture is served at the new size.
+// Whether a photo output's maximum needs the full-resolution mode.
+[[nodiscard]] bool photoMaximumNeedsFullResolution(CameraStillSize maximum) noexcept;
+
+// The pipeline takes this long after such a maximum is committed before a
+// capture is served at the new size.
 inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
 
 // What a camera records when it commits a photo output's maximum (at admission
 // and when its anchor is repaired, the same bookkeeping): `now` when the
-// maximum exceeds the format's size, zero (nothing to wait for) when there is
-// none or it does not.
-[[nodiscard]] std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, CameraStillSize format,
-                                                    std::uint64_t now) noexcept;
+// maximum needs the full-resolution mode, zero (nothing to wait for) when
+// there is none or it does not.
+[[nodiscard]] std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, std::uint64_t now) noexcept;
 
 // How long a capture waits before it starts: the rest of the settle time
 // since `committedAt` (photoMaximumCommittedAt), zero once it has passed or

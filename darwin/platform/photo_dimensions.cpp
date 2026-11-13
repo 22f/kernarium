@@ -126,14 +126,14 @@ bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested
     return (resolved.width == 0 && resolved.height == 0) || resolved == requested;
 }
 
-bool photoMaximumExceedsFormat(CameraStillSize format, CameraStillSize maximum) noexcept
+bool photoMaximumNeedsFullResolution(CameraStillSize maximum) noexcept
 {
-    return std::uint64_t(maximum.width) * maximum.height > std::uint64_t(format.width) * format.height;
+    return std::uint64_t(maximum.width) * maximum.height > binnedSensorStillPixels;
 }
 
-std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, CameraStillSize format, std::uint64_t now) noexcept
+std::uint64_t photoMaximumCommittedAt(std::optional<CameraStillSize> maximum, std::uint64_t now) noexcept
 {
-    return maximum && photoMaximumExceedsFormat(format, *maximum) ? now : 0;
+    return maximum && photoMaximumNeedsFullResolution(*maximum) ? now : 0;
 }
 
 std::uint64_t stillSettleNanoseconds(std::uint64_t committedAt, std::uint64_t now) noexcept

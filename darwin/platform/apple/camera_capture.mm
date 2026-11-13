@@ -431,8 +431,8 @@ struct RunningCamera : StreamCache {
     AVCaptureDeviceInput* input {};
     AVCaptureVideoDataOutput* videoOutput {};
     AVCapturePhotoOutput* photoOutput {};
-    // When the photo maximum that exceeds the format's size was committed, by the admission or by a repair of the
-    // anchor (host nanoseconds); zero if there is none (photoMaximumCommittedAt, stillSettleNanoseconds).
+    // When a photo maximum that needs the sensor's full-resolution mode was committed, by the admission or by a repair
+    // of the anchor (host nanoseconds); zero if there is none (photoMaximumCommittedAt, stillSettleNanoseconds).
     std::uint64_t photoMaximumCommittedAt {};
     UMLCameraOutputDelegate* delegate {};
     AVCaptureConnection* connection {};
@@ -962,12 +962,12 @@ public:
             std::lock_guard lock(photoMutex_);
             photos_[request.token] = {camera, delegate, request, attempt};
         }
-        // The pipeline applies a maximum that exceeds the format's size some time after the session commits it, and a
-        // capture that starts before is served at the format's size: the first still starts when that time has
+        // The pipeline applies a maximum that needs the sensor's full-resolution mode some time after the session commits
+        // it, and a capture that starts before is served at the binned size: the first still starts when that time has
         // passed, scheduled on the session's queue, which stays free for the other cameras and the stop meanwhile.
         // Another attempt of the request (stillSizeOutcome) has waited.
         if (const std::uint64_t wait = attempt == 1 ? stillSettleNanoseconds(running.photoMaximumCommittedAt, hostNow()) : 0; wait != 0) {
-            std::fprintf(stderr, "Camera: camera %zu: the first still starts in %llu ms, when the photo output's maximum beyond its format has taken effect\n",
+            std::fprintf(stderr, "Camera: camera %zu: the first still starts in %llu ms, when the photo output's full-resolution maximum has taken effect\n",
                          camera, static_cast<unsigned long long>(wait / 1000000));
             scheduleStill(camera, request.token, output, settings, delegate, wait);
             return true;
@@ -1479,7 +1479,7 @@ private:
         if (newPhoto != nil) {
             running.photoOutput = newPhoto;
             running.photoMaximumCommittedAt = uml::platform::photoMaximumCommittedAt(
-                photoMaximum(anchor->facts, limits_.maximumStillPixels), {anchor->facts.width, anchor->facts.height}, hostNow());
+                photoMaximum(anchor->facts, limits_.maximumStillPixels), hostNow());
         }
         running.format = anchor->format;
         // The timing written again is known; what was applied before is written again after it.
@@ -1629,7 +1629,7 @@ private:
         // The photo maximum was written again: the pipeline takes its time again.
         if (ok && running.photoOutput != nil)
             running.photoMaximumCommittedAt = uml::platform::photoMaximumCommittedAt(
-                photoMaximum(anchor->facts, limits_.maximumStillPixels), {anchor->facts.width, anchor->facts.height}, hostNow());
+                photoMaximum(anchor->facts, limits_.maximumStillPixels), hostNow());
         // A stream's durations are written with its anchor; a still-only camera's are written when it streams.
         if (ok && running.video) running.timingWritten();
         if (ok && running.applied) applyOnQueue(camera, running.settings, true);
