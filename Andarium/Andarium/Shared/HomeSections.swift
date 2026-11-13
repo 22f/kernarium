@@ -584,13 +584,13 @@ struct BackupOption: View {
     @Binding var isOn: Bool
 
     var body: some View {
-        OptionRow(title: String(localized: "Back up virtual machine data"), symbol: "icloud.fill") {
-            Toggle("Back up virtual machine data", isOn: $isOn).labelsHidden()
+        OptionRow(title: String(localized: "Include in backups"), symbol: "icloud.fill") {
+            Toggle("Include in backups", isOn: $isOn).labelsHidden()
         }
     }
 }
 
-/// What the Back up guest data row does to iCloud and computer backups.
+/// What the Include in backups row does to iCloud and computer backups.
 /// Snapshots are never in a backup, which the note says once there are some.
 struct BackupNote: View {
     let host: HostDevice
@@ -611,6 +611,7 @@ struct BackupSection: View {
                     get: { guest.includeInBackups },
                     set: { model.guest?.includeInBackups = $0 }
                 ))
+                .id("backup-row")
             } footer: {
                 BackupNote(host: model.host, hasSnapshots: model.snapshots.count > 0)
             }
