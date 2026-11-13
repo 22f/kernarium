@@ -560,6 +560,12 @@ struct ContainerGuestTests {
         func packages() async throws -> Set<String> {
             Set(try await shell(operations, "pm list packages -3").split(whereSeparator: \.isNewline).map { String($0.dropFirst("package:".count)) })
         }
+        if Self.environment["ANDARIUM_CONTAINER_GUEST_START_CLEAN"] != nil {
+            // A guest with no app of anyone's: the packages the guest was given, and the OBB folders they left.
+            let removed = try await packages()
+            for package in removed { _ = try await shell(operations, "pm uninstall \(package) >/dev/null 2>&1; rm -rf '/storage/emulated/0/Android/obb/\(package)'; true") }
+            print("REAL_SAMPLE start-clean removed-packages=\(removed.count) remaining=\(try await packages().count)")
+        }
         var known = try await packages()
         let numbers = ((try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []).compactMap(Int.init).sorted()
         for number in numbers {
@@ -598,6 +604,12 @@ struct ContainerGuestTests {
             var installedPackage: String?
             // The extra run: the copy of the data cancelled halfway.
             if cancelCopy.contains(number), let chosen, !chosen.data.isEmpty {
+                // The app, if an earlier file of the folder is the same app, goes first: this run is on a guest that has not seen it.
+                if let package = chosen.packageName, known.contains(package) {
+                    _ = try await shell(operations, "pm uninstall \(package) >/dev/null 2>&1; rm -rf '/storage/emulated/0/Android/obb/\(package)'; true")
+                    known = try await packages()
+                    print("REAL_SAMPLE \(number) pre-clean removed an earlier file's copy of the same app")
+                }
                 let log = UpdateLog()
                 let box = TaskBox()
                 let partials = try Self.settledLedger()
@@ -615,7 +627,7 @@ struct ContainerGuestTests {
                 line += " last-progress=\(String(format: "%.2f", log.progress.last ?? -1)) ledger-owed=\(partials.ledger.isOwed)"
                 print(line)
                 let now = try await packages()
-                installedPackage = now.subtracting(known).first
+                installedPackage = now.subtracting(known).first ?? chosen.packageName
                 known = now
                 if let package = installedPackage {
                     let listing = try await shell(operations, "ls -A '/storage/emulated/0/Android/obb/\(package)' 2>/dev/null")
@@ -659,13 +671,18 @@ struct ContainerGuestTests {
                 if let value = update.progress { latest = value }
                 if let flag = update.cancellable { cancellable.append("\(flag)@\(String(format: "%.2f", latest))") }
             }
-            let counted = log.details.filter { $0.contains("part") || $0.contains("data file") }
-            print("REAL_SAMPLE \(number) overlay updates=\(updates.count) progress-first=\(String(format: "%.2f", progress.first ?? -1)) progress-last=\(String(format: "%.2f", progress.last ?? -1)) monotonic=\(zip(progress, progress.dropFirst()).allSatisfy { $0 <= $1 }) cancellable-changes=\(cancellable) first-line=\"\(counted.first ?? "")\" last-line=\"\(counted.last ?? "")\"")
+            // The lines the overlay showed, with their numbers as #, in the order they first appeared.
+            var lines: [String] = []
+            for detail in log.details {
+                let shape = detail.map { $0.isNumber ? "#" : String($0) }.joined().replacingOccurrences(of: "##", with: "#")
+                if !lines.contains(shape) { lines.append(shape) }
+            }
+            print("REAL_SAMPLE \(number) overlay updates=\(updates.count) progress-first=\(String(format: "%.2f", progress.first ?? -1)) progress-last=\(String(format: "%.2f", progress.last ?? -1)) monotonic=\(zip(progress, progress.dropFirst()).allSatisfy { $0 <= $1 }) cancellable-changes=\(cancellable) lines=\(lines)")
             // What the guest now has: the new package, by its number.
             let now = try await packages()
             let added = now.subtracting(known)
             known = now
-            guard let package = added.first ?? installedPackage, added.count <= 1 else {
+            guard let package = added.first ?? installedPackage ?? chosen?.packageName.flatMap({ now.contains($0) ? $0 : nil }), added.count <= 1 else {
                 print("REAL_SAMPLE \(number) guest new-packages=\(added.count)")
                 print("REAL_SAMPLE \(number) guest active-sessions=\(try await activeSessions(operations))")
                 continue
@@ -694,7 +711,7 @@ struct ContainerGuestTests {
                     print("REAL_SAMPLE \(number) data \(index + 1) entry-bytes=\(entry.size) guest-bytes=\(guestBytes) sha256-entry=\(entryHash.prefix(16)) sha256-guest=\(guestHash.prefix(16)) equal=\(entryHash == guestHash) in-package-folder=\(place.folder.hasSuffix("/Android/obb/\(package)"))")
                 }
                 let listing = try await shell(operations, "ls -A '/storage/emulated/0/Android/obb/\(package)' 2>/dev/null")
-                let others = try await shell(operations, "ls -A /storage/emulated/0/Android/obb 2>/dev/null").split(whereSeparator: \.isNewline).filter { $0 != package }
+                let others = try await shell(operations, "ls -A /storage/emulated/0/Android/obb 2>/dev/null").split(whereSeparator: \.isNewline).filter { $0 != package && !$0.hasPrefix(".") }
                 print("REAL_SAMPLE \(number) obb-folder-entries=\(listing.split(whereSeparator: \.isNewline).count) partial-left=\(listing.contains(".andarium-")) other-obb-folders=\(others.count)")
             }
             print("REAL_SAMPLE \(number) guest active-sessions=\(try await activeSessions(operations))")
@@ -811,7 +828,11 @@ private nonisolated final class RecordingAdbTransport: AdbTransport, @unchecked 
     func readExactly(_ count: Int) throws -> Data { try base.readExactly(count) }
 
     func writeAll(_ data: Data) throws {
-        if data.count < 4096, let text = String(data: data, encoding: .utf8), text.contains("install-create") { commands.add(text) }
+        // The service string of an open request, with the header's binary bytes in front of it.
+        if data.count < 4096 {
+            let text = String(decoding: data, as: UTF8.self)
+            if text.contains("install-create") { commands.add(text) }
+        }
         try base.writeAll(data)
     }
 
