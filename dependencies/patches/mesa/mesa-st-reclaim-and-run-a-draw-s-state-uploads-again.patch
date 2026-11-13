@@ -9,11 +9,10 @@ update again with the next draw. The memory refused is often held for
 work that has finished, so the application lost a draw it could have
 made.
 
-st_validate_state() now gives back what the driver can (u_reclaim), runs
-the updates that failed again, and again a few milliseconds later while
-the room the reclaim freed has not shown. Only when they still fail does
-it skip the draw and raise the error as before. The updates it runs
-again do not reclaim in their turn.
+st_validate_state() now gives back what the driver can (u_reclaim), and
+runs the updates that failed once more when the room has shown. Only
+when they still fail does it skip the draw and raise the error as
+before. The updates it runs again do not reclaim in their turn.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---

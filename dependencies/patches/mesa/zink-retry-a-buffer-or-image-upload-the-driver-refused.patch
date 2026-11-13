@@ -8,8 +8,8 @@ staging buffer, copy into it and unmap it. When the driver refused the
 buffer the map failed and the upload was dropped without an error, so
 the application kept a buffer or texture with its older contents.
 
-Each now gives back what the driver can and tries once more, through
-u_reclaim. A call the threaded context made without synchronizing with
+Each now gives back what the driver can, through u_reclaim, and maps
+once more. A call the threaded context made without synchronizing with
 the driver thread does not finish the context's work, which it does not
 own: it only releases what the screen caches.
 

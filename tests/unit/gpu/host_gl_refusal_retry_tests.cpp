@@ -94,10 +94,10 @@ constexpr const char* shapeName = "draw";
 #endif
 
 #if defined(UML_REFUSAL_RETRY_DRAW)
-// A draw writes the one pixel of a 64 by 32 target that its index names, in
-// a colour that the index names too: the pixel tells a draw that ran from one
-// that was dropped, and tells which of the draws that wrap around the target
-// ran last.
+// A draw writes the one pixel of a 128 by 64 target that its index names, in
+// a colour that the index names too, so that no two of 8192 draws write the
+// same pixel or colour: a pixel tells a draw that ran from one that was
+// dropped.
 constexpr const char* vertexShader = R"(#version 450 core
 uniform vec4 values[2048];
 uniform int index;
@@ -106,8 +106,8 @@ void main()
 {
     tint = values[index & 2047];
     tint.a = (255.0 - 64.0 * float((index >> 11) & 3)) / 255.0;
-    gl_Position = vec4((float(index & 63) + 0.5) / 32.0 - 1.0,
-        (float((index >> 6) & 31) + 0.5) / 16.0 - 1.0, 0.0, 1.0);
+    gl_Position = vec4((float(index & 127) + 0.5) / 64.0 - 1.0,
+        (float((index >> 7) & 63) + 0.5) / 32.0 - 1.0, 0.0, 1.0);
     gl_PointSize = 1.0;
 }
 )";
@@ -133,8 +133,8 @@ using Pixel = std::array<std::uint8_t, 4>;
 
 #if defined(UML_REFUSAL_RETRY_DRAW)
 
-constexpr GLsizei targetWidth = 64;
-constexpr GLsizei targetHeight = 32;
+constexpr GLsizei targetWidth = 128;
+constexpr GLsizei targetHeight = 64;
 constexpr int pixelCount = targetWidth * targetHeight;
 
 // The colour of the draw of an index, as the shader writes it.
@@ -354,6 +354,13 @@ int main()
     require(runDraws() == 0, "a draw was refused with no limit");
     giveBack(provider);
     const std::uint64_t baseline = InjectedPool::live();
+    // The draws above painted the pixels the pressured draws are to paint:
+    // none of them may be left to pass for one of those.
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish();
+    require(pixelAt(0, 0) == Pixel {0, 0, 0, 255} && pixelAt(5, 0)
+            == Pixel {0, 0, 0, 255},
+        "the target was not cleared between the draws");
 #endif
 
     // The limit is eight of the uploader's buffers.
@@ -376,18 +383,17 @@ int main()
     require(refusedRounds == 0,
         "a draw was refused for memory that the finished work gives back");
 
-    // Every draw ran: the pixel of each index shows the colour of the last
-    // draw that named it, and the pixels no draw named are black.
+    // Every draw ran: the pixel of each index shows the colour of its draw,
+    // which no earlier draw and not the warm-up had painted, and the pixels
+    // no draw named are black.
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(pixelCount) * 4);
     glReadPixels(0, 0, targetWidth, targetHeight, GL_RGBA, GL_UNSIGNED_BYTE,
         pixels.data());
     int wrong = 0;
     for (int slot = 0; slot < pixelCount; ++slot) {
         Pixel want {0, 0, 0, 255};
-        if (slot <= totalDraws) {
-            const int last = slot + 2048 * ((totalDraws - slot) / 2048);
-            want = colourOf(last);
-        }
+        if (slot <= totalDraws)
+            want = colourOf(slot);
         const std::size_t at = static_cast<std::size_t>(slot) * 4;
         const Pixel got {
             pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]};
@@ -575,11 +581,13 @@ int main()
     require(pool.refusals() > 0,
         "the uploads were not refused, so nothing was proven");
     // The first upload is the one that reclaims: the request is made, and
-    // once more after the reclaim, and each of the two reserves memory once or
-    // twice (the driver releases its own caches and tries its allocation
-    // again). It is not made six times, or more.
+    // once more after the reclaim, so the pool refuses at least two
+    // reservations; and each of the two reserves memory once or twice (the
+    // driver releases its own caches and tries its allocation again), so it
+    // refuses at most four. A request made six times or more would exceed
+    // that. The helper's own test covers that nothing in it replays a request.
     std::fprintf(stderr, "the first upload met %u refusals\n", refusedByFirst);
-    require(refusedByFirst >= 1 && refusedByFirst <= 4,
+    require(refusedByFirst >= 2 && refusedByFirst <= 4,
         "a refused upload was not made once, and once more after a reclaim");
     require(elapsed < 20s, "uploads that cannot fit took too long");
     require(!shows(target, side, picture3),
