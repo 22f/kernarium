@@ -249,6 +249,35 @@ struct SendFeedbackStartLogTests {
         sheet.close()
     }
 
+    /// The values the driver knows are taken out wherever the output has them,
+    /// and the formats that carry any value are taken out without them.
+    @Test func theLogTakesOutWhatTheDriverKnowsAndTheFormatsThatCarryAnyValue() throws {
+        let fixture = try fixture()
+        let driver = try #require(fixture.app.driver as? StubDriver)
+        driver.identifiers = GuestIdentifiers(
+            serial: Self.serial, adbKey: Self.key, hardwareAddresses: [[0x02, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E]],
+            timeZones: ["America/Argentina/Buenos_Aires"])
+        let uuid = "12345678-1234-4abc-8def-123456789abc"
+        try fixture.writeRecord(
+            output: """
+                [    1.0] init: using \(Self.serial) and America/Argentina/Buenos_Aires
+                [    2.0] init: Init cannot set 'ro.boot.kernarium.adb_key' to '\(Self.key)': __system_property_add failed
+                [    3.0] eth0: IPv6 duplicate address fe80::1a:2bff:fe3c:4d5e used by 02:1a:2b:3c:4d:5e detected!
+                [    4.0] EXT4-fs (ubdb1): mounted filesystem \(uuid) r/w with ordered data mode. Quota mode: none.
+                [    5.0] eth0: 10.0.2.15 at 05:04:50
+
+                """)
+        let text = try logText(fixture)
+        for value in [Self.serial, "Buenos_Aires", Self.key, "QAAAAGJ4", "fe80::1a", "02:1a:2b", uuid] {
+            #expect(!text.contains(value), "\(value) in \(text)")
+        }
+        #expect(text.contains("init: using <masked> and <time zone>"))
+        #expect(text.contains("init: Init cannot set 'ro.boot.kernarium.adb_key' to '<masked>': __system_property_add failed"))
+        #expect(text.contains("eth0: IPv6 duplicate address <ipv6> used by <address> detected!"))
+        #expect(text.contains("EXT4-fs (ubdb1): mounted filesystem <uuid> r/w with ordered data mode. Quota mode: none."))
+        #expect(text.contains("[    5.0] eth0: 10.0.2.15 at 05:04:50"))
+    }
+
     /// The name is the moment the log was made, in the device's clock: a zone
     /// other than the test machine's gives the other hour, and the ambient
     /// language, calendar and digits (the run's `-testLanguage` and `-testRegion`)

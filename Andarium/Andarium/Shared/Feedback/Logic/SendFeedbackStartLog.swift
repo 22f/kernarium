@@ -49,9 +49,11 @@ nonisolated enum SendFeedbackStartLog {
     /// The file's text. `output` is what the virtual machine printed in this
     /// boot, as the runtime's record last quoted it (nil where it has none yet);
     /// `containers` are the application's own folders, which the output may
-    /// name.
+    /// name, and `identifiers` the values of this installation that are taken
+    /// out wherever they stand.
     static func text(
-        step: String, seconds: Int, kind: BootKind, restarts: Int, output: String?, containers: [String] = []
+        step: String, seconds: Int, kind: BootKind, restarts: Int, output: String?, containers: [String] = [],
+        identifiers: GuestIdentifiers = .none
     ) -> String {
         var lines = [
             "Start log",
@@ -62,16 +64,21 @@ nonisolated enum SendFeedbackStartLog {
         if restarts > 0 { lines.append("Restarts in this start: \(restarts)") }
         lines.append("")
         lines.append("Printed while starting, this boot only (the last \(outputLimit) bytes at most):")
-        let printed = (output.map { masked(limited($0), containers: containers) } ?? "")
+        let printed = (output.map { masked(limited($0), containers: containers, identifiers: identifiers) } ?? "")
             .trimmingCharacters(in: .newlines)
         lines.append(printed.isEmpty ? "(nothing yet)" : printed)
         return lines.joined(separator: "\n") + "\n"
     }
 
     /// `output` cut from its start to at most `outputLimit` bytes, at a line.
+    /// The cut falls between two characters: a character it would split is
+    /// left out whole, not replaced by U+FFFD, which is longer than the bytes
+    /// it stands for.
     static func limited(_ output: String) -> String {
         guard output.utf8.count > outputLimit else { return output }
-        var tail = String(decoding: Array(output.utf8.suffix(outputLimit)), as: UTF8.self)
+        var bytes = Array(output.utf8.suffix(outputLimit))
+        while let first = bytes.first, first & 0xC0 == 0x80 { bytes.removeFirst() }
+        var tail = String(decoding: bytes, as: UTF8.self)
         if let newline = tail.firstIndex(of: "\n") { tail = String(tail[tail.index(after: newline)...]) }
         return tail
     }
@@ -84,7 +91,8 @@ nonisolated enum SendFeedbackStartLog {
     ]
 
     /// `text` with what could tell an installation apart taken out, as well as
-    /// what the bug report takes out (`DiagnosticRedaction`):
+    /// what the bug report takes out (`DiagnosticRedaction`). By the name that
+    /// carries a value:
     /// - the value of every `adb_key=` assignment (the kernel echoes its command
     ///   line, and the host's adb public key is on it), and of the same property
     ///   printed as `[...adb_key]: [value]`;
@@ -93,11 +101,20 @@ nonisolated enum SendFeedbackStartLog {
     ///   for a text that did not come from it);
     /// - the value of `timezone=` and of the property `[...timezone]: [value]`,
     ///   which tells the region the person is in, as `<time zone>`;
-    /// - any hardware address;
-    /// - the application's own folders and the person's home folder;
+    /// - the value in init's `Init cannot set 'NAME' to 'VALUE'`, whichever
+    ///   property it names (the properties come from the kernel's command line,
+    ///   and the reason after it stays);
     /// - and, where the text begins in the middle of a line, the rest of an
     ///   assignment that was cut, or of a key cut inside its value.
-    static func masked(_ text: String, containers: [String] = []) -> String {
+    ///
+    /// By value, wherever the text has it (`identifiers`): the serial number,
+    /// the adb key, the hardware address in its colon, dash and plain spellings
+    /// and the interface identifier an IPv6 address derives from it, and the
+    /// time zone's name. By shape, whatever the value: any hardware address in
+    /// its colon spelling, any IPv6 address (`maskedIPv6`), any UUID (a
+    /// filesystem's, a container's), the application's own folders and the
+    /// person's home folder.
+    static func masked(_ text: String, containers: [String] = [], identifiers: GuestIdentifiers = .none) -> String {
         let masked = "<masked>"
         var result = maskedFirstLineFragment(text)
         for (pattern, template) in [
@@ -107,11 +124,19 @@ nonisolated enum SendFeedbackStartLog {
             (#"(serialno\]: \[)[^\]]*"#, "$1\(masked)"),
             (#"(timezone=)\S*"#, "$1<time zone>"),
             (#"(timezone\]: \[)[^\]]*"#, "$1<time zone>"),
-            (#"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b"#, "<address>"),
+            (#"(Init cannot set '[^']*' to ')[^']*(')"#, "$1\(masked)$2"),
         ] {
             result = result.replacingOccurrences(of: pattern, with: template, options: .regularExpression)
         }
-        return DiagnosticRedaction.redact(result, containers: containers)
+        result = maskedKnownValues(result, identifiers)
+        result = result.replacingOccurrences(
+            of: #"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b"#, with: "<address>", options: .regularExpression)
+        // The folders go first: a container's path ends in a UUID, which the
+        // rule for UUIDs would leave the rest of the path of.
+        result = DiagnosticRedaction.redact(result, containers: containers)
+        result = maskedIPv6(result)
+        result = maskedInterfaceIdentifiers(result, identifiers)
+        return maskedUUIDs(result)
     }
 
     /// A text cut at its start begins in the middle of a line. If the cut fell

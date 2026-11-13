@@ -473,8 +473,12 @@ requires reopening Andarium.
   Only the running record of the boot under way counts (this process, begun in
   this run, with the run's count of the guest's restarts: `BootRecordBinding`);
   an ended record, another process's or an earlier boot's gives "(nothing
-  yet)". The serial, every `adb_key=` value, the time zone, hardware addresses
-  and the application's folders are masked. Its name in the mail is
+  yet)". What identifies the installation is masked: the serial, the adb key,
+  the hardware address and the time zone the application knows, wherever they
+  stand, and by shape every `adb_key=`, `serialno=` and `timezone=` value,
+  init's `Init cannot set 'NAME' to 'VALUE'`, any UUID, any IPv6 address
+  (`::1` stays), any colon hardware address and the application's folders. Its
+  name in the mail is
   `start-log-yyyyMMdd-HHmmss.txt`, the moment it was made, in the device's
   clock and never localized (English, Gregorian, ASCII digits). It is a row the person can remove, counted in the total;
   a removed log is not made again, and the file is not refreshed while the sheet

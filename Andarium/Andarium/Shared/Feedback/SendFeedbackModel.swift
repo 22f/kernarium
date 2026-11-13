@@ -90,7 +90,7 @@ final class SendFeedbackModel {
         guard !closed, case let .booting(kind) = app.phase, let boot = information.boot else { return }
         let text = SendFeedbackStartLog.text(
             step: boot.step, seconds: boot.seconds, kind: kind, restarts: boot.restarts, output: app.startOutput(),
-            containers: app.diagnosticsContainers)
+            containers: app.diagnosticsContainers, identifiers: app.driver?.guestIdentifiers() ?? .none)
         do {
             let url = try folder.reserve(SendFeedbackStartLog.fileName(at: app.feedbackServices.now()))
             try Data(text.utf8).write(to: url)

@@ -199,6 +199,193 @@ struct SendFeedbackStartLogTests {
         #expect(!masked.contains("/Users/NAME") && masked.contains("/Users/<user>"))
     }
 
+    // MARK: Identifiers of any format
+
+    /// Synthetic values, as the reviewer's producers print them.
+    private let serial = "a1b2c3d4e5f60718"
+    private let mac = "02:1a:2b:3c:4d:5e"
+    private let uuid = "12345678-1234-4abc-8def-123456789abc"
+    private let zone = "America/Argentina/Buenos_Aires"
+
+    private var identifiers: GuestIdentifiers {
+        GuestIdentifiers(
+            serial: serial, adbKey: key, hardwareAddresses: [GuestIdentifiers.hardwareAddress(mac)!],
+            timeZones: [zone])
+    }
+
+    /// The lines the guest's own software prints: what the value stood in is
+    /// gone, and the words around it remain.
+    @Test func theProducersOfTheGuestsIdentifiersAreMasked() {
+        let producers: [(line: String, value: String, kept: [String])] = [
+            (
+                "[1.0] init: Init cannot set 'ro.boot.kernarium.adb_key' to '\(key)': __system_property_add failed", key,
+                ["init: Init cannot set 'ro.boot.kernarium.adb_key' to '", "': __system_property_add failed"]
+            ),
+            (
+                "[1.0] init: Init cannot set 'ro.serialno' to '\(serial)': __system_property_add failed", serial,
+                ["init: Init cannot set 'ro.serialno' to '", "': __system_property_add failed"]
+            ),
+            (
+                "[1.0] eth0: IPv6 duplicate address fe80::1a:2bff:fe3c:4d5e used by \(mac) detected!",
+                "fe80::1a:2bff:fe3c:4d5e", ["eth0: IPv6 duplicate address <ipv6> used by <address> detected!"]
+            ),
+            ("[1.0] mke2fs: Filesystem UUID: \(uuid)", uuid, ["mke2fs: Filesystem UUID: <uuid>"]),
+            (
+                "[ 2.0] EXT4-fs (ubdb1): mounted filesystem \(uuid) r/w with ordered data mode. Quota mode: none.", uuid,
+                ["EXT4-fs (ubdb1): mounted filesystem <uuid> r/w with ordered data mode. Quota mode: none."]
+            ),
+        ]
+        for producer in producers {
+            // By the shape alone, and with the values known as well.
+            for known in [GuestIdentifiers.none, identifiers] {
+                let masked = SendFeedbackStartLog.masked(producer.line, identifiers: known)
+                #expect(!masked.contains(producer.value), "\(producer.line) -> \(masked)")
+                for part in producer.kept { #expect(masked.contains(part), "\(part) in \(masked)") }
+                #expect(masked.hasPrefix(String(producer.line.prefix(6))))
+            }
+        }
+        // And in the finished text.
+        let text = log(output: producers.map(\.line).joined(separator: "\n") + "\n")
+        for producer in producers { #expect(!text.contains(producer.value)) }
+    }
+
+    @Test func initsQuotedPropertyErrorLosesItsValueWhateverThePropertyIs() {
+        let line = "[ 3.0] init: Init cannot set 'persist.sys.timezone' to 'Asia/Tokyo': permission denied"
+        #expect(SendFeedbackStartLog.masked(line)
+            == "[ 3.0] init: Init cannot set 'persist.sys.timezone' to '<masked>': permission denied")
+        // A line that is not that message is its own.
+        let other = "[ 3.0] init: cannot set 'x' to 'y'"
+        #expect(SendFeedbackStartLog.masked(other) == other)
+    }
+
+    @Test func everySpellingOfAnIPv6AddressIsMasked() {
+        let addresses = [
+            "fe80::1a:2bff:fe3c:4d5e", "FE80::1A:2BFF:FE3C:4D5E", "fe80:0:0:0:1a:2bff:fe3c:4d5e",
+            "FE80:0000:0000:0000:001A:2BFF:FE3C:4D5E", "fe80:0000:0000:0000:001a:2bff:fe3c:4d5e",
+            "2001:db8::8a2e:370:7334", "2001:0DB8:0000:0000:0000:8A2E:0370:7334", "2001:db8::", "::ffff:10.0.2.15",
+            "::ffff:0a00:020f", "fd00:1234:5678:9abc:def0:1234:5678:9abc", "1::2", "fe80::1%eth0",
+        ]
+        for address in addresses {
+            let bare = address.components(separatedBy: "%")[0]
+            for (template, expected) in [
+                ("[ 2.0] eth0: address %@ done", "[ 2.0] eth0: address <ipv6> done"),
+                ("[ 2.0] eth0: address %@.", "[ 2.0] eth0: address <ipv6>."),
+                ("[ 2.0] eth0: address %@: bad", "[ 2.0] eth0: address <ipv6>: bad"),
+                ("[ 2.0] inet6 %@/64 scope link", "[ 2.0] inet6 <ipv6>/64 scope link"),
+                ("[ 2.0] listening on [%@]:5555", "[ 2.0] listening on [<ipv6>]:5555"),
+                ("[ 2.0] %@", "[ 2.0] <ipv6>"),
+            ] {
+                let input = template.replacingOccurrences(of: "%@", with: bare)
+                let masked = SendFeedbackStartLog.masked(input)
+                #expect(masked == expected.replacingOccurrences(of: "%@", with: bare), "\(input) -> \(masked)")
+            }
+        }
+        // A colon that opens a run of its own is the text's: `addr:fe80::1` is an address after a label.
+        #expect(SendFeedbackStartLog.masked("[ 2.0] addr:fe80::1a:2bff:fe3c:4d5e/64") == "[ 2.0] addr:<ipv6>/64")
+        // A zone stays: it names an interface, not an installation.
+        #expect(SendFeedbackStartLog.masked("[ 2.0] fe80::1a:2bff:fe3c:4d5e%eth0 up") == "[ 2.0] <ipv6>%eth0 up")
+    }
+
+    @Test func whatIsNotAnIPv6AddressStays() {
+        let ordinary = [
+            "[    5.123456] eth0: link up", "[ 5.1] time 05:04:50 and 5:04:50.123", "2026-11-08T05:04:50Z",
+            "[ 5.1] eth0: 10.0.2.15 gateway 10.0.2.2 dns 10.0.2.3", "adb connect 10.0.2.15:5555",
+            "[ 5.1] loopback ::1 and unspecified ::", "[ 5.1] 0:0:0:0:0:0:0:1", "[ 5.1] mask 0xdeadbeef ffff0000 cafe",
+            "[ 5.1] major:minor 8:16 and 259:3", "[ 5.1] std::string and android::hardware::Foo",
+            "[ 5.1] android.hardware.foo@1.0::IFoo/default", "[ 5.1] ip=::::eth0:dhcp", "[ 5.1] 1:2:3:4:5:6:7:8:9",
+            "[ 5.1] status=1 pid:312 uid:1000:2000", "[ 5.1] Filesystem 12345678-1234-1234 a1b2c3d4e5f60718",
+        ]
+        for line in ordinary {
+            // `1:2:3:4:5:6:7:8:9` has nine groups: not an address.
+            #expect(SendFeedbackStartLog.masked(line) == line, "\(line)")
+        }
+        // A hardware address is the existing rule's, not an IPv6 address.
+        #expect(SendFeedbackStartLog.masked("[ 5.1] link/ether aa:bb:cc:dd:ee:ff brd ff:ff:ff:ff:ff:ff")
+            == "[ 5.1] link/ether <address> brd <address>")
+    }
+
+    @Test func everyUUIDIsMaskedInEitherCase() {
+        for value in [uuid, uuid.uppercased(), "00000000-0000-0000-0000-000000000000"] {
+            for template in ["UUID=%@ rw", "(%@)", "Filesystem UUID: %@", "x_%@_y".replacingOccurrences(of: "_", with: "/")] {
+                let masked = SendFeedbackStartLog.masked(template.replacingOccurrences(of: "%@", with: value))
+                #expect(masked.contains("<uuid>") && !masked.contains(value.prefix(8)), "\(template) -> \(masked)")
+            }
+        }
+        // A container's path goes whole, as before, and what is not a UUID stays.
+        let container = "/private/var/mobile/Containers/Data/Application/\(uuid.uppercased())"
+        let masked = SendFeedbackStartLog.masked("opened \(container)/Library/x", containers: [container])
+        #expect(masked == "opened <container>/Library/x")
+        #expect(SendFeedbackStartLog.masked("12345678-1234-4abc-8def-12345678 123456789-1234-4abc-8def-123456789abc")
+            == "12345678-1234-4abc-8def-12345678 123456789-1234-4abc-8def-123456789abc")
+    }
+
+    @Test func theValuesTheApplicationKnowsAreMaskedWhereverTheyStand() {
+        let output = """
+            [ 1.0] init: using \(serial) as the serial and \(key) as the key
+            [ 1.1] sntp: zone \(zone) selected, UTC kept
+            [ 1.2] eth0: hwaddr \(mac), \(mac.uppercased()), \(mac.replacingOccurrences(of: ":", with: "-").uppercased()), \(mac.replacingOccurrences(of: ":", with: ""))
+            [ 1.3] eth0: iid 1a:2bff:fe3c:4d5e, 001A:2BFF:FE3C:4D5E, 1A:2BFF:FE3C:4D5E and fe80::001a:2bff:fe3c:4d5e
+            [ 1.4] other 1a2bff3c4d5e a1b2c3d4e5f607189 x\(serial)
+            """
+        let masked = SendFeedbackStartLog.masked(output, identifiers: identifiers)
+        for value in [serial.uppercased() + "x", key, zone, "1a:2bff", "1A:2BFF", "2bff:fe3c", "021a2b", "02-1A-2B"]
+        where !(value == serial.uppercased() + "x") {
+            #expect(!masked.localizedCaseInsensitiveContains(value), "\(value) in \(masked)")
+        }
+        #expect(!masked.contains(serial + " ") && !masked.contains("as the serial and \(key)"))
+        #expect(masked.contains("init: using <masked> as the serial and <masked> as the key"))
+        #expect(masked.contains("sntp: zone <time zone> selected, UTC kept"))
+        #expect(masked.contains("eth0: hwaddr <address>, <address>, <address>, <address>"))
+        #expect(masked.contains("eth0: iid <address>, <address>, <address> and <ipv6>"))
+        // A serial inside a longer word is not the serial.
+        #expect(masked.contains("a1b2c3d4e5f607189 x\(serial)") && masked.contains("1a2bff3c4d5e"))
+        // Without the values, the shapes that do not carry them stay.
+        #expect(SendFeedbackStartLog.masked("[ 1.0] init: using \(serial) as the serial")
+            == "[ 1.0] init: using \(serial) as the serial")
+        // And through the finished text.
+        let text = log(output: "[ 1.0] init: using \(serial) at \(zone)\n")
+        #expect(text.contains(serial))
+        let known = SendFeedbackStartLog.text(
+            step: "Startup", seconds: 197, kind: .normal, restarts: 0, output: "[ 1.0] init: using \(serial) at \(zone)\n",
+            identifiers: identifiers)
+        #expect(known.contains("[ 1.0] init: using <masked> at <time zone>"))
+    }
+
+    @Test func theIdentityFileGivesTheSerialAndTheHardwareAddress() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("andarium-identity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(InstanceFiles.identityFile)
+        try Data("{\n  \"ethernet_mac\": \"\(mac)\",\n  \"schema\": 1,\n  \"serialno\": \"\(serial)\"\n}\n".utf8).write(to: file)
+        let read = GuestIdentifiers.reading(identityFile: file, adbKey: key, timeZones: [zone])
+        #expect(read == identifiers)
+        // A file that is absent, too long or not an object adds nothing.
+        #expect(GuestIdentifiers.reading(identityFile: directory.appendingPathComponent("none"), adbKey: nil, timeZones: [])
+            == .none)
+        try Data(String(repeating: " ", count: 5000).utf8).write(to: file)
+        #expect(GuestIdentifiers.reading(identityFile: file, adbKey: nil, timeZones: []) == .none)
+        try Data("[1, 2]".utf8).write(to: file)
+        #expect(GuestIdentifiers.reading(identityFile: file, adbKey: nil, timeZones: []) == .none)
+        #expect(GuestIdentifiers.hardwareAddress("02:1a:2b:3c:4d") == nil
+            && GuestIdentifiers.hardwareAddress("02:1a:2b:3c:4d:5g") == nil
+            && GuestIdentifiers.hardwareAddress("02:1A:2B:3C:4D:5E") == [2, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E])
+    }
+
+    @Test func theCutNeverSplitsACharacter() {
+        // 1366 characters of three bytes: 4098 bytes, which a cut at 4096 would split.
+        let expanded = String(repeating: "\u{6F22}", count: 1366)
+        let limited = SendFeedbackStartLog.limited(expanded)
+        #expect(limited.utf8.count <= SendFeedbackStartLog.outputLimit)
+        #expect(!limited.contains("\u{FFFD}") && limited.allSatisfy { $0 == "\u{6F22}" })
+        #expect(limited.utf8.count == 4095)
+        // Lines of two-byte characters are cut at a line.
+        let lines = (0..<600).map { "[\($0)] \(String(repeating: "\u{E9}", count: 8))" }.joined(separator: "\n") + "\n"
+        let cut = SendFeedbackStartLog.limited(lines)
+        #expect(cut.utf8.count <= SendFeedbackStartLog.outputLimit && cut.hasPrefix("[") && cut.hasSuffix("\n"))
+        #expect(!cut.contains("\u{FFFD}"))
+    }
+
     // MARK: The sheet's rules
 
     @Test func theTipFollowsTheStateTheSheetWasOpenedIn() {
