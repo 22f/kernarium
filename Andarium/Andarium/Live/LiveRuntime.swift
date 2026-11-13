@@ -180,6 +180,12 @@ final class LiveRuntime: RuntimeDriver {
     /// asked for since waits for it (`startIfReady`), and so does whatever else
     /// writes the files (`settleGuestFiles`).
     private var preparation: Task<Void, Never>?
+    /// The changes of the guest's files from Home (`withGuestFiles`: setting
+    /// the guest up, erasing it, the update's Restore) from the moment they are
+    /// asked for until they end. A start asked for meanwhile waits for them
+    /// (`startIfReady`): one that waited behind a preparation must not be let
+    /// in ahead of a change that was asked for before it.
+    private var fileChanges = 0
     /// The start `preparation` belongs to, so that the end of one that was
     /// stopped does not clear its successor.
     private var preparationGeneration = -1
@@ -289,30 +295,56 @@ final class LiveRuntime: RuntimeDriver {
 
     func create(_ guest: Guest, progress: @escaping @Sendable (Double) -> Void) async throws -> Guest {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        await settleGuestFiles()
-        storageBusy = true
-        defer {
-            snapshotRevision += 1
-            storageBusy = false
+        return try await withGuestFiles {
+            storageBusy = true
+            defer {
+                snapshotRevision += 1
+                storageBusy = false
+            }
+            return try await storage.create(guest, progress: progress)
         }
-        return try await storage.create(guest, progress: progress)
     }
 
     func erase(progress: @escaping @Sendable (Double) -> Void) async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
         // The snapshots go with the guest: an operation on them finishes first,
         // and so does the preparation of a start that was stopped.
-        await settleGuestFiles()
-        storageBusy = true
-        defer {
-            snapshotRevision += 1
-            storageBusy = false
+        try await withGuestFiles {
+            storageBusy = true
+            defer {
+                snapshotRevision += 1
+                storageBusy = false
+            }
+            try await storage.erase(progress: progress)
+            partials.diskErased()
+            // The next guest is a new one: it boots with a key of its own.
+            keyStore.delete()
+            adbIdentity = nil
         }
-        try await storage.erase(progress: progress)
-        partials.diskErased()
-        // The next guest is a new one: it boots with a key of its own.
-        keyStore.delete()
-        adbIdentity = nil
+    }
+
+    /// Changes the guest's files from Home. The change owns them from the
+    /// moment it is asked for, before its first wait, so a start asked for
+    /// after it does not begin until it has ended; it then waits until nothing
+    /// else writes them, and refuses if a start or the run took them first (a
+    /// start that was under way when it was asked for, and went on to the
+    /// runtime): the end of a preparation does not say that the files are idle.
+    private func withGuestFiles<Value>(_ change: () async throws -> Value) async throws -> Value {
+        fileChanges += 1
+        defer {
+            fileChanges -= 1
+            startIfReady()
+        }
+        await settleGuestFiles()
+        guard !SnapshotRules.runtimeActive(running: runActive, pending: false, launching: launching, preparing: preparing)
+        else { throw GuestFilesTaken() }
+        return try await change()
+    }
+
+    /// What a change of the guest's files says when a start or the run holds
+    /// them: the snapshots' own words.
+    private struct GuestFilesTaken: LocalizedError {
+        var errorDescription: String? { String(localized: "Not while the virtual machine is starting or running.") }
     }
 
     func save(_ guest: Guest) throws {
@@ -338,16 +370,17 @@ final class LiveRuntime: RuntimeDriver {
     /// restore that did not finish first), so what a screen has listed is stale.
     func restoreUpdate() async throws {
         defer { model?.host.freeStorageBytes = AppEntry.freeStorageBytes() }
-        await settleGuestFiles()
-        // A guest being set up or erased has no update to restore.
-        guard !storageBusy else { return }
-        defer { snapshotRevision += 1 }
-        do {
-            try storage.restoreUpdate()
-            rollForwardFailure = nil
-        } catch let unfinished as SnapshotRestoreUnfinished {
-            rollForwardFailure = SnapshotFailure(unfinished.cause)
-            throw unfinished
+        try await withGuestFiles {
+            // A guest being set up or erased has no update to restore.
+            guard !storageBusy else { return }
+            defer { snapshotRevision += 1 }
+            do {
+                try storage.restoreUpdate()
+                rollForwardFailure = nil
+            } catch let unfinished as SnapshotRestoreUnfinished {
+                rollForwardFailure = SnapshotFailure(unfinished.cause)
+                throw unfinished
+            }
         }
     }
 
@@ -404,7 +437,7 @@ final class LiveRuntime: RuntimeDriver {
     }
 
     private func startIfReady() {
-        guard let run = pending, !launching, view != nil, geometry != nil else { return }
+        guard let run = pending, !launching, fileChanges == 0, view != nil, geometry != nil else { return }
         pending = nil
         launching = true
         let generation = launchGeneration

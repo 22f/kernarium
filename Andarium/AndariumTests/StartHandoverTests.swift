@@ -57,8 +57,11 @@ struct StartHandoverTests {
         private(set) var mostInHand = 0
         /// Whether the preparation that is released ends with a failure.
         var failing = true
+        /// Told how many preparations have begun, as each one does.
+        var onEnter: ((Int) -> Void)?
         func prepare() async throws {
             entered += 1
+            onEnter?(entered)
             inHand += 1
             mostInHand = max(mostInHand, inHand)
             await withCheckedContinuation { waits.append($0) }
@@ -162,6 +165,97 @@ struct StartHandoverTests {
     @MainActor private final class Finished {
         private(set) var names: [String] = []
         func mark(_ name: String) { names.append(name) }
+    }
+
+    /// A guest whose update did not finish: the record says so, the snapshot
+    /// holds the data the update started from, and `data.img` is what the
+    /// update's start wrote since. A Restore puts the snapshot back.
+    private func unfinishedUpdate(in directory: URL) throws -> URL {
+        let systemDirectory = try #require(Bundle.main.resourceURL).appendingPathComponent(SystemFolder.name)
+        let current = try SystemFolder.release(in: systemDirectory).identity
+        try #require(current.buildNumber > 1)
+        let earlier = ReleaseIdentity(
+            releaseID: "earlier-release", buildFingerprint: "earlier", buildNumber: current.buildNumber - 1,
+            securityPatch: "2026-01-01", systemDiskSHA256: String(repeating: "a", count: 64),
+            dataLayout: current.dataLayout, minimumGiB: current.minimumGiB, defaultGiB: current.defaultGiB,
+            maximumGiB: current.maximumGiB)
+        let files = InstanceFiles(directory: directory)
+        try files.apply(files.decide(for: earlier), release: earlier)
+        try Data("before-update".utf8).write(to: files.data)
+        try files.apply(files.decide(for: current), release: current)
+        try Data("after-update".utf8).write(to: files.data)
+        return files.data
+    }
+
+    /// The review's sequence on the real storage: a start is stopped while its
+    /// preparation runs, Restore waits for it, and a start is asked for while
+    /// Restore waits. The start waits for Restore, which puts the data back
+    /// before any preparation of the next start touches it.
+    @Test func aStartAskedForWhileARestoreWaitsDoesNotOvertakeIt() async throws {
+        let rig = try rig()
+        defer { try? FileManager.default.removeItem(at: rig.directory) }
+        let data = try unfinishedUpdate(in: rig.directory)
+        let hold = Hold()
+        hold.failing = false
+        let finished = Finished()
+        var dataWhenTheSecondBegan: String?
+        var restoredWhenTheSecondBegan = false
+        hold.onEnter = { count in
+            guard count == 2 else { return }
+            restoredWhenTheSecondBegan = finished.names.contains("restore")
+            dataWhenTheSecondBegan = (try? String(contentsOf: data, encoding: .utf8))
+        }
+        rig.runtime.prepareFilesOverride = { _ in try await hold.prepare() }
+        defer {
+            hold.failing = true
+            hold.release()
+        }
+        rig.model.start(.normal)
+        layOut(rig.runtime)
+        try #require(await until { hold.entered == 1 })
+        rig.model.stopStart()
+        let restore = Task { @MainActor in
+            try? await rig.runtime.restoreUpdate()
+            finished.mark("restore")
+        }
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(finished.names.isEmpty, "Restore did not wait for the stopped preparation")
+        rig.model.start(.normal)
+        layOut(rig.runtime)
+        try? await Task.sleep(for: .milliseconds(200))
+        // The first ends: Restore goes first, then the start's own preparation.
+        hold.release()
+        await restore.value
+        try #require(await until { hold.entered == 2 }, "the start never began after Restore")
+        #expect(restoredWhenTheSecondBegan, "the start began its preparation before Restore had ended")
+        #expect(dataWhenTheSecondBegan == "before-update", "Restore did not put the data back first")
+        hold.failing = true
+        hold.release()
+    }
+
+    /// The start that waits on a change of the files begins by itself when it
+    /// ends, whatever the change was.
+    @Test func aStartThatWaitedOnAnEraseBeginsWhenTheEraseEnds() async throws {
+        let rig = try rig()
+        defer { try? FileManager.default.removeItem(at: rig.directory) }
+        let hold = Hold()
+        hold.failing = false
+        rig.runtime.prepareFilesOverride = { _ in try await hold.prepare() }
+        defer {
+            hold.failing = true
+            hold.release()
+        }
+        rig.model.start(.normal)
+        layOut(rig.runtime)
+        try #require(await until { hold.entered == 1 })
+        rig.model.stopStart()
+        let erase = Task { @MainActor in try? await rig.runtime.erase { _ in } }
+        try? await Task.sleep(for: .milliseconds(100))
+        rig.model.start(.normal)
+        layOut(rig.runtime)
+        hold.release()
+        await erase.value
+        #expect(await until { hold.entered == 2 }, "the start never began after the erase")
     }
 
     // MARK: The console and the restart

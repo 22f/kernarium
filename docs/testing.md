@@ -455,9 +455,12 @@ the feedback receiver, that the sheet the notice opens outlives the boot, the
 Boot line of the information block, and that the notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
 held, and check that a stopped start's preparation is the only one at a time,
-that what changes the files waits for it, that an old boot's console cannot
-mark the next boot, that the notice's clock stands still while the application
-is away, and that the stop is made off the main actor until the run ends.
+that what changes the files waits for it and is not overtaken by a start asked
+for after it (a Restore on the real storage), that an old boot's console cannot
+mark the next boot, not even through a restart that printed no banner, that a
+guest whose first boot did not complete starts with the longer time, that the
+notice's clock stands still while the application is away, and that the stop is
+made off the main actor until the run ends.
 `SlowStartCaptureTests` save the notice in windows the Simulator's own capture
 cannot take (an iPad turned, a narrow Split View window, the Duo's poses) and
 at the largest text size scrolled to its buttons, and do nothing unless
