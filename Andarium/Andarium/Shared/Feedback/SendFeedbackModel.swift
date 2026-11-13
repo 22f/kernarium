@@ -14,6 +14,23 @@ struct SendFeedbackFailure: Identifiable, Equatable {
     var message: String
 }
 
+extension SendFeedbackMissing {
+    /// What the alert says is missing, and what to do.
+    var message: String {
+        switch self {
+        case .problem:
+            String(
+                localized: "Write what went wrong in the Problem line, then send again.", table: "Feedback")
+        case .details:
+            String(localized: "Describe what you did and what happened, then send again.", table: "Feedback")
+        case .both:
+            String(
+                localized: "Write what went wrong in the Problem line, and describe what you did and what happened, then send again.",
+                table: "Feedback")
+        }
+    }
+}
+
 /// The Send feedback sheet's state and what its controls do. The rules are
 /// `SendFeedbackForm`'s; this holds the files and runs the bug report, the
 /// screenshot, the picked media and the mail. It stops the virtual machine
@@ -34,6 +51,9 @@ final class SendFeedbackModel {
     /// the sheet draws it over itself. The Simulator preview sets it for a capture.
     var fileBusy: BusyState?
     var failure: SendFeedbackFailure?
+    /// Send was tapped while the problem or the details were empty: the alert
+    /// that says which, over the sheet. Nothing opens.
+    var incomplete: SendFeedbackMissing?
     /// Cancel asks before it discards.
     var confirmingDiscard = false
     /// The information block shows in full.
@@ -414,7 +434,13 @@ final class SendFeedbackModel {
     /// where the person reads and may change the mail; nothing is sent from
     /// here.
     func send() {
-        guard state.canSend, !presentingMail, let address = app.feedbackAddress, attachmentsAreThere() else { return }
+        guard state.canSend, !presentingMail else { return }
+        // The mail needs a subject and a body: nothing opens, and an alert says which is empty.
+        if let missing = state.missing {
+            incomplete = missing
+            return
+        }
+        guard let address = app.feedbackAddress, attachmentsAreThere() else { return }
         // Every file is mapped here, before the composer opens: one that cannot
         // be (it went after the look above) is said, like any other that is gone,
         // and the person looks at the list again.

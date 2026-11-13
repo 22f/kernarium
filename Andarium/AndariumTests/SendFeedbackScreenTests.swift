@@ -304,6 +304,7 @@ struct SendFeedbackScreenTests {
         #expect(sheet.form.attachments.isEmpty && sheet.failure == nil)
         #expect(!sheet.state.canMakeBugReport && !sheet.state.canTakeScreenshot)
         sheet.form.problem = "An idea"
+        sheet.form.details = "Details"
         #expect(sheet.state.canSend && sheet.state.canAddMedia)
         sheet.send()
         let request = try #require(fixture.composer.request)
@@ -382,6 +383,7 @@ struct SendFeedbackScreenTests {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.form.problem = "Photos"
+        sheet.form.details = "Details"
         let good = try pickedPhoto(in: fixture)
         let started = Gate()
         let gate = Gate()
@@ -431,6 +433,7 @@ struct SendFeedbackScreenTests {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.form.problem = "Large"
+        sheet.form.details = "Details"
         let big = try fixture.staging.makeFolder().reserve("video.mov")
         try Data(count: 1).write(to: big)
         let handle = try FileHandle(forWritingTo: big)
@@ -475,15 +478,45 @@ struct SendFeedbackScreenTests {
         sheet.close()
     }
 
-    @Test func sendNeedsAProblemAndAnAvailableComposer() {
+    @Test func sendNeedsAProblemDetailsAndAnAvailableComposer() {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.send()
-        #expect(fixture.composer.request == nil)
+        #expect(fixture.composer.request == nil && sheet.incomplete == .both && sheet.failure == nil)
+        sheet.incomplete = nil
+        sheet.form.problem = "x"
+        sheet.send()
+        #expect(fixture.composer.request == nil && sheet.incomplete == .details)
+        sheet.incomplete = nil
+        sheet.form.problem = " \n "
+        sheet.form.details = "y"
+        sheet.send()
+        #expect(fixture.composer.request == nil && sheet.incomplete == .problem)
+        sheet.incomplete = nil
         sheet.form.problem = "x"
         fixture.app.feedbackServices.presentMail = { _, _ in false }
         sheet.send()
-        #expect(sheet.failure?.title == "Mail not opened")
+        #expect(sheet.incomplete == nil && sheet.failure?.title == "Mail not opened")
+        sheet.close()
+    }
+
+    @Test func aMissingFieldAskedAboutDoesNotTouchTheDraftOrTheFiles() async throws {
+        let fixture = fixture()
+        let sheet = fixture.sheet()
+        let picked = try pickedPhoto(in: fixture)
+        await sheet.importMedia([picked])
+        sheet.form.problem = "x"
+        let before = sheet.form
+        sheet.send()
+        #expect(sheet.incomplete == .details && sheet.form == before && fixture.composer.request == nil)
+        sheet.close()
+    }
+
+    @Test func withoutMailNothingIsAskedAboutEither() {
+        let fixture = fixture(mail: false)
+        let sheet = fixture.sheet()
+        sheet.send()
+        #expect(sheet.incomplete == nil && fixture.composer.request == nil && sheet.failure == nil)
         sheet.close()
     }
 
@@ -491,6 +524,7 @@ struct SendFeedbackScreenTests {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         sheet.send()
         fixture.composer.leave(.cancelled)
         #expect(!sheet.sent && sheet.form.problem == "x" && sheet.failure == nil)
@@ -508,6 +542,7 @@ struct SendFeedbackScreenTests {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         let picked = try pickedPhoto(in: fixture)
         await sheet.importMedia([picked])
         let staged = try #require(sheet.form.attachments.items.first?.url)
@@ -532,6 +567,7 @@ struct SendFeedbackScreenTests {
         sheet.takeScreenshot()
         #expect(fixture.app.busy == nil && sheet.form.attachments.isEmpty)
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         sheet.send()
         #expect(fixture.composer.request == nil)
         // The person adds an account in iOS Settings and comes back.
@@ -547,6 +583,7 @@ struct SendFeedbackScreenTests {
         let fixture = fixture()
         let sheet = fixture.sheet()
         sheet.form.problem = "draft"
+        sheet.form.details = "Details"
         await sheet.importMedia([try pickedPhoto(in: fixture)])
         sheet.takeScreenshot()
         #expect(await eventually { sheet.form.attachments.count == 2 })

@@ -202,6 +202,7 @@ struct SendFeedbackFilesScreenTests {
         let file = try fixture.original("app-release.apk", bytes: 12_345)
         let sheet = fixture.sheet()
         sheet.form.problem = "Crash"
+        sheet.form.details = "Details"
         await sheet.addFiles([file])
         let row = try #require(sheet.form.attachments.items.first)
         #expect(sheet.form.attachments.count == 1)
@@ -273,6 +274,7 @@ struct SendFeedbackFilesScreenTests {
         defer { fixture.tearDown() }
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([try fixture.original("sent.apk")])
         sheet.send()
         #expect(fixture.access.stops.isEmpty, "the composer maps the file: the access stays until it is over")
@@ -305,6 +307,7 @@ struct SendFeedbackFilesScreenTests {
         defer { fixture.tearDown() }
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         sheet.takeScreenshot()
         #expect(await eventually { sheet.form.attachments.count == 1 })
         let clash = try fixture.original("Screenshot.PNG")
@@ -386,6 +389,7 @@ struct SendFeedbackFilesScreenTests {
         try handle.close()
         let sheet = fixture.sheet()
         sheet.form.problem = "Big"
+        sheet.form.details = "Details"
         let before = footprint()
         await sheet.addFiles([big])
         let row = try #require(sheet.form.attachments.items.first)
@@ -435,6 +439,7 @@ struct SendFeedbackFilesScreenTests {
         fixture.access.notDownloaded("slow.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         let file = try fixture.original("slow.apk")
         let adding = Task { await sheet.addFiles([file]) }
         #expect(await eventually { sheet.fileBusy != nil })
@@ -536,6 +541,7 @@ struct SendFeedbackFilesScreenTests {
         let keep = try fixture.original("keep.apk"), lose = try fixture.original("lose.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([keep, lose])
         try FileManager.default.removeItem(at: lose)
         sheet.send()
@@ -557,6 +563,7 @@ struct SendFeedbackFilesScreenTests {
         let file = try fixture.original("evicted.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([file])
         fixture.access.notDownloaded("evicted.apk")
         sheet.send()
@@ -572,6 +579,7 @@ struct SendFeedbackFilesScreenTests {
         let file = try fixture.original("rebuilt.apk", bytes: 1000, fill: 1)
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([file])
         try Data(repeating: 2, count: 21 << 20).write(to: file)
         sheet.send()
@@ -590,6 +598,7 @@ struct SendFeedbackFilesScreenTests {
         let file = try fixture.original("emptied.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([file])
         try Data().write(to: file)
         sheet.send()
@@ -603,6 +612,7 @@ struct SendFeedbackFilesScreenTests {
         defer { fixture.tearDown() }
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         sheet.takeScreenshot()
         #expect(await eventually { sheet.form.attachments.count == 1 })
         try FileManager.default.removeItem(at: sheet.form.attachments.items[0].url)
@@ -620,6 +630,7 @@ struct SendFeedbackFilesScreenTests {
         let keep = try fixture.original("keep.apk"), lose = try fixture.original("lose.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([keep, lose])
         // Send's own look finds `lose` as it should be, and the file is gone right after it: the mapping is what finds out.
         let look = fixture.app.feedbackServices.files.inspect
@@ -762,6 +773,7 @@ struct SendFeedbackFilesScreenTests {
         let keep = try fixture.original("keep.apk"), one = try fixture.original("one.apk"), two = try fixture.original("two.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([keep, one, two])
         try FileManager.default.removeItem(at: one)
         try FileManager.default.removeItem(at: two)
@@ -780,6 +792,7 @@ struct SendFeedbackFilesScreenTests {
         let japanese = try fixture.original("\u{30C6}\u{30B9}\u{30C8}\u{30A2}\u{30D7}\u{30EA}.apk")
         let sheet = fixture.sheet()
         sheet.form.problem = "x"
+        sheet.form.details = "Details"
         await sheet.addFiles([chinese, japanese])
         sheet.send()
         let request = try #require(fixture.composer.request)
@@ -933,6 +946,40 @@ struct SendFeedbackFilesScreenTests {
             An empty file can\u{2019}t be attached.
             """)
         #expect(alert?.actions.map(\.title) == ["OK"])
+    }
+
+    /// Send with the problem or the details empty: no composer, and the system's alert over the sheet says
+    /// which. A file or the start log in the draft is neither.
+    @Test(arguments: [
+        ("", "", "Write what went wrong in the Problem line, and describe what you did and what happened, then send again."),
+        ("", "It stops.", "Write what went wrong in the Problem line, then send again."),
+        ("Game freezes", " \n ", "Describe what you did and what happened, then send again."),
+    ])
+    func sendWithAFieldEmptyOpensNoMailAndAnAlertSaysWhichIsMissing(
+        problem: String, details: String, message: String
+    ) async throws {
+        let fixture = try fixture()
+        defer { fixture.tearDown() }
+        let file = try fixture.original("example-app.apk", bytes: 1 << 20)
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let controller = hostSheet(fixture, in: lease) { model in
+            // A file is in the draft: it is not a problem and not details.
+            await model.addFiles([file])
+            model.form.problem = problem
+            model.form.details = details
+            model.send()
+        }
+        var alert: UIAlertController?
+        let shown = await eventually {
+            alert = controller.presentedViewController as? UIAlertController
+            return alert != nil
+        }
+        try #require(shown, "the alert was not presented")
+        #expect(alert?.title == "Can\u{2019}t send yet")
+        #expect(alert?.message == message)
+        #expect(alert?.actions.map(\.title) == ["OK"])
+        #expect(fixture.composer.request == nil, "no mail composer opens")
     }
 
     @Test func theRowSpeaksItsKindItsNameAndItsSizeAndFilesHaveTheirOwnWords() {

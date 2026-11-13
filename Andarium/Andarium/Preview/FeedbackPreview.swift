@@ -67,6 +67,12 @@ enum FeedbackPreview {
                 try? await Task.sleep(for: .milliseconds(500))
                 feedback.confirmingDiscard = true
             }
+        case "feedback-missing-both", "feedback-missing-problem", "feedback-missing-details":
+            // Send tapped with the problem or the details empty, as a person does it: the real alert, no composer.
+            if screen == "feedback-missing-details" { feedback.form.problem = words.problem }
+            if screen == "feedback-missing-problem" { feedback.form.details = words.details }
+            try? await Task.sleep(for: .milliseconds(500))
+            feedback.send()
         case "feedback-large":
             feedback.form.problem = words.problem
             feedback.form.details = words.details

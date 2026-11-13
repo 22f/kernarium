@@ -201,15 +201,54 @@ struct SendFeedbackTests {
 
     // MARK: The form
 
-    @Test func sendWaitsForAProblem() {
+    @Test func sendNeedsAProblemAndDetailsAndSaysWhichIsMissing() {
         var form = SendFeedbackForm(mailAvailable: true, running: true)
-        #expect(!form.canSend)
-        form.problem = "  \n "
-        #expect(!form.canSend)
+        #expect(form.canSend, "Send stays enabled, so that its tap can say what is missing")
+        #expect(form.missing == .both)
         form.problem = "It froze"
-        #expect(form.canSend)
-        form.details = "more"
-        #expect(form.canSend)
+        #expect(form.canSend && form.missing == .details)
+        form.details = "I opened a game"
+        #expect(form.canSend && form.missing == nil)
+        form.problem = ""
+        #expect(form.canSend && form.missing == .problem)
+    }
+
+    @Test func whiteSpaceAndLineBreaksAreNotWords() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        form.problem = "  \n \t"
+        form.details = "\n\n   \r\n"
+        #expect(form.missing == .both)
+        form.problem = "It froze"
+        #expect(form.missing == .details)
+        form.problem = " \n "
+        form.details = "I opened a game"
+        #expect(form.missing == .problem)
+        form.problem = "\u{00A0}\u{2003}"
+        #expect(form.missing == .problem, "no-break and wide spaces are white space too")
+    }
+
+    @Test func filesAndTheStartLogAreNeitherAProblemNorDetails() {
+        var form = SendFeedbackForm(mailAvailable: true, running: true)
+        form.attachments.add(attachment(.bugReport, bytes: 10))
+        form.attachments.add(attachment(.screenshot, bytes: 10))
+        form.attachments.add(attachment(.file, bytes: 10))
+        #expect(form.missing == .both)
+        form.problem = "x"
+        #expect(form.missing == .details)
+    }
+
+    @Test func theProblemLineIsFocusedFirstWhenItIsEmpty() {
+        #expect(SendFeedbackMissing.both.focusesProblem)
+        #expect(SendFeedbackMissing.problem.focusesProblem)
+        #expect(!SendFeedbackMissing.details.focusesProblem)
+    }
+
+    @Test func aMissingFieldDoesNotEnableSendWhileSomethingRunsOrMailIsOff() {
+        var form = SendFeedbackForm(mailAvailable: false, running: true)
+        #expect(!form.canSend)
+        form.mailAvailable = true
+        form.importingMedia = true
+        #expect(!form.canSend && form.missing == .both)
     }
 
     @Test func whileAReportIsMadeNothingIsEditedOrAddedOrSent() {

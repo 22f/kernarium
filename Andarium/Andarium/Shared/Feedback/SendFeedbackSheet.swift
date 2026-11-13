@@ -136,6 +136,17 @@ struct SendFeedbackSheet: View {
         } message: { failure in
             Text(failure.message.keepingTogether)
         }
+        // The mail needs a problem and details: Send says which is empty, and the first empty field is
+        // ready to be typed in once the alert is closed.
+        .alert(
+            Text("Can\u{2019}t send yet", tableName: "Feedback"),
+            isPresented: Binding(get: { model.incomplete != nil }, set: { if !$0 { model.incomplete = nil } }),
+            presenting: model.incomplete
+        ) { missing in
+            Button(Words.ok, role: .cancel) { focus = missing.focusesProblem ? .problem : .details }
+        } message: { missing in
+            Text(missing.message.keepingTogether)
+        }
         .photosPicker(
             isPresented: $picking, selection: $picked, matching: .any(of: [.images, .videos]),
             preferredItemEncoding: .current

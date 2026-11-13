@@ -271,6 +271,11 @@ links. The feature's words are looked up in the `Feedback` string table
 prefix and its information block are English whatever the interface language,
 and the bug report's overlay text is the app's own.
 
+Send needs both a problem (the mail's subject) and details (its body); white
+space counts as empty, and a file or the start log is neither. Send stays
+enabled while one is empty: its tap opens no composer and shows one alert that
+names what is missing, and the first empty field takes the focus after OK.
+
 The sheet attaches the bug report, a screenshot, photos and videos from the
 photo library, and any number of files from Files. The bar has three buttons:
 Bug report, Screenshot and Add, a paperclip whose menu offers Photos and Files
