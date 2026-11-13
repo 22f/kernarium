@@ -878,7 +878,11 @@ void checkpoint_state(int descriptor) noexcept
 			checkpointed_completed.store(done, std::memory_order_relaxed);
 			/* An end that came while this write was delayed has written
 			 * its record, or will: if this write landed after it, write
-			 * it again, which is the same bytes as the end's own. */
+			 * it again, which is the same bytes as the end's own. The
+			 * window that remains is accepted: a process that dies after
+			 * this write lands and before the next line writes leaves
+			 * "running" on disk, which is what a record that was never
+			 * ended says. */
 			if (const std::size_t ended =
 				    terminal_size.load(std::memory_order_seq_cst);
 			    ended != 0)

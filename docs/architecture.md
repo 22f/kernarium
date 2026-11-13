@@ -717,9 +717,10 @@ checkpoint thread rewrites the state with the console's last output whenever
 that grew, so a process ended mid-boot leaves where the boot had got, and a
 stop, restart or power-off before the boot completed quotes that output too.
 The output a record quotes is its own boot's, never an earlier boot's of the
-same process. An end is the last write of the state: it formats its record
-before it writes it, and a checkpoint whose write lands after it, however
-late, writes that record again. The file is text of a fixed layout
+same process. An end is the last state on disk unless the process dies between
+a delayed checkpoint's write and its repair: the end formats its record before
+it writes it, and a checkpoint whose write lands after it writes that record
+again at once. The file is text of a fixed layout
 (`uml-session 6`) that never passes 17920 bytes
 (`session_record_max_bytes`): an 8 KiB memory slot, a 4 KiB stall slot, a 512-byte
 network slot and the state with the kernel output it quotes, at most 5 KiB. Each

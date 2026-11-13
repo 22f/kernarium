@@ -3,10 +3,12 @@
  * The session record's state against a checkpoint that is delayed between its
  * last look at the session and its write. The test binary defines pwrite, which
  * the record's object resolves to, and holds the state write of the thread that
- * asks for it; every other write goes to the real one. An end is the last write
- * of the state, whether it waited for the checkpoint (an ordinary end waits a
- * bounded time) or did not (a crash). The race is deterministic here: the
- * checkpoint is stuck in its write while the end runs.
+ * asks for it; every other write goes to the real one. An end is the last state
+ * on disk once the checkpoint's repair has run, whether it waited for the
+ * checkpoint (an ordinary end waits a bounded time) or did not (a crash). The
+ * race is deterministic here: the checkpoint is stuck in its write while the
+ * end runs. The instant between that write and its repair is accepted and not
+ * tested.
  */
 #include "scratch_directory.hpp"
 #include "session_record.hpp"
