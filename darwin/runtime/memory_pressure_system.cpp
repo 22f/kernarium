@@ -102,12 +102,20 @@ private:
 struct Hub final {
 	dispatch_queue_t queue{};
 	dispatch_source_t source{};
+	/* The timer of the retries, made with the hub so that arming a retry
+	 * allocates nothing of its own: a retry is wanted when the system is
+	 * short of memory. One-shot, set again for each retry and disarmed at
+	 * an unbind. */
+	dispatch_source_t retry_timer{};
 	/* The run that listens; touched only on the queue. */
 	MemoryPressureWatch::State *current{};
-	/* Counts every bind and unbind, so that a retry timer left from a run
-	 * that ended (a libdispatch timer cannot be cancelled) finds it; touched
-	 * only on the queue. */
+	/* Counts every bind and unbind, so that a retry that fires after its run
+	 * ended finds it; touched only on the queue. */
 	std::uint64_t generation{};
+	/* The run and the generation the timer was last set for; touched only
+	 * on the queue. */
+	MemoryPressureWatch::State *retry_state{};
+	std::uint64_t retry_generation{};
 };
 
 } // namespace
@@ -133,13 +141,6 @@ struct MemoryPressureWatch::State final {
 
 namespace {
 
-/* What a retry's timer carries: the state it was set for, which is only
- * compared until the hub says it is still bound. */
-struct RetryTicket final {
-	MemoryPressureWatch::State *state;
-	std::uint64_t generation;
-};
-
 void retry_due(void *context) noexcept;
 
 /* On the queue, after anything that may have left a guest trim pending. */
@@ -150,29 +151,33 @@ void arm_retry(Hub &hub, MemoryPressureWatch::State &state) noexcept
 	const std::uint64_t delay = state.response.retry_delay_ns();
 	if (delay == 0U)
 		return;
-	auto *const ticket =
-		new (std::nothrow) RetryTicket{&state, hub.generation};
-	if (ticket == nullptr)
-		return;
 	state.retry_armed = true;
-	dispatch_after_f(
+	hub.retry_state = &state;
+	hub.retry_generation = hub.generation;
+	dispatch_source_set_timer(hub.retry_timer,
 		dispatch_time(DISPATCH_TIME_NOW, static_cast<std::int64_t>(delay)),
-		hub.queue, ticket, &retry_due);
+		DISPATCH_TIME_FOREVER, delay / 10U);
 }
 
-Hub *shared_hub() noexcept;
+void disarm_retry(Hub &hub) noexcept
+{
+	hub.retry_state = nullptr;
+	dispatch_source_set_timer(hub.retry_timer, DISPATCH_TIME_FOREVER,
+		DISPATCH_TIME_FOREVER, 0);
+}
 
+/* On the queue, when the timer fires. A retry that was set for a run that has
+ * since ended finds the hub bound elsewhere, or bound again. */
 void retry_due(void *context) noexcept
 {
-	const std::unique_ptr<RetryTicket> ticket{
-		static_cast<RetryTicket *>(context)};
-	Hub &hub = *shared_hub();
-	if (hub.current != ticket->state || hub.generation != ticket->generation)
+	Hub &hub = *static_cast<Hub *>(context);
+	MemoryPressureWatch::State *const state = hub.current;
+	if (state == nullptr || hub.retry_state != state ||
+	    hub.retry_generation != hub.generation)
 		return;
-	auto &state = *ticket->state;
-	state.retry_armed = false;
-	(void)state.response.on_retry();
-	arm_retry(hub, state);
+	state->retry_armed = false;
+	(void)state->response.on_retry();
+	arm_retry(hub, *state);
 }
 
 /* On the queue. The source's data is the status flags the system raised since
@@ -205,9 +210,18 @@ Hub *make_hub() noexcept
 		hub->queue);
 	if (hub->source == nullptr)
 		return nullptr;
+	hub->retry_timer =
+		dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, hub->queue);
+	if (hub->retry_timer == nullptr)
+		return nullptr;
 	dispatch_set_context(hub->source, hub);
 	dispatch_source_set_event_handler_f(hub->source, &level_changed);
 	dispatch_resume(hub->source);
+	dispatch_set_context(hub->retry_timer, hub);
+	dispatch_source_set_event_handler_f(hub->retry_timer, &retry_due);
+	dispatch_source_set_timer(hub->retry_timer, DISPATCH_TIME_FOREVER,
+		DISPATCH_TIME_FOREVER, 0);
+	dispatch_resume(hub->retry_timer);
 	return hub;
 }
 
@@ -241,6 +255,7 @@ void unbind(Hub &hub, MemoryPressureWatch::State *state) noexcept
 		if (binding.hub->current == binding.state) {
 			binding.hub->current = nullptr;
 			++binding.hub->generation;
+			disarm_retry(*binding.hub);
 		}
 	});
 }

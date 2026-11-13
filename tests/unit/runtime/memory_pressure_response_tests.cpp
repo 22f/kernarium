@@ -24,6 +24,7 @@
 #include <functional>
 #include <mutex>
 #include <memory>
+#include <new>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -38,8 +39,22 @@ std::atomic<dispatch_source_t> pressure_source{nullptr};
 /* The queue the source's handler runs on: a call on it from the test, once an
  * event was merged, returns after the handler that event started. */
 std::atomic<dispatch_queue_t> pressure_queue{nullptr};
+/* While set, the process's nothrow allocations fail, as they may when the
+ * system is short of memory, which is what a pressure response runs in. */
+std::atomic<bool> nothrow_allocation_fails{false};
 
 } // namespace
+
+void *operator new(std::size_t size, const std::nothrow_t &) noexcept
+{
+	if (nothrow_allocation_fails.load())
+		return nullptr;
+	try {
+		return ::operator new(size);
+	} catch (...) {
+		return nullptr;
+	}
+}
 
 extern "C" dispatch_source_t dispatch_source_create(
 	dispatch_source_type_t type, uintptr_t handle, uintptr_t mask,
@@ -952,6 +967,39 @@ void aBusyGuestTrimIsTriedAgainByTheWatch()
 	require(!contains(text, "(retry 1 of 4)"), text);
 }
 
+/* The guest is busy at the first try, and until the retry the process cannot
+ * allocate. */
+TrimOutcome busyWhileAllocationFails(void *context) noexcept
+{
+	auto &calls = *static_cast<std::atomic<int> *>(context);
+	if (calls.fetch_add(1) == 0) {
+		nothrow_allocation_fails.store(true);
+		return TrimOutcome::busy;
+	}
+	nothrow_allocation_fails.store(false);
+	return TrimOutcome::done;
+}
+
+void aRetryNeedsNoAllocationToBeArmed()
+{
+	std::atomic<int> calls{0};
+	StderrCapture capture;
+	PressureTiming timing;
+	timing.retry_interval_ns = 20 * millisecond;
+	{
+		const auto watch = uml::runtime::start_memory_pressure_response(
+			&busyWhileAllocationFails, &calls, timing);
+		require(watch != nullptr);
+		raiseAndWait(DISPATCH_MEMORYPRESSURE_CRITICAL);
+		const bool retried = waitUntil([&] { return calls == 2; },
+			std::chrono::seconds{20});
+		nothrow_allocation_fails.store(false);
+		require(retried, "a retry was lost for want of memory to arm it");
+	}
+	capture.restore();
+	require(contains(capture.take(), "(retry 1 of 4)"));
+}
+
 void aPendingRetryEndsWithTheWatch()
 {
 	BusyThenFree trim;
@@ -1029,6 +1077,8 @@ int main()
 			aWatchEndsWhileItsResponseIsRunning},
 		{"a-busy-guest-trim-is-tried-again-by-the-watch",
 			aBusyGuestTrimIsTriedAgainByTheWatch},
+		{"a-retry-needs-no-allocation-to-be-armed",
+			aRetryNeedsNoAllocationToBeArmed},
 		{"a-pending-retry-ends-with-the-watch", aPendingRetryEndsWithTheWatch},
 	};
 	return uml::testing::runNamedTests(tests);
