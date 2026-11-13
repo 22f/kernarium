@@ -91,6 +91,7 @@ final class AppModel {
                 refreshStatistics()
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
+                refreshMemoryNotice()
             }
             if (lifecycle.guest == nil) != (oldValue.guest == nil) { refreshNetworkWatch() }
         }
@@ -554,6 +555,7 @@ final class AppModel {
                 refreshStatistics()
                 refreshGraphicsNotice()
                 refreshNetworkWatch()
+                refreshMemoryNotice()
                 #if !APP_STORE
                 refreshJit()
                 #endif
@@ -605,6 +607,20 @@ final class AppModel {
         try? await Task.sleep(for: duration)
     }
     @ObservationIgnored private var thermalNoticeTask: Task<Void, Never>?
+
+    // MARK: Memory notice state
+
+    /// What iOS says of the device's memory, from the runtime, with whether a
+    /// session is on screen and whether the person put the notice away.
+    private(set) var memoryNotice = MemoryPressureNoticeState()
+    /// Waits out the time the notice lingers after the pressure has passed; a
+    /// test paces it by hand.
+    @ObservationIgnored var memoryNoticeSleep: @MainActor (Duration) async -> Void = { duration in
+        try? await Task.sleep(for: duration)
+    }
+    /// The moment a report is taken at; a test sets its own.
+    @ObservationIgnored var memoryNoticeClock: @MainActor () -> ContinuousClock.Instant = { .now }
+    @ObservationIgnored private var memoryNoticeExpiry: Task<Void, Never>?
 
     // MARK: Network notice state
 
@@ -1498,6 +1514,9 @@ final class AppModel {
         cameraNoticeExpiry?.cancel()
         cameraNoticeExpiry = nil
         cameraNotice.runEnded()
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        memoryNotice.runEnded()
         runEnd = end
         runUptimeSeconds = uptimeSeconds
         if end.poweredOff {
@@ -1845,6 +1864,76 @@ final class AppModel {
     /// configuration leaves this out.
     func previewCameraNotice(_ capture: CameraCapture = .interruptedByMultitasking) {
         cameraCaptureChanged(capture)
+    }
+    #endif
+
+    // MARK: Memory notice
+
+    /// The runtime reports a level the system raised, the repeats and the
+    /// return to normal included. The notice follows the level alone: whether
+    /// the host's own response ran changes nothing the person can do.
+    func memoryPressureChanged(_ level: MemoryPressureLevel) {
+        changeMemoryNotice { $0.levelChanged(level, at: $1) }
+    }
+
+    /// A virtual machine session is on screen: the guest runs and Andarium is
+    /// the active application. Not Home, not the boot screen, not the
+    /// background.
+    private var memoryNoticeSessionOnScreen: Bool {
+        guard case .running = phase else { return false }
+        return applicationActive
+    }
+
+    /// Tells the notice whether the session is on screen.
+    func refreshMemoryNotice() {
+        let onScreen = memoryNoticeSessionOnScreen
+        changeMemoryNotice { $0.screenChanged(onScreen: onScreen, at: $1) }
+    }
+
+    /// Applies a change to the notice's state; the views are told, and the
+    /// notice's end is timed, only when it changed.
+    private func changeMemoryNotice(_ change: (inout MemoryPressureNoticeState, ContinuousClock.Instant) -> Void) {
+        var next = memoryNotice
+        change(&next, memoryNoticeClock())
+        guard next != memoryNotice else { return }
+        memoryNotice = next
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+        guard let wait = next.staysFor(at: memoryNoticeClock()) else { return }
+        memoryNoticeExpiry = Task { [weak self] in
+            await self?.memoryNoticeSleep(wait)
+            guard !Task.isCancelled else { return }
+            self?.expireMemoryNotice()
+        }
+    }
+
+    /// The pressure passed and the notice's time is up.
+    private func expireMemoryNotice() {
+        memoryNoticeExpiry = nil
+        var next = memoryNotice
+        next.expire(at: memoryNoticeClock())
+        if next != memoryNotice { memoryNotice = next }
+    }
+
+    /// The notice the session shows about the memory, and none while no
+    /// session is on screen or the person put it away.
+    var memoryNoticeKind: MemoryPressureNotice? { memoryNotice.showing }
+
+    var memoryNoticeShowing: Bool { memoryNoticeKind != nil }
+
+    func dismissMemoryNotice() {
+        var next = memoryNotice
+        next.dismiss()
+        if next != memoryNotice { memoryNotice = next }
+        memoryNoticeExpiry?.cancel()
+        memoryNoticeExpiry = nil
+    }
+
+    #if !APP_STORE
+    /// The Simulator preview plays the levels: it has no runtime to run short
+    /// of memory. The App Store configuration leaves this out.
+    func previewMemoryPressure(_ level: MemoryPressureLevel) {
+        memoryPressureChanged(level)
     }
     #endif
 

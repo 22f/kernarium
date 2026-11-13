@@ -4284,6 +4284,28 @@
         }
       }
     },
+    "iOS asked Andarium to free memory. The virtual machine may slow down for a moment." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSがAndariumにメモリの解放を要求しました。仮想マシンが一時的に遅くなることがあります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS要求Andarium释放内存。虚拟机可能会短暂变慢。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS要求Andarium釋出記憶體。虛擬機器可能會暫時變慢。"
+          }
+        }
+      }
+    },
     "iOS closed Andarium" : {
       "localizations" : {
         "ja" : {
@@ -4412,6 +4434,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "iOS不允許Andarium使用此裝置的位置。請在「設定」中為Andarium開啟「位置」，然後回來使用。"
+          }
+        }
+      }
+    },
+    "iOS may close Andarium. Close other apps, or shut down the virtual machine and lower its memory with Edit under Virtual machine." : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSによってAndariumが終了される可能性があります。他のアプリを閉じるか、仮想マシンをシャットダウンしてから、“仮想マシン”の“編集”でメモリを減らしてください。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能会关闭Andarium。请关闭其他应用，或先将虚拟机关机，再使用“虚拟机”下的“编辑”降低其内存。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能會關閉Andarium。請關閉其他應用程式，或先將虛擬機器關機，再使用「虛擬機器」下的「編輯」降低其記憶體。"
           }
         }
       }
@@ -4859,6 +4903,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "記憶體%@"
+          }
+        }
+      }
+    },
+    "Memory is critically low" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリが著しく不足しています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存严重不足"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體嚴重不足"
+          }
+        }
+      }
+    },
+    "Memory is low" : {
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリが不足しています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存不足"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體不足"
           }
         }
       }
