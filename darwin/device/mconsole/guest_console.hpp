@@ -109,8 +109,9 @@ enum class GuestWriteback {
  * "synced in <n> ms" with n in decimal, is a confirmation; any other text is a
  * refusal. A guest that is busy for longer than `wait`, or that the host holds
  * a block device of while its disk is full, gives no reply in time and the
- * result is `unanswered`. A request that gets no reply is not repeated or
- * followed by another.
+ * result is `unanswered`. A request that gets no reply is not repeated by
+ * this call; whether anything is sent after it, as a quiesce's suspend is, is
+ * the caller's choice.
  *
  * `wait` is the whole request's budget, counted from the call and shared by
  * everything it does: the wait for the console's lock (`busy` when another

@@ -174,8 +174,10 @@ std::atomic_bool runtimeActive;
  * kernarium::console::InputRegistry.
  */
 std::mutex emulatorLifecycleMutex;
-/* The emulator that runs, for a sync, which must not wait for the mutex above. */
-kernarium::settle::Gate emulatorGate;
+/* The emulator that runs, for a sync, which must not wait for the mutex above.
+ * Process lifetime, like the callers it serves: a sync still pinned while the
+ * process exits must not unpin a destroyed mutex. */
+kernarium::settle::Gate& emulatorGate = *new kernarium::settle::Gate;
 /* A held key repeats, so an ordinary key sends the guest one wake edge a second
  * at most. */
 kernarium::input::KeyWakePolicy keyWakePolicy {std::chrono::seconds(1)};

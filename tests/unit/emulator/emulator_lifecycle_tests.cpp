@@ -667,7 +667,7 @@ void aQuiesceWhoseSyncGetsNoReplySkipsTheTrim()
 			return uml_emulator_quiesce(emulator.get(), &settle);
 		});
 	require(suspended.heard == Requests {"sync", "suspend"},
-		"no trim queues behind a sync that is still running");
+		"no trim is sent after a sync that got no reply");
 	requireReport(suspended, UML_EMULATOR_GUEST_STORAGE_UNCONFIRMED,
 		UML_EMULATOR_GUEST_SUSPENSION_SUSPENDED,
 		"a suspend does not confirm the storage the sync did not");
