@@ -470,7 +470,8 @@ requires reopening Andarium.
   gamepad that lists only what the controller has. Controllers are looked for
   during a normal run, and nothing is scanned for or paired. Their input
   reaches the guest only while Andarium is in front, and leaving the front
-  lets every button go. Home, Menu, Options and Share are taken from iOS's
+  lets every button go; what a controller holds on the return reaches the
+  guest with its next report. Home, Menu, Options and Share are taken from iOS's
   gestures while a controller is held and reach Android as buttons (iOS's own
   Home setting decides whether Andarium may have Home). A button going down
   wakes a guest that suspended itself (`wake_for_input`, runtime API 34).
