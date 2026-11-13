@@ -96,7 +96,7 @@ struct AppEntry {
         "home-camera-restricted": "capabilities", "home-camera-unavailable": "capabilities",
         "home-camera-alert": "capabilities", "home-camera-restricted-alert": "capabilities",
         "home-camera-ask": "capabilities",
-        "home-backup": "backup", "home-backup-row": "backup-row",
+        "home-backup": "backup",
         "home-jit": "jit", "home-jit-no-debugger": "jit", "home-jit-fallback": "jit",
     ]
 
@@ -233,7 +233,7 @@ struct AppEntry {
             }
         case "home-memory-warning", "system-memory-warning":
             model.guest = PreviewData.highMemoryGuest(on: host)
-        case "home-options", "home-display", "home-capabilities", "home-backup", "home-backup-row", "system-edit",
+        case "home-options", "home-display", "home-capabilities", "home-backup", "system-edit",
              "home-location-ask", "home-camera-ask":
             break
         case "home-jit":
@@ -421,7 +421,8 @@ struct AppEntry {
         case "stopped":
             // What Stop on the slow-start notice leaves: the run ended by the person.
             model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
-        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished":
+        case "feedback-boot", "feedback-boot-filled", "feedback-boot-details", "feedback-boot-finished",
+             "feedback-boot-removed":
             slowBoot(stage: 3, seconds: 197)
         default:
             break

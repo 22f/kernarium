@@ -66,8 +66,6 @@ struct SideKeysTouchTests {
         let lease: HostWindow.Lease
         let root: UIView
         let guest: GuestMetalView
-        /// The screen of a given size, which the root fills.
-        let holder: UIView?
         /// The safe area the overlay lays out in, from its top-left corner.
         let width: CGFloat
         let height: CGFloat
@@ -77,14 +75,9 @@ struct SideKeysTouchTests {
         private let safe: UIEdgeInsets
 
         /// Holds the host window until `end()`. The session runs in `mode` on a
-        /// runtime with `capabilities`, and the window reads its text at
-        /// `contentSize` when that is given. With a `size` the session is in a
-        /// screen of that size at the window's top-left corner, as a smaller
-        /// phone has it: the keys sit at its right edge, where the popover
-        /// finds the room a smaller phone leaves it.
+        /// runtime with `capabilities`.
         init(
-            _ test: SideKeysTouchTests, capabilities: Capabilities = .device, mode: StartMode = .normal,
-            contentSize: UIContentSizeCategory? = nil, size: CGSize? = nil
+            _ test: SideKeysTouchTests, capabilities: Capabilities = .device, mode: StartMode = .normal
         ) async throws {
             let entry = AppEntry.fromArguments()
             let model = entry.makeModel()
@@ -92,26 +85,12 @@ struct SideKeysTouchTests {
             model.capabilities = capabilities
             model.driver = StubDriver(plan: nil)
             let lease = try await HostWindow.take()
-            if let contentSize { lease.window.traitOverrides.preferredContentSizeCategory = contentSize }
             let controller = AndariumHostingController(rootView: RootView(entry: entry).environment(model), model: model)
             // These are the phone's edge keys. A display that folds lays the
             // session out by its pose instead (`FoldSessionHostingTests`), so
             // here the scene reads as one that does not fold.
             controller.foldReader.stub = { nil }
-            if let size {
-                let container = UIViewController()
-                let holder = UIView(frame: CGRect(origin: .zero, size: size))
-                lease.window.rootViewController = container
-                container.view.addSubview(holder)
-                container.addChild(controller)
-                holder.addSubview(controller.view)
-                controller.view.frame = holder.bounds
-                controller.didMove(toParent: container)
-                self.holder = holder
-            } else {
-                lease.window.rootViewController = controller
-                holder = nil
-            }
+            lease.window.rootViewController = controller
             model.phase = .running(mode)
             let root = controller.view!
             var display: GuestMetalView?
@@ -121,19 +100,15 @@ struct SideKeysTouchTests {
                 return display != nil && display!.bounds.width > 0
             }
             guard found, let display else {
-                lease.window.traitOverrides.remove(UITraitPreferredContentSizeCategory.self)
                 lease.give()
                 throw Failure.noDisplay
             }
             // The session hides the status bar. Where the bar has an inset of
             // its own (the iPhone Duo's inner display, an iPad) the safe area
-            // changes with it, so it is read once the bar is hidden. A
-            // session in a screen of its own size is not asked about the bar.
-            if size == nil {
-                _ = await test.eventually {
-                    root.layoutIfNeeded()
-                    return lease.scene.statusBarManager?.isStatusBarHidden ?? true
-                }
+            // changes with it, so it is read once the bar is hidden.
+            _ = await test.eventually {
+                root.layoutIfNeeded()
+                return lease.scene.statusBarManager?.isStatusBarHidden ?? true
             }
             root.layoutIfNeeded()
             let safe = root.safeAreaInsets
@@ -151,7 +126,6 @@ struct SideKeysTouchTests {
         enum Failure: Error { case noDisplay }
 
         func end() {
-            lease.window.traitOverrides.remove(UITraitPreferredContentSizeCategory.self)
             lease.give()
         }
 
@@ -323,30 +297,9 @@ struct SideKeysTouchTests {
         #expect(run.model.capabilities.offersApkInstall(in: mode) == hint)
     }
 
-    /// The tip on the smallest phone (375 by 667 points) at the largest
-    /// accessibility text size: a card inside the screen, taller than at the
-    /// ordinary size (the size reached the popover), that shows its top and
-    /// scrolls what does not fit, with and without the line for Install APK.
-    @Test(arguments: [true, false])
-    func theTipFitsTheSmallestPhoneAtTheLargestTextSize(_ installs: Bool) async throws {
-        let phone = CGSize(width: 375, height: 667)
-        let capabilities = installs ? Capabilities.device : withoutApkInstall
-        let ordinary = try await shownTip(capabilities, contentSize: .large, size: phone)
-        let largest = try await shownTip(capabilities, contentSize: .accessibilityExtraExtraExtraLarge, size: phone)
-        #expect(
-            largest.card.height > ordinary.card.height + 20,
-            "the largest size did not reach the tip: \(ordinary.card) at the ordinary size, \(largest.card) at the largest")
-        #expect(largest.screen.contains(largest.card), "the card \(largest.card) is not inside the screen \(largest.screen)")
-        #expect(largest.card.height <= SideKeysTipCard.maxHeight(in: largest.sessionHeight) + 1, "\(largest.card)")
-        largest.expectNothingCutOff()
-        #expect(largest.text.contains { $0.label.contains("Install APK") } == installs)
-    }
-
     /// What the popover of the tip shows, in screen coordinates.
     struct ShownTip {
         let card: CGRect
-        let screen: CGRect
-        let sessionHeight: CGFloat
         /// The card's elements but TipKit's close button, whose touch area
         /// reaches past the card's top edge by design, and the scroll bar.
         let text: [(label: String, frame: CGRect)]
@@ -365,22 +318,6 @@ struct SideKeysTouchTests {
             expectCloseInsideCard(sourceLocation: sourceLocation)
         }
 
-        /// A card that scrolls shows its top: nothing starts above it, the
-        /// close button shows, and what does not end inside it is what scrolls.
-        func expectNothingCutOff(sourceLocation: SourceLocation = #_sourceLocation) {
-            #expect(!text.isEmpty, "no text found in the tip", sourceLocation: sourceLocation)
-            for element in text {
-                #expect(
-                    element.frame.minY >= card.minY - 1 && element.frame.minX >= card.minX - 1 && element.frame.maxX <= card.maxX + 1,
-                    "\(element.label) at \(element.frame) starts outside the card \(card)", sourceLocation: sourceLocation)
-                #expect(
-                    element.frame.maxY <= card.maxY + 1 || scrollContent > card.height + 1,
-                    "\(element.label) at \(element.frame) runs past the card \(card) that does not scroll",
-                    sourceLocation: sourceLocation)
-            }
-            expectCloseInsideCard(sourceLocation: sourceLocation)
-        }
-
         private func expectCloseInsideCard(sourceLocation: SourceLocation) {
             if let close {
                 #expect(
@@ -392,25 +329,12 @@ struct SideKeysTouchTests {
         }
     }
 
-    /// The production session in a screen of `size`, its tip up.
-    fileprivate func shownTip(_ capabilities: Capabilities, contentSize: UIContentSizeCategory, size: CGSize) async throws -> ShownTip {
-        let run = try await RunningSession(self, capabilities: capabilities, contentSize: contentSize, size: size)
-        defer { run.end() }
-        try #require(await eventually { run.presented != nil }, "the tip did not show")
-        try await Task.sleep(for: .milliseconds(700))
-        let popover = try #require(run.presented)
-        let holder = try #require(run.holder)
-        return Self.shown(
-            popover, screen: UIAccessibility.convertToScreenCoordinates(holder.bounds, in: holder), sessionHeight: run.height,
-            test: self)
-    }
-
-    static func shown(_ popover: UIViewController, screen: CGRect, sessionHeight: CGFloat, test: SideKeysTouchTests) -> ShownTip {
+    static func shown(_ popover: UIViewController, test: SideKeysTouchTests) -> ShownTip {
         let view = popover.view!
         let found = elements(in: view)
         let scroll = test.descendants(of: view).compactMap { $0 as? UIScrollView }.first
         return ShownTip(
-            card: UIAccessibility.convertToScreenCoordinates(view.bounds, in: view), screen: screen, sessionHeight: sessionHeight,
+            card: UIAccessibility.convertToScreenCoordinates(view.bounds, in: view),
             text: found.filter { !$0.button && !$0.label.hasPrefix("Vertical scroll bar") }.map { ($0.label, $0.frame) },
             close: found.first { $0.button }?.frame,
             scrollContent: scroll?.contentSize.height ?? 0, preferred: popover.preferredContentSize)
@@ -428,7 +352,7 @@ struct SideKeysTouchTests {
         private let container = UIViewController()
         private let host: UIHostingController<AnyView>
 
-        init(size: CGSize, language: String, contentSize: UIContentSizeCategory = .large, leading: Bool = false) async throws {
+        init(size: CGSize, language: String, leading: Bool = false) async throws {
             let locale = Locale(identifier: language)
             tip = SideKeysTip(offersInstall: true, locale: locale)
             let nothing = {}
@@ -438,7 +362,7 @@ struct SideKeysTouchTests {
                     power: nothing, powerHold: nothing, volumeUp: nothing, volumeDown: nothing, back: nothing, home: nothing,
                     settings: nothing))
             lease = try await HostWindow.take()
-            lease.window.traitOverrides.preferredContentSizeCategory = contentSize
+            lease.window.traitOverrides.preferredContentSizeCategory = .large
             host = UIHostingController(rootView: AnyView(overlay.environment(\.locale, locale)))
             host.safeAreaRegions = []
             holder = UIView(frame: CGRect(origin: .zero, size: size))
@@ -458,19 +382,14 @@ struct SideKeysTouchTests {
         }
     }
 
-    fileprivate func shownTip(language: String, width: CGFloat, contentSize: UIContentSizeCategory = .large, leading: Bool = false)
-        async throws -> (ShownTip, SideKeysTip)
-    {
+    fileprivate func shownTip(language: String, width: CGFloat, leading: Bool = false) async throws -> (ShownTip, SideKeysTip) {
         let size = CGSize(width: width, height: 667)
-        let screen = try await TipScreen(size: size, language: language, contentSize: contentSize, leading: leading)
+        let screen = try await TipScreen(size: size, language: language, leading: leading)
         defer { screen.end() }
         try #require(await eventually { screen.popover != nil }, "\(language): the tip did not show")
         try await Task.sleep(for: .milliseconds(700))
         let popover = try #require(screen.popover)
-        let shown = Self.shown(
-            popover, screen: UIAccessibility.convertToScreenCoordinates(screen.holder.bounds, in: screen.holder),
-            sessionHeight: size.height, test: self)
-        return (shown, screen.tip)
+        return (Self.shown(popover, test: self), screen.tip)
     }
 
     /// At the default size the tip fits its card with no scrolling in every
@@ -504,10 +423,9 @@ struct SideKeysTouchTests {
         #expect(shown.card.minX > 0 && shown.card.maxX < 375, "the card \(shown.card) leaves the screen")
     }
 
-    /// The card hugs its text, up to the third accessibility text size (the
-    /// larger sizes read as that one, so the tip stays a card), and takes no
-    /// more than the height it is given: what does not fit scrolls inside it,
-    /// so on the smallest iPhone, and in a fold's half, nothing is cut off.
+    /// The card hugs its text, taller as the text grows, and takes no more
+    /// than the height it is given: what does not fit scrolls inside it, so on
+    /// the smallest iPhone, and in a fold's half, nothing is cut off.
     @Test func theTipCardHugsItsTextAndScrollsBeyondItsMaxHeight() async throws {
         let lease = try await HostWindow.take()
         defer {
@@ -528,14 +446,14 @@ struct SideKeysTouchTests {
             return (fit.height, (scroll?.contentSize.height ?? 0) > fit.height + 1)
         }
         let plain = try await measure(.large, maxHeight: 4000)
-        let third = try await measure(.accessibilityExtraLarge, maxHeight: 4000)
-        let fifth = try await measure(.accessibilityExtraExtraExtraLarge, maxHeight: 4000)
+        let larger = try await measure(.extraExtraExtraLarge, maxHeight: 4000)
         #expect(plain.height > 100 && !plain.scrolls, "the card at the ordinary size is \(plain)")
-        #expect(third.height > plain.height, "larger text makes a taller card: \(plain) \(third)")
-        #expect(abs(fifth.height - third.height) < 1, "the fifth size reads as the third: \(third) \(fifth)")
-        #expect(!third.scrolls && !fifth.scrolls, "with room the card does not scroll: \(third) \(fifth)")
-        let capped = try await measure(.accessibilityExtraExtraExtraLarge, maxHeight: 200)
-        #expect(capped.height <= 200.5 && capped.scrolls, "short of room the card scrolls inside 200 points: \(capped)")
+        #expect(larger.height > plain.height, "larger text makes a taller card: \(plain) \(larger)")
+        #expect(!larger.scrolls, "with room the card does not scroll: \(larger)")
+        let capped = try await measure(.large, maxHeight: plain.height / 2)
+        #expect(
+            capped.height <= plain.height / 2 + 0.5 && capped.scrolls,
+            "short of room the card scrolls inside half its height: \(capped)")
         #expect(SideKeysTipCard.maxHeight(in: 667) < 667 && SideKeysTipCard.maxHeight(in: 100) >= 160)
         // The width leaves the room a popover keeps beside the keys (UIKit left
         // 361 points of 402 and 334 of 375), and is the widest where there is

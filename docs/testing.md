@@ -385,7 +385,7 @@ metadata, fed literal metadata and an in-memory image, never a camera, and
 fake format tables
 ([Cameras](../darwin/device/camera/README.md)). The Camera setting's hosted
 tests (`CameraFlowTests`, and `CameraOffNoticeBannerTests` for the notice that
-Camera is off, drawn in a window at the largest text size) play iOS's
+Camera is off, drawn in a window) play iOS's
 permission with a fake and open no camera;
 the Simulator has no camera and `simctl privacy` cannot grant or revoke one, so
 the denied, restricted and absent states are shown by the preview
@@ -417,6 +417,7 @@ map, backup attribute) on a small sparse file and prints their answers on a
 `SNAPSHOT_FILE_APIS` line; a device reports a refused call there and does not
 fail on it. `SnapshotsModelTests` and `SnapshotWordsTests` check the snapshot
 screens' flows, refusals and words on a fake driver. `SendFeedbackScreenTests`,
+`SendFeedbackStartLogTests` (the sheet's tip and start log during a start),
 `SendFeedbackFilesScreenTests` (files from Files: in place, the copy of a file
 that cannot be used there, the access held and stopped once) and
 `HomeMenuTests` (Home's toolbar menu) exist only in a build with
@@ -456,7 +457,8 @@ the test moves, so no test waits three minutes: when the notice comes (also for
 a start whose boot line never comes, the case it is for), what Stop asks of the
 runtime (after the dialog's answer) and the stopped end screen's words, the
 later notice and plain title of a first start, the controls with and without
-the feedback receiver, that the sheet the notice opens outlives the boot, that
+the feedback receiver and their size (the application's ordinary 44 points at the
+default text size, no less at any size), that the sheet the notice opens outlives the boot, that
 the alert and the sheet take the appearance of the screen under them, the
 Boot line of the information block, and that the notice goes with the boot.
 `StartHandoverTests` run the real runtime object with the files' preparation
@@ -469,8 +471,7 @@ notice's clock stands still while the application is away, and that the stop is
 made off the main actor until the run ends.
 `SlowStartCaptureTests` save the notice in windows the Simulator's own capture
 cannot take (an iPad turned, a narrow Split View window, the Duo's poses) and
-at the largest text size scrolled to its buttons, and do nothing unless
-`TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
+do nothing unless `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` names a folder.
 `GuestRecoveryTests` check that a recovery the guest asked for is a recovery
 session and its reboot a normal one.
 

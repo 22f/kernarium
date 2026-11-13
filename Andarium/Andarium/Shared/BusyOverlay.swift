@@ -16,9 +16,9 @@ struct BusyOverlay: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.32).ignoresSafeArea()
-            // The card is as tall as its text. Where the text does not fit the screen (the largest accessibility
-            // sizes, a long text in another language) the text scrolls between the title and the button, so
-            // that the button stays on the screen and the card can be closed.
+            // The card is as tall as its text. Where the text does not fit the screen (a long text in another
+            // language) the text scrolls between the title and the button, so that the button stays on the
+            // screen and the card can be closed.
             ViewThatFits(in: .vertical) {
                 content(scrolls: false)
                 content(scrolls: true)

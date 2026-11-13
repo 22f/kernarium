@@ -81,9 +81,9 @@ private struct OnCardHalf: ViewModifier {
 
 extension View {
     /// While the device is bent, puts the view in a scroll view that scrolls
-    /// only when it is taller than the space it is given, which a half can be
-    /// at an accessibility size; the view keeps its place otherwise. Flat, on
-    /// the cover and on a display with no hinge it keeps the view it had.
+    /// only when it is taller than the space it is given, which a half can be;
+    /// the view keeps its place otherwise. Flat, on the cover and on a display
+    /// with no hinge it keeps the view it had.
     func scrollsWhenTall() -> some View { modifier(ScrollsWhenTall()) }
 }
 

@@ -9,22 +9,13 @@ import SwiftUI
 struct MemoryPressureNoticeBanner: View {
     let dismiss: () -> Void
 
-    @Environment(\.dynamicTypeSize) private var typeSize
-
     var body: some View {
         // The capsule is as wide as its words when they fit on one line, so a
         // short text in any language is not lost in a wide one; a longer text
-        // wraps inside the cap. At the accessibility sizes the button goes
-        // under the words, as the camera notice's does, so they keep the width.
-        Group {
-            if typeSize.isAccessibilitySize {
-                stacked
-            } else {
-                ViewThatFits(in: .horizontal) {
-                    banner(oneLine: true)
-                    banner(oneLine: false)
-                }
-            }
+        // wraps inside the cap.
+        ViewThatFits(in: .horizontal) {
+            banner(oneLine: true)
+            banner(oneLine: false)
         }
         .frame(maxWidth: 640)
         .padding(.horizontal, 24)
@@ -74,23 +65,6 @@ struct MemoryPressureNoticeBanner: View {
         }
         .padding(.vertical, 10)
         .padding(.horizontal, 14)
-        .glassEffect(.regular, in: .rect(cornerRadius: 22))
-    }
-
-    /// The icon stays beside the title only: the line under it takes the whole
-    /// width, so the larger text sizes do not wrap it into a narrow column.
-    private var stacked: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                icon
-                titleText(oneLine: false)
-            }
-            detailText(oneLine: false)
-            dismissButton
-        }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
     }
 }

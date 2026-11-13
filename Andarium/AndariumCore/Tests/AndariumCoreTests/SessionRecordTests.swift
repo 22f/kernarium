@@ -98,6 +98,25 @@ struct SessionRecordTests {
         #expect(odd.bootFinished == nil && odd.restarts == nil)
     }
 
+    /// The runtime writes every state over the whole of its area and pads it
+    /// with newlines, so a shorter state never leaves the end of a longer one.
+    @Test func newlinesThatPadTheStateAreNotPartOfIt() throws {
+        let padding = String(repeating: "\n", count: 3000)
+        let unfinished = try #require(SessionRecord(text: record(
+            "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\nboot unfinished\nrestarts 2\n"
+                + "kernel-output\n[   31.2] init: starting service 'netd'\n[   31.3] init: next\n" + padding)))
+        #expect(unfinished.running && unfinished.bootFinished == false && unfinished.restarts == 2)
+        #expect(unfinished.kernelOutput == "[   31.2] init: starting service 'netd'\n[   31.3] init: next\n")
+        let completed = try #require(SessionRecord(text: record(
+            "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\nboot completed\nrestarts 2\n"
+                + padding)))
+        #expect(completed.bootFinished == true && completed.kernelOutput == nil && completed.processID == 7)
+        // A line the guest left unfinished stays as it is.
+        let cut = try #require(SessionRecord(text: record(
+            "state ended\nend failed\nstatus 1\npid 7\nstarted 1794114339\nended 1794114340\nkernel-output\n[ 1.0] ab")))
+        #expect(cut.kernelOutput == "[ 1.0] ab")
+    }
+
     @Test func aRecordStillRunningNearTheLimitWasEndedByIOS() throws {
         let near = try #require(SessionRecord(text: record(
             "state running\nend running\nstatus 0\npid 7\nstarted 1794114339\n",
