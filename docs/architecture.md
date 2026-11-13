@@ -697,23 +697,35 @@ bind the console, host-file flushing still runs but guest write-back and freeze
 are unavailable.
 
 Each of the three calls reports what the guest confirmed through a nullable
-`uml_emulator_settle`: the guest's storage is confirmed (it replied to `sync`,
-or entered suspend, which syncs first), there was no guest, or it is
-unconfirmed (no reply in time, or a kernel that only started a writeback),
-refused, or unreachable (its console could not be bound); and whether it sleeps.
-Only confirmed and no-guest are settled: an application never logs "settled"
-for another outcome (`GuestSettle` in `GuestHostCore`, filled from the runtime's
-`kernarium_runtime_settle`), and the session record counts them. A kernel
-without the `sync` command answers "Unknown command", and the host then asks for
-`sysrq s`, which only starts a writeback and needs SysRq enabled (the Kernarium
-runtime boots its guests with it for that case): the result is unconfirmed.
-Each wait for the guest is bounded: `sync` 3.5 s in all, of which at most 1 s
-for the lifecycle lock; `quiesce` 2 s for its first writeback, 3 s for the trim
-(skipped when that writeback was not answered), 10 s for the suspend, which
-confirms the storage, and 1.5 s for a final writeback after a suspend that
-failed. The guest runs each `sync` on a work item of its own, so a console
-request queued behind it waits only for it, and a reply that comes after the
-host stopped waiting finds the request's own socket closed.
+`uml_emulator_settle`, and whether it sleeps. The guest's storage is confirmed
+only by its own reply to a `sync` request made in that call. A suspend never
+confirms it: the kernel syncs on the way to suspend only while the guest's
+`sync_on_suspend` is set, and its reply says nothing of that. Otherwise there
+was no guest, or the storage is unconfirmed (no reply in time, a busy lifecycle
+call or console, or a kernel that only started a writeback), refused, or
+unreachable (its console could not be bound). Only confirmed and no-guest are
+settled: an application never logs "settled" for another outcome (`GuestSettle`
+in `GuestHostCore`, filled from the runtime's `kernarium_runtime_settle`), and
+the session record counts them. The zero value of the storage report claims
+nothing, so a report the call never wrote is no confirmation.
+
+A reply confirms only as "synced in <n> ms" whole, in one well-formed datagram
+per part; text that starts alike, a truncated datagram and an error flagged in
+any part of the reply are refusals. A kernel without the `sync` command answers
+exactly "Unknown command", and the host then asks for `sysrq s`, which only
+starts a writeback and needs SysRq enabled (the Kernarium runtime boots its
+guests with it for that case): the result is unconfirmed. One deadline, from the
+call, covers a writeback request in full: the console's lock, every part of the
+reply, the fallback and its settling period. The header
+([`uml/emulator.h`](../darwin/api/include/uml/emulator.h)) states each call's
+bounds. A quiesced guest the host holds is reported again by a later call; a
+guest whose threads could not be held, or whose suspension is unconfirmed, may
+have run and written since, so a later call asks it again. The guest runs each
+`sync` on a work item of its own, so the console's dispatcher is never blocked
+behind one, and a reply that comes after the host stopped waiting finds the
+request's own socket closed. The runtime's `sync` pins the handle instead of
+holding the lifecycle mutex, which a quiesce keeps for as long as it takes, so
+the library's own bounded wait is the only one.
 
 The kernel says how the guest ends before it shuts its drivers down, with the
 bridge import `darwin_uml_guest_shutdown()`: power-off, halt, or restart with the

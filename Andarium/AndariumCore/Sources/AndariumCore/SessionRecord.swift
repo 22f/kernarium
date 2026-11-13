@@ -69,9 +69,10 @@ public struct SessionRecord: Equatable, Sendable {
         "uml-session 7",
     ]
 
-    /// The most a record file ever holds is 18176 bytes
-    /// (`session_record_max_bytes`); a file longer than this is not one the
-    /// runtime wrote, and is neither read nor copied beyond it.
+    /// The read cap, 20 KiB: the runtime writes at most 18176 bytes
+    /// (`session_record_max_bytes`), so a file longer than the cap is not one
+    /// it wrote, and is neither read nor copied beyond it. The gap is slack for
+    /// a later layout, not a limit the runtime reaches.
     public static let maximumBytes = 20 << 10
 
     /// Reads a record's text; nil when it is not one.
