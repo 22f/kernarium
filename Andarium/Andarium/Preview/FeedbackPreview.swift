@@ -37,6 +37,8 @@ enum FeedbackPreview {
         guard opensSheet(screen) else { return }
         if overHome(screen) {
             model.phase = .home
+        } else if screen == "feedback-boot" {
+            // The slow start's own screen stays beneath; AppEntry set it.
         } else {
             model.phase = .running(.normal)
             model.sessionPreset = SessionPreset(settings: true, settingsLarge: true)

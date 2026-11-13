@@ -166,6 +166,17 @@ struct AppEntry {
             model.phase = .booting(kind)
         }
 
+        /// A start that has run `seconds`: the model's own clock says so, so
+        /// the notice appears as it does for a real one, and Stop (played)
+        /// ends the run as a host stop does.
+        func slowBoot(stage: Int, seconds: Int, stopping: Bool = false) {
+            boot(.normal, stage: stage, seconds: seconds)
+            let now = model.clock()
+            model.slowStart.begin(at: now.addingTimeInterval(-TimeInterval(seconds)))
+            _ = model.slowStart.update(at: now)
+            if stopping { _ = model.slowStart.requestStop() }
+        }
+
         switch screen {
         case "home-new":
             model.guest = Guest.fresh(on: host)
@@ -270,6 +281,13 @@ struct AppEntry {
             boot(.recovery, stage: 3, seconds: 7)
         case "boot-restart":
             boot(.restart, stage: 3, seconds: 8)
+        case "boot-slow":
+            slowBoot(stage: 3, seconds: 197)
+        case "boot-slow-stopping":
+            slowBoot(stage: 3, seconds: 203, stopping: true)
+        case "boot-slow-storage":
+            // The same notice over an earlier step, as a start stuck on the disk shows it.
+            slowBoot(stage: 2, seconds: 184)
         case "boot-jit":
             model.jitOn = true
             model.preparingJit = true
@@ -353,6 +371,11 @@ struct AppEntry {
         case "failed":
             // The failure path a real run takes: a crash after 42 minutes.
             model.fail()
+        case "stopped":
+            // What Stop on the slow-start notice leaves: the run ended by the person.
+            model.fail(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: 203)
+        case "feedback-boot":
+            slowBoot(stage: 3, seconds: 197)
         default:
             break
         }

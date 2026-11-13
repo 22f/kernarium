@@ -430,6 +430,21 @@ disk then holds and where Start boots again in the same process; an unclean
 shutdown, a host stop or a cleanup that fails keeps the failure screen and
 requires reopening Andarium.
 
+- **Slow start.** A start still on the boot screen after three minutes
+  (`SlowStart`, by a clock a test moves) puts a notice above the steps: the
+  step under way and the time, Stop and, where Send feedback is compiled in,
+  Send feedback. The boot goes on behind it and the notice goes with the boot;
+  it has no dismissal and takes no room the steps need. The time is the
+  start's, kept through the restarts of a start that had not finished. Stop
+  asks the runtime to end the run (`RuntimeDriver.stopGuest`); a stopped
+  Android guest cannot be released, so the end is the end screen with its own
+  wording (`RunEnd.stoppedByUser`), not Home, and a stop before the runtime
+  runs ends at Home. Send feedback opens the sheet as Home does, where a bug
+  report and a screenshot need a running guest, and the information block
+  gains a Boot line with the step, the time and the restarts. A process that
+  ended in the boot leaves the runtime's session record with the console's
+  last output, which the next bug report carries as the previous session's
+  record.
 - **Time zone.** Every start gives the guest the host's zone
   (`GuestTimeZone`, the boot request's `android_time_zone`); the system image
   applies it unless the guest's user chose a zone

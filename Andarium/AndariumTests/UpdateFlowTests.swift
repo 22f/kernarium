@@ -30,6 +30,9 @@ final class StubDriver: RuntimeDriver {
     /// What the data disk holds now; a test sets it as a run would.
     var diskUsedBytes: UInt64 = 0
     func measuredUsedBytes() -> UInt64 { diskUsedBytes }
+    /// How many times the model asked to stop the start under way.
+    private(set) var guestStops = 0
+    func stopGuest() { guestStops += 1 }
     func begin(guest: Guest, mode: StartMode, kind: BootKind) {
         begun.append((mode, kind))
         begunGuests.append(guest)

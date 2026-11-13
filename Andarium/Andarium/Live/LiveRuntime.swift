@@ -155,6 +155,12 @@ final class LiveRuntime: RuntimeDriver {
     private let preferences: PreferenceKeeper
 
     private var pending: PendingRun? { didSet { publishSnapshotActivity() } }
+    /// Which start the preparation in hand belongs to: a start the person
+    /// stopped before the runtime ran moves it on, and the preparation, which
+    /// goes on to its end, then drops its launch.
+    private var launchGeneration = 0
+    /// The person stopped this start (`stopGuest`); the run's end says so.
+    private var userStopped = false
     private var launching = false { didSet { publishSnapshotActivity() } }
     private var preparing = false { didSet { publishSnapshotActivity() } }
     /// The snapshot operation under way (`SnapshotDriver`). It clears the
@@ -306,9 +312,27 @@ final class LiveRuntime: RuntimeDriver {
         // new boot's view to lay out before starting another runtime.
         view = nil
         geometry = nil
+        launchGeneration += 1
+        userStopped = false
         pending = PendingRun(guest: guest, mode: mode, kind: kind)
         launching = false
         startIfReady()
+    }
+
+    func stopGuest() {
+        userStopped = true
+        if runActive {
+            // The run returns, and `finished` reports it as the person's.
+            kernarium_runtime_loader_request_stop()
+            return
+        }
+        // The runtime has not run: the start ends here. A preparation under
+        // way goes on to its end, since it is the guest's files that it
+        // writes, and drops its launch.
+        launchGeneration += 1
+        pending = nil
+        userStopped = false
+        model?.runEnded(RunEnd(result: 0, stoppedByUser: true), uptimeSeconds: nil)
     }
 
     /// The display view has a size. The first layout after a run is wanted
@@ -326,20 +350,35 @@ final class LiveRuntime: RuntimeDriver {
         guard let run = pending, !launching, view != nil, geometry != nil else { return }
         pending = nil
         launching = true
-        Task { await prepareAndLaunch(run) }
+        let generation = launchGeneration
+        Task { await prepareAndLaunch(run, generation: generation) }
     }
 
-    private func prepareAndLaunch(_ run: PendingRun) async {
+    /// The person stopped the start that this preparation is for.
+    private func launchWasStopped(_ generation: Int) -> Bool {
+        guard generation != launchGeneration else { return false }
+        preparing = false
+        launching = false
+        model?.preparingDisk = false
+        model?.diskProgress = nil
+        // A start asked for since waits for this preparation to end.
+        startIfReady()
+        return true
+    }
+
+    private func prepareAndLaunch(_ run: PendingRun, generation: Int) async {
         preparing = true
         do {
             try await prepareFiles(for: run.guest) { fraction in
                 Task { @MainActor in self.preparingDisk(fraction) }
             }
         } catch {
+            if launchWasStopped(generation) { return }
             preparing = false
             end(startFailure: "the disk could not be prepared: \(error.localizedDescription)")
             return
         }
+        if launchWasStopped(generation) { return }
         // The guest's adb key, made here when there is none: generating it
         // takes a moment and the main thread does not wait for it. Without
         // one the guest still boots; its adb features then say why they fail.
@@ -352,6 +391,7 @@ final class LiveRuntime: RuntimeDriver {
                 return nil
             }
         }.value
+        if launchWasStopped(generation) { return }
         preparing = false
         model?.preparingDisk = false
         #if APP_STORE
@@ -359,6 +399,7 @@ final class LiveRuntime: RuntimeDriver {
         #else
         var extras = StartExtras()
         extras.jit = await prepareJit(for: run)
+        if launchWasStopped(generation) { return }
         #endif
         guard let view, let geometry else {
             end(startFailure: "the display is not ready")
@@ -835,7 +876,9 @@ final class LiveRuntime: RuntimeDriver {
         // than before it.
         model?.host.freeStorageBytes = freeSpace()
         let loop = result == Int32(KERNARIUM_RUNTIME_RESULT_RESTART_LOOP)
-        model?.runEnded(RunEnd(result: result, restartedInALoop: loop), uptimeSeconds: uptime)
+        let stopped = userStopped
+        userStopped = false
+        model?.runEnded(RunEnd(result: result, restartedInALoop: loop, stoppedByUser: stopped), uptimeSeconds: uptime)
     }
 
     // MARK: Keys

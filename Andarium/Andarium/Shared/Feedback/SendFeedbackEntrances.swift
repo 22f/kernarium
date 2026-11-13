@@ -31,7 +31,10 @@ extension View {
     /// Presents Send feedback over Home or Settings. It stays over Settings,
     /// which does not close beneath it, so a bug report made from the sheet
     /// leaves the session as it was.
-    func sendFeedbackSheet(_ app: AppModel) -> some View {
+    ///
+    /// `opensInPreview` is false over the boot screen, which the preview does
+    /// not open the sheet from at launch: a shot of the sheet is of Home's.
+    func sendFeedbackSheet(_ app: AppModel, opensInPreview: Bool = true) -> some View {
         sheet(isPresented: Binding(get: { app.feedbackSheetOpen }, set: { app.feedbackSheetOpen = $0 })) {
             SendFeedbackSheet(app: app)
                 .environment(app)
@@ -42,7 +45,7 @@ extension View {
             // The Simulator preview opens it once Home or Settings has
             // settled, as a tap would; a sheet presented while its presenter
             // still moves is laid out inside it.
-            guard app.feedbackServices.previewOpensAtLaunch else { return }
+            guard opensInPreview, app.feedbackServices.previewOpensAtLaunch else { return }
             try? await Task.sleep(for: .milliseconds(1600))
             app.feedbackSheetOpen = true
         }

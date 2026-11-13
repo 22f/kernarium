@@ -433,6 +433,13 @@ iPhone's `UIDevice` under a portrait-only interface (XCUIDevice reaches the
 interface only), so the device is injected there; the real turns are checked on
 an iPhone.
 
+`SlowStartScreenTests` check the boot screen's slow-start notice by a clock
+the test moves, so no test waits three minutes: when the notice comes (also for
+a start whose boot line never comes, the case it is for), what Stop asks of the
+runtime and the stopped end screen's words, the controls with and without the
+feedback receiver, the Boot line of the information block, and that the notice
+goes with the boot.
+
 `AndariumUITests` is the UI-test target of the same scheme
 (`xcodebuild test -scheme Andarium -only-testing:AndariumUITests`, with
 `-parallel-testing-enabled NO`), run on an iPad Simulator and an iPhone

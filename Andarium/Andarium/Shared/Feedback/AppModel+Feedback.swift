@@ -38,8 +38,19 @@ extension AppModel {
             virtualMachine: machine,
             androidRelease: system.release,
             runningSeconds: virtualMachineRuns ? feedbackServices.runningSeconds(self) : nil,
+            boot: bootingInformation(),
             freeSpaceBytes: host.freeStorageBytes,
             thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState))
+    }
+
+    /// Where a start that is still under way has got, for the mail written
+    /// from the boot screen's notice; nil in any other state.
+    private func bootingInformation() -> SendFeedbackInformation.Boot? {
+        guard case let .booting(kind) = phase else { return nil }
+        let step = BootSteps.current(preparingDisk: preparingDisk, milestone: bootTracker.milestone)
+        return SendFeedbackInformation.Boot(
+            step: BootSteps.reportName(ofStep: min(step, BootSteps.count - 1), recovery: kind == .recovery),
+            seconds: bootElapsedSeconds(), restarts: slowStart.restarts)
     }
 
     private static var buildConfiguration: String {

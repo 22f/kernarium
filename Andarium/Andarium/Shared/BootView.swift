@@ -10,6 +10,13 @@ import SwiftUI
 /// update, recovery and restart are variants of the same screen. A launch
 /// has one run, so there is no Cancel.
 ///
+/// A start that has run for three minutes (`SlowStart`) without reaching
+/// Android puts a notice above the steps, which it never covers: what the
+/// screen is waiting for, the step and the time, Stop and, where Send
+/// feedback is compiled in, Send feedback. The boot goes on behind it, and
+/// it goes away when the boot completes. There is no way to dismiss it: it
+/// takes no room that the steps need.
+///
 /// A normal boot lays the guest's display out from the first frame and shows
 /// it dimmed behind this screen, so the guest is seen starting. The dim is a
 /// plain translucent fill and the panels are flat fills too, not materials or
@@ -47,6 +54,24 @@ struct BootView: View {
         .background { backdrop }
         .environment(\.colorScheme, dimmed ? .dark : colorScheme)
         .statusBarHidden(true)
+        .task {
+            // The notice comes from the clock, not from the console: a boot
+            // whose line never comes is exactly the one it is for.
+            while !Task.isCancelled {
+                model.updateSlowStart()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onChange(of: model.slowStart.showing) { _, showing in
+            guard showing else { return }
+            AccessibilityNotification.Announcement(Self.slowTitle).post()
+        }
+        #if FEEDBACK_MAIL
+        .sendFeedbackSheet(model, opensInPreview: false)
+        // A sheet cannot outlive the screen it was opened over: the boot
+        // that ends (or restarts) takes it, and its draft, away.
+        .onDisappear { model.feedbackSheetOpen = false }
+        #endif
         .task(id: kind) {
             guard frozen == nil else { return }
             if model.driver != nil {
@@ -118,7 +143,11 @@ struct BootView: View {
                 .foregroundStyle(Color.accentColor)
             Spacer()
             TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
-                let seconds = frozen ? model.frozenElapsed : Int(timeline.date.timeIntervalSince(startedAt))
+                // The start's own time, which a restart of the guest in place
+                // goes on counting; this screen's, where none is kept.
+                let seconds = frozen ? model.frozenElapsed
+                    : model.slowStart.began != nil ? model.bootElapsedSeconds()
+                    : Int(timeline.date.timeIntervalSince(startedAt))
                 Text(Formats.elapsed(seconds))
                     .font(.system(.subheadline, design: .rounded).weight(.medium))
                     .monospacedDigit()
@@ -137,6 +166,10 @@ struct BootView: View {
             Text(kind == .recovery ? "Recovery" : "Andarium")
                 .font(.largeTitle.weight(.bold))
                 .padding(.horizontal, 4)
+
+            if model.slowStart.showing {
+                slowNotice(steps: steps, current: current)
+            }
 
             VStack(spacing: 0) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
@@ -183,6 +216,81 @@ struct BootView: View {
         .padding(.vertical, 20)
         .frame(maxWidth: 520)
         .frame(maxWidth: .infinity)
+    }
+
+    // MARK: Slow start
+
+    static var slowTitle: String { String(localized: "Starting is taking longer than usual") }
+
+    /// "3 minutes, 12 seconds" in the person's language, for VoiceOver.
+    static func spoken(_ seconds: Int) -> String {
+        Duration.seconds(seconds).formatted(.units(allowed: [.minutes, .seconds], width: .wide))
+    }
+
+    private func slowNotice(steps: [Step], current: Int) -> some View {
+        let stepTitle = steps[min(max(current, 0), steps.count - 1)].title
+        let seconds = model.frozenBootStage != nil ? model.frozenElapsed : model.bootElapsedSeconds()
+        return VStack(alignment: .leading, spacing: 12) {
+            Label {
+                Text(Self.slowTitle)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "hourglass")
+                    .foregroundStyle(Color.accentColor)
+            }
+            .accessibilityAddTraits(.isHeader)
+            Text("The virtual machine is still starting. You can keep waiting, or stop it. To start it again after stopping, close Andarium and open it again.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(verbatim: "\(stepTitle) \u{00B7} \(Formats.elapsed(seconds))")
+                .font(.subheadline.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(Color.accentColor)
+                .accessibilityLabel(Text(verbatim: "\(stepTitle), \(Self.spoken(seconds))"))
+            ViewThatFits(in: .horizontal) {
+                slowButtons(lineLimit: 1, axis: .horizontal)
+                slowButtons(lineLimit: nil, axis: .vertical)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(BootPanel(dimmed: dimmed, radius: 22))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("boot-slow-notice")
+    }
+
+    @ViewBuilder
+    private func slowButtons(lineLimit: Int?, axis: Axis) -> some View {
+        let layout = axis == .horizontal ? AnyLayout(HStackLayout(spacing: 12)) : AnyLayout(VStackLayout(spacing: 10))
+        layout {
+            Button(role: .destructive) {
+                model.stopStart()
+            } label: {
+                Text(model.slowStart.stopping ? "Stopping\u{2026}" : "Stop")
+                    .lineLimit(lineLimit)
+                    .frame(maxWidth: .infinity, minHeight: 32)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(model.slowStart.stopping)
+            .accessibilityIdentifier("boot-stop")
+            #if FEEDBACK_MAIL
+            if model.feedbackAddress != nil {
+                Button {
+                    model.feedbackSheetOpen = true
+                } label: {
+                    Text("Send feedback", tableName: "Feedback")
+                        .lineLimit(lineLimit)
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .accessibilityIdentifier("boot-send-feedback")
+            }
+            #endif
+        }
     }
 
     private enum StepState { case done, active, pending }

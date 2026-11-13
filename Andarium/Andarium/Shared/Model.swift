@@ -88,6 +88,9 @@ final class AppModel {
         // The readings run while the guest does.
         didSet {
             if lifecycle.phase != oldValue.phase {
+                // The notice belongs to the boot screen: any other screen has
+                // no start under way to call slow.
+                if case .booting = lifecycle.phase {} else { slowStart.finish() }
                 refreshStatistics()
                 refreshGraphicsNotice()
                 showThermalNoticeIfWaiting()
@@ -434,6 +437,11 @@ final class AppModel {
     @ObservationIgnored private var installAttemptTag = 0
     /// How far the current boot has got, from the guest's console.
     var bootTracker = BootTracker()
+    /// When the start under way began and whether the boot screen says it is
+    /// slow (`SlowStart`).
+    var slowStart = SlowStart()
+    /// The time the boot screen counts a start by; a test replaces it.
+    @ObservationIgnored var clock: () -> Date = { Date() }
     /// The guest's disk is being written before the run can begin.
     var preparingDisk = false
     var diskProgress: Double?
@@ -1471,6 +1479,7 @@ final class AppModel {
             snapshots.cancelReads()
             frozenBootStage = nil
             bootTracker = BootTracker()
+            slowStart.begin(at: clock())
             preparingDisk = false
             diskProgress = nil
             #if !APP_STORE
@@ -1571,7 +1580,40 @@ final class AppModel {
         session.showStats = showStats
         statisticsMeter = StatsMeter()
         bootTracker = BootTracker()
+        // A restart before the start finished is the same start; a running
+        // session's restart begins a boot of its own.
+        var unfinished = false
+        if case .booting = phase { unfinished = true }
         lifecycle.restart()
+        slowStart.guestRestarted(at: clock(), startUnfinished: unfinished)
+    }
+
+    // MARK: Slow start
+
+    /// The boot screen looked at the clock: puts the notice up once a start
+    /// has run for `SlowStart.threshold`. Returns whether it just appeared.
+    @discardableResult
+    func updateSlowStart() -> Bool {
+        guard case .booting = phase else { return false }
+        return slowStart.update(at: clock())
+    }
+
+    /// The seconds the start under way has run, as the status line and the
+    /// notice both show them.
+    func bootElapsedSeconds() -> Int {
+        slowStart.elapsedSeconds(at: clock())
+    }
+
+    /// The notice's Stop: ends the start under way. The runtime ends the run
+    /// and `runEnded` follows; the notice says Stopping meanwhile. The
+    /// preview, with no runtime, ends it at once as a host stop does.
+    func stopStart() {
+        guard case .booting = phase, slowStart.requestStop() else { return }
+        if let driver {
+            driver.stopGuest()
+        } else {
+            runEnded(RunEnd(result: -5, stoppedByUser: true), uptimeSeconds: bootElapsedSeconds())
+        }
     }
 
     func factoryReset() {
