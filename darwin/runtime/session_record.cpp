@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "session_record.hpp"
 
+#include "console_boot_signal.hpp"
 #include "fixed_text.hpp"
 #include "platform/host_wait.hpp"
 
@@ -42,6 +43,8 @@ constexpr std::string_view host_fault_line{
 
 std::atomic<char> output[output_size];
 std::atomic<std::uint64_t> output_end{0};
+/* What the same output says of the boot (console_boot_signal.hpp). */
+ConsoleBootSignal boot_signal;
 std::atomic<int> console_descriptors[console_slots] = {-1, -1, -1, -1};
 
 std::atomic<int> record_descriptor{-1};
@@ -892,6 +895,7 @@ bool begin_session_record(std::string_view path,
 	for (std::size_t slot = 0; slot < console_slots; ++slot)
 		console_descriptors[slot].store(consoles[slot],
 			std::memory_order_relaxed);
+	boot_signal.reset();
 	if (path.empty())
 		return true;
 	const std::string name{path};
@@ -1032,6 +1036,7 @@ ssize_t kernel_write(int descriptor, const void *buffer, std::size_t length)
 {
 	if (length != 0 && buffer != nullptr && kept(descriptor)) {
 		keep_output(buffer, length);
+		boot_signal.feed(buffer, length);
 		/* The fault ends the process as soon as the handler returns. */
 		if (descriptor == STDERR_FILENO &&
 		    std::string_view{static_cast<const char *>(buffer), length}
@@ -1049,6 +1054,16 @@ void *kernel_output_import(const char *name) noexcept
 		++name;
 	return name != nullptr && std::strcmp(name, "write") == 0 ?
 		reinterpret_cast<void *>(&kernel_write) : nullptr;
+}
+
+bool console_boot_completed() noexcept
+{
+	return boot_signal.completed();
+}
+
+bool console_init_observed() noexcept
+{
+	return boot_signal.init_observed();
 }
 
 std::size_t kernel_output_tail(std::span<char> buffer) noexcept
@@ -1100,6 +1115,7 @@ void reset_session_record() noexcept
 	for (auto &console : console_descriptors)
 		console.store(-1, std::memory_order_relaxed);
 	output_end.store(0, std::memory_order_release);
+	boot_signal.reset();
 	crash_recorded.store(false, std::memory_order_release);
 }
 
