@@ -263,7 +263,7 @@ struct SendFeedbackStartLogTests {
             "fe80::1a:2bff:fe3c:4d5e", "FE80::1A:2BFF:FE3C:4D5E", "fe80:0:0:0:1a:2bff:fe3c:4d5e",
             "FE80:0000:0000:0000:001A:2BFF:FE3C:4D5E", "fe80:0000:0000:0000:001a:2bff:fe3c:4d5e",
             "2001:db8::8a2e:370:7334", "2001:0DB8:0000:0000:0000:8A2E:0370:7334", "2001:db8::", "::ffff:10.0.2.15",
-            "::ffff:0a00:020f", "fd00:1234:5678:9abc:def0:1234:5678:9abc", "1::2", "fe80::1%eth0",
+            "::ffff:0a00:020f", "2001:db8:1234:5678:9abc:def0:1234:5678", "1::2", "fe80::1%eth0",
         ]
         for address in addresses {
             let bare = address.components(separatedBy: "%")[0]
