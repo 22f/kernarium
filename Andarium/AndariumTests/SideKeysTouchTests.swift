@@ -311,7 +311,9 @@ struct SideKeysTouchTests {
         let card = UIAccessibility.convertToScreenCoordinates(view.bounds, in: view)
         let screen = UIAccessibility.convertToScreenCoordinates(run.lease.window.bounds, in: run.lease.window)
         #expect(screen.contains(card), "the card \(card) is not inside the screen \(screen)")
-        let text = Self.elements(in: view).filter { !$0.label.isEmpty }
+        // TipKit's own close button is not text: its touch area reaches past the
+        // card's top edge by design.
+        let text = Self.elements(in: view).filter { !$0.label.isEmpty && $0.label != "Close" }
         try #require(!text.isEmpty, "no text found in the tip")
         for element in text {
             #expect(
