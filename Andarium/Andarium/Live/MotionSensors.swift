@@ -90,7 +90,8 @@ nonisolated enum CompassSource {
 #if !APP_STORE
 /// The development build's compass check (`ANDARIUM_COMPASS_READOUT=1`,
 /// `CompassReadoutLaunch`): about twice a second, one line on the console with
-/// the device motion sample the guest's field is taken from, and what iOS
+/// the device motion sample the guest's field is taken from (and the extremes
+/// of every field sample forwarded since the previous line), and what iOS
 /// itself makes of the device's attitude and heading in the magnetic-north
 /// frame from that same sample, so that a harness can compare an Android
 /// app's azimuth with iOS's own. The field and the gravity are in the device's
@@ -101,8 +102,24 @@ nonisolated enum CompassSource {
 nonisolated final class CompassReadout: @unchecked Sendable {
     /// The mount the guest's sensors have now (`MotionSensors.update`).
     private static let mount = OSAllocatedUnfairLock(initialState: MotionSample.Axes.portrait)
+
+    /// Every field sample forwarded to the guest since the last printed line,
+    /// that line's own sample included: how many, and the lowest and highest
+    /// value of each component. A harness bounds the source's variation by it,
+    /// because the lines themselves are only a few of the samples.
+    struct Extrema: Equatable {
+        var count: Int
+        var low: SIMD3<Double>
+        var high: SIMD3<Double>
+    }
+
+    private struct Span {
+        var printed = -TimeInterval.infinity
+        var extrema = Extrema(count: 0, low: SIMD3(repeating: .infinity), high: SIMD3(repeating: -.infinity))
+    }
+
     private let period: TimeInterval
-    private let last = OSAllocatedUnfairLock(initialState: -TimeInterval.infinity)
+    private let span = OSAllocatedUnfairLock(initialState: Span())
 
     static func setMount(_ axes: MotionSample.Axes) { mount.withLock { $0 = axes } }
 
@@ -115,38 +132,52 @@ nonisolated final class CompassReadout: @unchecked Sendable {
 
     init(period: TimeInterval = 0.5) { self.period = period }
 
-    /// Whether a sample stamped `timestamp` (Core Motion's seconds) is the one
-    /// to print: the first, and then the first one a period after the last.
-    func due(at timestamp: TimeInterval) -> Bool {
-        last.withLock { printed in
-            guard timestamp - printed >= period else { return false }
-            printed = timestamp
-            return true
+    /// Takes one forwarded sample (Core Motion's `timestamp`, in seconds) into
+    /// the span since the last line. The span is returned, and starts again,
+    /// when this is the sample to print: the first, and then the first one a
+    /// period after the last. Every sample is taken, printed or not, under one
+    /// lock.
+    func observe(_ field: CMMagneticField, at timestamp: TimeInterval) -> Extrema? {
+        span.withLock { state in
+            let sample = SIMD3(field.x, field.y, field.z)
+            state.extrema.count += 1
+            state.extrema.low = pointwiseMin(state.extrema.low, sample)
+            state.extrema.high = pointwiseMax(state.extrema.high, sample)
+            guard timestamp - state.printed >= period else { return nil }
+            state.printed = timestamp
+            let taken = state.extrema
+            state.extrema = Extrema(count: 0, low: SIMD3(repeating: .infinity), high: SIMD3(repeating: -.infinity))
+            return taken
         }
     }
 
     /// The line for this sample, or nil while it is not due.
     func line(for data: CMDeviceMotion) -> String? {
-        guard due(at: data.timestamp) else { return nil }
         let field = data.magneticField
+        guard let extrema = observe(field.field, at: data.timestamp) else { return nil }
         return Self.line(
             timestamp: data.timestamp, mount: Self.mount.withLock { $0 },
-            accuracy: Int(field.accuracy.rawValue), field: field.field, gravity: data.gravity,
+            accuracy: Int(field.accuracy.rawValue), field: field.field, extrema: extrema, gravity: data.gravity,
             attitude: data.attitude.rotationMatrix, heading: data.heading)
     }
 
     /// `t` in seconds, `field` in microtesla, `grav` in g, `att` the rotation
     /// matrix row by row, `heading` in degrees (iOS's own; negative when it has
-    /// none), `acc` Core Motion's field accuracy (-1 uncalibrated).
+    /// none), `acc` Core Motion's field accuracy (-1 uncalibrated), `fmin` and
+    /// `fmax` the lowest and highest field component over the `n` samples since
+    /// the last line (this one's included).
     static func line(
-        timestamp: TimeInterval, mount: MotionSample.Axes, accuracy: Int, field: CMMagneticField,
+        timestamp: TimeInterval, mount: MotionSample.Axes, accuracy: Int, field: CMMagneticField, extrema: Extrema,
         gravity: CMAcceleration, attitude m: CMRotationMatrix, heading: Double
     ) -> String {
         let numbers = String(
             format: "field=%.3f,%.3f,%.3f grav=%.5f,%.5f,%.5f att=%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f heading=%.2f",
             field.x, field.y, field.z, gravity.x, gravity.y, gravity.z,
             m.m11, m.m12, m.m13, m.m21, m.m22, m.m23, m.m31, m.m32, m.m33, heading)
-        return "Andarium: compass-check: t=\(String(format: "%.3f", timestamp)) mount=\(mount) acc=\(accuracy) \(numbers)"
+        let span = String(
+            format: "fmin=%.3f,%.3f,%.3f fmax=%.3f,%.3f,%.3f n=%d",
+            extrema.low.x, extrema.low.y, extrema.low.z, extrema.high.x, extrema.high.y, extrema.high.z, extrema.count)
+        return "Andarium: compass-check: t=\(String(format: "%.3f", timestamp)) mount=\(mount) acc=\(accuracy) \(numbers) \(span)"
     }
 }
 #endif
