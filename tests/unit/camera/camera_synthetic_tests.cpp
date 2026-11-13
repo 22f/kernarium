@@ -265,6 +265,75 @@ void controls()
     require(recorder.frames.back().second.exposure.zoomRatio == 2.0f);
 }
 
+// What the exposure of a frame says: the lens's focal length is left to the device (the camera's own, as its
+// description states it), an automatic exposure follows the compensation and the picture with it, and a frame lasts at
+// least as long as its exposure, which delays the next one.
+void exposureReport()
+{
+    const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::tablet));
+    Recorder recorder;
+    auto session = camera->openSession(recorder);
+    require(session->startVideo(0, 640, 480, 30));
+    camera->pump(0, 1);
+    const auto unit = recorder.frames.back().second;
+    require(unit.exposure.focalLengthMillimetres == 0.0f);  // none: the device states the lens's own
+    require(unit.exposure.exposureNanoseconds == 8'333'333 && unit.exposure.frameDurationNanoseconds == 33'333'333);
+    const auto unitLuma = meanLuma(unit);
+
+    CameraSettings settings;
+    settings.exposureBiasStops = -1.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    const auto& half = recorder.frames.back().second;
+    require(std::llabs(std::int64_t(half.exposure.exposureNanoseconds) - 8'333'333 / 2) <= 1 && half.exposure.iso == unit.exposure.iso);
+    require(half.exposure.ae == CameraControlState::converged && half.exposure.frameDurationNanoseconds == 33'333'333);
+    require(meanLuma(half) < unitLuma * 0.7);
+    settings.exposureBiasStops = 2.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    const auto& bright = recorder.frames.back().second;
+    require(std::llabs(std::int64_t(bright.exposure.exposureNanoseconds) - 8'333'333 * 4) <= 1);
+    require(meanLuma(bright) > unitLuma);
+    // The exposure of the sensor ends where its range does, and the picture stops with it.
+    const auto info = camera->cameras()[0];
+    settings.exposureBiasStops = 20.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == info.exposureMaximumNanoseconds);
+    settings.exposureBiasStops = -20.0f;
+    session->apply(0, settings);
+    camera->pump(0, 1);
+    require(recorder.frames.back().second.exposure.exposureNanoseconds == info.exposureMinimumNanoseconds);
+
+    // A manual exposure longer than the frame period: the frame lasts as long as the exposure, and the next frame
+    // arrives after it.
+    settings = {};
+    settings.exposureMode = CameraExposureMode::manual;
+    settings.exposureNanoseconds = 333'346'667;
+    settings.iso = 100;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    const auto& first = recorder.frames[recorder.frames.size() - 2].second;
+    const auto& second = recorder.frames.back().second;
+    require(first.exposure.exposureNanoseconds == 333'346'667 && first.exposure.frameDurationNanoseconds == 333'346'667);
+    require(second.timestampNanoseconds - first.timestampNanoseconds == 333'346'667);
+    // A shorter one leaves the period alone.
+    settings.exposureNanoseconds = 8'333'333;
+    session->apply(0, settings);
+    camera->pump(0, 2);
+    const auto& short1 = recorder.frames[recorder.frames.size() - 2].second;
+    require(short1.exposure.frameDurationNanoseconds == 33'333'333 &&
+            recorder.frames.back().second.timestampNanoseconds - short1.timestampNanoseconds == 33'333'333);
+    // A still's exposure states no focal length either.
+    CameraStillRequest request;
+    request.jpegWidth = 640;
+    request.jpegHeight = 480;
+    require(session->takeStill(0, request));
+    camera->pump(0, 0);
+    require(recorder.waitFor(1, 1));
+    require(recorder.stills.back().second.exposure.focalLengthMillimetres == 0.0f);
+}
+
 void zoomCamera()
 {
     const auto camera = makeSyntheticCamera(manual(SyntheticCameraProfile::phone));
@@ -598,6 +667,7 @@ int main()
     unauthorized();
     video();
     controls();
+    exposureReport();
     zoomCamera();
     multiCamera();
     multiCameraFormats();

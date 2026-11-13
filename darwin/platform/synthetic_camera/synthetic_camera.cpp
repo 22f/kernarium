@@ -26,6 +26,8 @@ constexpr std::uint8_t markerOne = 235;
 constexpr std::uint8_t markerZero = 16;
 // An exposure of 1/120 s at ISO 100 is the chart's unit brightness.
 constexpr double referenceExposure = 1.0 / 120.0 * 100.0;
+// What the automatic exposure runs at (1/120 s at ISO 100) without a compensation.
+constexpr std::uint64_t automaticExposure = 8'333'333;
 constexpr std::uint32_t whiteLevel = 16383;
 constexpr std::uint32_t blackLevel = 1024;
 
@@ -395,6 +397,8 @@ struct RunningVideo {
     std::uint32_t requestedHeight {};
     std::uint32_t frameRate {};
     std::uint32_t counter {};
+    // How long the last frame lasted: its period, or its exposure when that was longer.
+    std::uint64_t duration {};
     std::chrono::steady_clock::time_point next;
 };
 
@@ -531,7 +535,12 @@ public:
                 rate = cameras_[camera].video->frameRate;
             }
             if (!interrupted()) produceFrame(camera);
-            core_.clock += 1'000'000'000ull / rate;
+            std::uint64_t advance = 1'000'000'000ull / rate;
+            {
+                std::lock_guard lock(mutex_);
+                if (cameras_[camera].video) advance = std::max(advance, cameras_[camera].video->duration);
+            }
+            core_.clock += advance;
         }
     }
 
@@ -688,8 +697,7 @@ private:
         auto& exposure = result.exposure;
         exposure.activeCamera = std::uint32_t(camera);
         exposure.aperture = info.aperture;
-        exposure.frameDurationNanoseconds = frameRate ? 1'000'000'000ull / frameRate : 0;
-        exposure.focalLengthMillimetres = 6.9f;
+        // No focal length: the lens's own, which the device takes from the camera's description.
         exposure.noiseProfile = {1e-4f, 1e-6f, 1e-4f, 1e-6f, 1e-4f, 1e-6f, 1e-4f, 1e-6f};
         exposure.neutralPoint = {0.5f, 1.0f, 0.6f};
         // Exposure.
@@ -700,12 +708,20 @@ private:
             exposure.ae = CameraControlState::inactive;
             result.scene.gain = exposure.exposureNanoseconds / 1e9 * exposure.iso / referenceExposure;
         } else {
-            exposure.exposureNanoseconds = 8'333'333;
+            // The automatic exposure holds the chart at its unit brightness, and a compensation of n stops
+            // moves the exposure by n stops: the picture's gain and the exposure the result reports agree.
+            const double stops = std::exp2(double(settings.exposureBiasStops));
+            exposure.exposureNanoseconds = std::clamp<std::uint64_t>(std::uint64_t(std::llround(double(automaticExposure) * stops)),
+                                                                     info.exposureMinimumNanoseconds,
+                                                                     info.exposureMaximumNanoseconds);
             exposure.iso = std::max<std::uint32_t>(100, info.isoMinimum);
             exposure.ae = settings.exposureMode == CameraExposureMode::locked ? CameraControlState::locked
                                                                               : CameraControlState::converged;
-            result.scene.gain = std::pow(2.0, settings.exposureBiasStops);
+            result.scene.gain = double(exposure.exposureNanoseconds) / double(automaticExposure);
         }
+        // A frame lasts at least as long as its exposure, whatever the rate asked for.
+        if (frameRate)
+            exposure.frameDurationNanoseconds = std::max<std::uint64_t>(1'000'000'000ull / frameRate, exposure.exposureNanoseconds);
         // Focus.
         // A new trigger scans in any mode, and the lens ends on the chart; a manual
         // lens moves only when the distance was written anew; a locked or manual
@@ -777,6 +793,12 @@ private:
             if (stopped_ || !state.video) return;
             auto outcome = this->outcome(camera, state.video->frameRate);
             outcome.scene.counter = ++state.video->counter;
+            // A frame lasts as long as its exposure: a longer one delays the next (the timer has scheduled
+            // the next one a period after this one).
+            const auto period = 1'000'000'000ull / state.video->frameRate;
+            state.video->duration = outcome.exposure.frameDurationNanoseconds;
+            if (!core_.options_.manualClock && state.video->duration > period)
+                state.video->next += std::chrono::nanoseconds(state.video->duration - period);
             auto picture = std::make_shared<Picture>(render(base(state, state.video->width, state.video->height), outcome.scene));
             frame.width = picture->width;
             frame.height = picture->height;
