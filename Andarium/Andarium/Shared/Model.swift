@@ -1114,14 +1114,16 @@ final class AppModel {
     /// alert. `finished` runs once the overlay has gone. With `ending`, the
     /// overlay stays up instead and says how the operation ended (its words
     /// on success; `failure` and the error's on failure) until the person
-    /// closes it; cancelling still takes the overlay away.
+    /// closes it; cancelling takes the overlay away, except that an operation
+    /// which returns its outcome after the cancel (an install whose app was in
+    /// by then) shows that outcome.
     ///
     /// `failed` says how a failure ends instead of the alert, for a task
     /// started from a sheet, where an alert of the screens could not show.
     /// `finished` does not run for a cancelled operation.
     func runOperation<Output: Sendable>(
         _ state: BusyState, failure: String,
-        ending: ((Output) -> (title: String, detail: String))? = nil,
+        ending: ((Output) -> BusyWords)? = nil,
         failed: (@MainActor (String) -> Void)? = nil,
         _ work: @escaping @MainActor (@escaping @Sendable (BusyUpdate) -> Void) async throws -> Output,
         finished: @escaping @MainActor (Output) -> Void = { _ in }
@@ -1160,7 +1162,7 @@ final class AppModel {
             operation = nil
             if let ending, let result {
                 let words = ending(result)
-                busy = ended(title: words.title, detail: words.detail, failed: false)
+                busy = ended(title: words.title, detail: words.detail, style: words.style)
             } else if ending != nil, let failureWords {
                 busy = ended(title: failure, detail: failureWords, failed: true)
             } else {
@@ -1175,9 +1177,13 @@ final class AppModel {
     /// The overlay of an operation that is over: how it ended, and the button
     /// that closes it.
     private func ended(title: String, detail: String, failed: Bool) -> BusyState {
+        ended(title: title, detail: detail, style: failed ? .failure : .success)
+    }
+
+    private func ended(title: String, detail: String, style: BusyResult.Style) -> BusyState {
         BusyState(
             title: title, detail: detail,
-            result: BusyResult(failed: failed, dismiss: BusyCancel { [weak self] in self?.busy = nil })
+            result: BusyResult(style: style, dismiss: BusyCancel { [weak self] in self?.busy = nil })
         )
     }
 
@@ -1190,6 +1196,9 @@ final class AppModel {
         }
         if let detail = update.detail { busy?.detail = detail }
         if update.cancellable == false { busy?.cancel = nil }
+        if update.cancellable == true, busy?.cancel == nil, busy?.result == nil {
+            busy?.cancel = BusyCancel { [weak self] in self?.cancelOperation() }
+        }
     }
 
     /// The overlay's Cancel: the operation stops and cleans up while the
@@ -1327,10 +1336,11 @@ final class AppModel {
 
     /// Install APK: `url` is what the Files picker returned. Settings has
     /// dismissed and the install runs behind the overlay, which stays up at the
-    /// end with how it went until the person closes it. A file that is not a
-    /// single .apk, or is one Android cannot take by its size, is refused on the
-    /// same overlay, at once. The file's security scope is held to the end of
-    /// the install.
+    /// end with how it went until the person closes it. A file that is not an
+    /// .apk, .apks, .xapk or .apkm, or is an .apk that Android cannot take by
+    /// its size, is refused on the same overlay, at once; an archive of an
+    /// app's parts is read, and refused or installed, by the operation. The
+    /// file's security scope is held to the end of the install.
     func installPicked(_ url: URL) {
         guard busy == nil else { return }
         guard fileBrowser?.busy != true else {
@@ -1348,7 +1358,9 @@ final class AppModel {
         // down has none yet, and the install reads the real one when it has
         // the file.
         let size = UInt64(max((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 0))
-        if let refusal = InstallRefusal(sizeBytes: size) {
+        // The size limit is an .apk's: an archive may be larger, and each APK
+        // inside it is held to the limit by the operation.
+        if InstallRefusal.isPlainApk(fileName: name), let refusal = InstallRefusal(sizeBytes: size) {
             endAccess()
             busy = ended(title: Self.installFailure, detail: refusal.message, failed: true)
             return
@@ -1357,19 +1369,22 @@ final class AppModel {
         runOperation(
             BusyState(title: String(localized: "Installing app"), detail: detail, progress: 0),
             failure: Self.installFailure,
-            ending: { _ in (title: String(localized: "App installed"), detail: String(localized: "\(name) is installed in the virtual machine.")) },
+            ending: { (outcome: ApkInstallOutcome) in outcome.words(fileName: name) },
             { [driver] update in
                 defer { endAccess() }
-                try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
+                let outcome = try await self.installAskingAboutLegacyApps(detail: detail) { bypass, update in
                     if let driver {
-                        try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
+                        return try await driver.installApk(at: url, bypassLowTargetSdkBlock: bypass, update: update)
                     } else {
                         try await self.playInstall(bypassLowTargetSdkBlock: bypass, update)
+                        return self.previewInstallOutcome
                     }
                 }
-                // 100% for a moment, then the result.
-                update(BusyUpdate(progress: 1))
+                // 100% for a moment, then the result. Nothing is left to stop, so
+                // the Cancel that came back for an app's data goes.
+                update(BusyUpdate(progress: 1, cancellable: false))
                 try? await Task.sleep(for: .milliseconds(500))
+                return outcome
             }
         )
     }
@@ -1383,10 +1398,11 @@ final class AppModel {
     /// attempt reads the file and checks the room afresh.
     private func installAskingAboutLegacyApps(
         detail: String,
-        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> Void
-    ) async throws {
+        attempt: (_ bypassLowTargetSdkBlock: Bool, _ update: @escaping @Sendable (BusyUpdate) -> Void) async throws -> ApkInstallOutcome
+    ) async throws -> ApkInstallOutcome {
         let epoch = operationEpoch
         var flow = LegacyInstallFlow()
+        var outcome = ApkInstallOutcome.installed
         while true {
             switch flow.step {
             case let .attempt(bypass):
@@ -1399,7 +1415,7 @@ final class AppModel {
                     }
                 }
                 do {
-                    try await attempt(bypass, update)
+                    outcome = try await attempt(bypass, update)
                     flow.attemptEnded(.installed)
                 } catch let refused as LegacyApkRefused {
                     flow.attemptEnded(.tooOldTarget(refused.target))
@@ -1422,7 +1438,7 @@ final class AppModel {
                 if installAnyway { busy?.progress = 0 }
             case let .finished(ending):
                 switch ending {
-                case .installed: return
+                case .installed: return outcome
                 case .cancelled: throw CancellationError()
                 // Today only a second too-old refusal ends this way, and
                 // `ApkInstall` words one of those as an ordinary failure
@@ -1476,6 +1492,12 @@ final class AppModel {
     /// The App Store configuration leaves this out.
     @ObservationIgnored
     var previewInstallAttempt: (@Sendable (_ bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws -> Void)?
+    /// How the preview's install ends. The App Store configuration leaves
+    /// this out, and its install always ends as installed.
+    @ObservationIgnored
+    var previewInstallOutcome = ApkInstallOutcome.installed
+    #else
+    private var previewInstallOutcome: ApkInstallOutcome { .installed }
     #endif
 
     private func playInstall(bypassLowTargetSdkBlock: Bool, _ update: @Sendable (BusyUpdate) -> Void) async throws {

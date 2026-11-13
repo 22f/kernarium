@@ -500,7 +500,10 @@ parses (any guest), the session record's network slot (a real guest's DHCP
 lease, `NetworkRecordGuestTests`), Retina memory, the resolution a real guest
 gets (`ResolutionGuestTests`: the size and density Android reports at a
 scale), the ADB-over-vsock guest tests (including Android storage and the
-touch-cancel path), the side keys' pass-through of touches to Android, the
+touch-cancel path), Install APK of an app in parts against a guest's adbd on a
+loopback port (`ContainerGuestTests`: `TEST_RUNNER_ANDARIUM_CONTAINER_GUEST_PORT`
+and a folder of synthesized APKs in `TEST_RUNNER_ANDARIUM_CONTAINER_GUEST_FIXTURES`; an optional
+`..._GUEST_SAMPLES` folder of numbered folders runs a person's own container files through it), the side keys' pass-through of touches to Android, the
 ADB-over-network hold, the background disk locks (which also requires a guest
 that was allocating buffers when the GPU was held to suspend), the resume
 after a save while the application is away, the real `HostLocation` against
