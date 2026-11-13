@@ -624,9 +624,10 @@ blocker in every one of them.
   as each fault the retry must refuse in both lanes, and checks the rule on
   programs that do not execute their store. The two unit tests that run a pair
   once, `arm64-tlb-probe-set` and `arm64-gadget-sme`, retry only a result that
-  is exactly a lost reservation (the status 1, the load's result, every other
-  register and watched byte unchanged, and in the SME test SP, PC and NZCV),
-  and each checks its rule with results that differ in one field.
+  is exactly a lost reservation: both check the status, the loaded value and
+  the watched memory, and the SME test also the other registers, SP, PC, NZCV
+  and the fault fields. Each checks its rule with results that differ in one
+  field.
 - `arm64-emitted-registers` requires that no host code names x18, which Darwin
   clears when it interrupts a thread.
 - `arm64-instruction-corpus-invalid-encoding` requires every
