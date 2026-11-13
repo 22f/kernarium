@@ -566,7 +566,9 @@ directory until a host serves, and a device with no host to read is the first
 and its sender gets status 3. Run it in a terminal, detached with
 `watch --detach`, or as a job manager's job (`watch --print-launchd-job
 <label>` prints a launchd job that launchd never restarts, and creates nothing:
-make its log directory first); `stop --force` ends the watch before the host.
+make its log directory first; launchd must be able to open the job file and the
+log, so both belong on a volume with ownership enabled, and `--launchd-log`
+names the log); `stop --force` ends the watch before the host.
 The `kernarium-ipad-automation-watch` and
 `kernarium-ipad-automation-watch-process` tooling tests run the real script
 against fake `xcrun` and `xcodebuild` executables.
