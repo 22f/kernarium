@@ -181,8 +181,9 @@ A test of a suspend contract, such as `guest-video-suspend` for the Virtio video
 devices, suspends the guest both as the host's quiesce does and as the guest does
 by itself, with a stream in progress as well as idle. `vhost-user-held-requests`
 checks the transport's rules for a device that holds requests across a ring
-disable, `vhost-user-backend-wait` its bound on the wait for a backend
-request's acknowledgement, on a clock the test moves, and
+disable, `vhost-user-backend-wait` the budget of the wait for a backend
+request's acknowledgement and the end of the main socket during it, in time the
+test moves, and
 `gpu-device-suspend-held-fence` the Virtio-GPU device's fenced command across
 one, on a renderer the test controls. A driver path that only a
 misbehaving device reaches, such as a device that was reset during a suspend

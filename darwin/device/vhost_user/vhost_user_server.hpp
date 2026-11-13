@@ -22,17 +22,24 @@
 
 namespace uml::gpu {
 
-/* How long the server waits for the front-end to acknowledge a backend
+/* The time the server waits for the front-end to acknowledge a backend
  * request once a reply the front-end itself waits for depends on that: a
- * query or a request that asks for an acknowledgement, which the server
+ * query, or a request that asks for an acknowledgement, which the server
  * answers only after the backend request is, or the end of the connection,
  * when nothing else will. A front-end blocked on such a reply drains the
- * backend channel meanwhile and answers within microseconds; this is far
- * beyond that, and below the 15 seconds of one window of the GPU's fence
- * timer (DeferredFences::maximumFenceWait), which the thread that waits here
- * must be free to run. A frame of either socket whose first byte has arrived
- * is given the same time to complete. A wait that nothing waits behind, such
- * as an acknowledgement a suspended guest has not yet sent, has no deadline. */
+ * backend channel meanwhile and answers within microseconds, so this is far
+ * beyond what an answer takes, and it is below one 15 second window of the
+ * GPU's fence timer (DeferredFences::maximumFenceWait), which the thread that
+ * waits here cannot run meanwhile.
+ *
+ * The wait's own polls spend it, each charged at most the interval it asked
+ * for plus a small slack (WaitBudget), not the clock: an interval in which the
+ * whole process could not run costs one poll. An awake front-end that stays
+ * silent therefore gets this much real time and the time the wait spends
+ * between polls. Only the frames received during such a wait are timed, from
+ * their first byte, and an armed wait's budget covers them too; ordinary
+ * request reception is not. A wait that nothing waits behind, such as an
+ * acknowledgement a suspended guest has not yet sent, has no budget. */
 inline constexpr std::chrono::seconds backendAcknowledgementBound {10};
 
 class VhostUserServer {
@@ -188,12 +195,13 @@ private:
      * deferred, as is a GET_FEATURES that retires held requests or follows
      * a message already deferred. Throws unless the reply acknowledges
      * `request` with a zero status. It also throws when the front-end closes
-     * the main socket, before anything the acknowledgement would have
-     * released is done, and, once a reply the front-end waits for depends on
-     * the wait (frontendWaitsForReply()), when backendAcknowledgementBound
-     * passes without the acknowledgement. A throw other than a stop closes
-     * the backend channel: the request is unanswered, so no later reply on
-     * the channel can be paired with it or may complete anything. */
+     * the main socket, even while the acknowledgement is being received and
+     * before anything it would have released is done, and, once a reply the
+     * front-end waits for depends on the wait (frontendWaitsForReply()), when
+     * the budget (backendAcknowledgementBound) is spent without the
+     * acknowledgement. A throw other than a stop closes the backend channel:
+     * the request is unanswered, so no later reply on the channel can be paired
+     * with it or may complete anything. */
     void awaitBackendAcknowledgement(
         const protocol::VhostHeader& request,
         const char* channel);

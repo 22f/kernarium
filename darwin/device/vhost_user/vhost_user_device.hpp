@@ -150,8 +150,8 @@ public:
      * acknowledgement of a map or unmap, but once the wait is over, behind
      * the messages queued before it. The wait ends with the acknowledgement,
      * the end of the backend-request channel, the end of the main socket or a
-     * service stop, and fails after backendAcknowledgementBound once a reply
-     * the front-end waits for is behind it. */
+     * service stop, and fails when backendAcknowledgementBound of its polls
+     * is spent once a reply the front-end waits for is behind it. */
     [[nodiscard]] virtual bool keepsDeferredRequestsWhileDisabled() const noexcept
     {
         return false;
