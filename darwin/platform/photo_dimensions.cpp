@@ -487,6 +487,18 @@ Resizing resizeStream(const ResizeSteps& steps)
     return Resizing::resized;
 }
 
+void RepairBoundary::repaired(std::optional<std::int64_t> captureClockNanoseconds) noexcept
+{
+    repairedAt_ = captureClockNanoseconds;
+    generation_.fetch_add(1, std::memory_order_release);
+}
+
+bool RepairBoundary::predates(Generation callbackEntered, std::optional<std::int64_t> capturedAt) const noexcept
+{
+    if (callbackEntered != generation_.load(std::memory_order_acquire)) return true;
+    return repairedAt_ && capturedAt && *capturedAt < *repairedAt_;
+}
+
 StreamCache::Path StreamCache::pathFor(std::uint32_t askedWidth, std::uint32_t askedHeight, std::uint32_t askedRate) const noexcept
 {
     if (!video) return Path::admit;

@@ -182,9 +182,13 @@ interface to the wire.
   session and tries again later, and a failure stays for the session
   (`RecoveryLatch`: a second notification repairs and announces nothing); the
   client delivers nothing from a camera it has been told is interrupted, nor
-  anything captured before the repair: the session discards a buffer the
-  capture had in flight when the cameras were put back (`framePredatesRepair`)
-  and the client what it had already been handed.
+  anything captured before the repair: an output callback reads the repair
+  boundary's generation when it is entered, before it waits for the lock the
+  announcement holds, and delivers only while it is current, and a callback that
+  began later compares the sample's capture time with the repair's on the
+  capture's own clock (the session's synchronization clock, never the host's;
+  `RepairBoundary`), with no age beyond which a sample is kept; the client
+  discards what it had already been handed.
 - `nv12_transform.hpp` crops, rotates and scales NV12 pictures: the portable
   `transformNv12()` is the reference, and `Camera::makeFrameTransformer()` gives
   the host's fastest. The Apple camera's (`apple/accelerated_nv12.hpp`) scales a

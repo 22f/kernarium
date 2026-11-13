@@ -381,6 +381,9 @@ class AppleSession;
 struct SessionState {
     std::mutex mutex;
     AppleSession* session {};
+    // Which samples are from before the last repair of the cameras (RepairBoundary): read by the output callbacks
+    // as they are entered, set by the recovery, both with `mutex` held for the decision.
+    RepairBoundary boundary;
 };
 
 } // namespace
@@ -469,6 +472,14 @@ CameraTime cameraTimeOf(CMTime time)
 CMTime cmTimeOf(CameraTime time)
 {
     return CMTimeMake(time.value, time.scale);
+}
+
+// A time on the capture's clock, in nanoseconds; nothing for one that is not a number (invalid, indefinite, infinite).
+std::optional<std::int64_t> nanosecondsOf(CMTime time)
+{
+    if (!CMTIME_IS_NUMERIC(time)) return std::nullopt;
+    const CMTime scaled = CMTimeConvertScale(time, 1'000'000'000, kCMTimeRoundingMethod_RoundTowardZero);
+    return CMTIME_IS_NUMERIC(scaled) ? std::optional<std::int64_t>(scaled.value) : std::nullopt;
 }
 
 DeviceTiming timingOf(AVCaptureDevice* device)
@@ -994,12 +1005,10 @@ public:
     void deliverFrame(std::size_t camera, CMSampleBufferRef sample)
     {
         if (camera >= entries_.size()) return;
+        // What the capture made before the cameras were put back in their anchors does not get here
+        // (RepairBoundary, applied by the output delegate before it calls this).
         const CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
         const std::uint64_t capturedAt = CMTIME_IS_VALID(presentation) ? std::uint64_t(CMTimeGetSeconds(presentation) * 1e9) : hostNow();
-        // A buffer the capture had in flight when the cameras were put back in their
-        // anchors was made before it; it can reach this callback after the session
-        // has said it is back.
-        if (framePredatesRepair(capturedAt, repairedAt_.load())) return;
         CVPixelBufferRef pixels = CMSampleBufferGetImageBuffer(sample);
         if (pixels == nullptr || CVPixelBufferGetPlaneCount(pixels) != 2) return;
         if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
@@ -1442,15 +1451,26 @@ private:
         };
         steps.announce = [&](Recovery outcome) {
             if (outcome == Recovery::failed) std::fprintf(stderr, "Camera: the cameras could not be put back in their anchors\n");
-            // What the capture made before this moment is from before the repair.
-            if (outcome == Recovery::resumed && repaired) repairedAt_ = hostNow();
+            // What the capture made before this moment is from before the repair: its clock now, and the boundary
+            // drawn under the lock that delivery holds, before the session is said to be back.
+            const bool drawBoundary = outcome == Recovery::resumed && repaired;
+            const std::optional<std::int64_t> captureClock = drawBoundary ? captureClockNow() : std::nullopt;
             std::lock_guard lock(state_->mutex);
+            if (drawBoundary) state_->boundary.repaired(captureClock);
             if (state_->session) deliver({allCameras, outcome == Recovery::resumed ? CameraEventKind::resumed : CameraEventKind::failed});
         };
         // A failed recovery is final for the session: a second notification (the end
         // of the interruption and the restart both arrive) repairs and announces
         // nothing more, whatever state the first left the cameras in.
         (void)recovery_.recover(inputs, steps);
+    }
+
+    // The capture's own clock now: the timeline of its samples' timestamps (the session's synchronization clock),
+    // which is not assumed to be the host's.
+    std::optional<std::int64_t> captureClockNow() const
+    {
+        CMClockRef clock = session_.synchronizationClock;
+        return clock != nullptr ? nanosecondsOf(CMClockGetTime(clock)) : std::nullopt;
     }
 
     // Puts a camera whose device was moved out of its anchor back: the format
@@ -1659,10 +1679,8 @@ private:
     std::set<std::size_t> joinsLogged_;
     std::atomic_bool stopped_ {};
     // The recoveries of this session: a failure stays until the session is torn
-    // down. And when the cameras were last put back in their anchors (the host's
-    // clock, zero before any was): frames captured before it are not delivered.
+    // down.
     RecoveryLatch recovery_;
-    std::atomic<std::uint64_t> repairedAt_ {0};
     std::map<std::size_t, RunningCamera> cameras_;
 };
 
@@ -1761,8 +1779,12 @@ std::unique_ptr<Camera> makeAppleCamera()
 {
     (void)output;
     (void)connection;
-    std::lock_guard lock(_state->mutex);
-    if (_state->session) static_cast<uml::platform::AppleSession*>(_state->session)->deliverFrame(_camera, sampleBuffer);
+    // The sample's capture time on the capture's clock, and the boundary's generation (read inside deliverSample),
+    // are both taken before this callback waits for the lock the recovery's announcement holds.
+    const auto capturedAt = uml::platform::nanosecondsOf(CMSampleBufferGetPresentationTimeStamp(sampleBuffer));
+    uml::platform::deliverSample(_state->boundary, _state->mutex, capturedAt, [&] {
+        if (_state->session) static_cast<uml::platform::AppleSession*>(_state->session)->deliverFrame(_camera, sampleBuffer);
+    });
 }
 
 @end

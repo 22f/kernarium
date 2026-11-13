@@ -10,6 +10,8 @@
 #include <Block.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -18,6 +20,7 @@
 #include <numeric>
 #include <set>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1277,15 +1280,155 @@ void aFailedRecoveryIsFinalForItsSession()
 
 // R5 (recheck6): the capture's frames carry their capture time; one made before the repair is discarded when it reaches
 // the callback after it, within a window that a disagreeing clock cannot stretch into every frame.
-void aFrameCapturedBeforeTheRepairIsDiscarded()
+// A mutex that says when a callback reaches for it: the callback has read the boundary by then, since it reads it first.
+struct SpyMutex {
+    std::mutex held;
+    std::atomic<bool> waiting {false};
+    void lock()
+    {
+        waiting = true;
+        held.lock();
+    }
+    void unlock() { held.unlock(); }
+};
+
+bool waitUntil(const std::atomic<bool>& flag)
 {
-    constexpr std::uint64_t repaired = 5'000'000'000ull;
-    require(!framePredatesRepair(repaired - 1, 0), "no repair, no discard");
-    require(framePredatesRepair(repaired - 1, repaired), "captured just before the repair: discarded");
-    require(!framePredatesRepair(repaired, repaired) && !framePredatesRepair(repaired + 1, repaired), "at or after it: kept");
-    require(framePredatesRepair(repaired - repairWindowNanoseconds, repaired), "at the edge of the window: discarded");
-    require(!framePredatesRepair(repaired - repairWindowNanoseconds - 1, repaired),
-            "beyond the window, which no buffer in flight can be: kept, so that a clock that disagrees discards nothing for good");
+    for (int tries = 0; tries < 500 && !flag; ++tries) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return flag;
+}
+
+constexpr std::int64_t second = 1'000'000'000;
+
+// R5 (recheck7): a sample is already inside the output callback, waiting for the lock the announcement of the repair
+// holds, when the repair completes; it is delivered after it, however long it waited. The reviewer's probe held it
+// for 2.3 s; a window of two seconds let it through, which is why the boundary is a generation read at entry.
+void aSampleThatWasInsideTheCallbackWhenTheRepairCompletedIsRejected()
+{
+    // The sample's timestamp is before the repair's, and, as it would be on a clock that runs ahead of the one the repair
+    // was read on, after it: the generation rejects it either way.
+    for (const std::int64_t waited : {second / 10, 3 * second, 120 * second}) for (const std::int64_t ahead : {std::int64_t(0), waited + 10 * second}) {
+        RepairBoundary boundary;
+        SpyMutex mutex;
+        int delivered = 0;
+        mutex.lock();
+        mutex.waiting = false;
+        std::thread callback([&] { (void)deliverSample(boundary, mutex, 1000 * second + ahead, [&] { ++delivered; }); });
+        require(waitUntil(mutex.waiting), "the callback is waiting for the lock");
+        // The repair completes `waited` after the sample was captured, with the lock, and resumed is announced.
+        boundary.repaired(1000 * second + waited);
+        mutex.unlock();
+        callback.join();
+        require(delivered == 0, "the sample that was in the callback before the repair is not delivered after it");
+    }
+}
+
+void aSampleWhoseCallbackBeganAfterTheRepairIsJudgedByItsCaptureTime()
+{
+    RepairBoundary boundary;
+    std::mutex mutex;
+    int delivered = 0;
+    const auto deliver = [&](std::optional<std::int64_t> capturedAt) {
+        const int before = delivered;
+        (void)deliverSample(boundary, mutex, capturedAt, [&] { ++delivered; });
+        return delivered != before;
+    };
+    boundary.repaired(500 * second);
+    require(!deliver(499 * second), "captured before the repair: rejected");
+    require(!deliver(500 * second - 1), "just before it");
+    require(deliver(500 * second), "at it: kept, the device was in its anchor");
+    require(deliver(501 * second), "after it");
+    require(!deliver(500 * second - 30 * second), "captured thirty seconds before the repair: rejected, there is no age beyond which it is kept");
+    require(!deliver(500 * second - 3600 * second), "nor an hour");
+    require(!deliver(-5 * second), "nor a sample before the clock's own start");
+}
+
+void aFreshFrameAfterTheRepairPassesAndAStreamIsNotMuted()
+{
+    RepairBoundary boundary;
+    std::mutex mutex;
+    int delivered = 0;
+    boundary.repaired(100 * second);
+    for (int frame = 0; frame < 30 * 60; ++frame)
+        (void)deliverSample(boundary, mutex, 100 * second + frame * (second / 30), [&] { ++delivered; });
+    require(delivered == 30 * 60, "every frame captured after the repair reaches the guest");
+}
+
+// The boundary compares what it is given with what it is given; it does not know a host clock. A capture clock that is
+// a fixed offset from the host's (ahead or behind, by any amount) therefore changes nothing: the repair is read on the
+// capture's clock, so are the samples.
+void aCaptureClockThatDiffersFromTheHostsChangesNothing()
+{
+    for (const std::int64_t offset : {-3600 * second, -10 * second, std::int64_t(-1), std::int64_t(1), 10 * second, 3600 * second}) {
+        const auto onCapture = [offset](std::int64_t host) { return host + offset; };
+        RepairBoundary boundary;
+        std::mutex mutex;
+        int stale = 0, fresh = 0;
+        // Frames in flight at the repair, captured over the 5 s before it (host time 100 s), and the stream after it.
+        boundary.repaired(onCapture(100 * second));
+        for (int frame = 0; frame < 150; ++frame)
+            (void)deliverSample(boundary, mutex, onCapture(95 * second + frame * (second / 30)), [&] { ++stale; });
+        for (int frame = 0; frame < 30 * 20; ++frame)
+            (void)deliverSample(boundary, mutex, onCapture(100 * second + frame * (second / 30)), [&] { ++fresh; });
+        require(stale == 0, "nothing captured before the repair is delivered, whatever the offset");
+        require(fresh == 30 * 20, "and nothing after it is withheld: the stream is not muted");
+    }
+}
+
+void aSampleWithoutATimestampOrARepairWithoutAClockIsJudgedByTheGenerationAlone()
+{
+    RepairBoundary boundary;
+    std::mutex mutex;
+    int delivered = 0;
+    const auto deliver = [&](std::optional<std::int64_t> capturedAt) {
+        const int before = delivered;
+        (void)deliverSample(boundary, mutex, capturedAt, [&] { ++delivered; });
+        return delivered != before;
+    };
+    require(deliver(std::nullopt) && deliver(5 * second), "before any repair, everything passes");
+    boundary.repaired(std::nullopt);  // the capture's clock could not be read
+    require(deliver(5 * second) && deliver(std::nullopt), "after a repair without a clock reading, a callback that began after it passes");
+    boundary.repaired(50 * second);
+    require(deliver(std::nullopt), "a sample without a timestamp is not rejected by one");
+    boundary.repaired(std::nullopt);
+    require(deliver(40 * second), "and a later repair without a reading does not keep the time of an earlier one");
+    SpyMutex spy;
+    RepairBoundary later;
+    int count = 0;
+    spy.lock();
+    spy.waiting = false;
+    std::thread callback([&] { (void)deliverSample(later, spy, std::nullopt, [&] { ++count; }); });
+    require(waitUntil(spy.waiting), "waiting");
+    later.repaired(std::nullopt);
+    spy.unlock();
+    callback.join();
+    require(count == 0, "but the one that was inside the callback before the repair is rejected, with or without either");
+}
+
+void everyRepairDrawsANewBoundary()
+{
+    RepairBoundary boundary;
+    SpyMutex mutex;
+    int delivered = 0;
+    boundary.repaired(10 * second);
+    mutex.lock();
+    mutex.waiting = false;
+    std::thread callback([&] { (void)deliverSample(boundary, mutex, 20 * second, [&] { ++delivered; }); });
+    require(waitUntil(mutex.waiting), "waiting");
+    boundary.repaired(30 * second);  // a second recovery
+    mutex.unlock();
+    callback.join();
+    require(delivered == 0, "a sample that was captured after the first repair, and is inside a callback when the second completes, is rejected");
+}
+
+void aSampleIsDeliveredWhileTheLockIsHeld()
+{
+    RepairBoundary boundary;
+    std::mutex mutex;
+    bool held = false;
+    require(deliverSample(boundary, mutex, std::nullopt, [&] { held = !mutex.try_lock(); if (!held) mutex.unlock(); }),
+            "delivered");
+    require(held, "under the lock the announcement of a repair also takes, so that none is delivered across it");
 }
 
 // ---------------------------------------------------------------------------
@@ -1734,7 +1877,13 @@ int main()
     everyCameraIsRepairedBeforeTheSessionIsToldItIsBack();
     aRefusedRepairIsAFailureAndNothingIsAnnouncedAsBack();
     aFailedRecoveryIsFinalForItsSession();
-    aFrameCapturedBeforeTheRepairIsDiscarded();
+    aSampleThatWasInsideTheCallbackWhenTheRepairCompletedIsRejected();
+    aSampleWhoseCallbackBeganAfterTheRepairIsJudgedByItsCaptureTime();
+    aFreshFrameAfterTheRepairPassesAndAStreamIsNotMuted();
+    aCaptureClockThatDiffersFromTheHostsChangesNothing();
+    aSampleWithoutATimestampOrARepairWithoutAClockIsJudgedByTheGenerationAlone();
+    everyRepairDrawsANewBoundary();
+    aSampleIsDeliveredWhileTheLockIsHeld();
     aPressureNotificationIsAppliedWhileTheStreamRunsAndNeverAfterIt();
     aRefusalIsLoggedOncePerCameraAndReasonUntilTheCameraChanges();
     everyGeneratedTableHoldsTheInvariants();

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -479,16 +480,49 @@ private:
     std::atomic<bool> failed_ {false};
 };
 
-// Frames the platform's capture handed over after a recovery began can still be
-// from before it: a buffer in flight when a device was moved back into its
-// anchor reaches the client's callback afterwards. Capture times and `repairedAt`
-// are on one clock (the host's); a frame captured before the repair is
-// discarded, within `repairWindowNanoseconds` of it (a frame older than that
-// cannot be in flight, and a clock that disagrees must not discard every frame).
-inline constexpr std::uint64_t repairWindowNanoseconds = 2'000'000'000;
-[[nodiscard]] constexpr bool framePredatesRepair(std::uint64_t capturedAt, std::uint64_t repairedAt) noexcept
+// Samples the platform's capture hands over after a recovery began can be from
+// before it: one already inside the client's callback, waiting for the lock that
+// delivery and the announcement of the repair share, and one the capture had
+// queued behind it. Both were made by the device as it was moved out of its
+// anchor, and none may reach the guest once the session is said to be back.
+//
+// A callback reads the boundary's generation when it is entered, before it waits
+// (`entered`), and delivers only while that is still the current generation: a
+// repair made after the callback began rejects it, however long it waited. A
+// callback that began after the repair compares the sample's capture time with
+// the repair's, both on the capture's own clock (the timeline of every sample's
+// timestamps, the session's synchronization clock): a sample captured before the
+// repair is rejected at any age, one captured after it is kept. The host's clock
+// is never compared with it, so a capture clock that is offset from the host's by
+// any amount rejects nothing it should not, and mutes nothing for good. A sample
+// without a timestamp, or a repair without a reading of the clock, is judged by
+// the generation alone.
+class RepairBoundary {
+public:
+    using Generation = std::uint64_t;
+
+    [[nodiscard]] Generation entered() const noexcept { return generation_.load(std::memory_order_acquire); }
+    // The cameras are back in their anchors: `captureClockNanoseconds` is the capture clock's reading now. Called
+    // with the lock that delivery holds, before the session is announced as resumed.
+    void repaired(std::optional<std::int64_t> captureClockNanoseconds) noexcept;
+    // Whether a sample is from before the last repair. Called with the same lock.
+    [[nodiscard]] bool predates(Generation callbackEntered, std::optional<std::int64_t> capturedAt) const noexcept;
+
+private:
+    std::atomic<Generation> generation_ {0};
+    std::optional<std::int64_t> repairedAt_;
+};
+
+// What an output callback does with a sample: it reads the boundary when it is entered, before it waits for the
+// delivery lock, and hands the sample on only if the boundary lets it pass once it has the lock.
+template <typename Mutex, typename Deliver>
+bool deliverSample(const RepairBoundary& boundary, Mutex& mutex, std::optional<std::int64_t> capturedAt, Deliver&& deliver)
 {
-    return repairedAt != 0 && capturedAt < repairedAt && repairedAt - capturedAt <= repairWindowNanoseconds;
+    const RepairBoundary::Generation entered = boundary.entered();
+    std::lock_guard lock(mutex);
+    if (boundary.predates(entered, capturedAt)) return false;
+    deliver();
+    return true;
 }
 
 // ---------------------------------------------------------------------------
