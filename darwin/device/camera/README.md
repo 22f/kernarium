@@ -76,8 +76,11 @@ application's statements (the sensor orientation, the rotation that
   and a later boot composes under all of it (`composeCamerasWithin`): the layout
   the guest is told is one the reservation covers (cameras at once, RAW capture,
   source working storage), and a run that began without cameras stays without.
-  A reserve that takes all of B refuses the launch. The loader states the
-  ceiling for the application's plan before the boot. The system camera's own
+  A reserve that takes all of B refuses the launch. The runtime answers the
+  application the same figure before the boot (`plan_camera_reserve`): it
+  discovers the cameras, which asks for no permission and opens no session, and
+  composes the use a boot would reserve for. The loader's ceiling stands only
+  where no runtime can say. The system camera's own
   processing storage while it makes a picture is counted as working bytes for
   each pixel of a JPEG still (`systemCameraStillWorkingBytesPerPixel`), a figure
   measured on one device with headroom, and the ceiling holds it. The platform

@@ -6,9 +6,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
@@ -172,6 +175,95 @@ void aLiveSessionReservesMemoryOnlyForCamerasItHas()
     require(!none.hasCameras());
     require(liveCameraReserveMiB(CameraMode::live, none.layout, none.reserved, tier) == 0, "a live session without cameras");
     require(liveCameraReserveMiB(CameraMode::blocked, none.layout, none.reserved, tier) == 0);
+}
+
+// A phone's lenses have taught the store its colour data, in `directory`.
+void teachTheStore(const std::string& directory)
+{
+    const auto phone = uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone);
+    uml::camera::CalibrationStore store(directory);
+    for (const auto& info : phone->cameras()) {
+        if (!info.rawStills)
+            continue;
+        uml::platform::CameraColorData data;
+        data.bayer = uml::platform::BayerOrder::grbg;
+        data.blackLevel = 64;
+        data.whiteLevel = 1023;
+        data.rawWidth = info.rawStillSize.width;
+        data.rawHeight = info.rawStillSize.height;
+        data.illuminant1 = 17;
+        data.illuminant2 = 21;
+        data.colorMatrix1 = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        data.focalLengthMillimetres = 6.9;
+        data.intrinsics = {3000, 3000, 1008, 756};
+        require(store.save(phone->hostModel(), uml::camera::CalibrationStore::lensKey(info), data));
+    }
+}
+
+void thePlannedReserveIsTheComposedLayoutsFigure()
+{
+    using uml::camera::CameraUse;
+    using uml::camera::cameraHostMemoryReserveMiB;
+    const auto tier = CameraTier::small;
+    const auto source = [](uml::camera::SyntheticProfile profile) { return uml::camera::makeSyntheticCameraSource(profile); };
+
+    // The figure is the one a boot takes out of the pool (the reserve of the first composition's use), and it
+    // is exact.
+    for (const auto profile : {uml::camera::SyntheticProfile::phone, uml::camera::SyntheticProfile::laptop,
+             uml::camera::SyntheticProfile::tablet}) {
+        const auto run = present(source(profile), tier, "");
+        const auto plan = planReserve(source(profile), tier, "");
+        require(plan.exact && run.hasCameras(), "the host's cameras are discovered");
+        require(plan.reserveMiB == liveCameraReserveMiB(CameraMode::live, run.layout, run.reserved, tier),
+            "what the boot reserves");
+        require(plan.reserveMiB == cameraHostMemoryReserveMiB(tier, run.reserved) && plan.reserveMiB > 0, run.layout);
+    }
+    // The synthetic phone's front camera does not run with its back one and its back lens can take a RAW still:
+    // one stream, RAW, and the working storage its source states (11 B/px).
+    const auto phone = planReserve(source(uml::camera::SyntheticProfile::phone), tier, "");
+    require(phone.reserveMiB == cameraHostMemoryReserveMiB(tier, CameraUse {1, true, 11}), "the phone's use");
+    // The laptop has one camera and no RAW: a lighter figure than the phone's.
+    const auto laptop = planReserve(source(uml::camera::SyntheticProfile::laptop), tier, "");
+    require(laptop.reserveMiB < phone.reserveMiB, "a laptop's one camera holds less than a phone");
+
+    // A host with no camera holds nothing, and says so as exactly as any other.
+    const auto none = planReserve(nullptr, tier, "");
+    require(none.exact && none.reserveMiB == 0, "no camera, no reserve");
+
+    // A host whose cameras could not be discovered holds the most a system camera's layout does, and the figure
+    // says it is not exact.
+    const auto ceiling = ceilingReserve(tier);
+    require(!ceiling.exact && ceiling.reserveMiB == 197, "the tier's ceiling");
+    require(none.reserveMiB < ceiling.reserveMiB);
+}
+
+void theColourDataARunTeachesMovesNoFigure()
+{
+    using uml::camera::CameraUse;
+    using uml::camera::cameraHostMemoryReserveMiB;
+    const auto tier = CameraTier::small;
+    // A lens that has no colour data yet is counted for the RAW still that would teach it, and one that has it
+    // for the RAW it offers: teaching the store moves no figure, so the sheet's does not change under a run.
+    const auto phone = [] { return uml::camera::makeSyntheticCameraSource(uml::camera::SyntheticProfile::phone); };
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("kernarium-camera-reserve-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+
+    const auto before = planReserve(phone(), tier, directory.string());
+    teachTheStore(directory.string());
+    const auto learned = planReserve(phone(), tier, directory.string());
+    require(before.exact && learned.exact, "both are the layout's");
+    require(learned.reserveMiB == cameraHostMemoryReserveMiB(tier, CameraUse {1, true, 11}), "the learned use");
+    require(before.reserveMiB == learned.reserveMiB, "RAW is counted before the first still teaches it");
+    std::filesystem::remove_all(directory);
+
+    // A path that is not a path states no directory.
+    bool invalid = false;
+    require(readCalibrationPath(nullptr, invalid).empty() && !invalid, "no path");
+    require(readCalibrationPath("", invalid).empty() && invalid, "an empty one is invalid");
+    invalid = false;
+    require(readCalibrationPath("/calibration", invalid) == "/calibration" && !invalid);
 }
 
 void theLensCoverFollowsTheSession()
@@ -589,6 +681,8 @@ int main()
         {"the-layout-follows-the-cameras-and-the-tier", theLayoutFollowsTheCamerasAndTheTier},
         {"every-host-composes-the-small-tier-for-now", everyHostComposesTheSmallTierForNow},
         {"a-live-session-reserves-memory-only-for-cameras-it-has", aLiveSessionReservesMemoryOnlyForCamerasItHas},
+        {"the-planned-reserve-is-the-composed-layouts-figure", thePlannedReserveIsTheComposedLayoutsFigure},
+        {"the-colour-data-a-run-teaches-moves-no-figure", theColourDataARunTeachesMovesNoFigure},
         {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
         {"a-later-boot-composes-the-layout-again", aLaterBootComposesTheLayoutAgain},
         {"a-later-boot-is-held-to-the-first-discoverys-reservation", aLaterBootIsHeldToTheFirstDiscoverysReservation},

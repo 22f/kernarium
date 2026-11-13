@@ -52,6 +52,20 @@ struct Request {
     bool invalidCalibrationPath {};
 };
 
+/* A calibration directory the application states: empty for none (a null
+ * path, or one that is not a path, which sets `invalid`). */
+[[nodiscard]] inline std::string readCalibrationPath(const char* path, bool& invalid)
+{
+    if (path == nullptr)
+        return {};
+    const std::size_t length = ::strnlen(path, PATH_MAX);
+    if (length == 0 || length == PATH_MAX) {
+        invalid = true;
+        return {};
+    }
+    return std::string(path, length);
+}
+
 /* The camera fields of `boot`, read only as far as its struct_size covers. A
  * request that states nothing runs blocked. */
 [[nodiscard]] inline Request readRequest(const kernarium_runtime_boot& boot)
@@ -70,14 +84,9 @@ struct Request {
         }
     }
     if (boot.struct_size >=
-            bootSizeBeforeCalibrationPath + sizeof(boot.android_camera_calibration_path) &&
-        boot.android_camera_calibration_path != nullptr) {
-        const std::size_t length = ::strnlen(boot.android_camera_calibration_path, PATH_MAX);
-        if (length == 0 || length == PATH_MAX)
-            request.invalidCalibrationPath = true;
-        else
-            request.calibrationDirectory.assign(boot.android_camera_calibration_path, length);
-    }
+            bootSizeBeforeCalibrationPath + sizeof(boot.android_camera_calibration_path))
+        request.calibrationDirectory = readCalibrationPath(
+            boot.android_camera_calibration_path, request.invalidCalibrationPath);
     return request;
 }
 
@@ -156,6 +165,43 @@ inline void recompose(Presentation& presentation)
         *presentation.source, *presentation.calibration, arrangement, {presentation.reservedCameras, presentation.reserved});
     presentation.layout = std::move(composed.layout);
     presentation.use = composed.use;
+}
+
+/* The host memory a live session of a host's cameras would hold, which the
+ * application asks for before the boot (runtime API 40). It is the figure the
+ * boot takes out of the GPU's pool: the use composed from the cameras and the
+ * colour data the store holds, and what that use lets a session hold
+ * (`liveCameraReserveMiB`, of the first composition's use, which is the run's
+ * reservation). A host with no camera holds none, and that is as exact as any
+ * other figure. Discovery needs no permission and opens no session. */
+struct ReservePlan {
+    std::uint32_t reserveMiB {};
+    /* False where the cameras could not be discovered and the figure is the
+     * tier's ceiling. */
+    bool exact {true};
+};
+
+/* The reserve of `source`'s cameras (a null source is a host with no camera)
+ * at `tier`, with the colour data `calibrationDirectory` holds. */
+[[nodiscard]] inline ReservePlan planReserve(
+    uml::camera::CameraSourceHandle source,
+    uml::camera::CameraTier tier,
+    const std::string& calibrationDirectory)
+{
+    const auto cameras = present(std::move(source), tier, calibrationDirectory);
+    return {
+        static_cast<std::uint32_t>(uml::camera::liveCameraReserveMiB(
+            uml::camera::CameraMode::live, cameras.layout, cameras.reserved, cameras.tier)),
+        true};
+}
+
+/* The reserve of a host whose cameras could not be discovered: the most any
+ * layout holds at `tier`. */
+[[nodiscard]] inline ReservePlan ceilingReserve(uml::camera::CameraTier tier)
+{
+    return {
+        static_cast<std::uint32_t>(uml::camera::cameraHostMemoryReserveMiB(tier)),
+        false};
 }
 
 /* The runtime's state value of the device's. */
