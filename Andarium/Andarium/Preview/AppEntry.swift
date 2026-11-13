@@ -122,7 +122,7 @@ struct AppEntry {
     func configureTips() {
         if resetTips { try? Tips.resetDatastore() }
         // The legacy install, played, shows the tip as a real session may.
-        if screen == "session-tip" || (screen == "install-legacy" && play) {
+        if screen == "session-tip" || screen == "session-tip-left" || (screen == "install-legacy" && play) {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
@@ -278,7 +278,7 @@ struct AppEntry {
             model.jitOn = true
             model.jitLastStart = .noDebugger
             boot(.normal, stage: 1, seconds: 4)
-        case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
+        case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
              "session-camera-notice", "session-camera-off-notice":
@@ -287,7 +287,7 @@ struct AppEntry {
             model.sessionPreset = SessionPreset(
                 volumePanel: screen == "session-volume",
                 powerMenu: screen == "session-power",
-                leftEdge: ["session-left", "session-volume"].contains(screen),
+                leftEdge: ["session-left", "session-volume", "session-tip-left"].contains(screen),
                 guestScreen: {
                     switch screen {
                     case "session-setup": .setup
@@ -304,7 +304,7 @@ struct AppEntry {
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
-        case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
+        case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-legacy", "install-done", "install-failed", "install-not-apk", "install-bundle",
              "bug-report":
             let session = model.session

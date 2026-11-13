@@ -258,6 +258,8 @@ SHOTS: list[Shot] = [
     # Running guest
     s("session", "Guest", "session", "The running guest with the side keys closed."),
     s("session-tip", "Guest", "session-tip", "The side-keys tip over the running guest: the keys line and the line that says Settings holds Install APK.", "-resetTips", "YES"),
+    s("session-tip-left", "Guest", "session-tip-left", "The side-keys tip beside the keys on the left edge: the popover opens to the right of them.", "-resetTips", "YES"),
+    s("session-tip-left-largest-text", "Guest", "session-tip-left", "The side-keys tip beside the keys on the left edge at the largest accessibility text size.", "-resetTips", "YES", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
     s("session-tip-largest-text", "Guest", "session-tip", "The side-keys tip at the largest accessibility text size (the launch states it for the Preview alone): a card on the screen, its text scrolling inside it where it does not fit.", "-resetTips", "YES", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"),
     s("session-side-keys", "Guest", "session-open", "The side keys open: Power, volume, Back, Home and Settings."),
     s("session-left-edge", "Guest", "session-left", "The side keys on the left edge."),
@@ -285,6 +287,7 @@ SHOTS: list[Shot] = [
     s("recovery-side-keys", "Guest", "recovery-open", "Recovery with the side keys open."),
     # Settings during a session
     s("settings", "Settings", "settings", "Settings at full height: Apps (Install APK) and File browser first, then Stats, Developer and Diagnostics.", dark=True),
+    s("settings-medium", "Settings", "settings-medium", "Settings as the side keys open it, at the medium detent: Apps (Install APK) and File browser at the top of the first screenful.", dark=True),
     s("settings-stats", "Settings", "settings-stats", "Settings scrolled to Stats: CPU, Memory and VRAM with bars of their share, and Frame rate.", dark=True),
     s("settings-stats-short", "Settings", "settings-stats", "Settings scrolled to Stats after three CPU readings: the bars fill from the right.", "-statsReadings", "3"),
     system_mic("home-mic-system-prompt", "Capabilities", "home-mic-alert", "The system's own question when Microphone is turned on for the first time (the Simulator's alert).", "reset"),
