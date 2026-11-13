@@ -517,6 +517,52 @@ void trimmingIsSwitchedByOneRequest()
 	(void)::close(server);
 }
 
+/* The request that does not wait returns at once with the guest silent or
+ * gone, leaves a request another thread has in flight alone, and reaches the
+ * guest as the ordinary one does. */
+void aNoWaitTrimRequestReturnsAtOnce()
+{
+	using ::uml::device::GuestRequest;
+	using ::uml::device::set_guest_page_cache_trim;
+	using ::uml::device::set_guest_page_cache_trim_nowait;
+	const ::uml::device::GuestConsoleRun run {true};
+	const auto path = consolePath();
+	/* No guest console yet. */
+	require(set_guest_page_cache_trim_nowait(true) ==
+		GuestRequest::unreachable);
+	const int server = bindServer(path);
+	const auto started = std::chrono::steady_clock::now();
+	require(set_guest_page_cache_trim_nowait(true) == GuestRequest::sent);
+	require(set_guest_page_cache_trim_nowait(false) == GuestRequest::sent);
+	/* The guest never answers: nothing waited for it. */
+	require(std::chrono::steady_clock::now() - started <
+		std::chrono::milliseconds {1500});
+	sockaddr_un client {};
+	socklen_t clientLength {};
+	require(awaitRequest(server, 1000));
+	require(receiveRequest(server, client, clientLength) == "trim on");
+	require(awaitRequest(server, 1000));
+	require(receiveRequest(server, client, clientLength) == "trim off");
+	requireOwnerOnly(path);
+
+	/* A request in flight on another thread holds the console: the one that
+	 * does not wait is busy and sends nothing. */
+	std::atomic<bool> inFlight {false};
+	std::thread holder {[&] {
+		inFlight = true;
+		(void)set_guest_page_cache_trim(true);
+	}};
+	require(awaitRequest(server, 5000));
+	const auto command = receiveRequest(server, client, clientLength);
+	require(command == "trim on");
+	require(set_guest_page_cache_trim_nowait(true) == GuestRequest::busy);
+	/* Let the holder's wait end with the reply. */
+	require(sendReply(server, client, clientLength, 0U, "trim on"));
+	holder.join();
+	require(!awaitRequest(server, 200));
+	(void)::close(server);
+}
+
 /* A pass takes longer than an ordinary request may wait, and is waited for
  * up to its own bound and no longer. */
 void aTrimPassIsWaitedForUpToItsBound()
@@ -1007,6 +1053,7 @@ int main(int argc, char **argv)
 	} else if (selected == "trim") {
 		runPrivately([] {
 			trimmingIsSwitchedByOneRequest();
+			aNoWaitTrimRequestReturnsAtOnce();
 			aTrimPassIsWaitedForUpToItsBound();
 		});
 	} else if (selected == "memory") {

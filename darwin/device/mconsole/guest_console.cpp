@@ -285,15 +285,18 @@ public:
 
 	[[nodiscard]] bool usable() const noexcept { return descriptor_ >= 0; }
 
-	/* False when nothing was sent. */
-	[[nodiscard]] bool send(std::string_view command) const noexcept
+	/* False when nothing was sent. `wait` false does not wait for room in the
+	 * console's queue. */
+	[[nodiscard]] bool send(std::string_view command,
+		bool wait = true) const noexcept
 	{
 		Request request {consoleMagic, consoleVersion,
 			static_cast<std::uint32_t>(command.size()), {}};
 		if (!usable() || command.size() >= request.data.size())
 			return false;
 		std::memcpy(request.data.data(), command.data(), command.size());
-		const auto sent = ::sendto(descriptor_, &request, sizeof(request), 0,
+		const auto sent = ::sendto(descriptor_, &request, sizeof(request),
+			wait ? 0 : MSG_DONTWAIT,
 			reinterpret_cast<const sockaddr *>(&console_),
 			sizeof(console_));
 		return sent == static_cast<ssize_t>(sizeof(request));
@@ -685,6 +688,24 @@ bool wake_guest() noexcept
 GuestRequest set_guest_page_cache_trim(bool enabled) noexcept
 {
 	return requestGuest(enabled ? "trim on" : "trim off", replyWait);
+}
+
+GuestRequest set_guest_page_cache_trim_nowait(bool enabled) noexcept
+{
+	try {
+		std::unique_lock lock(consoleMutex, std::try_to_lock);
+		if (!lock.owns_lock())
+			return GuestRequest::busy;
+		const auto &location = guest_console_location();
+		if (!location)
+			return GuestRequest::unreachable;
+		adoptConsolePath(location->console);
+		const Client client {*location};
+		return client.send(enabled ? "trim on" : "trim off", false) ?
+			GuestRequest::sent : GuestRequest::unreachable;
+	} catch (...) {
+		return GuestRequest::unreachable;
+	}
 }
 
 GuestRequest trim_guest_page_cache(unsigned int waitMs) noexcept
