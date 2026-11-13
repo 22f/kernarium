@@ -31,6 +31,7 @@ private struct TipJarPresentation: View {
                 #if !APP_STORE
                 .environment(\.openURL, OpenURLAction { app.tipJarServices.openLink($0) })
                 .environment(\.tipJarScrollsToTop, app.tipJarServices.previewScrollsToTop)
+                .environment(\.tipJarFullHeight, app.tipJarServices.previewFullHeight)
                 .task { await app.tipJarServices.previewPlays(jar) }
                 #endif
         }

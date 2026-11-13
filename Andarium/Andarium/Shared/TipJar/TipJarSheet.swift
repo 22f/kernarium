@@ -19,10 +19,21 @@ private struct TipJarScrollsToTopKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+/// The Simulator preview opens the sheet at the full height of a page, taller than its conversation, to
+/// show where a short conversation stands.
+private struct TipJarFullHeightKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var tipJarScrollsToTop: Bool {
         get { self[TipJarScrollsToTopKey.self] }
         set { self[TipJarScrollsToTopKey.self] = newValue }
+    }
+
+    var tipJarFullHeight: Bool {
+        get { self[TipJarFullHeightKey.self] }
+        set { self[TipJarFullHeightKey.self] = newValue }
     }
 }
 #endif
@@ -37,10 +48,14 @@ struct TipJarSheet: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     #if !APP_STORE
     @Environment(\.tipJarScrollsToTop) private var scrollsToTop
+    @Environment(\.tipJarFullHeight) private var fullHeight
     private var anchor: UnitPoint { scrollsToTop ? .top : .bottom }
     #else
+    private let fullHeight = false
     private var anchor: UnitPoint { .bottom }
     #endif
+    /// The sheet takes the whole height: at accessibility sizes, where the conversation needs it.
+    private var tall: Bool { typeSize.isAccessibilitySize || fullHeight }
     /// The conversation's and the bar's heights: the sheet is as tall as they
     /// are, and grows as the conversation does.
     @State private var conversationHeight: CGFloat = 400
@@ -76,7 +91,12 @@ struct TipJarSheet: View {
                     conversationHeight = height
                 }
             }
-            .defaultScrollAnchor(anchor)
+            // A conversation longer than the sheet opens at its end and follows it as it grows; one
+            // shorter than the sheet stands at the top, under the title, and is not centred or pushed
+            // down to the bar.
+            .defaultScrollAnchor(anchor, for: .initialOffset)
+            .defaultScrollAnchor(anchor, for: .sizeChanges)
+            .defaultScrollAnchor(.top, for: .alignment)
             .background(Color(.systemBackground))
             .navigationTitle(Text(TipJarWords.name))
             .navigationBarTitleDisplayMode(.inline)
@@ -102,9 +122,9 @@ struct TipJarSheet: View {
             }
         }
         // Larger text needs the whole height.
-        .presentationDetents(typeSize.isAccessibilitySize ? [.large] : [.height(fittedHeight)])
+        .presentationDetents(tall ? [.large] : [.height(fittedHeight)])
         // An iPad sheet at an accessibility size takes the whole height.
-        .presentationSizing(FixedSheetSizing(width: 600, height: typeSize.isAccessibilitySize ? 2000 : fittedHeight))
+        .presentationSizing(FixedSheetSizing(width: 600, height: tall ? 2000 : fittedHeight))
         .accessibilityIdentifier("tipjar-sheet")
         .task { jar.start() }
     }

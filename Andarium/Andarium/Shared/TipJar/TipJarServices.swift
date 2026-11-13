@@ -25,6 +25,8 @@ struct TipJarServices {
     var previewOpensSheet = false
     /// Scrolls the conversation to its top instead of resting at its bottom.
     var previewScrollsToTop = false
+    /// Opens the sheet at the full height of a page, taller than its conversation.
+    var previewFullHeight = false
     /// Runs when the sheet appears: the Simulator preview plays a purchase with it.
     var previewPlays: @MainActor (TipJarModel) async -> Void = { _ in }
     /// What a tap on a profile logo does: the system opens the page unless a

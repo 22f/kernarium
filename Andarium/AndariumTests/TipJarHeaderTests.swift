@@ -407,6 +407,33 @@ struct TipJarHeaderTests {
         lease.window.rootViewController = nil
     }
 
+    /// A conversation shorter than the sheet stands at the top, under the title bar, and is neither
+    /// centred nor pushed down to the bar of tiers. The sheet is the window's own view here, taller than
+    /// its conversation.
+    @Test func aConversationShorterThanTheSheetStandsAtTheTop() async throws {
+        let model = app()
+        let lease = try await HostWindow.take()
+        defer { lease.give() }
+        let jar = try #require(model.makeTipJarModel())
+        let controller = UIHostingController(
+            rootView: TipJarSheet(jar: jar, sender: Self.content(), device: "iPhone") {}
+                .environment(model))
+        lease.window.rootViewController = controller
+        try #require(await eventually { controller.viewIfLoaded?.window != nil })
+        try await Task.sleep(for: .seconds(1.5))
+        controller.view.layoutIfNeeded()
+        let bar = try #require(Self.views(of: UINavigationBar.self, under: controller.view).first, "the title bar")
+        let barBottom = bar.convert(bar.bounds, to: nil).maxY
+        let elements = ToolbarProbe.elements(in: lease.window, above: 5000, includeUnlabelled: true)
+        let role = String(localized: TipJarWords.sender)
+        let header = try #require(elements.first { $0.label == "example, \(role)" }, "the sender: \(elements.map(\.description))")
+        let chip = try #require(elements.first { $0.label.hasPrefix("Lite") }, "a tier: \(elements.map(\.description))")
+        // The room between the title bar and the tiers is more than the conversation needs, or the
+        // test says nothing.
+        try #require(chip.top - barBottom > 380, "the sheet is \(chip.top - barBottom) pt tall above its tiers")
+        #expect(header.top - barBottom < 30, "the conversation starts \(header.top - barBottom) pt under the title bar")
+    }
+
     /// Where purchases are not allowed the sheet says so once, in the title, over the dimmed tiers: no
     /// second line says it again, and VoiceOver reads the title one time.
     @Test func whereTipsAreNotAllowedTheTitleAloneSaysSo() async throws {
