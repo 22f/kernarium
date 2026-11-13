@@ -23,27 +23,34 @@ below `kVideoEncodeMinimumSide`, and profiles a guest API cannot name (ProRes,
 HEVC range extensions, alpha, depth) are not probed.
 
 A probe that does not prove what it asked for is a refusal of the host or no
-answer at all (a session the busy hardware could not give, a session lost, a
-drain that ran out of time). Only a refusal is a fact. A probe with no answer is
-asked again a few times after a short pause; where a refusal and a busy encoder
-look alike (a size beyond the ceiling and an encoder with no session both fail
-to create one), it is a refusal when the first probe that proved in that codec
-proves again right after it. A probe still unanswered makes the discovery
-**incomplete**: its result lists only what was proved, and a codec whose probes
-keep going unanswered is given up. `bgra` and `rgba` are one probe, because they
-are one session and pool with the red and blue bytes exchanged on submit, so a
-profile lists both or neither.
+answer at all (a session the busy hardware could not give or lost, a drain that
+ran out of time, a call that failed). Only a refusal is a fact. A probe with no
+answer is asked again three times after a short pause; only then, where a
+refusal and a busy encoder look alike (a size beyond the ceiling and an encoder
+with no session both fail to create one), is it a refusal, when the first probe
+that proved in that codec proves again right after the retries. A probe that is
+still unanswered makes the discovery **incomplete**: its result lists only what
+was proved, and a codec whose probes keep going unanswered is given up. A probe
+refused before the codec had a control is asked again once it has one. A failed
+call that lists the encoders is no answer; a list that names none is. `bgra` and
+`rgba` are one probe, because they are one session and pool with the red and
+blue bytes exchanged on submit, so a profile lists both or neither. A session
+the host lost, or could not give hardware to, at any property is not a refusal of
+that property, optional or not.
 
 The result is cached as JSON keyed by the host model, OS build and a format
 revision. `UML_VIDEO_ENCODE_CACHE` names the file and an empty value turns the
 cache off; a missing, foreign or unreadable file is ignored and replaced. An
-incomplete result is never cached. It serves the query that found it, and a
-later query, at least 30 seconds after the last run and at most three runs in
-the process, computes discovery again; a complete result replaces the answer
-whole, so it lists a superset of what the guest was offered. A running guest's
-device took its list when it was created and keeps it: a better answer changes
-what the encoder accepts, not what the guest was offered. The session count is a
-snapshot of what other processes held when it was measured.
+incomplete result is never cached. One discovery runs at a time, whether it is
+the first or a later one. An incomplete result serves the query that found it,
+and a later query, at least 30 seconds after the last run and at most three runs
+in the process, computes discovery again. The answer of a process never shrinks:
+a complete result replaces an incomplete one as the union of the two, so what a
+guest was offered is still accepted, while the cache holds the complete run as
+measured. A running guest's device took its list when it was created and keeps
+it: a better answer changes what the encoder accepts, not what the guest was
+offered. The concurrent session count is measured in each process, cached or
+not, because what other processes held is no property of the host.
 
 ## Sessions
 

@@ -35,6 +35,9 @@ struct Discovery {
     // of the complete one; it is never cached.
     bool complete {true};
     unsigned unanswered {};   // the probes that stayed unanswered
+    // The codecs with a probe left unanswered, whether or not they are listed
+    // above: what is uncertain is those codecs, not the host.
+    std::vector<VideoCodec> unansweredCodecs;
 
     [[nodiscard]] const CodecDiscovery* find(VideoCodec codec) const noexcept
     {
@@ -107,12 +110,15 @@ struct Probe {
 struct DiscoveryHooks {
     std::function<Stream(const Probe&)> run;                                 // one trial encode
     std::function<unsigned(const VideoEncodeSettings&)> countSessions;       // sessions opened together, up to a limit
-    std::function<bool(VideoCodec)> hardwareListed;                          // VideoToolbox lists a hardware encoder
+    std::function<std::optional<bool>(VideoCodec)> hardwareListed;           // VideoToolbox lists a hardware encoder; none: the call failed
     std::function<std::set<std::string>(VideoCodec)> listedProfiles;         // empty: the encoder would not say
     std::function<void(unsigned)> pause;                                     // milliseconds
     std::function<std::uint64_t()> now;                                      // monotonic milliseconds
     std::function<std::optional<Discovery>()> load;                          // the cache file, when it is valid
     std::function<void(const Discovery&)> store;                             // writes the cache file
+    // How long a query waits for a discovery that runs; the discovery goes on
+    // in the background when it passes.
+    unsigned waitMilliseconds {300'000};
 };
 
 // The result of discovery for a process, and when it is computed again.
@@ -120,9 +126,13 @@ struct DiscoveryHooks {
 // An incomplete discovery (Discovery::complete) is never stored. It serves the
 // query that found it. A later query computes the discovery again, at most
 // kMaximumRuns times in the process and not sooner than kRerunInterval after
-// the last one, and a complete result replaces the answer whole.
-// `discovery()` never computes: the encoder checks against the answer it has,
-// which only grows to a superset of it.
+// the last one, and a complete result replaces the answer. One discovery runs
+// at a time, whoever started it; a run counts when it starts. The answer of
+// a process never shrinks: what was offered stays valid, so a complete result
+// is published joined with the answer it replaces, and nothing replaces a
+// complete answer. The session count is measured in each process; the cache
+// does not carry it. `discovery()` never computes: the encoder checks against
+// the answer it has.
 class DiscoveryService {
 public:
     static constexpr unsigned kMaximumRuns = 3;

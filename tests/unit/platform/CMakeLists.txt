@@ -93,6 +93,10 @@ uml_add_unit_test(NAME platform-video-encoder-cache
 # that hold them (one holds all it can get) run one at a time.
 set_tests_properties(platform-video-encoder platform-video-encoder-recovery
     platform-video-encoder-cache PROPERTIES RESOURCE_LOCK video-encoder-hardware)
+# A host that left a probe of the discovery unanswered in every discovery the
+# test asked for cannot validate those codecs; the test says so and is skipped,
+# not passed.
+set_tests_properties(platform-video-encoder PROPERTIES SKIP_RETURN_CODE 77)
 
 # The platform's run routing; the transaction tests use its test variant.
 add_executable(uml_run_routing_tests

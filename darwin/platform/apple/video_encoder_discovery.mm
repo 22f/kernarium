@@ -324,12 +324,14 @@ bool answered(const Stream& stream)
 }
 
 // Runs the probes of one discovery. A probe with no answer is asked again after
-// a short pause, kProbeRetries times at most. A probe that still has none is a
-// refusal when the control, the first probe that proved in this codec, proves
-// again right after it, so a ceiling (VideoToolbox cannot create a session for
-// a picture of 8192 by 8192) is told from a host that cannot create sessions at
-// all. Otherwise it stays unanswered, which makes the discovery incomplete,
-// and a codec whose probes keep being unanswered is given up.
+// a short pause, kProbeRetries times, and only then is it told from a refusal:
+// it is a refusal when the control, the first probe that proved in this codec,
+// proves right after the last attempt, so a ceiling (VideoToolbox cannot create
+// a session for a picture of 8192 by 8192) is told from a host that cannot
+// create sessions at all. Otherwise it stays unanswered, which makes the
+// discovery incomplete, and a codec whose probes keep being unanswered is given
+// up. A probe left unanswered before any control exists is asked again by
+// discoverHost once one does.
 class Prober {
 public:
     explicit Prober(const DiscoveryHooks& hooks) : hooks_(hooks) {}
@@ -338,8 +340,19 @@ public:
     {
         control_.reset();
         consecutive_ = 0;
+        deferred_ = false;
+    }
+    // Starts the codec's probes again with the control it has now, and forgets
+    // the probes left unanswered since `unansweredBefore`.
+    void rewind(unsigned unansweredBefore) noexcept
+    {
+        unanswered_ = unansweredBefore;
+        consecutive_ = 0;
+        deferred_ = false;
     }
     [[nodiscard]] unsigned unanswered() const noexcept { return unanswered_; }
+    [[nodiscard]] bool deferred() const noexcept { return deferred_; }
+    [[nodiscard]] bool hasControl() const noexcept { return control_.has_value(); }
 
     Stream run(const Probe& probe)
     {
@@ -350,13 +363,27 @@ public:
             hooks_.pause(kRetryPauseMilliseconds[retry]);
             stream = hooks_.run(probe);
             if (answered(stream)) return settle(probe, std::move(stream));
-            if (control_ && proves(*control_, hooks_.run(*control_))) {
-                consecutive_ = 0;
-                return stream;
-            }
         }
+        if (control_ && proves(*control_, hooks_.run(*control_))) {
+            consecutive_ = 0;
+            return stream;
+        }
+        deferred_ = deferred_ || !control_;
         report(describe(probe), statusName(stream.status), stream.diagnostic);
         return stream;
+    }
+
+    // Whether VideoToolbox lists a hardware encoder for the codec. A failed
+    // call is no answer, which is not the same as an empty list.
+    std::optional<bool> listed(VideoCodec codec)
+    {
+        auto answer = hooks_.hardwareListed(codec);
+        for (unsigned retry = 0; !answer && retry < kProbeRetries; ++retry) {
+            hooks_.pause(kRetryPauseMilliseconds[retry]);
+            answer = hooks_.hardwareListed(codec);
+        }
+        if (!answer) report("the list of encoders", "failed", {});
+        return answer;
     }
 
     // Sessions that open together, which the system limits across processes:
@@ -408,6 +435,7 @@ private:
     std::optional<Probe> control_;
     unsigned consecutive_ {};
     unsigned unanswered_ {};
+    bool deferred_ {};   // a probe ended unanswered while there was no control
 };
 
 // Whether a rate control mode does what its name says. A property the encoder
@@ -511,11 +539,12 @@ std::set<std::string> listedProfileValues(CMVideoCodecType type)
     return values;
 }
 
-// Whether VideoToolbox lists a hardware encoder for the codec.
-bool hardwareEncoderListed(CMVideoCodecType type)
+// Whether VideoToolbox lists a hardware encoder for the codec; none when the
+// call failed, which says nothing about the encoders.
+std::optional<bool> hardwareEncoderListed(CMVideoCodecType type)
 {
     CFArrayRef list = nullptr;
-    if (VTCopyVideoEncoderList(nullptr, &list) != noErr || !list) return false;
+    if (VTCopyVideoEncoderList(nullptr, &list) != noErr || !list) return std::nullopt;
     NSArray* entries = (__bridge_transfer NSArray*)list;
     for (NSDictionary* entry in entries) {
         NSNumber* codec = entry[(__bridge NSString*)kVTVideoEncoderList_CodecType];
@@ -578,7 +607,8 @@ VideoHdrStaticMetadata sampleHdr()
 
 std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks& hooks, VideoCodec codec)
 {
-    if (!hooks.hardwareListed(codec)) return std::nullopt;
+    const auto listed = prober.listed(codec);
+    if (!listed || !*listed) return std::nullopt;
     const bool jpeg = codec == VideoCodec::jpeg;
     CodecDiscovery found;
     auto& capability = found.capability;
@@ -586,9 +616,9 @@ std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks
     capability.sizeAlignment = 2;
 
     // Profiles and the layouts each accepts.
-    const auto listed = jpeg ? std::set<std::string> {} : hooks.listedProfiles(codec);
+    const auto profileNames = jpeg ? std::set<std::string> {} : hooks.listedProfiles(codec);
     for (const auto& candidate : candidates(codec)) {
-        if (!listed.empty() && !listed.count(autoLevelName(candidate.profile))) continue;
+        if (!profileNames.empty() && !profileNames.count(autoLevelName(candidate.profile))) continue;
         VideoEncodeProfileCapability profile;
         profile.profile = candidate.profile;
         for (const auto layout : candidate.layouts) {
@@ -687,7 +717,10 @@ std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks
             capability.minimumQp = 0;
             capability.maximumQp = 51;
         }
-        for (const std::uint64_t bitrate : {300'000'000ull, 240'000'000ull, 100'000'000ull, 50'000'000ull, 20'000'000ull}) {
+        // The ladder reaches below any rate a guest asks for with a picture this large, so a codec that
+        // encodes at all has a ceiling and is not dropped for one it cannot state.
+        for (const std::uint64_t bitrate : {300'000'000ull, 240'000'000ull, 100'000'000ull, 50'000'000ull, 20'000'000ull, 10'000'000ull,
+                                            5'000'000ull, 2'000'000ull}) {
             Probe probe {referenceSettings(kProbeWidth, kProbeHeight), 4};
             probe.settings.bitrate = bitrate;
             if (proves(probe, prober.run(probe))) {
@@ -759,8 +792,7 @@ std::optional<CodecDiscovery> discoverCodec(Prober& prober, const DiscoveryHooks
         }
     }
 
-    capability.concurrentSessions = prober.sessions(referenceSettings(kProbeWidth, kProbeHeight));
-    if (!capability.concurrentSessions) return std::nullopt;
+    // The sessions are measured by measureSessions, in every process.
 
     // Throughput, for the codecs a guest streams in real time.
     if (!jpeg) {
@@ -982,10 +1014,40 @@ DiscoveryHooks productionHooks()
     };
     hooks.load = loadCache;
     hooks.store = storeCache;
+    hooks.waitMilliseconds = unsigned(std::chrono::milliseconds(kDiscoveryWait).count());
     return hooks;
 }
 
 // ---- Discovery of the whole host.
+
+// The sessions that open together are what the host has free: other processes
+// hold some of them, so a count is a figure of its moment and never a ceiling
+// to keep. Each process measures it, for the discovery it computed and for one
+// it took from the cache, which does not carry the figure. A codec that cannot
+// open a session is left out and is unanswered.
+void measureSessions(Prober& prober, Discovery& discovery)
+{
+    for (auto codec = discovery.codecs.begin(); codec != discovery.codecs.end();) {
+        auto& capability = codec->capability;
+        const auto* reference = referenceProfile(capability);
+        if (!reference || reference->inputs.empty()) {
+            ++codec;
+            continue;
+        }
+        prober.beginCodec();
+        const auto before = prober.unanswered();
+        const auto held = prober.sessions(baseSettings(capability.codec, reference->profile, referenceInput(*reference)));
+        if (held) {
+            capability.concurrentSessions = held;
+            ++codec;
+            continue;
+        }
+        if (prober.unanswered() > before) discovery.unansweredCodecs.push_back(capability.codec);
+        codec = discovery.codecs.erase(codec);
+    }
+    discovery.unanswered = prober.unanswered();
+    discovery.complete = discovery.unanswered == 0;
+}
 
 Discovery discoverHost(const DiscoveryHooks& hooks)
 {
@@ -994,12 +1056,78 @@ Discovery discoverHost(const DiscoveryHooks& hooks)
         Discovery discovery;
         for (const auto codec : {VideoCodec::h264, VideoCodec::hevc, VideoCodec::jpeg}) {
             prober.beginCodec();
-            if (auto found = discoverCodec(prober, hooks, codec)) discovery.codecs.push_back(std::move(*found));
+            const auto before = prober.unanswered();
+            auto found = discoverCodec(prober, hooks, codec);
+            if (prober.deferred() && prober.hasControl()) {
+                // A probe went unanswered before there was a control to tell
+                // its refusal from a busy host; there is one now.
+                prober.rewind(before);
+                found = discoverCodec(prober, hooks, codec);
+            }
+            if (prober.unanswered() > before) discovery.unansweredCodecs.push_back(codec);
+            if (found) discovery.codecs.push_back(std::move(*found));
         }
-        discovery.unanswered = prober.unanswered();
-        discovery.complete = discovery.unanswered == 0;
+        measureSessions(prober, discovery);
         return discovery;
     }
+}
+
+// ---- Joining two answers of one process.
+
+template<class T> void join(std::vector<T>& into, const std::vector<T>& from)
+{
+    for (const auto& value : from)
+        if (std::find(into.begin(), into.end(), value) == into.end()) into.push_back(value);
+}
+
+void joinCodec(CodecDiscovery& into, const CodecDiscovery& from)
+{
+    auto& c = into.capability;
+    const auto& f = from.capability;
+    for (const auto& profile : f.profiles) {
+        auto found = std::find_if(c.profiles.begin(), c.profiles.end(), [&](const auto& entry) { return entry.profile == profile.profile; });
+        if (found == c.profiles.end()) {
+            c.profiles.push_back(profile);
+            continue;
+        }
+        join(found->inputs, profile.inputs);
+        found->maximumLevel = std::max(found->maximumLevel, profile.maximumLevel);
+        found->levelSelectable = found->levelSelectable || profile.levelSelectable;
+    }
+    c.minimumWidth = std::min(c.minimumWidth, f.minimumWidth);
+    c.minimumHeight = std::min(c.minimumHeight, f.minimumHeight);
+    c.maximumWidth = std::max(c.maximumWidth, f.maximumWidth);
+    c.maximumHeight = std::max(c.maximumHeight, f.maximumHeight);
+    c.sizeAlignment = std::min(c.sizeAlignment, f.sizeAlignment);
+    join(c.rateControls, f.rateControls);
+    c.maximumBitrate = std::max(c.maximumBitrate, f.maximumBitrate);
+    c.minimumQp = std::min(c.minimumQp, f.minimumQp);
+    c.maximumQp = std::max(c.maximumQp, f.maximumQp);
+    c.maximumBFrames = std::max(c.maximumBFrames, f.maximumBFrames);
+    c.maximumTemporalLayers = std::max(c.maximumTemporalLayers, f.maximumTemporalLayers);
+    c.entropyModeSelectable = c.entropyModeSelectable || f.entropyModeSelectable;
+    c.hdrStaticMetadata = c.hdrStaticMetadata || f.hdrStaticMetadata;
+    c.concurrentSessions = std::max(c.concurrentSessions, f.concurrentSessions);
+    if (!c.measuredFramesPerSecond720p) c.measuredFramesPerSecond720p = f.measuredFramesPerSecond720p;
+    if (!c.measuredFramesPerSecond1080p) c.measuredFramesPerSecond1080p = f.measuredFramesPerSecond1080p;
+    join(into.lowLatencyProfiles, from.lowLatencyProfiles);
+}
+
+// The complete result that replaces an answer, with everything the answer
+// offered kept: a guest that was offered a configuration may still use it. Every
+// fact of either is an encode that worked, so the join lists no more than the
+// host did.
+Discovery joinAnswers(const Discovery& served, Discovery fresh)
+{
+    for (const auto& old : served.codecs) {
+        auto found = std::find_if(fresh.codecs.begin(), fresh.codecs.end(),
+                                  [&](const auto& entry) { return entry.capability.codec == old.capability.codec; });
+        if (found == fresh.codecs.end()) fresh.codecs.push_back(old);
+        else joinCodec(*found, old);
+    }
+    std::sort(fresh.codecs.begin(), fresh.codecs.end(),
+              [](const auto& a, const auto& b) { return int(a.capability.codec) < int(b.capability.codec); });
+    return fresh;
 }
 
 // ---- The process-wide result.
@@ -1014,15 +1142,9 @@ public:
             std::lock_guard lock(state_->mutex);
             if (state_->started) return;
             state_->started = true;
+            state_->reserveLocked();
         }
-        std::thread([state = state_] {
-            pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
-            @autoreleasepool {
-                auto cached = state->hooks.load();
-                Discovery computed = cached ? std::move(*cached) : state->compute();
-                state->publish(std::move(computed));
-            }
-        }).detach();
+        state_->launch();
     }
 
     std::shared_ptr<const Discovery> current() override
@@ -1032,75 +1154,103 @@ public:
         // Every probe has its own deadline, so discovery ends; the bound here keeps
         // a caller from waiting on a VideoToolbox that never answers, in which case
         // the host reports no encoder rather than hanging the guest's probe.
-        if (!state_->condition.wait_for(lock, kDiscoveryWait, [&] { return state_->result != nullptr; })) {
-            auto none = std::make_shared<Discovery>();
-            none->complete = false;
-            return none;
-        }
+        if (!state_->condition.wait_for(lock, std::chrono::milliseconds(state_->hooks.waitMilliseconds),
+                                        [&] { return state_->result != nullptr; }))
+            return State::unknown();
         return state_->result;
     }
 
     std::vector<VideoEncodeCapability> query() override
     {
-        auto answer = current();
-        // One refresh at a time: a second query waits for it and takes its answer.
-        std::lock_guard refresh(state_->refreshMutex);
-        if (!answer->complete && state_->refreshDue()) {
-            // Another process may have finished the discovery meanwhile.
-            auto next = state_->hooks.load();
-            if (!next) next = state_->compute();
-            if (next->complete) state_->publish(std::move(*next));
-            answer = current();
+        (void)current();
+        std::unique_lock lock(state_->mutex);
+        auto& state = *state_;
+        // A later query computes again once an incomplete answer has been served,
+        // while no discovery runs, a few times and not in the same busy moment.
+        if (state.result && !state.result->complete && state.served && !state.running && state.runs < kMaximumRuns &&
+            state.hooks.now() - state.lastRun >= kRerunIntervalMilliseconds) {
+            state.reserveLocked();
+            lock.unlock();
+            state.launch();
+            lock.lock();
+            state.condition.wait_for(lock, std::chrono::milliseconds(state.hooks.waitMilliseconds), [&] { return !state.running; });
         }
-        if (!answer->complete) state_->servedIncomplete(true);
+        // The answer as it is now, not as it was when this query began.
+        const auto answer = state.result ? state.result : State::unknown();
+        if (!answer->complete) state.served = true;
         std::vector<VideoEncodeCapability> capabilities;
         for (const auto& entry : answer->codecs) capabilities.push_back(entry.capability);
         return capabilities;
     }
 
 private:
-    struct State {
+    struct State : std::enable_shared_from_this<State> {
         explicit State(DiscoveryHooks given) : hooks(std::move(given)) {}
 
-        // Computes the discovery and stores it when it is complete.
-        Discovery compute()
+        static std::shared_ptr<const Discovery> unknown()
         {
+            auto none = std::make_shared<Discovery>();
+            none->complete = false;
+            return none;
+        }
+
+        // The one discovery that runs is reserved, and counted, when it starts.
+        void reserveLocked()
+        {
+            running = true;
+            ++runs;
+        }
+
+        void launch()
+        {
+            std::thread([state = shared_from_this()] { state->work(); }).detach();
+        }
+
+        // The cache, when it has a valid answer, or a discovery of the host;
+        // the cache's figure for the sessions is replaced by this process's.
+        Discovery acquire()
+        {
+            if (auto cached = hooks.load()) {
+                Prober prober(hooks);
+                measureSessions(prober, *cached);
+                return std::move(*cached);
+            }
             auto discovery = discoverHost(hooks);
             if (discovery.complete) hooks.store(discovery);
             else std::fprintf(stderr, "Video encoder discovery is incomplete: %u probe(s) had no answer\n", discovery.unanswered);
-            std::lock_guard lock(mutex);
-            ++runs;
-            lastRun = hooks.now();
             return discovery;
         }
 
-        void publish(Discovery discovery)
+        void work()
         {
-            std::lock_guard lock(mutex);
-            result = std::make_shared<const Discovery>(std::move(discovery));
-            condition.notify_all();
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+            @autoreleasepool {
+                auto discovery = acquire();
+                std::lock_guard lock(mutex);
+                lastRun = hooks.now();
+                publishLocked(std::move(discovery));
+                running = false;
+                condition.notify_all();
+            }
         }
 
-        // A later query computes again once an incomplete answer has been served,
-        // a few times and not in the same busy moment.
-        bool refreshDue()
+        // Nothing replaces a complete answer, an incomplete one replaces nothing,
+        // and a complete one that replaces an incomplete answer keeps what it offered.
+        void publishLocked(Discovery next)
         {
-            std::lock_guard lock(mutex);
-            return served && runs < kMaximumRuns && hooks.now() - lastRun >= kRerunIntervalMilliseconds;
-        }
-
-        void servedIncomplete(bool value)
-        {
-            std::lock_guard lock(mutex);
-            served = value;
+            if (!result) {
+                result = std::make_shared<const Discovery>(std::move(next));
+            } else if (!result->complete && next.complete) {
+                result = std::make_shared<const Discovery>(joinAnswers(*result, std::move(next)));
+            }
         }
 
         DiscoveryHooks hooks;
         std::mutex mutex;
-        std::mutex refreshMutex;
         std::condition_variable condition;
         bool started {};
-        bool served {};   // the last query was answered with an incomplete discovery
+        bool running {};   // a discovery is in flight, the first or a later one
+        bool served {};    // the last query was answered with an incomplete discovery
         unsigned runs {};
         std::uint64_t lastRun {};
         std::shared_ptr<const Discovery> result;
