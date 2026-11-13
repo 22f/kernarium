@@ -454,6 +454,9 @@ DEBUG_SYMBOLS = (
     # (Model.previewCameraNotice and previewThermalNotice).
     ("camera diagnostics", (b"17printRotateAndCrop", b"15printCheckpoint",
                             b"19previewCameraNotice", b"20previewThermalNotice")),
+    # The development build's compass check (Live/MotionSensors.swift,
+    # CompassReadout, and its launch setting in Live/LaunchEnvironment.swift).
+    ("compass readout", (b"14CompassReadout", b"20CompassReadoutLaunch")),
     # Simulated game controllers: the scripted input and the guest end of the
     # gamepad wire (AndariumCoreTestSupport, which only tests and the probe
     # tool link) and the host reader that moved there.
@@ -482,6 +485,7 @@ DEBUG_STRINGS = (
     ("remote framebuffer", (b"RFB 003.00",)),
     ("input probe", (b"inputProbeLog", b"inputProbeField")),
     ("camera diagnostics", (b"ROTATE_AND_CROP", b"Camera: memory: ")),
+    ("compass readout", (b"Andarium: compass-check: ",)),
     ("synthetic camera", (b"SyntheticPhone1,1", b"SyntheticTablet1,1",
                           b"SyntheticLaptop1,1", b"synthetic-back-wide",
                           b"KERNARIUM_CAMERA_SOURCE", b"is not a back camera")),

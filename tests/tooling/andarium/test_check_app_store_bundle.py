@@ -87,6 +87,10 @@ DEBUG_SUPPORT = (
     ("input probe", "int _s8Andarium8AppModelC10inputProbeAA0cD0CSgvg(void) { return 1; }\n"),
     ("input probe", 'const char *fixture(void) { return "inputProbeLog"; }\n'),
     ("input probe", 'const char *fixture(void) { return "inputProbeField"; }\n'),
+    # The development build's compass check: its class, its launch setting and its line.
+    ("compass readout", "int _s8Andarium14CompassReadoutC4line3forSSSgSo14CMDeviceMotionC_tF(void) { return 1; }\n"),
+    ("compass readout", "int _s8Andarium20CompassReadoutLaunchO9requested2inSbSDyS2SG_tFZ(void) { return 1; }\n"),
+    ("compass readout", 'const char *fixture(void) { return "Andarium: compass-check: t=%s mount=%s"; }\n'),
     # The fold reader's test hook, which replaces the system's reading.
     ("fold reader stub", "int _s8Andarium15FoldSceneReaderC4stubSo9FoldReadingVSgyYbcSgvg(void) { return 1; }\n"),
     # The picked file's access a hosted test puts in place of the real one.

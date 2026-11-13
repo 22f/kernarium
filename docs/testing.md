@@ -352,7 +352,9 @@ and the final check that a reading or failure already on its way is dropped once
 the guest no longer asks for the field, on fake devices and guests; the hosted
 `CompassHostTests` cover the availability decision and the boot request's
 compass bit, and read the real manager's availability (a Simulator and a Mac
-have no magnetometer) without starting a sensor), the vibrator
+have no magnetometer) without starting a sensor; `CompassReadoutTests` cover the
+development build's compass readout: its launch setting, its rate and its
+line), the vibrator
 HAL's haptics wire (against those golden frames, whose path the test takes as
 its argument), timelines and state, the thermal HAL's wire and the status,
 temperature and thresholds of each severity, the gamepad relay's wire (the

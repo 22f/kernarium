@@ -156,3 +156,38 @@ struct CompassHostTests {
         #endif
     }
 }
+
+#if !APP_STORE
+/// The development build's compass readout: asked for by the launch, one line
+/// a period, and the line the compass check's driver reads.
+struct CompassReadoutTests {
+    @Test func aLaunchAsksForTheReadoutWithOneAndOnlyWithOne() {
+        #expect(CompassReadoutLaunch.requested(in: ["ANDARIUM_COMPASS_READOUT": "1"]))
+        #expect(!CompassReadoutLaunch.requested(in: [:]))
+        #expect(!CompassReadoutLaunch.requested(in: ["ANDARIUM_COMPASS_READOUT": "0"]))
+        #expect(CompassReadout.requested(environment: [:]) == nil)
+        #expect(CompassReadout.requested(environment: ["ANDARIUM_COMPASS_READOUT": "1"]) != nil)
+    }
+
+    @Test func theReadoutPrintsTheFirstSampleAndThenOneAPeriodLater() {
+        let readout = CompassReadout(period: 0.5)
+        #expect(readout.due(at: 100.0))
+        #expect(!readout.due(at: 100.2))
+        #expect(!readout.due(at: 100.499))
+        #expect(readout.due(at: 100.5))
+        #expect(!readout.due(at: 100.6))
+    }
+
+    @Test func theLineCarriesTheFieldTheGravityTheAttitudeAndTheMount() {
+        let identity = CMRotationMatrix(m11: 1, m12: 0, m13: 0, m21: 0, m22: 1, m23: 0, m31: 0, m32: 0, m33: 1)
+        let line = CompassReadout.line(
+            timestamp: 12.5, mount: .landscapeLeft, accuracy: 2,
+            field: CMMagneticField(x: 1.5, y: -2.25, z: -40), gravity: CMAcceleration(x: 0, y: 0, z: -1),
+            attitude: identity, heading: 123.456)
+        #expect(
+            line == "Andarium: compass-check: t=12.500 mount=landscapeLeft acc=2 field=1.500,-2.250,-40.000 "
+                + "grav=0.00000,0.00000,-1.00000 att=1.00000,0.00000,0.00000,0.00000,1.00000,0.00000,0.00000,0.00000,1.00000 "
+                + "heading=123.46")
+    }
+}
+#endif

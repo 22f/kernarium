@@ -646,7 +646,9 @@ requires reopening Andarium.
   accelerometer and gyroscope are tried again as above. A run ends with the
   foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
   a motion status of denied or restricted hides it from the guest; nothing is
-  requested.
+  requested. A development build launched with `ANDARIUM_COMPASS_READOUT=1`
+  prints the Core Motion sample behind the guest's field with iOS's own attitude
+  and heading; App Store builds compile it out.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
