@@ -995,6 +995,7 @@ private:
 			.struct_size = sizeof(run_end_),
 			.kind = UML_EMULATOR_RUN_END_NONE,
 			.restart_command = {},
+			.boot_completed = 0,
 		};
 	}
 
@@ -1007,6 +1008,8 @@ private:
 			.struct_size = sizeof(end),
 			.kind = UML_EMULATOR_RUN_END_FAILED,
 			.restart_command = {},
+			.boot_completed =
+				::uml::runtime::console_boot_completed() ? 1U : 0U,
 		};
 		const auto shutdown = runtime_.guest_shutdown();
 		if (runtime_.stop_requested()) {
@@ -1292,6 +1295,7 @@ private:
 		.struct_size = sizeof(uml_emulator_run_end),
 		.kind = UML_EMULATOR_RUN_END_NONE,
 		.restart_command = {},
+		.boot_completed = 0,
 	};
 };
 

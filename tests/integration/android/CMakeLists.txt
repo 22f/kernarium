@@ -177,6 +177,25 @@ if(UML_ANDROID_WIFI_NETWORK_RELEASE AND TARGET uml-darwin-android17)
         RESOURCE_GROUPS cpus:4)
 endif()
 
+# The launcher's restart-loop guard on an Android guest: a guest that restarts
+# itself before its boot finishes ends the launch after five restarts, and
+# restarts after finished boots (a reboot suite's) never do. It boots Android
+# with the macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_RESTART_LOOP_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-restart-loop test boots")
+if(UML_ANDROID_RESTART_LOOP_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-restart-loop
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_restart_loop.py
+            --release ${UML_ANDROID_RESTART_LOOP_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
+
 # The host's cameras (routes p0030 and p0031 and the camera layouts): the runner
 # boots the release with the launcher's synthetic camera and a camera layout on the
 # vendor SKU, and checks the layout's features and media profiles, the cameras

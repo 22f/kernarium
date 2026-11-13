@@ -1397,14 +1397,16 @@ public:
 			services_.stop();
 			if (network_)
 				network_->reset_link();
+			const auto completion = uml::emulator::boot_completion(
+				configuration_.console_reports_boot_completion,
+				end.boot_completed != 0U);
 			if (!guard.may_restart(
-				    uml::emulator::RestartLoopGuard::Clock::now())) {
+				    uml::emulator::RestartLoopGuard::Clock::now(),
+				    completion)) {
 				std::fprintf(stderr,
-					"The guest restarted %u times in a row within %lld s "
-					"of booting; not booting it again (status %d)\n",
-					guard.early_restarts(),
-					static_cast<long long>(
-						uml::emulator::early_restart_window.count()),
+					"The guest %s; not booting it again (status %d)\n",
+					uml::emulator::restart_loop_end_message(
+						guard.early_restarts(), completion).c_str(),
 					uml::emulator::early_restart_exit_status);
 				return uml::emulator::early_restart_exit_status;
 			}
