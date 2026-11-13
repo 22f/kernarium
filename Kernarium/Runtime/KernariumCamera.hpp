@@ -148,6 +148,8 @@ inline void recompose(Presentation& presentation)
         return KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING;
     case uml::camera::CameraState::interruptedBySystemPressure:
         return KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE;
+    case uml::camera::CameraState::blockedInUse:
+        return KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE;
     }
     return KERNARIUM_RUNTIME_CAMERA_STATE_IDLE;
 }
