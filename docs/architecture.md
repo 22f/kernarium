@@ -736,8 +736,8 @@ starts a writeback and needs SysRq enabled (the Kernarium runtime boots its
 guests with it for that case): the result is unconfirmed. One deadline, from the
 call, covers a writeback request in full: the console's lock, every part of the
 reply, the fallback and its settling period. The header
-([`uml/emulator.h`](../darwin/api/include/uml/emulator.h)) states each call's
-bounds. A quiesced guest the host holds is reported again by a later call; a
+([`darwin/api/include/uml/emulator.h`](../darwin/api/include/uml/emulator.h))
+states each call's bounds. A quiesced guest the host holds is reported again by a later call; a
 guest whose threads could not be held, or whose suspension is unconfirmed, may
 have run and written since, so a later call asks it again. The guest runs each
 `sync` on a work item of its own, so the console's dispatcher is never blocked
