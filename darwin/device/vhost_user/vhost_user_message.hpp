@@ -93,6 +93,12 @@ struct DescriptorCeiling final {
  */
 std::uint64_t raiseDescriptorCeiling() noexcept;
 
+/* Whether `error`, from a write to a socket of a vhost-user connection, shows
+ * that the front-end closed its end: EPIPE, ECONNRESET when it left data
+ * unread, or ENOTCONN when the write lands between the kernel's disconnect of
+ * the socket and its shutdown for sending. */
+[[nodiscard]] bool writeFailureMeansPeerClosed(int error) noexcept;
+
 // Returns false only for an orderly peer close or a truncated stream.
 [[nodiscard]] bool receiveVhostUserMessage(
     int socket,
