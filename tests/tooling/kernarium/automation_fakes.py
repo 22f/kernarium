@@ -16,8 +16,14 @@ Scenario kinds:
   with `FakeDevice.control(nonce, action)`: `die` (xcodebuild exits),
   `lifetime` (a clean end at the host's own deadline), `relaunch` (xcodebuild
   starts the runner again, which never serves and never says anything),
-  `relaunch-quiet` (the same, and xcodebuild ends at once: nothing was asked
-  of the device), `relaunch-timeout`, `relaunch-authentication` and
+  `relaunch-quiet` (the same, and xcodebuild ends at once with no word of
+  whether the runner initialized), `relaunch-initialized` (the runner
+  initialized: xcodebuild's restart notice and the totals of a run of no
+  tests, as its log shows them, and xcodebuild ends),
+  `relaunch-initialized-then-timeout` (and then the runner started again
+  fails as `relaunch-timeout` does; `-authentication` likewise),
+  `relaunch-restarting` (the restart notice, and then nothing: a log cut
+  in the middle of the pattern), `relaunch-timeout`, `relaunch-authentication` and
   `relaunch-authentication-localized` (the same, and the device's approval
   was not given: XCTest's timeout line, or the authentication cancelled with
   an English or a localized description, `relaunch_after` seconds after the
@@ -127,6 +133,26 @@ def say(text):
 def runner_up():
     stamp = time.strftime("%Y-%m-%d %H:%M:%S") + ".123456+0900"
     say(f"{stamp} KernariumAutomation-Runner[1:2] [Default] Running tests...")
+
+
+def relaunch_initialized(finish=True):
+    """What xcodebuild's log shows when the runner it started again came up
+    and initialized for UI testing: its restart notice, then the totals of the
+    run, which ran no test."""
+    runner_up()
+    say("    t =      nans Interface orientation changed to Landscape Right")
+    say("")
+    say("Restarting after unexpected exit, crash, or test timeout; summary will "
+        "include totals from previous launches.")
+    say("")
+    if not finish:
+        return
+    say("Test Suite 'Selected tests' started at 2026-11-13 23:38:23.798.")
+    say("Test Suite 'KernariumAutomation.xctest' started at 2026-11-13 23:38:23.800.")
+    say("Test Suite 'KernariumAutomation.xctest' passed at 2026-11-13 23:38:23.801.")
+    say("\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds")
+    say("Test Suite 'Selected tests' passed at 2026-11-13 23:38:23.801.")
+    say("\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.003) seconds")
 
 
 def approval_failure(signal_kind):
@@ -245,6 +271,21 @@ while True:
     if now == "relaunch":
         runner_up()
         time.sleep(3600)
+    if now == "relaunch-initialized":
+        relaunch_initialized()
+        say("** TEST EXECUTE FAILED **")
+        sys.exit(65)
+    if now == "relaunch-restarting":
+        relaunch_initialized(finish=False)
+        time.sleep(3600)
+    if now.startswith("relaunch-initialized-then-"):
+        # One runner initialized; the next one, started again, asks the device.
+        relaunch_initialized()
+        time.sleep(scenario.get("relaunch_after", 0.3))
+        runner_up()
+        time.sleep(scenario.get("relaunch_after", 0.3))
+        approval_failure(now[len("relaunch-initialized-then-"):])
+        sys.exit(65)
     if now.startswith("relaunch-"):
         # The runner started again asks the device for its approval, or not.
         runner_up()
