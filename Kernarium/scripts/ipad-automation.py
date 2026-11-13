@@ -1837,6 +1837,7 @@ class Watch:
         # A host another launch is still bringing up is that launch's to
         # finish: the owner may be approving it now.
         self.settle_last_launch()
+        self.reconcile_last_launch()
         self.observer = HostObserver(self.options, None, None, clock=self.clock,
                                      on_progress=self.progress)
         while not self.stop.is_set():
@@ -1862,10 +1863,14 @@ class Watch:
         nothing replaced, when that lasts too long."""
         blind = self.observer.blind_for()
         if blind >= WATCH_UNKNOWN_LIMIT:
+            latch = self.latch.read()
             return self.give_up(
                 CANNOT_OBSERVE,
                 f"the host's heartbeat could not be read for {blind:.0f} s, so "
-                "it is not known whether a host serves; nothing was replaced",
+                "it is not known whether a host serves; nothing was replaced"
+                + (f"; an approval that nobody gave is recorded ({latch.get('kind')}: "
+                   f"{latch.get('detail')}); a `start` with the owner at the "
+                   "device clears it" if latch else ""),
                 EXIT_WATCH_CANNOT_OBSERVE)
         if blind >= 60 and not self.blind_said:
             self.say(f"the host's heartbeat cannot be read for {blind:.0f} s; "
@@ -1900,6 +1905,20 @@ class Watch:
                          "ago does not serve yet; waiting for it")
                 announced = True
             self.clock.wait(self.stop, WATCH_POLL)
+
+    def reconcile_last_launch(self):
+        """What the last launch's own log says of the device's approval,
+        whether or not a heartbeat can be read: a failure that nobody answered
+        is recorded for good, and kept until a host serves (adopting one
+        clears it)."""
+        record = local_record(self.options)
+        if not record.get("nonce"):
+            return
+        scan = LogScan(record.get("log"))
+        scan.read()
+        if scan.approval_failure:
+            self.latch.set("observed", record["nonce"], record.get("log"),
+                           scan.describe())
 
     def adopt(self):
         """The host the observer follows serves (its beat advanced): it is

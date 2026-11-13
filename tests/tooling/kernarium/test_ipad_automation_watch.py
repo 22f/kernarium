@@ -25,6 +25,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -1020,6 +1021,160 @@ class ClockBoundTests(unittest.TestCase):
         # 600 s of its own, 400 elapsed: about 200 s remain, not the 14 of
         # the watch's own bounds.
         self.assertGreater(self.clock.time() - before, 150)
+
+
+class FastClock(ManualClock):
+    """A clock whose waits cost no real time: for a watch that runs for hours
+    of the policy's time in a moment of the test's."""
+
+    def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+
+
+class VerdictBoundaryTests(unittest.TestCase):
+    """The policy's boundaries after a verdict, as the reviewer's final probe
+    drew them, on a clock that costs nothing: a host that stopped beating is
+    given a verdict, and what the watch does next rests on what it can show."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.options = automation.parse(
+            ["--device", "synthetic", "--state-dir", self.tmp.name, "watch"])
+        self.clock = FastClock()
+        self.log = Path(self.tmp.name) / "host.log"
+        self.log.write_text(automation.RUNNER_UP_LINE + "\n")
+        self.record = {"nonce": "same-launch", "log": str(self.log),
+                       "supervisor": None, "started": 0, "wait": 20}
+        self.state = {"nonce": "same-launch", "time": 10000, "started": 9000,
+                      "deadline": 20000, "finished": False}
+        self.patch(automation, "log", lambda _: None)
+        self.patch(automation, "local_record", lambda _: dict(self.record))
+        self.patch(automation, "recorded_supervisor", lambda _: None)
+        self.patch(automation, "host_state",
+                   lambda *args, **kwargs: dict(self.state))
+        self.watch = automation.Watch(self.options, clock=self.clock)
+        scan = automation.LogScan(self.log)
+        scan.read()
+        self.watch.observer = automation.HostObserver(
+            self.options, "same-launch", dict(self.state), scan=scan, clock=self.clock)
+        self.clock.advance(3)
+        self.assertIsNone(self.watch.observer.check())
+        self.clock.advance(3)
+        self.reason = self.watch.observer.check()
+        self.assertIsNotNone(self.reason)
+
+    def patch(self, target, name, value):
+        patcher = mock.patch.object(target, name, value)
+        result = patcher.start()
+        self.addCleanup(patcher.stop)
+        return result
+
+    def assert_lock_free(self) -> None:
+        descriptor = os.open(automation.state_dir(self.options) / "launch.lock",
+                             os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+    def test_fresh_progress_a_new_start_and_a_failed_read_drop_the_verdict(self) -> None:
+        # Rule (R3, R4): the verdict rests on a heartbeat that has not moved; a
+        # beat, another launch's record or a read that fails each drop it with
+        # nothing signalled and nothing launched, the launch lock released.
+        for kind in ("progress", "published", "unreadable"):
+            with self.subTest(kind):
+                state, record = dict(self.state), dict(self.record)
+                if kind == "progress":
+                    self.state["time"] += 1
+                if kind == "published":
+                    self.record["nonce"] = "another-launch"
+                read = (mock.patch.object(automation, "host_state", return_value=None)
+                        if kind == "unreadable" else mock.patch.object(
+                            automation, "host_state",
+                            side_effect=lambda *x, **y: dict(self.state)))
+                with read, mock.patch.object(self.watch, "end_all") as end, \
+                        mock.patch.object(automation, "launch_host") as launch:
+                    self.assertEqual(self.watch.replace(self.reason), automation.AGAIN)
+                end.assert_not_called()
+                launch.assert_not_called()
+                self.assert_lock_free()
+                self.state, self.record = state, record
+
+    def test_an_existing_latch_refuses_a_launch_and_releases_the_lock(self) -> None:
+        self.watch.latch.set("possible", "same-launch", self.log,
+                             "earlier unresolved approval")
+        with mock.patch.object(self.watch, "end_all") as end, \
+                mock.patch.object(automation, "launch_host") as launch:
+            self.assertEqual(self.watch.replace(self.reason), 4)
+        end.assert_not_called()
+        launch.assert_not_called()
+        self.assert_lock_free()
+
+    def test_a_relaunch_is_latched_before_cleanup_even_if_cleanup_crashes(self) -> None:
+        with self.log.open("a") as stream:
+            stream.write(automation.RUNNER_UP_LINE + "\n")
+
+        def crash(verdict, remainder):
+            self.assertEqual(self.watch.latch.read()["kind"], "possible")
+            raise RuntimeError("interrupted after the durable latch")
+        with mock.patch.object(self.watch, "end_all", crash), \
+                mock.patch.object(automation, "launch_host") as launch:
+            with self.assertRaises(RuntimeError):
+                self.watch.replace(self.reason)
+        launch.assert_not_called()
+        self.assert_lock_free()
+        successor = automation.Watch(self.options, clock=self.clock)
+        self.assertEqual(successor.latch.read()["kind"], "possible")
+
+    def test_an_approval_line_that_appears_during_cleanup_is_latched(self) -> None:
+        def cleanup(verdict, remainder):
+            with self.log.open("a") as stream:
+                stream.write("Failed to initialize for UI testing: Error Domain="
+                             'com.apple.LocalAuthentication Code=-4 "localized"\n')
+            return automation.ENDED
+        with mock.patch.object(self.watch, "end_all", cleanup), \
+                mock.patch.object(automation, "launch_host") as launch:
+            self.assertEqual(self.watch.replace(self.reason), 4)
+        self.assertEqual(self.watch.latch.read()["kind"], "observed")
+        launch.assert_not_called()
+        self.assert_lock_free()
+
+    def test_the_launch_lock_is_released_before_the_wait_for_a_published_host(self) -> None:
+        launch = automation.Launch(mock.Mock(), self.log, "new-launch")
+
+        def await_launch(value):
+            self.assertIs(value, launch)
+            self.assert_lock_free()
+            return ("failed", "the one started host failed")
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(automation, "launch_host",
+                                  return_value=launch) as started, \
+                mock.patch.object(self.watch, "await_launch", await_launch):
+            self.assertEqual(self.watch.replace(self.reason), 5)
+        self.assertEqual(started.call_count, 1)
+        self.assert_lock_free()
+
+    def test_an_approval_failure_in_the_last_launch_is_latched_without_a_heartbeat(self) -> None:
+        # Rule (R1, the reviewer's final probe): the last launch's own log says
+        # the device asked and nobody answered. The watch records that whether
+        # or not it can read a heartbeat; it starts nothing, and ends with the
+        # cannot-observe status naming the recorded approval.
+        with self.log.open("a") as stream:
+            stream.write("Failed to initialize for UI testing: Error Domain="
+                         'com.apple.LocalAuthentication Code=-2 "localized"\n')
+        watch = automation.Watch(self.options, clock=self.clock)
+        with mock.patch.object(automation, "host_state", return_value=None), \
+                mock.patch.object(automation, "end_host") as end, \
+                mock.patch.object(automation, "launch_host") as launch:
+            self.assertEqual(watch.run(), automation.EXIT_WATCH_CANNOT_OBSERVE)
+        latch = watch.latch.read()
+        self.assertIsNotNone(latch, "the approval failure was not recorded")
+        self.assertEqual(latch["kind"], "observed")
+        self.assertEqual(latch["nonce"], "same-launch")
+        self.assertIn("approval", watch.record.data.get("detail", ""))
+        end.assert_not_called()
+        launch.assert_not_called()
 
 
 class ObserverTests(unittest.TestCase):
