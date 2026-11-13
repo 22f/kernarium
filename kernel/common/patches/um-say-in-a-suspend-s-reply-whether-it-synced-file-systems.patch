@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yi Xie <imxieyi@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 04:52:41 +0900
+Subject: [PATCH] um: say in a suspend's reply whether it synced file systems
+
+The host asks the guest to sync, trims it and then suspends it, and
+counts the storage as settled from the sync's reply alone, because
+the suspend's reply, "suspended", says only that the guest reached
+the sleep boundary: the PM core syncs on the way only while
+sync_on_suspend is set, and the reply did not say whether it did.
+
+Reply "suspended, synced" when the suspend's own sync ran to its
+return before this reply, and "suspended, not synced" otherwise (sync
+disabled).  A suspend that failed or was given up replies as before,
+with an error and no statement.  Both texts still contain "suspended"
+and carry no error flag, which is all an older host looks for, so it
+takes them as it took the old reply.  A kernel without this change
+replies "suspended", which says nothing, and the host keeps treating
+that as nothing confirmed.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ arch/um/drivers/mconsole_kern.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/arch/um/drivers/mconsole_kern.c b/arch/um/drivers/mconsole_kern.c
+index d9753c60ac429c5b1fdb3a556c38934c89112357..a24671ac590e39de5acc026a3bd530cfef37da4b 100644
+--- a/arch/um/drivers/mconsole_kern.c
++++ b/arch/um/drivers/mconsole_kern.c
+@@ -222,7 +222,9 @@ void mconsole_proc(struct mc_request *req)
+     cad - invoke the Ctrl-Alt-Del handler \n\
+     stop - pause the UML; it will do nothing until it receives a 'go' \n\
+     go - continue the UML after a 'stop' \n\
+-    suspend - enter system suspend until the host sends 'wake' \n\
++    suspend - enter system suspend until the host sends 'wake'; replies\n\
++	'suspended, synced' or 'suspended, not synced', by whether the\n\
++	suspend synced the file systems \n\
+     wake - resume a system-suspended UML \n\
+     log <string> - make UML enter <string> into the kernel log\n\
+     proc <file> - returns the contents of the UML's /proc/<file>\n\
+@@ -300,12 +302,23 @@ static bool mconsole_overtaken(const struct mc_request *req)
+ 	return atomic_read(&mconsole_wakes) != req->wakes;
+ }
+ 
++/*
++ * The host's suspend is answered once the guest has reached the sleep
++ * boundary, after the PM core's own sync, which it does only while
++ * sync_on_suspend is set (pm_suspend_synced()).  "suspended, synced" says
++ * that sync returned for this suspend; "suspended, not synced" says there was
++ * none.  Tasks are frozen after the sync, so a write between the two is not
++ * covered.  A kernel without this statement says only "suspended", which the
++ * host takes as nothing confirmed.
++ */
+ void um_suspend_notify_entered(void)
+ {
+ 	struct mc_request *req = xchg(&suspend_request, NULL);
+ 
+ 	if (req != NULL)
+-		mconsole_reply(req, "suspended", 0, 0);
++		mconsole_reply(req, pm_suspend_synced() ?
++			       "suspended, synced" : "suspended, not synced",
++			       0, 0);
+ }
+ 
+ int um_suspend_wake_requested(void)

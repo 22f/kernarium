@@ -37,6 +37,17 @@ for the second guest: a kernel without ``sync`` answers ``Unknown command``,
 and ``sysrq s`` is refused with SysRq off, so the guest loses the file the
 same way and the run says so.
 
+A suspend states in its reply whether the suspend's own sync returned:
+``suspended, synced`` once the PM core's sync of that suspend has returned
+and ``suspended, not synced`` when sync_on_suspend is off, a kernel before the
+statement says only ``suspended``, and the host takes the statement as the only
+confirmation a suspend gives. Two more guests dirty a file the same way and ask
+``suspend`` without a ``sync`` before it. With sync_on_suspend on, the reply
+must say synced and the image must hold the whole file right after it. With it
+off, the reply must say not synced and the image must still lack the file: the
+statement is true in both directions. ``--suspend-statement none`` expects a
+kernel without the statement (``suspended``, nothing more) and checks only that.
+
 The contract is the management-console paragraph of kernel/common/README.md.
 """
 
@@ -329,6 +340,117 @@ def dirty_then_kill(emulator: pathlib.Path, rootfs: pathlib.Path,
     return payload_bytes(image), answer, at_reply
 
 
+def suspend_exchange(guest: Guest, directory: pathlib.Path,
+                     serial: int) -> tuple[bool, str]:
+    """The host's suspend request, asked again while the guest answers busy
+    (a wake source fired while it synced), as the host does."""
+    for attempt in range(40):
+        error, text = exchange(guest, directory, serial + attempt, "suspend")
+        if not error or not text.startswith("Suspend failed: -16"):
+            break
+        time.sleep(0.25)
+    return error, text
+
+
+def dirty_then_suspend(emulator: pathlib.Path, rootfs: pathlib.Path,
+                       engine: str, private: pathlib.Path, label: str,
+                       sync_on_suspend: bool) -> tuple[str, int]:
+    """Boots a guest with an ext4 disk whose write-back is held off, with its
+    sync_on_suspend as asked, dirties a file only the page cache holds, and
+    asks for a suspend with no sync before it. Returns the suspend's reply and
+    how many of the image's bytes are the payload's right after it, then wakes
+    the guest and ends it cleanly."""
+    image = private / f"disk-{label}.img"
+    with open(image, "wb") as handle:
+        handle.truncate(DISK_BYTES)
+    with Guest(emulator, rootfs, "1G", "tmpfs",
+               ("ncpus=2", f"ubd1={image}", "sysctl.kernel.sysrq=0"),
+               init_shell=True, engine=engine) as guest:
+        guest.boot_to_shell(180)
+        directory = private / f"uml-kern{guest.process_id}"
+        guest.check_command(
+            f"echo {int(sync_on_suspend)} > /sys/power/sync_on_suspend", 30)
+        guest.check_command("cat /sys/power/sync_on_suspend", 30,
+                            expected=str(int(sync_on_suspend)))
+        guest.check_command(DIRTY_SETUP, 60)
+        output = guest.check_command(WRITE_PAYLOAD, 60)
+        dirty = re.search(r"Dirty:\s+(\d+) kB", output)
+        if dirty is None or int(dirty[1]) < PAYLOAD_BYTES // 1024 // 2:
+            raise RuntimeError(
+                f"{label}: the payload is not dirty in the guest: {output!r}"
+            )
+        if payload_bytes(image) >= PAYLOAD_BYTES // 4:
+            raise RuntimeError(
+                f"{label}: the image holds the payload before any request"
+            )
+        try:
+            error, text = suspend_exchange(guest, directory, 1)
+            at_reply = payload_bytes(image)
+            if error:
+                raise RuntimeError(f"{label}: 'suspend' ended with an error "
+                                   f"{text!r}")
+            error, woken = exchange(guest, directory, 100, "wake")
+            if error:
+                raise RuntimeError(f"{label}: 'wake' ended with an error "
+                                   f"{woken!r}")
+        except GuestGone as gone:
+            raise gone_report(guest, gone, 0) from None
+        guest.check_command("echo alive", 60, expected="alive")
+        check_clean(guest)
+        if not guest.shutdown(60):
+            raise RuntimeError(f"{label}: the guest did not power off")
+    return text, at_reply
+
+
+def run_suspend_states_its_sync(emulator: pathlib.Path, rootfs: pathlib.Path,
+                                engine: str, private: pathlib.Path,
+                                statement: str) -> None:
+    """The suspend's reply says whether its sync returned, and the image shows
+    it did or did not."""
+    on_text, on_bytes = dirty_then_suspend(emulator, rootfs, engine, private,
+                                           "suspend-sync", True)
+    off_text, off_bytes = dirty_then_suspend(emulator, rootfs, engine, private,
+                                             "suspend-nosync", False)
+    if statement == "none":
+        for label, text in (("on", on_text), ("off", off_text)):
+            if text != "suspended":
+                raise RuntimeError(
+                    f"sync_on_suspend {label}: the suspend replied {text!r}; "
+                    "a kernel without the statement replies 'suspended'"
+                )
+        print(f"suspend replied {on_text!r} with sync_on_suspend on ({on_bytes} "
+              f"payload bytes of {PAYLOAD_BYTES} in the image) and "
+              f"{off_text!r} with it off ({off_bytes}): no statement, as "
+              "expected of a kernel without it")
+        return
+    if on_text != "suspended, synced":
+        raise RuntimeError(
+            f"sync_on_suspend on: the suspend replied {on_text!r}, not "
+            "'suspended, synced'"
+        )
+    if on_bytes < PAYLOAD_BYTES:
+        raise RuntimeError(
+            f"the suspend replied {on_text!r}, and the image held only "
+            f"{on_bytes} of the payload's {PAYLOAD_BYTES} bytes right after "
+            "the reply: the statement was not true"
+        )
+    if off_text != "suspended, not synced":
+        raise RuntimeError(
+            f"sync_on_suspend off: the suspend replied {off_text!r}, not "
+            "'suspended, not synced'"
+        )
+    if off_bytes >= PAYLOAD_BYTES // 4:
+        raise RuntimeError(
+            f"sync_on_suspend off: the image already held {off_bytes} of the "
+            f"payload's {PAYLOAD_BYTES} bytes after the suspend (a sync ran "
+            "that the reply denied)"
+        )
+    print(f"suspend replied {on_text!r}: the image held {on_bytes} payload "
+          f"bytes right after the reply, of {PAYLOAD_BYTES}; with "
+          f"sync_on_suspend off it replied {off_text!r} and the image held "
+          f"{off_bytes}")
+
+
 def run_sync_reaches_the_image(emulator: pathlib.Path, rootfs: pathlib.Path,
                                engine: str, private: pathlib.Path,
                                request: str) -> None:
@@ -381,6 +503,13 @@ def main() -> int:
     parser.add_argument("--engine", choices=("jit", "gadgets"), default="jit")
     parser.add_argument("--only-sync", action="store_true",
                         help="run only the kill-after-request scenario")
+    parser.add_argument("--only-suspend-statement", action="store_true",
+                        help="run only the suspend-statement scenario")
+    parser.add_argument("--suspend-statement", choices=("stated", "none"),
+                        default="stated",
+                        help="whether the kernel states in its suspend reply "
+                        "whether the suspend synced (default), or is one "
+                        "without the statement, which replies 'suspended'")
     parser.add_argument("--request", default="sync",
                         help="the command that must reach the image (default "
                         "sync); only sync passes on every kernel that has it")
@@ -391,13 +520,17 @@ def main() -> int:
     os.environ["TMPDIR"] = str(private)
     tempfile.tempdir = str(private)
     try:
-        for scenario in () if arguments.only_sync else (run, run_sysrq_off):
-            scenario(arguments.emulator.resolve(), arguments.rootfs.resolve(),
-                     arguments.engine, private)
-        run_sync_reaches_the_image(arguments.emulator.resolve(),
-                                   arguments.rootfs.resolve(),
-                                   arguments.engine, private,
-                                   arguments.request)
+        emulator = arguments.emulator.resolve()
+        rootfs = arguments.rootfs.resolve()
+        only = arguments.only_sync or arguments.only_suspend_statement
+        for scenario in () if only else (run, run_sysrq_off):
+            scenario(emulator, rootfs, arguments.engine, private)
+        if not arguments.only_suspend_statement:
+            run_sync_reaches_the_image(emulator, rootfs, arguments.engine,
+                                       private, arguments.request)
+        if not arguments.only_sync:
+            run_suspend_states_its_sync(emulator, rootfs, arguments.engine,
+                                        private, arguments.suspend_statement)
     finally:
         shutil.rmtree(private, ignore_errors=True)
     return 0

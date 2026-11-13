@@ -433,8 +433,13 @@ it. The bridge fields used below are defined by the comments in
   and holds up no other request in the console's dispatcher, though a request
   that needs the same I/O still waits for it; the host bounds its wait. The
   reply says the pass returned, not that no I/O error occurred. A suspend syncs
-  only while the guest's `sync_on_suspend` is set, so this reply alone confirms
-  a guest's storage (`guest-mconsole-console-clients`).
+  only while the guest's `sync_on_suspend` is set, and says so in its reply:
+  `suspended, synced` once the PM core's sync of this suspend has returned,
+  `suspended, not synced` when there was none (a failed or given-up suspend
+  replies with an error and no statement). A kernel without the statement
+  replies `suspended`, which confirms nothing, and the host reads either text
+  as the old reply. The sync runs before tasks are frozen, so a write between
+  the two is not covered (`guest-mconsole-console-clients`).
 - A command that answers with what the kernel prints (`sysrq`, `stack`)
   sends its client what the consoles write while it runs, whichever vCPU
   writes it, and nothing after its final reply. The final reply names the
