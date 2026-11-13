@@ -12,8 +12,9 @@ target_compile_options(uml_memory_pressure_injector PRIVATE -Wall -Wextra -Werro
 target_compile_features(uml_memory_pressure_injector PRIVATE cxx_std_20)
 add_dependencies(integration-test-binaries uml_memory_pressure_injector)
 
-# A warning and a critical level trim a guest's page cache once each, a second
-# warning inside the interval does nothing, and the lines say so.
+# A warning turns the guest's page-cache trimmer on and a second one does
+# nothing, a critical level trims the cache once, the normal level turns the
+# trimmer off, and the lines say so.
 uml_add_guest_integration_test(
     NAME guest-memory-pressure
     SCRIPT run_guest_memory_pressure.py

@@ -6,7 +6,9 @@
  * still be alive then. The binary substitutes the memory pressure source for one
  * it raises (as memory_pressure_response_tests does), and raises the level from
  * a handler memory_pressure_exit_first.cpp registers before the response's
- * statics exist, so the handler runs after their destructors.
+ * statics exist, so the handler runs after their destructors. The handler
+ * records the delivery and the response's own queue handles it, so the binary
+ * waits for both queues.
  *
  * The exit status says what happened: 0 when the report was delivered after
  * static destruction, 2 when the handler never ran, 3 when no report arrived,
@@ -24,6 +26,7 @@ namespace {
 
 std::atomic<dispatch_source_t> pressure_source{nullptr};
 std::atomic<dispatch_queue_t> pressure_queue{nullptr};
+std::atomic<dispatch_queue_t> policy_queue{nullptr};
 std::atomic<int> reports_heard{0};
 
 } // namespace
@@ -35,10 +38,14 @@ void afterStaticDestruction()
 	std::fputs("raising a level after static destruction\n", stdout);
 	std::fflush(stdout);
 	dispatch_source_merge_data(pressure_source.load(), DISPATCH_MEMORYPRESSURE_NORMAL);
-	/* Two calls on the serial queue: the second returns after the handler the
-	 * merge started, whichever of them libdispatch ran it behind. */
-	dispatch_sync_f(pressure_queue.load(), nullptr, [](void *) {});
-	dispatch_sync_f(pressure_queue.load(), nullptr, [](void *) {});
+	/* Two calls on each serial queue: the second returns after the handler the
+	 * merge started, whichever of them libdispatch ran it behind. The source's
+	 * handler records the delivery and signals the policy queue, which makes
+	 * the report. */
+	for (const auto queue : {pressure_queue.load(), policy_queue.load()}) {
+		dispatch_sync_f(queue, nullptr, [](void *) {});
+		dispatch_sync_f(queue, nullptr, [](void *) {});
+	}
 	const int heard = reports_heard.load();
 	std::printf("reports heard after static destruction: %d\n", heard);
 	std::fflush(stdout);
@@ -55,6 +62,10 @@ extern "C" dispatch_source_t dispatch_source_create(
 		dispatch_source_type_t, uintptr_t, uintptr_t, dispatch_queue_t);
 	static const auto real = reinterpret_cast<Create>(
 		dlsym(RTLD_NEXT, "dispatch_source_create"));
+	/* The response's own signal to its policy queue is the one data source
+	 * made through this call. */
+	if (type == DISPATCH_SOURCE_TYPE_DATA_OR)
+		policy_queue.store(queue);
 	if (type != DISPATCH_SOURCE_TYPE_MEMORYPRESSURE)
 		return real(type, handle, mask, queue);
 	const dispatch_source_t source =
