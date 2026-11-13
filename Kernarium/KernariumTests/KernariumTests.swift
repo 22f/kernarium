@@ -1079,7 +1079,7 @@ struct KernariumTests {
         #expect(
             maximums(kernarium_launch_memory_set(
                 application_mib: 56, engine_mib: 563, headroom_mib: 64
-            )) == [1664, 1600, 1536, 1536, 1536, 1536, 1472, 1472]
+            )) == [1664, 1600, 1536, 1536, 1536, 1472, 1472, 1472]
         )
         #expect(
             maximums(kernarium_launch_memory_set(
