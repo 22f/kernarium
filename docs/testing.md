@@ -469,7 +469,10 @@ needs a debugger, so `run_ios_device_android.py --engine jit` is its lane.
 Unattended device automation goes through the long-lived `KernariumAutomation`
 UI-test host, because each new XCTest session on a device with a passcode needs
 the owner's approval. `Kernarium/scripts/ipad-automation.py --help` has its
-commands and failure modes. Keep all automation code in the test targets.
+commands and failure modes. Keep all automation code in the test targets. The
+host's test run records no screen video and keeps no attachments (the scheme
+sets it, and `start` refuses a built run file that does not), and its result
+bundle lives under the state directory, not in DerivedData.
 
 ### Edge gestures (device only)
 

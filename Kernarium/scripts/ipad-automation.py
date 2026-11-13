@@ -39,18 +39,26 @@ keyboard animation has left XCTest's wait for an idle application stuck;
 relaunch the application. The host is not in the Kernarium scheme, so
 reinstalling Kernarium or running other tests leaves it serving, and its log
 records each such termination as a Kernarium crash.
+
+The host's test run records no video of the screen and keeps no attachments: a
+host runs for hours, and Xcode's defaults would store a recording of whatever
+the device shows. The KernariumAutomation scheme turns both off, `start`
+refuses a built test run file that does not say so, and the run's result
+bundle lives next to the host log in --state-dir.
 """
 
 import argparse
 import json
 import os
 import pathlib
+import plistlib
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from xml.parsers import expat
 
 RUNNER = "com.imxieyi.KernariumAutomation.xctrunner"
 KERNARIUM = "com.imxieyi.Kernarium"
@@ -61,6 +69,15 @@ EXIT_FAILED = 1
 EXIT_NO_HOST = 3
 # How long `stop` lets the supervisor end on its own before signalling it.
 SUPERVISOR_EXIT_WAIT = 60
+# What the host's test run file must say (the KernariumAutomation scheme sets
+# it). Xcode's defaults record the device's screen for the whole session and
+# keep every attachment, and a host runs for hours: that filled the internal
+# disk with a video of whatever the device showed.
+RECORDING_SETTINGS = {
+    "PreferredScreenCaptureFormat": "screenshots",
+    "SystemAttachmentLifetime": "keepNever",
+    "UserAttachmentLifetime": "keepNever",
+}
 SCRIPT = pathlib.Path(__file__).resolve()
 CHECKOUT = SCRIPT.parents[2]
 
@@ -251,6 +268,7 @@ def command_status(options):
         })
     if record:
         summary["xcodebuild_log"] = record.get("log")
+        summary["result_bundle"] = record.get("result_bundle")
         summary["supervisor_running"] = recorded_supervisor(record) is not None
     print(json.dumps(summary, indent=2))
     return 0 if reason is None else EXIT_NO_HOST
@@ -277,8 +295,44 @@ def command_build(options):
         return EXIT_FAILED
 
 
+def recording_problems(xctestrun):
+    """What in the test run file lets Xcode record the session, as messages.
+
+    Every test target (a dictionary with a TestBundlePath, at any depth: the
+    two file formats nest it differently) must state each setting."""
+    try:
+        with open(xctestrun, "rb") as handle:
+            plan = plistlib.load(handle)
+    except (OSError, ValueError, expat.ExpatError) as error:
+        return [f"{xctestrun} cannot be read: {error}"]
+    targets = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "TestBundlePath" in node:
+                targets.append(node)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(plan)
+    if not targets:
+        return [f"{xctestrun} names no test target"]
+    problems = {
+        f"{key} is {target.get(key)!r}, not {wanted!r}"
+        for target in targets
+        for key, wanted in RECORDING_SETTINGS.items()
+        if target.get(key) != wanted}
+    return sorted(problems)
+
+
 def command_supervise(options):
-    """Runs xcodebuild for the host's lifetime; started detached by `start`."""
+    """Runs xcodebuild for the host's lifetime; started detached by `start`.
+
+    The result bundle goes where `start` says, under the state directory,
+    never to the default under the internal disk's DerivedData."""
     environment = dict(os.environ,
                        TEST_RUNNER_KERNARIUM_AUTOMATION_HOST="1",
                        TEST_RUNNER_KERNARIUM_AUTOMATION_HOST_SECONDS=str(options.seconds),
@@ -286,6 +340,7 @@ def command_supervise(options):
     command = ["xcodebuild", "test-without-building",
                "-xctestrun", options.xctestrun,
                "-destination", f"platform=iOS,id={options.device}",
+               "-resultBundlePath", options.result_bundle,
                f"-only-testing:{TEST}"]
     # xcodebuild stays in this process group, which `start` and `stop`
     # signal as a whole.
@@ -312,21 +367,30 @@ def command_start(options):
     if not runs:
         log(f"no built host under {derived_data(options)}; run `build` first")
         return EXIT_FAILED
+    problems = recording_problems(runs[-1])
+    if problems:
+        log(f"{runs[-1]} does not turn Xcode's recording off ({'; '.join(problems)}): "
+            "it would record the device's screen for the whole session and keep "
+            "attachments; run `build` again with the current KernariumAutomation scheme")
+        return EXIT_FAILED
     seconds = int(options.hours * 3600)
     nonce = uuid.uuid4().hex
     directory = state_dir(options)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log_path = directory / f"host-{stamp}.log"
+    result_bundle = directory / f"host-{stamp}.xcresult"
     with open(log_path, "w") as output:
         supervisor = subprocess.Popen(
             [sys.executable, str(SCRIPT), "--device", options.device,
              "--runner", options.runner, "--state-dir", options.state_dir,
              "_supervise", "--xctestrun", str(runs[-1]),
+             "--result-bundle", str(result_bundle),
              "--seconds", str(seconds), "--nonce", nonce],
             stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
             start_new_session=True)
     (directory / "host.json").write_text(json.dumps({
-        "supervisor": supervisor.pid, "log": str(log_path), "nonce": nonce,
+        "supervisor": supervisor.pid, "log": str(log_path),
+        "result_bundle": str(result_bundle), "nonce": nonce,
         "started": time.time(), "seconds": seconds}))
     log(f"started xcodebuild under supervisor {supervisor.pid}; log {log_path}")
     deadline = time.monotonic() + options.wait
@@ -472,7 +536,8 @@ def parse(argv):
                         help=f"application a command acts on (default: {KERNARIUM})")
     parser.add_argument("--state-dir", default=os.environ.get(
         "KERNARIUM_AUTOMATION_STATE_DIR", str(CHECKOUT / ".build/kernarium-automation")),
-        help="where `start` keeps the host's xcodebuild log and supervisor pid")
+        help="where `start` keeps the host's xcodebuild log, result bundle "
+                             "and supervisor pid")
     parser.add_argument("--derived-data", default=str(CHECKOUT / ".build/kernarium-automation/derived"),
                         help="derived data of the host build")
     parser.add_argument("--timeout", type=int, default=120,
@@ -488,6 +553,7 @@ def parse(argv):
                        help="seconds to wait for the host to serve (default: 240)")
     supervise = commands.add_parser("_supervise")
     supervise.add_argument("--xctestrun", required=True)
+    supervise.add_argument("--result-bundle", required=True)
     supervise.add_argument("--seconds", type=int, required=True)
     supervise.add_argument("--nonce", required=True)
     commands.add_parser("status", help="report whether the host is serving")
