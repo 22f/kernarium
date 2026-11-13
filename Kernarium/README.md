@@ -232,8 +232,9 @@ Kernarium attaches:
   tier for every host), live cameras take their host-side memory out of the
   GPU's pool, the colour data a Bayer still teaches is kept in
   `android_camera_calibration_path`, the state of the capture (idle, streaming,
-  interrupted, interrupted by iPad multitasking, by system pressure) comes back
-  through `set_camera_state_callback` (a blocked guest stays idle) and
+  interrupted, interrupted by iPad multitasking, by system pressure, and, for a
+  blocked guest, blocked in use while an app has a camera open, which opens no
+  session; runtime API 39) comes back through `set_camera_state_callback` and
   `set_camera_rotation` states how the device body is turned from portrait where
   the host owns the guest's rotation: each boot derives every camera's sensor
   orientation from it, and a change after the boot turns the picture by the

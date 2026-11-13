@@ -91,7 +91,8 @@ void theEnumsAreTheApplicationsWords()
     std::vector<int> seen;
     for (const auto state :
          {CameraState::idle, CameraState::streaming, CameraState::interrupted,
-          CameraState::interruptedByMultitasking, CameraState::interruptedBySystemPressure}) {
+          CameraState::interruptedByMultitasking, CameraState::interruptedBySystemPressure,
+          CameraState::blockedInUse}) {
         const int value = stateValue(state);
         for (const int earlier : seen) require(earlier != value, "distinct");
         seen.push_back(value);
@@ -101,6 +102,8 @@ void theEnumsAreTheApplicationsWords()
         KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_MULTITASKING);
     require(stateValue(CameraState::interruptedBySystemPressure) ==
         KERNARIUM_RUNTIME_CAMERA_STATE_INTERRUPTED_BY_SYSTEM_PRESSURE);
+    require(stateValue(CameraState::blockedInUse) == KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE &&
+            KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE == 5, "the value the application reads");
 }
 
 void aHostWithoutCamerasPresentsNone()
@@ -247,6 +250,19 @@ void theStateReceiverReportsChanges()
                 KERNARIUM_RUNTIME_CAMERA_STATE_IDLE}),
         "in the order they happened");
 
+    // A blocked guest's opens: reported at each open, idle between, and a guest that ends closes it.
+    receiver.publish(CameraState::blockedInUse);
+    receiver.publish(CameraState::blockedInUse);
+    receiver.publish(CameraState::idle);
+    receiver.publish(CameraState::blockedInUse);
+    require((std::vector<int>(reports.states.end() - 3, reports.states.end()) == std::vector<int> {
+                KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE,
+                KERNARIUM_RUNTIME_CAMERA_STATE_IDLE,
+                KERNARIUM_RUNTIME_CAMERA_STATE_BLOCKED_IN_USE}),
+        "each open is reported once, with idle between");
+    receiver.ended();
+    require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_IDLE && receiver.current() == 0,
+        "a guest that ends with a camera open leaves none open");
     receiver.publish(CameraState::interrupted);
     receiver.ended();
     require(reports.states.back() == KERNARIUM_RUNTIME_CAMERA_STATE_IDLE && receiver.current() == 0,
