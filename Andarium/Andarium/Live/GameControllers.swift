@@ -341,7 +341,6 @@ nonisolated final class GameControllers: @unchecked Sendable {
     private let batteryInterval: DispatchTimeInterval
     private let lock = NSLock()
     private var running = false
-    private var foreground = false
     private var observers: [NSObjectProtocol] = []
     private var batteryTimer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "andarium-game-controllers", qos: .userInteractive)
@@ -383,30 +382,23 @@ nonisolated final class GameControllers: @unchecked Sendable {
     // MARK: What is wanted
 
     /// What is wanted now, as `GamepadSession.update` takes it. Controllers
-    /// are looked for from the moment a run begins until it ends, and what
-    /// each holds is read again when the application returns to the front.
+    /// are looked for from the moment a run begins until it ends. Leaving the
+    /// front lets every controller go, and returning to it shows the guest
+    /// nothing held. iOS delivers no input to an application that is not in
+    /// front, and until a controller reports again both its snapshot
+    /// (`capture`) and its element values still say what they said before the
+    /// stretch: a button let go of meanwhile reads as held, with no report to
+    /// correct it. What the controller holds reaches the guest with its next
+    /// report (`drain`), which carries every element.
     func update(running: Bool, booted: Bool, foreground: Bool) {
-        let (change, entered) = lock.withLock { () -> (Bool?, Bool) in
+        let change = lock.withLock { () -> Bool? in
             let change: Bool? = running != self.running ? running : nil
             self.running = running
-            let entered = foreground && !self.foreground
-            self.foreground = foreground
-            return (change, entered)
+            return change
         }
         if change == false { stopLooking() }
         session.update(running: running, booted: booted, foreground: foreground)
         if change == true { startLooking() }
-        if entered && running && change == nil { refresh() }
-    }
-
-    /// Gives the session what each controller holds now. iOS delivers no
-    /// input to an application that is not in front, so a button held down
-    /// across the return is not seen again until it changes.
-    func refresh() {
-        for entry in table.all {
-            let state = entry.controller.input.capture()
-            session.submit(GamepadInputMapper.state(GamepadReading(state: state)), for: entry.id)
-        }
     }
 
     /// The guest restarted itself: the controllers stay, and the relay is

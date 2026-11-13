@@ -246,6 +246,23 @@ struct GameControllersTests {
             }
         }
 
+        /// Every frame the host sends until it has been quiet for `quiet`
+        /// seconds, or for three seconds at most.
+        func frames(quiet: TimeInterval = 0.3) async -> [GamepadHostFrame] {
+            var frames: [GamepadHostFrame] = []
+            var last = Date()
+            let deadline = Date().addingTimeInterval(3)
+            while Date() < deadline, Date().timeIntervalSince(last) < quiet {
+                if let frame = readOne() {
+                    frames.append(frame)
+                    last = Date()
+                } else {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+            }
+            return frames
+        }
+
         /// Whether the host closed the connection, within three seconds.
         func closedByHost() async -> Bool {
             guard let peer = lock.withLock({ peers.last }) else { return false }
@@ -295,6 +312,72 @@ struct GameControllersTests {
         #expect(report.first == 1)
         controllers.update(running: false, booted: false, foreground: false)
         #expect(await relay.closedByHost())
+    }
+
+    /// What a controller holds that the guest is shown on the return to the
+    /// front: a button, a trigger or a stick.
+    enum Held: CaseIterable {
+        case buttons, trigger, stick
+
+        func hold(_ pad: GCExtendedGamepad) {
+            switch self {
+            case .buttons:
+                pad.buttonA.setValue(1)
+                pad.buttonB.setValue(1)
+                pad.rightShoulder.setValue(1)
+            case .trigger:
+                pad.rightTrigger.setValue(0.8)
+            case .stick:
+                pad.leftThumbstick.setValueForXAxis(0.5, yAxis: -0.25)
+            }
+        }
+    }
+
+    /// iOS delivers no input to an application that is not in front, and until
+    /// a controller reports again what it holds for it, snapshot and element
+    /// values alike, is what it was before the stretch: a button let go of
+    /// meanwhile still reads as held, and nothing tells that from a button held
+    /// all along. The guest is shown the released state on the return whatever
+    /// the elements say. (The software controller keeps its elements as they
+    /// were, as a controller does that iOS has not heard from. Its snapshot is
+    /// neutral whatever its elements say, so a read of the elements is what a
+    /// regression is caught through.)
+    @Test(arguments: Held.allCases)
+    func whatAControllerHeldBeforeTheApplicationLeftIsReleasedOnTheReturn(held: Held) async throws {
+        let relay = Relay()
+        let software = GCController.withExtendedGamepad()
+        let pad = try #require(software.extendedGamepad)
+        held.hold(pad)
+        // What the guest holds for a state, as the device's own encoder says.
+        var encoder = GamepadProfiles.profile(
+            family: .generic, name: "ExtendedGamepad", elements: GamepadInputMapper.elements(of: software.physicalInputProfile)
+        ).makeEncoder()
+        let releasedReport = try #require(encoder.reports(for: .neutral, after: nil).first)
+
+        let controllers = make(relay, center: NotificationCenter(), controllers: { [software] in [software] })
+        controllers.update(running: true, booted: false, foreground: true)
+        #expect(await eventually { relay.connections == 1 })
+        relay.send(.hello(version: 1, slotCount: 8))
+        _ = await relay.next()
+        relay.send(.created(slot: 0, result: 0))
+        relay.send(.event(slot: 0, event: .start))
+        guard case .input(0, let shown)? = await relay.next() else { Issue.record("no state was sent"); return }
+        // The test holds something the guest is shown.
+        #expect(shown != releasedReport, "\(held)")
+        _ = await relay.frames()
+
+        // The guest's last state: the application leaves the front and returns to it.
+        controllers.update(running: true, booted: false, foreground: false)
+        var frames = await relay.frames()
+        #expect(frames.contains(.input(slot: 0, report: releasedReport)), "\(held) is let go of when the application leaves")
+        controllers.update(running: true, booted: false, foreground: true)
+        frames += await relay.frames()
+        let last = frames.reversed().compactMap { frame -> [UInt8]? in
+            if case .input(0, let report) = frame { return report }
+            return nil
+        }.first
+        #expect(last == releasedReport, "\(held) is released on the return")
+        controllers.update(running: false, booted: false, foreground: false)
     }
 
     @Test func aControllerThatConnectsAndDisconnectsIsMadeAndDestroyed() async throws {
@@ -403,9 +486,11 @@ struct GameControllersTests {
             if case .input(own, let report) = frame, report == neutralReport { released = true }
         }
         #expect(released)
-        // Returning to it reads what the controller holds again.
+        // Returning to it shows the guest nothing held until the controller reports again,
+        // though A is still down on the virtual controller.
         controllers.update(running: true, booted: false, foreground: true)
         controllers.session.settle()
+        #expect(!(await relay.frames()).contains(.input(slot: own, report: pressedReport)))
         #expect(controllers.session.isConnected)
         // The virtual controller goes away, and its device with it.
         virtual.disconnect()

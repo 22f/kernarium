@@ -533,7 +533,7 @@ struct GamepadSessionTests {
         #expect(noFrame(rig))
         #expect(rig.wakes.count == 0)
         rig.session.update(running: true, booted: true, foreground: true)
-        // The state the session holds is the let go one; the application refreshes it next.
+        // The state the session holds is the let go one; the controller's next report changes it.
         guard case .input(0, let released)? = rig.guest.nextFrame() else { Issue.record("no report"); return }
         #expect(Array(released[8...10]) == [8, 0, 0])
         rig.session.submit(GamepadState(buttons: .south), for: 1)
