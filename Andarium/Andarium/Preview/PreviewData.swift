@@ -78,7 +78,8 @@ enum PreviewData {
     /// evaluates as the runtime does for a guest of 1.5 GiB or more.
     static let iPadMini6Memory = MemoryPolicy(
         maximumsMiB: [2304, 2304, 2240, 2240, 2176, 2176], defaultsMiB: Array(repeating: 1536, count: 6),
-        graphicsMiB: { memory, count in budget(limitMiB: 2867, memoryMiB: memory, vCPUs: count) }
+        graphicsMiB: { memory, count in budget(limitMiB: 2867, memoryMiB: memory, vCPUs: count) },
+        cameraReserveMiB: { _ in cameraCeilingMiB }
     )
 
     /// The same for a memory limit of 5120 MiB, which an iPhone 18 Pro Max is
@@ -88,8 +89,21 @@ enum PreviewData {
     static let iPhone18ProMaxMemory = MemoryPolicy(
         maximumsMiB: Array(repeating: 4096, count: 6), defaultsMiB: Array(repeating: 3072, count: 6),
         safeMiB: Array(repeating: 3584, count: 6), defaultHoldsGraphics: Array(repeating: true, count: 6),
-        graphicsMiB: { memory, count in budget(limitMiB: 5120, memoryMiB: memory, vCPUs: count) }
+        graphicsMiB: { memory, count in budget(limitMiB: 5120, memoryMiB: memory, vCPUs: count) },
+        cameraReserveMiB: { _ in cameraCeilingMiB }
     )
+
+    /// What a live camera session holds out of the budget at most, which a
+    /// device plans with until its runtime says the figure for its cameras.
+    static let cameraCeilingMiB = 197
+
+    /// What the runtime would answer for a mock device's cameras: the iPad
+    /// mini 6's back camera takes a RAW still but its front camera does not run
+    /// with it (one stream and RAW), a phone's two cameras run together (two
+    /// streams and RAW, which is the ceiling).
+    static func cameraReserveMiB(device: String?) -> Int {
+        device == "ipad-mini-6" ? 171 : cameraCeilingMiB
+    }
 
     /// An iOS app on a Mac with 64 GiB: the host's RAM is on offer at every
     /// count (about a thousand positions on the memory ruler), a new guest gets

@@ -129,7 +129,11 @@ session holds host memory outside the GPU (the camera device's reserve,
 `device/camera/camera_tiers.hpp`), and the GPU's pool is B less it
 (`gpu_pool_bytes`), taken after the clamp; blocked cameras and none take
 nothing, a reserve that takes all of B refuses the launch (a pool of zero is no
-limit to the renderer), and the applications show the pool.
+limit to the renderer), and the applications show the pool. The reserve is the
+use the host's cameras compose, which the runtime answers before the boot
+(`plan_camera_reserve`, the next boot's figure while the cameras, the source
+and the calibration data are unchanged); the loader's ceiling, which bounds the
+system cameras, is the figure only where no runtime can say.
 
 The guest side's memory follows the vCPU count, v, and that header is the one
 place that says how; every caller evaluates it:

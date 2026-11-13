@@ -238,7 +238,7 @@ struct AppEntry {
             model.locationAuthorization = .restricted
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
-        case "home-camera-on":
+        case "home-camera-on", "system-edit-camera":
             model.guest?.camera = true
             model.cameraAccess = .authorized
         case "home-camera-denied", "home-camera-alert":
@@ -515,6 +515,15 @@ struct AppEntry {
         case "resize":
             model.sheet = .resize
         case "system-edit", "system-memory-warning":
+            model.sheet = .system
+        case "system-edit-camera":
+            // The sheet shows what the runtime answers for the mock's cameras
+            // when it opens, as the device's does after launch.
+            let reserve = PreviewData.cameraReserveMiB(device: device)
+            model.cameraReservePlanner = { policy in
+                CameraReservePlan(policy: policy.withCameraReserve { _ in reserve }, exact: true)
+            }
+            await model.refreshCameraReserve().value
             model.sheet = .system
         case "resolution-sheet":
             model.sheet = .resolution
