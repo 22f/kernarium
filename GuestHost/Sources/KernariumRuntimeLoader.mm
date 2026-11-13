@@ -350,7 +350,8 @@ __attribute__((constructor)) void isolateGuestTimerFromApplicationThreads()
         api->set_input_status_callback == nullptr ||
         api->set_network_notice == nullptr ||
         api->set_camera_state_callback == nullptr ||
-        api->set_camera_rotation == nullptr) {
+        api->set_camera_rotation == nullptr ||
+        api->plan_camera_reserve == nullptr) {
         std::fputs("Kernarium: runtime API validation failed\n", stderr);
         return false;
     }
@@ -764,6 +765,32 @@ extern "C" uint32_t kernarium_runtime_loader_camera_reserve_mib(
     return static_cast<uint32_t>(uml::camera::cameraHostMemoryReserveMiB(
         uml::camera::cameraTierForBudget(
             static_cast<uint64_t>(gpuBudgetMiB) << 20)));
+}
+
+extern "C" uint32_t kernarium_runtime_loader_plan_camera_reserve_mib(
+    uint32_t gpuBudgetMiB,
+    const char* calibrationPath,
+    uint32_t rediscover,
+    uint32_t* exact)
+{
+    const auto ceiling = [&]() -> uint32_t {
+        if (exact != nullptr)
+            *exact = 0;
+        return kernarium_runtime_loader_camera_reserve_mib(gpuBudgetMiB);
+    };
+    const kernarium_runtime_api* runtime = api();
+    if (runtime == nullptr)
+        return ceiling();
+    kernarium_runtime_camera_reserve plan {};
+    plan.struct_size = sizeof(plan);
+    if (rediscover != 0)
+        plan.flags = KERNARIUM_RUNTIME_CAMERA_PLAN_DISCOVER_AGAIN;
+    if (runtime->plan_camera_reserve(gpuBudgetMiB, calibrationPath, &plan) != 0 ||
+        plan.basis != KERNARIUM_RUNTIME_CAMERA_RESERVE_EXACT)
+        return ceiling();
+    if (exact != nullptr)
+        *exact = 1;
+    return plan.reserve_mib;
 }
 
 extern "C" int kernarium_runtime_loader_set_microphone(int enabled)

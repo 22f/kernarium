@@ -12,6 +12,16 @@ struct CapabilitiesTests {
         #expect(device.statistics)
     }
 
+    @Test func installApkIsOfferedInANormalSessionOfARuntimeThatInstalls() {
+        let installs = Capabilities.device
+        #expect(installs.offersApkInstall(in: .normal))
+        // Recovery runs no adb.
+        #expect(!installs.offersApkInstall(in: .recovery))
+        var without = installs
+        without.apkInstall = false
+        #expect(!without.offersApkInstall(in: .normal) && !without.offersApkInstall(in: .recovery))
+    }
+
     @Test func thePreviewPretendsToDoEverything() {
         let preview = Capabilities.preview
         #expect(preview.bugReport && preview.apkInstall && preview.adbOverNetwork && preview.guestFiles)

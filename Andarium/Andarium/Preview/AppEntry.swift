@@ -77,8 +77,7 @@ struct AppEntry {
 
     /// Where Home scrolls to for a screen that shows a lower section.
     private static let scrollTargets: [String: String] = [
-        "home-options": "erase", "home-recovery-erase": "erase", "start-recovery": "erase", "erase": "erase",
-        "home-new-recovery": "erase",
+        "home-options": "erase", "home-erase": "erase", "erase": "erase",
         "home-resolution": "resolution",
         "home-capabilities": "capabilities", "home-mic-on": "capabilities", "home-mic-denied": "capabilities",
         "home-haptics-off": "capabilities",
@@ -123,7 +122,7 @@ struct AppEntry {
     func configureTips() {
         if resetTips { try? Tips.resetDatastore() }
         // The legacy install, played, shows the tip as a real session may.
-        if screen == "session-tip" || (screen == "install-legacy" && play) {
+        if screen == "session-tip" || screen == "session-tip-left" || (screen == "install-legacy" && play) {
             Tips.showAllTipsForTesting()
         } else if screen.hasPrefix("session") || screen.hasPrefix("settings") || screen.hasPrefix("files")
             || screen.hasPrefix("recovery") || screen.hasPrefix("boot")
@@ -168,7 +167,7 @@ struct AppEntry {
         }
 
         switch screen {
-        case "home-new", "home-new-recovery":
+        case "home-new":
             model.guest = Guest.fresh(on: host)
             model.plan = .firstStart
         case "home-grow":
@@ -239,7 +238,7 @@ struct AppEntry {
             model.locationAuthorization = .restricted
         case "home-location-services-off", "home-location-services-off-alert":
             model.locationAuthorization = .servicesOff
-        case "home-camera-on":
+        case "home-camera-on", "system-edit-camera":
             model.guest?.camera = true
             model.cameraAccess = .authorized
         case "home-camera-denied", "home-camera-alert":
@@ -279,7 +278,7 @@ struct AppEntry {
             model.jitOn = true
             model.jitLastStart = .noDebugger
             boot(.normal, stage: 1, seconds: 4)
-        case "session", "session-tip", "session-open", "session-keyboard", "session-stats",
+        case "session", "session-tip", "session-tip-left", "session-open", "session-keyboard", "session-stats",
              "session-power", "session-setup", "session-off", "session-left", "session-volume",
              "session-graphics-notice", "session-thermal-notice", "session-network-cellular", "session-network-wifi",
              "session-camera-notice", "session-camera-off-notice":
@@ -288,7 +287,7 @@ struct AppEntry {
             model.sessionPreset = SessionPreset(
                 volumePanel: screen == "session-volume",
                 powerMenu: screen == "session-power",
-                leftEdge: ["session-left", "session-volume"].contains(screen),
+                leftEdge: ["session-left", "session-volume", "session-tip-left"].contains(screen),
                 guestScreen: {
                     switch screen {
                     case "session-setup": .setup
@@ -305,7 +304,7 @@ struct AppEntry {
             if screen == "session-network-wifi" { model.previewNetworkNotice(.wifi) }
             if screen == "session-camera-notice" { model.previewCameraNotice() }
             if screen == "session-camera-off-notice" { model.previewCameraNotice(.blockedInUse) }
-        case "settings", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
+        case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
              "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
@@ -563,6 +562,15 @@ struct AppEntry {
         case "resize":
             model.sheet = .resize
         case "system-edit", "system-memory-warning":
+            model.sheet = .system
+        case "system-edit-camera":
+            // The sheet shows what the runtime answers for the mock's cameras
+            // when it opens, as the device's does after launch.
+            let reserve = PreviewData.cameraReserveMiB(device: device)
+            model.cameraReservePlanner = { policy in
+                CameraReservePlan(policy: policy.withCameraReserve { _ in reserve }, exact: true)
+            }
+            await model.refreshCameraReserve().value
             model.sheet = .system
         case "resolution-sheet":
             model.sheet = .resolution

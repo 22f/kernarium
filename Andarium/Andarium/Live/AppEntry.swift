@@ -201,13 +201,19 @@ struct AppEntry {
                 Self.answerSpaceScreenFromHarness(model: model, directory: locations.directory)
             }
             #endif
+            // The colour data's folder: the boot reads it and the planner asks the runtime
+            // about it, and the planner's figure is the boot's only while they are one value.
+            let calibration = markerDirectory.appendingPathComponent("Camera", isDirectory: true)
             let runtime = LiveRuntime(
                 model: model, storage: storage, marker: marker, keyStore: adbKeyStore,
                 sessionRecord: sessionRecord,
-                cameraDirectory: markerDirectory.appendingPathComponent("Camera", isDirectory: true),
+                cameraDirectory: calibration,
                 freeSpace: watched)
             model.driver = runtime
             model.snapshotDriver = runtime
+            model.cameraReservePlanner = { policy in
+                LiveRuntime.cameraReservePlan(for: policy, calibration: calibration)
+            }
             // The listing says why a restore that began last time is still not finished.
             if let snapshotRecoveryFailure { runtime.snapshotRecoveryFailed(snapshotRecoveryFailure) }
             model.fileBrowser = FileBrowserModel(backend: runtime.makeGuestFiles(hostFree: watched))

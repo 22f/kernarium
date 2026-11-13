@@ -93,6 +93,9 @@ struct SystemSheet: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("System")
             .navigationBarTitleDisplayMode(.inline)
+            // A camera that came without a change of access is planned for
+            // before the person reads the figure.
+            .onAppear { model.refreshCameraReserve() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", role: .cancel) { dismiss() }
