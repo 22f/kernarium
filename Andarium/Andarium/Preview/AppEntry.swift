@@ -164,7 +164,6 @@ struct AppEntry {
         // screen states another access (and `-systemCamera` reads the
         // Simulator's own).
         model.cameraAccess = .notDetermined
-        model.previewBootScrollsToBottom = UserDefaults.standard.bool(forKey: "scrollToBottom")
 
         func boot(_ kind: BootKind, stage: Int, seconds: Int) {
             model.frozenBootStage = freeze ? (bootStage ?? stage) : nil

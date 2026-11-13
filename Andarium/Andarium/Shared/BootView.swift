@@ -53,9 +53,6 @@ struct BootView: View {
                         .frame(minHeight: proxy.size.height, alignment: .center)
                 }
                 .scrollBounceBehavior(.basedOnSize)
-                #if !APP_STORE
-                .defaultScrollAnchor(model.previewBootScrollsToBottom ? .bottom : nil)
-                #endif
             }
         }
         .onCardHalf(.boot)

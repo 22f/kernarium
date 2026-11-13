@@ -8,18 +8,31 @@ import UIKit
 
 /// Opt-in captures of the slow-start notice in windows the Simulator's own
 /// capture cannot take: an iPad turned to landscape, a narrow window as Split
-/// View gives, and the Duo's poses (`FoldSessionHostingTests.Pose`). With
+/// View gives, the Duo's poses (`FoldSessionHostingTests.Pose`), and the
+/// largest text size scrolled to the buttons, which a launch cannot do. With
 /// `TEST_RUNNER_ANDARIUM_CAPTURE_DIR` naming a folder, each saves a PNG of the
 /// root in a window of that shape, named by shape and by the language the run
 /// was given (`xcodebuild -testLanguage`); without it the test does nothing.
+/// `TEST_RUNNER_ANDARIUM_CAPTURE_SHAPES` names the shapes to take.
 @MainActor @Suite(.serialized)
 struct SlowStartCaptureTests {
     private static let folder = ProcessInfo.processInfo.environment["ANDARIUM_CAPTURE_DIR"]
 
     private struct Shape {
         let name: String
-        let size: CGSize
+        /// The window's own size when nil.
+        let size: CGSize?
         let pose: FoldSessionHostingTests.Pose?
+        var largestText = false
+        var stopping = false
+
+        init(name: String, size: CGSize?, pose: FoldSessionHostingTests.Pose?, largestText: Bool = false, stopping: Bool = false) {
+            self.name = name
+            self.size = size
+            self.pose = pose
+            self.largestText = largestText
+            self.stopping = stopping
+        }
     }
 
     private static let shapes = [
@@ -27,9 +40,40 @@ struct SlowStartCaptureTests {
         Shape(name: "ipad-narrow", size: CGSize(width: 375, height: 1032), pose: nil),
         Shape(name: "duo-upright-book", size: CGSize(width: 951, height: 669), pose: .uprightBook),
         Shape(name: "duo-standing-book", size: CGSize(width: 669, height: 951), pose: .turnedBook),
+        Shape(name: "largest-text-buttons", size: nil, pose: nil, largestText: true),
+        Shape(name: "largest-text-stopping", size: nil, pose: nil, largestText: true, stopping: true),
     ]
 
-    @Test(.enabled(if: SlowStartCaptureTests.folder != nil), arguments: shapes.map(\.name))
+    private func scrollViews(in view: UIView) -> [UIScrollView] {
+        let own: [UIScrollView] = (view as? UIScrollView).map { [$0] } ?? []
+        return own + view.subviews.flatMap { scrollViews(in: $0) }
+    }
+
+    /// The accessibility element the application named by `identifier`.
+    private func element(identified identifier: String, in node: NSObject, depth: Int = 0) -> NSObject? {
+        if (node as? UIAccessibilityIdentification)?.accessibilityIdentifier == identifier { return node }
+        guard depth < 32 else { return nil }
+        let count = node.accessibilityElementCount()
+        if count != NSNotFound, count > 0 {
+            for index in 0..<count {
+                if let child = node.accessibilityElement(at: index) as? NSObject,
+                    let found = element(identified: identifier, in: child, depth: depth + 1) { return found }
+            }
+        }
+        for child in (node as? UIView)?.subviews ?? [] {
+            if let found = element(identified: identifier, in: child, depth: depth + 1) { return found }
+        }
+        return nil
+    }
+
+    /// The shapes to take, by name and comma-separated, in
+    /// `ANDARIUM_CAPTURE_SHAPES`; all of them without it.
+    private static let wanted = ProcessInfo.processInfo.environment["ANDARIUM_CAPTURE_SHAPES"]?
+        .split(separator: ",").map(String.init)
+
+    @Test(
+        .enabled(if: SlowStartCaptureTests.folder != nil),
+        arguments: shapes.map(\.name).filter { SlowStartCaptureTests.wanted?.contains($0) ?? true })
     func theNoticeInAWindowOfThisShape(name: String) async throws {
         let shape = try #require(Self.shapes.first { $0.name == name })
         let directory = URL(fileURLWithPath: try #require(Self.folder), isDirectory: true)
@@ -58,11 +102,16 @@ struct SlowStartCaptureTests {
         defer { lease.give() }
         let container = UIViewController()
         container.view.backgroundColor = .black
-        let holder = UIView(frame: CGRect(origin: .zero, size: shape.size))
+        let holder = UIView(frame: CGRect(origin: .zero, size: shape.size ?? lease.window.bounds.size))
         let entry = AppEntry(overrides: LaunchOverrides())
         let controller = AndariumHostingController(
             rootView: AnyView(RootView(entry: entry).environment(model)), model: model)
         controller.foldReader.stub = { shape.pose?.reading }
+        if shape.largestText { controller.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge }
+        if shape.stopping {
+            model.askToStop()
+            model.stopStart()
+        }
         lease.window.rootViewController = container
         container.view.addSubview(holder)
         container.addChild(controller)
@@ -72,6 +121,20 @@ struct SlowStartCaptureTests {
         controller.view.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(1500))
         controller.view.layoutIfNeeded()
+        if shape.largestText {
+            // The notice is taller than the screen here: scroll until the Stop
+            // button is the last thing on it, as a finger would.
+            let button = try #require(element(identified: "boot-stop", in: controller.view), "no Stop button")
+            let scroll = try #require(
+                scrollViews(in: controller.view).max { $0.contentSize.height < $1.contentSize.height }, "no scroll view")
+            let screen = try #require(holder.window?.screen)
+            let frame = scroll.convert(button.accessibilityFrame, from: screen.coordinateSpace)
+            let top = -scroll.adjustedContentInset.top
+            let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            scroll.contentOffset.y = min(max(frame.maxY + 24 - scroll.bounds.height, top), bottom)
+            controller.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(500))
+        }
         let image = UIGraphicsImageRenderer(bounds: holder.bounds).image { _ in
             holder.drawHierarchy(in: holder.bounds, afterScreenUpdates: true)
         }
