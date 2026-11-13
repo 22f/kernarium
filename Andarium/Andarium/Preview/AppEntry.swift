@@ -319,7 +319,7 @@ struct AppEntry {
             }
         case "settings", "settings-medium", "settings-adb-off", "settings-adb-no-address", "settings-adb", "settings-stats",
              "settings-feedback", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
-             "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed",
+             "install-app-bundle", "bug-report", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container",
              "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split",
              "install-part-too-large":
             let session = model.session
@@ -391,7 +391,7 @@ struct AppEntry {
     /// The screens that show a guest operation on the full-screen overlay.
     private static let operationScreens: Set<String> = [
         "bug-report", "install-apk", "install-parts", "install-legacy", "install-done", "install-failed", "install-not-apk",
-        "install-app-bundle", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-encrypted",
+        "install-app-bundle", "install-data", "install-done-without-data", "install-done-data-not-placed", "install-done-container", "install-encrypted",
         "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-missing-split", "install-part-too-large",
     ]
     /// The ones that show how an install ended.
@@ -429,17 +429,16 @@ struct AppEntry {
                 detail: String(localized: "Copying data file \(1) of \(2)\u{2026}"),
                 progress: 0.6, cancel: cancel
             )
-        case "install-done-without-data":
+        case "install-done-without-data", "install-done-data-not-placed", "install-done-container":
+            // What the install's own card says for each of these endings.
+            let outcome: ApkInstallOutcome = switch screen {
+            case "install-done-without-data": .installedWithoutData
+            case "install-done-data-not-placed": .installedDataNotPlaced
+            default: .installed
+            }
+            let words = outcome.words(fileName: container)
             return BusyState(
-                title: String(localized: "App installed"),
-                detail: String(localized: "\(container) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them. Install the file again to copy them."),
-                result: BusyResult(failed: false, dismiss: dismiss)
-            )
-        case "install-done-data-not-placed":
-            return BusyState(
-                title: String(localized: "App installed"),
-                detail: String(localized: "\(container) is installed in the virtual machine, but not all of its data files were copied. The app may not work without them."),
-                result: BusyResult(failed: false, dismiss: dismiss)
+                title: words.title, detail: words.detail, result: BusyResult(style: words.style, dismiss: dismiss)
             )
         case "install-encrypted", "install-damaged-or-encrypted", "install-no-app", "install-damaged", "install-part-too-large":
             let refusal: InstallRefusal = switch screen {

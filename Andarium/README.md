@@ -830,7 +830,9 @@ is on. `AndariumCore/Adb` speaks the protocol.
   does, covered by the same ledger, and is moved into place only after it has
   been verified. Other data in the file (`Android/data`, say) is not placed.
   The copy has its own Cancel, and a stop or a failure in it leaves the app
-  installed, with a result that says its data was not all copied.
+  installed, with a result that says its data was not all copied. That
+  result is a warning, not a success: the caution symbol in the caution
+  colour, and a title of its own (`ApkInstallOutcome.words`).
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB
