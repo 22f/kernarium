@@ -168,9 +168,9 @@ struct BootView: View {
             Text(model.slowStart.stopping ? String(localized: "Stopping\u{2026}") : Self.status(kind))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.accentColor)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
-                .fixedSize(horizontal: false, vertical: true)
+                // One word, which shrinks before it would break ("Stop-/ping").
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
                 .layoutPriority(1)
             Spacer()
             TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
@@ -191,7 +191,7 @@ struct BootView: View {
             }
         }
         .padding(.horizontal, 24)
-        // Taller than 44 where the text is large enough for two lines.
+        // Taller than 44 where the text is large.
         .padding(.vertical, 6)
         .frame(minHeight: 44)
         .frame(maxWidth: 640)
