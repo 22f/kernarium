@@ -231,6 +231,36 @@ void aLaterBootComposesTheLayoutAgain()
     require(none.layout == "none" && none.source == nullptr && !none.hasCameras());
 }
 
+// The cameras of a later boot never exceed what the pool was reduced for, whatever the host's cameras become, and a run that
+// had none at its first discovery has none at a later boot.
+void aLaterBootIsHeldToTheFirstDiscoverysReservation()
+{
+    using uml::camera::SyntheticProfile;
+    auto presentation = present(uml::camera::makeSyntheticCameraSource(SyntheticProfile::phone), CameraTier::small, "");
+    const auto before = presentation;
+    require(presentation.hasCameras() && presentation.reservedCameras, "the first discovery's cameras are reserved for");
+    // The host's cameras narrow to the laptop's: a layout within the reservation.
+    presentation.source = uml::camera::makeSyntheticCameraSource(SyntheticProfile::laptop);
+    recompose(presentation);
+    require(presentation.layout == "front" && presentation.use.streams <= before.reserved.streams &&
+                presentation.reserved == before.reserved,
+            presentation.layout);
+    require(!presentation.use.rawStill, "and no RAW capture");
+
+    // A run whose first discovery had no cameras gets none later, whatever appears.
+    auto none = present(nullptr, CameraTier::small, "");
+    none.source = uml::camera::makeSyntheticCameraSource(SyntheticProfile::phone);
+    recompose(none);
+    require(none.layout == "none" && !none.hasCameras(), "none stays none");
+    // A first discovery of a laptop reserved no RAW: a phone that shows up later is not told its back cameras.
+    auto laptop = present(uml::camera::makeSyntheticCameraSource(SyntheticProfile::laptop), CameraTier::small, "");
+    laptop.source = uml::camera::makeSyntheticCameraSource(SyntheticProfile::phone);
+    recompose(laptop);
+    require(!laptop.hasCameras() && laptop.reserved.streams == 1 && !laptop.reserved.rawStill,
+            "a later host is held to the reservation");
+    require(laptop.layout == "none", laptop.layout);
+}
+
 struct Reports {
     std::vector<int> states;
     static void callback(void* context, int state) { static_cast<Reports*>(context)->states.push_back(state); }
@@ -543,6 +573,7 @@ int main()
         {"a-live-session-reserves-memory-only-for-cameras-it-has", aLiveSessionReservesMemoryOnlyForCamerasItHas},
         {"the-lens-cover-follows-the-session", theLensCoverFollowsTheSession},
         {"a-later-boot-composes-the-layout-again", aLaterBootComposesTheLayoutAgain},
+        {"a-later-boot-is-held-to-the-first-discoverys-reservation", aLaterBootIsHeldToTheFirstDiscoverysReservation},
         {"the-state-receiver-reports-changes", theStateReceiverReportsChanges},
         {"the-rotation-takes-quarter-turns", theRotationTakesQuarterTurns},
         {"the-device-options-carry-the-sessions-statements", theDeviceOptionsCarryTheSessionsStatements},

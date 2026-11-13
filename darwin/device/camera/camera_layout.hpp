@@ -161,4 +161,27 @@ struct ComposedCameras {
     const uml::platform::Camera& host, const CalibrationStore& calibration, const ArrangementOptions& options,
     const std::function<bool(std::string_view)>& available = {});
 
+/* What a run paid for at its first discovery: the use the GPU's pool was reduced
+ * for, or no cameras at all (no reduction). A later boot is held to it. */
+struct CameraReservation {
+    bool cameras {};
+    CameraUse use;
+};
+
+[[nodiscard]] inline CameraReservation reservationOf(const ComposedCameras& composed) noexcept
+{
+    return {layoutHasCameras(composed.layout), composed.use};
+}
+
+/* The cameras of a later boot of a run (`composeCameras`), held to `reserved`:
+ * the layout the guest is told is one whose use fits the reservation (no more
+ * cameras at once, no RAW capture or source working storage it did not count),
+ * the widest of the layouts that fit if the first choice does not, and none
+ * where none fits or the first discovery had no cameras. The host's cameras that
+ * change under a running application therefore never reach the device with a
+ * use the pool was not reduced for. */
+[[nodiscard]] ComposedCameras composeCamerasWithin(
+    const uml::platform::Camera& host, const CalibrationStore& calibration, const ArrangementOptions& options,
+    const CameraReservation& reserved);
+
 } // namespace uml::camera

@@ -271,6 +271,26 @@ ComposedCameras composeCameras(const uml::platform::Camera& host, const Calibrat
     return composed;
 }
 
+ComposedCameras composeCamerasWithin(const uml::platform::Camera& host, const CalibrationStore& calibration,
+                                     const ArrangementOptions& options, const CameraReservation& reserved)
+{
+    ComposedCameras none;
+    none.layout = std::string(noCameraLayout);
+    none.use = reserved.use;
+    if (!reserved.cameras) return none;
+    const auto fits = [&](const CameraUse& use) {
+        return use.streams <= reserved.use.streams && (!use.rawStill || reserved.use.rawStill) &&
+            use.stillWorkingBytesPerPixel <= reserved.use.stillWorkingBytesPerPixel;
+    };
+    auto composed = composeCameras(host, calibration, options);
+    if (!layoutHasCameras(composed.layout) || fits(composed.use)) return composed;
+    auto narrower = composeCameras(host, calibration, options, [&](std::string_view name) {
+        const auto dimensions = layoutDimensionsNamed(name);
+        return dimensions && layoutStreams(*dimensions) <= reserved.use.streams;
+    });
+    return layoutHasCameras(narrower.layout) && fits(narrower.use) ? narrower : none;
+}
+
 std::string composeLayout(const uml::platform::Camera& host, const CalibrationStore& calibration,
                           const ArrangementOptions& options, const std::function<bool(std::string_view)>& available)
 {

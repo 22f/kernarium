@@ -100,6 +100,9 @@ struct Presentation {
     /* The use the GPU's pool was reduced for: the first composition's, which no
      * later boot of the run exceeds (`composeCameras`). */
     uml::camera::CameraUse reserved;
+    /* Whether the first composition had cameras: a run that had none has no
+     * reserve, and a later boot has none either. */
+    bool reservedCameras {};
 
     /* Whether the guest gets a camera device at all. */
     [[nodiscard]] bool hasCameras() const noexcept { return uml::camera::layoutHasCameras(layout); }
@@ -131,6 +134,7 @@ struct Presentation {
     auto composed = composeNow(presentation);
     presentation.layout = std::move(composed.layout);
     presentation.use = presentation.reserved = composed.use;
+    presentation.reservedCameras = uml::camera::layoutHasCameras(presentation.layout);
     return presentation;
 }
 
@@ -142,14 +146,16 @@ inline void recompose(Presentation& presentation)
 {
     if (presentation.source == nullptr)
         return;
-    auto composed = composeNow(presentation);
+    /* The pool was sized for the first composition's use, and a later boot is
+     * held to all of it: the layout the guest is told is one the reservation
+     * allows (`composeCamerasWithin`). The colour data a still taught moves a lens
+     * from capturing RAW to offering it, which is within the first use. */
+    uml::camera::ArrangementOptions arrangement;
+    arrangement.tier = presentation.tier;
+    auto composed = uml::camera::composeCamerasWithin(
+        *presentation.source, *presentation.calibration, arrangement, {presentation.reservedCameras, presentation.reserved});
     presentation.layout = std::move(composed.layout);
     presentation.use = composed.use;
-    /* The pool was sized for the first composition's use. The cameras the device
-     * runs at once follow the layout and never grow; a RAW capture is possible
-     * from the first boot wherever a lens can make one. A later boot is held to
-     * the first's streams regardless. */
-    presentation.use.streams = std::min(presentation.use.streams, presentation.reserved.streams);
 }
 
 /* The runtime's state value of the device's. */

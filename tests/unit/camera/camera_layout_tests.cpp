@@ -442,6 +442,71 @@ void testComposedCamerasAreGivenTheirUse()
             "and so is the memory it reserves");
 }
 
+// A later boot of a run is held to what the first discovery paid for: the layout the guest is told is one the reservation
+// allows, and where no layout of the host's cameras does, none.
+void testALaterBootIsHeldToTheReservation()
+{
+    uml::camera::ArrangementOptions options;
+    options.tier = CameraTier::large;  // The phone's back and front cameras run at once only at the large tier.
+    CalibrationStore store;
+    const auto host = [](SyntheticCameraProfile profile) {
+        SyntheticCameraOptions synthetic;
+        synthetic.profile = profile;
+        return uml::platform::makeSyntheticCamera(synthetic);
+    };
+    const auto fits = [](const CameraUse& use, const CameraReservation& reserved) {
+        return use.streams <= reserved.use.streams && (!use.rawStill || reserved.use.rawStill) &&
+            use.stillWorkingBytesPerPixel <= reserved.use.stillWorkingBytesPerPixel;
+    };
+    const auto phoneHost = host(SyntheticCameraProfile::phone);
+    const auto first = composeCameras(*phoneHost, store, options);
+    const auto reserved = reservationOf(first);
+    require(reserved.cameras && first.use.streams == 2 && first.use.rawStill,
+            first.layout + " " + std::to_string(first.use.streams) + (first.use.rawStill ? " raw" : " no raw"));
+
+    // The same host composes the same layout.
+    const auto again = composeCamerasWithin(*phoneHost, store, options, reserved);
+    require(again.layout == first.layout && again.use == first.use, "an unchanged host composes what it did");
+
+    // A host that stays within the reservation is told its own layout.
+    const auto laptop = composeCamerasWithin(*host(SyntheticCameraProfile::laptop), store, options, reserved);
+    require(laptop.layout == "front" && fits(laptop.use, reserved), laptop.layout);
+
+    // The first discovery that had no cameras reserved nothing: none stays none, whatever the host offers later.
+    CameraReservation nothing, roomy;
+    roomy.use = reserved.use;  // Whatever use the none composition carries, no camera was reserved for.
+    for (const auto profile : {SyntheticCameraProfile::phone, SyntheticCameraProfile::tablet, SyntheticCameraProfile::laptop}) {
+        for (const auto* none : {&nothing, &roomy}) {
+            const auto later = composeCamerasWithin(*host(profile), store, options, *none);
+            require(!layoutHasCameras(later.layout) && later.layout == noCameraLayout, "none stays none");
+        }
+    }
+
+    // More cameras at once than the reservation counts: the widest layout that runs within it.
+    CameraReservation oneStream = reserved;
+    oneStream.use.streams = 1;
+    const auto narrowed = composeCamerasWithin(*phoneHost, store, options, oneStream);
+    require(layoutHasCameras(narrowed.layout) && narrowed.use.streams == 1 && fits(narrowed.use, oneStream) &&
+                narrowed.layout.find("concurrent") == std::string::npos,
+            narrowed.layout);
+
+    // A RAW capture or source working storage the first discovery did not count is never reached, so none.
+    CameraReservation noRaw = reserved;
+    noRaw.use.rawStill = false;
+    const auto raw = composeCamerasWithin(*phoneHost, store, options, noRaw);
+    require(!layoutHasCameras(raw.layout), "a RAW capture the reservation did not count is not offered");
+    CameraReservation noWorking = reserved;
+    noWorking.use.stillWorkingBytesPerPixel = 0;
+    const auto working = composeCamerasWithin(*phoneHost, store, options, noWorking);
+    require(!layoutHasCameras(working.layout), "nor a source whose stills hold more than the reservation counted");
+
+    // A host whose first discovery was the laptop and which later shows a phone: nothing the reservation did not count.
+    const auto laptopFirst = reservationOf(composeCameras(*host(SyntheticCameraProfile::laptop), store, options));
+    const auto grown = composeCamerasWithin(*phoneHost, store, options, laptopFirst);
+    require(!layoutHasCameras(grown.layout) || fits(grown.use, laptopFirst), "a host that grew is held to the first's use");
+    require(!layoutHasCameras(grown.layout), "and its RAW-capable back cameras are not told");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -455,6 +520,7 @@ int main(int argc, char** argv)
     testConcurrentRuleIsTheHals();
     testTheReserveFollowsTheUse();
     testComposedCamerasAreGivenTheirUse();
+    testALaterBootIsHeldToTheReservation();
     std::puts("camera-layout: passed");
     return 0;
 }
