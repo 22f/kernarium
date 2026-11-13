@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """`ipad-automation.py watch` keeps a device's UI automation host serving.
 
-A host that ended minutes ago is replaced by a new one without the device's
-approval prompt; one that ended hours ago is not. The watch therefore starts
-the next host the moment the old one stops serving, and fails, once and for
-good, when the device asks for approval. Every test runs the real script (its
+A host whose runner iOS ended is replaced by a new one the moment it stops
+serving when xcodebuild's relaunch of the runner initialized, because the
+system still holds the approval and nobody is needed at the device. The watch
+fails, once and for good, when the device asks for approval, or when the log
+does not say that it did not. Every test runs the real script (its
 supervisor included) against `automation_fakes.FakeDevice`, an `xcrun` and an
 `xcodebuild` that are files in a scratch folder, so no call reaches a device or
 Xcode; the rules about time run on a `ManualClock` that only the test moves.
@@ -544,8 +545,9 @@ class FailureTests(WatchTestCase):
         # runner again; that runner may ask the device for its approval. The
         # watch does not start a host that would put the same prompt up
         # again: it exits 4, with the latch, having started nothing. Whether
-        # the failure line came before it looked (observed) or not (possible)
-        # makes no difference to what it does.
+        # the failure line came before it looked (observed) or not (possible:
+        # the log says nothing of how the runner's initialization went, and
+        # nothing is not taken for safe) makes no difference to what it does.
         for failure, kind in (("authentication", "observed"),
                               ("authentication-localized", "observed"),
                               ("timeout", "observed"), ("quiet", "possible")):
@@ -564,6 +566,94 @@ class FailureTests(WatchTestCase):
                 self.assertEqual(self.record()["restarts"], 0)
                 self.assertEqual(self.run_watch().join(), automation.EXIT_NEEDS_APPROVAL)
                 self.invoked(1)
+
+    def test_a_relaunched_runner_that_initialized_is_replaced_at_once(self) -> None:
+        # Rule (round 4): xcodebuild started the runner again and the log shows
+        # it initialized (the restart notice, then the totals of a run of no
+        # tests): the system still held the approval, a new host serves with
+        # nobody at the device, so there is no approval risk. The watch
+        # replaces the host without a latch and keeps watching.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "relaunch-initialized")
+        second = self.watching(restarts=1)
+        self.assertNotEqual(first, second)
+        self.assertIsNone(watch.code)
+        self.invoked(2)
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
+        self.assertTrue(self.device.serving(second))
+        self.assertTrue(any("initialized" in line and "replacing the host" in line
+                            for line in self.messages), self.messages)
+        self.assertFalse(self.device.alive(self.device.invocations()[0]["ppid"]))
+
+    def test_the_replacement_of_an_initialized_relaunch_that_fails_ends_the_watch(self) -> None:
+        # Rule (round 4, the residual case): one replacement per death. When
+        # the replacement itself fails to initialize, the watch ends with
+        # needs-approval as it always did, and starts no third host.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "approval"},
+                               {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "relaunch-initialized")
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(2)
+        self.assertEqual(self.record()["state"], automation.NEEDS_APPROVAL)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "observed")
+        self.assertEqual(latch["nonce"], self.device.invocations()[1]["nonce"])
+
+    def test_a_relaunch_that_initialized_and_a_later_one_that_failed_needs_the_owner(self) -> None:
+        # Rule (round 4, the mixed case): one relaunched runner initialized and
+        # the runner started again after it failed to initialize. The failure
+        # is the owner's to answer: the watch exits 4 and starts nothing.
+        for failure in ("timeout", "authentication"):
+            with self.subTest(failure):
+                self.setUp()
+                self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+                first = self.watch_over_host()
+                watch = self.last_watch
+                self.device.control(first, f"relaunch-initialized-then-{failure}")
+                self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL,
+                                 self.messages)
+                self.invoked(1)
+                latch = automation.ApprovalLatch(self.options("status")).read()
+                self.assertEqual(latch["kind"], "observed")
+                self.assertEqual(latch["nonce"], first)
+
+    def test_a_log_cut_in_the_middle_of_the_relaunch_is_not_taken_for_safe(self) -> None:
+        # Rule (round 4, an unknown): the relaunched runner came up and
+        # xcodebuild's restart notice is there, but the totals that show the
+        # run are not. A runner that is still starting may be waiting for a
+        # prompt that nobody answers, and a host started now would put a
+        # second one up: the watch records "possible", exits 4, and starts
+        # nothing. Only a log that shows the whole pattern lets it restart.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+        first = self.watch_over_host()
+        watch = self.last_watch
+        self.device.control(first, "relaunch-restarting")
+        self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL, self.messages)
+        self.invoked(1)
+        latch = automation.ApprovalLatch(self.options("status")).read()
+        self.assertEqual(latch["kind"], "possible")
+        self.assertEqual(latch["nonce"], first)
+
+    def test_a_watch_that_takes_over_after_an_initialized_relaunch_replaces_the_host(self) -> None:
+        # Rule (round 4): the watch that follows a host did not see the death;
+        # the log it reads shows the relaunch initialized, so the stale
+        # heartbeat is a dead host to replace, not one that waits for the
+        # owner.
+        self.device.scenarios([{"kind": "serve"}, {"kind": "serve"}])
+        host = self.start_host()
+        self.device.control(host.nonce, "relaunch-initialized")
+        self.device.wait(lambda: host.process.poll() is not None, 20,
+                         "xcodebuild ends and the supervisor with it")
+        watch = self.run_watch()
+        second = self.watching(restarts=1)
+        self.assertNotEqual(host.nonce, second)
+        self.assertIsNone(watch.code)
+        self.invoked(2)
+        self.assertIsNone(automation.ApprovalLatch(self.options("status")).read())
 
     def test_a_relaunched_runner_whose_outcome_comes_late_is_not_retired_unrecorded(self) -> None:
         # Rule (R1, sequence 1): the relaunched runner's approval outcome
@@ -1126,6 +1216,45 @@ class VerdictBoundaryTests(unittest.TestCase):
         self.assert_lock_free()
         successor = automation.Watch(self.options, clock=self.clock)
         self.assertEqual(successor.latch.read()["kind"], "possible")
+
+    def test_a_relaunch_that_shows_initialized_only_during_cleanup_stays_recorded(self) -> None:
+        # Rule (round 4): the relaunched runner's log was cut when the watch
+        # looked (a risk, recorded before anything is ended), and the rest of
+        # the pattern arrives while the host is ended. What was not known when
+        # the risk was recorded does not undo it: the watch exits 4 and starts
+        # nothing, as it would for a log that never said.
+        with self.log.open("a") as stream:
+            stream.write(automation.RUNNER_UP_LINE + "\n")
+
+        def cleanup(verdict, remainder):
+            self.assertEqual(self.watch.latch.read()["kind"], "possible")
+            with self.log.open("a") as stream:
+                stream.write("Restarting after unexpected exit, crash, or test timeout\n"
+                             "\t Executed 0 tests, with 0 failures (0 unexpected)\n")
+            return automation.ENDED
+        with mock.patch.object(self.watch, "end_all", cleanup), \
+                mock.patch.object(automation, "launch_host") as launch:
+            self.assertEqual(self.watch.replace(self.reason), 4)
+        self.assertEqual(self.watch.latch.read()["kind"], "possible")
+        launch.assert_not_called()
+        self.assert_lock_free()
+
+    def test_a_relaunch_that_initialized_is_replaced_without_a_latch(self) -> None:
+        # Rule (round 4): the log shows the whole pattern, so the host is ended
+        # and its replacement launched, with nothing recorded.
+        with self.log.open("a") as stream:
+            stream.write(automation.RUNNER_UP_LINE + "\n"
+                         "Restarting after unexpected exit, crash, or test timeout\n"
+                         "\t Executed 0 tests, with 0 failures (0 unexpected)\n")
+        launch = automation.Launch(mock.Mock(), self.log, "new-launch")
+        with mock.patch.object(self.watch, "end_all", return_value=automation.ENDED), \
+                mock.patch.object(automation, "launch_host", return_value=launch) as started, \
+                mock.patch.object(self.watch, "await_launch",
+                                  return_value=("failed", "the one started host failed")):
+            self.assertEqual(self.watch.replace(self.reason), 5)
+        self.assertEqual(started.call_count, 1)
+        self.assertIsNone(self.watch.latch.read())
+        self.assert_lock_free()
 
     def test_an_approval_line_that_appears_during_cleanup_is_latched(self) -> None:
         def cleanup(verdict, remainder):
@@ -2457,6 +2586,95 @@ class LogSignalTests(unittest.TestCase):
     def test_a_runner_started_again_is_counted(self) -> None:
         self.assertEqual(self.scan(self.RUNNER).runner_up, 1)
         self.assertEqual(self.scan(self.RUNNER, "x", self.RUNNER).runner_up, 2)
+
+    INITIALIZED = (
+        "2026-11-13 23:38:22.997307+0900 KernariumAutomation-Runner[11111:2222222] "
+        "[UIKit App Config] Update the Info.plist: Launch screens will soon be required.",
+        "    t =      nans Interface orientation changed to Landscape Right",
+        "",
+        "Restarting after unexpected exit, crash, or test timeout; summary will "
+        "include totals from previous launches.",
+        "",
+        "Test Suite 'Selected tests' started at 2026-11-13 23:38:23.798.",
+        "Test Suite 'KernariumAutomation.xctest' passed at 2026-11-13 23:38:23.801.",
+        "\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds",
+        "Test Suite 'Selected tests' passed at 2026-11-13 23:38:23.801.",
+        "\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.003) seconds",
+        "** TEST EXECUTE FAILED **")
+
+    def risk(self, scan, served=True):
+        return automation.Watch.approval_risk([("n" * 32, scan, served)])
+
+    def test_a_relaunched_runner_that_initialized_is_no_approval_risk(self) -> None:
+        # Rule (round 4): the restart notice and then the totals of a run of no
+        # tests, as xcodebuild prints them after the second "Running tests...".
+        scan = self.scan(self.RUNNER, "Test Case started", self.RUNNER, *self.INITIALIZED)
+        self.assertEqual(scan.runner_up, 2)
+        self.assertEqual(scan.relaunches, ["initialized"])
+        self.assertEqual(scan.unconfirmed_relaunches(), 0)
+        self.assertIsNone(self.risk(scan))
+
+    def test_a_relaunched_runner_that_failed_is_an_approval_risk(self) -> None:
+        # Rule: the failure line (here as the device's timeout prints it, and
+        # as an initialization failure that is not the approval's) is the owner's.
+        failed = self.scan(self.RUNNER, self.RUNNER, self.PROMPT)
+        self.assertEqual(failed.relaunches, ["failed"])
+        self.assertEqual(self.risk(failed)[0], "observed")
+        other = self.scan(self.RUNNER, self.RUNNER, self.PROMPT.replace(
+            "Timed out while enabling automation mode", "Timed out while loading"))
+        self.assertEqual(other.relaunches, ["failed"])
+        self.assertEqual(self.risk(other)[0], "possible")
+
+    def test_a_relaunch_that_initialized_then_one_that_failed_is_an_approval_risk(self) -> None:
+        scan = self.scan(self.RUNNER, self.RUNNER, *self.INITIALIZED[3:8], self.RUNNER,
+                         self.PROMPT)
+        self.assertEqual(scan.relaunches, ["initialized", "failed"])
+        self.assertEqual(self.risk(scan)[0], "observed")
+        # And the other way round: the failure stands whatever else the log shows.
+        scan = self.scan(self.RUNNER, self.RUNNER, self.PROMPT, self.RUNNER,
+                         *self.INITIALIZED[3:8])
+        self.assertEqual(scan.relaunches, ["failed", "initialized"])
+        self.assertEqual(self.risk(scan)[0], "observed")
+
+    def test_a_log_cut_inside_the_relaunch_pattern_is_not_taken_for_safe(self) -> None:
+        # Rule (round 4): only the whole pattern shows the runner initialized.
+        # Each prefix of it, and a runner that said nothing, is a possible
+        # approval risk, as it was before the pattern was told.
+        for cut in range(0, 8):
+            with self.subTest(cut=cut):
+                lines = self.INITIALIZED[3:3 + cut]
+                scan = self.scan(self.RUNNER, self.RUNNER, *lines)
+                whole = "Executed 0 tests" in "".join(lines)
+                self.assertEqual(scan.unconfirmed_relaunches(), 0 if whole else 1)
+                self.assertEqual(self.risk(scan) is None, whole)
+        # The same lines before the restart notice, or of a first runner, do
+        # not make a relaunch that initialized.
+        scan = self.scan(self.RUNNER, self.INITIALIZED[7])
+        self.assertEqual(scan.relaunches, [])
+        scan = self.scan(self.RUNNER, self.RUNNER, self.INITIALIZED[7])
+        self.assertEqual(scan.relaunches, ["pending"])
+        self.assertIsNotNone(self.risk(scan))
+        # Totals that are not those of a run of no tests are not the pattern.
+        scan = self.scan(self.RUNNER, self.RUNNER, self.INITIALIZED[3],
+                         "\t Executed 10 tests, with 0 failures (0 unexpected)")
+        self.assertEqual(scan.relaunches, ["restarted"])
+        # A line that is not yet complete is not taken.
+        with mock.patch("builtins.open", mock.mock_open(read_data=(
+                "\n".join((self.RUNNER, self.RUNNER, *self.INITIALIZED[3:7]))
+                + "\n\t Executed 0 te").encode())):
+            scan = automation.LogScan("log")
+            scan.read()
+        self.assertEqual(scan.relaunches, ["restarted"])
+        self.assertIsNotNone(self.risk(scan))
+
+    def test_only_a_runner_that_followed_a_serving_one_can_be_cleared_by_its_pattern(self) -> None:
+        # Rule: the first runner of a launch that never served is a risk
+        # whatever the log shows after it, as it was.
+        scan = self.scan(self.RUNNER, *self.INITIALIZED[3:])
+        self.assertIsNotNone(self.risk(scan, served=False))
+        scan = self.scan(self.RUNNER, self.RUNNER, *self.INITIALIZED)
+        self.assertIsNotNone(self.risk(scan, served=False))
+        self.assertIsNone(self.risk(self.scan("Test Case started")))
 
     def test_the_supervisors_exit_line_is_read(self) -> None:
         scan = self.scan("ipad-automation: xcodebuild exited with status 65")

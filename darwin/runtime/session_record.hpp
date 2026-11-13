@@ -84,30 +84,37 @@ namespace uml::runtime {
  *
  * The file is text of a fixed layout and of a size it never exceeds
  * (session_record_max_bytes), whatever the session does: the memory slot, the
- * stall slot, the network slot, then the state with the kernel output it
- * quotes. Each part is rewritten in place by its own writer, so none grows
- * with the session's length. The stall slot is the stall watch's
- * (runtime/stall_record.hpp). The network slot holds the counts of the guest's
- * user network (set_network_counts_reader) and whether the application showed
- * its notice that iOS denies it the network (set_network_notice): numbers and
- * words only, never an address, a port or a name. The first line names the
- * layout: "uml-session 6" has the history rows described above in a memory
- * slot of 8 KiB; "uml-session 5" has the network slot between the stall slot
- * and the state and shorter rows in a 4 KiB memory slot; "uml-session 4" has
- * the stall slot between the memory slot and the state; the earlier layouts (1
- * to 3) have the state where the stall slot is now.
+ * stall slot, the network slot, the storage slot, then the state with the
+ * kernel output it quotes. Each part is rewritten in place by its own writer,
+ * so none grows with the session's length. The stall slot is the stall
+ * watch's (runtime/stall_record.hpp). The network slot holds the counts of the
+ * guest's user network (set_network_counts_reader) and whether the application
+ * showed its notice that iOS denies it the network (set_network_notice):
+ * numbers and words only, never an address, a port or a name. The storage slot
+ * holds how many times the guest's storage was settled (note_guest_settle) and
+ * how many of those the guest did not confirm, and the last settle's kind,
+ * outcome and time; it stays blank until the first one. The first line names
+ * the layout: "uml-session 7" has the storage slot between the network slot
+ * and the state; "uml-session 6" has the history rows described above in a
+ * memory slot of 8 KiB; "uml-session 5" has the network slot between the
+ * stall slot and the state and shorter rows in a 4 KiB memory slot;
+ * "uml-session 4" has the stall slot between the memory slot and the state;
+ * the earlier layouts (1 to 3) have the state where the stall slot is now.
  */
 inline constexpr unsigned memory_checkpoint_interval_ms = 2000;
 /* The bytes of the memory slot at the start of the file, of the stall slot
- * after it, of the network slot after that, and where the session's state
- * begins. */
+ * after it, of the network slot after that, of the storage slot, and where the
+ * session's state begins. */
 inline constexpr std::size_t session_memory_slot_bytes = 8192;
 inline constexpr std::size_t session_stall_slot_bytes = 4096;
 inline constexpr std::size_t session_network_slot_bytes = 512;
+inline constexpr std::size_t session_storage_slot_bytes = 256;
 inline constexpr std::size_t session_network_offset =
 	session_memory_slot_bytes + session_stall_slot_bytes;
-inline constexpr std::size_t session_state_offset =
+inline constexpr std::size_t session_storage_offset =
 	session_network_offset + session_network_slot_bytes;
+inline constexpr std::size_t session_state_offset =
+	session_storage_offset + session_storage_slot_bytes;
 /* The kernel output the state quotes, and the most the state ever takes: its
  * lines, a message and that output, which is the boot's own. Once the ring has
  * dropped output of that boot the state quotes it from its first complete
@@ -195,6 +202,55 @@ enum class NetworkNotice : std::uint8_t {
 };
 
 void set_network_notice(NetworkNotice notice) noexcept;
+
+/* What a call that settles the guest's storage ended with, for the storage
+ * slot. `kind` is the call; `storage` is what the guest confirmed of its own
+ * writeback, and `suspension` whether the call put it to sleep. */
+enum class SettleKind : std::uint8_t {
+	sync,
+	quiesce,
+	quiesce_resident,
+};
+
+enum class GuestStorage : std::uint8_t {
+	/* The zero value claims nothing: no call reported. A record never holds
+	 * it. */
+	not_reported,
+	/* The guest ran sync(2) to its return and said so. */
+	confirmed,
+	/* No guest was running: there was nothing to settle. */
+	no_guest,
+	/* The guest was asked and did not confirm in time, or only started the
+	 * writeback, or the host could not ask. */
+	unconfirmed,
+	/* The guest refused the request. */
+	refused,
+	/* A guest was running and its console could not be reached. */
+	unreachable,
+};
+
+enum class SettleSuspension : std::uint8_t {
+	not_asked,
+	suspended,
+	not_suspended,
+};
+
+/* Whether the guest's storage counts as settled: it confirmed its writeback,
+ * or there was no guest. Anything else leaves dirty pages the host cannot see
+ * in a guest that may still run. */
+[[nodiscard]] constexpr bool guest_storage_settled(GuestStorage storage)
+	noexcept
+{
+	return storage == GuestStorage::confirmed ||
+		storage == GuestStorage::no_guest;
+}
+
+/* Records one settle in the storage slot of the session that is open: a count
+ * of all of them and of those that left the storage unsettled, and the last
+ * one's kind, outcome and time. Nothing without an open session. Any thread
+ * but a signal handler: it may wait for another writer of the slot. */
+void note_guest_settle(SettleKind kind, GuestStorage storage,
+	SettleSuspension suspension) noexcept;
 
 enum class SessionEnd : std::uint8_t {
 	running,

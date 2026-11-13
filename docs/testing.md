@@ -338,7 +338,7 @@ fake guests and players, the haptics wire against the golden frames in
 relay test against too; the game controllers' wire against that directory's
 gamepad frames, each family's reports read back through a test-only HID
 descriptor parser, and the stream and session on a fake relay; the session
-record's stall and network slots against the golden slots there, which
+record's stall, network and storage slots against the golden slots there, which
 `runtime-stall-record` and `runtime-session-record` check the runtime's writers
 against; and the notice that iOS denies the network, from the path's mapping to
 the watcher's start and stop on a fake path source);
@@ -556,8 +556,11 @@ host's test run records no screen video and keeps no attachments (the scheme
 sets it, and `start` refuses a built run file that does not), and its result
 bundle lives under the state directory, not in DerivedData.
 
-A host ends on its own now and then, and a new one started within minutes needs
-no approval at the device while one started hours later does. `watch` keeps one
+A host ends on its own now and then. A new one needs the owner at the device
+only when the system lost the last approval, however soon it starts: when
+xcodebuild's relaunch of the runner initialized (its log says so) nothing is
+asked and the watch replaces the host at once; when it failed to initialize, or
+the log does not say, the owner may be needed and the watch ends. `watch` keeps one
 device's host serving, and acts only on evidence: it adopts a serving host,
 starts the next only once the old one is shown to be dead (three reads in a row
 that all worked and all showed the same beat), and otherwise replaces nothing
@@ -842,6 +845,15 @@ previous release's data disk to check the one-time on-screen keyboard change.
 `screenrecord`'s encoder run across a suspend by the host's route (asked again
 while the guest is busy, as the host does) and by the guest's own on one stream
 each, and the host closes no stream by a reset.
+`android-sync` (integration) registers when `UML_ANDROID_SYNC_RELEASE` names the
+release: with SysRq off, a file the guest holds dirty reaches the host's data
+image once the management console's `sync` replies, and survives a hard kill of
+the emulator; a request that is refused leaves it in the guest only. The host's
+side of the settle calls is covered on any host by `guest-console-writeback`
+(with `-timeout`, `-strict` for the reply grammar and `-budget` for the one
+deadline), `emulator-lifecycle` (what each call reports, and when a saved answer
+is repeated), `kernarium-settle-plumbing` (the runtime's report envelope, the
+handle a sync pins and the loader's forwarding) and `runtime-session-record`.
 `android-wifi-network` (integration) registers when
 `UML_ANDROID_WIFI_NETWORK_RELEASE` names the release: the guest's one Wi-Fi
 network stays enabled, joined and validated while the internet checks fail, and

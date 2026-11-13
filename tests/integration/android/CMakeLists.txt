@@ -351,3 +351,22 @@ if(UML_ANDROID_GAMEPAD_RELEASE AND UML_ANDROID_GAMEPAD_PROBE_APK AND TARGET uml-
         PROCESSORS 4
         RESOURCE_GROUPS cpus:4)
 endif()
+
+# The management console's sync on an Android guest, whose init leaves SysRq
+# off: a file the guest holds dirty reaches the host's data image once sync
+# replies, and survives a hard kill of the emulator. It boots Android with the
+# macOS launcher, so it is opt-in: name the release under test.
+set(UML_ANDROID_SYNC_RELEASE "" CACHE PATH
+    "Installed Android release directory that the android-sync test boots")
+if(UML_ANDROID_SYNC_RELEASE AND TARGET uml-darwin-android17)
+    uml_add_integration_test(
+        NAME android-sync
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_android_sync.py
+            --release ${UML_ANDROID_SYNC_RELEASE}
+            --emulator $<TARGET_FILE:uml-darwin-android17>
+        LABELS guest;boot;android
+        TIMEOUT 3600
+        PROCESSORS 4
+        RESOURCE_GROUPS cpus:4)
+endif()
