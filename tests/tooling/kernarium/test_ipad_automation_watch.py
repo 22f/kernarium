@@ -69,6 +69,7 @@ class ManualClock:
     def __init__(self) -> None:
         self.mono = 5000.0
         self.wall = 1_800_000_000.0
+        self.waited = 0.0
         self.hooks: list = []
 
     def monotonic(self) -> float:
@@ -80,8 +81,7 @@ class ManualClock:
     def advance(self, seconds: float) -> None:
         self.mono += seconds
         self.wall += seconds
-        if self.mono > 5000 + 100_000:
-            raise RuntimeError("the code under test waits without a bound")
+
         for hook in list(self.hooks):
             hook(self)
 
@@ -90,6 +90,9 @@ class ManualClock:
         self.wall += seconds
 
     def sleep(self, seconds: float) -> None:
+        self.waited += seconds
+        if self.waited > 1000:
+            raise RuntimeError("the code under test waits without a bound")
         self.advance(seconds)
         time.sleep(0.01)
 
@@ -680,8 +683,12 @@ class CommandTests(WatchTestCase):
         self.run_watch()
         first = self.watching(restarts=1)
         self.device.control(first, "silent")
-        self.device.wait(lambda: self.device.silent_for() > 1.2, 10,
-                         "the host stops beating")
+        # The command goes only when the watch has seen a beat lately, in its
+        # own record: wait until that is no longer so, and the watch has not
+        # yet ended the host.
+        self.device.wait(lambda: time.time() - self.record().get("alive_at", 0)
+                         > automation.WATCH_ALIVE_FRESH + 0.2, 10,
+                         "the watch has not seen the host beat lately")
         results: list = []
         self.ping(results).join(30)
         self.assertEqual(len(results), 1, self.messages)
@@ -969,6 +976,7 @@ class ObserverTests(unittest.TestCase):
         # host is not declared dead on waking; and a read is the first thing
         # made on waking.
         self.run_for(30)
+        self.observer.pull()   # the last read is as young as it can be
         reads = self.reads
         self.clock.suspend(6 * 3600)
         self.device_clock += 6 * 3600
@@ -1037,17 +1045,19 @@ class SettleTests(WatchTestCase):
         clock = ManualClock()
         self.device.scenarios([{"kind": "up-silent"}])
         real = automation.host_state
-        injected = []
+        reads = []
 
         def slow(options, timeout=60):
             record = automation.local_record(options)
             log = Path(record.get("log", "/nonexistent"))
-            if (log.exists() and automation.RUNNER_UP_LINE in log.read_text()
-                    and not injected):
-                injected.append(1)
-                with open(log, "a") as handle:
-                    handle.write(PROMPT + "\n")
-                clock.advance(100)
+            if log.exists() and automation.RUNNER_UP_LINE in log.read_text():
+                reads.append(1)
+                # The read after the one that saw the runner come up: the
+                # runner's deadline is set by then, and this read passes it.
+                if len(reads) == 2:
+                    with open(log, "a") as handle:
+                        handle.write(PROMPT + "\n")
+                    clock.advance(100)
             return real(options, timeout)
         self.patch(automation, "host_state", slow)
         outcome = automation.Watch(self.watch_options(), threading.Event(),
@@ -1186,6 +1196,9 @@ class ApprovalLatchTests(WatchTestCase):
         self.device.control(first, "die")
         self.assertEqual(watch.join(), automation.EXIT_NEEDS_APPROVAL)
         self.invoked(2)
+        # The host's own log, which a later watch could read the refusal from
+        # again, is no longer what the record points at: only the latch is left.
+        (self.device.state_dir / self.device.udid / "host.json").unlink()
 
     def test_the_refusal_survives_a_watch_that_is_stopped(self) -> None:
         # Rule (R2): a watch that starts and is stopped at once, before it has
