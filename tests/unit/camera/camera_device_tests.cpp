@@ -130,6 +130,8 @@ struct RigOptions {
     /* The working storage a source holds for each pixel of a still it makes, where a test is to state it (the synthetic
      * source's is 11 bytes). */
     std::optional<std::uint32_t> workingBytes;
+    /* The RAW size the host declares for its first camera, where a test is to state it. */
+    std::optional<uml::platform::CameraStillSize> rawStillSize;
 };
 
 class Recorder final : public CameraSessionDelegate {
@@ -177,7 +179,13 @@ public:
         pauseCondition.notify_all();
     }
 
-    std::vector<CameraInfo> cameras() const override { return host->cameras(); }
+    std::optional<uml::platform::CameraStillSize> rawStillSize;
+    std::vector<CameraInfo> cameras() const override
+    {
+        auto infos = host->cameras();
+        if (rawStillSize && !infos.empty()) infos[0].rawStillSize = *rawStillSize;
+        return infos;
+    }
     std::vector<std::vector<std::size_t>> concurrentSets() const override { return host->concurrentSets(); }
     std::string hostModel() const override { return host->hostModel(); }
     std::uint64_t now() const noexcept override { return host->now(); }
@@ -278,6 +286,7 @@ struct Rig final {
         };
         watched = std::make_shared<WatchedCamera>(camera);
         watched->workingBytes = rigOptions.workingBytes;
+        watched->rawStillSize = rigOptions.rawStillSize;
         device = std::make_unique<VirtioCameraDevice>(watched, std::move(options));
         device->setGuestMapper([this](std::uint64_t offset, std::size_t size) {
             if (offset > memory.size() || size > memory.size() - offset) return std::span<std::uint8_t> {};
@@ -2531,6 +2540,71 @@ void testAWaitingCapturesTimeRunsFromItsRequest()
     require(rig.done(second) && (rig.result(second).base.flags & errorFlag), "its buffer fails ten seconds after its request");
 }
 
+// A capture the guest gave up on may end just as the device decides it was lost: the completion reaches the inbox after the
+// pump took its batch and before the thirty seconds are over, and expiry then runs. The capture is finished, and the
+// session it ended in is healthy: it is not closed, and the preview on it runs on.
+void testACompletionQueuedWhenExpiryDecidesIsNotALoss()
+{
+    Rig rig;
+    videoStream(rig, 1, 0, 640, 480, 1);
+    (void)rig.queue(1, 1);
+    stillStream(rig, 2, 0, 1008, 756, 1);
+    const auto gone = rig.queue(2, 1, 101);
+    rig.camera->advanceClock(10'100'000'000);
+    rig.step();
+    require(rig.done(gone) && rig.camera->sessionsOpen() == 1, "the guest gave up on a capture the platform still holds");
+    const auto closes = [&] { return std::count(rig.checkpoints.begin(), rig.checkpoints.end(), CameraCheckpoint::sessionClosed); };
+    // A recovery event gives a point after the pump took its batch: the platform ends the capture there, 29.9 s on, and
+    // the clock passes the thirty seconds before expiry runs.
+    rig.camera->post({uml::platform::allCameras, CameraEventKind::interrupted});
+    rig.step();
+    rig.camera->post({uml::platform::allCameras, CameraEventKind::resumed});
+    rig.camera->advanceClock(29'900'000'000);
+    bool once = false;
+    rig.onStateChange = [&] {
+        if (once) return;
+        once = true;
+        require(rig.camera->videoRunning(0), "the preview runs when the platform ends the capture");
+        rig.camera->pump(0, 0);
+        rig.camera->advanceClock(200'000'000);
+    };
+    rig.step();
+    rig.onStateChange = nullptr;
+    require(once && rig.watched->holding.empty(), "the platform ended the capture before expiry ran");
+    require(closes() == 0 && rig.camera->videoRunning(0), "the session was not closed and the preview runs on");
+    // The charge went with the capture: a new still starts at once.
+    const auto next = rig.queue(2, 1, 102);
+    require(rig.camera->stillsTaken() == 2 && !rig.done(next), "and the next capture starts");
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(next) && rig.result(next).base.flags == 0, "and is delivered");
+}
+
+// A waiting capture's cost is worked out again when it comes to start, for a control the guest set while it waited changes
+// what the capture asks for (a zoom back to 1 adds the colour data of an uncalibrated lens). One that now costs more than the
+// device admits at all is refused, as it is at the request, and does not start.
+void testAWaitingCaptureThatGrowsBeyondTheWholeBudgetIsRefused()
+{
+    RigOptions options;
+    options.use = {1, true, 0};
+    options.workingBytes = 0;
+    options.rawStillSize = uml::platform::CameraStillSize {6000, 4000};
+    Rig rig(options);
+    stillStream(rig, 1, 0, 4032, 3024, 4);
+    rig.setOk(1, {{VIRTIO_VIDEO_CAMERA_CID_ZOOM_Q16, 2 * 65536, {}}});
+    std::vector<std::uint64_t> cookies;
+    for (unsigned index = 1; index <= 4; ++index) cookies.push_back(rig.queue(1, index, 100 + index));
+    require(rig.camera->stillsTaken() == 3, "three JPEG captures fit the budget at zoom 2 and the fourth waits");
+    rig.setOk(1, {{VIRTIO_VIDEO_CAMERA_CID_ZOOM_Q16, 65536, {}}});
+    for (unsigned index = 0; index < 3; ++index) {
+        rig.camera->pump(0, 0);
+        rig.step();
+    }
+    require(rig.done(cookies[3]) && (rig.result(cookies[3]).base.flags & errorFlag), "the fourth fails once it would cost more than the budget");
+    require(rig.camera->stillsTaken() == 3, "and never reaches the platform");
+    require(rig.camera->sessionsOpen() == 0, "the session closes with nothing left to do");
+}
+
 // A delivered result's payload is given back (the memory, not only its size) before the capture that waited for it
 // starts: the charge of a capture covers its payload.
 void testAResultsPayloadIsFreedBeforeTheNextCaptureStarts()
@@ -2842,6 +2916,8 @@ int main()
     testALateFrameOfAStoppedCameraIsNotKept();
     testAnExpiredCaptureStaysChargedUntilThePlatformEndsIt();
     testAWaitingCapturesTimeRunsFromItsRequest();
+    testACompletionQueuedWhenExpiryDecidesIsNotALoss();
+    testAWaitingCaptureThatGrowsBeyondTheWholeBudgetIsRefused();
     testAResultsPayloadIsFreedBeforeTheNextCaptureStarts();
     testStillsAreAdmittedInTheOrderTheyAsked();
     testACaptureBeyondTheWholeBudgetIsRefusedBeforeItStarts();

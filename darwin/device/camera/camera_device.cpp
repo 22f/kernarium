@@ -1139,6 +1139,7 @@ public:
     {
         if (firingWaiting) return;
         firingWaiting = true;
+        bool refused = false;
         for (;;) {
             // The oldest group that waits goes first.
             auto next = groups.end();
@@ -1157,6 +1158,14 @@ public:
                 continue;
             }
             next->cost = costOf(*next, *runtime);
+            // A control changed while it waited (a zoom back to 1 adds the colour data of an uncalibrated lens): the capture
+            // may now cost more than the device admits at all, which is refused as it is at the request.
+            if (next->cost > stillBudget) {
+                failGroup(*next, 0);
+                groups.erase(next);
+                refused = true;
+                continue;
+            }
             const auto held = capturesCost();
             if (held != 0 && held + next->cost > stillBudget) break;
             next->waiting = false;
@@ -1164,6 +1173,10 @@ public:
         }
         firingWaiting = false;
         armGroupTimer();
+        if (refused) {
+            releaseSessionIfIdle();
+            reportState();
+        }
     }
 
     /* The captures a camera has with the platform. */
@@ -1385,11 +1398,37 @@ public:
             }
             groups.erase(groups.begin() + std::ptrdiff_t(index));
         }
+        if (lost) {
+            // A completion may have reached the inbox after the pump took its batch: the capture it ends is finished, not
+            // lost, and its session is healthy. What is still unfinished past its time was lost.
+            deliverQueuedResultsOfAbandoned(time);
+            lost = std::any_of(groups.begin(), groups.end(), [time](const auto& group) { return group.expired && group.deadline <= time; });
+        }
         if (lost) abandonSession();
         fireWaiting();
         armGroupTimer();
         releaseSessionIfIdle();
         reportState();
+    }
+
+    /* Delivers the results already in the inbox of the captures the guest gave up on whose time has run out. The inbox is
+     * read under its lock and the results are delivered after it is let go. */
+    void deliverQueuedResultsOfAbandoned(std::uint64_t time)
+    {
+        std::vector<InboxStill> finished;
+        {
+            std::lock_guard lock(inboxMutex);
+            for (auto still = inboxStills.begin(); still != inboxStills.end();) {
+                const auto* group = groupOfToken(still->result.token);
+                if (group != nullptr && group->expired && group->deadline <= time) {
+                    finished.push_back(std::move(*still));
+                    still = inboxStills.erase(still);
+                } else {
+                    ++still;
+                }
+            }
+        }
+        for (auto& still : finished) deliverStill(still.camera, still.result);
     }
 
     /* Ends the platform's session, and with it every capture it holds: the ones
