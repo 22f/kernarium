@@ -7,6 +7,7 @@
  */
 #include "a64_register_operands.hpp"
 #include "architecture_difference.hpp"
+#include "arm64_exclusive_retry.hpp"
 #include "cpu/arm64/cpu_state.hpp"
 #include "cpu/arm64/detail/sme_decode.hpp"
 #include "cpu/arm64/engine_execution.hpp"
@@ -34,6 +35,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cinttypes>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -50,6 +52,7 @@
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <unordered_set>
 #include <utility>
@@ -58,6 +61,7 @@
 namespace {
 
 namespace arm64 = ::uml::cpu::arm64;
+using ::uml::emulator::tests::exclusive_attempts;
 using ::uml::emulator::tests::first_architecture_difference;
 using ::uml::emulator::tests::first_sme_register_difference;
 using ::uml::cpu::ArmFeature;
@@ -90,6 +94,8 @@ constexpr std::uint16_t without_afp_option = 0x400U;
  * encodings UNDEFINED. */
 constexpr std::uint16_t without_sme_option = 0x800U;
 constexpr std::uint16_t known_options = 0x1fffU;
+/* How long --interrupt may go on looking for a lost reservation. */
+constexpr std::chrono::seconds interrupt_deadline{60};
 /* SME state: Z0-Z31, P0-P15 and the ZA rows are sized by a record's
  * streaming vector length (SVL), ZT0 is 64 bytes. */
 constexpr std::size_t zt0_bytes = arm64::sme_zt0_bytes;
@@ -959,6 +965,12 @@ private:
   std::size_t size_;
 };
 
+/* Bytes of guest memory: where a store-exclusive writes. */
+struct Footprint final {
+  std::uint64_t address{};
+  std::size_t size{};
+};
+
 /* One declared data region, mapped for the lifetime of one case. */
 class CaseRegion final {
 public:
@@ -990,10 +1002,46 @@ public:
     std::copy(initial_.begin(), initial_.end(), backing_.view().begin());
   }
 
-  [[nodiscard]] std::optional<std::string> check() const {
+  /* The region's bytes as the case started, as the case expects them to end,
+   * and as they are now. */
+  [[nodiscard]] std::span<const std::byte> initial() const noexcept {
+    return initial_;
+  }
+  [[nodiscard]] std::span<const std::byte> expected() const noexcept {
+    return expected_.empty() ? initial_
+                             : std::span<const std::byte>{expected_};
+  }
+  [[nodiscard]] std::span<std::byte> live() const noexcept {
+    return backing_.view();
+  }
+
+  [[nodiscard]] std::uint64_t address() const noexcept {
+    return spec_.address;
+  }
+
+  /* Whether `size` bytes at `address` lie in the region. */
+  [[nodiscard]] bool contains(std::uint64_t address,
+                              std::size_t size) const noexcept {
+    return address >= spec_.address && address - spec_.address <= spec_.size &&
+           size <= spec_.size - (address - spec_.address);
+  }
+
+  /* The bytes that differ from what the case expects, naming the first.
+   * `unwritten`, for a lost store-exclusive, expects its bytes as the case
+   * started with them. */
+  [[nodiscard]] std::optional<std::string>
+  check(const Footprint *unwritten = nullptr) const {
     const auto actual = backing_.view();
-    const std::span<const std::byte> expected =
-        expected_.empty() ? initial_ : std::span<const std::byte>{expected_};
+    std::vector<std::byte> lost;
+    std::span<const std::byte> expected = this->expected();
+    if (unwritten != nullptr && contains(unwritten->address, unwritten->size)) {
+      lost.assign(expected.begin(), expected.end());
+      const auto offset = unwritten->address - spec_.address;
+      std::copy_n(initial_.begin() + static_cast<std::ptrdiff_t>(offset),
+                  unwritten->size,
+                  lost.begin() + static_cast<std::ptrdiff_t>(offset));
+      expected = lost;
+    }
     const auto mismatch =
         std::mismatch(actual.begin(), actual.end(), expected.begin());
     if (mismatch.first != actual.end()) {
@@ -1175,6 +1223,218 @@ private:
 };
 
 /* ------------------------------------------------------------------------ */
+/* Store-exclusives that lose their reservation                               */
+
+/* A store-exclusive may fail without cause, as the architecture allows. The
+ * engines run the host's own exclusives and the host's monitor ends at any
+ * interrupt or preemption between the load and the store, so under load one
+ * lands in that window now and then (a gadget stream has about twenty host
+ * instructions between the pair, the JIT's fused pair none). A guest loops on
+ * the status, but a store that discards it (STXR WZR, ...) cannot, so the
+ * corpus runs it once. A case of that shape whose only difference from the
+ * pack is that its store wrote nothing runs again, up to exclusive_attempts
+ * times in all, and must then agree completely: a store that never writes,
+ * writes other bytes, or writes elsewhere still fails. */
+
+/* The store-exclusive of a program and the bytes it writes when it succeeds. */
+struct ExclusiveStore final {
+  /* Rs, the register that receives the status; 31 discards it. */
+  unsigned status{};
+  Footprint written;
+};
+
+/* The one store-exclusive in `program`, with the bytes at its base register's
+ * final value (the register must be what the case started with, and the
+ * address loses its tag under top-byte ignore). Nothing for a program with
+ * none or several. */
+[[nodiscard]] std::optional<ExclusiveStore>
+exclusive_store(const Program &program, const arm64::CpuState &initial,
+                const arm64::CpuState &expected) {
+  std::optional<ExclusiveStore> found;
+  for (const auto item : program.words) {
+    const auto word = item.word;
+    std::size_t size = 0;
+    if ((word & 0x3fe0'7c00U) == 0x0800'7c00U) /* STXR, STLXR */
+      size = std::size_t{1} << (word >> 30);
+    else if ((word & 0xbfe0'0000U) == 0x8820'0000U) /* STXP, STLXP */
+      size = std::size_t{8} << ((word >> 30) & 1U);
+    else
+      continue;
+    if (found.has_value())
+      return std::nullopt;
+    const auto base = (word >> 5) & 31U;
+    const auto pointer = [&](const arm64::CpuState &state) {
+      return base == 31U ? state.sp : state.registers[base];
+    };
+    if (pointer(initial) != pointer(expected))
+      return std::nullopt;
+    const std::uint64_t address = initial.tbi_enabled
+                                      ? pointer(expected) & 0x00ff'ffff'ffff'ffffULL
+                                      : pointer(expected);
+    found = ExclusiveStore{(word >> 16) & 31U, {address, size}};
+  }
+  return found;
+}
+
+/* The bytes a case's lost store-exclusive leaves unwritten, when the case is
+ * the one-attempt shape: a straight-line program (its retirement is exact)
+ * that ends in a system call after a store-exclusive whose status it
+ * discards, so the loss changes nothing but those bytes. Nothing for any
+ * other case, which a guest's own loop or an expected failure already
+ * covers. */
+[[nodiscard]] std::optional<Footprint>
+lost_store(const CorpusCase &test_case, const Program &program,
+           const arm64::CpuState &initial, const arm64::CpuState &expected) {
+  if (test_case.event != Event::system_call ||
+      test_case.validator != no_validator ||
+      test_case.retired.kind != Retirement::Kind::exact)
+    return std::nullopt;
+  const auto store = exclusive_store(program, initial, expected);
+  if (!store.has_value() || store->status != 31U)
+    return std::nullopt;
+  return store->written;
+}
+
+/* Faults --inject makes an engine lane commit on purpose, in the first
+ * attempt at each case of the one-attempt shape, to prove what the retry
+ * takes for a lost reservation and what it refuses. A plan that is `retried`
+ * must be taken for one, run again and pass; any other must fail on the
+ * attempt it was made in, and `every_attempt` makes it in all of them. */
+enum class Fault : std::uint8_t {
+  lost,
+  lost_and_register,
+  lost_and_elsewhere,
+  wrong_bytes,
+  partly_written,
+  never_written,
+};
+
+struct FaultPlan final {
+  Fault fault;
+  const char *name;
+  bool retried;
+  bool every_attempt;
+};
+
+constexpr FaultPlan fault_plans[] = {
+    /* The store reports nothing and wrote nothing. */
+    {Fault::lost, "lost", true, false},
+    /* A loss with another register wrong. */
+    {Fault::lost_and_register, "lost+register", false, false},
+    /* A loss with a byte outside the store's changed. */
+    {Fault::lost_and_elsewhere, "lost+elsewhere", false, false},
+    /* The store wrote, and wrote other bytes. */
+    {Fault::wrong_bytes, "wrong-bytes", false, false},
+    /* The store wrote some of its bytes. */
+    {Fault::partly_written, "partly-written", false, false},
+    /* A store that never writes: every attempt is a loss. */
+    {Fault::never_written, "never-written", false, true},
+};
+
+/* The region that holds the bytes of a lost store, and which of them the case
+ * changes. */
+struct StoreBytes final {
+  const CaseRegion *region{};
+  std::size_t offset{};
+  std::vector<std::size_t> changed;
+};
+
+[[nodiscard]] StoreBytes
+store_bytes(const Footprint &store,
+            const std::vector<std::unique_ptr<CaseRegion>> &regions) {
+  StoreBytes bytes;
+  const auto found = std::ranges::find_if(regions, [&](const auto &region) {
+    return region->contains(store.address, store.size);
+  });
+  if (found == regions.end())
+    return bytes;
+  bytes.region = found->get();
+  bytes.offset =
+      static_cast<std::size_t>(store.address - bytes.region->address());
+  const auto initial = bytes.region->initial();
+  const auto expected = bytes.region->expected();
+  for (std::size_t byte = bytes.offset; byte < bytes.offset + store.size;
+       ++byte)
+    if (initial[byte] != expected[byte])
+      bytes.changed.push_back(byte);
+  return bytes;
+}
+
+/* Whether `fault` can be made in a case whose lost store is `store`: the
+ * store changes a byte, and two for a fault that writes only some of them. */
+[[nodiscard]] bool
+fault_fits(Fault fault, const Footprint &store,
+           const std::vector<std::unique_ptr<CaseRegion>> &regions) {
+  const auto bytes = store_bytes(store, regions);
+  return bytes.region != nullptr &&
+         bytes.changed.size() >= (fault == Fault::partly_written ? 2U : 1U);
+}
+
+/* Makes the run `outcome`, a correct run of a case whose lost store is
+ * `store`, one that ended with `fault` (see fault_fits). */
+void inject_fault(Fault fault, const Footprint &store,
+                  const std::vector<std::unique_ptr<CaseRegion>> &regions,
+                  Outcome &outcome) {
+  const auto bytes = store_bytes(store, regions);
+  const auto live = bytes.region->live();
+  const auto initial = bytes.region->initial();
+  const auto expected = bytes.region->expected();
+  /* Puts the store's bytes back to what the case started with, except the
+   * changed byte `keep` if there is one, which the store wrote. Whatever the
+   * engine did, the outcome is then what the fault says. */
+  const auto put_back = [&](std::optional<std::size_t> keep) {
+    for (std::size_t byte = bytes.offset; byte < bytes.offset + store.size;
+         ++byte)
+      live[byte] = keep.has_value() && byte == *keep ? expected[byte]
+                                                     : initial[byte];
+  };
+  switch (fault) {
+  case Fault::lost:
+  case Fault::never_written:
+    put_back(std::nullopt);
+    break;
+  case Fault::lost_and_register:
+    put_back(std::nullopt);
+    outcome.cpu.registers[28] ^= 1U;
+    break;
+  case Fault::lost_and_elsewhere: {
+    put_back(std::nullopt);
+    const auto other = (bytes.offset + store.size) % live.size();
+    live[other] = ~live[other];
+    break;
+  }
+  case Fault::wrong_bytes:
+    for (const auto byte : bytes.changed)
+      live[byte] = expected[byte] ^ std::byte{0x5a};
+    break;
+  case Fault::partly_written:
+    put_back(bytes.changed.front());
+    break;
+  }
+}
+
+/* A completing store-exclusive that reports its status must loop on it. One
+ * that does not is run once, is lost now and then, and so fails now and then:
+ * the pack is refused. The other shapes are the guest's own loop (its
+ * retirement a pattern), a store that discards its status (retried by the
+ * runner) and one the case expects to fail. */
+void require_exclusive_loop(const Record &record, const CorpusCase &test_case,
+                            const Program &program,
+                            const arm64::CpuState &initial,
+                            const arm64::CpuState &expected) {
+  if (test_case.event != Event::system_call ||
+      test_case.retired.kind == Retirement::Kind::pattern)
+    return;
+  const auto store = exclusive_store(program, initial, expected);
+  if (store.has_value() && store->status != 31U &&
+      expected.registers[store->status] == 0U)
+    throw CorpusError{std::string{record.name} + ": " +
+                      std::string{test_case.name} +
+                      ": a store-exclusive that reports its status and "
+                      "completes must loop on it"};
+}
+
+/* ------------------------------------------------------------------------ */
 /* Runner                                                                     */
 
 struct Options final {
@@ -1194,6 +1454,14 @@ struct Options final {
   std::size_t max_failures{25};
   bool list{};
   bool emitted_registers{};
+  /* Interrupt the thread that runs the guest continuously, and go on until a
+   * store-exclusive has lost its reservation to it. */
+  bool interrupt{};
+  /* Make each lane commit the faults of fault_plans, and check that a loss is
+   * retried and anything else refused. */
+  bool inject{};
+  /* Run the selected records at least this many times. */
+  std::size_t passes{1};
 };
 
 struct Counts final {
@@ -1205,6 +1473,13 @@ struct Counts final {
   std::size_t gadgets_skipped_host_feature{};
   std::size_t jit_unavailable{};
   std::size_t failures{};
+  /* Attempts that were a store-exclusive losing its reservation, the cases
+   * they were retried in, and those that then passed. */
+  std::size_t exclusive_lost{};
+  std::size_t exclusive_retried{};
+  std::size_t exclusive_recovered{};
+  /* Under --inject, the cases a fault was committed in. */
+  std::size_t injected{};
   std::map<std::string_view, std::size_t> missing_features;
   /* The features the gadget lane's virtual CPU lacks, by case. */
   std::map<std::string_view, std::size_t> gadgets_missing_features;
@@ -1278,8 +1553,10 @@ runner_host(const Options &options) {
 
 class Runner final {
 public:
-  Runner(const Corpus &corpus, const Options &options)
-      : corpus_{corpus}, options_{options}, host_{runner_host(options)},
+  Runner(const Corpus &corpus, const Options &options,
+         const FaultPlan *fault = nullptr)
+      : corpus_{corpus}, options_{options}, fault_{fault},
+        host_{runner_host(options)},
         code_backing_{page_size},
         code_mapping_{code_base, code_backing_, page_size,
                       PROT_READ | PROT_EXEC, true, false} {
@@ -1448,26 +1725,61 @@ private:
         for (const auto &region : test_case.memory)
           regions.push_back(std::make_unique<CaseRegion>(
               region, corpus_.blobs[region.blob]));
+        require_exclusive_loop(record, test_case, program, *initial,
+                               *expected);
       }
-      for (const auto &region : regions)
-        region->restore();
-      /* Each run starts from the initial SME state, as the task storage
-       * the kernel would hand the engine, with an empty register file. */
-      auto start = *initial;
-      std::vector<std::byte> task = initial_sme;
-      arm64::SmeRegisterFile file;
-      if (record.svl != 0U) {
-        file = arm64::SmeRegisterFile{record.svl};
-        start.bind_sme_registers(file);
-        start.defer_sme_load(task.data(), initial->svcr, initial->tpidr2);
-      }
-      auto outcome = engines.run(lane, start, memory_);
-      if (record.svl != 0U)
-        outcome.cpu.write_back_sme_state();
+      const auto lost = lost_store(test_case, program, *initial, *expected);
+      /* Under --inject only the cases a fault fits. */
+      if (fault_ != nullptr &&
+          (!lost.has_value() || !fault_fits(fault_->fault, *lost, regions)))
+        continue;
       ++(lane == Lane::gadgets ? counts_.gadgets : counts_.jit);
-      if (auto failure =
-              check(test_case, program, *initial, *expected, outcome, regions,
-                    {record.svl, expected_sme, task})) {
+      std::optional<std::string> failure;
+      bool lost_attempt = false;
+      unsigned attempts = 0;
+      do {
+        ++attempts;
+        for (const auto &region : regions)
+          region->restore();
+        /* Each run starts from the initial SME state, as the task storage
+         * the kernel would hand the engine, with an empty register file. */
+        auto start = *initial;
+        std::vector<std::byte> task = initial_sme;
+        arm64::SmeRegisterFile file;
+        if (record.svl != 0U) {
+          file = arm64::SmeRegisterFile{record.svl};
+          start.bind_sme_registers(file);
+          start.defer_sme_load(task.data(), initial->svcr, initial->tpidr2);
+        }
+        auto outcome = engines.run(lane, start, memory_);
+        if (record.svl != 0U)
+          outcome.cpu.write_back_sme_state();
+        if (fault_ != nullptr && (attempts == 1U || fault_->every_attempt)) {
+          inject_fault(fault_->fault, *lost, regions, outcome);
+          if (attempts == 1U)
+            ++counts_.injected;
+        }
+        const SmeImages sme{record.svl, expected_sme, task};
+        failure = check(test_case, program, *initial, *expected, outcome,
+                        regions, sme);
+        /* Only the store's bytes differ, as a lost reservation leaves them. */
+        lost_attempt = failure.has_value() && lost.has_value() &&
+                       !check(test_case, program, *initial, *expected,
+                              outcome, regions, sme, &*lost);
+        if (lost_attempt)
+          ++counts_.exclusive_lost;
+      } while (lost_attempt && attempts < exclusive_attempts);
+      if (attempts > 1U) {
+        ++counts_.exclusive_retried;
+        if (!failure.has_value())
+          ++counts_.exclusive_recovered;
+      }
+      if (failure.has_value()) {
+        if (attempts > 1U)
+          *failure += lost_attempt
+                          ? " (the store-exclusive lost its reservation in "
+                            "each of " + std::to_string(attempts) + " attempts)"
+                          : " (attempt " + std::to_string(attempts) + ")";
         report(record, index, lane, *failure);
         if (++counts_.failures == options_.max_failures)
           return false;
@@ -1488,7 +1800,7 @@ private:
         const arm64::CpuState &initial, const arm64::CpuState &expected,
         const Outcome &outcome,
         const std::vector<std::unique_ptr<CaseRegion>> &regions,
-        const SmeImages &sme) const {
+        const SmeImages &sme, const Footprint *unwritten = nullptr) const {
     if (outcome.cpu.gadget_fp_active ||
         outcome.cpu.gadget_indirect_miss != nullptr)
       return std::string{
@@ -1568,7 +1880,7 @@ private:
     if (std::memcmp(translated, installed_.data(), installed_.size()) != 0)
       return std::string{"unexpected code-page write"};
     for (const auto &region : regions)
-      if (auto failure = region->check())
+      if (auto failure = region->check(unwritten))
         return failure;
     return std::nullopt;
   }
@@ -1577,6 +1889,8 @@ private:
    * exported it. */
   void report(const Record &record, std::size_t index, Lane lane,
               std::string_view message) const {
+    if (fault_ != nullptr)
+      return;
     const auto &test_case = record.cases[index];
     const auto &program = record.programs[test_case.program];
     std::string origin{record.producer};
@@ -1594,6 +1908,8 @@ private:
 
   const Corpus &corpus_;
   const Options &options_;
+  /* The fault each lane commits in the case it can, or none. */
+  const FaultPlan *fault_;
   /* What the engines translate for, and what the hardware runs. */
   const ::uml::platform::HostCapabilities host_;
   const ::uml::platform::HostCapabilities &native_host_{
@@ -1857,7 +2173,16 @@ void usage() {
       "  --list             list the selected records without running them\n"
       "  --emitted-registers\n"
       "                     check that neither the gadget region nor a JIT\n"
-      "                     translation of the selected records names x18\n");
+      "                     translation of the selected records names x18\n"
+      "  --passes N         run the selected records at least N times\n"
+      "  --interrupt        interrupt the thread that runs the guest with a\n"
+      "                     timer signal every few microseconds, and go on past\n"
+      "                     --passes until a store-exclusive has lost its\n"
+      "                     reservation to it; fails if none does\n"
+      "  --inject           make each lane commit on purpose the faults of\n"
+      "                     fault_plans in its first attempt at a store-exclusive\n"
+      "                     that discards its status, and check that a lost\n"
+      "                     reservation is retried and anything else is not\n");
 }
 
 [[nodiscard]] std::optional<Options> parse_options(int argc, char **argv) {
@@ -1873,7 +2198,7 @@ void usage() {
         argument == "--case" || argument == "--ordinal" ||
         argument == "--engine" || argument == "--max-failures" ||
         argument == "--assume-host-feature" ||
-        argument == "--assume-sme-svl") {
+        argument == "--assume-sme-svl" || argument == "--passes") {
       const auto text = value();
       if (!text.has_value())
         return std::nullopt;
@@ -1899,6 +2224,10 @@ void usage() {
           if (number == 0U || number > 0xffff'ffffULL)
             return std::nullopt;
           options.ordinals.push_back(static_cast<std::uint32_t>(number));
+        } else if (argument == "--passes") {
+          if (number == 0U)
+            return std::nullopt;
+          options.passes = static_cast<std::size_t>(number);
         } else if (argument == "--assume-sme-svl") {
           if (!arm64::valid_streaming_vector_length(
                   static_cast<unsigned>(number)) ||
@@ -1913,6 +2242,10 @@ void usage() {
       options.max_failures = 1;
     } else if (argument == "--emitted-registers") {
       options.emitted_registers = true;
+    } else if (argument == "--interrupt") {
+      options.interrupt = true;
+    } else if (argument == "--inject") {
+      options.inject = true;
     } else if (argument == "--list") {
       options.list = true;
     } else if (!argument.starts_with("--") && options.pack == nullptr) {
@@ -1924,6 +2257,80 @@ void usage() {
   if (options.pack == nullptr)
     return std::nullopt;
   return options;
+}
+
+/* Host interrupts on demand: an interval timer sends SIGALRM to the process
+ * every few microseconds, and the process has one thread, the one that runs
+ * the guest. Each delivery enters and leaves the kernel on the interrupted
+ * thread, which ends the host's exclusive monitor as a timer tick, an
+ * inter-processor interrupt or a preemption does on a loaded host. The timer
+ * is the kernel's, so no thread of ours has to be scheduled for it to fire,
+ * as one that sent the signals would. The handler does nothing and stays
+ * installed after the timer stops, so that a signal already pending when it
+ * does is not fatal. */
+class InterruptStorm final {
+public:
+  InterruptStorm() {
+    struct sigaction action {};
+    action.sa_handler = [](int) {};
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    if (::sigaction(SIGALRM, &action, nullptr) != 0)
+      host_failure("sigaction");
+    struct itimerval timer {};
+    timer.it_interval.tv_usec = timer.it_value.tv_usec = interval;
+    if (::setitimer(ITIMER_REAL, &timer, nullptr) != 0)
+      host_failure("setitimer");
+  }
+
+  ~InterruptStorm() {
+    struct itimerval off {};
+    (void)::setitimer(ITIMER_REAL, &off, nullptr);
+  }
+
+  InterruptStorm(const InterruptStorm &) = delete;
+  InterruptStorm &operator=(const InterruptStorm &) = delete;
+
+private:
+  /* Microseconds. Shorter fills the host with timer interrupts for no more
+   * losses; longer loses fewer. */
+  static constexpr suseconds_t interval = 5;
+};
+
+/* Runs each fault plan over the selected records and reports whether the
+ * runner took every fault as the plan says: a lost reservation retried until
+ * the case agreed, and anything else failed in the attempt it was made in. */
+[[nodiscard]] bool inject_faults(const Corpus &corpus, const Options &options,
+                                 const std::vector<const Record *> &records) {
+  bool good = true;
+  auto quiet = options;
+  quiet.max_failures = 0;
+  for (const auto &plan : fault_plans) {
+    const auto runner = std::make_unique<Runner>(corpus, quiet, &plan);
+    (void)runner->run(records);
+    const auto &counts = runner->counts();
+    const auto run = counts.gadgets + counts.jit;
+    const bool as_planned =
+        run != 0U && counts.injected == run &&
+        (plan.retried
+             /* The attempt after the fault may itself be a real loss. */
+             ? counts.failures == 0U && counts.exclusive_lost >= run &&
+                   counts.exclusive_retried == run &&
+                   counts.exclusive_recovered == run
+             : counts.failures == run && counts.exclusive_recovered == 0U &&
+                   (plan.every_attempt
+                        ? counts.exclusive_lost == run * exclusive_attempts &&
+                              counts.exclusive_retried == run
+                        : counts.exclusive_lost == 0U &&
+                              counts.exclusive_retried == 0U));
+    std::printf("  inject %-16s run %3zu  failed %3zu  retried %3zu  "
+                "recovered %3zu  %s\n",
+                plan.name, run, counts.failures, counts.exclusive_retried,
+                counts.exclusive_recovered,
+                as_planned ? "as planned" : "NOT AS PLANNED");
+    good = good && as_planned;
+  }
+  return good;
 }
 
 [[nodiscard]] bool record_selected(const Record &record,
@@ -1979,9 +2386,25 @@ int main(int argc, char **argv) {
                              .count());
       return scan.passed() ? 0 : 1;
     }
+    if (options->inject)
+      return inject_faults(corpus, *options, records) ? 0 : 1;
     /* The runner owns a full software TLB; keep it off the main stack. */
     const auto runner = std::make_unique<Runner>(corpus, *options);
-    const bool completed = runner->run(records);
+    std::optional<InterruptStorm> storm;
+    if (options->interrupt)
+      storm.emplace();
+    const auto deadline = std::chrono::steady_clock::now() + interrupt_deadline;
+    bool completed = true;
+    for (std::size_t pass = 1; completed; ++pass) {
+      completed = runner->run(records);
+      const bool enough = pass >= options->passes &&
+                          (!options->interrupt ||
+                           runner->counts().exclusive_lost != 0U);
+      if (enough || (options->interrupt &&
+                     std::chrono::steady_clock::now() >= deadline))
+        break;
+    }
+    storm.reset();
     const auto &counts = runner->counts();
     const auto elapsed = std::chrono::duration<double>(
                              std::chrono::steady_clock::now() - started)
@@ -2007,6 +2430,17 @@ int main(int argc, char **argv) {
         std::printf(" %.*s=%zu", static_cast<int>(feature.size()),
                     feature.data(), count);
       std::printf("\n");
+    }
+    if (counts.exclusive_lost != 0U)
+      std::printf("store-exclusives that lost their reservation: %zu "
+                  "attempts, %zu cases run again, %zu passed\n",
+                  counts.exclusive_lost, counts.exclusive_retried,
+                  counts.exclusive_recovered);
+    /* A storm that never ended a reservation proved nothing. */
+    if (options->interrupt && counts.exclusive_lost == 0U) {
+      std::fprintf(stderr, "--interrupt: no store-exclusive lost its "
+                           "reservation, so none was interrupted\n");
+      return 1;
     }
     return counts.failures == 0U ? 0 : 1;
   } catch (const std::exception &error) {

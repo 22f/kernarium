@@ -601,6 +601,14 @@ blocker in every one of them.
   `arm64-instruction-corpus-*` and `arm64-absent-*` tests that re-derive them
   from their generators, and records that need SME or FEAT_AFP/BF16 run only on
   a host that has them.
+  The runner also runs a case again, up to 16 attempts in all, when it runs
+  one store-exclusive that discards its status and the only difference from the
+  pack is that store's bytes unwritten: a spurious failure the architecture
+  allows and a guest's loop would absorb.
+  `arm64-instruction-corpus-exclusive-interrupted` provokes it on the gadget
+  lane with the host interrupting the guest's thread, and `-exclusive-injected`
+  makes the first attempt end as a lost reservation in both lanes and requires
+  that only a plain loss is retried.
 - `arm64-emitted-registers` requires that no host code names x18, which Darwin
   clears when it interrupts a thread.
 - `arm64-instruction-corpus-invalid-encoding` requires every

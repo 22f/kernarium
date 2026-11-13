@@ -68,6 +68,19 @@ engine marked them written, FPCR and FPSR as the deferred image reports them).
 A case that expects a vector write therefore fails for an engine that did not
 load the vectors first.
 
+A store-exclusive may fail without cause, as the architecture allows: the
+engines run the host's own exclusives, and the host's monitor ends at any
+interrupt or preemption between the load and the store. A guest loops on the
+status; a case that discards it (`STXR WZR, ...`) cannot, and runs once. The
+runner runs such a case again, up to 16 attempts in all, when its program has
+one store-exclusive, its retirement is exact, and the only difference from the
+pack is that the store's own bytes hold what the case started with. A store
+that never writes, writes other bytes or writes elsewhere still fails, and
+the runner refuses a pack with a completing store-exclusive that reports its
+status and does not retire a pattern. `--interrupt` interrupts the thread that
+runs the guest until a store has lost its reservation, and `--inject` makes
+each lane commit on purpose the faults the retry must take or refuse.
+
 ### Validator relations
 
 | Relation | Accepted result |
