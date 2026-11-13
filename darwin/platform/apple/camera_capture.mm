@@ -431,8 +431,8 @@ struct RunningCamera : StreamCache {
     AVCaptureDeviceInput* input {};
     AVCaptureVideoDataOutput* videoOutput {};
     AVCapturePhotoOutput* photoOutput {};
-    // When the admission that raised the photo output's maximum was committed (host nanoseconds); zero if it did not
-    // (stillSettleNanoseconds).
+    // When the admission whose photo maximum exceeds the format's size was committed (host nanoseconds); zero if
+    // it does not (stillSettleNanoseconds).
     std::uint64_t photoMaximumRaisedAt {};
     UMLCameraOutputDelegate* delegate {};
     AVCaptureConnection* connection {};
@@ -893,11 +893,11 @@ public:
         if (!prepareStill(camera)) return false;
         AVCapturePhotoOutput* output = running.photoOutput;
         AVCapturePhotoSettings* settings = nil;
-        // The pipeline applies a raised maximum some time after the session commits it, and a capture that starts
-        // before is served at the size from before: the first still waits out the rest of that time. Another attempt
-        // of the request (stillSizeOutcome) has waited.
+        // The pipeline applies a maximum that exceeds the format's size some time after the session commits it, and a
+        // capture that starts before is served at the format's size: the first still waits out the rest of that time.
+        // Another attempt of the request (stillSizeOutcome) has waited.
         if (const std::uint64_t wait = attempt == 1 ? stillSettleNanoseconds(running.photoMaximumRaisedAt, hostNow()) : 0; wait != 0) {
-            std::fprintf(stderr, "Camera: camera %zu: the first still waits %llu ms for the photo output's raised maximum\n", camera,
+            std::fprintf(stderr, "Camera: camera %zu: the first still waits %llu ms for the photo output's maximum beyond its format\n", camera,
                          static_cast<unsigned long long>(wait / 1000000));
             [NSThread sleepForTimeInterval:double(wait) * 1e-9];
         }
@@ -1255,7 +1255,7 @@ private:
         UMLCameraOutputDelegate* newDelegate = nil;
         AVCaptureConnection* newConnection = nil;
         AVCapturePhotoOutput* newPhoto = nil;
-        bool newPhotoRaised = false;
+        bool newPhotoExceedsFormat = false;
         AdmitPlan plan;
         plan.addInput = running.input == nil;
         plan.activate = plan.addInput || video;
@@ -1345,10 +1345,8 @@ private:
                 // of the output's source: set after the output is attached.
                 const auto setMaximum = [&](CameraStillSize size) -> bool {
                     @try {
-                        const CMVideoDimensions before = output.maxPhotoDimensions;
                         output.maxPhotoDimensions = CMVideoDimensions {std::int32_t(size.width), std::int32_t(size.height)};
-                        newPhotoRaised = photoMaximumIsRaised(
-                            {std::uint32_t(std::max(0, int(before.width))), std::uint32_t(std::max(0, int(before.height)))}, size);
+                        newPhotoExceedsFormat = photoMaximumExceedsFormat({anchor->facts.width, anchor->facts.height}, size);
                         return true;
                     } @catch (NSException* exception) {
                         // The first refusal's detail is the one logged; the admission's own
@@ -1417,7 +1415,7 @@ private:
         }
         if (newPhoto != nil) {
             running.photoOutput = newPhoto;
-            running.photoMaximumRaisedAt = newPhotoRaised ? hostNow() : 0;
+            running.photoMaximumRaisedAt = newPhotoExceedsFormat ? hostNow() : 0;
         }
         running.format = anchor->format;
         // The timing written again is known; what was applied before is written again after it.

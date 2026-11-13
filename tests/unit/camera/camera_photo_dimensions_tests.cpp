@@ -124,14 +124,14 @@ void aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails()
     require(stillAttemptLimit >= 2, "one retry at least");
 }
 
-void aRaisedMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill()
+void aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill()
 {
-    require(photoMaximumIsRaised({4032, 3024}, {8064, 6048}), "a 48 MP maximum over the 12 MP default is a raise");
-    require(!photoMaximumIsRaised({4032, 3024}, {4032, 3024}), "the default itself is not");
-    require(!photoMaximumIsRaised({8064, 6048}, {4032, 3024}), "nor is a smaller one");
-    require(!photoMaximumIsRaised({0, 0}, {0, 0}), "nor is no size");
+    require(photoMaximumExceedsFormat({4032, 3024}, {8064, 6048}), "a 48 MP maximum on a 12 MP format needs the sensor's other mode");
+    require(!photoMaximumExceedsFormat({4032, 3024}, {4032, 3024}), "the format's own size is served from the first capture");
+    require(!photoMaximumExceedsFormat({4032, 3024}, {2016, 1512}), "so is a smaller one");
+    require(!photoMaximumExceedsFormat({0, 0}, {0, 0}), "no size is not beyond anything");
     // A product that does not overflow 32 bits.
-    require(photoMaximumIsRaised({65535, 65535}, {65535, 65536}), "wide sizes compare in 64 bits");
+    require(photoMaximumExceedsFormat({65535, 65535}, {65535, 65536}), "wide sizes compare in 64 bits");
 
     constexpr std::uint64_t settle = photoOutputSettleNanoseconds;
     constexpr std::uint64_t raisedAt = 5'000'000'000;
@@ -311,7 +311,7 @@ int main()
     aCaptureWithoutAJpegTakesTheSmallestSize();
     theResolvedSizeIsTheRequestOrItIsRefused();
     aPhotoOfAnotherSizeIsMadeAgainOnceAndThenFails();
-    aRaisedMaximumIsGivenTimeToTakeEffectBeforeTheFirstStill();
+    aMaximumBeyondTheFormatIsGivenTimeToTakeEffectBeforeTheFirstStill();
     theOutputIsAttachedBeforeItsMaximumIsSet();
     aMaximumTheSourceRefusesDetachesTheOutput();
     anOutputThatCannotBeAttachedGetsNoMaximum();

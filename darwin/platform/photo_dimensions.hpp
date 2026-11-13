@@ -95,18 +95,20 @@ enum class PhotoOutputPreparation : std::uint8_t {
 // alone has no processed photo), which is not a different size.
 [[nodiscard]] bool resolvedSizeIsRequested(CameraStillSize resolved, CameraStillSize requested) noexcept;
 
-// Whether setting a photo output's maximum to `after` raises what it made
-// before (`before`, its own default): the pipeline is then reconfigured after
-// the session commits.
-[[nodiscard]] bool photoMaximumIsRaised(CameraStillSize before, CameraStillSize after) noexcept;
+// Whether a photo output's maximum is larger than the size its format makes
+// (the format's own width and height): the sensor then changes mode for the
+// photo, and the pipeline is reconfigured after the session commits. A
+// maximum within the format's size (12 MP on a 12 MP format) is served from
+// the first capture.
+[[nodiscard]] bool photoMaximumExceedsFormat(CameraStillSize format, CameraStillSize maximum) noexcept;
 
-// The pipeline takes this long after a raised maximum is committed before a
-// capture is served at the new size.
+// The pipeline takes this long after a maximum that exceeds its format is
+// committed before a capture is served at the new size.
 inline constexpr std::uint64_t photoOutputSettleNanoseconds = 300'000'000;
 
 // How long a capture waits before it starts: the rest of the settle time
-// since `raisedAt` (host nanoseconds when the raised maximum was committed;
-// zero when it was not raised), zero once it has passed.
+// since `raisedAt` (host nanoseconds when the maximum that exceeds its format
+// was committed; zero when it does not), zero once it has passed.
 [[nodiscard]] std::uint64_t stillSettleNanoseconds(std::uint64_t raisedAt, std::uint64_t now) noexcept;
 
 // What a finished capture whose photo is not the size asked for leads to. A
