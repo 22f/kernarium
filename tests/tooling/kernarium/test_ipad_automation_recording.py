@@ -162,6 +162,8 @@ class StartAndSuperviseTests(unittest.TestCase):
         with mock.patch.object(
             automation.subprocess, "Popen",
             lambda command, **keywords: FakeProcess(calls, command, **keywords),
+        ), mock.patch.object(
+            automation.ios_device_reports, "preflight"
         ), contextlib.redirect_stderr(errors):
             status = automation.command_start(self.options("start", "--wait", "1"))
         return status, errors.getvalue(), calls
@@ -210,6 +212,45 @@ class StartAndSuperviseTests(unittest.TestCase):
         self.assertEqual(bundle.stem, log.stem)
         self.assertEqual(record["result_bundle"], str(bundle))
         self.assertFalse(bundle.exists(), "xcodebuild refuses an existing bundle")
+
+    def test_start_makes_room_for_reports_before_it_starts_anything(self) -> None:
+        self.run_file(format_two(target()))
+        order: list[str] = []
+
+        def popen(command, **keywords):
+            order.append("supervisor")
+            return FakeProcess([], command, **keywords)
+
+        with mock.patch.object(automation.subprocess, "Popen", popen), \
+                mock.patch.object(
+                    automation.ios_device_reports, "preflight",
+                    side_effect=lambda *a, **k: order.append("reports")
+                ) as preflight, contextlib.redirect_stderr(io.StringIO()):
+            automation.command_start(self.options("start", "--wait", "1"))
+        self.assertEqual(order, ["reports", "supervisor"])
+        options, applications, directory = preflight.call_args.args
+        self.assertEqual(options.device, DEVICE)
+        self.assertEqual(directory, self.state / DEVICE)
+        self.assertIn("KernariumAutomation-Runner",
+                      preflight.call_args.kwargs["extra_processes"])
+
+    def test_start_refuses_when_the_reports_cannot_be_made_room_for(self) -> None:
+        self.run_file(format_two(target()))
+        calls: list = []
+        errors = io.StringIO()
+        with mock.patch.object(
+            automation.subprocess, "Popen",
+            lambda command, **keywords: FakeProcess(calls, command, **keywords),
+        ), mock.patch.object(
+            automation.ios_device_reports, "preflight",
+            side_effect=automation.ios_device_reports.DeviceError(
+                "still short of 5 free slots"),
+        ), contextlib.redirect_stderr(errors):
+            status = automation.command_start(self.options("start", "--wait", "1"))
+        self.assertEqual(status, automation.EXIT_FAILED)
+        self.assertEqual(calls, [])
+        self.assertIn("still short of 5 free slots", errors.getvalue())
+        self.assertFalse((self.state / DEVICE / "host.json").exists())
 
     def test_the_supervisor_gives_xcodebuild_that_result_bundle(self) -> None:
         bundle = self.state / DEVICE / "host-20260101-000000.xcresult"

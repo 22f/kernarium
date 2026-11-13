@@ -51,6 +51,8 @@ import sys
 import tempfile
 import time
 
+import ios_device_reports
+
 # ``brk #0xf00d``.
 REQUEST_WORD = 0xD43E01A0
 PREPARE = 1
@@ -376,8 +378,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="how long to wait for the launched process to be listed")
     parser.add_argument("--hold-seconds", type=float, default=600)
     parser.add_argument("--serve-timeout", type=float, default=900)
+    ios_device_reports.add_arguments(parser)
     options = parser.parse_args(argv)
     options.log.mkdir(parents=True, exist_ok=True)
+    ios_device_reports.preflight(
+        options, [], options.log, extra_processes=[options.process_name])
     console_log = options.log / "console.log"
     serve_log = options.log / "jit-debugger.log"
     # What the device lists before the launch is not the launch's process.

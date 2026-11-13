@@ -87,11 +87,13 @@ class FakeDevice:
                 report = pathlib.Path(
                     arguments[arguments.index("--json-output") + 1]
                 )
+                # The diagnostic reports the runners count first: none held.
+                held = {} if "systemCrashLogs" in arguments else self.documents
                 report.write_text(json.dumps({"result": {"files": [
                     {"relativePath": name,
                      "metadata": {"size": len(contents)},
                      "resources": {"isDirectory": False}}
-                    for name, contents in self.documents.items()
+                    for name, contents in held.items()
                 ]}}))
             elif arguments[:3] == ["device", "copy", "to"]:
                 source = pathlib.Path(

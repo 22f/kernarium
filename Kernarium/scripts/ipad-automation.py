@@ -80,6 +80,12 @@ RECORDING_SETTINGS = {
 }
 SCRIPT = pathlib.Path(__file__).resolve()
 CHECKOUT = SCRIPT.parents[2]
+sys.path.insert(0, str(CHECKOUT / "tests" / "integration" / "support"))
+import ios_device_reports  # noqa: E402
+
+# The processes whose diagnostic reports a host session needs free slots for:
+# the applications it drives and its own runner.
+REPORT_PROCESSES = ("KernariumAutomation-Runner",)
 
 # XCTest types a key from the character it produces. On a device it delivers
 # nothing for the characters of XCUIKeyboardKey.return ("\r"), .delete
@@ -376,6 +382,15 @@ def command_start(options):
     seconds = int(options.hours * 3600)
     nonce = uuid.uuid4().hex
     directory = state_dir(options)
+    try:
+        # Before anything starts: a kill during the session must leave a report.
+        ios_device_reports.preflight(
+            options, [], directory,
+            extra_processes=(*ios_device_reports.APPLICATION_PROCESSES,
+                             *REPORT_PROCESSES))
+    except ios_device_reports.DeviceError as error:
+        log(str(error))
+        return EXIT_FAILED
     stamp = time.strftime("%Y%m%d-%H%M%S")
     log_path = directory / f"host-{stamp}.log"
     result_bundle = directory / f"host-{stamp}.xcresult"
@@ -551,6 +566,7 @@ def parse(argv):
     start.add_argument("--hours", type=float, default=8, help="host lifetime (default: 8)")
     start.add_argument("--wait", type=int, default=240,
                        help="seconds to wait for the host to serve (default: 240)")
+    ios_device_reports.add_arguments(start)
     supervise = commands.add_parser("_supervise")
     supervise.add_argument("--xctestrun", required=True)
     supervise.add_argument("--result-bundle", required=True)

@@ -284,7 +284,14 @@ On a connected iOS device, Android runs go through Andarium
 (`tests/perf/run_ios_device_android.py`, [`Andarium/README.md`](../Andarium/README.md#automation))
 and Kernarium's device runners keep Linux; both share
 `tests/integration/support/ios_device.py`, and their tooling tests run against
-fakes, so no device is needed. Android recovery qualification uses a fresh
+fakes, so no device is needed. A device run starts with at least five free
+slots of JetsamEvent reports and of each tested process's crash reports, since
+iOS caps each kind and drops the next report once it is full. The shared
+`tests/integration/support/ios_device_reports.py` preflight moves a short
+kind's reports off the device into `--device-reports-dir` (outside the
+repository) and fails the run if the slots stay short; it needs
+libimobiledevice's `idevicecrashreport` only then, and
+`--leave-device-reports` opts out. Android recovery qualification uses a fresh
 disposable bundle with `TEST_RUNNER_KERNARIUM_ANDROID_BOOT_MODE=recovery`;
 never run wipe checks against an existing user bundle.
 

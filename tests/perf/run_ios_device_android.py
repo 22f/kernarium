@@ -47,6 +47,7 @@ import android_launch_suite as launch_suite  # noqa: E402
 import android_provision  # noqa: E402
 import andarium  # noqa: E402
 import ios_device  # noqa: E402
+import ios_device_reports  # noqa: E402
 import ios_jit_debugger  # noqa: E402
 
 DEFAULT_ARTIFACT_ROOT = REPOSITORY / ".build" / "ios-device-android"
@@ -161,6 +162,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--artifact-root", type=Path,
                         default=DEFAULT_ARTIFACT_ROOT)
+    ios_device_reports.add_arguments(parser)
     options = parser.parse_args(argv)
     if options.jit_debugger is None:
         options.jit_debugger = "stand-in" if options.engine == "jit" else "none"
@@ -641,6 +643,8 @@ class Run:
         """Install, boot, drive, power off; fills the summary."""
         options, plan = self.options, self.plan
         self.check_unlocked()
+        ios_device_reports.preflight(
+            options, [andarium.APPLICATION], self.artifact)
         if options.app is not None:
             app = options.app.resolve()
             andarium.require_automation_app(app)

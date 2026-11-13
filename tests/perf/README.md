@@ -25,8 +25,11 @@ its script own its options and its output.
   host, never write into the application container, and never pass
   `--remove-existing-content`. Hold exclusive use of the device for the whole
   run and settle about 45 s between runs, because iOS releases the previous
-  guest's wired window asynchronously. Attached Instruments or other sampling
-  turns a run into a diagnostic capture.
+  guest's wired window asynchronously. Every device runner first makes room
+  for diagnostic reports ([testing](../../docs/testing.md)): reports it moves
+  off the device go to `--device-reports-dir` or `device-reports/` in the
+  run's output directory. Attached Instruments or other sampling turns a run
+  into a diagnostic capture.
 - Summarize an accepted or rejected trial in
   [`../../docs/optimization-history.md`](../../docs/optimization-history.md).
   Do not add raw profiles, temporary paths, or a separate investigation

@@ -38,6 +38,7 @@ DEVICE = "fake-device"
 EXISTING = {"keep.txt": b"the owner's file", "rootfs.erofs": b"x" * 64}
 DEVICECTL_ALLOWED = (
     ["device", "info", "lockState"],
+    ["device", "info", "files"],
     ["device", "install", "app"],
     ["device", "process", "launch"],
 )
@@ -106,7 +107,8 @@ class Scratch:
             (self.documents / name).write_bytes(contents)
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        for tool in ("xcrun", "iproxy", "adb", "codesign"):
+        for tool in ("xcrun", "iproxy", "adb", "codesign",
+                     "idevicecrashreport"):
             wrapper = bin_dir / tool
             wrapper.write_text(
                 f"#!/bin/sh\nexec {sys.executable} -S -B "
@@ -191,6 +193,61 @@ class AndroidRunnerTests(unittest.TestCase):
         first_adb = order.index("adb")
         self.assertIn("launch", order[:first_adb])
         self.assertIn("iproxy", order[:first_adb])
+
+    def hold_reports(self, count: int) -> None:
+        """The device holds this many (invented) JetsamEvent reports."""
+        names = [f"JetsamEvent-2026-01-{day + 1:02d}-0{day:05d}.ips"
+                 for day in range(count)]
+        (self.scratch.state / "crash-logs.txt").write_text(
+            "\n".join(names) + "\n")
+
+    def test_a_short_report_store_is_emptied_before_anything_is_installed(
+        self
+    ) -> None:
+        self.hold_reports(23)
+        outcome = self.run_android(
+            "--app", str(self.scratch.app(automation=True)),
+            "--script", str(self.scratch.script))
+        self.assertEqual(outcome.status, 0, outcome.err)
+        self.assert_only_allowed_devicectl(outcome)
+        steps = [
+            "devicectl " + " ".join(c["args"][:3]) if c["tool"] == "devicectl"
+            else c["tool"] for c in outcome.commands]
+        self.assertLess(steps.index("devicectl device info files"),
+                        steps.index("idevicecrashreport"))
+        self.assertLess(steps.index("idevicecrashreport"),
+                        steps.index("devicectl device install app"))
+        self.assertLess(steps.index("idevicecrashreport"),
+                        steps.index("launch"))
+        (move,) = outcome.tool("idevicecrashreport")
+        self.assertEqual(move["args"][:4], ["-u", DEVICE, "-f", "JetsamEvent-"])
+        self.assertEqual(
+            len(list(outcome.artifacts.glob("*/device-reports/*/*"))), 23)
+        self.assertEqual((self.scratch.state / "crash-logs.txt").read_text().strip(), "")
+        self.assertIn("JetsamEvent 23 -> 0", outcome.out)
+
+    def test_a_store_that_cannot_be_freed_stops_the_run_untouched(self) -> None:
+        self.hold_reports(25)
+        outcome = self.run_android(
+            "--app", str(self.scratch.app(automation=True)),
+            "--script", str(self.scratch.script),
+            environment={"FAKE_REPORT_MOVE": "keep"})
+        self.assertEqual(outcome.status, 1)
+        self.assertIn("still short of 5 free slots", outcome.err)
+        self.assertEqual(outcome.devicectl("device", "install"), [])
+        self.assertEqual(outcome.tool("launch"), [])
+        self.assertEqual(outcome.tool("adb"), [])
+
+    def test_a_caller_may_leave_the_old_reports_in_place(self) -> None:
+        self.hold_reports(25)
+        outcome = self.run_android(
+            "--app", str(self.scratch.app(automation=True)),
+            "--script", str(self.scratch.script), "--leave-device-reports")
+        self.assertEqual(outcome.status, 0, outcome.err)
+        self.assertEqual(outcome.tool("idevicecrashreport"), [])
+        self.assertEqual(
+            len((self.scratch.state / "crash-logs.txt").read_text().split()), 25)
+        self.assertIn("left in place", outcome.out)
 
     def test_a_run_boots_works_powers_off_and_leaves_nothing(self) -> None:
         scratch = self.scratch

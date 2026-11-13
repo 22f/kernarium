@@ -7,7 +7,11 @@ The tooling tests put one executable wrapper per tool on PATH; each runs
 named by ``FAKE_STATE``: ``documents/`` is the application's container (the
 runner must leave it as it is), ``commands.jsonl`` records every invocation,
 and ``poweroff`` is written by the guest's power-off command and ends the fake
-console. ``FAKE_*`` variables choose a failure: ADB (``never-ready``), CONSOLE
+console. ``crash-logs.txt`` lists, one file name per line, the diagnostic reports the
+device holds (synthetic names: the tests invent them), and the fake
+``idevicecrashreport`` moves the matching ones into its directory argument,
+leaving an empty file of the same name; ``FAKE_REPORT_MOVE=keep`` makes it
+move nothing. ``FAKE_*`` variables choose a failure: ADB (``never-ready``), CONSOLE
 (``silent`` after power off), AUTH (``missing`` line), FOCUS (``alert`` or
 ``stuck``), GUEST (``dies``) and LOCKED. ``FAKE_START_AFTER=TOOL:OTHER``
 holds TOOL (``launch`` or ``iproxy``) back until OTHER has recorded itself,
@@ -72,11 +76,54 @@ def devicectl(arguments: list[str]) -> int:
         print(f"passcodeRequired: {'true' if locked else 'false'}")
     elif kind == ["device", "install", "app"]:
         pass
+    elif kind == ["device", "info", "files"]:
+        return info_files(arguments)
     elif kind == ["device", "process", "launch"]:
         return launch(arguments)
     else:
         print(f"unexpected devicectl: {arguments}", file=sys.stderr)
         return 99
+    return 0
+
+
+def option(arguments: list[str], name: str) -> str:
+    return arguments[arguments.index(name) + 1]
+
+
+def crash_logs() -> list[str]:
+    path = STATE / "crash-logs.txt"
+    return path.read_text().split() if path.exists() else []
+
+
+def info_files(arguments: list[str]) -> int:
+    """The diagnostic-report listing; any other domain is not modelled."""
+    if option(arguments, "--domain-type") != "systemCrashLogs":
+        print(f"unexpected devicectl: {arguments}", file=sys.stderr)
+        return 99
+    if os.environ.get("FAKE_REPORT_LIST") == "fail":
+        print("ERROR: the device is not available", file=sys.stderr)
+        return 1
+    files = [{"relativePath": name, "resources": {"isDirectory": False},
+              "metadata": {"size": 1}} for name in crash_logs()]
+    pathlib.Path(option(arguments, "--json-output")).write_text(
+        json.dumps({"result": {"files": files}}))
+    return 0
+
+
+def idevicecrashreport(arguments: list[str]) -> int:
+    """``-u UDID -f FILTER DIRECTORY``: move the reports whose name has FILTER."""
+    record("idevicecrashreport", arguments)
+    if os.environ.get("FAKE_REPORT_MOVE") == "keep":
+        return 0
+    wanted, directory = option(arguments, "-f"), pathlib.Path(arguments[-1])
+    directory.mkdir(parents=True, exist_ok=True)
+    kept = []
+    for name in crash_logs():
+        if wanted in name:
+            (directory / name).write_text("")
+        else:
+            kept.append(name)
+    (STATE / "crash-logs.txt").write_text("\n".join(kept) + ("\n" if kept else ""))
     return 0
 
 
@@ -262,7 +309,8 @@ def main() -> int:
     if tool == "codesign":
         record("codesign", arguments)
         return 0
-    return {"iproxy": iproxy, "adb": adb}[tool](arguments)
+    return {"iproxy": iproxy, "adb": adb,
+            "idevicecrashreport": idevicecrashreport}[tool](arguments)
 
 
 if __name__ == "__main__":
