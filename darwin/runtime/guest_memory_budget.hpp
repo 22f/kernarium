@@ -136,11 +136,14 @@ inline constexpr unsigned measured_vcpu_maximum =
  * the charge above the budget by what it stored. The table is the largest such
  * excess (a charge-time high-water mark) of an Android guest's boot, the first
  * launches of its applications and the simultaneous start of several of them,
- * rounded up to 1 MiB. A guest that keeps every vCPU translating its own large
+ * rounded up to a whole MiB and never under 1 (a single executor never
+ * exceeded its budget). A guest that keeps every vCPU translating its own large
  * address space holds a working set the budget cannot hold and exceeds it by
  * more (tens of MiB at 4 to 8 vCPUs); that is not counted. */
 inline constexpr std::array<std::uint32_t, 8> gadget_cache_burst_mib{
 	1, 1, 1, 1, 1, 1, 1, 2};
+static_assert(gadget_cache_burst_mib.size() == measured_vcpu_maximum,
+	"x(v) has an entry for every vCPU count the cap is measured for");
 
 /* x(v), in bytes; a count of zero is one, and a count above the last measured
  * one has the last one's. */
