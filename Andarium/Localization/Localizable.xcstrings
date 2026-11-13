@@ -4504,6 +4504,29 @@
         }
       }
     },
+    "iOS may close Andarium." : {
+      "comment" : "Text of the notice shown when iOS is critically short of memory: iOS may end the Andarium app. Andarium is the app's name.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOSによってAndariumが終了される可能性があります。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能会关闭Andarium。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS可能會關閉Andarium。"
+          }
+        }
+      }
+    },
     "It could not be asked to power off. Try again, or close Andarium and open it again." : {
       "localizations" : {
         "ja" : {
@@ -4947,6 +4970,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "記憶體%@"
+          }
+        }
+      }
+    },
+    "Memory is critically low" : {
+      "comment" : "Title of the notice shown over the running guest when iOS is critically short of memory.",
+      "localizations" : {
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリが著しく不足しています"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存严重不足"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體嚴重不足"
           }
         }
       }

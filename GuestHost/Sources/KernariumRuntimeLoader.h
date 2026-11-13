@@ -31,6 +31,11 @@ typedef void (^KernariumLocationReceiverHandler)(BOOL powered);
  * KERNARIUM_RUNTIME_CAMERA_STATE_ value), delivered on the main queue in the
  * order the states happened. */
 typedef void (^KernariumCameraStateHandler)(int state);
+/* A level the system's memory pressure reached the host at (a
+ * KERNARIUM_RUNTIME_MEMORY_PRESSURE_ value) and what the host does about it
+ * (a KERNARIUM_RUNTIME_MEMORY_RESPONSE_ value), delivered on the main queue in
+ * the order the levels arrived. */
+typedef void (^KernariumMemoryPressureHandler)(int level, int response);
 /* The guest's keyboard lights, an application's pointer capture or the guest's
  * registration of its keyboard or pointer changed (a
  * KERNARIUM_RUNTIME_INPUT_STATUS_ value, and whether it is on), delivered on
@@ -349,6 +354,15 @@ void kernarium_runtime_loader_set_camera_state_handler(
  * errno: -ENODEV when no runtime is loaded, -EINVAL for a value the runtime
  * refuses. */
 int kernarium_runtime_loader_set_camera_rotation(uint32_t degrees);
+/* Receives the levels of the system's memory pressure and the host's response
+ * (see kernarium_runtime_set_memory_pressure_callback_function), or none for a
+ * nil handler. It may be set before a runtime is selected. Each report is
+ * queued to the main queue as one block that holds the handler of its time, so
+ * the number of reports waiting is not bounded while the main queue is busy, and
+ * setting or clearing the handler does not cancel the ones already queued: they
+ * reach the handler they were queued for. */
+void kernarium_runtime_loader_set_memory_pressure_handler(
+    KernariumMemoryPressureHandler _Nullable handler);
 #ifndef UML_APP_STORE_APPLICATION
 /* Whether the selected runtime is an automation build and the launch asked it,
  * through the environment, to start the background job with the guest. Always
