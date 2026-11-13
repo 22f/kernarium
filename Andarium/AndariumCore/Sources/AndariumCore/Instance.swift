@@ -378,12 +378,19 @@ enum CloneFile {
     }
 }
 
-/// An instance's files: `data.img`, `instance.json` and the snapshot of an
-/// update, in one directory.
+/// An instance's files: `data.img`, `instance.json`, the installation's
+/// identity and the snapshot of an update, in one directory.
 public struct InstanceFiles: Sendable {
     public static let dataDisk = "data.img"
     public static let stateFile = "instance.json"
     public static let snapshotPrefix = "data.img.pre-"
+    /// The installation's serial number and eth0 address, which the runtime
+    /// makes beside the data disk (`darwin/device/block/android_identity.hpp`
+    /// owns the file). It belongs to the data disk's life: an update, a resize,
+    /// a snapshot restore and the guest's own factory reset leave it, and an
+    /// erase deletes it, so the next installation gets values of its own. The
+    /// temporary name a write of it uses starts with the same text.
+    public static let identityFile = "identity.json"
 
     public var directory: URL
 
@@ -393,6 +400,7 @@ public struct InstanceFiles: Sendable {
 
     public var data: URL { directory.appendingPathComponent(Self.dataDisk) }
     public var state: URL { directory.appendingPathComponent(Self.stateFile) }
+    public var identity: URL { directory.appendingPathComponent(Self.identityFile) }
     /// The user's snapshots of the data (`SnapshotStore`), which an erase
     /// deletes with the rest.
     public var snapshots: URL { directory.appendingPathComponent(SnapshotStore.directoryName, isDirectory: true) }
@@ -456,14 +464,14 @@ public struct InstanceFiles: Sendable {
         return formatter.string(from: date)
     }
 
-    /// Deletes the data disk, the record, the copies an update left and the
-    /// user's snapshots, trying each of them; the first failure is thrown once
-    /// the rest are done.
+    /// Deletes the data disk, the record, the installation's identity, the
+    /// copies an update left and the user's snapshots, trying each of them;
+    /// the first failure is thrown once the rest are done.
     public func removeAll() throws {
         let manager = FileManager.default
         var doomed = [data, state]
         for entry in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? []
-        where entry.hasPrefix(Self.snapshotPrefix) {
+        where entry.hasPrefix(Self.snapshotPrefix) || entry.hasPrefix(Self.identityFile) {
             doomed.append(directory.appendingPathComponent(entry))
         }
         doomed.append(snapshots)
@@ -515,6 +523,12 @@ public struct InstanceFiles: Sendable {
         if action == .create {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             try? manager.removeItem(at: data)
+            // A disk made at the next start is a new installation, whatever
+            // identity an earlier one left beside it.
+            for entry in (try? manager.contentsOfDirectory(atPath: directory.path)) ?? []
+            where entry.hasPrefix(Self.identityFile) {
+                try? manager.removeItem(at: directory.appendingPathComponent(entry))
+            }
             // A data disk that is made at the next start holds nothing.
             if !manager.fileExists(atPath: data.path) { try PartialSweepLedger.markSettled(in: directory) }
             let created = InstanceState(creating: release, at: when)
