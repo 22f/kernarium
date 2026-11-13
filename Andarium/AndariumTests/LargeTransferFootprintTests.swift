@@ -119,8 +119,14 @@ struct LargeTransferFootprintTests {
         var base = Data(count: 3 << 20)
         for index in 0..<base.count { base[index] = UInt8(truncatingIfNeeded: index &* 7 &+ index >> 9) }
         let last = Data((0..<4096).map { UInt8(truncatingIfNeeded: $0 &* 13) })
+        let toc = BundleToc(variants: [
+            BundleToc.Variant(apks: [
+                .master("splits/base-master.apk"), .split("splits/base-xxhdpi.apk", "config.xxhdpi"),
+                .split("splits/base-xxxhdpi.apk", "config.xxxhdpi"), .split("splits/base-ldrtl.apk", "config.ldrtl"),
+            ])
+        ])
         let url = try ContainerFixture.write([
-            ContainerEntry("toc.pb", Data([1])),
+            ContainerEntry("toc.pb", toc.build()),
             ContainerEntry("splits/base-master.apk", base),
             ContainerEntry("splits/base-xxhdpi.apk", zeros: big),
             ContainerEntry("splits/base-xxxhdpi.apk", zeros: big),
