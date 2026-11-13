@@ -24,7 +24,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  3 files changed, 24 insertions(+), 6 deletions(-)
 
 diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
-index 4b21c5ab4e8f1c8239b35d0f90dcd0891c3848af..4ac0c45bf7792bf538dfdb6d73cecffd9e184e8c 100644
+index 8738c6dd5eb4b33864e42b1e3d419f4fb622ae96..be2a12eac3f887ae057b0419474a75dd29102d82 100644
 --- a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
 +++ b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
 @@ -382,6 +382,11 @@ status_t EmulatedCameraDeviceInfo::InitializeControlSceneDefaults() {

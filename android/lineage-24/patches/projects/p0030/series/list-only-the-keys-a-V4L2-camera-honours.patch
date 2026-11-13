@@ -18,25 +18,46 @@ and CTS reads that as a contradiction:
   fails that as well.
 - The tone map mode and the three curves were listed for every camera.
   A host camera makes its own picture and takes no curve, and CTS runs
-  its tone map test for any camera that lists the mode and then reads
-  android.tonemap.maxCurvePoints, a number the HAL has none to give. No
-  camera lists the four keys now.
+  its tone map test for any camera that lists the mode, which then
+  reads android.tonemap.maxCurvePoints, a number the HAL has no value
+  for. No camera lists the four keys now, and none states
+  android.tonemap.availableToneMapModes, which CameraDeviceTest wants
+  listed together with the mode key. With no modes the templates carry
+  no tone map key, and the camera is not refused for lacking them.
 
 Take the keys that the camera's description does not earn out of both
-lists, from the rules in camera_plan.hpp (unlisted_keys), and state the
-number of regions from the same place (max_regions_of). The tags the
-rules name by number are asserted against camera_metadata_tags.h.
+lists, and the characteristic out of the metadata, from the rules in
+camera_plan.hpp (unlisted_keys, unstated_characteristics), and state
+the number of regions from the same place (max_regions_of). The tags
+the rules name by number are asserted against camera_metadata_tags.h.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../hwl/V4l2Characteristics.cpp               | 19 ++++++++++++++++++-
- 1 file changed, 18 insertions(+), 1 deletion(-)
+ .../hwl/EmulatedCameraDeviceInfo.cpp          |  5 ++++
+ .../hwl/V4l2Characteristics.cpp               | 26 ++++++++++++++++++-
+ 2 files changed, 30 insertions(+), 1 deletion(-)
 
+diff --git a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
+index 4b21c5ab4e8f1c8239b35d0f90dcd0891c3848af..8738c6dd5eb4b33864e42b1e3d419f4fb622ae96 100644
+--- a/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
++++ b/devices/EmulatedCamera/hwl/EmulatedCameraDeviceInfo.cpp
+@@ -1203,6 +1203,11 @@ status_t EmulatedCameraDeviceInfo::InitializeTonemapDefaults() {
+     if (ret == OK) {
+       available_tonemap_modes_.insert(entry.data.u8,
+                                       entry.data.u8 + entry.count);
++    } else if (!is_level_full_or_higher_) {
++      // A camera that states no tone map modes has no tone map control, and
++      // no template carries a tone map key: CTS wants the request key and
++      // the modes listed together.
++      return InitializeStatisticsDefaults();
+     } else {
+       ALOGE("%s: No available tonemap modes!", __FUNCTION__);
+       return BAD_VALUE;
 diff --git a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-index 6cc1bb9ac5739abbacc164ad7abc4b68acaa7408..afd2c514b356a848db63880716b883bcd7925dbf 100644
+index 6cc1bb9ac5739abbacc164ad7abc4b68acaa7408..39eec7563bc3278cf8fa27a86bfb2bcf4338b9fe 100644
 --- a/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
 +++ b/devices/EmulatedCamera/hwl/V4l2Characteristics.cpp
-@@ -42,6 +42,17 @@ namespace {
+@@ -42,6 +42,19 @@ namespace {
  namespace abi = andarium::camera::abi;
  namespace plan = andarium::camera;
  
@@ -50,11 +71,13 @@ index 6cc1bb9ac5739abbacc164ad7abc4b68acaa7408..afd2c514b356a848db63880716b883bc
 +static_assert(plan::tag::tonemap_curve_green == ANDROID_TONEMAP_CURVE_GREEN);
 +static_assert(plan::tag::tonemap_curve_red == ANDROID_TONEMAP_CURVE_RED);
 +static_assert(plan::tag::tonemap_mode == ANDROID_TONEMAP_MODE);
++static_assert(plan::tag::tonemap_available_tone_map_modes ==
++              ANDROID_TONEMAP_AVAILABLE_TONE_MAP_MODES);
 +
  constexpr char kTemplateFile[] = "emu_camera_v4l2.json";
  
  template <typename T>
-@@ -250,7 +261,13 @@ status_t Specialize(const v4l2cam::CameraNodes& nodes, HalCameraMetadata* m) {
+@@ -250,7 +263,18 @@ status_t Specialize(const v4l2cam::CameraNodes& nodes, HalCameraMetadata* m) {
    } else {
      Put<uint8_t>(m, ANDROID_CONTROL_AF_AVAILABLE_MODES, {ANDROID_CONTROL_AF_MODE_OFF});
    }
@@ -66,6 +89,11 @@ index 6cc1bb9ac5739abbacc164ad7abc4b68acaa7408..afd2c514b356a848db63880716b883bc
 +  const std::set<int32_t> unlisted(keys.begin(), keys.end());
 +  EditKeyList(m, ANDROID_REQUEST_AVAILABLE_REQUEST_KEYS, unlisted, {});
 +  EditKeyList(m, ANDROID_REQUEST_AVAILABLE_RESULT_KEYS, unlisted, {});
++  // The modes are the other half of the tone map mode key: CTS wants the key and the modes listed together,
++  // so a camera that lists no mode states no modes (and the templates carry no tone map key).
++  for (const int32_t tag : plan::unstated_characteristics()) {
++    RemoveCharacteristic(m, static_cast<uint32_t>(tag));
++  }
  
    if (caps.manual_sensor) {
      Put<uint8_t>(m, ANDROID_CONTROL_AVAILABLE_MODES,
