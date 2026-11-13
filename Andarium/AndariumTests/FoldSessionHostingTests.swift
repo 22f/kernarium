@@ -6,6 +6,17 @@ import Testing
 import UIKit
 @testable import Andarium
 
+/// A model whose host has a fixed free space. Home and Welcome state the
+/// device's, in a width of its own, and a test that lays a screen out twice
+/// to compare the two would otherwise see a layout change where the disk
+/// merely filled or emptied in between.
+@MainActor
+private func steadyModel(_ entry: AppEntry = .fromArguments()) -> AppModel {
+    let model = entry.makeModel()
+    model.host.freeStorageBytes = 40_000_000_000
+    return model
+}
+
 /// The production root with a run on a display that folds: the guest's
 /// display where the plan puts it, Andarium's pieces off the fold, the guest
 /// kept through every fold and turn, and the rotation rule of the inner
@@ -131,7 +142,7 @@ struct FoldSessionHostingTests {
             self.pose = pose
             self.plain = plain
             let entry = AppEntry.fromArguments()
-            let model = entry.makeModel()
+            let model = steadyModel(entry)
             model.launchApplied = true
             self.model = model
             lease = try await HostWindow.take()
@@ -494,7 +505,7 @@ struct FoldSessionHostingTests {
             ?? withUnsafeBytes(of: &info.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
         guard machine != "iPhone19,4" else { return }
         let entry = AppEntry.fromArguments()
-        let model = entry.makeModel()
+        let model = steadyModel(entry)
         let lease = try await HostWindow.take()
         defer { lease.give() }
         let controller = AndariumHostingController(rootView: Color.black, model: model)
@@ -540,7 +551,7 @@ struct FoldSessionHostingTests {
     private func welcome(on pose: Pose, plain: Bool = false) async throws -> (column: CGRect, footer: CGRect, scrolls: Bool) {
         let lease = try await HostWindow.take()
         defer { lease.give() }
-        let model = AppEntry.fromArguments().makeModel()
+        let model = steadyModel()
         model.guest = nil
         model.fold = plain ? nil : pose.reading
         let container = UIViewController()
@@ -729,7 +740,7 @@ struct FoldSessionHostingTests {
                       (pose: Pose.uprightFlat, sheet: CGRect(x: 150, y: 0, width: 651, height: 500)),
                       (pose: Pose.turnedFlat, sheet: CGRect(x: 60, y: 200, width: 549, height: 600))])
     func aCardInASheetsOwnFrameIsNotPaddedAwayByTheWindowsHalves(_ test: (pose: Pose, sheet: CGRect)) async throws {
-        let model = AppEntry.fromArguments().makeModel()
+        let model = steadyModel()
         model.fold = test.pose.reading
         let lease = try await HostWindow.take()
         defer { lease.give() }
@@ -767,7 +778,7 @@ struct FoldSessionHostingTests {
     func aCardTallerThanItsPlaceIsCentredOnItExceptOnABentHalf(_ pose: Pose?) async throws {
         final class Frame: @unchecked Sendable { var rect = CGRect.zero }
         let seen = Frame()
-        let model = AppEntry.fromArguments().makeModel()
+        let model = steadyModel()
         model.fold = pose?.reading
         let lease = try await HostWindow.take()
         defer { lease.give() }
@@ -809,7 +820,7 @@ struct FoldSessionHostingTests {
     /// is: a sheet decides its presentation once, when it is presented.
     @Test(arguments: [(from: Pose.uprightBook, to: Pose.turnedFlat), (from: Pose.turnedBook, to: Pose.uprightFlat)])
     func turningTheDisplayWithASheetOpenKeepsItsContent(_ turn: (from: Pose, to: Pose)) async throws {
-        let model = AppEntry.fromArguments().makeModel()
+        let model = steadyModel()
         model.fold = turn.from.reading
         let counter = SheetProbe.Counter()
         let lease = try await HostWindow.take()
@@ -834,7 +845,7 @@ struct FoldSessionHostingTests {
     /// it is the system's, as on an iPad.
     @Test(arguments: [Pose.turnedBook, Pose.turnedFlat, Pose.uprightFlat])
     func aSheetRisesToTheFoldOnlyWhileTheDeviceStandsBent(_ pose: Pose) async throws {
-        let model = AppEntry.fromArguments().makeModel()
+        let model = steadyModel()
         model.fold = pose.reading
         let counter = SheetProbe.Counter()
         let lease = try await HostWindow.take()
@@ -1008,7 +1019,7 @@ struct TheRealDisplay {
     @Test func theSceneReadsAsTheExpectedPoseAndTheGuestFollowsThePlan() async throws {
         guard let pose = expected else { return }
         let entry = AppEntry.fromArguments()
-        let model = entry.makeModel()
+        let model = steadyModel(entry)
         model.launchApplied = true
         model.driver = StubDriver(plan: nil)
         let lease = try await HostWindow.take()

@@ -83,9 +83,10 @@ device's orientation as iOS reports it, which already includes the person's
 Portrait Orientation Lock: while a session is in front the application
 observes `UIDevice` (`DeviceOrientationObserver`) and sends the orientation
 over the motion connection (`MotionOrientation.swift`), which Android treats as
-a rotation proposal that its own policy still decides on. The Gyroscope switch
-governs only the accelerometer and gyroscope data apps may read, not this. A
-guest whose image has no such sensor judges the accelerometer as before. On iPad
+a rotation proposal that its own policy still decides on. That is the display's
+own behaviour and uses no accelerometer or gyroscope reading, which are the
+guest's separately ([Runtime](#runtime), Motion). A guest whose image has no
+such sensor judges the accelerometer as before. On iPad
 the interface turns with the device in a session as it does at Home, full screen
 or in a window, and the host drives the guest: it is held at display rotation
 zero, its display follows the scene, and the sensor axes follow the scene's
@@ -583,11 +584,27 @@ requires reopening Andarium.
   slower than on gadgets, and a long single-process computation runs faster. An
   App Store build carries none of this: its runtime has no JIT and the
   application has no row, preference, entries or sentences.
-- **Motion.** Gyroscope needs no permission. The host reads a sensor only while
-  a guest application uses it and sends samples over private vsock port 5556
-  from the process's one Core Motion manager, which is never released (a
-  released manager crashes inside Core Motion); the system image must include
-  the [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+- **Motion.** The guest has the device's accelerometer and gyroscope wherever
+  the device has them, with no setting and no permission. An iPad app on a Mac
+  and the Simulator have none, so nothing is read there, and Android still
+  lists both sensors. The host reads a sensor only while the guest is in front
+  and an application in it uses the sensor, and sends samples over private
+  vsock port 5556 from the process's one Core Motion manager, which is never
+  released (a released manager crashes inside Core Motion). A failure of the
+  device's sensors stops them and keeps the connection, which also carries the
+  orientation; they are tried again when the guest's demand changes or the
+  application next updates the session. The system image must include the
+  [motion sub-HAL](../android/lineage-24/README.md#motion-sensors).
+  The magnetometer, for an image that lists it (the `compass` host feature),
+  is Core Motion's calibrated device-motion field with Core Motion's accuracy
+  as Android's, read while an application uses it, with no setting and no
+  permission. Core Motion's request to move the device for calibration is no
+  failure; a start that delivers nothing in 5 s without that request, or any
+  other Core Motion error, turns it off for the rest of the run, where the
+  accelerometer and gyroscope are tried again as above. A run ends with the
+  foreground, a changed mount or a restart, not with a reconnect. From iOS 27.2
+  a motion status of denied or restricted hides it from the guest; nothing is
+  requested.
 - **Free space.** Free space is the space a write can use (`HostStorage`,
   `statfs(2)`), the one figure the watch, the start and transfer checks and
   every screen use; it leaves out the purgeable space iOS Settings counts, so
@@ -695,7 +712,13 @@ is on. `AndariumCore/Adb` speaks the protocol.
   before the first byte when the device (`TransferRoom`) or the virtual
   machine's data partition lacks room for the app and its reserve
   (`InstallRoom`), or when the file is a single .apk of 4 GiB or more, which
-  Android cannot install (`InstallRefusal.tooLarge`).
+  Android cannot install (`InstallRefusal.tooLarge`). The first attempt is
+  always the plain install. When Android's own answer is the refusal of an app
+  built for a much older version (`INSTALL_FAILED_DEPRECATED_SDK_VERSION`),
+  and for no other answer, an alert asks whether to install it anyway, and
+  Install anyway sends the same file again with the package manager's
+  `--bypass-low-target-sdk-block`, once (`LegacyInstallFlow`). Nothing else in
+  Andarium sends that flag, and the choice is kept nowhere.
 - **File browser** in Settings browses the guest's internal storage
   (`/storage/emulated/0/`, the guest Files app's root) and imports and exports
   files over the same channel, in a normal session and whatever the guest's USB

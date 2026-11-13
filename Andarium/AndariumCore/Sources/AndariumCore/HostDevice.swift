@@ -19,11 +19,15 @@ public struct HostDevice: Equatable, Sendable {
     /// Whether the device can have a mouse or trackpad whose pointer iOS shows
     /// the application: an iPad or a Mac, not an iPhone.
     public var supportsPointer: Bool
+    /// Whether the device can give the guest a compass: it has a magnetometer
+    /// that Core Motion can give calibrated, and no permission refuses it. An
+    /// iPhone or an iPad, not a Mac or the Simulator.
+    public var hasCompass: Bool
 
     /// `processorCount` is the vCPU limit.
     public init(
         name: String, processorCount: Int, memory: MemoryPolicy, freeStorageBytes: UInt64,
-        runsGuestGraphics: Bool = true, supportsPointer: Bool = true
+        runsGuestGraphics: Bool = true, supportsPointer: Bool = true, hasCompass: Bool = false
     ) {
         self.name = name
         self.processorCount = max(1, processorCount)
@@ -31,6 +35,7 @@ public struct HostDevice: Equatable, Sendable {
         self.freeStorageBytes = freeStorageBytes
         self.runsGuestGraphics = runsGuestGraphics
         self.supportsPointer = supportsPointer
+        self.hasCompass = hasCompass
     }
 
     public func hasRoom(for bytes: UInt64) -> Bool { freeStorageBytes >= bytes }

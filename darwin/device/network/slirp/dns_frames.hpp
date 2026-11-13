@@ -55,10 +55,10 @@ struct Classified final {
 };
 
 /*
- * The two addresses the provider answers DNS for. `name_server` is SLiRP's
- * virtual name server, which serves only DNS: UDP here, TCP through SLiRP's
- * guest forward. `gateway` answers DNS too, for guests configured with the
- * gateway as their server, and passes the rest to SLiRP. A `_stream` flag
+ * The addresses the provider and SLiRP serve themselves. `name_server` is
+ * SLiRP's virtual name server, which serves only DNS: UDP here, TCP through
+ * SLiRP's guest forward. `gateway` answers DNS too, for guests configured with
+ * the gateway as their server, and passes the rest to SLiRP. A `_stream` flag
  * says that the guest forward for DNS over TCP is installed at that address;
  * without it a TCP connection to port 53 is reset, because SLiRP, with its own
  * DNS proxy off, would connect to the literal address on the host's network.
@@ -73,12 +73,6 @@ struct Servers final {
 [[nodiscard]] Classified classify_guest_frame(
 	std::span<const std::uint8_t> frame, const Servers &servers);
 
-/* An IPv4 network: the address bits that `mask` selects. */
-struct Subnet final {
-	Ipv4Address address{};
-	Ipv4Address mask{};
-};
-
 /*
  * A guest flow addressed to one of the host's own addresses is refused, for
  * SLiRP would connect it to a service of the machine the application runs
@@ -90,25 +84,32 @@ struct Subnet final {
  * the flow it belongs to or resets it itself, and the host's own client
  * reaches a forward through one of the host's addresses by a flow the host
  * opened. ICMP, fragments and a malformed packet addressed to the host are
- * dropped. A frame for any other address, the addresses of the virtual
- * network `network` included, is `pass`. Run it after classify_guest_frame
- * has passed the frame on.
+ * dropped. A frame for any other address is `pass`. The virtual network is
+ * no exception: an address of it that the table holds is the host's, and
+ * SLiRP would connect a flow to it as it does to any other literal address.
+ * The one exception is what SLiRP and the provider give at their own
+ * addresses without a host socket: ICMP to the gateway or the name server
+ * (SLiRP answers an echo itself and drops every other type), DNS (port 53) at
+ * either, and DHCP (UDP port 67) at the gateway.
+ * They are `pass` even when the host holds the address; every other flow to
+ * those addresses is refused like one to any other address the host holds.
+ * Run it after classify_guest_frame has passed the frame on.
  */
 [[nodiscard]] Classified classify_host_bound_frame(
 	std::span<const std::uint8_t> frame, const HostAddresses &host,
-	const Subnet &network);
+	const Servers &servers);
 
 /*
  * Whether classify_host_bound_frame needs the host's current addresses for
- * `frame`: an IPv4 frame to an address outside the virtual network `network`
- * that the table can change the fate of. That is every such frame but an
- * unfragmented TCP segment that is not a connect attempt: a connect attempt,
- * every fragment, every UDP datagram, ICMP and the other protocols. The
- * provider reads the addresses again for such a frame only, so it asks the
- * system nothing while the guest is quiet.
+ * `frame`, that is, whether the table can change its fate. It cannot for an
+ * unfragmented TCP segment that is not a connect attempt, nor for a service
+ * of `servers` (see above). It can for every other IPv4 frame: a connect
+ * attempt, every fragment, every UDP datagram, ICMP and the other protocols.
+ * The provider reads the addresses again for such a frame only, so it asks
+ * the system nothing while the guest is quiet.
  */
 [[nodiscard]] bool needs_host_check(std::span<const std::uint8_t> frame,
-				    const Subnet &network);
+				    const Servers &servers);
 
 /* One Ethernet frame carrying `payload` from the server back to the guest.
  * The payload must fit one 1500-byte IP packet. */

@@ -326,14 +326,15 @@ struct SnapshotsRow: View {
 // MARK: Capabilities
 
 /// What the guest may use of this device: the location and the microphone,
-/// which iOS asks about when they are turned on, the gyroscope, and the
-/// haptics on a device that has them.
+/// which iOS asks about when they are turned on, and the haptics on a device
+/// that has them. The motion sensors are always the guest's where the device
+/// has them, so there is no row for them.
 struct CapabilitiesSection: View {
     @Environment(AppModel.self) private var model
 
     /// The rows, top to bottom; VoiceOver reads them in this order.
     enum Row: CaseIterable {
-        case location, microphone, gyroscope, haptics
+        case location, microphone, haptics
     }
 
     /// The rows a device shows: Haptics only where there is a Taptic Engine
@@ -351,22 +352,12 @@ struct CapabilitiesSection: View {
                     switch row {
                     case .location: LocationRow()
                     case .microphone: MicrophoneRow()
-                    case .gyroscope: GyroscopeRow()
                     case .haptics: HapticsRow()
                     }
-                }
-            } footer: {
-                if let reason = model.motionSensorsProblem ?? Self.gyroscopeUnavailable(available: model.motionSensorsAvailable) {
-                    SectionNote(reason)
                 }
             }
             .id("capabilities")
         }
-    }
-
-    /// Why Gyroscope cannot be turned on; nil when it can, which needs no note.
-    static func gyroscopeUnavailable(available: Bool) -> String? {
-        available ? nil : String(localized: "This device has no gyroscope or accelerometer to share.")
     }
 }
 
@@ -391,21 +382,6 @@ struct MicrophoneRow: View {
             .labelsHidden()
         }
         .accessibilityHint(denied ? String(localized: "Andarium is not allowed to use the microphone. Turning this on offers to open Settings.") : "")
-    }
-}
-
-struct GyroscopeRow: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        OptionRow(title: String(localized: "Gyroscope"), symbol: "gyroscope") {
-            Toggle("Gyroscope", isOn: Binding(
-                get: { model.motionSensorsOn },
-                set: { model.setMotionSensors($0) }
-            ))
-            .labelsHidden()
-            .disabled(!model.motionSensorsAvailable)
-        }
     }
 }
 

@@ -113,7 +113,6 @@ public final class MotionActivity extends Activity implements SensorEventListene
 
     private boolean passed() {
         if (!valid) return false;
-        if (mode.equals("silence")) return acceleration.count == 0 && rotation.count == 0;
         if (acceleration.count < 75 || rotation.count < 75) return false;
         if (mode.equals("movement")) return acceleration.span() > 0.5 && rotation.peak > 0.05;
         return acceleration.sum / acceleration.count > 7 && acceleration.sum / acceleration.count < 12;

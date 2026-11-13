@@ -151,7 +151,7 @@ layout once, so a guest created earlier keeps its home screen.
 The product installs Android's AIDL multi-HAL service and a motion sub-HAL
 (`overlay/sensors/`) advertising an accelerometer and a gyroscope with
 continuous delivery and 10 ms minimum periods. Andarium supplies samples only
-while its Gyroscope switch is on and an application uses the sensor. The sub-HAL
+while an application uses the sensor, on a device that has it. The sub-HAL
 accepts a single stream on vsock port 5556 from host CID 2 (no guest-originated
 source) and tells the host which sensors are active.
 `overlay/sensors/motion_protocol.hpp` and
@@ -234,9 +234,25 @@ receiver is open, and without the lock it would suspend and wake every second
 for as long as a client listens. The lock belongs to the HAL's process, so it
 goes with the HAL, and it holds back only Android's own autosuspend.
 
+The HAL never calls the framework from an entry point or under one of its own
+locks: every announcement, status and report is posted to the HAL's one
+reporter thread, which makes the calls in the order posted, so a framework
+thread that holds a lock of its own while it calls the HAL cannot wait on a HAL
+thread that waits for it, and no entry point waits for a delivery. A callback's
+announcement and every status are never dropped: they reach the callback they
+were posted for, in one order across callbacks, even if the HAL is closed or
+the callback replaced first, and a `start()` is refused while 64 sessions'
+statuses are still undelivered. A session's `engine_on` and `session_begin`
+come before its first location and its `session_end` and `engine_off` after the
+last. Locations, sentences and satellite reports may be dropped: a session's
+queued ones go when it is restarted, or the HAL is closed or its callback
+replaced, and only the newest 64 are kept when the framework is slow.
+
 `overlay/gnss/nmea.hpp` and `location_policy.hpp` hold the parsing and the
-rules and `gnss_engine.hpp` the session, with no Android dependency; the
-`gnss-hal-*` unit tests read the host writer's own epochs through them.
+rules, `gnss_engine.hpp` the session, `gnss_reporter.hpp` the calls to the
+framework and `gnss_hal.hpp` the state behind the AIDL entry points, with no
+Android dependency; the `gnss-hal-*` unit tests read the host writer's own
+epochs through them.
 `tests/integration/android/location/` is a probe application for the candidate
 image, never installed in a release.
 

@@ -48,6 +48,9 @@ void everyBitIsOneBitOfItsOwn()
     require((knownBits() & KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) != 0U);
     require(KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION == 2U);
     require((knownBits() & KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) != 0U);
+    require(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS == 4U);
+    require((knownBits() & KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) != 0U);
+    require(knownBits() == 7U);
 }
 
 void aCollisionBetweenTwoRowsIsDetected()
@@ -114,6 +117,39 @@ void theOrientationBitBecomesTheArgumentTheSubHalReads()
             std::vector<std::string> {
                 "androidboot.product.hardware.sku=haptics",
                 "androidboot.kernarium.orientation=1"});
+}
+
+void theCompassBitBecomesTheArgumentTheSubHalWillRead()
+{
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS) ==
+            std::vector<std::string> {"androidboot.kernarium.compass=1"});
+    /* init makes "ro.boot.kernarium.compass" of this argument, the property
+     * the guest's sub-HAL and the compass feature are keyed by. */
+    const std::string argument =
+        kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS).front();
+    require(argument.starts_with("androidboot."));
+    const std::string name = argument.substr(
+        std::string_view {"androidboot."}.size(),
+        argument.find('=') - std::string_view {"androidboot."}.size());
+    require("ro.boot." + name == "ro.boot.kernarium.compass");
+    /* The three features are independent and come in table order. */
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS) ==
+            std::vector<std::string> {
+                "androidboot.product.hardware.sku=haptics",
+                "androidboot.kernarium.orientation=1",
+                "androidboot.kernarium.compass=1"});
+    require(kernelArguments(KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS |
+                            KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION) ==
+            std::vector<std::string> {"androidboot.kernarium.orientation=1",
+                                      "androidboot.kernarium.compass=1"});
+    /* Neither of the other bits makes the compass argument. */
+    for (const std::uint32_t bit : {KERNARIUM_RUNTIME_ANDROID_HOST_HAPTICS,
+                                    KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION}) {
+        for (const std::string& other : kernelArguments(bit))
+            require(!other.starts_with("androidboot.kernarium.compass="));
+    }
 }
 
 void everyKnownBitMakesOneArgumentInTableOrder()
@@ -192,6 +228,8 @@ int main()
          theHapticsBitBecomesTheSkuArgument},
         {"the-orientation-bit-becomes-the-argument-the-sub-hal-reads",
          theOrientationBitBecomesTheArgumentTheSubHalReads},
+        {"the-compass-bit-becomes-the-argument-the-sub-hal-will-read",
+         theCompassBitBecomesTheArgumentTheSubHalWillRead},
         {"every-known-bit-makes-one-argument-in-table-order",
          everyKnownBitMakesOneArgumentInTableOrder},
         {"bits-the-runtime-has-no-row-for-are-reported-and-make-nothing",

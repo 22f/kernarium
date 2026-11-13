@@ -42,6 +42,12 @@ inline constexpr Feature features[] = {
      * not find one that nothing feeds. */
     {"orientation", KERNARIUM_RUNTIME_ANDROID_HOST_ORIENTATION,
      "androidboot.kernarium.orientation=", "1"},
+    /* The guest's motion sub-HAL lists a magnetometer, and the compass feature
+     * is declared, only when ro.boot.kernarium.compass is true: Android's
+     * features must match its sensors, and a host that has no magnetometer
+     * (a Mac, the Simulator) must not offer one that nothing feeds. */
+    {"compass", KERNARIUM_RUNTIME_ANDROID_HOST_COMPASS,
+     "androidboot.kernarium.compass=", "1"},
 };
 
 [[nodiscard]] constexpr bool singleBit(std::uint32_t value) noexcept

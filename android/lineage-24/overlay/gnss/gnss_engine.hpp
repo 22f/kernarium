@@ -2,13 +2,23 @@
 //
 // The GNSS HAL's engine: a session on the host's virtual receiver. start()
 // holds a wakelock, opens the receiver (which powers it on the host) and runs a
-// thread that parses what it writes and reports to the framework through a
-// Sink; stop() joins the thread, powers the receiver off and lets the wakelock
-// go. After stop() returns, nothing more is reported. A session whose receiver
-// goes away by itself (it closed or failed) ends there: the thread lets the
-// wakelock go and reports session_end and engine_off once, and the stop() that
-// follows reports nothing more. The receiver is not opened again; the next
-// start() opens it.
+// thread that parses what it writes; stop() joins that thread, powers the
+// receiver off and lets the wakelock go. A session whose receiver goes away by
+// itself (it closed or failed) ends there: the thread lets the wakelock go and
+// reports session_end and engine_off once, and the stop() that follows reports
+// nothing more. The receiver is not opened again; the next start() opens it.
+//
+// Nothing here calls the framework. Every report, and every status, is posted
+// to a Reporter (gnss_reporter.hpp), whose thread makes the calls in the order
+// they were posted and holds no lock of the HAL while it does; its header holds
+// the delivery contract. So the statuses of a session come in order with its
+// locations (engine_on and session_begin before the first, session_end and
+// engine_off after the last, none of an earlier session after a later one's
+// session_begin), and no entry point of the engine waits for the framework or
+// for a delivery. A session's four statuses are reserved at its start(), which
+// is refused when the framework has too many undelivered. close(), a restart
+// and a replacement drop the queued locations of the session they end, and
+// never its statuses.
 //
 // The wakelock is the one decision of this file that is not obvious. The
 // framework holds a partial wakelock only while it handles each report
@@ -45,6 +55,7 @@
 #include <thread>
 #include <vector>
 
+#include "gnss_reporter.hpp"
 #include "location_policy.hpp"
 #include "nmea.hpp"
 
@@ -66,11 +77,13 @@ struct Env {
     std::function<void(const std::string&)> log;
 };
 
-// What the engine reports. Every call is made on the session's thread, except
-// the statuses of start() and stop(), which are made on the caller's thread
-// while the engine's control lock is held: a sink must not call start() or
-// stop(). No other call is made with a lock of the engine held.
+// What the engine reports. Every call is made on the reporter's thread, one at
+// a time in the order they were posted, with no lock of the engine held: a sink
+// may take locks of the framework, and may even call back into the engine,
+// without blocking an entry point of the HAL.
 struct Sink {
+    // Made once, first, and whole: tells the framework what the receiver is.
+    std::function<void()> ready;
     std::function<void(Status)> status;
     std::function<void(const Location&)> location;
     // One NMEA sentence with the time of its fix, in Unix milliseconds.
@@ -89,30 +102,60 @@ class Engine {
 public:
     static constexpr int kDefaultIntervalMs = 1000;
 
-    Engine(Env env, Sink sink) : env_(std::move(env)), sink_(std::move(sink)) {}
+    // `reporter` is shared by the engines of one HAL, so that their calls come
+    // in one order; an engine given none makes its own.
+    Engine(Env env, Sink sink, std::shared_ptr<Reporter> reporter = nullptr)
+        : env_(std::move(env)),
+          sink_(std::make_shared<const Sink>(std::move(sink))),
+          reporter_(reporter ? std::move(reporter) : std::make_shared<Reporter>()) {
+        if (sink_->ready) {
+            reporter_->post_essential([sink = sink_] { sink->ready(); }, false);
+        }
+    }
 
-    ~Engine() { stop_locked(false); }
+    // Never waits for the framework: the session ends silently and its queued
+    // locations are dropped.
+    ~Engine() {
+        std::lock_guard control(control_);
+        retire_session();
+        stop_locked(false);
+    }
 
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
-    // Begins a session. False when the receiver cannot be opened. A session
-    // already running is ended first, without statuses, as the framework's
-    // start() after a start() restarts.
+    // Begins a session. False when the receiver cannot be opened, after
+    // close(), and, before anything changes, when the framework has too many
+    // statuses undelivered to take this session's. A session already running
+    // is ended first, without statuses and without its queued locations, as the
+    // framework's start() after a start() restarts.
     bool start() {
         std::lock_guard control(control_);
+        if (closed_) return false;
+        if (!reporter_->reserve(Reporter::kSessionStatuses)) {
+            // One line the first time and then one in 64, for a framework that
+            // stays silent.
+            if (refused_++ % 64 == 0) {
+                log("cannot start: " + std::to_string(Reporter::kMaxStatuses) +
+                    " statuses are waiting for the framework");
+            }
+            return false;
+        }
+        retire_session();
         stop_locked(false);
         std::shared_ptr<void> wakelock;
         if (env_.hold_wakelock) wakelock = env_.hold_wakelock();
         if (!wakelock) log("no wakelock: the guest may suspend during the session");
         const int device = env_.open_device();
         if (device < 0) {
+            reporter_->release(Reporter::kSessionStatuses);
             log("cannot open the receiver: errno " + std::to_string(-device));
             return false;
         }
         int pipe_fds[2];
         if (pipe(pipe_fds) != 0) {
             ::close(device);
+            reporter_->release(Reporter::kSessionStatuses);
             log("cannot make the wake pipe: errno " + std::to_string(errno));
             return false;
         }
@@ -122,6 +165,7 @@ public:
         }
         parser_.reset();
         pacer_.reset();
+        session_ = Reporter::make_token();
         end_reported_ = false;
         {
             std::lock_guard guard(shared_);
@@ -138,10 +182,21 @@ public:
         return true;
     }
 
-    // Ends the session: no report follows the return.
+    // Ends the session: no report of it is made after session_end. It does not
+    // wait for the framework to hear the statuses.
     void stop() {
         std::lock_guard control(control_);
         stop_locked(true);
+    }
+
+    // Ends the session silently and for good: its queued locations are
+    // dropped, the statuses already posted are still delivered, and start()
+    // fails from now on. The framework's close().
+    void close() {
+        std::lock_guard control(control_);
+        closed_ = true;
+        retire_session();
+        stop_locked(false);
     }
 
     // The interval of the framework's setPositionMode, in milliseconds.
@@ -166,8 +221,29 @@ private:
         if (env_.log) env_.log(message);
     }
 
-    void notify(Status status) const {
-        if (sink_.status) sink_.status(status);
+    // The queued locations of the session are not wanted any more.
+    void retire_session() {
+        if (session_) reporter_->retire(session_);
+    }
+
+    // Queues a status, whose room start() reserved. It is made later, on the
+    // reporter's thread, from a copy of the sink that this closure keeps alive.
+    void notify(Status status) {
+        reporter_->post_essential(
+            [sink = sink_, status] {
+                if (sink->status) sink->status(status);
+            },
+            true);
+    }
+
+    // Queues calls for the reporter's thread to make for the current session:
+    // `call` gets the sink and a function that says whether the session is
+    // still wanted, to ask between its own calls.
+    template <typename Call>
+    void post_report(Call call) {
+        reporter_->post_report(session_, [sink = sink_, live = session_, call = std::move(call)] {
+            call(*sink, [&live] { return !live->load(); });
+        });
     }
 
     // Joins the thread, closes the receiver and releases the wakelock. With
@@ -189,7 +265,13 @@ private:
             std::lock_guard guard(shared_);
             wakelock_.reset();
         }
-        if (notify_framework) report_end();
+        if (notify_framework) {
+            report_end();
+        } else if (!end_reported_.exchange(true)) {
+            // The session ends silently: its end and off statuses will not be
+            // posted, so their room is given back.
+            reporter_->release(2);
+        }
     }
 
     // Tells the framework the session and the engine ended, once per session.
@@ -246,10 +328,20 @@ private:
     void report(const nmea::Epoch& epoch) {
         const int64_t realtime = env_.realtime_ns();
         const int64_t boottime = env_.boottime_ns();
-        if (sv_status_on_ && sink_.sv_status) sink_.sv_status();
-        if (nmea_on_ && sink_.nmea) {
+        if (sv_status_on_ && sink_->sv_status) {
+            post_report([](const Sink& sink, const auto& wanted) {
+                if (wanted()) sink.sv_status();
+            });
+        }
+        if (nmea_on_ && sink_->nmea) {
             const int64_t at_ms = epoch.utc_ms != 0 ? epoch.utc_ms : realtime / 1'000'000;
-            for (const std::string& sentence : listener_sentences(epoch)) sink_.nmea(at_ms, sentence);
+            post_report([at_ms, sentences = listener_sentences(epoch)](const Sink& sink, const auto& wanted) {
+                // The epoch stops between its sentences once it is not wanted.
+                for (const std::string& sentence : sentences) {
+                    if (!wanted()) return;
+                    sink.nmea(at_ms, sentence);
+                }
+            });
         }
         if (epoch.position.fix_class == nmea::FixClass::none) return;
         if (!pacer_.admit(epoch.position.utc_ms, boottime, interval_ms_)) return;
@@ -259,14 +351,25 @@ private:
             std::lock_guard guard(shared_);
             last_fix_ = DebugFix{epoch.position, boottime};
         }
-        if (sink_.location) sink_.location(*location);
+        if (sink_->location) {
+            post_report([fix = *location](const Sink& sink, const auto& wanted) {
+                if (wanted()) sink.location(fix);
+            });
+        }
     }
 
     Env env_;
-    Sink sink_;
-    // Serializes start() and stop(); the session's thread never takes it.
+    std::shared_ptr<const Sink> sink_;
+    std::shared_ptr<Reporter> reporter_;
+    // The current session's reports, until they are retired.
+    Reporter::Token session_;
+    // The starts refused for want of room, for the log.
+    unsigned refused_ = 0;
+    // Serializes start(), stop() and close(); the session's thread never takes
+    // it, and nothing under it calls the framework.
     mutable std::mutex control_;
     bool running_ = false;
+    bool closed_ = false;
     // Set once the framework has been told this session ended, by the thread or
     // by stop(); whichever comes first does the telling.
     std::atomic<bool> end_reported_{false};
