@@ -737,6 +737,17 @@ void aWritebackReplyIsValidatedStrictly()
 		require(one.heard == onlySync);
 	}
 	{
+		/* One whose text is whole but whose last advertised byte, the NUL
+		 * the guest counts, is not in the datagram: the zeros that fill a
+		 * receive buffer would make it read as the reply. */
+		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
+			constexpr std::string_view reply {"synced in 7 ms"};
+			sendRawReply(fd, to, n, 0U, 15U, reply, 12U + reply.size());
+		});
+		require(one.result == GuestWriteback::refused,
+			"a datagram one byte short is no confirmation");
+	}
+	{
 		/* One that advertises more than a reply can carry. */
 		const auto one = sync([](int fd, const sockaddr_un &to, socklen_t n) {
 			sendRawReply(fd, to, n, 0U, 9999U, "synced in 3 ms",
