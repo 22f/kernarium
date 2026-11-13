@@ -291,18 +291,18 @@ struct CameraFlowTests {
         #expect(noneRuntime.cameraBootMode() == UInt32(KERNARIUM_RUNTIME_ANDROID_CAMERA_BLOCKED))
     }
 
-    @Test func theLoaderStatesTheCamerasReserveThatTheRuntimeTakesOutOfTheBudget() {
-        // Every host is given the small tier for now, so the reserve is the same at any budget: 153.9 MiB,
-        // the worst case of the capture pools (six held buffers of the aligned 4:3 frame a 1080p stream is
-        // delivered, for each of two cameras), the staging, the transformer's scratch and a 12 MP RAW still
-        // with its DNG and JPEG.
+    @Test func theLoaderStatesTheCamerasCeilingThatNoSystemCameraExceeds() {
+        // The most any use of a system camera holds, which the application plans with: every host is given the
+        // small tier for now, so it is the same at any budget: 159.98 MiB, the worst case of the capture pools
+        // (six held buffers of the aligned 4:3 frame a 1080p stream is delivered, for each of two cameras), the
+        // staging, the transformer's scratch and the stills the device admits at once, a 12 MP JPEG with a RAW.
         for budget: UInt32 in [384, 534, 1249, 2048, 4096, 9152] {
-            #expect(kernarium_runtime_loader_camera_reserve_mib(budget) == 154, "budget \(budget) MiB")
+            #expect(kernarium_runtime_loader_camera_reserve_mib(budget) == 160, "budget \(budget) MiB")
         }
         // The model's policy takes that reserve out of the budget the runtime
-        // computes: an iPad mini 6 (B 534) is left 380 MiB, a 4 GiB iPhone
-        // (B 1249) 1095 MiB, and the figure is the budget's while Camera is off.
-        for (budget, pool) in [(534, 380), (1249, 1095)] {
+        // computes: an iPad mini 6 (B 534) is left 374 MiB, a 4 GiB iPhone
+        // (B 1249) 1089 MiB, and the figure is the budget's while Camera is off.
+        for (budget, pool) in [(534, 374), (1249, 1089)] {
             let policy = MemoryPolicy(
                 processorCount: 1, bound: { _ in 4096 }, defaultMemory: { _ in 2048 },
                 graphicsMemory: { _, _ in budget },

@@ -110,7 +110,8 @@ to be ended. [`graphics.md`](graphics.md) owns what B bounds. A live camera
 session holds host memory outside the GPU (the camera device's reserve,
 `device/camera/camera_tiers.hpp`), and the GPU's pool is B less it
 (`gpu_pool_bytes`), taken after the clamp; blocked cameras and none take
-nothing, and the applications show the pool.
+nothing, a reserve that takes all of B refuses the launch (a pool of zero is no
+limit to the renderer), and the applications show the pool.
 
 The guest side's memory follows the vCPU count, v, and that header is the one
 place that says how; every caller evaluates it:

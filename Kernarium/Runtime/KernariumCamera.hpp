@@ -10,6 +10,7 @@
 #include "camera/camera_source.hpp"
 #include "camera/camera_tiers.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -92,6 +93,13 @@ struct Presentation {
     /* The vendor SKU's value: one of the image's layouts, "none" when the host
      * has no cameras the image can describe. */
     std::string layout {uml::camera::noCameraLayout};
+    /* What the device is given (`CameraDeviceOptions::use`): the cameras it lets
+     * run at once and whether a RAW capture is possible, from the cameras and
+     * the colour data of this composition. */
+    uml::camera::CameraUse use;
+    /* The use the GPU's pool was reduced for: the first composition's, which no
+     * later boot of the run exceeds (`composeCameras`). */
+    uml::camera::CameraUse reserved;
 
     /* Whether the guest gets a camera device at all. */
     [[nodiscard]] bool hasCameras() const noexcept { return uml::camera::layoutHasCameras(layout); }
@@ -99,11 +107,11 @@ struct Presentation {
 
 /* The layout of `presentation`'s cameras now: what the calibration store has
  * learned since decides whether RAW is among them. */
-[[nodiscard]] inline std::string composeNow(const Presentation& presentation)
+[[nodiscard]] inline uml::camera::ComposedCameras composeNow(const Presentation& presentation)
 {
     uml::camera::ArrangementOptions arrangement;
     arrangement.tier = presentation.tier;
-    return uml::camera::composeLayout(*presentation.source, *presentation.calibration, arrangement);
+    return uml::camera::composeCameras(*presentation.source, *presentation.calibration, arrangement);
 }
 
 /* Discovers `source`'s cameras at `tier` and composes the layout. A null
@@ -120,7 +128,9 @@ struct Presentation {
     if (source == nullptr)
         return presentation;
     presentation.source = std::move(source);
-    presentation.layout = composeNow(presentation);
+    auto composed = composeNow(presentation);
+    presentation.layout = std::move(composed.layout);
+    presentation.use = presentation.reserved = composed.use;
     return presentation;
 }
 
@@ -130,8 +140,16 @@ struct Presentation {
  * offers. A presentation with no cameras stays as it is. */
 inline void recompose(Presentation& presentation)
 {
-    if (presentation.source != nullptr)
-        presentation.layout = composeNow(presentation);
+    if (presentation.source == nullptr)
+        return;
+    auto composed = composeNow(presentation);
+    presentation.layout = std::move(composed.layout);
+    presentation.use = composed.use;
+    /* The pool was sized for the first composition's use. The cameras the device
+     * runs at once follow the layout and never grow; a RAW capture is possible
+     * from the first boot wherever a lens can make one. A later boot is held to
+     * the first's streams regardless. */
+    presentation.use.streams = std::min(presentation.use.streams, presentation.reserved.streams);
 }
 
 /* The runtime's state value of the device's. */
@@ -239,6 +257,7 @@ private:
     uml::camera::CameraDeviceOptions options;
     options.mode = mode;
     options.tier = presentation.tier;
+    options.use = presentation.use;
     options.calibration = presentation.calibration;
     const auto bootTurn = rotation.degrees();
     options.sensorOrientation = [bootTurn](const uml::platform::CameraInfo& info) {

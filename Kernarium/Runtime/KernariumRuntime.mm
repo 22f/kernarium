@@ -2347,9 +2347,22 @@ int runtimeRun(
             auto cameras = presentCameras(request);
             cameraReserve = uml::camera::liveCameraReserveMiB(
                                 request.camera.mode, cameras.layout,
-                                cameras.tier) *
+                                cameras.reserved, cameras.tier) *
                 mebibyte;
 #endif
+            /* A pool of zero is no limit to the renderer: a reserve that
+             * leaves none is a launch that cannot be given a pool. */
+            if (uml::platform::gpu_pool_exhausted(
+                    gpuBudget.budget, cameraReserve)) {
+                std::fprintf(
+                    stderr,
+                    "Kernarium: live cameras would hold %llu MiB, all of the "
+                    "%llu MiB GPU budget\n",
+                    static_cast<unsigned long long>(cameraReserve >> 20),
+                    static_cast<unsigned long long>(
+                        gpuBudget.budget.bytes >> 20));
+                return -UML_EMULATOR_INVALID_ARGUMENT;
+            }
             const std::uint64_t deviceMemoryLimit =
                 uml::platform::gpu_pool_bytes(gpuBudget.budget, cameraReserve);
             if (gpuBudget.budget.short_of_floor) {

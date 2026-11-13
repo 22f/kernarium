@@ -36,34 +36,51 @@ application's statements (the sensor orientation, the rotation that
   (`largestOfferedTier`), so no layout of the large tier or with a 2160p front
   camera is composed; the image keeps them, and the launcher's `--camera-tier=`
   exercises them.
-- **Memory.** A live session holds host memory outside the guest's RAM: the
-  capture pools (six frames a camera is holding, `heldFramesPerCamera`, of the
-  largest buffer the platform delivers, for each camera that streams at once:
-  the 4:3 frame of the tier's width at the capture buffer's 256-byte row
-  alignment), the device's staging, the platform transformer's scratch (a scaled
-  buffer, a rotation scratch and vImage's temporaries) and the transients of a
-  still with its JPEG and, where the layout has RAW, its DNG. The reserve
-  follows the composed layout (`liveCameraReserveMiB`, from `CameraUse`): two
-  streams only for back and front cameras with the concurrent feature, one
-  otherwise, and the RAW term only in a layout with RAW. At the small tier that
-  is 56 MiB (one stream), 82 (two), 129 (one with RAW) or 154 (two with RAW,
-  the tier's ceiling, `cameraHostMemoryReserveMiB`); a layout that is not
-  stated or not of the image's set holds the ceiling. Nothing the guest is
-  offered depends on it: the offer is bounded by the capture buffer alone. The
-  loader states the ceiling from the budget alone, as the application cannot
-  compose a layout before the boot; the runtime and the launcher take the
-  layout's own figure. Cameras that do not run together are never open at
-  once (the camera service closes the first before it opens the second, and the
-  device's session ends with the first's last stream, giving its frames back),
-  so one stream's six cover a switch.
-  The six are a maximum of the code: the inbox keeps a camera's
-  newest three, the pump takes the newest frame of a camera and frees the older
-  ones before it lets go of the inbox, and frees each as soon as it is written;
-  one more frame arrives and one is being filled. The device checks the first
-  buffer of each configuration against the reserved buffer (a log line that says
-  when one is larger). The GPU's pool is the budget B less the reserve while the
-  cameras are live and B otherwise, in the runtime, the launcher and the
-  applications' figure alike.
+- **Memory.** A live session holds host memory outside the guest's RAM, and the
+  device holds the host to what it counts (`camera_tiers.hpp`, `CameraUse`,
+  which the device is given in `CameraDeviceOptions::use`):
+  - At most `use.streams` cameras hold a capture at once: two only for the
+    layout of back and front cameras with the concurrent feature, one
+    otherwise. A start or a still beyond it is refused as the platform refuses
+    a camera that conflicts with a running one, whatever the platform would
+    allow and whatever the guest was told; so the guest closes a camera before
+    it opens the other where they do not run together.
+  - The capture pools are six frames (`heldFramesPerCamera`: the inbox's
+    three, the pump's, the platform's and the capture's) of the largest buffer
+    the platform delivers, the 4:3 frame of the tier's width at the capture
+    buffer's 256-byte row alignment, for each camera that runs; the device's
+    staging is one frame of the largest video size; the transformer's scratch
+    is a scaled buffer, a rotation scratch and vImage's temporaries. The first
+    buffer of each configuration is checked against the pool's buffer (a log
+    line says when one is larger).
+  - The stills the device admits at once cost no more than
+    `stillAdmissionBytes`. A JPEG capture holds its file twice, at most one byte
+    a pixel of the size asked (a larger file fails the capture before it is
+    copied), and the working storage the platform camera's source holds for
+    each pixel (`Camera::stillWorkingBytesPerPixel`: 11 bytes for the synthetic
+    camera, not measured for the system's camera, whose own peak while it
+    makes a picture is not counted); a RAW capture holds its pixels three
+    times. RAW is counted wherever a lens the guest sees can make a RAW still
+    in the run: it offers one, or its first still takes its colour data
+    whatever the layout lists. The first capture is always admitted and a later
+    one that does not fit waits for the others, in the order the guests asked,
+    so a burst is slower and fails nowhere.
+  - Black pictures are written from a chunk of the device's own, so no stream
+    or picture size holds one: a blocked session holds none of the memory
+    above and opens no capture session.
+
+  At the small tier the reserve is 62 MiB (one stream), 88 (two), 135 (one with
+  RAW) or 160 (two with RAW, the tier's ceiling `cameraHostMemoryReserveMiB`,
+  which a layout stated by name takes, as the device is not held to what it
+  says). The runtime and the launcher compose the device's use from the
+  cameras the guest is told (`composeCameras`) and take it from the GPU's pool
+  while the cameras are live: B less the reserve, and B otherwise. The use of a
+  later boot of a run never exceeds the first's, because colour data learned
+  later only moves a lens from capturing it to offering it, so the pool is
+  sized once. A reserve that takes all of B refuses the launch. The loader
+  states the ceiling, which no use of a system camera exceeds, for the
+  application's plan before the boot. Nothing the guest is offered depends on
+  any of it: the offer is bounded by the capture buffer alone.
 - **Frames.** Video buffers hold NV12, BT.709 full range, rows at the 16-byte
   pitch of `raw_pitch.hpp`. The device crops (centred, to the stream's aspect),
   rotates and scales with the platform camera's transformer
@@ -78,7 +95,8 @@ application's statements (the sensor orientation, the rotation that
   buffer that lacks the flag. A group not complete in two seconds fails; a
   capture that has started has ten seconds to deliver. At most as many captures
   as a tier has buffers are with the platform for one camera; one more fails
-  its buffers. A still in a blocked or interrupted session, or one the platform
+  its buffers; a capture that the bytes it costs do not leave room for waits
+  for the others (Memory). A still in a blocked or interrupted session, or one the platform
   refuses, completes with the error flag (and the interrupted flag when the
   session failed or was interrupted), and so does one that completes while its
   camera is interrupted or that was asked for before an interruption or

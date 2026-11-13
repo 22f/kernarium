@@ -18,6 +18,7 @@
 #include "virtio_video_v4l2_ids.h"
 #include "wire_bytes.hpp"
 
+#include <mach/mach.h>
 #include <poll.h>
 #include <sys/event.h>
 
@@ -61,6 +62,8 @@ struct RigOptions {
     CameraTier tier {CameraTier::small};
     bool authorized {true};
     std::shared_ptr<CalibrationStore> store;
+    /* What the device is given (`CameraDeviceOptions::use`): the ceiling unless a test says. */
+    CameraUse use;
 };
 
 class Recorder final : public CameraSessionDelegate {
@@ -83,6 +86,7 @@ struct Rig final {
         CameraDeviceOptions options;
         options.mode = rigOptions.mode;
         options.tier = rigOptions.tier;
+        options.use = rigOptions.use;
         options.calibration = store;
         options.onState = [this](CameraState state) {
             states.push_back(state);
@@ -2064,31 +2068,145 @@ void testTheMostFramesHeldAtOnceIsWhatTheReserveCounts()
     rig.onStateChange = nullptr;
 }
 
-// A layout whose cameras do not run together (the reserve counts one stream for it) switches from one camera to the
-// other: the camera service closes the first before it opens the second, and the session's end gives back the frames
-// that wait for the worker, so the host never holds the frames of both.
-void testASwitchBetweenCamerasHoldsOneCamerasFrames()
+/* The memory the process holds, which a test reads before and after something that could grow it. */
+std::uint64_t physicalFootprint()
+{
+    task_vm_info_data_t info {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    require(task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS, "task_info");
+    return info.phys_footprint;
+}
+
+// The device runs at most the cameras its use allows, whatever the platform would run: a camera beyond them is refused as
+// one that conflicts with a running one is, until a running camera stops. The synthetic tablet's platform runs both
+// together, so what holds the second back is the device.
+void testTheDeviceRunsOnlyTheCamerasItsUseAllows()
+{
+    {
+        Rig rig;
+        videoStream(rig, 1, 0, 640, 480, 3);
+        videoStream(rig, 2, 1, 640, 480, 3);
+        (void)rig.queue(1, 1);
+        (void)rig.queue(2, 1);
+        require(rig.camera->videoRunning(0) && rig.camera->videoRunning(1), "the ceiling's use lets both cameras run");
+    }
+
+    RigOptions options;
+    options.use = {1, true, 0};
+    Rig rig(options);
+    videoStream(rig, 1, 0, 640, 480, 3);
+    videoStream(rig, 2, 1, 640, 480, 3);
+    (void)rig.queue(1, 1);
+    const auto second = rig.queue(2, 1);
+    require(rig.camera->videoRunning(0), "the first camera runs");
+    require(!rig.camera->videoRunning(1), "a second one is not started, although the platform would run both");
+    require(rig.waitFor([&] { return rig.done(second); }) && rig.result(second).base.flags == (blackFlag | interruptedFlag),
+            "and its stream gets black pictures flagged interrupted, as when the platform refuses a camera");
+
+    // A still on that camera is refused too, and the camera that runs is unharmed.
+    rig.create(3, 1, stillKind);
+    require(Rig::type(rig.setParams(3, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    rig.attach(3, 1, rig.params(3).plane_formats[0].plane_size);
+    const auto still = rig.queue(3, 1, 9);
+    require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "a still on a second camera fails");
+    require(rig.camera->videoRunning(0) && rig.camera->stillsTaken() == 0, "without reaching the platform");
+
+    // The first camera stops: the second is admitted at its next try, and the pair never ran together.
+    rig.camera->resetFramePeak();
+    rig.destroy(1);
+    require(!rig.camera->videoRunning(0), "the first camera stopped");
+    rig.camera->advanceClock(1'100'000'000);
+    require(rig.waitFor([&] { return rig.camera->videoRunning(1); }), "the second camera starts once the first has stopped");
+    rig.camera->pump(1, 4);
+    rig.step();
+    require(rig.camera->framePeak() <= inboxFramesPerCamera + 1, "and the host held one camera's frames at a time");
+}
+
+// The captures the device holds at once are bounded by what they cost, not by how many the guest's pipeline has: a
+// capture that does not fit waits for the ones with the platform and then goes, in order, and none of them fails.
+void testStillsAreAdmittedByTheBytesTheyCost()
 {
     Rig rig;
-    rig.create(1, 0, videoKind);
-    rig.setVideo(1, 640, 480);
-    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(1, resource, nv12Size(640, 480));
-    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(1, resource);
-    rig.camera->resetFramePeak();
-    rig.camera->pump(0, 3);
-    require(rig.camera->framesAlive() == inboxFramesPerCamera, "three frames of the first camera wait for the worker");
-    rig.destroy(1);
-    require(!rig.camera->videoRunning(0) && rig.camera->sessionsOpen() == 0 && rig.camera->framesAlive() == 0,
-            "the camera that closed holds none: its session ended");
-    rig.create(2, 1, videoKind);
-    rig.setVideo(2, 640, 480);
-    for (std::uint32_t resource = 1; resource <= 3; ++resource) rig.attach(2, resource, nv12Size(640, 480));
-    for (std::uint32_t resource = 1; resource <= 3; ++resource) (void)rig.queue(2, resource);
-    rig.camera->pump(1, 4);
-    require(rig.camera->framesAlive() == inboxFramesPerCamera, "the second camera's newest three");
-    require(rig.camera->framePeak() <= inboxFramesPerCamera + 1, "at no time more than one camera's inbox and the frame arriving");
+    rig.create(1, 0, stillKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 4032, 3024)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a 12 MP size");
+    const auto size = rig.params(1).plane_formats[0].plane_size;
+    std::vector<std::uint64_t> requests;
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) {
+        rig.bump = 16 * page;  // The buffers alias: the test reads none of the pictures.
+        rig.attach(1, resource, size);
+    }
+    for (std::uint32_t resource = 1; resource <= 3; ++resource) requests.push_back(rig.queue(1, resource, 200 + resource));
+    require(rig.camera->stillsTaken() == 1, "one 12 MP capture is with the platform: the synthetic source holds 11 bytes a pixel while it makes one");
+    require(!rig.done(requests[0]) && !rig.done(requests[1]) && !rig.done(requests[2]), "the others wait, and none has failed");
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+        rig.camera->pump(0, 0);
+        rig.step();
+        require(rig.done(requests[index]) && rig.result(requests[index]).base.flags == 0 &&
+                    rig.result(requests[index]).base.timestamp == 201 + index,
+                "the capture is delivered");
+        require(rig.camera->stillsTaken() == std::min<std::size_t>(index + 2, 3), "and the next one waiting goes");
+    }
+    require(rig.camera->sessionsOpen() == 0, "the session is released after the last");
+
+    // Pictures of a small size cost little, so the pipeline's depth is what bounds them, as it was.
+    Rig small;
+    small.create(1, 0, stillKind);
+    require(Rig::type(small.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    const auto smallSize = small.params(1).plane_formats[0].plane_size;
+    for (std::uint32_t resource = 1; resource <= 4; ++resource) small.attach(1, resource, smallSize);
+    for (std::uint32_t resource = 1; resource <= 4; ++resource) (void)small.queue(1, resource, 300 + resource);
+    require(small.camera->stillsTaken() == 4, "four small captures are with the platform at once");
+}
+
+// A file larger than a byte a pixel of the size the guest asked for fails its capture, and nothing of it reaches the guest.
+void testAnOversizedStillFailsItsCapture()
+{
+    Rig rig;
+    rig.camera->oversizedStills(true);
+    rig.create(1, 0, stillKind);
+    require(Rig::type(rig.setParams(1, VIRTIO_VIDEO_FORMAT_CAMERA_JPEG, 1008, 756)) == VIRTIO_VIDEO_RESP_OK_NODATA, "a size");
+    const auto size = rig.params(1).plane_formats[0].plane_size;
+    rig.attach(1, 1, size);
+    const auto before = rig.bytes(1, 1, size);
+    const auto still = rig.queue(1, 1, 400);
+    rig.camera->pump(0, 0);
     rig.step();
-    require(rig.camera->framesAlive() == 0, "and the worker frees them");
+    require(rig.done(still) && (rig.result(still).base.flags & errorFlag), "the capture fails");
+    require(rig.bytes(1, 1, size) == before, "and the guest's buffer is untouched");
+    rig.camera->oversizedStills(false);
+    rig.attach(1, 2, size);
+    const auto next = rig.queue(1, 2, 401);
+    rig.camera->pump(0, 0);
+    rig.step();
+    require(rig.done(next) && rig.result(next).base.flags == 0, "the next capture is taken");
+}
+
+// Black pictures hold nothing of their own, however many streams are black and however large their pictures are: twenty
+// 1080p streams of one camera used to keep twenty pictures (62 MB) the reserve did not count.
+void testBlackPicturesHoldNothingOfTheirOwn()
+{
+    for (const bool blockedSession : {false, true}) {
+        RigOptions options;
+        options.authorized = false;
+        options.mode = blockedSession ? CameraMode::blocked : CameraMode::live;
+        Rig rig(options);
+        std::vector<std::uint64_t> requests;
+        for (std::uint32_t stream = 1; stream <= 20; ++stream) {
+            rig.bump = 16 * page;  // Guest buffers may alias: only the host's would not.
+            videoStream(rig, stream, 0, 1920, 1080, 1);
+        }
+        const auto before = physicalFootprint();
+        for (std::uint32_t stream = 1; stream <= 20; ++stream) requests.push_back(rig.queue(stream, 1));
+        require(rig.waitFor([&] { return std::all_of(requests.begin(), requests.end(), [&](auto id) { return rig.done(id); }); }),
+                "every stream gets its black picture");
+        const auto growth = physicalFootprint() > before ? physicalFootprint() - before : 0;
+        for (const auto id : requests) require((rig.result(id).base.flags & blackFlag) != 0, "black");
+        require(growth < (8u << 20), "no picture of a stream stays behind: twenty 1080p pictures are 62 MB");
+        // And the picture is black: luma 0, neutral chroma, in a buffer a chunk of the device's own does not cover.
+        const auto picture = rig.bytes(20, 1, nv12Size(1920, 1080));
+        require(std::all_of(picture.begin(), picture.begin() + 1920 * 1080, [](auto byte) { return byte == 0; }), "luma");
+        require(std::all_of(picture.begin() + 1920 * 1080, picture.end(), [](auto byte) { return byte == 128; }), "chroma");
+    }
 }
 
 /* R5 (recheck5): the interruption ends and the system has moved the camera out of its format meanwhile. The platform
@@ -2316,7 +2434,10 @@ int main()
     testAFrameCapturedBeforeTheRepairIsNeverDeliveredAfterIt();
     testAStillThatSpansAnInterruptionFails();
     testTheMostFramesHeldAtOnceIsWhatTheReserveCounts();
-    testASwitchBetweenCamerasHoldsOneCamerasFrames();
+    testTheDeviceRunsOnlyTheCamerasItsUseAllows();
+    testStillsAreAdmittedByTheBytesTheyCost();
+    testAnOversizedStillFailsItsCapture();
+    testBlackPicturesHoldNothingOfTheirOwn();
     testService();
     return 0;
 }

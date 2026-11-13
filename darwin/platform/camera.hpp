@@ -374,6 +374,11 @@ public:
     // camera's runs on the system's scaler). The caller keeps the object and
     // uses it from one thread.
     [[nodiscard]] virtual std::unique_ptr<Nv12Transformer> makeFrameTransformer() const = 0;
+    // The working storage, in bytes for each pixel of a JPEG still, that this
+    // host's source holds while it makes the picture, beyond the encoded file
+    // the device counts. Zero where it is not measured (the system's camera) or
+    // the source makes the file in place.
+    [[nodiscard]] virtual std::uint32_t stillWorkingBytesPerPixel() const noexcept { return 0; }
     // Opens a capture session, or returns null when the system has not granted
     // access or the host has no camera. This is the only call that can light a
     // capture indicator, and a blocked guest session never makes it.

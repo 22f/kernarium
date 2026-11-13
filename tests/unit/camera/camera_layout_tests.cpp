@@ -350,65 +350,96 @@ void testConcurrentRuleIsTheHals()
     require(!meetsConcurrentStreams(describe({{1920, 1080}}, {{4032, 3024}})), "1080p cannot make 1920x1440");
 }
 
-// The reserve follows the composed layout: what a live session of a layout can hold outside the guest's RAM, from
-// the cameras that stream together and the RAW still it has. No layout holds more than the tier's ceiling, and the
-// ceiling is a layout's own figure: the one with both cameras running together and RAW.
-void testTheReserveFollowsTheLayout()
+// The reserve is what the device lets the host hold (`CameraUse`), which `composeCameras` derives from the cameras and
+// their layout: no layout holds more than the tier's ceiling, and the ceiling is the use with both cameras running
+// together and RAW.
+void testTheReserveFollowsTheUse()
 {
     const auto tier = CameraTier::small;
     const auto ceiling = cameraHostMemoryReserveMiB(tier);
-    require(ceiling == 154, "the tier's ceiling");
+    require(ceiling == 160, "the tier's ceiling");
     require(cameraHostMemoryReserveMiB(tier, CameraUse {}) == ceiling, "the default use is the ceiling");
-
-    // The four figures a small-tier layout can have: one camera or two, with or without RAW.
-    require(cameraHostMemoryReserveMiB(tier, {1, false}) == 56, "one stream, no RAW: 55.9 MiB, rounded up");
-    require(cameraHostMemoryReserveMiB(tier, {1, true}) == 129, "one stream and a RAW still");
-    require(cameraHostMemoryReserveMiB(tier, {2, false}) == 82, "two streams, no RAW");
-    require(cameraHostMemoryReserveMiB(tier, {2, true}) == 154, "two streams and a RAW still");
-    require(cameraHostMemory(tier, {1, false}).rawStill == 0 && cameraHostMemory(tier, {1, true}).rawStill == 12'700'000ull * 6,
-            "the RAW term is the RAW still's alone");
-    require(cameraHostMemory(tier, {1, false}).capturePools * 2 == cameraHostMemory(tier, {2, false}).capturePools,
-            "the capture pools are those of the cameras that stream");
 
     std::set<std::uint64_t> figures;
     bool reachesTheCeiling = false;
     for (const auto& dimensions : allLayouts()) {
         const auto name = layoutName(dimensions);
-        const auto reserve = liveCameraReserveMiB(CameraMode::live, name, tier);
-        require(liveCameraReserveMiB(CameraMode::blocked, name, tier) == 0, "a blocked session holds none");
-        if (!layoutHasCameras(name)) {
-            require(reserve == 0, "no cameras, no device, no reserve");
-            continue;
-        }
+        const auto streams = layoutStreams(dimensions);
+        require((name.find("concurrent") != std::string::npos) == dimensions.concurrent, name);
+        require(streams == (dimensions.cameras == LayoutCameras::backAndFront && dimensions.concurrent ? 2u : 1u), name);
         const auto named = layoutDimensionsNamed(name);
         require(named && layoutName(*named) == name, "every layout of the set is found by its name");
-        const bool together = dimensions.cameras == LayoutCameras::backAndFront && dimensions.concurrent;
-        require(cameraUseOf(dimensions) == CameraUse {together ? 2u : 1u, dimensions.raw}, name);
-        require((name.find("concurrent") != std::string::npos) == dimensions.concurrent, name);
-        require((name.find("raw") != std::string::npos) == dimensions.raw, name);
-        require(reserve == cameraHostMemoryReserveMiB(tier, cameraUseOf(dimensions)), name);
-        require(reserve <= ceiling, "no layout holds more than the tier's ceiling");
-        require(reserve == (together ? (dimensions.raw ? 154u : 82u) : (dimensions.raw ? 129u : 56u)), name);
-        figures.insert(reserve);
-        reachesTheCeiling = reachesTheCeiling || reserve == ceiling;
+        for (const bool raw : {false, true}) {
+            const CameraUse use {streams, raw, 0};
+            const auto reserve = liveCameraReserveMiB(CameraMode::live, name, use, tier);
+            require(liveCameraReserveMiB(CameraMode::blocked, name, use, tier) == 0, "a blocked session holds none");
+            if (!layoutHasCameras(name)) {
+                require(reserve == 0, "no cameras, no device, no reserve");
+                continue;
+            }
+            require(reserve == cameraHostMemoryReserveMiB(tier, use) && reserve <= ceiling, "no use holds more than the ceiling");
+            figures.insert(reserve);
+            reachesTheCeiling = reachesTheCeiling || reserve == ceiling;
+        }
     }
-    require(figures == std::set<std::uint64_t> {56, 82, 129, 154}, "the four figures are the layouts' all");
-    require(reachesTheCeiling, "the ceiling is a layout's own figure");
-
-    // A layout that is not stated, or is not of the image's set, holds the ceiling: nothing known to lower it.
-    require(liveCameraReserveMiB(CameraMode::live, "", tier) == ceiling);
-    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw-concurrent-nothing", tier) == ceiling);
+    require(figures == std::set<std::uint64_t> {62, 88, 135, 160}, "the four figures are all there are");
+    require(reachesTheCeiling, "the ceiling is a use's own figure");
     require(!layoutDimensionsNamed("").has_value() && !layoutDimensionsNamed("bf-small-nothing").has_value());
-    require(liveCameraReserveMiB(CameraMode::live, "none", tier) == 0 && liveCameraReserveMiB(CameraMode::blocked, "", tier) == 0);
+}
 
-    // The hosts of the synthetic profiles earn the layouts above: the iPad's pair (the front camera does not run with
-    // the back one, no RAW before it is learned) holds the least, a phone that learned RAW and runs both together the most.
-    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual", tier) == 56, "a tablet's pair before RAW is learned");
-    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw", tier) == 129, "with RAW learned");
-    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-concurrent", tier) == 82, "a pair that runs together");
-    require(liveCameraReserveMiB(CameraMode::live, "bf-small-flash-manual-raw-concurrent", tier) == 154, "with RAW learned");
-    require(liveCameraReserveMiB(CameraMode::live, "front", tier) == 56 && liveCameraReserveMiB(CameraMode::live, "front-manual", tier) == 56,
-            "a host with a front camera alone (a laptop) holds one stream");
+// What a host's cameras are given: a layout the device holds to, and a RAW capture wherever a lens can make one.
+void testComposedCamerasAreGivenTheirUse()
+{
+    const auto tier = CameraTier::small;
+    uml::camera::ArrangementOptions options;
+    options.tier = tier;
+    const auto compose = [&](SyntheticCameraProfile profile, CalibrationStore& store) {
+        SyntheticCameraOptions synthetic;
+        synthetic.profile = profile;
+        return composeCameras(*uml::platform::makeSyntheticCamera(synthetic), store, options);
+    };
+
+    // The tablet's front camera does not run with the back one in the layout the guest is told, so the device lets one
+    // camera run: the layout is the stated one, not the host's own concurrent masks.
+    CalibrationStore store;
+    const auto tablet = compose(SyntheticCameraProfile::tablet, store);
+    require(tablet.layout == "bf-small-flash-manual" && tablet.use.streams == 1, tablet.layout);
+    // Its back lens makes RAW stills and has taught nothing yet, so its first still takes one with the JPEG: the layout
+    // lists no RAW and the use has it, from the first boot.
+    require(tablet.use.rawStill, "an uncalibrated RAW-capable lens captures RAW although the layout lists none");
+    require(tablet.use.stillWorkingBytesPerPixel == 11, "the synthetic source's working storage is counted");
+    const auto phone = compose(SyntheticCameraProfile::phone, store);
+    require(phone.use.streams == (phone.layout.find("concurrent") != std::string::npos ? 2u : 1u), phone.layout);
+    // A laptop's one front camera, with no RAW, holds the least.
+    const auto laptop = compose(SyntheticCameraProfile::laptop, store);
+    require(laptop.layout == "front" && laptop.use.streams == 1 && !laptop.use.rawStill, laptop.layout);
+
+    // Teaching the store every lens's colour data moves a lens from capturing it to offering it: the use is the same, so
+    // the pool a later boot of the run gets was sized for it.
+    SyntheticCameraOptions synthetic;
+    synthetic.profile = SyntheticCameraProfile::phone;
+    const auto host = uml::platform::makeSyntheticCamera(synthetic);
+    for (const auto& info : host->cameras()) {
+        if (!info.rawStills) continue;
+        uml::platform::CameraColorData data;
+        data.bayer = uml::platform::BayerOrder::grbg;
+        data.blackLevel = 64;
+        data.whiteLevel = 1023;
+        data.rawWidth = info.rawStillSize.width;
+        data.rawHeight = info.rawStillSize.height;
+        data.illuminant1 = 17;
+        data.illuminant2 = 21;
+        data.colorMatrix1 = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        data.focalLengthMillimetres = 6.9;
+        data.intrinsics = {3000, 3000, 1008, 756};
+        require(store.save(host->hostModel(), CalibrationStore::lensKey(info), data));
+    }
+    const auto learned = composeCameras(*host, store, options);
+    require(learned.layout == "bf-small-flash-manual-raw", learned.layout);
+    require(learned.use == phone.use, "the boot after the calibration is held to the use the first was sized for");
+    require(liveCameraReserveMiB(CameraMode::live, learned.layout, learned.use, tier) ==
+                liveCameraReserveMiB(CameraMode::live, phone.layout, phone.use, tier),
+            "and so is the memory it reserves");
 }
 
 } // namespace
@@ -422,7 +453,8 @@ int main(int argc, char** argv)
     testHostsEarnTheirLayouts();
     testComposeLayoutOfAHost();
     testConcurrentRuleIsTheHals();
-    testTheReserveFollowsTheLayout();
+    testTheReserveFollowsTheUse();
+    testComposedCamerasAreGivenTheirUse();
     std::puts("camera-layout: passed");
     return 0;
 }

@@ -469,6 +469,8 @@ public:
     std::atomic<bool> rawRefused {false};
     std::atomic<bool> rawFails {false};
     std::atomic<bool> stillsOfAnotherSize {false};
+    std::atomic<bool> oversizedStills {false};
+    std::atomic<unsigned> stillsTaken {0};
     // The system moved the anchored cameras out of their formats while the cameras were
     // interrupted; a session that opens puts them back by starting afresh.
     std::atomic<bool> movedOutOfAnchor {false};
@@ -551,6 +553,7 @@ public:
         if (!plan(camera, false, 0, 0, 0, picks)) return false;
         applyPicks(camera, false, 0, 0, 0, picks);
         ++cameras_[camera].stillsOut;
+        ++core_.stillsTaken;
         cameras_[camera].stills.push_back({request});
         wake_.notify_all();
         return true;
@@ -961,6 +964,8 @@ private:
                 const auto picture = render(base(state, size->width / divisor, size->height / divisor), outcome.scene);
                 result.jpeg = encodeSyntheticJpeg(picture.luma.data(), picture.width, picture.chroma.data(),
                                                   picture.width, picture.width, picture.height, request.jpegQuality);
+                if (core_.oversizedStills && !result.jpeg.empty())
+                    result.jpeg.resize(std::max(result.jpeg.size(), std::size_t(request.jpegWidth) * request.jpegHeight + 1), 0);
             }
             if (request.raw && !core_.rawFails) {
                 const auto picture = render(base(state, info.rawStillSize.width, info.rawStillSize.height), outcome.scene);
@@ -1039,6 +1044,10 @@ public:
     std::string hostModel() const override { return core_.profile_.model; }
     std::uint64_t now() const noexcept override { return core_.options_.manualClock ? core_.clock.load() : realNow(); }
     std::unique_ptr<Nv12Transformer> makeFrameTransformer() const override { return makePortableNv12Transformer(); }
+    /* The source renders its pictures and converts one to RGBA before it
+     * encodes: 130,138,376 bytes of footprint for one 12 MP file, 10.7 bytes a
+     * pixel, of which the device's own copies of the file are counted apart. */
+    std::uint32_t stillWorkingBytesPerPixel() const noexcept override { return 11; }
 
     std::unique_ptr<CameraSession> openSession(CameraSessionDelegate& delegate) override
     {
@@ -1130,6 +1139,8 @@ public:
     void refuseRaw(bool refuse) override { core_.rawRefused = refuse; }
     void failRaw(bool fail) override { core_.rawFails = fail; }
     void stillsOfAnotherSize(bool another) override { core_.stillsOfAnotherSize = another; }
+    void oversizedStills(bool oversized) override { core_.oversizedStills = oversized; }
+    unsigned stillsTaken() const noexcept override { return core_.stillsTaken; }
 
     void resume() override
     {

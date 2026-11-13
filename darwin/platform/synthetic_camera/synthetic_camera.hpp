@@ -115,6 +115,13 @@ public:
     // The platform makes a JPEG of another size than the request names (the
     // device must fail that still, not pass the picture on).
     virtual void stillsOfAnotherSize(bool another) = 0;
+    // The platform's JPEG files are larger than a byte a pixel (padded behind the
+    // picture), as a noisy scene at the highest quality can make them: the device
+    // must fail that still, not copy the file.
+    virtual void oversizedStills(bool oversized) = 0;
+    // The stills the sessions have been asked for and accepted since the object
+    // was made, so a test sees how many captures the device had with the platform.
+    [[nodiscard]] virtual unsigned stillsTaken() const noexcept = 0;
 };
 
 [[nodiscard]] std::unique_ptr<SyntheticCamera> makeSyntheticCamera(const SyntheticCameraOptions& options = {});

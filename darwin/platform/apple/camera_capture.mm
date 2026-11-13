@@ -1873,6 +1873,16 @@ std::unique_ptr<Camera> makeAppleCamera()
     } else
 #endif
     if (data != nil) {
+        // A file larger than a byte a pixel of the size the guest configured is not copied: the capture
+        // fails with those bytes still the system's alone (the host's cost of a capture counts this file).
+        const std::uint64_t pixels = std::uint64_t(_jpegSize.width) * _jpegSize.height;
+        if (!_wantJpeg || data.length > pixels) {
+            if (_wantJpeg)
+                std::fprintf(stderr, "Camera: the photo's file is %lu bytes, more than the %llu a %ux%u photo may take\n",
+                             static_cast<unsigned long>(data.length), static_cast<unsigned long long>(pixels), _jpegSize.width,
+                             _jpegSize.height);
+            return;
+        }
         _jpegReadings = readings;
         const auto* bytes = static_cast<const std::uint8_t*>(data.bytes);
         _result.jpeg.assign(bytes, bytes + data.length);
