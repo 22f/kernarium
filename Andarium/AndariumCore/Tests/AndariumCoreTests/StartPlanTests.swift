@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 @testable import AndariumCore
+import AndariumCoreTestSupport
 
 private func identity(
     _ id: String, build: Int, sha: String = String(repeating: "a", count: 64), layout: Int = 1

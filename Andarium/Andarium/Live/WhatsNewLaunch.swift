@@ -9,11 +9,16 @@ extension AppEntry {
     /// ribbon above Start and keeps their record in `defaults`; any other
     /// shows no ribbon and keeps none, so a harness never sees the ribbon and
     /// never uses it up. `vCPUs` is the guest's count, at which the device's
-    /// memory is measured for an entry's requirement.
+    /// memory is measured for an entry's requirement; `features` is what the
+    /// build has (`AppModel.buildFeatures`), and notes about one it lacks are
+    /// in neither the ribbon nor Info.
     @MainActor
     func announceWhatsNew(
-        on model: AppModel, hasGuest: Bool, vCPUs: Int, notes: [WhatsNewRelease] = WhatsNewCatalog.load()
+        on model: AppModel, hasGuest: Bool, vCPUs: Int, features: Set<WhatsNewFeature>? = nil,
+        notes: [WhatsNewRelease] = WhatsNewCatalog.load()
     ) {
+        let features = features ?? model.buildFeatures
+        let notes = WhatsNewCatalog.available(notes, features: features)
         guard announcesWhatsNew, let build else {
             model.whatsNew.list(notes)
             return
@@ -23,6 +28,6 @@ extension AppEntry {
         model.whatsNew.keep = { store.keep($0) }
         model.whatsNew.launch(
             releases: notes, record: store.record, currentBuild: build, hasGuest: hasGuest,
-            offers: { $0.requirement?.isMet(by: host, vCPUs: vCPUs) ?? true })
+            offers: { $0.requirement?.isMet(by: host, vCPUs: vCPUs, features: features) ?? true })
     }
 }
