@@ -591,10 +591,16 @@ blocker in every one of them.
   opt-in with the pinned LLVM MC.
 - `arm64-aarch32-decoder`, `arm64-a32-encoding-table`, `arm64-aarch32-corpus`,
   `arm64-a32-corpus` and `arm64-aarch32-semantics*` check the AArch32 decoder,
-  generated tables, corpus and semantic library without an engine. The
-  corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
-  case that differs only by a spurious store-exclusive failure, and the
-  `-interrupted` tests provoke that failure on purpose.
+  generated tables, corpus and semantic library without an engine;
+  `arm64-aarch32-corpus` also proves the store-exclusive ranges the retry
+  compares and what it refuses. The corpus runs of `arm64-gadget-a32-corpus` and `arm64-jit-a32-corpus` retry a
+  case that differs only by a spurious store-exclusive failure (its own bytes
+  unwritten, the case's other stores in the data), and the `-interrupted`
+  tests provoke that failure on purpose. Only the gadget one runs the spill
+  suite, whose cases store between the pair: the JIT does not lose a
+  reservation there. The `-injected` tests make an attempt end as a lost
+  reservation with another register or a thread register wrong, and as other
+  faults, and require that only a plain loss is retried.
 - `guest-aarch32-engine-gadgets` and `-jit` boot the freestanding engine probe
   in `tests/integration/aarch32/engine_probe/` and count every `SIGILL`.
 
