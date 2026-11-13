@@ -9,10 +9,12 @@
  *   loader_memory_pressure_tests          what the loader delivers, and to whom
  *   loader_memory_pressure_tests --exit   a report forwarded after exit() has
  *                                         destroyed ordinary statics
+ *   loader_memory_pressure_tests --table  which runtime tables the loader takes
  */
 #include "KernariumMemoryPressure.hpp"
 
 #include <cstdio>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <dispatch/dispatch.h>
@@ -110,6 +112,55 @@ void deliveryTests()
     });
 }
 
+void unusedEntry() {}
+
+/* A table of the given version with every entry set. */
+kernarium_runtime_api fullTable(uint32_t version)
+{
+    kernarium_runtime_api api {};
+    api.abi_version = version;
+    api.struct_size = sizeof(api);
+    api.guest_page_size = 4096U;
+    api.guest_flavor = KERNARIUM_RUNTIME_GUEST_LINUX;
+    void (*entry)() = unusedEntry;
+    constexpr std::size_t first = offsetof(kernarium_runtime_api, run);
+    check((sizeof(api) - first) % sizeof(entry) == 0, "the table has an entry that is no function pointer");
+    for (std::size_t offset = first; offset < sizeof(api); offset += sizeof(entry))
+        std::memcpy(reinterpret_cast<unsigned char*>(&api) + offset, &entry, sizeof(entry));
+    return api;
+}
+
+/* The loader takes the table of its own version and refuses one of any other,
+ * a table too short for the entries it reads, and one that lacks an entry
+ * added since version 39. */
+void tableTests()
+{
+    kernarium_runtime_api api = fullTable(KERNARIUM_RUNTIME_API_VERSION);
+    check(validApi(&api, KERNARIUM_RUNTIME_GUEST_LINUX), "the table of the loader's version was refused");
+    check(!validApi(&api, KERNARIUM_RUNTIME_GUEST_ANDROID), "a table of another guest flavor was taken");
+    check(!validApi(nullptr, KERNARIUM_RUNTIME_GUEST_LINUX), "a null table was taken");
+
+    for (const uint32_t version : {39U, 40U, KERNARIUM_RUNTIME_API_VERSION + 1U}) {
+        api = fullTable(version);
+        check(!validApi(&api, KERNARIUM_RUNTIME_GUEST_LINUX), "a table of another version was taken");
+    }
+
+    api = fullTable(KERNARIUM_RUNTIME_API_VERSION);
+    api.struct_size = offsetof(kernarium_runtime_api, set_memory_pressure_callback);
+    check(!validApi(&api, KERNARIUM_RUNTIME_GUEST_LINUX), "a table without the last entry was taken");
+
+    api = fullTable(KERNARIUM_RUNTIME_API_VERSION);
+    api.plan_camera_reserve = nullptr;
+    check(!validApi(&api, KERNARIUM_RUNTIME_GUEST_LINUX), "a table without plan_camera_reserve was taken");
+
+    api = fullTable(KERNARIUM_RUNTIME_API_VERSION);
+    api.set_memory_pressure_callback = nullptr;
+    check(!validApi(&api, KERNARIUM_RUNTIME_GUEST_LINUX), "a table without set_memory_pressure_callback was taken");
+
+    std::puts("loader table: ok");
+    std::fflush(stdout);
+}
+
 } // namespace
 
 /* Registered first by the head: runs after the loader's statics were
@@ -132,6 +183,10 @@ extern "C" void loaderTestAfterStaticDestruction(void)
 int main(int argc, char** argv)
 {
     @autoreleasepool {
+        if (argc > 1 && std::strcmp(argv[1], "--table") == 0) {
+            tableTests();
+            return 0;
+        }
         static kernarium_runtime_api api {};
         api.set_memory_pressure_callback = fakeSet;
         selectedApi.store(&api);

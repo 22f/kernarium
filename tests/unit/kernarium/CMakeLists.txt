@@ -123,9 +123,10 @@ uml_add_unit_test(NAME kernarium-memory-pressure
 
 # What the application's loader does with the reports: delivery on the main queue
 # in order, one queued block per report that a replaced handler does not cancel,
-# and a report forwarded after exit() has destroyed ordinary statics. The
-# loader's forwarders are file-local, so the test compiles the loader's source
-# in one unit with the test's head and tail.
+# a report forwarded after exit() has destroyed ordinary statics, and which
+# runtime tables the loader takes. The loader's forwarders and its table check
+# are file-local, so the test compiles the loader's source in one unit with the
+# test's head and tail.
 set(_loader_memory_pressure_source
     ${CMAKE_CURRENT_BINARY_DIR}/loader_memory_pressure_tests_generated.mm)
 set(_loader_memory_pressure_parts
@@ -155,6 +156,10 @@ uml_add_unit_test(NAME kernarium-loader-memory-pressure
     LABELS kernarium)
 uml_add_unit_test(NAME kernarium-loader-memory-pressure-exit
     COMMAND uml_kernarium_loader_memory_pressure_tests --exit
+    TIMEOUT 60
+    LABELS kernarium)
+uml_add_unit_test(NAME kernarium-loader-api-table
+    COMMAND uml_kernarium_loader_memory_pressure_tests --table
     TIMEOUT 60
     LABELS kernarium)
 
